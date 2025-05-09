@@ -6,14 +6,12 @@ tpu_commons/
 │   ├── __init__.py
 │   ├── tpu_worker.py         # Moved and adapted from vllm/v1/worker/
 │   └── tpu_model_runner.py   # Moved and adapted from vllm/v1/worker/
-│── attention/
+├── kernels/
 │   ├── __init__.py
-│   └── backends/
+│   └── ragged_paged_attention
 │       ├── __init__.py
-│       └── pallas/           # <<< MOVED from vllm/v1/attention/backends/pallas/
-│           ├── __init__.py
-│           ├── attention.py  # (or whatever files are in original pallas dir)
-│           └── metadata.py   # (e.g., pallas_attention.py, pallas_metadata.py)
+│       ├── kernel.py
+│       └── tuned_block_sizes.py
 │── sample/
 │   ├── __init__.py
 │   └── tpu/                  # <<< MOVED from vllm/v1/sample/tpu/
@@ -21,7 +19,35 @@ tpu_commons/
 │       ├── metadata.py
 │       └── sampler.py
 ├── setup.py
+├── tests
+│   ├── __init__.py
+│   └── ragged_paged_attention_test.py
 ├── pyproject.toml
 └── .buildkite/
     └── pipeline.yml
+```
+
+## How to test kernel?
+
+Install dependencies:
+
+```
+pip install -r requirements.txt
+```
+
+Make sure TPU device is accessible:
+```
+tpu-info
+```
+
+Run the test:
+```
+pytest -v ./tests/ragged_paged_attention_test.py
+```
+
+
+## How to format the code?
+
+```
+yapf -ir .
 ```

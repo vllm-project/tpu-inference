@@ -1,0 +1,7 @@
+tpu-info
+yapf == 0.43.0
+pytest
+absl-py
+numpy
+jax[tpu]
+--find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html
