@@ -5,6 +5,12 @@ default_stages:
   - pre-commit # Run locally
   - manual # Run in CI
 repos:
+-   repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+    -   id: check-yaml
+    -   id: end-of-file-fixer
+    -   id: trailing-whitespace
 - repo: https://github.com/google/yapf
   rev: v0.43.0
   hooks:
@@ -40,13 +46,12 @@ repos:
     - id: pip-compile
       args: [requirements/test.in, -o, requirements/test.txt, --index-strategy, unsafe-best-match, --torch-backend, cu128]
       files: ^requirements/test\.(in|txt)$
+-   repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.10.0.1
+    hooks:
+    -   id: shellcheck
 - repo: local
   hooks:
-  - id: shellcheck
-    name: Lint shell scripts
-    entry: tools/shellcheck.sh
-    language: script
-    types: [shell]
   - id: png-lint
     name: Lint PNG exports from excalidraw
     entry: tools/png-lint.sh
