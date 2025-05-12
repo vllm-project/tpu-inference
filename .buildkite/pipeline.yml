@@ -23,7 +23,7 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - .buildkite/run_in_docker.sh python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_perf.py
+       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_perf.py
 
    - label: "TPU Test 1: test_compilation.py"
      key: tpu_test_1
@@ -32,7 +32,7 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - .buildkite/run_in_docker.sh python3 -m pytest -s -v /workspace/vllm/tests/tpu/test_compilation.py
+       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/vllm/tests/tpu/test_compilation.py
 
    - label: "TPU Test 2: test_basic.py"
      key: tpu_test_2
@@ -41,7 +41,7 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - .buildkite/run_in_docker.sh python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_basic.py
+       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_basic.py
 
    - label: "TPU Test 3: test_accuracy.py (v1)"
      key: tpu_test_3
@@ -50,7 +50,7 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - .buildkite/run_in_docker.sh python3 -m pytest -s -v /workspace/vllm/tests/entrypoints/llm/test_accuracy.py::test_lm_eval_accuracy_v1_engine
+       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/vllm/tests/entrypoints/llm/test_accuracy.py::test_lm_eval_accuracy_v1_engine
 
    - label: "TPU Test 4: test_quantization_accuracy.py"
      key: tpu_test_4
@@ -59,7 +59,7 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - .buildkite/run_in_docker.sh python3 -m pytest -s -v /workspace/vllm/tests/tpu/test_quantization_accuracy.py
+       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/vllm/tests/tpu/test_quantization_accuracy.py
 
    - label: "TPU Test 5: examples/offline_inference/tpu.py"
      key: tpu_test_5
@@ -68,7 +68,7 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - .buildkite/run_in_docker.sh python3 /workspace/vllm/examples/offline_inference/tpu.py
+       - .buildkite/scripts/run_in_docker.sh python3 /workspace/vllm/examples/offline_inference/tpu.py
 
    - label: "TPU Test 6: test_tpu_model_runner.py"
      key: tpu_test_6
@@ -77,7 +77,7 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - .buildkite/run_in_docker.sh python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/worker/test_tpu_model_runner.py
+       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/worker/test_tpu_model_runner.py
 
    - label: "TPU Test 7: test_sampler.py"
      key: tpu_test_7
@@ -86,7 +86,7 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - .buildkite/run_in_docker.sh python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_sampler.py
+       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_sampler.py
 
    - label: "TPU Test 8: test_topk_topp_sampler.py"
      key: tpu_test_8
@@ -95,7 +95,7 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - .buildkite/run_in_docker.sh python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_topk_topp_sampler.py
+       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_topk_topp_sampler.py
 
    - label: "TPU Test 9: test_multimodal.py"
      key: tpu_test_9
@@ -104,7 +104,7 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - .buildkite/run_in_docker.sh python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_multimodal.py
+       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_multimodal.py
 
    - label: "TPU Test 10: test_pallas.py"
      key: tpu_test_10
@@ -113,7 +113,7 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - .buildkite/run_in_docker.sh python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_pallas.py
+       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_pallas.py
 
    - label: "TPU Test 11: test_struct_output_generate.py"
      key: tpu_test_11
@@ -122,7 +122,7 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - .buildkite/run_in_docker.sh python3 -m pytest -s -v /workspace/vllm/tests/v1/entrypoints/llm/test_struct_output_generate.py
+       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/vllm/tests/v1/entrypoints/llm/test_struct_output_generate.py
 
    - label: "TPU Test 12: test_moe_pallas.py"
      key: tpu_test_12
@@ -131,7 +131,7 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-      - .buildkite/run_in_docker.sh python3 -m pytest -s -v /workspace/vllm/tests/tpu/test_moe_pallas.py
+      - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/vllm/tests/tpu/test_moe_pallas.py
 
    - label: "TPU Test 13: ragged_paged_attention_test.py"
      key: tpu_test_13
@@ -140,7 +140,7 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - .buildkite/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_commons/tests/ragged_paged_attention_test.py
+       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_commons/tests/ragged_paged_attention_test.py
 
   # -----------------------------------------------------------------
   # NOTIFICATION STEP
@@ -163,4 +163,4 @@ steps:
        - tpu_test_13
      agents:
        queue: tpu_v6e_queue
-     commands: "bash .buildkite/check_results.sh"
+     commands: "bash .buildkite/scripts/check_results.sh"
