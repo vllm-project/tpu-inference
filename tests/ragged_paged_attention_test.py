@@ -1,16 +1,13 @@
 import random
 
-from absl.testing import absltest
-from absl.testing import parameterized
 import jax
-from jax._src import test_util as jtu
 import jax.numpy as jnp
+from absl.testing import absltest, parameterized
+from jax._src import test_util as jtu
 
 from tpu_commons.kernels.ragged_paged_attention.kernel import (
-    dynamic_validate_inputs,
-    ragged_paged_attention,
-    ref_ragged_paged_attention,
-)
+    dynamic_validate_inputs, ragged_paged_attention,
+    ref_ragged_paged_attention)
 
 jax.config.parse_flags_with_absl()
 

@@ -7,7 +7,8 @@ setup(
     name="tpu_commons",
     version="0.1.0",
     description="",
-    long_description=open("README.md").read() if hasattr(open("README.md"), "read") else "",
+    long_description=open("README.md").read() if hasattr(
+        open("README.md"), "read") else "",
     long_description_content_type="text/markdown",
     author="tpu_commons Contributors",
     packages=find_packages(),

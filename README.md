@@ -1,4 +1,5 @@
 Current structure, please add, modify, remove etc.
+
 ```
 tpu_commons/
 │── __init__.py
@@ -36,18 +37,25 @@ pip install -r requirements.txt
 ```
 
 Make sure TPU device is accessible:
+
 ```
 tpu-info
 ```
 
 Run the test:
+
 ```
 pytest -v ./tests/ragged_paged_attention_test.py
 ```
 
-
 ## How to format the code?
 
 ```
-yapf -ir .
+pip install pre-commit
+
+# Linting, formatting and static type checking
+pre-commit install --hook-type pre-commit --hook-type commit-msg
+
+# You can manually run pre-commit with
+pre-commit run --all-files
 ```
