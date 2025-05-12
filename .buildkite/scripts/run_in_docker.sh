@@ -22,7 +22,6 @@ exec docker run \
   --net host \
   --shm-size=16G \
   --rm \
-  -v "${AGENT_RESULTS_DIR}:${CONTAINER_RESULTS_DIR}" \
   -e HF_TOKEN="$HF_TOKEN" \
   -e VLLM_XLA_CACHE_PATH= \
   -e VLLM_USE_V1=1 \
