@@ -1,4 +1,5 @@
 Current structure, please add, modify, remove etc.
+
 ```
 tpu_commons/
 │── __init__.py
@@ -36,15 +37,16 @@ pip install -r requirements.txt
 ```
 
 Make sure TPU device is accessible:
+
 ```
 tpu-info
 ```
 
 Run the test:
+
 ```
 pytest -v ./tests/ragged_paged_attention_test.py
 ```
-
 
 ## How to format the code?
 
