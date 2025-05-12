@@ -51,5 +51,11 @@ pytest -v ./tests/ragged_paged_attention_test.py
 ## How to format the code?
 
 ```
-yapf -ir .
+pip install pre-commit
+
+# Linting, formatting and static type checking
+pre-commit install --hook-type pre-commit --hook-type commit-msg
+
+# You can manually run pre-commit with
+pre-commit run --all-files
 ```
