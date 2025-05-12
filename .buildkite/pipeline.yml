@@ -1,24 +1,9 @@
 steps:
   # -----------------------------------------------------------------
-  # STEP 1: Build the image
-  # -----------------------------------------------------------------
-   - label: "Build TPU Docker Image"
-     key: build-docker
-     agents:
-       queue: tpu_v6e_queue
-     commands:
-       - yes | docker system prune -a
-       - >
-         docker build
-         -f docker/Dockerfile
-         -t vllm-tpu .
-
-  # -----------------------------------------------------------------
   # TEST STEPS - Calling wrapper, using python3 -m pytest
   # -----------------------------------------------------------------
    - label: "TPU Test 0: test_perf.py"
      key: tpu_test_0
-     depends_on: build-docker
      soft_fail: true
      agents:
        queue: tpu_v6e_queue
@@ -27,7 +12,6 @@ steps:
 
    - label: "TPU Test 1: test_compilation.py"
      key: tpu_test_1
-     depends_on: build-docker
      soft_fail: true
      agents:
        queue: tpu_v6e_queue
@@ -36,7 +20,6 @@ steps:
 
    - label: "TPU Test 2: test_basic.py"
      key: tpu_test_2
-     depends_on: build-docker
      soft_fail: true
      agents:
        queue: tpu_v6e_queue
@@ -45,7 +28,6 @@ steps:
 
    - label: "TPU Test 3: test_accuracy.py (v1)"
      key: tpu_test_3
-     depends_on: build-docker
      soft_fail: true
      agents:
        queue: tpu_v6e_queue
@@ -54,7 +36,6 @@ steps:
 
    - label: "TPU Test 4: test_quantization_accuracy.py"
      key: tpu_test_4
-     depends_on: build-docker
      soft_fail: true
      agents:
        queue: tpu_v6e_queue
@@ -63,7 +44,6 @@ steps:
 
    - label: "TPU Test 5: examples/offline_inference/tpu.py"
      key: tpu_test_5
-     depends_on: build-docker
      soft_fail: true
      agents:
        queue: tpu_v6e_queue
@@ -72,7 +52,6 @@ steps:
 
    - label: "TPU Test 6: test_tpu_model_runner.py"
      key: tpu_test_6
-     depends_on: build-docker
      soft_fail: true
      agents:
        queue: tpu_v6e_queue
@@ -81,7 +60,6 @@ steps:
 
    - label: "TPU Test 7: test_sampler.py"
      key: tpu_test_7
-     depends_on: build-docker
      soft_fail: true
      agents:
        queue: tpu_v6e_queue
@@ -90,7 +68,6 @@ steps:
 
    - label: "TPU Test 8: test_topk_topp_sampler.py"
      key: tpu_test_8
-     depends_on: build-docker
      soft_fail: true
      agents:
        queue: tpu_v6e_queue
@@ -99,7 +76,6 @@ steps:
 
    - label: "TPU Test 9: test_multimodal.py"
      key: tpu_test_9
-     depends_on: build-docker
      soft_fail: true
      agents:
        queue: tpu_v6e_queue
@@ -108,7 +84,6 @@ steps:
 
    - label: "TPU Test 10: test_pallas.py"
      key: tpu_test_10
-     depends_on: build-docker
      soft_fail: true
      agents:
        queue: tpu_v6e_queue
@@ -117,7 +92,6 @@ steps:
 
    - label: "TPU Test 11: test_struct_output_generate.py"
      key: tpu_test_11
-     depends_on: build-docker
      soft_fail: true
      agents:
        queue: tpu_v6e_queue
@@ -126,7 +100,6 @@ steps:
 
    - label: "TPU Test 12: test_moe_pallas.py"
      key: tpu_test_12
-     depends_on: build-docker
      soft_fail: true
      agents:
        queue: tpu_v6e_queue
@@ -135,7 +108,6 @@ steps:
 
    - label: "TPU Test 13: ragged_paged_attention_test.py"
      key: tpu_test_13
-     depends_on: build-docker
      soft_fail: true
      agents:
        queue: tpu_v6e_queue
