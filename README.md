@@ -2,23 +2,24 @@ Current structure, please add, modify, remove etc.
 
 ```
 tpu_commons/
-│── __init__.py
-│── worker/
+│── tpu_commons/
 │   ├── __init__.py
-│   ├── tpu_worker.py         # Moved and adapted from vllm/v1/worker/
-│   └── tpu_model_runner.py   # Moved and adapted from vllm/v1/worker/
-├── kernels/
-│   ├── __init__.py
-│   └── ragged_paged_attention
+|   ├── worker/
+│   |   ├── __init__.py
+│   |   ├── tpu_worker.py         # Moved and adapted from vllm/v1/worker/
+│   |   └── tpu_model_runner.py   # Moved and adapted from vllm/v1/worker/
+|   ├── kernels/
+│   |   ├── __init__.py
+│   |   └── ragged_paged_attention
+│   |       ├── __init__.py
+│   |       ├── kernel.py
+│   |       └── tuned_block_sizes.py
+|   │── sample/
 │       ├── __init__.py
-│       ├── kernel.py
-│       └── tuned_block_sizes.py
-│── sample/
-│   ├── __init__.py
-│   └── tpu/                  # <<< MOVED from vllm/v1/sample/tpu/
-│       ├── __init__.py
-│       ├── metadata.py
-│       └── sampler.py
+│       └── tpu/                  # <<< MOVED from vllm/v1/sample/tpu/
+│          ├── __init__.py
+│          ├── metadata.py
+│          └── sampler.py
 ├── setup.py
 ├── tests
 │   ├── __init__.py
