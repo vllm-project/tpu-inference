@@ -5,7 +5,7 @@ REQUIRED_PR_LABEL="ready"
 echo "--- Starting Buildkite Bootstrap ---"
 
 # Check if the current build is a pull request
-if [ "$BUILDKITE_PULL_REQUEST" = "true" ]; then
+if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
   echo "This is a Pull Request build."
   # If it's a PR, check for the specific label
   if buildkite-agent meta-data get "buildkite:pull_request_labels" | grep -q "$REQUIRED_PR_LABEL"; then
