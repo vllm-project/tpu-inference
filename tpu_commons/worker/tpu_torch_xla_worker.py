@@ -10,8 +10,6 @@ import torch.nn as nn
 import torch_xla.core.xla_model as xm
 import torch_xla.debug.profiler as xp
 import torch_xla.runtime as xr
-from tpu_commons.runner.tpu_torch_xla_runner import TPUModelRunner
-
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
@@ -25,6 +23,8 @@ from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import bind_kv_cache, report_usage_stats
+
+from tpu_commons.runner.tpu_torch_xla_runner import TPUModelRunner
 
 logger = init_logger(__name__)
 

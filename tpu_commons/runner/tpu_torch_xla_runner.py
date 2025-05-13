@@ -12,7 +12,6 @@ import torch.nn as nn
 # TPU XLA related
 import torch_xla.core.xla_model as xm
 import torch_xla.runtime as xr
-
 import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
@@ -1315,7 +1314,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             self, logits: torch.Tensor,
             sampling_metadata: TPUSupportedSamplingMetadata) -> torch.Tensor:
         """
-        Sample with xla-friendly function. This function is to be traced 
+        Sample with xla-friendly function. This function is to be traced
         separately from `forward` for lighter compilation overhead.
         """
         if sampling_metadata.all_greedy:
@@ -1455,13 +1454,13 @@ def _get_padded_num_reqs_with_upper_limit(x: int, upper_limit: int) -> int:
 
 def _get_token_paddings(min_token_size: int, max_token_size: int,
                         padding_gap: int) -> list[int]:
-    """Generate a list of padding size, starting from min_token_size, 
+    """Generate a list of padding size, starting from min_token_size,
     ending with a number that can cover max_token_size
-    
+
     If padding_gap == 0 then:
         increase 2X each time (exponential)
     else:
-        first increase the size to twice, 
+        first increase the size to twice,
         then increase the padding size by padding_gap.
     """
     # assert min_token_size is power of 2
