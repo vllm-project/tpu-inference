@@ -1,18 +1,18 @@
 #!/bin/bash
 
-REQUIRED_PR_LABEL="ready"
-
 echo "--- Starting Buildkite Bootstrap ---"
 
 # Check if the current build is a pull request
 if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
   echo "This is a Pull Request build."
+  PR_LABELS=$(curl -s "https://api.github.com/repos/vllm-project/tpu_commons/pulls/$BUILDKITE_PULL_REQUEST" | jq -r '.labels[].name')
+
   # If it's a PR, check for the specific label
-  if buildkite-agent meta-data get "buildkite:pull_request_labels" | grep -q "$REQUIRED_PR_LABEL"; then
-    echo "Found '$REQUIRED_PR_LABEL' label on PR. Uploading main pipeline..."
+  if [[ $PR_LABELS == *"ready"* ]]; then
+    echo "Found 'ready' label on PR. Uploading main pipeline..."
     buildkite-agent pipeline upload .buildkite/pipeline.yml
   else
-    echo "No '$REQUIRED_PR_LABEL' label found on PR. Skipping main pipeline upload."
+    echo "No 'ready' label found on PR. Skipping main pipeline upload."
     exit 0 # Exit with 0 to indicate success (no error, just skipped)
   fi
 else
