@@ -4,14 +4,16 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 import torch
-# Required to register custom ops.
-import torch_xla.experimental.custom_kernel  # noqa: F401
+import torch_xla
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import cdiv, next_power_of_2
+
+# Required to register the custom op "torch.ops.xla.ragged_paged_attention"
+import tpu_commons.attention.backends.torch_xla_custom_op  # noqa: F401
 
 logger = init_logger(__name__)
 
@@ -196,7 +198,6 @@ class PallasAttentionBackendImpl(AttentionImpl):
             num_kv_pages_per_block=None,
             num_queries_per_block=None,
             vmem_limit_bytes=None,
-            use_kernel=True,
             sm_scale=self.scale,
             sliding_window=self.sliding_window,
             soft_cap=self.logits_soft_cap,
