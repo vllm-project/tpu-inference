@@ -10,7 +10,7 @@ def get_tpu_worker_cls(worker_type=None):
 
     # Use environment variable if no explicit type is provided
     if worker_type is None:
-        worker_type = os.environ.get("TPU_WORKER_TYPE", "pytorch_xla").lower()
+        worker_type = os.environ.get("TPU_BACKEND_TYPE", "pytorch_xla").lower()
 
     if worker_type == "pytorch_xla":
         from tpu_commons.worker.tpu_torch_xla_worker import TPUWorker
@@ -20,9 +20,9 @@ def get_tpu_worker_cls(worker_type=None):
 
 
 # For convenience, also export the default worker
-TPU_WORKER_TYPE = os.environ.get("TPU_WORKER_TYPE", "pytorch_xla").lower()
+TPU_BACKEND_TYPE = os.environ.get("TPU_BACKEND_TYPE", "pytorch_xla").lower()
 try:
-    TPUWorker = get_tpu_worker_cls(TPU_WORKER_TYPE)
+    TPUWorker = get_tpu_worker_cls(TPU_BACKEND_TYPE)
     __all__.append("TPUWorker")
 except (ImportError, ValueError) as e:
     import warnings
