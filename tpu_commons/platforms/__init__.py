@@ -16,6 +16,9 @@ def get_tpu_platform_cls(backend_type=None):
     if backend_type == "pytorch_xla":
         from tpu_commons.platforms.tpu_torch_xla import TpuPlatform
         return TpuPlatform
+    elif backend_type == "jax":
+        from tpu_commons.platforms.tpu_jax import TpuPlatform
+        return TpuPlatform
     else:
         raise ValueError(f"Unknown TPU backend type: {backend_type}")
 
