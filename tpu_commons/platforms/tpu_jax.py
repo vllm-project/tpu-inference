@@ -21,7 +21,7 @@ else:
 
 logger = init_logger(__name__)
 
-_DTYPE = dict[str, jnp.dtype] = {
+_DTYPE: dict[str, jnp.dtype] = {
     "bfloat16": jnp.bfloat16,
     "float": jnp.float32,
     "float32": jnp.float32,
@@ -116,8 +116,9 @@ class TpuPlatform(Platform):
 
         if not isinstance(vllm_config.model_config.dtype, str):
             logger.warning(
-                "The model dtype is not properly set for JAX backend.")
-            vllm_config.model_config.dtype = jnp.bloat16
+                "The model dtype is not properly set for JAX backend. "
+                "Overwriting it to jnp.bfloat16")
+            vllm_config.model_config.dtype = jnp.bfloat16
         else:
             vllm_config.model_config.dtype = _DTYPE.get(
                 vllm_config.model_config.dtype, jnp.bfloat16)
