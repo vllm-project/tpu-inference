@@ -49,10 +49,11 @@ Follow this [guide](https://docs.vllm.ai/en/latest/getting_started/installation/
 Right after the `git clone` step and before the `pip install -e .` step, run the following command:
 
 ```
+cd vllm
 sed -i 's|return "vllm.platforms.tpu.TpuPlatform" if is_tpu else None|return "tpu_commons.platforms.TpuPlatform" if is_tpu else None|g' vllm/platforms/__init__.py
 ```
 
-Then continue the installation steps until pip isntall succeeds.
+Then continue the installation steps until pip install succeeds.
 
 ## How to test the JAX path?
 
