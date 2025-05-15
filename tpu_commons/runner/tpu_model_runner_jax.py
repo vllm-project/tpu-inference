@@ -1,15 +1,32 @@
 # SPDX-License-Identifier: Apache-2.0
+import time
 from typing import Any
 
 import jax
 import jax.numpy as jnp
-
-from vllm.v1.worker.input_batch_jax import InputBatch as InputBatchJax
-from vllm.v1.worker.tpu_model_runner import *
+import numpy as np
+import torch
+import vllm.envs as envs
+from vllm.config import VllmConfig
+from vllm.logger import init_logger
+from vllm.model_executor.model_loader import get_model
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.utils import LayerBlockType, cdiv, is_pin_memory_available
+from vllm.v1.attention.backends.pallas import PallasAttentionBackend
+from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
+                                        KVCacheConfig, KVCacheSpec)
+from vllm.v1.utils import bind_kv_cache
+from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.v1.worker.tpu_model_runner import (_get_req_paddings,
                                              _get_token_paddings)
 
+from tpu_commons.worker.input_batch_jax import InputBatch
+
 logger = init_logger(__name__)
+
+MIN_NUM_SEQS = 8
 
 
 class TPUModelRunnerJax:
@@ -58,7 +75,8 @@ class TPUModelRunnerJax:
         self.num_tokens_paddings = _get_token_paddings(
             min_token_size=16,
             max_token_size=scheduler_config.max_num_batched_tokens,
-            padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
+            padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP,
+        )
         # In case `max_num_tokens < max(num_tokens_paddings)` use the actual
         # padded max value to pre-allocate data structures and pre-compile.
         self.max_num_tokens = self.num_tokens_paddings[-1]
@@ -96,7 +114,7 @@ class TPUModelRunnerJax:
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
         # Persistent batch.
-        self.input_batch = InputBatchJax(
+        self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
             max_num_blocks_per_req=self.max_num_blocks_per_req,
@@ -299,56 +317,8 @@ class TPUModelRunnerJax:
             self.load_model()
 
         input_ids = jnp.zeros((num_tokens, ), dtype=jnp.int32)
-        # device=device) # Explicit placement if needed
-
-        inputs_embeds = None  # Remains None
-
-        actual_num_reqs = min(num_tokens, self.max_num_reqs)
-
+        inputs_embeds = None
         position_ids = jnp.zeros((num_tokens, ), dtype=jnp.int32)
-        # device=device) # Explicit placement if needed
-
-        slot_mapping = jnp.zeros(
-            (num_tokens, ), dtype=jnp.int64)  # Note: JAX default int is int32
-        # device=device) # Explicit placement if needed
-
-        block_tables = jnp.zeros(
-            (self.max_num_reqs,
-             self.block_table.shape[1]),  # Use shape directly
-            dtype=jnp.int32)
-        # device=device) # Explicit placement if needed
-
-        query_lens = [1] * self.max_num_reqs  # Standard Python list
-
-        # JAX equivalent for cumsum and tensor creation
-        # Create the initial array, potentially on the device
-        initial_query_loc = jnp.array([0] + query_lens, dtype=jnp.int32)
-        # device=device) # Explicit placement if needed
-
-        # Perform cumsum. The result typically stays on the same device.
-        query_start_loc = jnp.cumsum(initial_query_loc,
-                                     axis=0,
-                                     dtype=jnp.int32)
-
-        context_lens = jnp.ones((self.max_num_reqs, ), dtype=jnp.int32)
-        # device=device) # Explicit placement if needed
-
-        num_seqs = jnp.array([actual_num_reqs], dtype=jnp.int32)
-        # device=device) # Explicit placement if needed
-        attn_metadata = PallasMetadata(
-            slot_mapping=slot_mapping,
-            block_tables=block_tables,
-            context_lens=context_lens,
-            query_start_loc=query_start_loc,
-            num_seqs=num_seqs,
-        )
-
-        layer_names = get_layers_from_vllm_config(self.vllm_config,
-                                                  Attention).keys()
-        per_layer_attn_metadata = {
-            layer_name: attn_metadata
-            for layer_name in layer_names
-        }
 
         out = self.model(input_ids=input_ids,
                          positions=position_ids,
@@ -398,8 +368,11 @@ class TPUModelRunnerJax:
                 num_blocks = tensor_config.size // kv_cache_spec.page_size_bytes
                 if isinstance(kv_cache_spec, AttentionSpec):
                     kv_cache_shape = PallasAttentionBackend.get_kv_cache_shape(
-                        num_blocks, kv_cache_spec.block_size,
-                        kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
+                        num_blocks,
+                        kv_cache_spec.block_size,
+                        kv_cache_spec.num_kv_heads,
+                        kv_cache_spec.head_size,
+                    )
                     dtype = kv_cache_spec.dtype
 
                     tpu_kv_cache = jnp.zeros(kv_cache_shape, dtype=dtype)
@@ -411,4 +384,5 @@ class TPUModelRunnerJax:
         bind_kv_cache(
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
-            self.kv_caches)
+            self.kv_caches,
+        )
