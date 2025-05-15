@@ -6,14 +6,14 @@ from typing import Any, Optional, cast
 
 import jax
 import jax.numpy as jnp
-
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.worker.block_table_jax import BlockTableJax as BlockTable
+
+from tpu_commons.worker.block_table_jax import BlockTableJax as BlockTable
 
 _SAMPLING_EPS = 1e-5
 
@@ -241,8 +241,10 @@ class InputBatch:
             self.repetition_penalties_reqs.add(req_id)
 
         if sampling_params.min_tokens:
-            self.min_tokens[req_index] = (sampling_params.min_tokens,
-                                          sampling_params.all_stop_token_ids)
+            self.min_tokens[req_index] = (
+                sampling_params.min_tokens,
+                sampling_params.all_stop_token_ids,
+            )
 
         if request.generator is not None:
             self.generators[req_index] = request.generator
@@ -261,7 +263,9 @@ class InputBatch:
                     (self.max_num_reqs, self.vocab_size), dtype=jnp.bool_)
                 self.allowed_token_ids_mask = jax.device_put(
                     jnp.zeros((self.max_num_reqs, self.vocab_size),
-                              dtype=jnp.bool_), self.device)
+                              dtype=jnp.bool_),
+                    self.device,
+                )
 
             current_mask_row = jnp.ones(self.vocab_size, dtype=jnp.bool_)
             allowed_indices = jnp.array(list(
@@ -330,42 +334,50 @@ class InputBatch:
     def swap_states(self, i1: int, i2: int) -> None:
         old_id_i1 = self._req_ids[i1]
         old_id_i2 = self._req_ids[i2]
-        self._req_ids[i1], self._req_ids[i2] = self._req_ids[
-            i2], self._req_ids[i1]  # noqa
-        self.req_output_token_ids[i1], self.req_output_token_ids[
-            i2] = self.req_output_token_ids[i2], self.req_output_token_ids[i1]
+        self._req_ids[i1], self._req_ids[i2] = (
+            self._req_ids[i2],
+            self._req_ids[i1],
+        )  # noqa
+        self.req_output_token_ids[i1], self.req_output_token_ids[i2] = (
+            self.req_output_token_ids[i2],
+            self.req_output_token_ids[i1],
+        )
         assert old_id_i1 is not None and old_id_i2 is not None
-        self.req_id_to_index[old_id_i1], self.req_id_to_index[
-            old_id_i2] = self.req_id_to_index[old_id_i2], self.req_id_to_index[
-                old_id_i1]
+        self.req_id_to_index[old_id_i1], self.req_id_to_index[old_id_i2] = (
+            self.req_id_to_index[old_id_i2],
+            self.req_id_to_index[old_id_i1],
+        )
 
-        self.num_tokens = self.num_tokens.at[i1].set(
-            self.num_tokens[i2]).at[i2].set(self.num_tokens[i1])
-        self.num_tokens_no_spec = self.num_tokens_no_spec.at[i1].set(
+        self.num_tokens = (self.num_tokens.at[i1].set(
+            self.num_tokens[i2]).at[i2].set(self.num_tokens[i1]))
+        self.num_tokens_no_spec = (self.num_tokens_no_spec.at[i1].set(
             self.num_tokens_no_spec[i2]).at[i2].set(
-                self.num_tokens_no_spec[i1])
-        self.num_prompt_tokens = self.num_prompt_tokens.at[i1].set(
-            self.num_prompt_tokens[i2]).at[i2].set(self.num_prompt_tokens[i1])
-        self.num_computed_tokens_cpu = self.num_computed_tokens_cpu.at[i1].set(
-            self.num_computed_tokens_cpu[i2]).at[i2].set(
-                self.num_computed_tokens_cpu[i1])
-        self.temperature_cpu = self.temperature_cpu.at[i1].set(
-            self.temperature_cpu[i2]).at[i2].set(self.temperature_cpu[i1])
-        self.top_p_cpu = self.top_p_cpu.at[i1].set(
-            self.top_p_cpu[i2]).at[i2].set(self.top_p_cpu[i1])
-        self.top_k_cpu = self.top_k_cpu.at[i1].set(
-            self.top_k_cpu[i2]).at[i2].set(self.top_k_cpu[i1])
-        self.frequency_penalties_cpu = self.frequency_penalties_cpu.at[i1].set(
-            self.frequency_penalties_cpu[i2]).at[i2].set(
-                self.frequency_penalties_cpu[i1])
-        self.presence_penalties_cpu = self.presence_penalties_cpu.at[i1].set(
+                self.num_tokens_no_spec[i1]))
+        self.num_prompt_tokens = (self.num_prompt_tokens.at[i1].set(
+            self.num_prompt_tokens[i2]).at[i2].set(self.num_prompt_tokens[i1]))
+        self.num_computed_tokens_cpu = (
+            self.num_computed_tokens_cpu.at[i1].set(
+                self.num_computed_tokens_cpu[i2]).at[i2].set(
+                    self.num_computed_tokens_cpu[i1]))
+        self.temperature_cpu = (self.temperature_cpu.at[i1].set(
+            self.temperature_cpu[i2]).at[i2].set(self.temperature_cpu[i1]))
+        self.top_p_cpu = (self.top_p_cpu.at[i1].set(
+            self.top_p_cpu[i2]).at[i2].set(self.top_p_cpu[i1]))
+        self.top_k_cpu = (self.top_k_cpu.at[i1].set(
+            self.top_k_cpu[i2]).at[i2].set(self.top_k_cpu[i1]))
+        self.frequency_penalties_cpu = (
+            self.frequency_penalties_cpu.at[i1].set(
+                self.frequency_penalties_cpu[i2]).at[i2].set(
+                    self.frequency_penalties_cpu[i1]))
+        self.presence_penalties_cpu = (self.presence_penalties_cpu.at[i1].set(
             self.presence_penalties_cpu[i2]).at[i2].set(
-                self.presence_penalties_cpu[i1])
-        self.repetition_penalties_cpu = self.repetition_penalties_cpu.at[
-            i1].set(self.repetition_penalties_cpu[i2]).at[i2].set(
-                self.repetition_penalties_cpu[i1])
-        self.min_p_cpu = self.min_p_cpu.at[i1].set(
-            self.min_p_cpu[i2]).at[i2].set(self.min_p_cpu[i1])
+                self.presence_penalties_cpu[i1]))
+        self.repetition_penalties_cpu = (
+            self.repetition_penalties_cpu.at[i1].set(
+                self.repetition_penalties_cpu[i2]).at[i2].set(
+                    self.repetition_penalties_cpu[i1]))
+        self.min_p_cpu = (self.min_p_cpu.at[i1].set(
+            self.min_p_cpu[i2]).at[i2].set(self.min_p_cpu[i1]))
 
         tmp_row = jnp.copy(self.token_ids_cpu[i1, :])
         self.token_ids_cpu = self.token_ids_cpu.at[i1, :].set(
@@ -376,11 +388,13 @@ class InputBatch:
         swap_dict_values(self.min_tokens, i1, i2)
         swap_dict_values(self.bad_words_token_ids, i1, i2)
 
-        self.request_lora_mapping = self.request_lora_mapping.at[i1].set(
+        self.request_lora_mapping = (self.request_lora_mapping.at[i1].set(
             self.request_lora_mapping[i2]).at[i2].set(
-                self.request_lora_mapping[i1])
-        self.logit_bias[i1], self.logit_bias[i2] = self.logit_bias[
-            i2], self.logit_bias[i1]
+                self.request_lora_mapping[i1]))
+        self.logit_bias[i1], self.logit_bias[i2] = (
+            self.logit_bias[i2],
+            self.logit_bias[i1],
+        )
 
         if self.allowed_token_ids_mask_cpu is not None:
             tmp_mask_row = jnp.copy(self.allowed_token_ids_mask_cpu[i1])
@@ -481,9 +495,9 @@ class InputBatch:
             self.logit_bias[empty_index] = self.logit_bias[last_req_index]
 
             if current_allowed_token_ids_mask_cpu is not None:
-                current_allowed_token_ids_mask_cpu = current_allowed_token_ids_mask_cpu.at[
-                    empty_index].set(
-                        current_allowed_token_ids_mask_cpu[last_req_index])
+                current_allowed_token_ids_mask_cpu = (
+                    current_allowed_token_ids_mask_cpu.at[empty_index].set(
+                        current_allowed_token_ids_mask_cpu[last_req_index]))
 
             bad_words_token_ids = self.bad_words_token_ids.pop(
                 last_req_index, None)
@@ -549,7 +563,8 @@ class InputBatch:
             prompt_token_ids = self._make_prompt_token_ids_tensor()
 
         if not self.no_allowed_token_ids:
-            assert self.allowed_token_ids_mask is not None and self.allowed_token_ids_mask_cpu is not None
+            assert (self.allowed_token_ids_mask is not None
+                    and self.allowed_token_ids_mask_cpu is not None)
             self.allowed_token_ids_mask = self.allowed_token_ids_mask.at[:num_reqs].set(
                 self.allowed_token_ids_mask_cpu[:num_reqs])
             allowed_token_ids_mask_for_metadata = self.allowed_token_ids_mask[:
@@ -565,12 +580,12 @@ class InputBatch:
             generators=self.generators,
             max_num_logprobs=self.max_num_logprobs,
             prompt_token_ids=prompt_token_ids,
-            frequency_penalties=self.frequency_penalties[:num_reqs]
-            if not self.no_penalties else None,
-            presence_penalties=self.presence_penalties[:num_reqs]
-            if not self.no_penalties else None,
-            repetition_penalties=self.repetition_penalties[:num_reqs]
-            if not self.no_penalties else None,
+            frequency_penalties=(self.frequency_penalties[:num_reqs]
+                                 if not self.no_penalties else None),
+            presence_penalties=(self.presence_penalties[:num_reqs]
+                                if not self.no_penalties else None),
+            repetition_penalties=(self.repetition_penalties[:num_reqs]
+                                  if not self.no_penalties else None),
             output_token_ids=cast(list[list[int]], self.req_output_token_ids),
             min_tokens=self.min_tokens,
             no_penalties=self.no_penalties,
@@ -625,7 +640,8 @@ class InputBatch:
             token_lora_mapping_array = jnp.repeat(
                 req_lora_mapping_slice,
                 repeats_for_tokens,
-                total_repeat_length=jnp.sum(repeats_for_tokens).item())
+                total_repeat_length=jnp.sum(repeats_for_tokens).item(),
+            )
             token_lora_mapping = tuple(map(int, token_lora_mapping_array))
         else:
             token_lora_mapping = tuple()

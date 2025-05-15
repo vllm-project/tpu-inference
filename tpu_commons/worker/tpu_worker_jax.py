@@ -1,28 +1,23 @@
 """TPU jax based worker"""
 
-import os
 from typing import Optional
 
 import jax
-import jax.numpy as jnp
-
 import vllm.envs as envs
-from vllm.config import ParallelConfig, VllmConfig
-from vllm.distributed import (ensure_model_parallel_initialized,
-                              init_distributed_environment)
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheConfig,
-                                        KVCacheSpec)
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.utils import bind_kv_cache, report_usage_stats
-from vllm.v1.worker.tpu_model_runner_jax import TPUModelRunnerJax
 from vllm.v1.worker.worker_base import WorkerBase
 
+from tpu_commons.runner.tpu_model_runner_jax import TPUModelRunnerJax
+
 logger = init_logger(__name__)
+
 
 class TPUWorkerJax(WorkerBase):
 
@@ -57,7 +52,8 @@ class TPUWorkerJax(WorkerBase):
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
         else:
-            self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[self.cache_config.cache_dtype]
+            self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
+                self.cache_config.cache_dtype]
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
@@ -75,16 +71,16 @@ class TPUWorkerJax(WorkerBase):
             # For TPU, we can only have 1 active profiler session for 1 profiler
             # server. So we only profile on rank0.
             self.profile_dir = envs.VLLM_TORCH_PROFILER_DIR
-            logger.info(
-                "Profiling enabled. Traces will be saved to: %s", self.profile_dir
-            )
+            logger.info("Profiling enabled. Traces will be saved to: %s",
+                        self.profile_dir)
 
         if self.model_config.seed is None:
             self.model_config.seed = 0
 
         if vllm_config.lora_config is not None:
-            raise NotImplementedError("The V1 TPU backend doesn't support LoRA serving")
-        
+            raise NotImplementedError(
+                "The V1 TPU backend doesn't support LoRA serving")
+
         print("-------", jax.devices())
 
     def init_device(self):
