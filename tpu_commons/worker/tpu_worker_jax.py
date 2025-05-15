@@ -19,7 +19,7 @@ from tpu_commons.runner.tpu_model_runner_jax import TPUModelRunnerJax
 logger = init_logger(__name__)
 
 
-class TPUWorkerJax(WorkerBase):
+class TPUWorker(WorkerBase):
 
     def __init__(
         self,
@@ -36,18 +36,6 @@ class TPUWorkerJax(WorkerBase):
             distributed_init_method=distributed_init_method,
             is_driver_worker=is_driver_worker,
         )
-
-        self.vllm_config = vllm_config
-        self.model_config = vllm_config.model_config
-        self.cache_config = vllm_config.cache_config
-        self.lora_config = vllm_config.lora_config
-        self.load_config = vllm_config.load_config
-        self.parallel_config = vllm_config.parallel_config
-        self.scheduler_config = vllm_config.scheduler_config
-        self.device_config = vllm_config.device_config
-        self.speculative_config = vllm_config.speculative_config
-        self.prompt_adapter_config = vllm_config.prompt_adapter_config
-        self.observability_config = vllm_config.observability_config
 
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype

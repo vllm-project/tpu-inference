@@ -5,14 +5,8 @@ import os
 __all__ = ["get_tpu_platform_cls"]
 
 
-def get_tpu_platform_cls(backend_type=None):
+def get_tpu_platform_cls(backend_type="pytorch_xla"):
     """Get the appropriate TPU worker implementation."""
-
-    # Use environment variable if no explicit type is provided
-    if backend_type is None:
-        backend_type = os.environ.get("TPU_BACKEND_TYPE",
-                                      "pytorch_xla").lower()
-
     if backend_type == "pytorch_xla":
         from tpu_commons.platforms.tpu_torch_xla import TpuPlatform
         return TpuPlatform

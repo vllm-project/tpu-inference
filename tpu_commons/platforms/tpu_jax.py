@@ -154,7 +154,7 @@ class TpuPlatform(Platform):
             else:
                 if envs.VLLM_USE_V1:
                     parallel_config.worker_cls = \
-                        "tpu_commons.worker.tpu_worker_jax.TPUWorkerJax"
+                        "tpu_commons.worker.tpu_worker_jax.TPUWorker"
                 else:
                     parallel_config.worker_cls = \
                         "vllm.worker.tpu_worker.TPUWorker"
