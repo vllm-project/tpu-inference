@@ -26,6 +26,12 @@ from tpu_commons.worker.input_batch_jax import CachedRequestState, InputBatch
 logger = init_logger(__name__)
 
 MIN_NUM_SEQS = 8
+# When chunked prefill is enabled, this is the max number of prefill segments that
+# could scheduled in one token batch.
+MAX_PREFILL_SEQS_PER_TOKEN_BATCH = 5
+MAX_ALLOWED_PAGE_INDICES_N = (
+    128 * 1024
+)  # Based on experiments on v5e, 256x1024 results in smem oom but 128x1024 not. TODO: Adjust this based on TPU version.
 
 
 class TPUModelRunner():
@@ -73,6 +79,20 @@ class TPUModelRunner():
             pin_memory=None,
             vocab_size=self.vocab_size,
         )
+
+        self.params = None
+
+        # TODO(pooyam): Fix these defaults.
+        if not getattr(self.scheduler_config, 'chunked_prefill_tokens_padding',
+                       None):
+            self.scheduler_config.chunked_prefill_tokens_padding = 8
+        if not getattr(self.cache_config, 'sink_size', None):
+            self.cache_config.sink_size = None
+        if not getattr(self.scheduler_config, 'decode_blocks_padding', None):
+            self.scheduler_config.decode_blocks_padding = 8
+
+        self.perplexity_reference_text = None
+        self._init_jit()
 
     def load_model(self):
         pass
@@ -144,6 +164,17 @@ class TPUModelRunner():
     def capture_model(self) -> None:
         pass
 
+    def model_fn(self, is_prefill: bool, do_sampling: bool, kv_caches: Any,
+                 input_ids: jax.Array, *args, **kwargs) -> None:
+
+        # batch_size = input_ids.shape[0]
+
+        # next_tokens = np.zeros((batch_size, 1), dtype=np.int32)
+        # logits = np.zeros((batch_size, 1), dtype=np.float32)
+
+        # return self.kv_caches, next_tokens, logits, None
+        return self.kv_caches, None, None, None
+
     def execute_model(
         self,
         scheduler_output: "VllmSchedulerOutput",
@@ -155,11 +186,22 @@ class TPUModelRunner():
         req_ids = []
         prompt_logprobs_dict = {}
 
-        # TODO(pooyam): Add code to handle vllm input diff. Vllm sends diff of inputs, not the whole input everytime.
+        #At first step of this implementation, let's do prefill and decode seperately for maximum code reuse and simpler debug/verification.
+        prefill_inputs = self._prepare_prefill(scheduler_output)
+        if prefill_inputs is not None:
+            model_inputs, (running_indices,
+                           output_token_indices) = prefill_inputs
+            self.kv_caches, next_tokens_prefill, logits_prefill, single_step_attn_scores_prefill = self.model_fn(
+                self.params, *model_inputs)
+        decode_inputs = self._prepare_decode(scheduler_output)
+        if decode_inputs is not None:
+            model_inputs, (running_indices,
+                           output_token_indices) = decode_inputs
+            self.kv_caches, next_tokens_decode, logits_decode, single_step_attn_scores_decode = self.model_fn(
+                self.params, *model_inputs)
 
-        # At first step of this implementation, let's do prefill and decode seperately for maximum code reuse.
-        if len(scheduler_output.scheduled_new_reqs):
-            _ = self._prepare_prefill(scheduler_output)
+        # TODO(pooyam): merge output of prefill and decode and/or add _prepare_chunked_prefill.
+        # The goal here is to make sure we are using vllm scheduler output correctly. When we verify that, we can also add `_prepare_chunked_prefill`.
 
         all_reqs = scheduler_output.scheduled_new_reqs + scheduler_output.scheduled_cached_reqs
 
@@ -186,6 +228,9 @@ class TPUModelRunner():
             axis_names=axis_names,
         )
         logger.info(f"Init mesh | mesh={self.mesh}")
+
+    def _init_jit(self) -> None:
+        pass
 
     def _device_array(self, *args, sharding=None, **kwargs) -> jax.Array:
         if sharding is None:
@@ -316,7 +361,195 @@ class TPUModelRunner():
 
         return len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
 
+    # Modified from https://source.corp.google.com/h/vertex-model-garden/hex-llm/+/main:hex_llm/worker/runner_jax.py;drc=3ed287d21d5f95a053cb5fe3b249373064ac2f23;l=803.
+    def _prepare_decode(self, scheduler_output: VllmSchedulerOutput) -> Any:
+        if not len(scheduler_output.scheduled_cached_reqs):
+            return None
+
+        num_seqs = len(scheduler_output.scheduled_cached_reqs)
+        block_size = self.cache_config.block_size
+        sliding_window = self.model_config.get_sliding_window()
+        sink_size = self.cache_config.sink_size
+        cache_kv_before_rope = self.eviction_algorithm is not None
+        max_model_len = self.model_config.max_model_len
+
+        if sliding_window is not None:
+            max_num_blocks = ((sliding_window + sink_size) //
+                              block_size if sink_size else sliding_window //
+                              block_size)
+        else:
+            max_possible_num_blocks = math.ceil(max_model_len / block_size)
+            max_num_blocks = 0
+            for seq in scheduler_output.scheduled_cached_reqs:
+                seq_index = self.input_batch.req_id_to_index[seq.req_id]
+                max_num_blocks = max(
+                    max_num_blocks,
+                    self.input_batch.block_table.num_blocks_per_row[seq_index])
+
+            max_num_blocks = pad_to_multiple(
+                max_num_blocks,
+                self.scheduler_config.decode_blocks_padding,
+                max_possible_num_blocks,
+                keep_one=True,
+            )
+
+        # TODO(pooyam): Fix this. Not padding right now to debug easier.
+        # keep_one = not (
+        #     (
+        #         self.model_config.is_mistral()
+        #         and max_num_blocks > MAX_ALLOWED_PAGE_INDICES_N
+        #     )
+        #     or self.model_config.is_moe()
+        # )
+        # batch_size = pad_to_multiple(
+        #     num_seqs,
+        #     self.scheduler_config.decode_seqs_padding,
+        #     self.scheduler_config.max_decode_seqs,
+        #     keep_one=keep_one,
+        # )
+        batch_size = num_seqs
+
+        do_sampling = False
+        running_indices = np.full((batch_size, ), -1, dtype=np.int32)
+        input_token_indices = np.full((batch_size, ), -1, dtype=np.int32)
+        input_positions = np.zeros([batch_size, 1], dtype=np.int32)
+        seq_lens = np.zeros((batch_size, ), dtype=np.int32)
+        input_ids = np.zeros((batch_size, ), dtype=np.int32)
+        block_indices = np.zeros((batch_size, max_num_blocks), dtype=np.int32)
+        kv_cache_write_indices = np.full((batch_size, ), -1, dtype=np.int32)
+        temperatures = np.full((batch_size, ), 1.0, dtype=np.float32)
+        top_ps = np.full((batch_size, ), 1.0, dtype=np.float32)
+        top_ks = np.full((batch_size, ), 1, dtype=np.int32)
+        output_token_indices = np.full((batch_size, ), -1, dtype=np.int32)
+        kv_cache_position_indices = (np.zeros(
+            (batch_size, max_num_blocks *
+             block_size), dtype=np.int32) if cache_kv_before_rope else None)
+        # Physical indices of the evicted tokens and the replacement tokens.
+        evict_write_indices = (np.full((batch_size, ), -1, dtype=np.int32)
+                               if self.eviction_algorithm is not None
+                               and self.eviction_algorithm != "streamingllm"
+                               else None)
+        replacement_write_indices = (
+            np.full((batch_size, ), -1, dtype=np.int32)
+            if self.eviction_algorithm is not None
+            and self.eviction_algorithm != "streamingllm" else None)
+
+        for i, seq in enumerate(scheduler_output.scheduled_cached_reqs):
+            seq_index = self.input_batch.req_id_to_index[seq.req_id]
+            seq_len = self.input_batch.num_computed_tokens_cpu[seq_index]
+
+            num_blocks = self.input_batch.block_table.num_blocks_per_row[
+                seq_index]
+            block_table = self.input_batch.block_table.block_table_cpu[
+                seq_index, :num_blocks]
+
+            position = seq_len - 1
+
+            running_indices[i] = seq_index
+            #input_token_indices[i] = seq.get_decoded_len() - 1
+            # TODO(pooyam): Make sure this is correct
+            input_token_indices[i] = self.input_batch.num_computed_tokens_cpu[
+                seq_index] - self.input_batch.num_prompt_tokens[seq_index]
+            assert input_token_indices[i] >= 0
+
+            if self.eviction_algorithm in ["streamingllm", "h2o"]:
+                input_positions[i][:] = [
+                    min(position, sliding_window + sink_size - 1)
+                ]
+            else:
+                input_positions[i][:] = [position]
+
+            block_indices[i][:len(block_table)] = block_table
+
+            if sliding_window is None:
+                seq_lens[i] = seq_len
+                assert position // block_size == len(block_table) - 1
+                block_id = -1
+                block_offset = position % block_size
+            else:
+                # Let's remove for now for simplicity.
+                raise NotImplementedError("Refer to original impl in hex-llm.")
+
+            kv_cache_write_indices[i] = (block_table[block_id] * block_size +
+                                         block_offset)
+
+            temperatures[i] = self.input_batch.temperature_cpu[seq_index]
+            top_ps[i] = self.input_batch.top_p_cpu[seq_index]
+            top_ks[i] = self.input_batch.top_k_cpu[seq_index]
+            output_token_indices[i] = input_token_indices[i] + 1
+            if top_ks[i] != 1:
+                do_sampling = True
+
+            # TODO(pooyam): Check this.
+            input_ids[i] = self.input_batch.token_ids_cpu[seq_index][seq_len -
+                                                                     1]
+
+        running_indices = self._device_array(running_indices)
+        input_token_indices = self._device_array(input_token_indices)
+
+        # TODO(pooyam): Check this.
+        # input_ids = self.read_outputs(
+        #     self.output_cache, running_indices, input_token_indices
+        # )
+
+        # For perplexity experiments
+        if self.perplexity_reference_text is not None:
+            raise NotImplementedError("Not implemented.")
+            assert len(scheduler_output.scheduled_seqs) == 1
+            seq = scheduler_output.scheduled_seqs[0]
+            seq_len = seq.get_prompt_len() + seq.get_decoded_len()
+            input_ids = input_ids.at[0, 0].set(
+                self.perplexity_reference_text[seq_len - 1])
+
+        (
+            input_positions,
+            seq_lens,
+            block_indices,
+            kv_cache_write_indices,
+            temperatures,
+            top_ps,
+            top_ks,
+            output_token_indices,
+        ) = self._device_array((
+            input_positions,
+            seq_lens,
+            block_indices,
+            kv_cache_write_indices,
+            temperatures,
+            top_ps,
+            top_ks,
+            output_token_indices,
+        ))
+
+        if kv_cache_position_indices is not None:
+            kv_cache_position_indices = self._device_array(
+                kv_cache_position_indices)
+        if evict_write_indices is not None:
+            evict_write_indices = self._device_array(evict_write_indices)
+        eviction_score_mask = None
+        return (
+            False,  # is prefill
+            do_sampling,
+            self.kv_caches,
+            input_ids,
+            AttentionMetadata(input_positions, seq_lens, block_indices,
+                              kv_cache_write_indices),
+            temperatures,
+            top_ps,
+            top_ks,
+            kv_cache_position_indices,
+            evict_write_indices,
+            replacement_write_indices,
+            eviction_score_mask,
+        ), (
+            running_indices,
+            output_token_indices,
+        )
+
     def _prepare_prefill(self, scheduler_output: VllmSchedulerOutput) -> Any:
+        if not len(scheduler_output.scheduled_new_reqs):
+            return None
+
         block_size = self.vllm_config.cache_config.block_size
         sliding_window = self.vllm_config.model_config.get_sliding_window()
 
