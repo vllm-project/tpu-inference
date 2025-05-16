@@ -2,7 +2,7 @@
 import functools
 import math
 from dataclasses import dataclass
-from typing import Any, List, Optional, Union
+from typing import Any, List, Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -16,6 +16,7 @@ from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.utils import bind_kv_cache
 
 logger = init_logger(__name__)
 
@@ -59,7 +60,33 @@ class TPUModelRunner():
         return kv_cache_spec
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
-        pass
+        kv_caches: dict[str, Tuple[jax.Array, jax.Array]] = {}
+
+        kv_cache_groups = kv_cache_config.kv_cache_groups
+        assert len(
+            kv_cache_groups) == 1, "Only full attention layer is supported now"
+
+        kv_cache_spec = kv_cache_groups[0].kv_cache_spec
+        layer_names = kv_cache_groups[0].layer_names
+        dtype = kv_cache_spec.dtype
+        # TODO: vllm's pallas backend uses a different shape:
+        # (num_blocks, block_size, num_kv_heads * 2, head_size)
+        # need to figure out the performance diff.
+        shape = (
+            kv_cache_spec.num_kv_heads,
+            kv_cache_config.num_blocks,
+            kv_cache_spec.block_size,
+            kv_cache_spec.head_dim,
+        )
+        for layer_name in layer_names:
+            k_cache = jnp.empty(shape=shape, dtype=dtype)
+            v_cache = jnp.empty(shape=shape, dtype=dtype)
+            kv_caches[layer_name] = (k_cache, v_cache)
+
+        bind_kv_cache(
+            kv_caches,
+            self.vllm_config.compilation_config.static_forward_context,
+            self.kv_caches)
 
     def capture_model(self) -> None:
         pass

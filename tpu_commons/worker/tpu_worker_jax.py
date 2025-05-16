@@ -72,9 +72,7 @@ class TPUWorker(WorkerBase):
         print("-------", jax.devices())
 
     def init_device(self):
-        # TODO(xiang): fix device init
-        self.device = jax.devices()[0]
-        self.model_runner = TPUModelRunner(self.vllm_config, self.device)
+        self.model_runner = TPUModelRunner(self.vllm_config, None)
 
     def determine_available_memory(self) -> int:
         return 1e10
