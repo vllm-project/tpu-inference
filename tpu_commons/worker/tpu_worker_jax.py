@@ -14,7 +14,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerBase
 
-from tpu_commons.runner.tpu_model_runner_jax import TPUModelRunnerJax
+from tpu_commons.runner.tpu_jax_runner_v2 import TPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -74,7 +74,7 @@ class TPUWorker(WorkerBase):
     def init_device(self):
         # TODO(xiang): fix device init
         self.device = jax.devices()[0]
-        self.model_runner = TPUModelRunnerJax(self.vllm_config, self.device)
+        self.model_runner = TPUModelRunner(self.vllm_config, self.device)
 
     def determine_available_memory(self) -> int:
         return 1e10
