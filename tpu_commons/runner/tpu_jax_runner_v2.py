@@ -68,19 +68,29 @@ class TPUModelRunner():
 
         kv_cache_spec = kv_cache_groups[0].kv_cache_spec
         layer_names = kv_cache_groups[0].layer_names
-        dtype = kv_cache_spec.dtype
+        cache_dtype = kv_cache_spec.dtype
         # TODO: vllm's pallas backend uses a different shape:
         # (num_blocks, block_size, num_kv_heads * 2, head_size)
         # need to figure out the performance diff.
-        shape = (
+        cache_shape = (
             kv_cache_spec.num_kv_heads,
             kv_cache_config.num_blocks,
             kv_cache_spec.block_size,
             kv_cache_spec.head_dim,
         )
+        # Shard the num_kv_heads dim along the 'model' axis.
+        sharding = NamedSharding(self.mesh, PartitionSpec("model"))
+
+        def _allocate() -> Any:
+            return jnp.empty(
+                shape=cache_shape,
+                dtype=cache_dtype,
+            )
+
+        sharded_allocate = jax.jit(_allocate, out_shardings=sharding)
         for layer_name in layer_names:
-            k_cache = jnp.empty(shape=shape, dtype=dtype)
-            v_cache = jnp.empty(shape=shape, dtype=dtype)
+            k_cache = sharded_allocate()
+            v_cache = sharded_allocate()
             kv_caches[layer_name] = (k_cache, v_cache)
 
         bind_kv_cache(
