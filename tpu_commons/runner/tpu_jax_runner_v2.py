@@ -44,6 +44,8 @@ class TPUModelRunner():
         self.vllm_config = vllm_config
         self.kv_caches = None
         self.eviction_algorithm = None
+        self.device = None
+        self.pin_memory = False
         self._init_mesh()
 
         self.cache_config = self.vllm_config.cache_config
@@ -67,18 +69,6 @@ class TPUModelRunner():
         self.requests: dict[str, CachedRequestState] = {}
 
         self.encoder_cache: dict[str, dict[int, jax.Array]] = {}
-
-        # Persistent batch.
-        # TODO(pooyam): Investigate if both `cpu` and `device` buffers are really needed.
-        self.input_batch = InputBatch(
-            max_num_reqs=self.max_num_reqs,
-            max_model_len=self.model_config.max_model_len,
-            max_num_blocks_per_req=self.max_num_blocks_per_req,
-            max_num_batched_tokens=self.max_num_tokens,
-            device=jax.devices()[0],
-            pin_memory=None,
-            vocab_size=self.vocab_size,
-        )
 
         self.params = None
 
@@ -109,30 +99,44 @@ class TPUModelRunner():
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         model_config = self.vllm_config.model_config
         parallel_config = self.vllm_config.parallel_config
+
+        # TODO(xiang): this hack tricks engine core to init successfully
+        import torch
         for i in range(model_config.get_num_layers(parallel_config)):
             kv_cache_spec[f"layers.{i}"] = FullAttentionSpec(
                 block_size=block_size,
-                num_kv_heads=model_config.get_num_attention_heads(
-                    parallel_config),
+                num_kv_heads=model_config.get_total_num_kv_heads(),
                 head_size=model_config.get_head_size(),
-                dtype=jnp.bfloat16,
+                dtype=torch.bfloat16,
                 use_mla=False,
             )
 
         return kv_cache_spec
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
-        return
         kv_caches: dict[str, Tuple[jax.Array, jax.Array]] = {}
 
         kv_cache_groups = kv_cache_config.kv_cache_groups
-        assert len(
-            kv_cache_groups) == 1, "Only full attention layer is supported now"
+        if len(kv_cache_groups) > 1:
+            raise NotImplementedError(
+                "Hybrid models with more than one KV cache type are not "
+                "supported yet.")
+
+        self.input_batch = InputBatch(
+            max_num_reqs=self.max_num_reqs,
+            max_model_len=self.max_model_len,
+            max_num_batched_tokens=self.max_num_tokens,
+            device=self.device,
+            pin_memory=self.pin_memory,
+            vocab_size=self.model_config.get_vocab_size(),
+            kv_cache_config=kv_cache_config,
+        )
+        return
 
         kv_cache_spec = kv_cache_groups[0].kv_cache_spec
         layer_names = kv_cache_groups[0].layer_names
         cache_dtype = kv_cache_spec.dtype
-        # TODO: vllm's pallas backend uses a different shape:
+        # TODO(xiang): vllm's pallas backend uses a different shape:
         # (num_blocks, block_size, num_kv_heads * 2, head_size)
         # need to figure out the performance diff.
         cache_shape = (
@@ -383,8 +387,8 @@ class TPUModelRunner():
             for seq in scheduler_output.scheduled_cached_reqs:
                 seq_index = self.input_batch.req_id_to_index[seq.req_id]
                 max_num_blocks = max(
-                    max_num_blocks,
-                    self.input_batch.block_table.num_blocks_per_row[seq_index])
+                    max_num_blocks, self.input_batch.block_table.
+                    block_tables[0].num_blocks_per_row[seq_index])
 
             max_num_blocks = pad_to_multiple(
                 max_num_blocks,
@@ -438,10 +442,10 @@ class TPUModelRunner():
             seq_index = self.input_batch.req_id_to_index[seq.req_id]
             seq_len = self.input_batch.num_computed_tokens_cpu[seq_index]
 
-            num_blocks = self.input_batch.block_table.num_blocks_per_row[
-                seq_index]
-            block_table = self.input_batch.block_table.block_table_cpu[
-                seq_index, :num_blocks]
+            num_blocks = self.input_batch.block_table.block_tables[
+                0].num_blocks_per_row[seq_index]
+            block_table = self.input_batch.block_table.block_tables[
+                0].block_table_cpu[seq_index, :num_blocks]
 
             position = seq_len - 1
 
@@ -618,7 +622,7 @@ class TPUModelRunner():
             seq_lens[i] = prompt_len
 
             # Full prompt associated block indices.
-            block_table = seq.block_ids
+            block_table = seq.block_ids[0]
             assert len(block_table) <= padded_num_blocks
             block_indices[i][:len(block_table)] = block_table
             # Unfilled prompt associated block indices.
