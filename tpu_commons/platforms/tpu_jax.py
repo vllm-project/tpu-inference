@@ -159,6 +159,12 @@ class TpuPlatform(Platform):
                     parallel_config.worker_cls = \
                         "vllm.worker.tpu_worker.TPUWorker"
 
+        # TODO(xiang): fix this for multi-host case
+        if parallel_config.distributed_executor_backend != "uni":
+            logger.warning(
+                "JAX requires to use uniproc_executor for single host.")
+            parallel_config.distributed_executor_backend = "uni"
+
         assert not vllm_config.speculative_config, (
             "Speculative decoding is not yet supported for TPU backend")
 
