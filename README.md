@@ -60,7 +60,7 @@ Then continue the installation steps until pip install succeeds.
 **NOTE**: This is under development so the run may fail.
 
 ```
-TPU_BACKEND_TYPE=jax python vllm/examples/offline_inference/tpu.py
+TPU_BACKEND_TYPE=jax python vllm/examples/offline_inference/basic/generate.py --task=generate --max_model_len=1024
 ```
 
 ## How to test kernel?
