@@ -39,13 +39,14 @@ class TPUModelRunner():
     def __init__(
         self,
         vllm_config: VllmConfig,
-        device: Any,
+        devices: List[jax.Device],
+        random_key: jax.random.PRNGKey,
     ):
         self.vllm_config = vllm_config
         self.kv_caches = None
         self.eviction_algorithm = None
-        self.device = None
-        self.pin_memory = False
+        self.devices = devices
+        self.random_key = random_key
         self._init_mesh()
 
         self.cache_config = self.vllm_config.cache_config
@@ -126,8 +127,8 @@ class TPUModelRunner():
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
             max_num_batched_tokens=self.max_num_tokens,
-            device=self.device,
-            pin_memory=self.pin_memory,
+            device=None,
+            pin_memory=None,
             vocab_size=self.model_config.get_vocab_size(),
             kv_cache_config=kv_cache_config,
         )
@@ -224,7 +225,7 @@ class TPUModelRunner():
         )
 
     def _init_mesh(self) -> None:
-        mesh_shape = [1, len(jax.devices())]
+        mesh_shape = [1, len(self.devices)]
         # TODO: use global constants for mesh axis names.
         axis_names = ["data", "model"]
         self.mesh = Mesh(

@@ -8,15 +8,16 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerBase
 
 from tpu_commons.runner.tpu_jax_runner_v2 import TPUModelRunner
+from tpu_commons.worker.utils_jax import hbm_usage_gb, init_random
 
-logger = init_logger(__name__)
+# TODO(xiang): bridge tpu_commons's logger to vllm's logger to avoid this hack
+logger = init_logger("vllm")
 
 
 class TPUWorker(WorkerBase):
@@ -37,12 +38,6 @@ class TPUWorker(WorkerBase):
             is_driver_worker=is_driver_worker,
         )
 
-        if self.cache_config.cache_dtype == "auto":
-            self.cache_dtype = self.model_config.dtype
-        else:
-            self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
-                self.cache_config.cache_dtype]
-
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
@@ -62,17 +57,25 @@ class TPUWorker(WorkerBase):
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         self.profile_dir)
 
-        if self.model_config.seed is None:
-            self.model_config.seed = 0
-
         if vllm_config.lora_config is not None:
             raise NotImplementedError(
                 "The V1 TPU backend doesn't support LoRA serving")
 
-        print("-------", jax.devices())
-
     def init_device(self):
-        self.model_runner = TPUModelRunner(self.vllm_config, None)
+        if self.model_config.seed is None:
+            self.model_config.seed = 0
+        random_key = init_random(self.model_config.seed)
+
+        self.devices = jax.local_devices()
+        self.global_devices = jax.devices()
+
+        logger.info(f"Init devices | "
+                    f"local_devices={len(self.devices)} | "
+                    f"hbm={hbm_usage_gb(self.devices)}Gb | "
+                    f"global_devices={len(self.global_devices)}")
+
+        self.model_runner = TPUModelRunner(self.vllm_config, self.devices,
+                                           random_key)
 
     def determine_available_memory(self) -> int:
         return 1e10
