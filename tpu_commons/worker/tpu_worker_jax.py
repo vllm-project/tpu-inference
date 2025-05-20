@@ -5,7 +5,6 @@ from typing import Optional
 import jax
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -13,11 +12,11 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerBase
 
+from tpu_commons.logger import init_logger
 from tpu_commons.runner.tpu_jax_runner_v2 import TPUModelRunner
 from tpu_commons.worker.utils_jax import hbm_usage_gb, init_random
 
-# TODO(xiang): bridge tpu_commons's logger to vllm's logger to avoid this hack
-logger = init_logger("vllm")
+logger = init_logger(__name__)
 
 
 class TPUWorker(WorkerBase):

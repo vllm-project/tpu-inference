@@ -11,7 +11,6 @@ import vllm.envs as envs
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils import cdiv
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
@@ -20,6 +19,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import bind_kv_cache
 
+from tpu_commons.logger import init_logger
 from tpu_commons.runner.tpu_torch_xla_runner import _get_token_paddings
 from tpu_commons.worker.input_batch_jax import CachedRequestState, InputBatch
 
