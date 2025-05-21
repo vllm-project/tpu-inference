@@ -17,7 +17,6 @@ from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.utils import bind_kv_cache
 
 from tpu_commons.logger import init_logger
 from tpu_commons.runner.tpu_torch_xla_runner import _get_token_paddings
@@ -43,11 +42,9 @@ class TPUModelRunner():
         random_key: jax.random.PRNGKey,
     ):
         self.vllm_config = vllm_config
-        self.kv_caches = None
         self.eviction_algorithm = None
         self.devices = devices
         self.random_key = random_key
-        self._init_mesh()
 
         self.cache_config = self.vllm_config.cache_config
         self.scheduler_config = self.vllm_config.scheduler_config
@@ -83,6 +80,9 @@ class TPUModelRunner():
             self.scheduler_config.decode_blocks_padding = 8
 
         self.perplexity_reference_text = None
+
+        self.kv_caches: List[Tuple[jax.Array, jax.Array]] = []
+        self._init_mesh()
         self._init_jit()
 
     def load_model(self):
@@ -115,14 +115,7 @@ class TPUModelRunner():
         return kv_cache_spec
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
-        kv_caches: dict[str, Tuple[jax.Array, jax.Array]] = {}
-
-        kv_cache_groups = kv_cache_config.kv_cache_groups
-        if len(kv_cache_groups) > 1:
-            raise NotImplementedError(
-                "Hybrid models with more than one KV cache type are not "
-                "supported yet.")
-
+        self.kv_cache_config = kv_cache_config
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
@@ -132,11 +125,19 @@ class TPUModelRunner():
             vocab_size=self.model_config.get_vocab_size(),
             kv_cache_config=kv_cache_config,
         )
-        return
+
+        kv_cache_groups = kv_cache_config.kv_cache_groups
+        if len(kv_cache_groups) > 1:
+            raise NotImplementedError(
+                "Hybrid models with more than one KV cache type are not "
+                "supported yet.")
 
         kv_cache_spec = kv_cache_groups[0].kv_cache_spec
         layer_names = kv_cache_groups[0].layer_names
-        cache_dtype = kv_cache_spec.dtype
+        cache_dtype = jnp.bfloat16
+        # TODO(xiang): fix this together with get_kv_cache_spec
+        # cache_dtype = kv_cache_spec.dtype
+
         # TODO(xiang): vllm's pallas backend uses a different shape:
         # (num_blocks, block_size, num_kv_heads * 2, head_size)
         # need to figure out the performance diff.
@@ -156,15 +157,10 @@ class TPUModelRunner():
             )
 
         sharded_allocate = jax.jit(_allocate, out_shardings=sharding)
-        for layer_name in layer_names:
+        for _ in layer_names:
             k_cache = sharded_allocate()
             v_cache = sharded_allocate()
-            kv_caches[layer_name] = (k_cache, v_cache)
-
-        bind_kv_cache(
-            kv_caches,
-            self.vllm_config.compilation_config.static_forward_context,
-            self.kv_caches)
+            self.kv_caches.append((k_cache, v_cache))
 
     def capture_model(self) -> None:
         pass
@@ -226,7 +222,6 @@ class TPUModelRunner():
 
     def _init_mesh(self) -> None:
         mesh_shape = [1, len(self.devices)]
-        # TODO: use global constants for mesh axis names.
         axis_names = ["data", "model"]
         self.mesh = Mesh(
             devices=mesh_utils.create_device_mesh(mesh_shape),
