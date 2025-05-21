@@ -5,8 +5,6 @@ from typing import Optional
 import jax
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.lora.request import LoRARequest
-from vllm.model_executor import set_random_seed
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
@@ -14,7 +12,8 @@ from vllm.v1.worker.worker_base import WorkerBase
 
 from tpu_commons.logger import init_logger
 from tpu_commons.runner.tpu_jax_runner_v2 import TPUModelRunner
-from tpu_commons.worker.utils_jax import hbm_usage_gb, init_random
+from tpu_commons.worker.utils_jax import (hbm_usage_bytes, hbm_usage_gb,
+                                          init_random)
 
 logger = init_logger(__name__)
 
@@ -47,7 +46,6 @@ class TPUWorker(WorkerBase):
         # This is because in vLLM V1, MP runtime is initialized before the
         # TPU Worker is initialized. The profiler server needs to start after
         # MP runtime is initialized.
-        self.profiler = None
         self.profile_dir = None
         if envs.VLLM_TORCH_PROFILER_DIR and self.rank < 1:
             # For TPU, we can only have 1 active profiler session for 1 profiler
@@ -77,7 +75,12 @@ class TPUWorker(WorkerBase):
                                            random_key)
 
     def determine_available_memory(self) -> int:
-        return 1e10
+        # We don't trigger a dummy batch run to calculate the usage,
+        # we get the available size after loading the model directly.
+        hbm_usage = hbm_usage_bytes(self.devices)
+        hbm_free = [limit - used for used, limit in hbm_usage]
+        min_hbm_free = min(hbm_free)
+        return min_hbm_free
 
     def execute_model(
         self,
@@ -87,21 +90,16 @@ class TPUWorker(WorkerBase):
         return output if self.is_driver_worker else None
 
     def profile(self, is_start: bool = True):
-        pass
-
-    def add_lora(self, lora_request: LoRARequest) -> bool:
-        return self.model_runner.add_lora(lora_request)
+        if is_start:
+            jax.profiler.start_trace(self.profile_dir)
+        else:
+            jax.profiler.stop_trace()
 
     def load_model(self) -> None:
         self.model_runner.load_model()
 
     def compile_or_warm_up_model(self) -> None:
-        if not self.model_config.enforce_eager:
-            self.model_runner.capture_model()
-
-        # Reset the seed to ensure that the random state is not affected by
-        # the model initialization and profiling.
-        set_random_seed(self.model_config.seed)
+        return
 
     def get_model(self):
         return self.model_runner.get_model()
