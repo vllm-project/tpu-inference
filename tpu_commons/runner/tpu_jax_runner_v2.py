@@ -45,7 +45,6 @@ class TPUModelRunner():
         self.eviction_algorithm = None
         self.devices = devices
         self.random_key = random_key
-        self._init_mesh()
 
         self.cache_config = self.vllm_config.cache_config
         self.scheduler_config = self.vllm_config.scheduler_config
@@ -97,6 +96,9 @@ class TPUModelRunner():
             KVCacheSpec: A dictionary mapping layer names to their KV cache
             format. Layers that do not need KV cache are not included.
         """
+
+        # TODO(xiang): this hack tricks engine core to init successfully
+        import torch
         block_size = self.vllm_config.cache_config.block_size
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         model_config = self.vllm_config.model_config
@@ -104,10 +106,9 @@ class TPUModelRunner():
         for i in range(model_config.get_num_layers(parallel_config)):
             kv_cache_spec[f"layers.{i}"] = FullAttentionSpec(
                 block_size=block_size,
-                num_kv_heads=model_config.get_num_attention_heads(
-                    parallel_config),
+                num_kv_heads=model_config.get_total_num_kv_heads(),
                 head_size=model_config.get_head_size(),
-                dtype=jnp.bfloat16,
+                dtype=torch.bfloat16,
                 use_mla=False,
             )
 
