@@ -70,16 +70,12 @@ class TPUModelRunner():
 
         self.params = None
 
-        # TODO(pooyam): Fix these defaults.
-        if not getattr(self.scheduler_config, 'chunked_prefill_tokens_padding',
-                       None):
-            self.scheduler_config.chunked_prefill_tokens_padding = 8
-        if not getattr(self.cache_config, 'sink_size', None):
-            self.cache_config.sink_size = None
-        if not getattr(self.scheduler_config, 'decode_blocks_padding', None):
-            self.scheduler_config.decode_blocks_padding = 8
-
+        # TODO(pooyam): These should be set from vllm side with some defaults.
+        self.scheduler_config.chunked_prefill_tokens_padding = 8
+        self.cache_config.sink_size = None
+        self.scheduler_config.decode_blocks_padding = 8
         self.perplexity_reference_text = None
+        self.decode_seqs_padding = 8
 
         self.kv_caches: List[Tuple[jax.Array, jax.Array]] = []
         self._init_mesh()
@@ -206,7 +202,16 @@ class TPUModelRunner():
         all_reqs = scheduler_output.scheduled_new_reqs + scheduler_output.scheduled_cached_reqs
 
         for i, seq in enumerate(all_reqs):
-            req_id_to_index[seq.req_id] = i
+            index = self.input_batch.req_id_to_index[seq.req_id]
+            seq_len = max(self.input_batch.num_prompt_tokens[index],
+                          self.input_batch.num_computed_tokens_cpu[index])
+            self.input_batch.token_ids_cpu[
+                index,
+                seq_len] = self.input_batch.token_ids_cpu[index, seq_len -
+                                                          1] + 1  # Dummy
+
+            # TODO(pooyam): Figure out why all three of `num_tokens`, `num_prompt_tokens`, and 'num_computed_tokens_cpu` exist.
+            req_id_to_index[seq.req_id] = index
             req_ids.append(seq.req_id)
             prompt_logprobs_dict[seq.req_id] = None
 
@@ -392,20 +397,18 @@ class TPUModelRunner():
                 keep_one=True,
             )
 
-        # TODO(pooyam): Fix this. Not padding right now to debug easier.
-        # keep_one = not (
-        #     (
-        #         self.model_config.is_mistral()
-        #         and max_num_blocks > MAX_ALLOWED_PAGE_INDICES_N
-        #     )
-        #     or self.model_config.is_moe()
-        # )
-        # batch_size = pad_to_multiple(
-        #     num_seqs,
-        #     self.scheduler_config.decode_seqs_padding,
-        #     self.scheduler_config.max_decode_seqs,
-        #     keep_one=keep_one,
-        # )
+        is_moe = hasattr(self.vllm_config.model_config.hf_config,
+                         "num_local_experts")
+        is_mistral = self.vllm_config.model_config.hf_config.model_type == "mistral"
+        keep_one = not (
+            (is_mistral and max_num_blocks > MAX_ALLOWED_PAGE_INDICES_N)
+            or is_moe)
+        batch_size = pad_to_multiple(
+            num_seqs,
+            self.decode_seqs_padding,
+            self.max_num_reqs,
+            keep_one=keep_one,
+        )
         batch_size = num_seqs
 
         do_sampling = False
@@ -499,6 +502,10 @@ class TPUModelRunner():
             seq_len = seq.get_prompt_len() + seq.get_decoded_len()
             input_ids = input_ids.at[0, 0].set(
                 self.perplexity_reference_text[seq_len - 1])
+
+        for seq in scheduler_output.scheduled_cached_reqs:
+            req_id = seq.req_id
+            seq_index = self.input_batch.req_id_to_index[req_id]
 
         (
             input_positions,
@@ -603,6 +610,8 @@ class TPUModelRunner():
         eviction_score_mask = None
 
         for i, seq in enumerate(scheduler_output.scheduled_new_reqs):
+            seq_index = self.input_batch.req_id_to_index[seq.req_id]
+
             effective_cached_prompt_len = 0
             num_effective_cached_blocks = 0
             prompt_token_ids = seq.prompt_token_ids[
@@ -626,12 +635,11 @@ class TPUModelRunner():
             assert num_unfilled_blocks <= padded_num_unfilled_blocks
             kv_cache_write_indices[i][:num_unfilled_blocks] = block_table[
                 num_effective_cached_blocks:]
-            temperatures[i] = seq.sampling_params.temperature
-            top_ps[i] = seq.sampling_params.top_p
-            top_ks[i] = seq.sampling_params.top_k
+            temperatures[i] = self.input_batch.temperature_cpu[seq_index]
+            top_ps[i] = self.input_batch.top_p_cpu[seq_index]
+            top_ks[i] = self.input_batch.top_k_cpu[seq_index]
 
-            # TODO(pooyam): How to get this?
-            running_indices[i] = 0  # seq.running_id
+            running_indices[i] = seq_index
 
             # TODO(pooyam): double check this.
             output_token_indices[i] = seq.num_computed_tokens
