@@ -157,19 +157,44 @@ class TPUModelRunner():
             v_cache = sharded_allocate()
             self.kv_caches.append((k_cache, v_cache))
 
+        # From @pooyam to @xiangxu: Feel free to edit the output_cache however you want. I added to unblock testing.
+        self.output_cache = self.init_output_cache()
+
+    def init_output_cache(self):
+        output_size = (
+            self.max_num_reqs + 1,
+            self.vllm_config.model_config.max_model_len + 8,
+        )
+        output_dtype = jnp.int32
+
+        def _allocate() -> Any:
+            return jnp.empty(
+                shape=output_size,
+                dtype=output_dtype,
+            )
+
+        # Replicate the output_cache across all devices.
+        sharded_allocate = jax.jit(_allocate,
+                                   out_shardings=self.outputs_sharding)
+        output_cache = sharded_allocate()
+        return output_cache
+
     def capture_model(self) -> None:
         pass
 
-    def model_fn(self, is_prefill: bool, do_sampling: bool, kv_caches: Any,
-                 input_ids: jax.Array, *args, **kwargs) -> None:
+    def model_fn(self, params: Any, is_prefill: bool, do_sampling: bool,
+                 kv_caches: Any, input_ids: jax.Array, *args,
+                 **kwargs) -> None:
+        batch_size = input_ids.shape[0]
+        next_tokens = np.zeros((batch_size, ), dtype=np.int32)
+        logits = np.zeros((batch_size, 1), dtype=np.float32)
 
-        # batch_size = input_ids.shape[0]
+        return self.kv_caches, next_tokens, logits, None
 
-        # next_tokens = np.zeros((batch_size, 1), dtype=np.int32)
-        # logits = np.zeros((batch_size, 1), dtype=np.float32)
-
-        # return self.kv_caches, next_tokens, logits, None
-        return self.kv_caches, None, None, None
+    def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
+        #At first step of this implementation, let's do prefill and decode seperately for maximum code reuse and simpler debug/verification.
+        yield self._prepare_prefill(scheduler_output)
+        yield self._prepare_decode(scheduler_output)
 
     def execute_model(
         self,
@@ -178,23 +203,20 @@ class TPUModelRunner():
     ) -> ModelRunnerOutput:
         self._update_states(scheduler_output)
 
+        for inputs in self._prepare_inputs(scheduler_output):
+            if inputs is not None:
+                model_inputs, (running_indices, output_token_indices) = inputs
+
+                self.kv_caches, next_tokens, logits, single_step_attn_scores_decode = self.model_fn(
+                    self.params, *model_inputs)
+                self.output_cache = self.write_outputs(self.output_cache,
+                                                       next_tokens,
+                                                       running_indices,
+                                                       output_token_indices)
+
         req_id_to_index = {}
         req_ids = []
         prompt_logprobs_dict = {}
-
-        #At first step of this implementation, let's do prefill and decode seperately for maximum code reuse and simpler debug/verification.
-        prefill_inputs = self._prepare_prefill(scheduler_output)
-        if prefill_inputs is not None:
-            model_inputs, (running_indices,
-                           output_token_indices) = prefill_inputs
-            self.kv_caches, next_tokens_prefill, logits_prefill, single_step_attn_scores_prefill = self.model_fn(
-                self.params, *model_inputs)
-        decode_inputs = self._prepare_decode(scheduler_output)
-        if decode_inputs is not None:
-            model_inputs, (running_indices,
-                           output_token_indices) = decode_inputs
-            self.kv_caches, next_tokens_decode, logits_decode, single_step_attn_scores_decode = self.model_fn(
-                self.params, *model_inputs)
 
         # TODO(pooyam): merge output of prefill and decode and/or add _prepare_chunked_prefill.
         # The goal here is to make sure we are using vllm scheduler output correctly. When we verify that, we can also add `_prepare_chunked_prefill`.
@@ -234,7 +256,12 @@ class TPUModelRunner():
         logger.info(f"Init mesh | mesh={self.mesh}")
 
     def _init_jit(self) -> None:
-        pass
+        self.outputs_sharding = NamedSharding(self.mesh, PartitionSpec(None))
+        self.write_outputs = jax.jit(write_outputs,
+                                     donate_argnums=0,
+                                     out_shardings=self.outputs_sharding)
+        self.read_outputs = jax.jit(read_outputs,
+                                    out_shardings=self.outputs_sharding)
 
     def _device_array(self, *args, sharding=None, **kwargs) -> jax.Array:
         if sharding is None:
@@ -482,17 +509,11 @@ class TPUModelRunner():
             if top_ks[i] != 1:
                 do_sampling = True
 
-            # TODO(pooyam): Check this.
-            input_ids[i] = self.input_batch.token_ids_cpu[seq_index][seq_len -
-                                                                     1]
-
         running_indices = self._device_array(running_indices)
         input_token_indices = self._device_array(input_token_indices)
 
-        # TODO(pooyam): Check this.
-        # input_ids = self.read_outputs(
-        #     self.output_cache, running_indices, input_token_indices
-        # )
+        input_ids = self.read_outputs(self.output_cache, running_indices,
+                                      input_token_indices)
 
         # For perplexity experiments
         if self.perplexity_reference_text is not None:
@@ -735,3 +756,23 @@ class AttentionMetadata(object):
     prefill_page_indices: jax.Array = None  # [max_num_prefill_seqs, pages_per_sequence]
     prefill_query_start_offsets: jax.Array = None  # [max_num_prefill_seqs + 1]
     num_prefill_seqs: jax.Array = None  # [1]
+
+
+def write_outputs(
+    output_cache: jax.Array,
+    outputs: jax.Array,
+    running_indices: jax.Array,
+    token_indices: jax.Array,
+) -> jax.Array:
+    output_cache = output_cache.at[running_indices, token_indices].set(outputs)
+    return output_cache
+
+
+def read_outputs(
+    output_cache: jax.Array,
+    running_indices: jax.Array,
+    token_indices: jax.Array,
+) -> jax.Array:
+    outputs = output_cache.at[running_indices, token_indices].get()
+    outputs = jnp.expand_dims(outputs, 1)
+    return outputs
