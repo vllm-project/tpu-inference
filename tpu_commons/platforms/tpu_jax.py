@@ -10,6 +10,7 @@ from vllm.platforms.interface import Platform, PlatformEnum, _Backend
 from vllm.sampling_params import SamplingParams, SamplingType
 
 from tpu_commons.logger import init_logger
+from tpu_commons.core.experimental_scheduler_config import ExperimentalSchedulerConfig
 
 if TYPE_CHECKING:
     from vllm.config import BlockSize, ModelConfig, VllmConfig
@@ -142,6 +143,9 @@ class TpuPlatform(Platform):
 
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
+        experimental_scheduler_config = ExperimentalSchedulerConfig.initialize_from_config(
+            vllm_config.scheduler_config, {})
+        vllm_config.scheduler_config = experimental_scheduler_config
         if parallel_config.worker_cls == "auto":
             if scheduler_config.is_multi_step:
                 if envs.VLLM_USE_V1:
