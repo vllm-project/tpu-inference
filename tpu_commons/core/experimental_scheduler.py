@@ -1,10 +1,13 @@
+'''
+Simplified scheduler adapted from vllm-ascend
+'''
+
 from collections import deque
 from typing import Iterable, Optional, Union
 
 from vllm.config import VllmConfig
 from vllm.logger import logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.utils import cdiv
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.sched.utils import check_stop
@@ -15,10 +18,6 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 
-
-'''
-Simplified scheduler adapted from vllm-ascend
-'''
 
 class ExperimentalScheduler(Scheduler):
 
@@ -58,7 +57,8 @@ class ExperimentalScheduler(Scheduler):
 
             request = self.waiting[0]
 
-            prompt_limit = min(self.scheduler_config.max_model_len, self.scheduler_config.max_num_batched_tokens)
+            prompt_limit = min(self.scheduler_config.max_model_len,
+                               self.scheduler_config.max_num_batched_tokens)
             # Get already-cached tokens.
             computed_blocks, num_computed_tokens = (
                 self.kv_cache_manager.get_computed_blocks(request))
@@ -88,7 +88,7 @@ class ExperimentalScheduler(Scheduler):
             assert num_new_tokens > 0
 
             new_blocks = self.kv_cache_manager.allocate_slots(
-                request, num_new_tokens, new_computed_blocks = computed_blocks)
+                request, num_new_tokens, new_computed_blocks=computed_blocks)
             if new_blocks is None:
                 # The request cannot be scheduled.
                 break
@@ -161,7 +161,6 @@ class ExperimentalScheduler(Scheduler):
                 num_scheduled_tokens[request.request_id] = 1
                 token_budget -= 1
                 req_index += 1
-
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
@@ -236,8 +235,6 @@ class ExperimentalScheduler(Scheduler):
 
         self.finished_req_ids = set()  # type: ignore
         return scheduler_output
-
-    
 
     def finish_requests(
         self,

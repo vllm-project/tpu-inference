@@ -11,7 +11,6 @@ from vllm.sampling_params import SamplingParams, SamplingType
 
 from tpu_commons.logger import init_logger
 
-
 if TYPE_CHECKING:
     from vllm.config import BlockSize, ModelConfig, VllmConfig
     from vllm.pooling_params import PoolingParams
@@ -143,7 +142,8 @@ class TpuPlatform(Platform):
 
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
-        from tpu_commons.core.experimental_scheduler_config import ExperimentalSchedulerConfig
+        from tpu_commons.core.experimental_scheduler_config import \
+            ExperimentalSchedulerConfig
         experimental_scheduler_config = ExperimentalSchedulerConfig.initialize_from_config(
             vllm_config.scheduler_config, {})
         vllm_config.scheduler_config = experimental_scheduler_config
