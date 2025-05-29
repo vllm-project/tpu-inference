@@ -19,7 +19,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from vllm.v1.outputs import ModelRunnerOutput
 
 from tpu_commons.logger import init_logger
-from tpu_commons.models.jax.model_loader import get_model
+# from tpu_commons.models.jax.model_loader import get_model
 from tpu_commons.runner.tpu_torch_xla_runner import _get_token_paddings
 from tpu_commons.worker.input_batch_jax import CachedRequestState, InputBatch
 
@@ -87,7 +87,7 @@ class TPUModelRunner():
 
         self.kv_caches: List[Tuple[jax.Array, jax.Array]] = []
         self._init_mesh()
-        self._init_model()
+        # self._init_model()
         self._init_jit()
 
     def load_model(self):
@@ -272,30 +272,30 @@ class TPUModelRunner():
         )
         logger.info(f"Init mesh | mesh={self.mesh}")
 
-    def _init_model(self) -> None:
-        self.model, self.params = get_model(
-            self.model_config,
-            self.random_key,
-            self.mesh,
-            None,  # TODO: LoRA config
-            self.cache_config,
-        )
-        # If the params are not loaded from ckpts, it will be random inited.
-        # if self.params is None:
-        #     logger.warning(f"Random init model weights.")
-        #     self.params = self._random_init_model(self.model)
+    # def _init_model(self) -> None:
+    #     self.model, self.params = get_model(
+    #         self.model_config,
+    #         self.random_key,
+    #         self.mesh,
+    #         None,  # TODO: LoRA config
+    #         self.cache_config,
+    #     )
+    #     # If the params are not loaded from ckpts, it will be random inited.
+    #     # if self.params is None:
+    #     #     logger.warning(f"Random init model weights.")
+    #     #     self.params = self._random_init_model(self.model)
 
-        if any([
-                el.dtype in [jnp.uint4, jnp.int4]
-                for el in jax.tree.leaves(self.params)
-        ]):
-            logger.warning(
-                "There is at least one 4-bits dtype. 4-bits datatype will report same numbers of bytes as int8 datatype while occupying half HBM."
-            )
+    #     if any([
+    #             el.dtype in [jnp.uint4, jnp.int4]
+    #             for el in jax.tree.leaves(self.params)
+    #     ]):
+    #         logger.warning(
+    #             "There is at least one 4-bits dtype. 4-bits datatype will report same numbers of bytes as int8 datatype while occupying half HBM."
+    #         )
 
     def _init_jit(self) -> None:
         # TODO: add model JiT
-        self.model_fn = self.model.apply
+        # self.model_fn = self.model.apply
         self.outputs_sharding = NamedSharding(self.mesh, PartitionSpec(None))
         self.write_outputs = jax.jit(write_outputs,
                                      donate_argnums=0,
@@ -431,6 +431,15 @@ class TPUModelRunner():
             self.input_batch.condense(removed_req_indices)
 
         return len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
+
+    def model_fn(self, params: Any, is_prefill: bool, do_sampling: bool,
+                 kv_caches: Any, input_ids: jax.Array, *args,
+                 **kwargs) -> None:
+        batch_size = input_ids.shape[0]
+        next_tokens = np.zeros((batch_size, ), dtype=np.int32)
+        logits = np.zeros((batch_size, 1), dtype=np.float32)
+
+        return self.kv_caches, next_tokens, logits, None
 
     # Modified from https://source.corp.google.com/h/vertex-model-garden/hex-llm/+/main:hex_llm/worker/runner_jax.py;drc=3ed287d21d5f95a053cb5fe3b249373064ac2f23;l=803.
     def _prepare_decode(self, scheduler_output: VllmSchedulerOutput) -> Any:
