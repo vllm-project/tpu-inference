@@ -74,8 +74,10 @@ class TPUModelRunner():
         self.scheduler_config.chunked_prefill_tokens_padding = 8
         self.cache_config.sink_size = None
         self.scheduler_config.decode_blocks_padding = 8
+        self.scheduler_config.prefill_len_padding = 128
         self.perplexity_reference_text = None
         self.decode_seqs_padding = 8
+        self.cache_config.output_logits = False  # To make model run without error
 
         self.kv_caches: List[Tuple[jax.Array, jax.Array]] = []
         self._init_mesh()
@@ -594,12 +596,18 @@ class TPUModelRunner():
         max_unfilled_prompt_len = max_prompt_len
 
         # Padded full prompt length.
-        # TODO: Fix padding.
-        padded_prompt_len = max_prompt_len
+        padded_prompt_len = pad_to_multiple(
+            max_prompt_len,
+            self.scheduler_config.prefill_len_padding,
+            self.model_config.max_model_len,
+        )
 
         # Padded unfilled prompt length.
-        # TODO: Fix padding.
-        padded_unfilled_prompt_len = max_unfilled_prompt_len
+        padded_unfilled_prompt_len = pad_to_multiple(
+            max_unfilled_prompt_len,
+            self.scheduler_config.prefill_len_padding,
+            self.model_config.max_model_len,
+        )
 
         images_flattened = []
 
