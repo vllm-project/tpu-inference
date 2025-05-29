@@ -19,6 +19,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from vllm.v1.outputs import ModelRunnerOutput
 
 from tpu_commons.logger import init_logger
+from tpu_commons.models.jax.model_loader import get_model
 from tpu_commons.runner.tpu_torch_xla_runner import _get_token_paddings
 from tpu_commons.worker.input_batch_jax import CachedRequestState, InputBatch
 
@@ -47,8 +48,13 @@ class TPUModelRunner():
         self.random_key = random_key
 
         self.cache_config = self.vllm_config.cache_config
+        # TODO @jacobplatin
+        setattr(self.cache_config, "kv_cache_eviction_algorithm", None)
+        setattr(self.cache_config, "cache_attention_scores", False)
         self.scheduler_config = self.vllm_config.scheduler_config
         self.model_config = self.vllm_config.model_config
+        # TODO @jacobplatin
+        setattr(self.model_config, "load_format", "auto")
         self.max_model_len = self.model_config.max_model_len
         self.block_size = self.cache_config.block_size
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
@@ -81,6 +87,7 @@ class TPUModelRunner():
 
         self.kv_caches: List[Tuple[jax.Array, jax.Array]] = []
         self._init_mesh()
+        self._init_model()
         self._init_jit()
 
     def load_model(self):
@@ -184,15 +191,6 @@ class TPUModelRunner():
     def capture_model(self) -> None:
         pass
 
-    def model_fn(self, params: Any, is_prefill: bool, do_sampling: bool,
-                 kv_caches: Any, input_ids: jax.Array, *args,
-                 **kwargs) -> None:
-        batch_size = input_ids.shape[0]
-        next_tokens = np.zeros((batch_size, ), dtype=np.int32)
-        logits = np.zeros((batch_size, 1), dtype=np.float32)
-
-        return self.kv_caches, next_tokens, logits, None
-
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
         #At first step of this implementation, let's do prefill and decode seperately for maximum code reuse and simpler debug/verification.
         yield self._prepare_prefill(scheduler_output)
@@ -208,7 +206,7 @@ class TPUModelRunner():
         for inputs in self._prepare_inputs(scheduler_output):
             if inputs is not None:
                 model_inputs, (running_indices, output_token_indices) = inputs
-
+                # TODO @jacobplatin: use logits and single_step_attn_scores_decode?
                 self.kv_caches, next_tokens, logits, single_step_attn_scores_decode = self.model_fn(
                     self.params, *model_inputs)
                 self.output_cache = self.write_outputs(self.output_cache,
@@ -257,7 +255,30 @@ class TPUModelRunner():
         )
         logger.info(f"Init mesh | mesh={self.mesh}")
 
+    def _init_model(self) -> None:
+        self.model, self.params = get_model(
+            self.model_config,
+            self.random_key,
+            self.mesh,
+            None,  # TODO: LoRA config
+            self.cache_config,
+        )
+        # If the params are not loaded from ckpts, it will be random inited.
+        # if self.params is None:
+        #     logger.warning(f"Random init model weights.")
+        #     self.params = self._random_init_model(self.model)
+
+        if any([
+                el.dtype in [jnp.uint4, jnp.int4]
+                for el in jax.tree.leaves(self.params)
+        ]):
+            logger.warning(
+                "There is at least one 4-bits dtype. 4-bits datatype will report same numbers of bytes as int8 datatype while occupying half HBM."
+            )
+
     def _init_jit(self) -> None:
+        # TODO: add model JiT
+        self.model_fn = self.model.apply
         self.outputs_sharding = NamedSharding(self.mesh, PartitionSpec(None))
         self.write_outputs = jax.jit(write_outputs,
                                      donate_argnums=0,
@@ -609,7 +630,7 @@ class TPUModelRunner():
             self.model_config.max_model_len,
         )
 
-        images_flattened = []
+        images_flattened = None
 
         if sliding_window:
             raise NotImplementedError("Sliding window not implemented.")
