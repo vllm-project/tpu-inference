@@ -223,8 +223,16 @@ class TPUModelRunner():
 
         all_reqs = scheduler_output.scheduled_new_reqs + scheduler_output.scheduled_cached_reqs
 
+        running_indices = []
+        output_token_indices = []
+
         for i, seq in enumerate(all_reqs):
             index = self.input_batch.req_id_to_index[seq.req_id]
+            output_token_index = max(
+                self.input_batch.num_computed_tokens_cpu[index] -
+                self.input_batch.num_prompt_tokens[index] + 1, 0)
+            running_indices.append(index)
+            output_token_indices.append(output_token_index)
             seq_len = max(self.input_batch.num_prompt_tokens[index],
                           self.input_batch.num_computed_tokens_cpu[index])
             self.input_batch.token_ids_cpu[
@@ -237,13 +245,22 @@ class TPUModelRunner():
             req_ids.append(seq.req_id)
             prompt_logprobs_dict[seq.req_id] = None
 
+        # TODO(pooyam): device-to-host transfer step by step is inefficient. Should we execute for longer decoding steps?
+        # Not sure yet how that would work with vLLM engine that calls `execute_model`
+        outputs = []
+        if running_indices:
+            outputs = self.output_cache.at[running_indices,
+                                           output_token_indices].get()
+            outputs = jax.device_get(outputs).tolist()
+            outputs = [[el] for el in outputs]
+
         return ModelRunnerOutput(
             req_ids=req_ids,
             req_id_to_index=req_id_to_index,
             prompt_logprobs_dict=prompt_logprobs_dict,
             logprobs=None,
             spec_token_ids=None,
-            sampled_token_ids=[[0] for _ in range(len(req_ids))],
+            sampled_token_ids=outputs,
         )
 
     def _init_mesh(self) -> None:
