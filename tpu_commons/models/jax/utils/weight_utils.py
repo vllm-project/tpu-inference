@@ -8,7 +8,7 @@ import jax
 from safetensors import safe_open
 
 from tpu_commons.logger import init_logger
-from tpu_commons.models.jax import fileutils
+from tpu_commons.models.jax import file_utils
 
 logger = init_logger(__name__)
 
@@ -25,29 +25,29 @@ def hf_model_weights_iterator(
     weights_location = "local"
     if os.path.isdir(model_name):
         weights_files = glob.glob(os.path.join(model_name, HF_WEIGHTS_FORMAT))
-    elif fileutils.is_gcs_path(model_name):
-        local_free_disk_size = fileutils.get_free_disk_size()
-        model_size = fileutils.get_gcs_model_weights_size(
+    elif file_utils.is_gcs_path(model_name):
+        local_free_disk_size = file_utils.get_free_disk_size()
+        model_size = file_utils.get_gcs_model_weights_size(
             model_name, HF_WEIGHTS_FORMAT)
         if model_size < local_free_disk_size * FULL_DOWNLOAD_DISK_RATIO:
             logger.info(f"Downloading weights from GCS {model_name}")
-            weights_files = fileutils.download_model_weights_from_gcs(
+            weights_files = file_utils.download_model_weights_from_gcs(
                 model_name, HF_WEIGHTS_FORMAT)
         else:
-            weights_files = fileutils.list_gcs_dir(model_name,
-                                                   HF_WEIGHTS_FORMAT)
+            weights_files = file_utils.list_gcs_dir(model_name,
+                                                    HF_WEIGHTS_FORMAT)
             weights_location = "gcs"
-    elif fileutils.is_hf_repo(model_name):
-        local_free_disk_size = fileutils.get_free_disk_size()
-        model_size = fileutils.get_hf_model_weights_size(
+    elif file_utils.is_hf_repo(model_name):
+        local_free_disk_size = file_utils.get_free_disk_size()
+        model_size = file_utils.get_hf_model_weights_size(
             model_name, HF_WEIGHTS_FORMAT)
         if model_size < local_free_disk_size * FULL_DOWNLOAD_DISK_RATIO:
             logger.info(f"Downloading weights from HF {model_name}")
-            weights_files = fileutils.download_model_weights_from_hf(
+            weights_files = file_utils.download_model_weights_from_hf(
                 model_name, HF_WEIGHTS_FORMAT)
         else:
-            weights_files = fileutils.list_hf_repo(model_name,
-                                                   HF_WEIGHTS_FORMAT)
+            weights_files = file_utils.list_hf_repo(model_name,
+                                                    HF_WEIGHTS_FORMAT)
             weights_location = "hf"
     else:
         raise ValueError(
@@ -69,10 +69,10 @@ def hf_model_weights_iterator(
     for st_file in weights_files:
         logger.info(f"Loading weights from {st_file}")
         if weights_location == "gcs":
-            st_file = fileutils.download_model_weights_from_gcs(
+            st_file = file_utils.download_model_weights_from_gcs(
                 model_name, os.path.basename(st_file))[0]
         elif weights_location == "hf":
-            st_file = fileutils.download_model_weights_from_hf(
+            st_file = file_utils.download_model_weights_from_hf(
                 model_name, os.path.basename(st_file))[0]
         # NOTE: We enforce loading tensors on CPU here.
         # Because otherwise the tensor will be loaded on TPU:0 by default,
@@ -84,7 +84,7 @@ def hf_model_weights_iterator(
                     weight_tensor = f.get_tensor(name)
                     yield name, weight_tensor
         if weights_location != "local":
-            fileutils.delete_file(st_file)
+            file_utils.delete_file(st_file)
 
 
 def get_num_kv_heads_by_tp(num_kv_heads: int, tp_size: int) -> int:

@@ -6,6 +6,17 @@ import numpy as np
 
 GBYTES = 1024 * 1024 * 1024
 
+_megacore = False
+
+
+def enable_megacore() -> None:
+    global _megacore
+    _megacore = True
+
+
+def get_megacore() -> bool:
+    return _megacore
+
 
 def get_num_kv_heads_by_tp(num_kv_heads: int, tp_size: int) -> int:
     if tp_size <= num_kv_heads:

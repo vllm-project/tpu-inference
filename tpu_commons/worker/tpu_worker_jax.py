@@ -12,8 +12,7 @@ from vllm.v1.worker.worker_base import WorkerBase
 
 from tpu_commons.logger import init_logger
 from tpu_commons.runner.tpu_jax_runner_v2 import TPUModelRunner
-from tpu_commons.worker.utils_jax import (hbm_usage_bytes, hbm_usage_gb,
-                                          init_random)
+from tpu_commons.utils_jax import hbm_usage_bytes, hbm_usage_gb, init_random
 
 logger = init_logger(__name__)
 

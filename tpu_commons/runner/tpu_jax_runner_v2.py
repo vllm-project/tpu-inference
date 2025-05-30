@@ -49,8 +49,6 @@ class TPUModelRunner():
 
         self.cache_config = self.vllm_config.cache_config
         # TODO @jacobplatin
-        setattr(self.cache_config, "kv_cache_eviction_algorithm", None)
-        setattr(self.cache_config, "cache_attention_scores", False)
         self.scheduler_config = self.vllm_config.scheduler_config
         self.model_config = self.vllm_config.model_config
         # TODO @jacobplatin
@@ -285,23 +283,25 @@ class TPUModelRunner():
     #     #     logger.warning(f"Random init model weights.")
     #     #     self.params = self._random_init_model(self.model)
 
-    #     if any([
-    #             el.dtype in [jnp.uint4, jnp.int4]
-    #             for el in jax.tree.leaves(self.params)
-    #     ]):
-    #         logger.warning(
-    #             "There is at least one 4-bits dtype. 4-bits datatype will report same numbers of bytes as int8 datatype while occupying half HBM."
-    #         )
-
     def _init_jit(self) -> None:
         # TODO: add model JiT
         # self.model_fn = self.model.apply
+        self.model_fn = self.dummy_model_fn
         self.outputs_sharding = NamedSharding(self.mesh, PartitionSpec(None))
         self.write_outputs = jax.jit(write_outputs,
                                      donate_argnums=0,
                                      out_shardings=self.outputs_sharding)
         self.read_outputs = jax.jit(read_outputs,
                                     out_shardings=self.outputs_sharding)
+
+    def dummy_model_fn(self, params: Any, is_prefill: bool, do_sampling: bool,
+                       kv_caches: Any, input_ids: jax.Array, *args,
+                       **kwargs) -> None:
+        batch_size = input_ids.shape[0]
+        next_tokens = np.zeros((batch_size, ), dtype=np.int32)
+        logits = np.zeros((batch_size, 1), dtype=np.float32)
+
+        return self.kv_caches, next_tokens, logits, None
 
     def _device_array(self, *args, sharding=None, **kwargs) -> jax.Array:
         if sharding is None:
@@ -431,15 +431,6 @@ class TPUModelRunner():
             self.input_batch.condense(removed_req_indices)
 
         return len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
-
-    def model_fn(self, params: Any, is_prefill: bool, do_sampling: bool,
-                 kv_caches: Any, input_ids: jax.Array, *args,
-                 **kwargs) -> None:
-        batch_size = input_ids.shape[0]
-        next_tokens = np.zeros((batch_size, ), dtype=np.int32)
-        logits = np.zeros((batch_size, 1), dtype=np.float32)
-
-        return self.kv_caches, next_tokens, logits, None
 
     # Modified from https://source.corp.google.com/h/vertex-model-garden/hex-llm/+/main:hex_llm/worker/runner_jax.py;drc=3ed287d21d5f95a053cb5fe3b249373064ac2f23;l=803.
     def _prepare_decode(self, scheduler_output: VllmSchedulerOutput) -> Any:
