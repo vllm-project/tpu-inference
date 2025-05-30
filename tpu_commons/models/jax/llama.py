@@ -334,7 +334,7 @@ class LlamaForCausalLM(nn.Module):
             top_ps,
             top_ks,
         )
-        return kv_caches, next_tokens, None
+        return kv_caches, next_tokens, logits
 
     # TODO(xiang): fix this
     def load_weights(
@@ -362,16 +362,19 @@ class LlamaForCausalLM(nn.Module):
         combined_iterator = itertools.chain(weights_iterator,
                                             reprocessing_items)
 
+        model_config = self.vllm_config.model_config
+        hf_config = model_config.hf_config
+
         for name, checkpoint_weight in combined_iterator:
             # llama 4 vision
             if "vision_model" in name:
-                config_to_use = self.config.vision_config
-            elif getattr(self.config, "text_config", None):
-                config_to_use = self.config.text_config
+                config_to_use = hf_config.vision_config
+            elif getattr(hf_config, "text_config", None):
+                config_to_use = hf_config.text_config
             else:
-                config_to_use = self.config
+                config_to_use = hf_config
 
-            should_permute_qk = (self.config.model_type == "llama4"
+            should_permute_qk = (hf_config.model_type == "llama4"
                                  and "vision" not in name)
 
             # Pad the head_dim to multiple of 128 as the PagedAttention kernel requires.
@@ -474,7 +477,7 @@ class LlamaForCausalLM(nn.Module):
                                                        "up_proj"), up_weight))
                 continue
 
-            weight = checkpoint_weight.astype(self.dtype)
+            weight = checkpoint_weight.astype(model_config.dtype)
             key = key.replace("attention.wo.weight", "self_attn.o_proj.weight")
             key = key.replace("feed_forward.norm", "post_attention_layernorm")
             key = key.replace("params.params", "params.model")
@@ -636,8 +639,9 @@ class LlamaForCausalLM(nn.Module):
 
             params_dict[key] = weight
 
-        if self.lora_config is not None and self.lora_config.enable_lora:
-            for seq_index in range(self.lora_config.max_num_lora):
-                lora_params = self.load_zero_lora_adapter(seq_index)
-                params_dict.update(lora_params)
+        # TODO (jacobplatin)
+        # if self.lora_config is not None and self.lora_config.enable_lora:
+        #     for seq_index in range(self.lora_config.max_num_lora):
+        #         lora_params = self.load_zero_lora_adapter(seq_index)
+        #         params_dict.update(lora_params)
         return unflatten_dict(params_dict, ".")

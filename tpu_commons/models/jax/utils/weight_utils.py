@@ -8,7 +8,7 @@ import jax
 from safetensors import safe_open
 
 from tpu_commons.logger import init_logger
-from tpu_commons.models.jax import file_utils
+from tpu_commons.models.jax.utils import file_utils
 
 logger = init_logger(__name__)
 

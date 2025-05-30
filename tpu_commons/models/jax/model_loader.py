@@ -34,6 +34,5 @@ def get_model(
         rng=rng,
         mesh=mesh,
     )
-    params = None
-    # params = model.load_weights()
+    params = model.load_weights(vllm_config.model_config.model)
     return model, params
