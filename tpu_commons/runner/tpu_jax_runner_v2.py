@@ -283,8 +283,24 @@ class TPUModelRunner():
         #     self.params = self._random_init_model(self.model)
 
     def _init_jit(self) -> None:
-        # TODO (jacobplatin): add model JiT
-        self.model_fn = self.model.apply
+        # TODO (jacobplatin): do we want to support a non-jit option like HexLLM?
+        self.kv_cache_sharding = NamedSharding(self.mesh,
+                                               PartitionSpec("model"))
+        self.outputs_sharding = NamedSharding(self.mesh, PartitionSpec(None))
+        self.logits_cache_sharding = NamedSharding(self.mesh,
+                                                   PartitionSpec(None))
+        # self.attn_score_cache_sharding = NamedSharding(self.mesh, PartitionSpec(None))
+        self.model_fn = jax.jit(
+            self.model.apply,
+            out_shardings=(
+                self.kv_cache_sharding,
+                self.outputs_sharding,
+                self.logits_cache_sharding,
+                # self.attn_score_cache_sharding,
+            ),
+            static_argnums=(1, 2),
+            donate_argnums=3,
+        )
         self.outputs_sharding = NamedSharding(self.mesh, PartitionSpec(None))
         self.write_outputs = jax.jit(write_outputs,
                                      donate_argnums=0,
