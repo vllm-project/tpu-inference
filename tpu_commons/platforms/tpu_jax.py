@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 from typing import TYPE_CHECKING, Optional, Tuple, Union, cast
 
 import jax.numpy as jnp
@@ -142,11 +143,12 @@ class TpuPlatform(Platform):
 
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
-        from tpu_commons.core.experimental_scheduler_config import \
-            ExperimentalSchedulerConfig
-        experimental_scheduler_config = ExperimentalSchedulerConfig.initialize_from_config(
-            vllm_config.scheduler_config, {})
-        vllm_config.scheduler_config = experimental_scheduler_config
+        if os.getenv("EXP_SCHEDULER") is not None:
+            from tpu_commons.core.experimental_scheduler_config import \
+                ExperimentalSchedulerConfig
+            experimental_scheduler_config = ExperimentalSchedulerConfig.initialize_from_config(
+                vllm_config.scheduler_config, {})
+            vllm_config.scheduler_config = experimental_scheduler_config
         if parallel_config.worker_cls == "auto":
             if scheduler_config.is_multi_step:
                 if envs.VLLM_USE_V1:
