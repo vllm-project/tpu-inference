@@ -1,37 +1,4 @@
-## Structure
-
-Current structure, please add, modify, remove etc.
-
-```
-tpu_commons/
-│── tpu_commons/
-│   ├── __init__.py
-|   ├── worker/
-│   |   ├── __init__.py
-│   |   ├── tpu_worker.py         # Moved and adapted from vllm/v1/worker/
-│   |   └── tpu_model_runner.py   # Moved and adapted from vllm/v1/worker/
-|   ├── kernels/
-│   |   ├── __init__.py
-│   |   └── ragged_paged_attention
-│   |       ├── __init__.py
-│   |       ├── kernel.py
-│   |       └── tuned_block_sizes.py
-|   │── sample/
-│       ├── __init__.py
-│       └── tpu/                  # <<< MOVED from vllm/v1/sample/tpu/
-│          ├── __init__.py
-│          ├── metadata.py
-│          └── sampler.py
-├── setup.py
-├── tests
-│   ├── __init__.py
-│   └── ragged_paged_attention_test.py
-├── pyproject.toml
-└── .buildkite/
-    └── pipeline.yml
-```
-
-## How to setup development environment?
+## Setup development environment
 
 ### Install `tpu_commons`:
 
@@ -49,18 +16,48 @@ Follow this [guide](https://docs.vllm.ai/en/latest/getting_started/installation/
 Right after the `git clone` step and before the `pip install -e .` step, run the following command:
 
 ```
-cd vllm
 sed -i 's|return "vllm.platforms.tpu.TpuPlatform" if is_tpu else None|return "tpu_commons.platforms.TpuPlatform" if is_tpu else None|g' vllm/platforms/__init__.py
 ```
 
 Then continue the installation steps until pip install succeeds.
 
-## How to test the JAX path?
+### Setup pre-commit hooks
+
+```
+pip install pre-commit
+
+# Linting, formatting and static type checking
+pre-commit install --hook-type pre-commit --hook-type commit-msg
+
+# You can manually run pre-commit with
+pre-commit run --all-files
+```
+
+## Run JAX path examples
 
 **NOTE**: This is under development so the run may fail.
 
+Run `Llama 3.2 1B` offline inference:
+
 ```
-TPU_BACKEND_TYPE=jax python vllm/examples/offline_inference/basic/generate.py --task=generate --max_model_len=1024
+export TPU_BACKEND_TYPE=jax
+python vllm/examples/offline_inference/basic/generate.py \
+    --task=generate \
+    --max_model_len=1024
+```
+
+## Relevant env
+
+To enable JAX path:
+
+```
+export TPU_BACKEND_TYPE=jax
+```
+
+To enable experimental scheduler:
+
+```
+export EXP_SCHEDULER=1
 ```
 
 ## How to test kernel?
@@ -81,16 +78,4 @@ Run the test:
 
 ```
 pytest -v ./tests/ragged_paged_attention_test.py
-```
-
-## How to format the code?
-
-```
-pip install pre-commit
-
-# Linting, formatting and static type checking
-pre-commit install --hook-type pre-commit --hook-type commit-msg
-
-# You can manually run pre-commit with
-pre-commit run --all-files
 ```
