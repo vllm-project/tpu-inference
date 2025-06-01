@@ -11,12 +11,16 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.utils import copy_slice
 
-from tpu_commons.worker.block_table_jax import BlockTableJax as BlockTable
+from tpu_commons.worker.block_table_jax import MultiGroupBlockTable
 
 _SAMPLING_EPS = 1e-5
+
+# TODO(xiang): fix cpu tensor init
 
 
 @dataclass
@@ -27,9 +31,9 @@ class CachedRequestState:
     mm_inputs: list[MultiModalKwargs]
     mm_positions: list[PlaceholderRange]
     sampling_params: SamplingParams
-    generator: Any
+    generator: Optional[Any]
 
-    block_ids: list[int]
+    block_ids: list[list[int]]
     num_computed_tokens: int
     output_token_ids: list[int]
 
@@ -58,15 +62,14 @@ class InputBatch:
         self,
         max_num_reqs: int,
         max_model_len: int,
-        max_num_blocks_per_req: int,
         max_num_batched_tokens: int,
-        device: jax.Device,
+        device: Any,
         pin_memory: bool,
         vocab_size: int,
+        kv_cache_config: KVCacheConfig,
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
-        self.max_num_blocks_per_req = max_num_blocks_per_req
         self.max_num_batched_tokens = max_num_batched_tokens
         self.device = device
         self.pin_memory = pin_memory
@@ -75,91 +78,128 @@ class InputBatch:
         self._req_ids: list[Optional[str]] = []
         self.req_id_to_index: dict[str, int] = {}
 
+        # TODO(woosuk): This buffer could be too large if max_model_len is big.
+        # Find a way to reduce the CPU memory usage.
+        # This buffer is not directly transferred to the GPU, so it does not
+        # need to be pinned.
         self.token_ids_cpu = np.zeros(
             (max_num_reqs, max_model_len),
             dtype=np.int32,
         )
-        self.num_tokens = jnp.zeros(max_num_reqs, dtype=jnp.int32)
-        self.num_tokens_no_spec = jnp.zeros(max_num_reqs, dtype=jnp.int32)
-        self.num_prompt_tokens = jnp.zeros(max_num_reqs, dtype=jnp.int32)
+        self.num_tokens = np.zeros(max_num_reqs, dtype=np.int32)
+        self.num_tokens_no_spec = np.zeros(max_num_reqs, dtype=np.int32)
+        self.num_prompt_tokens = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_computed_tokens_cpu = np.zeros(
             (max_num_reqs, ),
             dtype=np.int32,
         )
 
-        self.block_table = BlockTable(
+        # Block table.
+        self.block_table = MultiGroupBlockTable(
             max_num_reqs=max_num_reqs,
-            max_num_blocks_per_req=max_num_blocks_per_req,
+            max_model_len=max_model_len,
             max_num_batched_tokens=max_num_batched_tokens,
             pin_memory=pin_memory,
             device=device,
+            kv_cache_config=kv_cache_config,
         )
 
-        self.temperature = jax.device_put(
-            jnp.empty((max_num_reqs, ), dtype=jnp.float32), self.device)
+        # Sampling-related.
+        self.temperature = jnp.empty((max_num_reqs, ),
+                                     dtype=jnp.float32,
+                                     device=device)
         self.temperature_cpu = np.empty((max_num_reqs, ), dtype=np.float32)
         self.greedy_reqs: set[str] = set()
         self.random_reqs: set[str] = set()
 
-        self.top_p = jax.device_put(
-            jnp.empty((max_num_reqs, ), dtype=jnp.float32), self.device)
+        self.top_p = jnp.empty((max_num_reqs, ),
+                               dtype=jnp.float32,
+                               device=device)
         self.top_p_cpu = np.empty((max_num_reqs, ), dtype=np.float32)
         self.top_p_reqs: set[str] = set()
 
-        self.top_k = jax.device_put(
-            jnp.empty((max_num_reqs, ), dtype=jnp.int32), self.device)
+        self.top_k = jnp.empty((max_num_reqs, ),
+                               dtype=jnp.int32,
+                               device=device)
         self.top_k_cpu = np.empty((max_num_reqs, ), dtype=np.int32)
         self.top_k_reqs: set[str] = set()
 
-        self.min_p = jax.device_put(
-            jnp.empty((max_num_reqs, ), dtype=jnp.float32), self.device)
+        self.min_p = jnp.empty((max_num_reqs, ),
+                               dtype=jnp.float32,
+                               device=device)
         self.min_p_cpu = np.empty((max_num_reqs, ), dtype=np.float32)
         self.min_p_reqs: set[str] = set()
 
-        self.frequency_penalties = jax.device_put(
-            jnp.empty((max_num_reqs, ), dtype=jnp.float32), self.device)
-        self.frequency_penalties_cpu = np.empty((max_num_reqs, ),
-                                                dtype=np.float32)
+        # Frequency penalty related data structures
+        self.frequency_penalties = jnp.empty((max_num_reqs, ),
+                                             dtype=jnp.float32,
+                                             device=device)
+        self.frequency_penalties_cpu = \
+            np.empty(
+            (max_num_reqs, ),
+            dtype=np.float32)
         self.frequency_penalties_reqs: set[str] = set()
 
-        self.presence_penalties = jax.device_put(
-            jnp.empty((max_num_reqs, ), dtype=jnp.float32), self.device)
+        # Presence penalty related data structures
+        self.presence_penalties = jnp.empty((max_num_reqs, ),
+                                            dtype=jnp.float32,
+                                            device=device)
         self.presence_penalties_cpu = np.empty((max_num_reqs, ),
                                                dtype=np.float32)
         self.presence_penalties_reqs: set[str] = set()
 
-        self.repetition_penalties = jax.device_put(
-            jnp.empty((max_num_reqs, ), dtype=jnp.float32), self.device)
-        self.repetition_penalties_cpu = np.empty((max_num_reqs, ),
-                                                 dtype=np.float32)
+        # Repetition penalty related data structures
+        self.repetition_penalties = jnp.empty((max_num_reqs, ),
+                                              dtype=jnp.float32,
+                                              device=device)
+        self.repetition_penalties_cpu = \
+            np.empty(
+            (max_num_reqs, ),
+            dtype=np.float32)
         self.repetition_penalties_reqs: set[str] = set()
 
+        # req_index -> (min_tokens, stop_token_ids)
         self.min_tokens: dict[int, tuple[int, set[int]]] = {}
 
-        self.request_lora_mapping = jnp.zeros((self.max_num_reqs, ),
-                                              dtype=jnp.int32)
+        # lora related
+        self.request_lora_mapping = np.zeros((self.max_num_reqs, ),
+                                             dtype=np.int32)
         self.lora_id_to_request_ids: dict[int, set[str]] = {}
         self.lora_id_to_lora_request: dict[int, LoRARequest] = {}
 
-        self.generators: dict[int, jax.random.PRNGKeyArray] = {}
+        # req_index -> generator
+        # NOTE(woosuk): The indices of the requests that do not have their own
+        # generator should not be included in the dictionary.
+        self.generators: dict[int, Any] = {}
 
         self.num_logprobs: dict[str, int] = {}
+        # NOTE(rob): num_prompt_logprobs only includes reqs
+        # that are currently in the prefill phase.
         self.num_prompt_logprobs: dict[str, int] = {}
 
+        # To accumulate prompt logprobs tensor chunks across prefill steps.
         self.in_progress_prompt_logprobs_cpu: dict[str, LogprobsTensors] = {}
 
         self.logit_bias: list[Optional[dict[int,
                                             float]]] = [None] * max_num_reqs
         self.has_allowed_token_ids: set[str] = set()
+        # NOTE(lufang): In the mask tensor, if the corresponding token allowed,
+        # the value is False. Since we use masked_fill_ to set -inf.
         self.allowed_token_ids_mask: Optional[jax.Array] = None
-        self.allowed_token_ids_mask_cpu: Optional[np.ndarray] = None
+        self.allowed_token_ids_mask_cpu: Optional[jax.Array] = None
 
+        # req_index -> bad_words_token_ids
         self.bad_words_token_ids: dict[int, list[list[int]]] = {}
+
         self.req_output_token_ids: list[Optional[list[int]]] = []
+
+        # This is updated each time the batch constituents change.
         self.sampling_metadata = self._make_sampling_metadata()
 
     @property
     def req_ids(self) -> list[str]:
+        # None elements should only be present transiently
+        # while performing state updates to the batch.
         return cast(list[str], self._req_ids)
 
     def add_request(
@@ -181,26 +221,27 @@ class InputBatch:
 
         self.req_id_to_index[req_id] = req_index
 
+        # Copy the prompt token ids and output token ids.
         num_prompt_tokens = len(request.prompt_token_ids)
-        self.num_prompt_tokens = self.num_prompt_tokens.at[req_index].set(
-            num_prompt_tokens)
-        self.token_ids_cpu[req_index, :num_prompt_tokens] = jnp.array(
-            request.prompt_token_ids, dtype=jnp.int32)
+        self.num_prompt_tokens[req_index] = num_prompt_tokens
+        self.token_ids_cpu[
+            req_index, :num_prompt_tokens] = request.prompt_token_ids
         start_idx = num_prompt_tokens
         end_idx = start_idx + len(request.output_token_ids)
-        if request.output_token_ids:
-            self.token_ids_cpu[req_index, start_idx:end_idx] = jnp.array(
-                request.output_token_ids, dtype=jnp.int32)
-
-        self.num_tokens = self.num_tokens.at[req_index].set(request.num_tokens)
-        self.num_tokens_no_spec = self.num_tokens_no_spec.at[req_index].set(
-            request.num_tokens)
+        self.token_ids_cpu[req_index,
+                           start_idx:end_idx] = request.output_token_ids
+        # Number of token ids in token_ids_cpu.
+        # NOTE(woosuk): This may include spec decode tokens.
+        self.num_tokens[req_index] = request.num_tokens
+        # Number of tokens without spec decode tokens.
+        self.num_tokens_no_spec[req_index] = request.num_tokens
 
         self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens
         self.block_table.add_row(request.block_ids, req_index)
 
         sampling_params = request.sampling_params
         if sampling_params.sampling_type == SamplingType.GREEDY:
+            # Avoid later division by zero.
             self.temperature_cpu[req_index] = -1.0
             self.greedy_reqs.add(req_id)
         else:
@@ -217,30 +258,26 @@ class InputBatch:
             top_k = self.vocab_size
         self.top_k_cpu[req_index] = top_k
         self.min_p_cpu[req_index] = sampling_params.min_p
-        if sampling_params.min_p > _SAMPLING_EPS:
-            self.min_p_reqs.add(req_id)
-
         self.frequency_penalties_cpu[
             req_index] = sampling_params.frequency_penalty
+        if sampling_params.min_p > _SAMPLING_EPS:
+            self.min_p_reqs.add(req_id)
         if sampling_params.frequency_penalty != 0.0:
             self.frequency_penalties_reqs.add(req_id)
-
         self.presence_penalties_cpu[
             req_index] = sampling_params.presence_penalty
         if sampling_params.presence_penalty != 0.0:
             self.presence_penalties_reqs.add(req_id)
-
         self.repetition_penalties_cpu[
             req_index] = sampling_params.repetition_penalty
         if sampling_params.repetition_penalty != 1.0:
             self.repetition_penalties_reqs.add(req_id)
-
         if sampling_params.min_tokens:
-            self.min_tokens[req_index] = (
-                sampling_params.min_tokens,
-                sampling_params.all_stop_token_ids,
-            )
+            self.min_tokens[req_index] = (sampling_params.min_tokens,
+                                          sampling_params.all_stop_token_ids)
 
+        # NOTE(woosuk): self.generators should not include the requests that
+        # do not have their own generator.
         if request.generator is not None:
             self.generators[req_index] = request.generator
 
@@ -254,39 +291,39 @@ class InputBatch:
         if sampling_params.allowed_token_ids:
             self.has_allowed_token_ids.add(req_id)
             if self.allowed_token_ids_mask_cpu is None:
-                self.allowed_token_ids_mask_cpu = jnp.zeros(
-                    (self.max_num_reqs, self.vocab_size), dtype=jnp.bool_)
-                self.allowed_token_ids_mask = jax.device_put(
-                    jnp.zeros((self.max_num_reqs, self.vocab_size),
-                              dtype=jnp.bool_),
-                    self.device,
-                )
-
-            current_mask_row = jnp.ones(self.vocab_size, dtype=jnp.bool_)
-            allowed_indices = jnp.array(list(
-                sampling_params.allowed_token_ids),
-                                        dtype=jnp.int32)
-            current_mask_row = current_mask_row.at[allowed_indices].set(False)
-            self.allowed_token_ids_mask_cpu[req_index] = current_mask_row
+                # Lazy allocation for this tensor, which can be large.
+                # False means we don't fill with -inf.
+                self.allowed_token_ids_mask = jnp.zeros(self.max_num_reqs,
+                                                        self.vocab_size,
+                                                        dtype=jnp.bool)
+                self.allowed_token_ids_mask_cpu = np.zeros(self.max_num_reqs,
+                                                           self.vocab_size,
+                                                           dtype=np.bool)
+            self.allowed_token_ids_mask_cpu[req_index] = True
+            # False means we don't fill with -inf.
+            self.allowed_token_ids_mask_cpu[req_index][
+                sampling_params.allowed_token_ids] = False
 
         if sampling_params.bad_words_token_ids:
             self.bad_words_token_ids[
                 req_index] = sampling_params.bad_words_token_ids
 
+        # Add request lora ID
         if request.lora_request:
             lora_id = request.lora_request.lora_int_id
             if lora_id not in self.lora_id_to_request_ids:
                 self.lora_id_to_request_ids[lora_id] = set()
 
-            self.request_lora_mapping = self.request_lora_mapping.at[
-                req_index].set(lora_id)
+            self.request_lora_mapping[req_index] = lora_id
             self.lora_id_to_request_ids[lora_id].add(request.req_id)
             self.lora_id_to_lora_request[lora_id] = request.lora_request
         else:
-            self.request_lora_mapping = self.request_lora_mapping.at[
-                req_index].set(0)
+            # No LoRA
+            self.request_lora_mapping[req_index] = 0
 
     def remove_request(self, req_id: str) -> Optional[int]:
+        """This method must always be followed by a call to condense()."""
+
         req_index = self.req_id_to_index.pop(req_id, None)
         if req_index is None:
             return None
@@ -307,120 +344,103 @@ class InputBatch:
         self.num_prompt_logprobs.pop(req_id, None)
         self.in_progress_prompt_logprobs_cpu.pop(req_id, None)
 
-        lora_id = self.request_lora_mapping[req_index].item(
-        )  # .item() to get Python int
+        # LoRA
+        lora_id = self.request_lora_mapping[req_index]
         if lora_id != 0:
             self.lora_id_to_request_ids[lora_id].discard(req_id)
             if len(self.lora_id_to_request_ids[lora_id]) == 0:
                 self.lora_id_to_request_ids.pop(lora_id)
                 self.lora_id_to_lora_request.pop(lora_id)
-            self.request_lora_mapping = self.request_lora_mapping.at[
-                req_index].set(0)
+            self.request_lora_mapping[req_index] = 0
 
         self.logit_bias[req_index] = None
         self.has_allowed_token_ids.discard(req_id)
         if self.allowed_token_ids_mask_cpu is not None:
-            self.allowed_token_ids_mask_cpu[req_index] = False
+            # False means we don't fill with -inf.
+            self.allowed_token_ids_mask_cpu[req_index].fill_(False)
         self.bad_words_token_ids.pop(req_index, None)
         return req_index
 
     def swap_states(self, i1: int, i2: int) -> None:
         old_id_i1 = self._req_ids[i1]
         old_id_i2 = self._req_ids[i2]
-        self._req_ids[i1], self._req_ids[i2] = (
-            self._req_ids[i2],
-            self._req_ids[i1],
-        )  # noqa
-        self.req_output_token_ids[i1], self.req_output_token_ids[i2] = (
-            self.req_output_token_ids[i2],
-            self.req_output_token_ids[i1],
-        )
+        self._req_ids[i1], self._req_ids[i2] =\
+            self._req_ids[i2], self._req_ids[i1] # noqa
+        self.req_output_token_ids[i1], self.req_output_token_ids[i2] =\
+            self.req_output_token_ids[i2], self.req_output_token_ids[i1]
         assert old_id_i1 is not None and old_id_i2 is not None
-        self.req_id_to_index[old_id_i1], self.req_id_to_index[old_id_i2] = (
-            self.req_id_to_index[old_id_i2],
-            self.req_id_to_index[old_id_i1],
-        )
+        self.req_id_to_index[old_id_i1], self.req_id_to_index[old_id_i2] =\
+            self.req_id_to_index[old_id_i2], self.req_id_to_index[old_id_i1]
+        self.num_tokens[i1], self.num_tokens[i2] =\
+            self.num_tokens[i2], self.num_tokens[i1]
+        self.num_tokens_no_spec[i1], self.num_tokens_no_spec[i2] =\
+            self.num_tokens_no_spec[i2], self.num_tokens_no_spec[i1]
+        self.num_prompt_tokens[i1], self.num_prompt_tokens[i2] =\
+            self.num_prompt_tokens[i2], self.num_prompt_tokens[i1]
+        self.num_computed_tokens_cpu[i1], self.num_computed_tokens_cpu[i2] =\
+            self.num_computed_tokens_cpu[i2], self.num_computed_tokens_cpu[i1]
+        self.temperature_cpu[i1], self.temperature_cpu[i2] =\
+            self.temperature_cpu[i2], self.temperature_cpu[i1]
+        self.top_p_cpu[i1], self.top_p_cpu[i2] =\
+            self.top_p_cpu[i2], self.top_p_cpu[i1]
+        self.top_k_cpu[i1], self.top_k_cpu[i2] =\
+            self.top_k_cpu[i2], self.top_k_cpu[i1]
+        self.frequency_penalties_cpu[i1], self.frequency_penalties_cpu[i2] =\
+            self.frequency_penalties_cpu[i2], self.frequency_penalties_cpu[i1]
+        self.presence_penalties_cpu[i1], self.presence_penalties_cpu[i2] =\
+            self.presence_penalties_cpu[i2], self.presence_penalties_cpu[i1]
+        self.repetition_penalties_cpu[i1], self.repetition_penalties_cpu[i2] =\
+            self.repetition_penalties_cpu[i2], self.repetition_penalties_cpu[i1]
+        self.min_p_cpu[i1], self.min_p_cpu[i2] =\
+            self.min_p_cpu[i2], self.min_p_cpu[i1]
 
-        self.num_tokens = (self.num_tokens.at[i1].set(
-            self.num_tokens[i2]).at[i2].set(self.num_tokens[i1]))
-        self.num_tokens_no_spec = (self.num_tokens_no_spec.at[i1].set(
-            self.num_tokens_no_spec[i2]).at[i2].set(
-                self.num_tokens_no_spec[i1]))
-        self.num_prompt_tokens = (self.num_prompt_tokens.at[i1].set(
-            self.num_prompt_tokens[i2]).at[i2].set(self.num_prompt_tokens[i1]))
-        self.num_computed_tokens_cpu[i1], self.num_computed_tokens_cpu[i2] = (
-            self.num_computed_tokens_cpu[i2], self.num_computed_tokens_cpu[i1])
-        self.temperature_cpu[i1], self.temperature_cpu[i2] = (
-            self.temperature_cpu[i2], self.temperature_cpu[i1])
-        self.top_p_cpu[i1], self.top_p_cpu[i2] = (self.top_p_cpu[i2],
-                                                  self.top_p_cpu[i1])
-        self.top_k_cpu[i1], self.top_k_cpu[i2] = (self.top_k_cpu[i2],
-                                                  self.top_k_cpu[i1])
-        self.frequency_penalties_cpu[i1], self.frequency_penalties_cpu[i2] = (
-            self.frequency_penalties_cpu[i2], self.frequency_penalties_cpu[i1])
-        self.presence_penalties_cpu[i1], self.presence_penalties_cpu[i2] = (
-            self.presence_penalties_cpu[i2], self.presence_penalties_cpu[i1])
-        self.repetition_penalties_cpu[i1], self.repetition_penalties_cpu[
-            i2] = (self.repetition_penalties_cpu[i2],
-                   self.repetition_penalties_cpu[i1])
-        self.min_p_cpu[i1], self.min_p_cpu[i2] = (self.min_p_cpu[i2],
-                                                  self.min_p_cpu[i1])
-
-        tmp_row = jnp.copy(self.token_ids_cpu[i1, :])
-        self.token_ids_cpu[i1, :] = self.token_ids_cpu[i2, :]
-        self.token_ids_cpu[i2, :] = tmp_row
+        # NOTE: the following is unsafe
+        # self.token_ids_cpu[i1, ...], self.token_ids_cpu[i2, ...], =\
+        #     self.token_ids_cpu[i2, ...], self.token_ids_cpu[i1, ...]
+        # instead, we need to temporiarily copy the data for one of the indices
+        # TODO(lucas): optimize this by only copying valid indices
+        tmp = self.token_ids_cpu[i1, ...].copy()
+        self.token_ids_cpu[i1, ...] = self.token_ids_cpu[i2, ...]
+        self.token_ids_cpu[i2, ...] = tmp
 
         swap_dict_values(self.generators, i1, i2)
         swap_dict_values(self.min_tokens, i1, i2)
         swap_dict_values(self.bad_words_token_ids, i1, i2)
 
-        self.request_lora_mapping = (self.request_lora_mapping.at[i1].set(
-            self.request_lora_mapping[i2]).at[i2].set(
-                self.request_lora_mapping[i1]))
-        self.logit_bias[i1], self.logit_bias[i2] = (
-            self.logit_bias[i2],
-            self.logit_bias[i1],
-        )
+        self.request_lora_mapping[i1], self.request_lora_mapping[i2] =\
+            self.request_lora_mapping[i2], self.request_lora_mapping[i1]
+        self.logit_bias[i1], self.logit_bias[i2] =\
+            self.logit_bias[i2], self.logit_bias[i1]
 
         if self.allowed_token_ids_mask_cpu is not None:
-            tmp_mask_row = jnp.copy(self.allowed_token_ids_mask_cpu[i1])
-            self.allowed_token_ids_mask_cpu[
-                i1] = self.allowed_token_ids_mask_cpu[i2]
-            self.allowed_token_ids_mask_cpu[i2] = tmp_mask_row
+            self.allowed_token_ids_mask_cpu[i1], \
+                self.allowed_token_ids_mask_cpu[i2] =\
+                self.allowed_token_ids_mask_cpu[i2], \
+                    self.allowed_token_ids_mask_cpu[i1]
         self.block_table.swap_row(i1, i2)
 
     def condense(self, empty_req_indices: list[int]) -> None:
         num_reqs = self.num_reqs
         if num_reqs == 0:
+            # The batched states are empty.
             self._req_ids.clear()
             self.req_output_token_ids.clear()
             return
 
+        # NOTE(woosuk): This function assumes that the empty_req_indices
+        # is sorted in descending order.
         last_req_index = num_reqs + len(empty_req_indices) - 1
-
-        current_token_ids_cpu = self.token_ids_cpu
-        current_num_tokens = self.num_tokens
-        current_num_tokens_no_spec = self.num_tokens_no_spec
-        current_num_prompt_tokens = self.num_prompt_tokens
-        current_num_computed_tokens_cpu = self.num_computed_tokens_cpu
-        current_temperature_cpu = self.temperature_cpu
-        current_top_p_cpu = self.top_p_cpu
-        current_top_k_cpu = self.top_k_cpu
-        current_frequency_penalties_cpu = self.frequency_penalties_cpu
-        current_presence_penalties_cpu = self.presence_penalties_cpu
-        current_repetition_penalties_cpu = self.repetition_penalties_cpu
-        current_min_p_cpu = self.min_p_cpu
-        current_request_lora_mapping = self.request_lora_mapping
-        current_allowed_token_ids_mask_cpu = self.allowed_token_ids_mask_cpu
-
         while empty_req_indices:
+            # Find the largest non-empty index.
             while last_req_index in empty_req_indices:
                 last_req_index -= 1
 
+            # Find the smallest empty index.
             empty_index = empty_req_indices.pop()
             if empty_index >= last_req_index:
                 break
 
+            # Swap the states.
             req_id = self._req_ids[last_req_index]
             output_token_ids = self.req_output_token_ids[last_req_index]
             assert req_id is not None
@@ -430,34 +450,28 @@ class InputBatch:
             self.req_output_token_ids[last_req_index] = None
             self.req_id_to_index[req_id] = empty_index
 
-            num_tokens_val = current_num_tokens[last_req_index].item()
-            current_token_ids_cpu[empty_index, :num_tokens_val] = (
-                current_token_ids_cpu[last_req_index, :num_tokens_val])
-            current_num_tokens = current_num_tokens.at[empty_index].set(
-                num_tokens_val)
-            current_num_tokens_no_spec = current_num_tokens_no_spec.at[
-                empty_index].set(current_num_tokens_no_spec[last_req_index])
-            current_num_prompt_tokens = current_num_prompt_tokens.at[
-                empty_index].set(current_num_prompt_tokens[last_req_index])
-            current_num_computed_tokens_cpu[empty_index] = (
-                current_num_computed_tokens_cpu[last_req_index])
-
+            num_tokens = self.num_tokens[last_req_index]
+            self.token_ids_cpu[empty_index, :num_tokens] = self.token_ids_cpu[
+                last_req_index, :num_tokens]
+            self.num_tokens[empty_index] = num_tokens
+            self.num_tokens_no_spec[empty_index] = self.num_tokens_no_spec[
+                last_req_index]
+            self.num_prompt_tokens[empty_index] = self.num_prompt_tokens[
+                last_req_index]
+            self.num_computed_tokens_cpu[
+                empty_index] = self.num_computed_tokens_cpu[last_req_index]
             self.block_table.move_row(last_req_index, empty_index)
-
-            current_temperature_cpu[empty_index] = (
-                current_temperature_cpu[last_req_index])
-            current_top_p_cpu[empty_index] = (
-                current_top_p_cpu[last_req_index])
-            current_top_k_cpu[empty_index] = (
-                current_top_k_cpu[last_req_index])
-            current_frequency_penalties_cpu[empty_index] = (
-                current_frequency_penalties_cpu[last_req_index])
-            current_presence_penalties_cpu[empty_index] = (
-                current_presence_penalties_cpu[last_req_index])
-            current_repetition_penalties_cpu[empty_index] = (
-                current_repetition_penalties_cpu[last_req_index])
-            current_min_p_cpu[empty_index] = (
-                current_min_p_cpu[last_req_index])
+            self.temperature_cpu[empty_index] = self.temperature_cpu[
+                last_req_index]
+            self.top_p_cpu[empty_index] = self.top_p_cpu[last_req_index]
+            self.top_k_cpu[empty_index] = self.top_k_cpu[last_req_index]
+            self.frequency_penalties_cpu[
+                empty_index] = self.frequency_penalties_cpu[last_req_index]
+            self.presence_penalties_cpu[
+                empty_index] = self.presence_penalties_cpu[last_req_index]
+            self.repetition_penalties_cpu[
+                empty_index] = self.repetition_penalties_cpu[last_req_index]
+            self.min_p_cpu[empty_index] = self.min_p_cpu[last_req_index]
             generator = self.generators.pop(last_req_index, None)
             if generator is not None:
                 self.generators[empty_index] = generator
@@ -466,36 +480,24 @@ class InputBatch:
             if min_token is not None:
                 self.min_tokens[empty_index] = min_token
 
-            current_request_lora_mapping = current_request_lora_mapping.at[
-                empty_index].set(current_request_lora_mapping[last_req_index])
+            self.request_lora_mapping[empty_index] = self.request_lora_mapping[
+                last_req_index]
+
             self.logit_bias[empty_index] = self.logit_bias[last_req_index]
 
-            if current_allowed_token_ids_mask_cpu is not None:
-                current_allowed_token_ids_mask_cpu[
-                    empty_index] = current_allowed_token_ids_mask_cpu[
+            if self.allowed_token_ids_mask_cpu is not None:
+                self.allowed_token_ids_mask_cpu[
+                    empty_index] = self.allowed_token_ids_mask_cpu[
                         last_req_index]
 
             bad_words_token_ids = self.bad_words_token_ids.pop(
                 last_req_index, None)
             if bad_words_token_ids is not None:
                 self.bad_words_token_ids[empty_index] = bad_words_token_ids
+            # Decrement last_req_index since it is now empty.
             last_req_index -= 1
 
-        self.token_ids_cpu = current_token_ids_cpu
-        self.num_tokens = current_num_tokens
-        self.num_tokens_no_spec = current_num_tokens_no_spec
-        self.num_prompt_tokens = current_num_prompt_tokens
-        self.num_computed_tokens_cpu = current_num_computed_tokens_cpu
-        self.temperature_cpu = current_temperature_cpu
-        self.top_p_cpu = current_top_p_cpu
-        self.top_k_cpu = current_top_k_cpu
-        self.frequency_penalties_cpu = current_frequency_penalties_cpu
-        self.presence_penalties_cpu = current_presence_penalties_cpu
-        self.repetition_penalties_cpu = current_repetition_penalties_cpu
-        self.min_p_cpu = current_min_p_cpu
-        self.request_lora_mapping = current_request_lora_mapping
-        self.allowed_token_ids_mask_cpu = current_allowed_token_ids_mask_cpu
-
+        # Trim lists to the batch size.
         del self._req_ids[self.num_reqs:]
         del self.req_output_token_ids[self.num_reqs:]
 
@@ -504,124 +506,96 @@ class InputBatch:
 
     def _make_sampling_metadata(self) -> SamplingMetadata:
         num_reqs = self.num_reqs
-        temperature_for_metadata: Optional[jax.Array] = None
-        top_p_for_metadata: Optional[jax.Array] = None
-        top_k_for_metadata: Optional[jax.Array] = None
-        min_p_for_metadata: Optional[jax.Array] = None
-        prompt_token_ids: Optional[jax.Array] = None
-        allowed_token_ids_mask_for_metadata: Optional[jax.Array] = None
-
         if not self.all_greedy:
-            self.temperature = self.temperature.at[:num_reqs].set(
-                self.temperature_cpu[:num_reqs])
-            temperature_for_metadata = self.temperature[:num_reqs]
-
+            temperature = copy_slice(self.temperature_cpu, self.temperature,
+                                     num_reqs)
+        else:
+            temperature = None
         if not self.no_top_p:
-            self.top_p = self.top_p.at[:num_reqs].set(
-                self.top_p_cpu[:num_reqs])
-            top_p_for_metadata = self.top_p[:num_reqs]
+            copy_slice(self.top_p_cpu, self.top_p, num_reqs)
         if not self.no_top_k:
-            self.top_k = self.top_k.at[:num_reqs].set(
-                self.top_k_cpu[:num_reqs])
-            top_k_for_metadata = self.top_k[:num_reqs]
+            copy_slice(self.top_k_cpu, self.top_k, num_reqs)
         if not self.no_min_p:
-            self.min_p = self.min_p.at[:num_reqs].set(
-                self.min_p_cpu[:num_reqs])
-            min_p_for_metadata = self.min_p[:num_reqs]
+            copy_slice(self.min_p_cpu, self.min_p, num_reqs)
 
         if not self.no_penalties:
-            self.frequency_penalties = self.frequency_penalties.at[:num_reqs].set(
-                self.frequency_penalties_cpu[:num_reqs])
-            self.presence_penalties = self.presence_penalties.at[:num_reqs].set(
-                self.presence_penalties_cpu[:num_reqs])
-            self.repetition_penalties = self.repetition_penalties.at[:num_reqs].set(
-                self.repetition_penalties_cpu[:num_reqs])
-            prompt_token_ids = self._make_prompt_token_ids_tensor()
+            # Since syncing these tensors is expensive only copy them
+            # if necessary i.e. if there are requests which require
+            # penalties to be applied during sampling.
+            copy_slice(self.frequency_penalties_cpu, self.frequency_penalties,
+                       num_reqs)
+            copy_slice(self.presence_penalties_cpu, self.presence_penalties,
+                       num_reqs)
+            copy_slice(self.repetition_penalties_cpu,
+                       self.repetition_penalties, num_reqs)
 
+            # The prompt tokens are used only for applying penalties during
+            # the sampling process. Hence copy these tensors only when
+            # there are requests which need penalties to be applied.
+            prompt_token_ids = self._make_prompt_token_ids_tensor()
+        else:
+            prompt_token_ids = None
+
+        allowed_token_ids_mask: Optional[jax.Array] = None
         if not self.no_allowed_token_ids:
-            assert (self.allowed_token_ids_mask is not None
-                    and self.allowed_token_ids_mask_cpu is not None)
-            self.allowed_token_ids_mask = self.allowed_token_ids_mask.at[:num_reqs].set(
-                self.allowed_token_ids_mask_cpu[:num_reqs])
-            allowed_token_ids_mask_for_metadata = self.allowed_token_ids_mask[:
-                                                                              num_reqs]
+            assert self.allowed_token_ids_mask is not None
+            copy_slice(self.allowed_token_ids_mask_cpu,
+                       self.allowed_token_ids_mask, num_reqs)
+            allowed_token_ids_mask = self.allowed_token_ids_mask[:num_reqs]
 
         return SamplingMetadata(
-            temperature=temperature_for_metadata,
+            temperature=temperature,
             all_greedy=self.all_greedy,
             all_random=self.all_random,
-            top_p=top_p_for_metadata,
-            top_k=top_k_for_metadata,
-            min_p=min_p_for_metadata,
+            top_p=None if self.no_top_p else self.top_p[:num_reqs],
+            top_k=None if self.no_top_k else self.top_k[:num_reqs],
+            min_p=None if self.no_min_p else self.min_p[:num_reqs],
             generators=self.generators,
             max_num_logprobs=self.max_num_logprobs,
             prompt_token_ids=prompt_token_ids,
-            frequency_penalties=(self.frequency_penalties[:num_reqs]
-                                 if not self.no_penalties else None),
-            presence_penalties=(self.presence_penalties[:num_reqs]
-                                if not self.no_penalties else None),
-            repetition_penalties=(self.repetition_penalties[:num_reqs]
-                                  if not self.no_penalties else None),
+            frequency_penalties=self.frequency_penalties[:num_reqs],
+            presence_penalties=self.presence_penalties[:num_reqs],
+            repetition_penalties=self.repetition_penalties[:num_reqs],
             output_token_ids=cast(list[list[int]], self.req_output_token_ids),
             min_tokens=self.min_tokens,
             no_penalties=self.no_penalties,
             logit_bias=self.logit_bias[:num_reqs],
-            allowed_token_ids_mask=allowed_token_ids_mask_for_metadata,
+            allowed_token_ids_mask=allowed_token_ids_mask,
             bad_words_token_ids=self.bad_words_token_ids,
         )
 
     def _make_prompt_token_ids_tensor(self) -> jax.Array:
-        if self.num_reqs == 0:
-            return jax.device_put(jnp.empty((0, 0), dtype=jnp.int64),
-                                  self.device)
-
-        max_prompt_len = self.num_prompt_tokens[:self.num_reqs].max().item()
-        if max_prompt_len == 0:  # Handle case where all prompts are empty
-            return jax.device_put(
-                jnp.empty((self.num_reqs, 0), dtype=jnp.int64), self.device)
-
-        prompt_token_ids_host = jnp.empty(
+        max_prompt_len = self.num_prompt_tokens[:self.num_reqs].max()
+        prompt_token_ids = np.empty(
             (self.num_reqs, max_prompt_len),
-            dtype=jnp.int64,
+            dtype=np.int64,
         )
-
-        prompt_token_ids_host = prompt_token_ids_host.at[:, :].set(
-            self.token_ids_cpu[:self.num_reqs, :max_prompt_len].astype(
-                jnp.int64))
-
+        prompt_token_ids[:] = self.token_ids_cpu[:self.
+                                                 num_reqs, :max_prompt_len]
+        # Use the value of vocab_size as a pad since we don't have a
+        # token_id of this value.
         for i in range(self.num_reqs):
-            num_prompt_tokens_i = self.num_prompt_tokens[i].item()
-            if num_prompt_tokens_i < max_prompt_len:
-                prompt_token_ids_host = prompt_token_ids_host.at[
-                    i, num_prompt_tokens_i:].set(self.vocab_size)
-
-        return jax.device_put(prompt_token_ids_host, self.device)
+            prompt_token_ids[i, self.num_prompt_tokens[i]:] = self.vocab_size
+        return jnp.array(prompt_token_ids)
 
     def make_lora_inputs(
-        self,
-        num_scheduled_tokens: jax.Array  # Changed from np.ndarray
+        self, num_scheduled_tokens: np.ndarray
     ) -> tuple[tuple[int, ...], tuple[int, ...], set[LoRARequest]]:
-        req_lora_mapping_slice = self.request_lora_mapping[:self.num_reqs]
-        prompt_lora_mapping = tuple(
-            map(int, req_lora_mapping_slice
-                ))  # Convert JAX array elements to Python int for tuple
+        """
+        Given the num_scheduled_tokens for each request in the batch, return
+        datastructures used to activate the current LoRAs.
+        Returns:
+            1. prompt_lora_mapping: A tuple of size self.num_reqs where,
+               prompt_lora_mapping[i] is the LoRA id to use for the ith prompt.
+            2. token_lora_mapping: A tuple of size np.sum(num_scheduled_tokens)
+               where, token_lora_mapping[i] is the LoRA id to use for ith token.
+            3. lora_requests: Set of relevant LoRA requests.
+        """
 
-        # jnp.repeat requires repeats to be an int or sequence of ints.
-        # num_scheduled_tokens is a JAX array of token counts per request.
-        # Ensure num_scheduled_tokens are Python integers for repeat if it's small or convert to list
-        if num_scheduled_tokens.size > 0:  # Check if there are any tokens scheduled
-            # Convert JAX array elements to Python int for jnp.repeat if needed, or ensure dtype is int.
-            repeats_for_tokens = num_scheduled_tokens.astype(
-                jnp.int32)  # Ensure integer type
-            token_lora_mapping_array = jnp.repeat(
-                req_lora_mapping_slice,
-                repeats_for_tokens,
-                total_repeat_length=jnp.sum(repeats_for_tokens).item(),
-            )
-            token_lora_mapping = tuple(map(int, token_lora_mapping_array))
-        else:
-            token_lora_mapping = tuple()
-
+        req_lora_mapping = self.request_lora_mapping[:self.num_reqs]
+        prompt_lora_mapping = tuple(req_lora_mapping)
+        token_lora_mapping = tuple(
+            req_lora_mapping.repeat(num_scheduled_tokens))
         active_lora_requests: set[LoRARequest] = set(
             self.lora_id_to_lora_request.values())
 

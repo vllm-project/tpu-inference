@@ -120,12 +120,13 @@ class TPUModelRunner():
         self.kv_cache_config = kv_cache_config
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
-            max_num_blocks_per_req=self.max_num_blocks_per_req,
             max_model_len=self.max_model_len,
             max_num_batched_tokens=self.max_num_tokens,
             device=None,
-            pin_memory=None,
-            vocab_size=self.model_config.get_vocab_size())
+            pin_memory=False,
+            vocab_size=self.model_config.get_vocab_size(),
+            kv_cache_config=kv_cache_config,
+        )
 
         kv_cache_groups = kv_cache_config.kv_cache_groups
         if len(kv_cache_groups) > 1:
@@ -459,8 +460,8 @@ class TPUModelRunner():
             for seq in scheduler_output.scheduled_cached_reqs:
                 seq_index = self.input_batch.req_id_to_index[seq.req_id]
                 max_num_blocks = max(
-                    max_num_blocks,
-                    self.input_batch.block_table.num_blocks_per_row[seq_index])
+                    max_num_blocks, self.input_batch.block_table.
+                    block_tables[0].num_blocks_per_row[seq_index])
 
             max_num_blocks = pad_to_multiple(
                 max_num_blocks,
@@ -512,10 +513,10 @@ class TPUModelRunner():
             seq_index = self.input_batch.req_id_to_index[seq.req_id]
             seq_len = self.input_batch.num_computed_tokens_cpu[seq_index]
 
-            num_blocks = self.input_batch.block_table.num_blocks_per_row[
-                seq_index]
-            block_table = self.input_batch.block_table.block_table_cpu[
-                seq_index, :num_blocks]
+            num_blocks = self.input_batch.block_table.block_tables[
+                0].num_blocks_per_row[seq_index]
+            block_table = self.input_batch.block_table.block_tables[
+                0].block_table_cpu[seq_index, :num_blocks]
 
             position = seq_len - 1
 
@@ -698,7 +699,7 @@ class TPUModelRunner():
             seq_lens[i] = prompt_len
 
             # Full prompt associated block indices.
-            block_table = seq.block_ids
+            block_table = seq.block_ids[0]
             assert len(block_table) <= padded_num_blocks
             block_indices[i][:len(block_table)] = block_table
             # Unfilled prompt associated block indices.
