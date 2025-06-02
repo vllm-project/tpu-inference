@@ -7,7 +7,7 @@ __all__ = ["get_tpu_platform_cls"]
 
 def get_tpu_platform_cls(backend_type="pytorch_xla"):
     """Get the appropriate TPU worker implementation."""
-    if backend_type == "pytorch_xla":
+    if backend_type == "pytorch_xla" or backend_type == "torchax":
         from tpu_commons.platforms.tpu_torch_xla import TpuPlatform
         return TpuPlatform
     elif backend_type == "jax":

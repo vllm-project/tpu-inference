@@ -23,6 +23,7 @@ logger = init_logger(__name__)
 
 
 class TpuPlatform(Platform):
+    print("tpu commons tpu platform")
     _enum = PlatformEnum.TPU
     device_name: str = "tpu"
     device_type: str = "tpu"
@@ -47,8 +48,12 @@ class TpuPlatform(Platform):
             logger.info("Cannot use %s backend on TPU.", selected_backend)
 
         if use_v1:
-            logger.info("Using Pallas V1 backend.")
-            return "vllm.v1.attention.backends.pallas.PallasAttentionBackend"
+            if envs.VLLM_TORCHAX_ENABLED:
+                logger.info("Using Pallas V1 backend with torchax.")
+                return "tpu_commons.attention.backends.pallas_torchax.PallasAttentionBackend"
+            else:
+                logger.info("Using Pallas V1 backend with torchxla.")
+                return "tpu_commons.attention.backends.pallas_torchxla.PallasAttentionBackend"
         else:
             logger.info("Using Pallas backend.")
             return "vllm.attention.backends.pallas.PallasAttentionBackend"
@@ -114,8 +119,12 @@ class TpuPlatform(Platform):
             vllm_config.model_config.dtype = torch.bfloat16
 
         if envs.VLLM_USE_V1:
-            from vllm.v1.attention.backends.pallas import \
-                PallasAttentionBackend
+            if envs.VLLM_TORCHAX_ENABLED:
+                from tpu_commons.attention.backends.pallas_torchax import \
+                    PallasAttentionBackend
+            else:
+                from tpu_commons.attention.backends.pallas import \
+                    PallasAttentionBackend
             cache_config.block_size = PallasAttentionBackend.get_page_size(
                 vllm_config)  # type: ignore[assignment]
             min_page_size = PallasAttentionBackend.get_min_page_size(

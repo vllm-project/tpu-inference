@@ -15,6 +15,9 @@ def get_tpu_worker_cls(worker_type=None):
     if worker_type == "pytorch_xla":
         from tpu_commons.worker.tpu_torch_xla_worker import TPUWorker
         return TPUWorker
+    elif worker_type == "torchax":
+        from tpu_commons.worker.tpu_worker_torchax import TPUWorker
+        return TPUWorker
     elif worker_type == "jax":
         from tpu_commons.worker.tpu_worker_jax import TPUWorker
         return TPUWorker
