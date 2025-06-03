@@ -190,7 +190,8 @@ class TPUModelRunner():
         pass
 
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
-        #At first step of this implementation, let's do prefill and decode seperately for maximum code reuse and simpler debug/verification.
+        # At first step of this implementation, let's do prefill and decode seperately for maximum code reuse and simpler debug/verification.
+        # We will at chunked_prefill inputs later.
         yield self._prepare_prefill(scheduler_output)
         yield self._prepare_decode(scheduler_output)
 
@@ -212,12 +213,7 @@ class TPUModelRunner():
                                                        running_indices,
                                                        output_token_indices)
 
-        req_id_to_index = {}
-        req_ids = []
         prompt_logprobs_dict = {}
-
-        # TODO(pooyam): merge output of prefill and decode and/or add _prepare_chunked_prefill.
-        # The goal here is to make sure we are using vllm scheduler output correctly. When we verify that, we can also add `_prepare_chunked_prefill`.
 
         all_reqs = scheduler_output.scheduled_new_reqs + scheduler_output.scheduled_cached_reqs
 
@@ -239,26 +235,29 @@ class TPUModelRunner():
                                                           1] + 1  # Dummy
 
             # TODO(pooyam): Figure out why all three of `num_tokens`, `num_prompt_tokens`, and 'num_computed_tokens_cpu` exist.
-            req_id_to_index[seq.req_id] = index
-            req_ids.append(seq.req_id)
             prompt_logprobs_dict[seq.req_id] = None
 
         # TODO(pooyam): device-to-host transfer step by step is inefficient. Should we execute for longer decoding steps?
         # Not sure yet how that would work with vLLM engine that calls `execute_model`
-        outputs = []
+        sampled_token_ids = [[] for _ in range(self.input_batch.num_reqs)]
+
         if running_indices:
             outputs = self.output_cache.at[running_indices,
                                            output_token_indices].get()
             outputs = jax.device_get(outputs).tolist()
-            outputs = [[el] for el in outputs]
+            # NOTE(pooyam): vLLM scheduler reads via `sampled_token_ids[req_index]` where sampled_token_ids is `list[list[int]]`.
+            # Not sure why they didn't make it dictionary because not all running sequences will be scheduled at each iter and
+            # we are sending pointless [] as the output of such requests. I think it's possible to optimize this if we just send a dict.
+            for running_index, output in zip(running_indices, outputs):
+                sampled_token_ids[running_index] = [output]
 
         return ModelRunnerOutput(
-            req_ids=req_ids,
-            req_id_to_index=req_id_to_index,
+            req_ids=self.input_batch.req_ids,
+            req_id_to_index=self.input_batch.req_id_to_index,
             prompt_logprobs_dict=prompt_logprobs_dict,
             logprobs=None,
             spec_token_ids=None,
-            sampled_token_ids=outputs,
+            sampled_token_ids=sampled_token_ids,
         )
 
     def _init_mesh(self) -> None:
