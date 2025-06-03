@@ -517,7 +517,7 @@ class TPUModelRunner():
             block_table = self.input_batch.block_table.block_tables[
                 0].block_table_cpu[seq_index, :num_blocks]
 
-            position = seq_len - 1
+            position = seq_len
 
             running_indices[i] = seq_index
             #input_token_indices[i] = seq.get_decoded_len() - 1
