@@ -3,6 +3,7 @@ from typing import List, Tuple
 
 import jax
 import numpy as np
+from ray._private.accelerators import TPUAcceleratorManager
 
 GBYTES = 1024 * 1024 * 1024
 
@@ -16,6 +17,19 @@ def enable_megacore() -> None:
 
 def get_megacore() -> bool:
     return _megacore
+
+
+def get_local_available_devices() -> int:
+    return TPUAcceleratorManager.get_current_node_num_accelerators()
+
+
+def set_visible_device_ids(tpu_ids: List[int]) -> None:
+    validate = TPUAcceleratorManager.validate_resource_request_quantity(
+        len(tpu_ids))
+    if not validate[0]:
+        raise ValueError(validate[1])
+    tpu_ids = [str(tpu_id) for tpu_id in tpu_ids]
+    TPUAcceleratorManager.set_current_process_visible_accelerator_ids(tpu_ids)
 
 
 def get_num_kv_heads_by_tp(num_kv_heads: int, tp_size: int) -> int:

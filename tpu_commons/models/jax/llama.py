@@ -271,7 +271,6 @@ class LlamaForCausalLM(nn.Module):
 
     def setup(self) -> None:
         model_config = self.vllm_config.model_config
-        hf_config = model_config.hf_config
         self.embed_tokens = layers.Embedder(
             vocab_size=model_config.get_vocab_size(),
             hidden_size=model_config.get_hidden_size(),
@@ -282,10 +281,7 @@ class LlamaForCausalLM(nn.Module):
             vllm_config=self.vllm_config,
             mesh=self.mesh,
         )
-        # TODO(xiang): check this for llama3.2
-        if getattr(hf_config, "use_embedding_as_last_layer", False):
-            self.lm_head = None
-        else:
+        try:
             self.lm_head = self.param(
                 "lm_head",
                 sharding_init(
@@ -296,6 +292,8 @@ class LlamaForCausalLM(nn.Module):
                  model_config.get_vocab_size()),
                 model_config.dtype,
             )
+        except Exception:
+            self.lm_head = None
 
     def __call__(
         self,

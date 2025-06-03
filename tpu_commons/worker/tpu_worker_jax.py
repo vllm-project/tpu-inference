@@ -10,9 +10,9 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerBase
 
+from tpu_commons import utils_jax as utils
 from tpu_commons.logger import init_logger
 from tpu_commons.runner.tpu_jax_runner_v2 import TPUModelRunner
-from tpu_commons.utils_jax import hbm_usage_bytes, hbm_usage_gb, init_random
 
 logger = init_logger(__name__)
 
@@ -35,6 +35,10 @@ class TPUWorker(WorkerBase):
             is_driver_worker=is_driver_worker,
         )
 
+        if rank != local_rank:
+            raise NotImplementedError(
+                "Multi host serving is not supported yet.")
+
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
@@ -53,21 +57,33 @@ class TPUWorker(WorkerBase):
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         self.profile_dir)
 
-        if vllm_config.lora_config is not None:
-            raise NotImplementedError(
-                "The V1 TPU backend doesn't support LoRA serving")
+        self._set_visible_devices()
+
+    def _set_visible_devices(self):
+        num_request_devices = self.parallel_config.tensor_parallel_size
+        num_available_devices = utils.get_local_available_devices()
+        if num_request_devices > num_available_devices:
+            raise ValueError(
+                f"Request {num_request_devices} TPU devices but only {num_available_devices} available"
+            )
+        device_ids = list(
+            range(
+                self.local_rank * num_request_devices,
+                (self.local_rank + 1) * num_request_devices,
+            ))
+        utils.set_visible_device_ids(device_ids)
 
     def init_device(self):
         if self.model_config.seed is None:
             self.model_config.seed = 0
-        random_key = init_random(self.model_config.seed)
+        random_key = utils.init_random(self.model_config.seed)
 
         self.devices = jax.local_devices()
         self.global_devices = jax.devices()
 
         logger.info(f"Init devices | "
                     f"local_devices={len(self.devices)} | "
-                    f"hbm={hbm_usage_gb(self.devices)}Gb | "
+                    f"hbm={utils.hbm_usage_gb(self.devices)}Gb | "
                     f"global_devices={len(self.global_devices)}")
 
         self.model_runner = TPUModelRunner(self.vllm_config, self.devices,
@@ -76,10 +92,11 @@ class TPUWorker(WorkerBase):
     def determine_available_memory(self) -> int:
         # We don't trigger a dummy batch run to calculate the usage,
         # we get the available size after loading the model directly.
-        hbm_usage = hbm_usage_bytes(self.devices)
+        hbm_usage = utils.hbm_usage_bytes(self.devices)
         hbm_free = [limit - used for used, limit in hbm_usage]
         min_hbm_free = min(hbm_free)
-        return min_hbm_free
+        taxed_hbm = min_hbm_free * self.cache_config.gpu_memory_utilization
+        return taxed_hbm
 
     def execute_model(
         self,
