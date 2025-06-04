@@ -1,4 +1,5 @@
 import itertools
+import math
 from collections import deque
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -348,6 +349,10 @@ class LlamaForCausalLM(nn.Module):
 
         def _device_weight(weight: jax.Array,
                            sharding_names: Tuple[str, ...]) -> jax.Array:
+            # Single device sharding requires this special handling
+            # to avoid the recursive jit error.
+            if math.prod(self.mesh.axis_sizes) == 1:
+                return jax.device_put(weight, jax.devices()[0])
             return jax.device_put(
                 weight, NamedSharding(self.mesh,
                                       PartitionSpec(*sharding_names)))

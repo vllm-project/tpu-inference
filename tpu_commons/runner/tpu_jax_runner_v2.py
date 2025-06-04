@@ -8,8 +8,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import vllm.envs as envs
-from jax.experimental import mesh_utils
-from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from jax.sharding import NamedSharding, PartitionSpec
 from vllm.config import VllmConfig
 from vllm.sequence import IntermediateTensors
 from vllm.utils import cdiv
@@ -39,7 +38,7 @@ class TPUModelRunner():
     def __init__(
         self,
         vllm_config: VllmConfig,
-        devices: List[jax.Device],
+        devices: List[Any],
         random_key: jax.random.PRNGKey,
     ):
         self.vllm_config = vllm_config
@@ -261,12 +260,9 @@ class TPUModelRunner():
         )
 
     def _init_mesh(self) -> None:
-        mesh_shape = [1, len(self.devices)]
-        axis_names = ["data", "model"]
-        self.mesh = Mesh(
-            devices=mesh_utils.create_device_mesh(mesh_shape),
-            axis_names=axis_names,
-        )
+        mesh_shape = (1, len(self.devices))
+        axis_names = ("data", "model")
+        self.mesh = jax.make_mesh(mesh_shape, axis_names)
         logger.info(f"Init mesh | mesh={self.mesh}")
 
     def _init_model(self) -> None:
