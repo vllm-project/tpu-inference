@@ -10,7 +10,7 @@ from flax import linen as nn
 from jax.experimental import shard_map
 from jax.experimental.pallas.ops.tpu.flash_attention import flash_attention
 from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 from tpu_commons.models.jax.param_init import sharding_init
@@ -19,6 +19,15 @@ from tpu_commons.utils_jax import get_megacore
 MAX_ALLOWED_PAGE_INDICES_N = (
     128 * 1024
 )  # Based on experiments on v5e, 256x1024 results in smem oom but 128x1024 not. TODO: Adjust this based on TPU version.
+
+
+def shard_array(x: jax.Array, sharding_names: Tuple[str, ...],
+                mesh: jax.sharding.Mesh) -> jax.Array:
+    # Single device sharding requires this special handling
+    # to avoid the recursive jit error.
+    if math.prod(mesh.axis_sizes) == 1:
+        return jax.device_put(x, jax.devices()[0])
+    return jax.device_put(x, NamedSharding(mesh, P(*sharding_names)))
 
 
 class Einsum(nn.Module):

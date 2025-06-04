@@ -40,7 +40,7 @@ pre-commit run --all-files
 Run `Llama 3.1 8B` offline inference on 4 TPU chips:
 
 ```
-export TPU_BACKEND_TYPE=jax
+TPU_BACKEND_TYPE=jax
 python vllm/examples/offline_inference/basic/generate.py \
     --model=meta-llama/Llama-3.1-8B \
     --tensor_parallel_size=4 \
@@ -51,7 +51,7 @@ python vllm/examples/offline_inference/basic/generate.py \
 (Fixing) Run `Llama 3.2 1B` offline inference on 1 TPU chip:
 
 ```
-export TPU_BACKEND_TYPE=jax
+TPU_BACKEND_TYPE=jax
 python vllm/examples/offline_inference/basic/generate.py \
     --model=meta-llama/Llama-3.2-1B \
     --tensor_parallel_size=1 \
@@ -64,13 +64,19 @@ python vllm/examples/offline_inference/basic/generate.py \
 To enable JAX path:
 
 ```
-export TPU_BACKEND_TYPE=jax
+TPU_BACKEND_TYPE=jax
 ```
 
 To enable experimental scheduler:
 
 ```
-export EXP_SCHEDULER=1
+EXP_SCHEDULER=1
+```
+
+To inspect model weights sharding:
+
+```
+INSPECT_MODEL=1
 ```
 
 ## How to test kernel?

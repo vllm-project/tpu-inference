@@ -2,7 +2,7 @@
 
 import glob
 import os
-from typing import Any, Generator, Optional
+from typing import Any, Generator
 
 import jax
 from safetensors import safe_open
@@ -19,7 +19,6 @@ FULL_DOWNLOAD_DISK_RATIO = 0.9
 def hf_model_weights_iterator(
     model_name: str,
     framework: str,
-    cache_dir: Optional[str] = None,
 ) -> Generator[tuple, Any, None]:
     weights_files = []
     weights_location = "local"

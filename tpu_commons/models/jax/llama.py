@@ -1,4 +1,4 @@
-import math
+from functools import partial
 from typing import Any, Dict, List, Optional, Tuple
 
 import jax
@@ -6,7 +6,7 @@ import jax.numpy as jnp
 from flax import linen as nn
 from flax.traverse_util import unflatten_dict
 from flax.typing import PRNGKey
-from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from jax.sharding import Mesh
 from transformers import LlamaConfig, modeling_flax_utils
 from vllm.config import VllmConfig
 
@@ -335,19 +335,7 @@ class LlamaForCausalLM(nn.Module):
     def load_weights(
         self,
         model_name_or_path: str,
-        cache_dir: Optional[str] = None,
     ) -> Dict[str, Any]:
-
-        def _device_weight(weight: jax.Array,
-                           sharding_names: Tuple[str, ...]) -> jax.Array:
-            # Single device sharding requires this special handling
-            # to avoid the recursive jit error.
-            if math.prod(self.mesh.axis_sizes) == 1:
-                return jax.device_put(weight, jax.devices()[0])
-            return jax.device_put(
-                weight, NamedSharding(self.mesh,
-                                      PartitionSpec(*sharding_names)))
-
         model_config = self.vllm_config.model_config
         hf_config = model_config.hf_config
 
@@ -357,8 +345,9 @@ class LlamaForCausalLM(nn.Module):
         head_dim = hf_config.head_dim
 
         params_dict = {}
+        shard = partial(layers.shard_array, mesh=self.mesh)
         for name, checkpoint_weight in hf_model_weights_iterator(
-                model_name_or_path, framework="flax", cache_dir=cache_dir):
+                model_name_or_path, framework="flax"):
             if "inv_freq" in name:
                 pass
 
@@ -373,16 +362,16 @@ class LlamaForCausalLM(nn.Module):
             weight = checkpoint_weight.astype(model_config.dtype)
 
             if "embed_tokens" in key:
-                weight = _device_weight(weight, ("model", None))
+                weight = shard(weight, ("model", None))
             elif "lm_head" in key:
                 weight = jnp.transpose(weight)
-                weight = _device_weight(weight, (None, "model"))
+                weight = shard(weight, (None, "model"))
             if "gate_proj" in key or "up_proj" in key:
                 weight = jnp.transpose(weight)
-                weight = _device_weight(weight, (None, "model"))
+                weight = shard(weight, (None, "model"))
             elif "down_proj" in key:
                 weight = jnp.transpose(weight)
-                weight = _device_weight(weight, ("model", None))
+                weight = shard(weight, ("model", None))
             elif "q_proj" in key:
                 weight = jnp.reshape(
                     weight,
@@ -393,7 +382,7 @@ class LlamaForCausalLM(nn.Module):
                     ),
                 )
                 weight = jnp.transpose(weight, (0, 2, 1))
-                weight = _device_weight(weight, ("model", None, None))
+                weight = shard(weight, ("model", None, None))
             elif "k_proj" in key or "v_proj" in key:
                 weight = jnp.reshape(
                     weight,
@@ -404,7 +393,7 @@ class LlamaForCausalLM(nn.Module):
                     ),
                 )
                 weight = jnp.transpose(weight, (0, 2, 1))
-                weight = _device_weight(weight, ("model", None, None))
+                weight = shard(weight, ("model", None, None))
             elif "o_proj" in key:
                 weight = jnp.reshape(
                     weight,
@@ -415,9 +404,9 @@ class LlamaForCausalLM(nn.Module):
                     ),
                 )
                 weight = jnp.transpose(weight, (1, 2, 0))
-                weight = _device_weight(weight, ("model", None, None))
+                weight = shard(weight, ("model", None, None))
             elif "norm" in key:
-                weight = _device_weight(weight, (None, ))
+                weight = shard(weight, (None, ))
 
             params_dict[key] = weight
 

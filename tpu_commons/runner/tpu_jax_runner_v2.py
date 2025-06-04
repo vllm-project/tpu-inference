@@ -1,6 +1,7 @@
 # Here we try to bring as much code as possible from Hex-LLM, instead of `tpu_torch_xla_runner.py` -> jax conversion.
 import functools
 import math
+import os
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple, Union
 
@@ -19,6 +20,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.model_loader import get_model
+from tpu_commons.models.jax.utils.param_overview import get_parameter_overview
 from tpu_commons.runner.tpu_torch_xla_runner import _get_token_paddings
 from tpu_commons.worker.input_batch_jax import CachedRequestState, InputBatch
 
@@ -270,13 +272,13 @@ class TPUModelRunner():
             self.vllm_config,
             self.random_key,
             self.mesh,
-            # None,  # TODO: LoRA config
-            # self.cache_config,
         )
-        # If the params are not loaded from ckpts, it will be random inited.
-        # if self.params is None:
-        #     logger.warning(f"Random init model weights.")
-        #     self.params = self._random_init_model(self.model)
+
+        if os.getenv("INSPECT_MODEL") is not None:
+            print(
+                "Model params:\n%s",
+                get_parameter_overview(self.params, include_stats="sharding"),
+            )
 
     def _init_jit(self) -> None:
         # TODO (jacobplatin): do we want to support a non-jit option like HexLLM?
