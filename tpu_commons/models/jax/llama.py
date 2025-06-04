@@ -11,10 +11,15 @@ from transformers import LlamaConfig, modeling_flax_utils
 from vllm.config import VllmConfig
 
 from tpu_commons.logger import init_logger
-from tpu_commons.models.jax import layers
-from tpu_commons.models.jax.param_init import sharding_init
-from tpu_commons.models.jax.rope.generic_rope import apply_rope
-from tpu_commons.models.jax.sampling import sample
+from tpu_commons.models.jax.layers.attention import (AttentionMetadata,
+                                                     sharded_flash_attention,
+                                                     sharded_paged_attention,
+                                                     update_cache)
+from tpu_commons.models.jax.layers.misc import (Einsum, Embedder, RMSNorm,
+                                                shard_put)
+from tpu_commons.models.jax.layers.params import sharding_init
+from tpu_commons.models.jax.layers.rope import apply_rope
+from tpu_commons.models.jax.layers.sampling import sample
 from tpu_commons.models.jax.utils.weight_utils import hf_model_weights_iterator
 
 logger = init_logger(__name__)
@@ -72,39 +77,39 @@ class LlamaAttention(nn.Module):
         self.rope_scaling = getattr(self.config, "rope_scaling", None)
         self.head_dim = self.config.head_dim
 
-        self.q_proj = layers.Einsum(
+        self.q_proj = Einsum(
             shape=(self.num_heads, self.hidden_size, self.head_dim),
             dtype=self.dtype,
             named_axes=("model", None, None),
             mesh=self.mesh,
         )
-        self.k_proj = layers.Einsum(
+        self.k_proj = Einsum(
             shape=(self.num_kv_heads, self.hidden_size, self.head_dim),
             dtype=self.dtype,
             named_axes=("model", None, None),
             mesh=self.mesh,
         )
-        self.v_proj = layers.Einsum(
+        self.v_proj = Einsum(
             shape=(self.num_kv_heads, self.hidden_size, self.head_dim),
             dtype=self.dtype,
             named_axes=("model", None, None),
             mesh=self.mesh,
         )
-        self.o_proj = layers.Einsum(
+        self.o_proj = Einsum(
             shape=(self.num_heads, self.head_dim, self.hidden_size),
             dtype=self.dtype,
             named_axes=("model", None, None),
             mesh=self.mesh,
         )
-        self.flash_attention = layers.sharded_flash_attention(self.mesh)
-        self.paged_attention = layers.sharded_paged_attention(self.mesh)
+        self.flash_attention = sharded_flash_attention(self.mesh)
+        self.paged_attention = sharded_paged_attention(self.mesh)
 
     def __call__(
         self,
         is_prefill: bool,
         kv_cache: Optional[KVCache],
         x: jax.Array,
-        attention_metadata: layers.AttentionMetadata,
+        attention_metadata: AttentionMetadata,
     ) -> Tuple[KVCache, jax.Array, Optional[jax.Array]]:
         # B: batch_size
         # T: seq_len
@@ -133,10 +138,10 @@ class LlamaAttention(nn.Module):
 
         # (K, L, S, H)
         k_cache, v_cache = kv_cache
-        k_cache = layers.update_cache(is_prefill, k_cache,
-                                      md.kv_cache_write_indices, k)
-        v_cache = layers.update_cache(is_prefill, v_cache,
-                                      md.kv_cache_write_indices, v)
+        k_cache = update_cache(is_prefill, k_cache, md.kv_cache_write_indices,
+                               k)
+        v_cache = update_cache(is_prefill, v_cache, md.kv_cache_write_indices,
+                               v)
 
         if is_prefill:
             # (B, N, T, H)
@@ -169,7 +174,7 @@ class LlamaDecoderLayer(nn.Module):
         intermediate_size = self.config.intermediate_size
         act = self.config.hidden_act
 
-        self.input_layernorm = layers.RMSNorm(
+        self.input_layernorm = RMSNorm(
             rms_norm_eps=rms_norm_eps,
             dtype=self.dtype,
             mesh=self.mesh,
@@ -181,7 +186,7 @@ class LlamaDecoderLayer(nn.Module):
             mesh=self.mesh,
         )
 
-        self.post_attention_layernorm = layers.RMSNorm(
+        self.post_attention_layernorm = RMSNorm(
             rms_norm_eps=rms_norm_eps,
             dtype=self.dtype,
             mesh=self.mesh,
@@ -200,7 +205,7 @@ class LlamaDecoderLayer(nn.Module):
         is_prefill: bool,
         kv_cache: KVCache,
         x: jax.Array,
-        attention_metadata: layers.AttentionMetadata,
+        attention_metadata: AttentionMetadata,
     ) -> Tuple[KVCache, jax.Array]:
         # Self attention.
         hidden_states = self.input_layernorm(x)
@@ -235,7 +240,7 @@ class LlamaModel(nn.Module):
                 mesh=self.mesh,
             ) for i in range(hf_config.num_hidden_layers)
         ]
-        self.norm = layers.RMSNorm(
+        self.norm = RMSNorm(
             rms_norm_eps=hf_config.rms_norm_eps,
             dtype=model_config.dtype,
             mesh=self.mesh,
@@ -246,7 +251,7 @@ class LlamaModel(nn.Module):
         is_prefill: bool,
         kv_caches: List[KVCache],
         x: jax.Array,
-        attention_metadata: layers.AttentionMetadata,
+        attention_metadata: AttentionMetadata,
     ) -> Tuple[List[KVCache], jax.Array]:
         for i, layer in enumerate(self.layers):
             kv_cache = kv_caches[i]
@@ -268,7 +273,7 @@ class LlamaForCausalLM(nn.Module):
 
     def setup(self) -> None:
         model_config = self.vllm_config.model_config
-        self.embed_tokens = layers.Embedder(
+        self.embed_tokens = Embedder(
             vocab_size=model_config.get_vocab_size(),
             hidden_size=model_config.get_hidden_size(),
             dtype=model_config.dtype,
@@ -298,7 +303,7 @@ class LlamaForCausalLM(nn.Module):
         do_sampling: bool,
         kv_caches: List[KVCache],
         input_ids: jax.Array,
-        attention_metadata: layers.AttentionMetadata,
+        attention_metadata: AttentionMetadata,
         temperatures: jax.Array = None,
         top_ps: jax.Array = None,
         top_ks: jax.Array = None,
@@ -345,7 +350,7 @@ class LlamaForCausalLM(nn.Module):
         head_dim = hf_config.head_dim
 
         params_dict = {}
-        shard = partial(layers.shard_array, mesh=self.mesh)
+        shard = partial(shard_put, mesh=self.mesh)
         for name, checkpoint_weight in hf_model_weights_iterator(
                 model_name_or_path, framework="flax"):
             if "inv_freq" in name:
