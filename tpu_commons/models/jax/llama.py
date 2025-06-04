@@ -1,6 +1,4 @@
-import itertools
 import math
-from collections import deque
 from typing import Any, Dict, List, Optional, Tuple
 
 import jax
@@ -17,8 +15,7 @@ from tpu_commons.models.jax import layers
 from tpu_commons.models.jax.param_init import sharding_init
 from tpu_commons.models.jax.rope.generic_rope import apply_rope
 from tpu_commons.models.jax.sampling import sample
-from tpu_commons.models.jax.utils.weight_utils import (
-    get_num_kv_heads_by_tp, get_num_q_heads_by_tp, hf_model_weights_iterator)
+from tpu_commons.models.jax.utils.weight_utils import hf_model_weights_iterator
 
 logger = init_logger(__name__)
 
@@ -69,7 +66,6 @@ class LlamaAttention(nn.Module):
 
     def setup(self) -> None:
         self.hidden_size = self.config.hidden_size
-        # TODO(xiang): shard by TP
         self.num_heads = self.config.num_attention_heads
         self.num_kv_heads = self.config.num_key_value_heads
         self.rope_theta = self.config.rope_theta
@@ -335,17 +331,12 @@ class LlamaForCausalLM(nn.Module):
         )
         return kv_caches, next_tokens, logits
 
-    # TODO(xiang): fix this
+    # TODO(xiangxu): extract this to a common weights loading utility
     def load_weights(
         self,
         model_name_or_path: str,
         cache_dir: Optional[str] = None,
     ) -> Dict[str, Any]:
-        # Permute for sliced rotary
-        def permute_qk(w, n_heads, dim1, dim2):
-            return jnp.transpose(
-                w.reshape((n_heads, dim1 // n_heads // 2, 2, dim2)),
-                (0, 2, 1, 3)).reshape(dim1, dim2)
 
         def _device_weight(weight: jax.Array,
                            sharding_names: Tuple[str, ...]) -> jax.Array:
@@ -357,294 +348,77 @@ class LlamaForCausalLM(nn.Module):
                 weight, NamedSharding(self.mesh,
                                       PartitionSpec(*sharding_names)))
 
-        params_dict = {}
-        weights_iterator = hf_model_weights_iterator(model_name_or_path,
-                                                     framework="flax",
-                                                     cache_dir=cache_dir)
-        reprocessing_items = deque()
-        combined_iterator = itertools.chain(weights_iterator,
-                                            reprocessing_items)
-
         model_config = self.vllm_config.model_config
         hf_config = model_config.hf_config
 
-        for name, checkpoint_weight in combined_iterator:
-            # llama 4 vision
-            if "vision_model" in name:
-                config_to_use = hf_config.vision_config
-            elif getattr(hf_config, "text_config", None):
-                config_to_use = hf_config.text_config
-            else:
-                config_to_use = hf_config
+        hidden_size = hf_config.hidden_size
+        num_heads = hf_config.num_attention_heads
+        num_kv_heads = hf_config.num_key_value_heads
+        head_dim = hf_config.head_dim
 
-            should_permute_qk = (hf_config.model_type == "llama4"
-                                 and "vision" not in name)
+        params_dict = {}
+        for name, checkpoint_weight in hf_model_weights_iterator(
+                model_name_or_path, framework="flax", cache_dir=cache_dir):
+            if "inv_freq" in name:
+                pass
 
-            # Pad the head_dim to multiple of 128 as the PagedAttention kernel requires.
-            if hasattr(config_to_use, "head_dim_original"):
-                head_dim = config_to_use.head_dim_original
-                head_dim_pad = config_to_use.head_dim - config_to_use.head_dim_original
-            else:
-                head_dim = config_to_use.head_dim
-                head_dim_pad = 0
-            num_kv_heads = getattr(
-                config_to_use, "num_key_value_heads", None) or getattr(
-                    config_to_use, "num_attention_heads", None)
-            num_kv_heads_by_tp = get_num_kv_heads_by_tp(
-                num_kv_heads, self.mesh.shape["model"])
-            hidden_size = config_to_use.hidden_size
-            num_attention_heads = config_to_use.num_attention_heads
-
-            num_q_heads_by_tp = get_num_q_heads_by_tp(num_attention_heads,
-                                                      num_kv_heads,
-                                                      self.mesh.shape["model"])
-            q_repeats = num_q_heads_by_tp // num_attention_heads
-
-            if "inv_freq" in name or "rope.freqs" in name:
-                continue
-
-            key = name
-
-            # I encourage everyone to start using direct mapping replacement instead of bunch of if-else conditions.
-            # The if-else below has become extremely buggy and difficult to maintain for compatability purposes.
-            MAPPING = {
-                # Llama < 4: `model.embed_tokens` -> `params.embed_tokens`
-                # Llama 4: `language_model.model.embed_tokens` -> `params.embed_tokens`
-                r"(.*?)model.embed_tokens":
-                r"params.embed_tokens",
-                r"^model":
-                r"params.model",
-                # Llama 4:
-                # MoE keys
-                r"feed_forward.experts":
-                r"experts",
-                r"feed_forward.shared_expert":
-                r"shared_expert",
-                r"feed_forward.router.weight":
-                r"experts.gate",
-                # Embedding
-                r"language_model.model.embed_tokens.weight":
-                r"params.embed_tokens.weight",
-                # Prefix
-                r"layers.(\d+)":
-                r"layers_\1",
-                r"language_model.model":
-                r"params.model",
-                # Vision
-                r"multi_modal_projector.linear_1.weight":
-                r"vision_projection.weight",
-                r"vision_model.layernorm_post":
-                r"vision_model.vision_encoder.layernorm_post",
-                r"vision_model.layernorm_pre":
-                r"vision_model.vision_encoder.layernorm_pre",
-                r"vision_model.class_embedding":
-                r"vision_model.vision_encoder.class_embedding",
-                r"vision_model.positional_embedding_vlm":
-                r"vision_model.vision_encoder.positional_embedding_vlm",
-                r"patch_embedding.linear":
-                r"vision_encoder.conv1",
-                r"vision_model.model.layers":
-                r"vision_model.vision_encoder.model.layers",
-                # LayerNorm (used in vision encoder) `weight` -> `scale`
-                r"vision_model(.+?)norm(_post|_pre)?.weight":
-                r"vision_model\1norm\2.scale",
-                ###########################
-                ###########################
-            }
-            import re
-
-            for pattern, replacement in MAPPING.items():
-                if replacement is None:
-                    key = re.sub(pattern, "", key)  # an empty line
-                    continue
-                key = re.sub(pattern, replacement, key)
-
+            key = name.replace("model", "params")
             key = key.replace("layers.", "model.layers_")
             key = key.replace("params.norm", "params.model.norm")
-
             if "gate_proj" in key or "up_proj" in key or "down_proj" in key:
                 key = key.strip(".weight")
             if "lm_head" in key:
                 key = "params.lm_head"
-            if key == "norm.weight":
-                key = "params.model.norm.weight"
-            if not key.startswith("params"):
-                key = f"params.{key}"
-            if "gate_up_proj" in key:
-                last_dim = checkpoint_weight.shape[-1] // 2
-                gate_weight = checkpoint_weight[..., :last_dim]
-                up_weight = checkpoint_weight[..., last_dim:]
-                reprocessing_items.append(
-                    (key.replace("gate_up_proj", "gate_proj"), gate_weight))
-                reprocessing_items.append((key.replace("gate_up_proj",
-                                                       "up_proj"), up_weight))
-                continue
 
             weight = checkpoint_weight.astype(model_config.dtype)
-            key = key.replace("attention.wo.weight", "self_attn.o_proj.weight")
-            key = key.replace("feed_forward.norm", "post_attention_layernorm")
-            key = key.replace("params.params", "params.model")
-
-            replicated_params_endswith = [
-                "class_embedding",
-                "positional_embedding_vlm",
-                "bias",
-                "scale",
-                "norm.weight",
-                "layernorm_post.weight",
-                "layernorm_pre.weight",
-            ]
 
             if "embed_tokens" in key:
                 weight = _device_weight(weight, ("model", None))
             elif "lm_head" in key:
                 weight = jnp.transpose(weight)
                 weight = _device_weight(weight, (None, "model"))
-            elif "experts.gate_proj" in key or "experts.up_proj" in key:
-                weight = weight.reshape(
-                    config_to_use.num_local_experts,
-                    config_to_use.hidden_size,
-                    config_to_use.intermediate_size,
-                )
-                weight = _device_weight(weight, (None, None, "model"))
-            elif "experts.down_proj" in key:
-                weight = weight.reshape(
-                    config_to_use.num_local_experts,
-                    config_to_use.intermediate_size,
-                    config_to_use.hidden_size,
-                )
-                weight = _device_weight(weight, (None, "model", None))
-            elif "gate_proj" in key or "up_proj" in key or "fc1.weight" in key:
+            if "gate_proj" in key or "up_proj" in key:
                 weight = jnp.transpose(weight)
                 weight = _device_weight(weight, (None, "model"))
-            elif "down_proj" in key or "fc2.weight" in key:
+            elif "down_proj" in key:
                 weight = jnp.transpose(weight)
                 weight = _device_weight(weight, ("model", None))
-            elif "experts.gate" in key:
-                weight = jnp.transpose(weight)
-                weight = _device_weight(weight, (None, None))
             elif "q_proj" in key:
-                if key.endswith("bias"):
-                    weight = jnp.reshape(
-                        weight,
-                        (
-                            config_to_use.num_attention_heads,
-                            head_dim,
-                        ),
-                    )
-                    if head_dim_pad:
-                        weight = jnp.pad(weight, ((0, 0), (0, head_dim_pad)))
-
-                    weight = jnp.repeat(weight, q_repeats, axis=0)
-                    weight = _device_weight(weight, ("model", None))
-                elif key.endswith("weight"):
-                    if should_permute_qk:
-                        logger.warning(f">>> Permuting qk for {key}")
-                        weight = permute_qk(
-                            weight,
-                            config_to_use.num_attention_heads,
-                            config_to_use.hidden_size,
-                            config_to_use.hidden_size,
-                        )
-                    weight = jnp.reshape(
-                        weight,
-                        (
-                            config_to_use.num_attention_heads,
-                            head_dim,
-                            config_to_use.hidden_size,
-                        ),
-                    )
-                    if head_dim_pad:
-                        weight = jnp.pad(
-                            weight,
-                            ((0, 0), (0, head_dim_pad), (0, 0)),
-                        )
-                    weight = jnp.repeat(weight, q_repeats, axis=0)
-                    weight = jnp.transpose(weight, (0, 2, 1))
-                    weight = _device_weight(weight, ("model", None, None))
+                weight = jnp.reshape(
+                    weight,
+                    (
+                        num_heads,
+                        head_dim,
+                        hidden_size,
+                    ),
+                )
+                weight = jnp.transpose(weight, (0, 2, 1))
+                weight = _device_weight(weight, ("model", None, None))
             elif "k_proj" in key or "v_proj" in key:
-                if key.endswith("bias"):
-                    weight = jnp.reshape(
-                        weight,
-                        (
-                            num_kv_heads,
-                            head_dim,
-                        ),
-                    )
-                    if head_dim_pad:
-                        weight = jnp.pad(weight, ((0, 0), (0, head_dim_pad)))
-
-                    weight = _device_weight(weight, ("model", None))
-                elif key.endswith("weight"):
-                    if "k_proj" in key:
-                        if should_permute_qk:
-                            logger.warning(f">>> Permuting qk for {key}")
-                            weight = permute_qk(
-                                weight,
-                                num_kv_heads,
-                                num_kv_heads * head_dim,
-                                config_to_use.hidden_size,
-                            )
-                    weight = jnp.reshape(
-                        weight,
-                        (
-                            num_kv_heads,
-                            head_dim,
-                            hidden_size,
-                        ),
-                    )
-                    if head_dim_pad:
-                        weight = jnp.pad(
-                            weight,
-                            ((0, 0), (0, head_dim_pad), (0, 0)),
-                        )
-                    weight = jnp.repeat(weight,
-                                        num_kv_heads_by_tp // num_kv_heads,
-                                        axis=0)
-                    weight = jnp.transpose(weight, (0, 2, 1))
-                    weight = _device_weight(weight, ("model", None, None))
+                weight = jnp.reshape(
+                    weight,
+                    (
+                        num_kv_heads,
+                        head_dim,
+                        hidden_size,
+                    ),
+                )
+                weight = jnp.transpose(weight, (0, 2, 1))
+                weight = _device_weight(weight, ("model", None, None))
             elif "o_proj" in key:
-                if key.endswith("bias"):
-                    weight = _device_weight(weight, (None, ))
-                elif key.endswith("weight"):
-                    weight = jnp.reshape(
-                        weight,
-                        (
-                            hidden_size,
-                            num_attention_heads,
-                            head_dim,
-                        ),
-                    )
-                    if head_dim_pad:
-                        weight = jnp.pad(
-                            weight,
-                            ((0, 0), (0, 0), (0, head_dim_pad)),
-                        )
-                    weight = jnp.transpose(weight, (1, 2, 0))
-                    target_weight = jnp.zeros(
-                        (weight.shape[0] * q_repeats, weight.shape[1],
-                         weight.shape[2]),
-                        dtype=weight.dtype,
-                    )
-                    target_weight = target_weight.at[::q_repeats].set(weight)
-                    weight = _device_weight(target_weight,
-                                            ("model", None, None))
-            elif any([key.endswith(el) for el in replicated_params_endswith]):
+                weight = jnp.reshape(
+                    weight,
+                    (
+                        hidden_size,
+                        num_heads,
+                        head_dim,
+                    ),
+                )
+                weight = jnp.transpose(weight, (1, 2, 0))
+                weight = _device_weight(weight, ("model", None, None))
+            elif "norm" in key:
                 weight = _device_weight(weight, (None, ))
-            elif key.endswith("vision_projection.weight"):
-                weight = jnp.transpose(weight)
-                weight = _device_weight(weight, (None, "model"))
-            elif key.endswith("conv1.weight"):
-                weight = jnp.transpose(weight)
-                weight = _device_weight(weight, (None, "model"))
-            else:
-                logger.warning(f"Unhandled key: {key}")
 
             params_dict[key] = weight
 
-        # TODO (jacobplatin)
-        # if self.lora_config is not None and self.lora_config.enable_lora:
-        #     for seq_index in range(self.lora_config.max_num_lora):
-        #         lora_params = self.load_zero_lora_adapter(seq_index)
-        #         params_dict.update(lora_params)
         return unflatten_dict(params_dict, ".")
