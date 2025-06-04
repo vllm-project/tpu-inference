@@ -26,6 +26,9 @@ def _get_model_architecture(config: PretrainedConfig) -> nn.Module:
         _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
         from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
         _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
+        if os.getenv("NEW_MODEL_DESIGN", False):
+            from tpu_commons.models.jax.recipes.llama4 import Llama4Scout
+            _MODEL_REGISTRY["Llama4Scout"] = Llama4Scout
     else:
         raise NotImplementedError("Unsupported MODEL_IMPL_TYPE")
 
