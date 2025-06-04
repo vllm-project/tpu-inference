@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple, Dict, Any
+from typing import List, Optional, Tuple
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -20,13 +20,13 @@ import torchax
 from torchax.interop import call_jax, extract_all_buffers, jax_jit
 from torchax.ops.mappings import j2t_dtype
 
-from transformers import PretrainedConfig
 
-from tpu_commons.models.jax import layers
-from tpu_commons.models.jax.sampling import sample
-# from hex_llm.models.jax.kv_cache_eviction import KVCacheUpdater
-from tpu_commons.models.jax.utils.weight_utils import (
-    get_num_kv_heads_by_tp, get_num_q_heads_by_tp, hf_model_weights_iterator)
+from tpu_commons.models.jax.layers.attention import (AttentionMetadata,
+                                                     sharded_flash_attention,
+                                                     sharded_paged_attention,
+                                                     update_cache)
+from tpu_commons.models.jax.layers.sampling import sample
+
 
 from vllm.attention import Attention as VllmAttention
 from vllm.config import VllmConfig
@@ -48,14 +48,14 @@ def _jax_attn_func(
         q: jax.Array,
         k: jax.Array,
         v: jax.Array,
-        attention_metadata: layers.AttentionMetadata,
+        attention_metadata: AttentionMetadata,
 ) -> Tuple[KVCache, jax.Array]:
 
     md = attention_metadata
     k_cache, v_cache = kv_cache
-    k_cache = layers.update_cache(is_prefill, k_cache,
+    k_cache = update_cache(is_prefill, k_cache,
                                     md.kv_cache_write_indices, k)
-    v_cache = layers.update_cache(is_prefill, v_cache,
+    v_cache = update_cache(is_prefill, v_cache,
                                     md.kv_cache_write_indices, v)
 
     if is_prefill:
@@ -91,8 +91,8 @@ class JaxAttentionWrapper(torch_nn.Module):
         self.num_kv_heads = vllm_attn.num_kv_heads
         self.layer_idx = extract_layer_index(vllm_attn.layer_name)
 
-        self.flash_attention = layers.sharded_flash_attention(mesh)
-        self.paged_attention = layers.sharded_paged_attention(mesh)
+        self.flash_attention = sharded_flash_attention(mesh)
+        self.paged_attention = sharded_paged_attention(mesh)
 
     
     def forward(
@@ -177,7 +177,7 @@ class JaxAttentionWrapper(torch_nn.Module):
 class VllmModelWrapperContext:
     is_prefill: bool
     kv_caches: List[KVCache]
-    attention_metadata: layers.AttentionMetadata
+    attention_metadata: AttentionMetadata
 
 
 _vllm_model_wrapper_context: Optional[VllmModelWrapperContext] = None
@@ -192,7 +192,7 @@ def get_vllm_model_wrapper_context() -> VllmModelWrapperContext:
 def set_vllm_model_wrapper_context(*,
                                    is_prefill: bool,
                                    kv_caches: List[KVCache],
-                                   attention_metadata: layers.AttentionMetadata,):
+                                   attention_metadata: AttentionMetadata,):
     global _vllm_model_wrapper_context
     prev_context = _vllm_model_wrapper_context
     _vllm_model_wrapper_context = VllmModelWrapperContext(
@@ -238,7 +238,6 @@ def swap_attention_module(model: torch.nn.Module, mesh: Mesh) -> None:
 class VllmModelWrapper:
     """ Wraps a vLLM Pytorch model and let it run on the JAX engine. """
 
-    hf_config: PretrainedConfig
     rng: PRNGKey
     mesh: Mesh
 
@@ -251,7 +250,6 @@ class VllmModelWrapper:
         vllm_config.device_config.device = "xla"
 
         self.vllm_config = vllm_config
-        self.hf_config = vllm_config.model_config.hf_config
         self.rng = rng
         self.mesh = mesh
 
@@ -304,7 +302,7 @@ class VllmModelWrapper:
             is_prefill: bool,
             kv_caches: List[KVCache],
             input_ids: jax.Array,
-            attention_metadata: layers.AttentionMetadata,):
+            attention_metadata: AttentionMetadata,):
             with set_vllm_model_wrapper_context(
                     is_prefill=is_prefill,
                     kv_caches=kv_caches,
@@ -347,7 +345,7 @@ class VllmModelWrapper:
         do_sampling: bool,
         kv_caches: List[KVCache],
         input_ids: jax.Array,
-        attention_metadata: layers.AttentionMetadata,
+        attention_metadata: AttentionMetadata,
         temperatures: jax.Array = None,
         top_ps: jax.Array = None,
         top_ks: jax.Array = None,
