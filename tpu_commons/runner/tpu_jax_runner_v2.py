@@ -1,8 +1,10 @@
 # Here we try to bring as much code as possible from Hex-LLM, instead of `tpu_torch_xla_runner.py` -> jax conversion.
-# This runner is a port of https://source.corp.google.com/h/vertex-model-garden/hex-llm/+/main:hex_llm/worker/runner_jax.py
+import enum
+import functools
 import math
 import os
-from typing import Any, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, List, Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -20,7 +22,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.models.jax.model_loader import get_model
+from tpu_commons.models.jax.model_loader import get_model, get_vllm_model
 from tpu_commons.models.jax.utils.param_overview import get_parameter_overview
 from tpu_commons.runner.tpu_torch_xla_runner import _get_token_paddings
 from tpu_commons.worker.input_batch_jax import CachedRequestState, InputBatch
@@ -36,6 +38,11 @@ MAX_ALLOWED_PAGE_INDICES_N = (
 )  # Based on experiments on v5e, 256x1024 results in smem oom but 128x1024 not. TODO: Adjust this based on TPU version.
 
 
+class ModelImplEnum(enum.Enum):
+    JAX = enum.auto()
+    VLLM = enum.auto()
+
+
 class TPUModelRunner():
 
     def __init__(
@@ -44,6 +51,14 @@ class TPUModelRunner():
         devices: List[Any],
         random_key: jax.random.PRNGKey,
     ):
+        env_var_model_impl_type = os.environ.get("MODEL_IMPL_TYPE", "jax").lower()
+        if env_var_model_impl_type == "jax":
+            self.model_impl_type = ModelImplEnum.JAX
+        elif env_var_model_impl_type == "vllm":
+            self.model_impl_type = ModelImplEnum.VLLM
+        else:
+            raise ValueError(f"Unknown model implmenentation type: {env_var_model_impl_type}")
+
         self.vllm_config = vllm_config
         self.eviction_algorithm = None
         self.devices = devices
@@ -240,9 +255,12 @@ class TPUModelRunner():
         for inputs in self._prepare_inputs(scheduler_output):
             if inputs is not None:
                 model_inputs, (running_indices, output_token_indices) = inputs
-                # TODO (jacobplatin): use logits and single_step_attn_scores_decode?
-                self.kv_caches, next_tokens, logits = self.model_fn(
-                    self.params, *model_inputs)
+                if self.model_impl_type == ModelImplEnum.JAX:
+                    # TODO (jacobplatin): use logits and single_step_attn_scores_decode?
+                    self.kv_caches, next_tokens, logits = self.model_fn(
+                        self.params, *model_inputs)
+                else:  # self.model_impl_type == ModelImplEnum.JAX
+                    self.kv_caches, next_tokens, logtis = self.model_fn(*model_inputs)
                 self.output_cache = self.write_outputs(self.output_cache,
                                                        next_tokens,
                                                        running_indices,
@@ -308,17 +326,44 @@ class TPUModelRunner():
         logger.info(f"Init mesh | mesh={self.mesh}")
 
     def _init_model(self) -> None:
-        self.model, self.params = get_model(
-            self.vllm_config,
-            self.random_key,
-            self.mesh,
-        )
-
-        if os.getenv("INSPECT_MODEL") is not None:
-            print(
-                "Model params:\n%s",
-                get_parameter_overview(self.params, include_stats="sharding"),
+        if self.model_impl_type == ModelImplEnum.JAX:
+            self.model, self.params = get_model(
+                self.vllm_config,
+                self.random_key,
+                self.mesh,
             )
+
+            if os.getenv("INSPECT_MODEL") is not None:
+                print(
+                    "Model params:\n%s",
+                    get_parameter_overview(self.params, include_stats="sharding"),
+                )
+        else:  # self.model_impl_type == ModelImplEnum.JAX
+            self.model = get_vllm_model(
+                self.vllm_config,
+                self.random_key,
+                self.mesh,
+            )
+            self.params = None
+
+        # https://source.corp.google.com/h/vertex-model-garden/hex-llm/+/main:hex_llm/worker/runner_jax.py#:~:text=143-,144,-145
+        # Prepare buffers used by chunk prefill
+        max_num_running_seq = self.scheduler_config.max_num_seqs
+        num_blocks_per_seq = (pad_to_multiple(
+            self.model_config.max_model_len,
+            self.cache_config.block_size,
+        ) // self.cache_config.block_size)
+        self.decode_seq_lens = np.zeros((max_num_running_seq, ),
+                                        dtype=np.int32)
+        self.decode_block_indices = np.zeros(
+            (max_num_running_seq, num_blocks_per_seq), dtype=np.int32)
+        self.prefill_seq_lens = np.zeros((MAX_PREFILL_SEQS_PER_TOKEN_BATCH, ),
+                                         dtype=np.int32)
+        self.prefill_block_indices = np.zeros(
+            (MAX_PREFILL_SEQS_PER_TOKEN_BATCH, num_blocks_per_seq),
+            dtype=np.int32)
+        self.prefill_query_start_offsets = np.zeros(
+            (MAX_PREFILL_SEQS_PER_TOKEN_BATCH + 1, ), dtype=np.int32)
 
         # https://source.corp.google.com/h/vertex-model-garden/hex-llm/+/main:hex_llm/worker/runner_jax.py#:~:text=143-,144,-145
         # Prepare buffers used by chunk prefill
@@ -347,17 +392,21 @@ class TPUModelRunner():
         self.logits_cache_sharding = NamedSharding(self.mesh,
                                                    PartitionSpec(None))
         # self.attn_score_cache_sharding = NamedSharding(self.mesh, PartitionSpec(None))
-        self.model_fn = jax.jit(
-            self.model.apply,
-            out_shardings=(
-                self.kv_cache_sharding,
-                self.outputs_sharding,
-                self.logits_cache_sharding,
-                # self.attn_score_cache_sharding,
-            ),
-            static_argnums=(1, 2),
-            donate_argnums=3,
-        )
+        if self.model_impl_type == ModelImplEnum.JAX:
+            self.model_fn = jax.jit(
+                self.model.apply,
+                out_shardings=(
+                    self.kv_cache_sharding,
+                    self.outputs_sharding,
+                    self.logits_cache_sharding,
+                    # self.attn_score_cache_sharding,
+                ),
+                static_argnums=(1, 2),
+                donate_argnums=3,
+            )
+        else:  # self.model_impl_type == ModelImplEnum.JAX
+            self.model.init_jit()
+            self.model_fn = self.model.step_func
         self.outputs_sharding = NamedSharding(self.mesh, PartitionSpec(None))
         self.write_outputs = jax.jit(write_outputs,
                                      donate_argnums=0,
