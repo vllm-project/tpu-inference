@@ -36,3 +36,19 @@ def get_model(
     )
     params = model.load_weights(vllm_config.model_config.model)
     return model, params
+
+
+def get_vllm_model(
+    vllm_config: VllmConfig,
+    rng: PRNGKey,
+    mesh: Mesh,
+):
+    from tpu_commons.models.vllm.vllm_model_wrapper import VllmModelWrapper
+
+    model = VllmModelWrapper(
+        vllm_config=vllm_config,
+        rng=rng,
+        mesh=mesh,
+    )
+    params = model.load_weights()
+    return model, params
