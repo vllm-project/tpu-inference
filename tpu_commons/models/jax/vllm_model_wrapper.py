@@ -28,6 +28,7 @@ from tpu_commons.models.jax.sampling import sample
 from tpu_commons.models.jax.utils.weight_utils import (
     get_num_kv_heads_by_tp, get_num_q_heads_by_tp, hf_model_weights_iterator)
 
+from vllm.attention import Attention as VllmAttention
 from vllm.config import VllmConfig
 from vllm.config import CacheConfig
 from vllm.config import set_current_vllm_config
@@ -39,8 +40,6 @@ from vllm.distributed.parallel_state import init_distributed_environment, ensure
 KVCache = Tuple[jax.Array, jax.Array]
 
 
-self_mesh = None
-
 
 def _jax_attn_func(
         self,
@@ -51,7 +50,7 @@ def _jax_attn_func(
         v: jax.Array,
         attention_metadata: layers.AttentionMetadata,
 ) -> Tuple[KVCache, jax.Array]:
-    
+
     md = attention_metadata
     k_cache, v_cache = kv_cache
     k_cache = layers.update_cache(is_prefill, k_cache,
@@ -78,34 +77,22 @@ def _jax_attn_func(
     return new_kv_cache, outputs
 
 
-import vllm.attention
-class AttentionOverride(torch_nn.Module):
+class JaxAttentionWrapper(torch_nn.Module):
     def __init__(
         self,
-        num_heads: int,
-        head_size: int,
-        scale: float,
-        num_kv_heads: Optional[int] = None,
-        alibi_slopes: Optional[List[float]] = None,
-        cache_config = None,
-        quant_config = None,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
-        logits_soft_cap: Optional[float] = None,
-        per_layer_sliding_window: Optional[int] = None,
-        use_mla: bool = False,
-        prefix: str = "",
-        attn_type: str = vllm.attention.AttentionType.DECODER,
-        **extra_impl_args,
+        vllm_attn: VllmAttention,
+        mesh: Mesh,
     ) -> None:
         super().__init__()
-        self.num_heads = num_heads
-        self.head_size = head_size
-        self.scale = scale
-        self.num_kv_heads = num_kv_heads
-        self.layer_idx = extract_layer_index(prefix)
 
-        self.flash_attention = layers.sharded_flash_attention(self_mesh)
-        self.paged_attention = layers.sharded_paged_attention(self_mesh)
+        self.num_heads = vllm_attn.num_heads
+        self.head_size = vllm_attn.head_size
+        self.scale = vllm_attn.impl.scale
+        self.num_kv_heads = vllm_attn.num_kv_heads
+        self.layer_idx = extract_layer_index(vllm_attn.layer_name)
+
+        self.flash_attention = layers.sharded_flash_attention(mesh)
+        self.paged_attention = layers.sharded_paged_attention(mesh)
 
     
     def forward(
@@ -184,8 +171,6 @@ class AttentionOverride(torch_nn.Module):
 
         return outputs
 
-vllm.attention.Attention = AttentionOverride
-
 
 
 @dataclass
@@ -231,6 +216,25 @@ class ComputeLogitsForVLLMModel(torch_nn.Module):
         return self.vllm_model.compute_logits(hidden_states, sampling_metadata=None)
 
 
+def swap_attention_module(model: torch.nn.Module, mesh: Mesh) -> None:
+    """
+    Swap the Attention torhc.nn.Module used in the model with an implementation
+    in JAX, which uses the KVCache management and attention kernels for TPU.
+
+    Args:
+        model: A vLLM model
+    """
+    def _process_module(module, name=None, parent=None):
+        if isinstance(module, VllmAttention):
+            wrapped_module = JaxAttentionWrapper(module, mesh)
+            assert parent is not None and name is not None, (
+                "Top Level module is not expected to be wrapped.")
+            setattr(parent, name, wrapped_module)
+        for child_name, child_module in list(module.named_children()):
+            _process_module(child_module, child_name, module)
+
+    _process_module(model)
+
 class VllmModelWrapper:
     """ Wraps a vLLM Pytorch model and let it run on the JAX engine. """
 
@@ -264,9 +268,8 @@ class VllmModelWrapper:
                 self.vllm_config.parallel_config.tensor_parallel_size,
                 self.vllm_config.parallel_config.pipeline_parallel_size,)
 
-        global self_mesh
-        self_mesh = mesh
         model = get_model(vllm_config=self.vllm_config)
+        swap_attention_module(model, mesh)
         compute_logits_model = ComputeLogitsForVLLMModel(model)
         # model.model.layers = model.model.layers[0:2]
         jax.config.update("jax_explain_cache_misses", True)
