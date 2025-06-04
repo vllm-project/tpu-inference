@@ -68,7 +68,7 @@ def _jax_attn_func(
     else:
         # (B, N, H)
         q = jnp.squeeze(q, 2)
-        outputs = self.paged_attention(q, k_cache, v_cache, md.seq_lens+1,
+        outputs = self.paged_attention(q, k_cache, v_cache, md.seq_lens,
                                         md.block_indices)
         # (B, N, 1, H)
         outputs = jnp.expand_dims(outputs, 2)
@@ -392,7 +392,7 @@ class VllmModelWrapper:
             self.rng,
             self.mesh,
             logits.jax(),
-            attention_metadata.seq_lens if is_prefill else attention_metadata.seq_lens+1,
+            attention_metadata.seq_lens if is_prefill else attention_metadata.seq_lens,
             temperatures,
             top_ps,
             top_ks,
