@@ -508,14 +508,15 @@ class TPUModelRunner():
 
         for i, seq in enumerate(scheduler_output.scheduled_cached_reqs):
             seq_index = self.input_batch.req_id_to_index[seq.req_id]
-            seq_len = self.input_batch.num_computed_tokens_cpu[seq_index]
+            # num cached tokens + token of this decode
+            seq_len = self.input_batch.num_computed_tokens_cpu[seq_index] + 1
 
             num_blocks = self.input_batch.block_table.block_tables[
                 0].num_blocks_per_row[seq_index]
             block_table = self.input_batch.block_table.block_tables[
                 0].block_table_cpu[seq_index, :num_blocks]
 
-            position = seq_len
+            position = seq_len - 1
 
             running_indices[i] = seq_index
             #input_token_indices[i] = seq.get_decoded_len() - 1
