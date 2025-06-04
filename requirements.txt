@@ -3,8 +3,10 @@ yapf == 0.43.0
 pytest
 absl-py
 numpy
-jax[tpu]
-jaxtyping
 google-cloud-storage
+--pre
+--find-links https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+--find-links https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
 --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html
+jaxtyping
 flax
