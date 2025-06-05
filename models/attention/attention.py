@@ -2,13 +2,13 @@
 # Could be created either from cfg or explicit parameters
 # self.make() create the live module from the config
 @dataclass(frozen=True)
-class AttentionConfig:
+class AttentionConfig(Config):
     d_model: int
     num_heads: int
     num_kv_heads: int   
     qk_dim: int
     v_dim int
-    ...
+    #...
 
     @classmethod
     def from_cfg(cls, flags_cfg: dict):
