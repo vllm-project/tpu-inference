@@ -30,7 +30,6 @@ from tpu_commons.models.jax.layers.sampling import sample
 
 from vllm.attention import Attention as VllmAttention
 from vllm.config import VllmConfig
-from vllm.config import CacheConfig
 from vllm.config import set_current_vllm_config
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.utils import (extract_layer_index)
@@ -40,7 +39,11 @@ from vllm.distributed.parallel_state import init_distributed_environment, ensure
 KVCache = Tuple[jax.Array, jax.Array]
 
 
-
+@functools.partial(
+        jax.jit,
+        static_argnames=['self', 'is_prefill'],
+        donate_argnums=[2],  # donate kv_cache
+)
 def _jax_attn_func(
         self,
         is_prefill: bool,
@@ -50,6 +53,10 @@ def _jax_attn_func(
         v: jax.Array,
         attention_metadata: AttentionMetadata,
 ) -> Tuple[KVCache, jax.Array]:
+    # TODO: fix
+    q = q.astype(jnp.bfloat16)
+    k = k.astype(jnp.bfloat16)
+    v = v.astype(jnp.bfloat16)
 
     md = attention_metadata
     k_cache, v_cache = kv_cache
@@ -295,7 +302,7 @@ class VllmModelWrapper:
             jax_jit,
             kwargs_for_jax_jit={
                 "static_argnames": ["is_prefill"],
-                "donate_argnames": ["kv_caches"],  # TODO: use "donate_argnums"
+                "donate_argnums": [1],  # kv_caches
             },
         )
         def func(
@@ -322,6 +329,8 @@ class VllmModelWrapper:
                 new_kv_caches = vllm_model_wrapper_context.kv_caches
             return new_kv_caches, model_output
 
+        # import inspect
+        # print(f"signature={inspect.signature(func)}")
         return func
     
 
