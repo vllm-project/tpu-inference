@@ -216,6 +216,21 @@ class TPUModelRunner():
             #yield self._prepare_prefill(scheduler_output)
             yield self._prepare_chunked_prefill(scheduler_output)
 
+    def _is_generating_new_token(self, scheduler_output: VllmSchedulerOutput,
+                                 seq: list[NewRequestData
+                                           | CachedRequestData]):
+        index = self.input_batch.req_id_to_index[seq.req_id]
+        whole_prompt_len = self.input_batch.num_prompt_tokens[index]
+        prefill_len = scheduler_output.num_scheduled_tokens[seq.req_id]
+        num_prefilled_tokens = self.input_batch.num_computed_tokens_cpu[index]
+
+        if self.input_batch.num_computed_tokens_cpu[
+                index] >= whole_prompt_len:  # it's being decoded
+            return True
+        else:  # It's being prefilled. It will generate a token only if computed_tokens + scheduled_tokens == prompt_len
+            assert prefill_len + num_prefilled_tokens <= whole_prompt_len
+            return prefill_len + num_prefilled_tokens == whole_prompt_len
+
     def execute_model(
         self,
         scheduler_output: "VllmSchedulerOutput",
@@ -242,6 +257,12 @@ class TPUModelRunner():
         output_token_indices = []
 
         for i, seq in enumerate(all_reqs):
+            # NOTE(pooyam): Unfinished prefills should not return anything to vLLM scheduler.
+            if not self._is_generating_new_token(scheduler_output, seq):
+                print(
+                    f"{seq.req_id} is not generating new token at this iter.")
+                continue
+
             index = self.input_batch.req_id_to_index[seq.req_id]
             output_token_index = max(
                 self.input_batch.num_computed_tokens_cpu[index] -
