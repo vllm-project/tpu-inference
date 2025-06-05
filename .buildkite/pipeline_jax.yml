@@ -1,0 +1,23 @@
+steps:
+  # -----------------------------------------------------------------
+  # TEST STEPS - Calling wrapper, using python3 -m pytest
+  # -----------------------------------------------------------------
+   - label: "TPU Test 13: ragged_paged_attention_test.py"
+     key: tpu_test_0
+     soft_fail: true
+     env:
+       TPU_BACKEND_TYPE: "jax"
+     agents:
+       queue: tpu_v6e_queue
+     commands:
+       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_commons/tests/ragged_paged_attention_test.py
+
+  # -----------------------------------------------------------------
+  # NOTIFICATION STEP
+  # -----------------------------------------------------------------
+   - label: "TPU V1 Test Notification"
+     depends_on:
+       - tpu_test_0
+     agents:
+       queue: tpu_v6e_queue
+     commands: "bash .buildkite/scripts/check_results.sh"

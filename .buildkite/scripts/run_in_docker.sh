@@ -21,6 +21,10 @@ if [ -z "${BUILDKITE_COMMIT:-}" ]; then
   exit 1
 fi
 
+if [ -z "${TPU_BACKEND_TYPE:-}" ]; then
+  TPU_BACKEND_TYPE=pytorch_xla
+fi
+
 # Prune older images on the host to save space.
 docker system prune -a -f --filter "until=3h"
 
@@ -33,6 +37,7 @@ exec docker run \
   --net host \
   --shm-size=16G \
   --rm \
+  -e TPU_BACKEND_TYPE="$TPU_BACKEND_TYPE" \
   -e HF_TOKEN="$HF_TOKEN" \
   -e VLLM_XLA_CACHE_PATH= \
   -e VLLM_USE_V1=1 \
