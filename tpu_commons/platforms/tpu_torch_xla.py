@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-
+import os
 from typing import TYPE_CHECKING, Optional, Tuple, Union, cast
 
 import torch
@@ -21,9 +21,10 @@ else:
 
 logger = init_logger(__name__)
 
+VLLM_TORCHAX_ENABLED = os.environ.get('VLLM_TORCHAX_ENABLED', '0') == '1'
+
 
 class TpuPlatform(Platform):
-    print("tpu commons tpu platform")
     _enum = PlatformEnum.TPU
     device_name: str = "tpu"
     device_type: str = "tpu"
@@ -48,7 +49,7 @@ class TpuPlatform(Platform):
             logger.info("Cannot use %s backend on TPU.", selected_backend)
 
         if use_v1:
-            if envs.VLLM_TORCHAX_ENABLED:
+            if VLLM_TORCHAX_ENABLED:
                 logger.info("Using Pallas V1 backend with torchax.")
                 return "tpu_commons.attention.backends.pallas_torchax.PallasAttentionBackend"
             else:
@@ -119,7 +120,7 @@ class TpuPlatform(Platform):
             vllm_config.model_config.dtype = torch.bfloat16
 
         if envs.VLLM_USE_V1:
-            if envs.VLLM_TORCHAX_ENABLED:
+            if VLLM_TORCHAX_ENABLED:
                 from tpu_commons.attention.backends.pallas_torchax import \
                     PallasAttentionBackend
             else:
