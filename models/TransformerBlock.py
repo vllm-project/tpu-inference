@@ -31,14 +31,14 @@ class TransformerConfig(Config):
         post_attention_norm = base.RMSNorm(
             num_groups=self.num_groups,
             epsilon=1e-6,
-            ...
+            #...
         )
 
         if self.routing:
             router_norm = base.RMSNorm(
                 num_groups=self.num_experts,
                 epsilon=1e-6,
-                ...
+                #...
             )
             mlp = self.moe.make(runtime_param)
         else:
@@ -46,7 +46,7 @@ class TransformerConfig(Config):
             post_mlp_norm = base.RMSNorm(
                 num_groups=self.num_groups,
                 epsilon=1e-6,
-                ...
+                #...
             )
 
         return TransformerBlock(
@@ -64,12 +64,12 @@ class TransformerBlock(nnx.Module):
     A heavy weight module which serves as the stateful live blocks in serving
     """
     cfg: TransformerConfig
-    embeddings: 
-    self_attn: 
-    post_attention_norm:
-    mlp:
-    post_mlp_norm:
-    ...
+    embeddings: Embedder
+    self_attn: Attention
+    post_attention_norm: RMSNorm
+    mlp: FFW
+    post_mlp_norm: RMSNorm
+    #...
 
     def setup(self) -> None:
         ...
