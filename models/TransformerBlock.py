@@ -1,6 +1,10 @@
 @dataclass
-class TransformerConfig:
-    embeddings: 
+class TransformerConfig(Config):
+    """
+    light weighted transformer config, which includes config for all sub-modules
+    it uses make() to create the live module from this config
+    """
+    embeddingsConfig: EmbedderConfig 
     attention: AttentionConfig
     moe: MoEConfig = None
     ffw: FFWConfig = None
@@ -9,15 +13,21 @@ class TransformerConfig:
     routing: bool = False
     ...
 
-    def __init__(self, yaml_config):
-        ...
+    @classmethod
+    def from_cfg(cls, flags_cfg: dict):
+        required_params = {f.name for f in fields(cls)}
+        provided_params = set(flags_cfg.keys())
+        missing_params  = required_params - provided_params
 
-    def make(self, kv_cache=None, sharding_cfg=None, quantization=None):
+        if missing_params:
+            ...
+
+        transformer_flags = {k: flags_cfg[k] for k in required_params}
+        return cls(**transformer_flags)
+
+    def make(self, runtime_param: Optional[layer.RuntimeParams] = None) -> TransformerBlock:
         
-        self_attn = self.attention.make(
-            sharding_cfg=sharding_cfg,
-            kv_cache=kv_cache,
-            quantization=quantization)
+        self_attn = self.attention.make(runtime_param)
         post_attention_norm = base.RMSNorm(
             num_groups=self.num_groups,
             epsilon=1e-6,
@@ -30,46 +40,36 @@ class TransformerConfig:
                 epsilon=1e-6,
                 ...
             )
-            mlp = self.moe.make(
-                sharding_cfg=sharding_cfg,
-                quantization=quantization
-            )
+            mlp = self.moe.make(runtime_param)
         else:
-            mlp = self.ffw.make(
-                sharding_cfg=sharding_cfg,
-                quantization=quantization                
+            mlp = self.ffw.make(runtime_param)
+            post_mlp_norm = base.RMSNorm(
+                num_groups=self.num_groups,
+                epsilon=1e-6,
+                ...
             )
-        post_mlp_norm = base.RMSNorm(
-            num_groups=self.num_groups,
-            epsilon=1e-6,
-            ...
-        )
-
 
         return TransformerBlock(
             cfg=self,
-            KV_cache=kv_cache,
             embeddings=self.embeddings,
             self_attn=self_attn,
-            quant=quantization,
             post_attention_norm=post_attention_norm,
             mlp=mlp,
             post_mlp_norm=post_mlp_norm,
         )
 
-
-
 @dataclass
-class TransformerBlock(nn.Module):
+class TransformerBlock(nnx.Module):
+    """
+    A heavy weight module which serves as the stateful live blocks in serving
+    """
     cfg: TransformerConfig
-    KV_cache: kv_cache.KV_cache
     embeddings: 
     self_attn: 
-    quant:
     post_attention_norm:
     mlp:
     post_mlp_norm:
-
+    ...
 
     def setup(self) -> None:
         ...
@@ -86,7 +86,7 @@ class TransformerBlock(nn.Module):
         y = self.mlp(x)
         logits = self.post_mlp_norm(x + y)
         ...
-        return logits
+        return logits, new_cache
 
     # Other methods
     ...
