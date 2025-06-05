@@ -589,7 +589,6 @@ class TPUModelRunner():
             top_ps[i] = self.input_batch.top_p_cpu[seq_index]
             top_ks[i] = self.input_batch.top_k_cpu[seq_index]
             output_token_indices[i] = input_token_indices[i] + 1
-            print("[decode] output token indices:  ", output_token_indices[:5])
             if top_ks[i] != 1:
                 do_sampling = True
 
