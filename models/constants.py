@@ -8,10 +8,10 @@ class LOGICAL_MESH_AXIS_NAME(enum.Enum):
   SEQUENCE_AXIS_NAME = 'y'
   ATTN_HEAD_AXIS_NAME #str | tuple(str)
   ATTN_TENSOR_AXIS_NAME #str | tuple(str)
-  MLP_TENSOR_AXIS_NAME ('x', 'y')
-  MOE_TENSOR_AXIS_NAME 'x'
-  EXPERT_AXIS_NAME: 'y'
-  VOCAB_AXIS_NAME: ('x', 'y', 'z')
+  MLP_TENSOR_AXIS_NAME = ('x', 'y')
+  MOE_TENSOR_AXIS_NAME = 'x'
+  EXPERT_AXIS_NAME = 'y'
+  VOCAB_AXIS_NAME = ('x', 'y', 'z')
 
 
 # MoE metrics to be monitored
