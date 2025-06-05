@@ -1,4 +1,5 @@
 # Here we try to bring as much code as possible from Hex-LLM, instead of `tpu_torch_xla_runner.py` -> jax conversion.
+# This runner is a port of https://source.corp.google.com/h/vertex-model-garden/hex-llm/+/main:hex_llm/worker/runner_jax.py
 import functools
 import math
 import os
@@ -13,6 +14,7 @@ from jax.sharding import NamedSharding, PartitionSpec
 from vllm.config import VllmConfig
 from vllm.sequence import IntermediateTensors
 from vllm.utils import cdiv
+from vllm.v1.core.sched.output import CachedRequestData, NewRequestData
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
@@ -75,13 +77,13 @@ class TPUModelRunner():
         self.params = None
 
         # TODO(pooyam): These should be set from vllm side with some defaults.
-        self.scheduler_config.chunked_prefill_tokens_padding = 8
         self.cache_config.sink_size = None
         self.scheduler_config.decode_blocks_padding = 8
         self.scheduler_config.prefill_len_padding = 128
         self.perplexity_reference_text = None
         self.decode_seqs_padding = 8
         self.cache_config.output_logits = False  # To make model run without error
+        self.scheduler_config.chunked_prefill_tokens_padding = 64
 
         self.kv_caches: List[Tuple[jax.Array, jax.Array]] = []
         self._init_mesh()
@@ -191,10 +193,28 @@ class TPUModelRunner():
         pass
 
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
-        # At first step of this implementation, let's do prefill and decode seperately for maximum code reuse and simpler debug/verification.
-        # We will at chunked_prefill inputs later.
-        yield self._prepare_prefill(scheduler_output)
-        yield self._prepare_decode(scheduler_output)
+        # We don't want to use ragged attention kernel all the time as paged attention is faster for decoding only.
+        # NOTE(pooyam): For full prefill, is not clear which one is faster. We have to benchmark it.
+        # NOTE(pooyam): If newer OSS ragged attention is also faster for decode, we should always used chunked prefill kernel and simplify the code.
+
+        new_prefilling_seqs, partial_prefilling_seqs, decoding_seqs = self._get_prefill_and_decode_seqs(
+            scheduler_output)
+        total_prefills = len(new_prefilling_seqs) + len(
+            partial_prefilling_seqs)
+        total_decodes = len(decoding_seqs)
+        if total_prefills + total_decodes == 0:
+            return None
+
+        if total_prefills == 0:  # Just decode
+            yield self._prepare_decode(scheduler_output)
+        elif len(partial_prefilling_seqs):  # There are some partial prefills
+            yield self._prepare_chunked_prefill(scheduler_output)
+        elif len(decoding_seqs):  # There is a full prefill and a decode
+            yield self._prepare_chunked_prefill(scheduler_output)
+        else:  # There is just a full prefill
+            # Commenting below to debug correctness.
+            #yield self._prepare_prefill(scheduler_output)
+            yield self._prepare_chunked_prefill(scheduler_output)
 
     def execute_model(
         self,
@@ -279,6 +299,25 @@ class TPUModelRunner():
                 "Model params:\n%s",
                 get_parameter_overview(self.params, include_stats="sharding"),
             )
+
+        # https://source.corp.google.com/h/vertex-model-garden/hex-llm/+/main:hex_llm/worker/runner_jax.py#:~:text=143-,144,-145
+        # Prepare buffers used by chunk prefill
+        max_num_running_seq = self.scheduler_config.max_num_seqs
+        num_blocks_per_seq = (pad_to_multiple(
+            self.model_config.max_model_len,
+            self.cache_config.block_size,
+        ) // self.cache_config.block_size)
+        self.decode_seq_lens = np.zeros((max_num_running_seq, ),
+                                        dtype=np.int32)
+        self.decode_block_indices = np.zeros(
+            (max_num_running_seq, num_blocks_per_seq), dtype=np.int32)
+        self.prefill_seq_lens = np.zeros((MAX_PREFILL_SEQS_PER_TOKEN_BATCH, ),
+                                         dtype=np.int32)
+        self.prefill_block_indices = np.zeros(
+            (MAX_PREFILL_SEQS_PER_TOKEN_BATCH, num_blocks_per_seq),
+            dtype=np.int32)
+        self.prefill_query_start_offsets = np.zeros(
+            (MAX_PREFILL_SEQS_PER_TOKEN_BATCH + 1, ), dtype=np.int32)
 
     def _init_jit(self) -> None:
         # TODO (jacobplatin): do we want to support a non-jit option like HexLLM?
@@ -550,6 +589,7 @@ class TPUModelRunner():
             top_ps[i] = self.input_batch.top_p_cpu[seq_index]
             top_ks[i] = self.input_batch.top_k_cpu[seq_index]
             output_token_indices[i] = input_token_indices[i] + 1
+            print("[decode] output token indices:  ", output_token_indices[:5])
             if top_ks[i] != 1:
                 do_sampling = True
 
@@ -752,6 +792,270 @@ class TPUModelRunner():
             eviction_score_mask,
             images_flattened,
             image_lens,
+        ), (
+            running_indices,
+            output_token_indices,
+        )
+
+    def _get_prefill_and_decode_seqs(
+        self, scheduler_output: VllmSchedulerOutput
+    ) -> Tuple[List[NewRequestData], List[CachedRequestData],
+               List[CachedRequestData]]:
+        new_prefilling_seqs = [
+            seq for seq in scheduler_output.scheduled_new_reqs
+        ]
+        decoding_seqs = []
+        partial_prefilling_seqs = []
+
+        for seq in scheduler_output.scheduled_cached_reqs:
+            seq_index = self.input_batch.req_id_to_index[seq.req_id]
+            num_prompt_tokens = self.input_batch.num_prompt_tokens[seq_index]
+            num_computed_tokens = seq.num_computed_tokens
+            remaining_prefill = max(0, num_prompt_tokens - num_computed_tokens)
+            if remaining_prefill > 0:
+                partial_prefilling_seqs.append(seq)
+            else:
+                decoding_seqs.append(seq)
+
+        return new_prefilling_seqs, partial_prefilling_seqs, decoding_seqs
+
+    def _prepare_chunked_prefill(self,
+                                 scheduler_output: VllmSchedulerOutput) -> Any:
+        block_size = self.cache_config.block_size
+        # in vLLMs scheduler output, scheduled_cached_reqs can mean two things: Subsequent prefill of an already seen request / or decode.
+
+        new_prefilling_seqs, partial_prefilling_seqs, decoding_seqs = self._get_prefill_and_decode_seqs(
+            scheduler_output)
+        num_decode_seqs = len(decoding_seqs)
+        num_prefill_seqs = len(new_prefilling_seqs) + len(
+            partial_prefilling_seqs)
+        assert num_prefill_seqs > 0
+        assert num_prefill_seqs <= MAX_PREFILL_SEQS_PER_TOKEN_BATCH
+
+        num_tokens_scheduled = pad_to_multiple(
+            scheduler_output.total_num_scheduled_tokens,
+            self.scheduler_config.chunked_prefill_tokens_padding,
+        )
+
+        if num_decode_seqs > 0:
+            decode_input_token_indices = np.full((num_tokens_scheduled, ),
+                                                 -1,
+                                                 dtype=np.int32)
+        else:
+            decode_input_token_indices = None
+
+        do_sampling = False
+        decode_seq_lens = self.decode_seq_lens
+        decode_seq_lens[num_decode_seqs:] = 0
+        decode_block_indices = self.decode_block_indices
+        input_positions = np.zeros((1, num_tokens_scheduled), dtype=np.int32)
+        decode_kv_cache_write_indices = np.full((num_tokens_scheduled, ),
+                                                -1,
+                                                dtype=np.int32)
+        temperatures = np.full((num_tokens_scheduled, ), 1.0, dtype=np.float32)
+        top_ps = np.full((num_tokens_scheduled, ), 1.0, dtype=np.float32)
+        top_ks = np.full((num_tokens_scheduled, ), 1, dtype=np.int32)
+        running_indices = np.full((num_tokens_scheduled, ), -1, dtype=np.int32)
+        output_token_indices = np.full((num_tokens_scheduled, ),
+                                       -1,
+                                       dtype=np.int32)
+
+        # Fill the token batch with decode tokens first.
+        for i, seq in enumerate(decoding_seqs):
+            seq_index = self.input_batch.req_id_to_index[seq.req_id]
+            seq_len = self.input_batch.num_computed_tokens_cpu[seq_index] + 1
+
+            num_blocks = self.input_batch.block_table.block_tables[
+                0].num_blocks_per_row[seq_index]
+            block_table = self.input_batch.block_table.block_tables[
+                0].block_table_cpu[seq_index, :num_blocks]
+
+            position = seq_len - 1
+
+            running_indices[i] = seq_index
+            decode_input_token_indices[
+                i] = self.input_batch.num_computed_tokens_cpu[
+                    seq_index] - self.input_batch.num_prompt_tokens[seq_index]
+            assert decode_input_token_indices[i] >= 0
+            input_positions[:, i] = position
+            decode_block_indices[i][:len(block_table)] = block_table
+
+            decode_seq_lens[i] = seq_len
+            assert position // block_size == len(block_table) - 1
+            block_id = -1
+            block_offset = position % block_size
+            decode_kv_cache_write_indices[i] = (
+                block_table[block_id] * block_size + block_offset)
+            temperatures[i] = self.input_batch.temperature_cpu[seq_index]
+            top_ps[i] = self.input_batch.top_p_cpu[seq_index]
+            top_ks[i] = self.input_batch.top_k_cpu[seq_index]
+            output_token_indices[i] = decode_input_token_indices[i] + 1
+            if top_ks[i] != 1:
+                do_sampling = True
+
+        token_offset = num_decode_seqs
+        if num_decode_seqs > 0 and num_prefill_seqs > 0:
+            # Add padding tokens so that prefill segments are paged aligned
+            if num_decode_seqs % block_size != 0:
+                token_offset = pad_to_multiple(num_decode_seqs, block_size)
+
+        # Then fill the token batch with prefill tokens.
+        prefill_seq_lens = self.prefill_seq_lens
+        prefill_seq_lens[num_prefill_seqs:] = 0
+        prefill_block_indices = self.prefill_block_indices
+        prefill_query_start_offsets = self.prefill_query_start_offsets
+        # One cache update index per page for prefill.
+        assert num_tokens_scheduled % block_size == 0
+        prefill_kv_cache_write_indices = np.full(
+            (num_tokens_scheduled // block_size, ), -1, dtype=np.int32)
+        prefill_input_ids = np.zeros((1, num_tokens_scheduled), dtype=np.int32)
+        for i, seq in enumerate(new_prefilling_seqs + partial_prefilling_seqs):
+            seq_index = self.input_batch.req_id_to_index[seq.req_id]
+            whole_prompt_len = self.input_batch.num_prompt_tokens[seq_index]
+            prefill_len = scheduler_output.num_scheduled_tokens[seq.req_id]
+            num_prefilled_tokens = self.input_batch.num_computed_tokens_cpu[
+                seq_index]
+            assert prefill_len + num_prefilled_tokens <= whole_prompt_len
+
+            num_prompt_tokens = self.input_batch.num_prompt_tokens[seq_index]
+            prompt_token_ids = self.input_batch.token_ids_cpu[
+                seq_index, :num_prompt_tokens]
+            prefill_input_ids[:, token_offset:token_offset + prefill_len] = (
+                prompt_token_ids[num_prefilled_tokens:num_prefilled_tokens +
+                                 prefill_len])
+            input_positions[:, token_offset:token_offset + prefill_len] = list(
+                range(
+                    num_prefilled_tokens,
+                    num_prefilled_tokens + prefill_len,
+                ))
+            prefill_seq_lens[i] = pad_to_multiple(
+                num_prefilled_tokens + prefill_len, block_size)
+            prefill_query_start_offsets[i] = token_offset
+            num_blocks = self.input_batch.block_table.block_tables[
+                0].num_blocks_per_row[seq_index]
+            block_table = self.input_batch.block_table.block_tables[
+                0].block_table_cpu[seq_index, :num_blocks]
+
+            prefill_block_indices[i][:len(block_table)] = block_table
+            prefill_kv_cache_write_indices[
+                token_offset // block_size:math.ceil(
+                    (token_offset + prefill_len) /
+                    block_size)] = block_table[num_prefilled_tokens //
+                                               block_size:math.ceil(
+                                                   (num_prefilled_tokens +
+                                                    prefill_len) / block_size)]
+            if num_prefilled_tokens + prefill_len == whole_prompt_len:
+                # only in this case, a new decode token will be generated
+                last_prefill_token_idx = token_offset + prefill_len - 1
+                running_indices[last_prefill_token_idx] = seq_index
+
+                # Hex-LLM equivalent: output_token_indices[last_prefill_token_idx] = seq.get_decoded_len()
+                assert seq.num_computed_tokens <= whole_prompt_len
+                # NOTE(pooyam): Is there a case where this shouldn't be 0?
+                output_token_indices[last_prefill_token_idx] = 0
+
+                temperatures[
+                    last_prefill_token_idx] = self.input_batch.temperature_cpu[
+                        seq_index]
+                top_ps[last_prefill_token_idx] = self.input_batch.top_p_cpu[
+                    seq_index]
+                top_ks[last_prefill_token_idx] = self.input_batch.top_k_cpu[
+                    seq_index]
+
+            if self.input_batch.top_k_cpu[seq_index] != 1:
+                do_sampling = True
+            # Add padding tokens so that prefill segments are paged aligned
+            token_offset = pad_to_multiple(token_offset + prefill_len,
+                                           block_size)
+        prefill_query_start_offsets[num_prefill_seqs:] = token_offset
+
+        # Concat the kv cache write indices for decode tokens and prefill tokens
+        kv_cache_write_indices = np.concatenate(
+            (decode_kv_cache_write_indices, prefill_kv_cache_write_indices))
+        num_decode_seqs_arr = np.array([num_decode_seqs], np.int32)
+        num_prefill_seqs_arr = np.array([num_prefill_seqs], np.int32)
+
+        (
+            prefill_input_ids,
+            decode_input_token_indices,
+            input_positions,
+            temperatures,
+            top_ps,
+            top_ks,
+            kv_cache_write_indices,
+            running_indices,
+            output_token_indices,
+            decode_seq_lens,
+            decode_block_indices,
+            num_decode_seqs_arr,
+            prefill_seq_lens,
+            prefill_block_indices,
+            prefill_query_start_offsets,
+            num_prefill_seqs_arr,
+        ) = self._device_array((
+            prefill_input_ids,
+            decode_input_token_indices,
+            input_positions,
+            temperatures,
+            top_ps,
+            top_ks,
+            kv_cache_write_indices,
+            running_indices,
+            output_token_indices,
+            decode_seq_lens,
+            decode_block_indices,
+            num_decode_seqs_arr,
+            prefill_seq_lens,
+            prefill_block_indices,
+            prefill_query_start_offsets,
+            num_prefill_seqs_arr,
+        ))
+        # Merge decode tokens with prefill tokens.
+        if num_decode_seqs == 0:
+            input_ids = prefill_input_ids
+        else:
+            decode_input_ids = jnp.swapaxes(
+                self.read_outputs(self.output_cache, running_indices,
+                                  decode_input_token_indices),
+                0,
+                1,
+            )
+            input_ids = jnp.where(
+                jnp.arange(num_tokens_scheduled) < num_decode_seqs,
+                decode_input_ids,
+                prefill_input_ids,
+            )
+        kv_cache_position_indices = None
+        evict_write_indices = None
+        replacement_write_indices = None
+        eviction_score_mask = None
+        return (
+            False,  # when chunked prefill is enabled, `is_prefill` is just a dummy value.
+            do_sampling,
+            self.kv_caches,
+            input_ids,
+            AttentionMetadata(
+                input_positions=input_positions,
+                seq_lens=None,  # use decode_lengths / prefill_lengths instead
+                block_indices=
+                None,  # use decode_page_indices / prefill_page_indices instead
+                kv_cache_write_indices=kv_cache_write_indices,
+                chunked_prefill_enabled=True,
+                decode_lengths=decode_seq_lens,
+                decode_page_indices=decode_block_indices,
+                num_decode_seqs=num_decode_seqs_arr,
+                prefill_lengths=prefill_seq_lens,
+                prefill_page_indices=prefill_block_indices,
+                prefill_query_start_offsets=prefill_query_start_offsets,
+                num_prefill_seqs=num_prefill_seqs_arr,
+            ),
+            temperatures,
+            top_ps,
+            top_ks,
+            kv_cache_position_indices,
+            evict_write_indices,
+            replacement_write_indices,
+            eviction_score_mask,
         ), (
             running_indices,
             output_token_indices,

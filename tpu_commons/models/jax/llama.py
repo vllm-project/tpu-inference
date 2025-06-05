@@ -15,6 +15,8 @@ from tpu_commons.models.jax.layers.attention import (AttentionMetadata,
                                                      sharded_flash_attention,
                                                      sharded_paged_attention,
                                                      update_cache)
+from tpu_commons.models.jax.layers.chunked_prefill_attention import (
+    sharded_chunked_prefill_attention, sharded_chunked_prefill_update_cache)
 from tpu_commons.models.jax.layers.misc import (Einsum, Embedder, RMSNorm,
                                                 shard_put)
 from tpu_commons.models.jax.layers.params import sharding_init
@@ -138,12 +140,31 @@ class LlamaAttention(nn.Module):
 
         # (K, L, S, H)
         k_cache, v_cache = kv_cache
-        k_cache = update_cache(is_prefill, k_cache, md.kv_cache_write_indices,
-                               k)
-        v_cache = update_cache(is_prefill, v_cache, md.kv_cache_write_indices,
-                               v)
+        if not md.chunked_prefill_enabled:
+            k_cache = update_cache(is_prefill, k_cache,
+                                   md.kv_cache_write_indices, k)
+            v_cache = update_cache(is_prefill, v_cache,
+                                   md.kv_cache_write_indices, v)
+        else:
+            k_cache = sharded_chunked_prefill_update_cache(self.mesh)(
+                k_cache, md.kv_cache_write_indices, k, md.num_decode_seqs)
+            v_cache = sharded_chunked_prefill_update_cache(self.mesh)(
+                v_cache, md.kv_cache_write_indices, v, md.num_decode_seqs)
 
-        if is_prefill:
+        if md.chunked_prefill_enabled:
+            outputs = sharded_chunked_prefill_attention(self.mesh)(
+                q,
+                k_cache,
+                v_cache,
+                attention_metadata.decode_lengths,
+                attention_metadata.decode_page_indices,
+                attention_metadata.num_decode_seqs,
+                attention_metadata.prefill_lengths,
+                attention_metadata.prefill_page_indices,
+                attention_metadata.prefill_query_start_offsets,
+                attention_metadata.num_prefill_seqs,
+            )
+        elif is_prefill:
             # (B, N, T, H)
             # TODO(xiang): support MQA and GQA
             if self.num_kv_heads != self.num_heads:
@@ -333,6 +354,7 @@ class LlamaForCausalLM(nn.Module):
             temperatures,
             top_ps,
             top_ks,
+            attention_metadata.chunked_prefill_enabled,
         )
         return kv_caches, next_tokens, logits
 

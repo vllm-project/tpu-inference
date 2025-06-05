@@ -17,6 +17,7 @@ def sample(
     temperatures: jax.Array,
     top_ps: jax.Array,
     top_ks: jax.Array,
+    chunked_prefill_enabled: bool = False,
 ) -> jax.Array:
     # (batch_size, vocab_size)
     if do_sampling:
@@ -25,7 +26,11 @@ def sample(
         logits = jax.lax.with_sharding_constraint(
             logits, NamedSharding(mesh, P(None, None)))
 
-    if is_prefill:
+    if chunked_prefill_enabled:
+        batch_size = logits.shape[0]
+        assert batch_size == 1
+        logits = jnp.squeeze(logits, 0)
+    elif is_prefill:
         batch_size = logits.shape[0]
         batch_indices = jnp.arange(batch_size)
         logits = logits[batch_indices, seq_lens - 1, :]
