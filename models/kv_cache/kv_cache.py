@@ -1,6 +1,5 @@
 # the idea's from Gemax to create a hier as:
 # PartialCache(sharded Cache) <- KVCache(single layer) <- GlobalKVCache(multi-layer)
-
 class PartialCache:
     # to decide which proto to use for k,v
     keys: MaybeQuantizedKVCacheTensor
@@ -10,7 +9,7 @@ class PartialCache:
 
     def zeros() -> 'PartialCache':
         ...
-    def shardings(
+    def sharding(
         ...
     ) -> 'PartialCache':
         ...
@@ -39,12 +38,12 @@ class KVCache:
     def sharding(self) -> 'KVCache':
         ...
     
-class GlobalKVCacheConfig:
+class GlobalKVCacheConfig(Config):
     n_layer: int
 
     def __init__(self):
         ...
-    def make(self, sharding_cfg=None, quantization=None) -> 'GlobalKVCache':
+    def make(self, runtime_param: Optional[layer.RuntimeParams] = None) -> 'GlobalKVCache':
         cache = []
         for i in cfg.layer:
             layer_cache = KVCache.make()
@@ -53,26 +52,24 @@ class GlobalKVCacheConfig:
         return GlobalKVCache(
             cfg=self,
             cache=cache,
-            sharding_cfg=sharding_cfg,
-            quantization=None)
+            sharding_cfg=layers.runtime_param.sharding_cfg,
+            quantization=layers.runtime_param.quantization)
 
 class GlobalKVCache:
     cfg: KVCacheConfig
+    # or better data type(dict) for each layer
     cache: list['KVCache']
     sharding_cfg: ShardingConfig = default_sharding()
     quantization: Quantization | None = None
 
-
     def __init__(self):
         ...
-    def make(self) -> 'GlobalKVCache':
-        cache = []
-        for i in cfg.layer:
-            layer_cache = KVCache.make()
-            cache.append(layer_cache)
-        
-        return GlobalKVCache(cache)
-    def get_cfg(self) -> GlobalKVCacheConfig:
+    def get_cfg(self) -> 'GlobalKVCacheConfig':
         ...
-    def shardings(self) -> 'GlobalKVCache':
+    def sharding(self) -> 'GlobalKVCache':
         ...
+    def update(self):
+        ...
+    def get_layer_kv_cache(layer:int):
+        ...
+        return self.cache[layer]

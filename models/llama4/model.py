@@ -8,77 +8,41 @@
 #   ep: 4
 # quant_flag_config: Config
 #
-# Each Block(attn, mlp etc) has Config Class and Body Class
-# There're 2 ways to initialize a block:
-# 1. Config(input_flags_config).make()
-# 2. Block(d_model=, n_layers=, etc)
+# Each Block(attn, mlp etc) has Config Class and Live Class
+# There're 2 ways to initialize a Config:
+# 1. manual specify as Config(d_model=, num_layer=, ..)
+# 2. auto assignment from a config as Config.from_cfg(cfg)
 
 
+# The foundation Model/ModelConfig class is to-be-implemented
 
-class LlamaConfig:
+class LlamaConfig(ModelConfig):
     parallelism_flag_config: Config # From User
     quant_flag_config: Config # From User
     model_flag_config: Config # From User
-
-    embedder_config: EmbedderConfig
-    global_KV_cache_config: kv_cache.GlobalKVCacheConfig
-    transformer_moe_blocks_config: TransformerConfig
-    transformer_dense_blocks_config: TransformerConfig
-
     ...
 
     def __init__(self):
 
-        # For deisgn demo purpose, need cleaner way for assignment
-
-        embedder_flags = self.build_embedder_flags()
-        attention_flags = self.build_attention_flags()
-        moe_flags = self.build_moe_flags()
-        ffw_flags = self.build_ffw_flags()
-
-
-        self.embedder_config = layers.EmbedderConfig(embedder_flags)
+        # For design demo purpose, need cleaner way for assignment
         self.global_KV_cache_config = kv_cache.GlobalKVCacheConfig(self.model_flag_config.n_layers)
-
-
+        self.embedder_config = layers.EmbedderConfig.from_cfg(model_flag_config)
         self.transformer_moe_blocks_config = TransformerConfig(
-            attention=LlamaAttentionConfig(attention_flags),
-            moe=LlamaMoEConfig(moe_flags),
+            embedder_config=self.embedder_config,
+            attention=LlamaAttentionConfig(model_flag_config),
+            moe=LlamaMoEConfig(model_flag_config),
             num_groups=self.model_flag_config.num_groups,
             routing=True,
             ...
-
         )
         self.transformer_dense_blocks_config = TransformerConfig(
-            attention=LlamaAttentionConfig(attention_flags),
-            ffw=layers.FFWConfig(ffw_flags),
+            attention=LlamaAttentionConfig(model_flag_config),
+            ffw=layers.FFWConfig(model_flag_config),
             num_groups=self.model_flag_config.num_groups,
             routing=False,
             ...
         )
         ...
-    
-    
-    def build_embedder_flags(self):
-        return Config(
-          vocab_size=self.model_flag_configlf.vocab_size
-          d_model=self.model_flag_config.d_model
-          normalize_embeddings=self.model_flag_config.normalize_embeddings
-            ...
-        )
-
-    def build_attention_flags(self):
-        return Config(
-            d_model = self.model_flag_config.d_model,
-            num_query_heads = self.model_flag_config.num_query_heads,
-            num_kv_heads = self.model_flag_config.num_query_heads,
-            attention_type = self.model_flag_config.attention_type,
-            qk_nope_head_dim = self.model_flag_config.qk_nope_head_dim,
-            qk_rope_head_dim = = self.model_flag_config.qk_rope_head_dim,
-            v_head_dim = self.model_flag_config.v_head_dim
-            enable_dropout = self.model_flag_config.enable_dropout
-            ...
-        )
     def build_routing_flags(self):
         
         match self.model_flag_config.routing_type:
@@ -94,41 +58,19 @@ class LlamaConfig:
             routed_scaling_factor = self.model_flag_config.routed_scaling_factor
             ...
         )
-    def build_moe_flags(self):
-        return Config(
-            d_model = self.model_flag_config.d_model,
-            base_moe_mlp_dim = self.model_flag_config.base_moe_mlp_dim,
-            mlp_activations = self.model_flag_config.mlp_activations,
-            enable_dropout = self.model_flag_config.enable_dropout,
-            num_experts = self.model_flag_config.num_experts,
-            num_experts_per_tok = self.model_flag_config.num_experts_per_tok,
-            router_config = self.build_routing_flags()
-            ...
-        )
-    def build_ffw_flags(self):
-        return Config(
-            d_model = self.model_flag_config.d_model,
-            base_mlp_dim = self.model_flag_config.base_mlp_dim,
-            num_dense_layers = self.model_flag_config.num_dense_layers,
-            mlp_activations = self.model_flag_config.mlp_activations,
-            enable_dropout = self.model_flag_config.enable_dropout,
-            ...
-        )
     
-    
-
-class LlamaModel(nn.Module):
+# Class Model(nnx.module) will be added
+class LlamaModel(Model):
     cfg: LlamaConfig
     dtype: jnp.dtype
-    embedder: 
+    embedder: layers.Embedder
     dense_blocks: list[]
     moe_blocks: list[]
-    final_norm: 
+    final_norm: layers.RMSNorm
     global_KV_cache: kv_cache.GlobalKVCache
     sharding_cfg: sharding.ShardingConfig
     quantization: Quantization.Quantization = None
-
-
+        
     def create_embedder(self):
         if self.cfg.embedder:
             return  = self.cfg.embedder.make(name='embedder')
@@ -137,15 +79,26 @@ class LlamaModel(nn.Module):
             return Embdder(
                 ...
             )
+    self create_global_runtime_params(self):
+        # demo only, need an organized way to process layer-level runtime params
+        self.global_runtime_params = [
+            layers.RuntimeParams(
+                kv_cache=self.global_KV_cache.get_layer_kv_cache(i)
+                sharding_cfg=self.sharding_cfg
+                quantization:=self.quantization)
+            for i in self.cfg.num_layer
+        ]
 
     def create_sharding_cfg(self):
         ...
         sharding = sharding.Sharding(self.cfg.parallelism_flag_config)
-        return sharding.make_sharding_config()
+        self.runtime_params.update_sharding_cfg(sharding.make_sharding_config())
+        return self.runtime_params.sharding_cfg
     
-    def create_quantizaiton(self):
+    def create_quantization(self):
         ...
-        return Quantization.QuantizationConfig(self.cfg.quant_flag_config)
+        self.runtime_params.update_quantization(Quantization.QuantizationConfig(self.cfg.quant_flag_config).make())
+        return self.runtime_params.quantization
 
     def create_KV_cache(self):
         ...
@@ -154,23 +107,24 @@ class LlamaModel(nn.Module):
     def setup(self) -> None:
 
         self.embedder = self.create_embedder()
+        # a better way to guarantee the order of initialization 
+        # i.e. sharding_cfg, quantization should be ready before global_KV_cache etc
         self.sharding_cfg = self.create_sharding_cfg()
-        self.quantization = self.create_quantizaiton()
+        self.quantization = self.create_quantization()
         self.global_KV_cache = self.create_KV_cache()
-
+        self.global_runtime_params = create_global_runtime_params()
 
         self.dense_blocks = [
             self.cfg.transformer_moe_blocks_config.make(
-                name=f'layer_{i}',
-                sharding_cfg=self.sharding_cfg,
-                quantization=self.quantization)
+                name=f'dense_layer_{i}',
+                runtime_param=self.global_runtime_params[i])
             for i in self.cfg.dense_layers
         ]
         self.moe_blocks = [
             self.cfg.transformer_dense_blocks_config.make(
-                name=f'layer_{i}',
-                sharding_cfg=self.sharding_cfg,
-                quantization=self.quantization)
+                name=f'moe_layer_{i}',
+                # demo only, retrieval of runtime_param should not be upon index
+                runtime_param=self.global_runtime_params[self.cfg.dense_layers + i])
             for i in self.cfg.moe_layers
         ]
         self.final_norm = base.RMSNorm(
