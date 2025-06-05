@@ -1,4 +1,12 @@
-class RMSNorm(nn.Module):
+@dataclass
+class RuntimeParams:
+# A layer wised runtime parameters that may be needed when initializing the live blocks, i.e. Attention
+# That way, if a new block need to be added, i.e. lora, we won't have to update the interfaces for all blocks
+    kv_cache: Optional[KVCache] = None
+    sharding_cfg: Optional[ShardingConfig] = None
+    quantization: Optional[Quantization] = None 
+
+class RMSNorm(nnx.Module):
   """nn.RMSNorm with scale param default at 0."""
   epsilon: float = 1e-6
   with_scale: bool = True
@@ -12,59 +20,70 @@ class RMSNorm(nn.Module):
     ...
 
 
-class FFWConfig:
+class FFWConfig(Config):
   d_model: int
   hidden_size: int
 
-  def __init__(self, yaml_config):
-      ...
-  def make(self, name, sharding_cfg=None, quantization=None) -> FFW:
+  @classmethod
+  def from_cfg(cls, flags_cfg: dict):
+      required_params = {f.name for f in fields(cls)}
+      provided_params = set(flags_cfg.keys())
+      missing_params  = required_params - provided_params
+      if missing_params:
+          ...
+
+      ffw_flags = {k: flags_cfg[k] for k in required_params}
+      return cls(**ffw_flags)
+
+  def make(self, name, runtime_param: Optional[layer.RuntimeParams] = None) -> FFW:
       ...
       return FFW(
-          d_model=self.d_model
-          hidden_size=self.hidden_size
           cfg=self,
-          sharding_cfg=sharding_cfg,
-          quantization=quantization,
+          sharding_cfg=runtime_param.sharding_cfg,
+          quantization=runtime_param.quantization,
       )
 
-class FFW(nn.Module):
+class FFW(nnx.Module):
   """Dense Feed Forward Layer"""
-  d_model: int
-  hidden_size: int
   cfg: Config = None
+  kernel: 
   sharding_cfg: ShardingConfig = default_sharding()
   quantization: Quantization | None = None
 
   def setup(self):
     ...
-  def __call__(self, x):
+  def __call__(self, x, op_mode):
+    ...
+  def sharding(op_mode):
     ...
 
-class EmbedderConfig:
+class EmbedderConfig(Config):
   vocab_size: int
   d_model: int
   normalize_embeddings: bool = False
 
-  def __init__(self, flags_cfg):
+  @classmethod
+  def from_cfg(cls, flags_cfg: dict):
+      required_params = {f.name for f in fields(cls)}
+      provided_params = set(flags_cfg.keys())
+      missing_params  = required_params - provided_params
+      if missing_params:
+          ...
+
+      embedder_flags = {k: flags_cfg[k] for k in required_params}
+      return cls(**embedder_flags)
+
+  def make(self, name, runtime_param: Optional[layer.RuntimeParams] = None) -> Embdder:
     ...
-  
-  def make(self, name, sharding_cfg=None, quantization=None) -> Embdder:
-    ...
-    return Embdder(
-          vocab_size=self.vocab_size
-          d_model=self.d_model
-          normalize_embeddings=self.normalize_embeddings
+    return Embedder(
           cfg=self,
-          sharding_cfg=sharding_cfg,
-          quantization=quantization,      
+          sharding_cfg=runtime_param.sharding_cfg,
+          quantization=runtime_param.quantization,      
     )
 
-class Embdder(nn.Module):
+class Embedder(nnx.Module):
   cfg: EmbedderConfig
-  vocab_size: int
-  d_model: int
-  normalize_embeddings: bool = False
+  vocab: 
   sharding_cfg: ShardingConfig = default_sharding()
   quantization: Quantization | None = None
 
@@ -74,6 +93,8 @@ class Embdder(nn.Module):
     ...
     return self.decode(x)
   def decode(self, x):
+    ...
+  def sharding():
     ...
 
 

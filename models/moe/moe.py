@@ -1,46 +1,40 @@
-# MoE metrics to be monitored
-MOE_METRICS = (
-    'per_layer_load_balancing_loss',
-    'rms_logits',
-    'per_layer_max_router_logits',
-    'over_capacity',
-    'expert_assignment_fraction',
-    'dispatched_to_0',
-    'dispatched_to_1',
-    'dispatched_to_2',
-    'total_dispatch_weight',
-    'router_w_clusterfactor',
-    'average_entropy',
-    'entropy_average',
-)
 
 @dataclass
-class MoEConfig:
+class MoEConfig(Config):
     d_model: int
     expert_hidden_size: int
     num_experts: int
+    sequence_len: int
     router_config: RoutingConfig
+    ...
 
-    def __init__(self, flags_cfg):
-        ...
-    def make(self, name, sharding_cfg=None, quantization=None) -> MoE:
+    @classmethod
+    def from_cfg(cls, flags_cfg: dict):
+        required_params = {f.name for f in fields(cls)}
+        provided_params = set(flags_cfg.keys())
+        missing_params  = required_params - provided_params
+
+        if missing_params:
+            ...
+
+        moe_flags = {k: flags_cfg[k] for k in required_params}
+        return cls(**moe_flags)
+    
+    def make(self, name, runtime_param: Optional[layer.RuntimeParams] = None) -> MoE:
         ...
         return MoE(
-            d_model=self.d_model
-            expert_hidden_size=self.expert_hidden_size
-            num_experts=self.num_experts
-            router_config=self.router_config.make()
             cfg=self,
-            sharding_cfg=sharding_cfg,
-            quantization=quantization,
+            kernel=kernel,
+            router=self.router_config.make()
+            sharding_cfg=runtime_param.sharding_cfg,
+            quantization=runtime_param.quantization,
         )
 
 @dataclass
 class MoE(nn.Module):
-    cfg: Config = None
-    d_model: int
-    expert_hidden_size: int
-    num_experts: int
+  """Moe Routed MLP Layer"""
+    cfg: MoEConfig
+    kernel: 
     router: Router
     sharding_cfg: ShardingConfig = default_sharding()
     quantization: Quantization | None = None
@@ -48,9 +42,12 @@ class MoE(nn.Module):
     def setup(self):
         ...
     def __call__(self,):
+        #TODO implement the logics here
         ...
     def get_cfg(self) -> MoEConfig: 
-
+        ...
+    def sharding(op_mode):
+        ...
 
 @dataclass
 class RoutingConfig:
@@ -75,13 +72,14 @@ class RoutingConfig:
                     expert_capacity=self.expert_capacity
                     ...
                 )
-
+@dataclass
 class TopkRouter:
     k: int
     num_experts: int
     expert_capacity: int
+    ...
 
-    def __init__(seslf):
+    def __init__(self):
         ...
     def router(self):
         ...
