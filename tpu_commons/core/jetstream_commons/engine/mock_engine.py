@@ -220,8 +220,8 @@ class TestEngine(engine_api.Engine):
             data=jnp.concatenate(
                 (
                     first_generated_token,
-                    jnp.ones_like(first_generated_token),
-                    jnp.ones_like(first_generated_token),
+                    jnp.ones_like(first_generated_token, dtype=jnp.int32),
+                    jnp.ones_like(first_generated_token, dtype=jnp.int32),
                 ),
                 axis=-1,
             ),
@@ -283,8 +283,8 @@ class TestEngine(engine_api.Engine):
             data=jnp.concatenate(
                 (
                     first_generated_tokens,
-                    jnp.ones_like(first_generated_tokens),
-                    jnp.ones_like(first_generated_tokens),
+                    jnp.ones_like(first_generated_tokens, dtype=jnp.int32),
+                    jnp.ones_like(first_generated_tokens, dtype=jnp.int32),
                 ),
                 axis=-1,
             ),
@@ -344,6 +344,7 @@ class TestEngine(engine_api.Engine):
         generated_tokens = (
             prefill_cache.sum(axis=-1) +
             (length_masked_gen_cache.sum(axis=-1) / params))[:, jnp.newaxis]
+        generated_tokens = generated_tokens.astype(jnp.int32)
         # Wait to simulate model step time.
         fake_size = 4096
         fake_work = jnp.ones((fake_size, fake_size)) @ jnp.ones(
@@ -358,7 +359,7 @@ class TestEngine(engine_api.Engine):
         token_data = jnp.concatenate(
             [
                 generated_tokens,
-                jnp.ones_like(generated_tokens),
+                jnp.ones_like(generated_tokens, dtype=jnp.int32),
                 new_lengths[:, None],
             ],
             axis=-1,
@@ -421,6 +422,7 @@ class TestEngine(engine_api.Engine):
             first_token = prefix.first_token
         else:
             first_token = prefix["first_token"]
+        print(first_token.dtype, decode_state.generate_tokens.dtype)
         generate_tokens = jax.lax.dynamic_update_slice_in_dim(
             decode_state.generate_tokens,
             first_token,
