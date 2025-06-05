@@ -71,6 +71,36 @@ To inspect model weights sharding:
 INSPECT_MODEL=1
 ```
 
+## Torchax Guide
+
+**NOTE**: This is under development so the run may fail.
+
+### Install dependencies
+
+#### Install `vLLM`
+
+Follow the above [step](#install-vllm-tpu) to install vllm for TPU backend.
+
+#### Install `tpu_commons`
+
+Follow the above step to install [tpu_commons](#install-tpu_commons)
+
+#### Install torchax
+
+```
+cd ~
+git clone git@github.com:pytorch/xla.git
+cd xla/torchax
+pip install -e . --no-deps
+```
+
+### Run example script
+
+```
+cd vllm
+TPU_BACKEND_TYPE=torchax VLLM_TORCHAX_ENABLED=1 VLLM_USE_V1=1 python examples/offline_inference/tpu.py
+```
+
 ## How to test kernel?
 
 Install dependencies:
