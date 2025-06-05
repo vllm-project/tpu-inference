@@ -1,5 +1,9 @@
 ## Setup development environment
 
+### Install `vLLM-TPU`:
+
+Follow this [guide](https://docs.vllm.ai/en/latest/getting_started/installation/ai_accelerator.html#set-up-using-python) to install vLLM from source.
+
 ### Install `tpu_commons`:
 
 ```
@@ -8,18 +12,6 @@ git clone https://github.com/vllm-project/tpu_commons.git
 cd tpu_commons
 pip install -e .
 ```
-
-### Install `vLLM-TPU`:
-
-Follow this [guide](https://docs.vllm.ai/en/latest/getting_started/installation/ai_accelerator.html#set-up-using-python) to install vLLM from source with the additional step:
-
-Right after the `git clone` step and before the `pip install -e .` step, run the following command:
-
-```
-sed -i 's|return "vllm.platforms.tpu.TpuPlatform" if is_tpu else None|return "tpu_commons.platforms.TpuPlatform" if is_tpu else None|g' vllm/platforms/__init__.py
-```
-
-Then continue the installation steps until pip install succeeds.
 
 ### Setup pre-commit hooks
 
