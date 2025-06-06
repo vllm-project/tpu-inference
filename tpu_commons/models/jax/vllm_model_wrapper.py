@@ -21,10 +21,12 @@ from torchax.interop import call_jax, extract_all_buffers, jax_jit
 from torchax.ops.mappings import j2t_dtype
 
 
-from tpu_commons.models.jax.layers.attention import (AttentionMetadata,
-                                                     sharded_flash_attention,
+from tpu_commons.models.jax.attention_metadata import AttentionMetadata
+from tpu_commons.models.jax.layers.attention import (sharded_flash_attention,
                                                      sharded_paged_attention,
                                                      update_cache)
+from tpu_commons.models.jax.layers.chunked_prefill_attention import (
+    sharded_chunked_prefill_attention, sharded_chunked_prefill_update_cache)
 from tpu_commons.models.jax.layers.sampling import sample
 
 
@@ -60,25 +62,42 @@ def _jax_attn_func(
 
     md = attention_metadata
     k_cache, v_cache = kv_cache
-    k_cache = update_cache(is_prefill, k_cache,
-                                    md.kv_cache_write_indices, k)
-    v_cache = update_cache(is_prefill, v_cache,
-                                    md.kv_cache_write_indices, v)
-
-    if is_prefill:
-        # (B, N, T, H)
-        # TODO(xiang): support MQA and GQA
-        if self.num_kv_heads != self.num_heads:
-            k = jnp.repeat(k, self.num_heads // self.num_kv_heads, axis=1)
-            v = jnp.repeat(v, self.num_heads // self.num_kv_heads, axis=1)
-        outputs = self.flash_attention(q, k, v)
+    if md.chunked_prefill_enabled:
+        k_cache = sharded_chunked_prefill_update_cache(self.mesh)(
+            k_cache, md.kv_cache_write_indices, k, md.num_decode_seqs)
+        v_cache = sharded_chunked_prefill_update_cache(self.mesh)(
+            v_cache, md.kv_cache_write_indices, v, md.num_decode_seqs)
+        outputs = sharded_chunked_prefill_attention(self.mesh)(
+            q,
+            k_cache,
+            v_cache,
+            attention_metadata.decode_lengths,
+            attention_metadata.decode_page_indices,
+            attention_metadata.num_decode_seqs,
+            attention_metadata.prefill_lengths,
+            attention_metadata.prefill_page_indices,
+            attention_metadata.prefill_query_start_offsets,
+            attention_metadata.num_prefill_seqs,
+        )
     else:
-        # (B, N, H)
-        q = jnp.squeeze(q, 2)
-        outputs = self.paged_attention(q, k_cache, v_cache, md.seq_lens,
-                                        md.block_indices)
-        # (B, N, 1, H)
-        outputs = jnp.expand_dims(outputs, 2)
+        k_cache = update_cache(is_prefill, k_cache,
+                               md.kv_cache_write_indices, k)
+        v_cache = update_cache(is_prefill, v_cache,
+                               md.kv_cache_write_indices, v)
+        if is_prefill:
+            # (B, N, T, H)
+            # TODO(xiang): support MQA and GQA
+            if self.num_kv_heads != self.num_heads:
+                k = jnp.repeat(k, self.num_heads // self.num_kv_heads, axis=1)
+                v = jnp.repeat(v, self.num_heads // self.num_kv_heads, axis=1)
+            outputs = sharded_flash_attention(self.mesh)(q, k, v)
+        else:
+            # (B, N, H)
+            q = jnp.squeeze(q, 2)
+            outputs = sharded_paged_attention(self.mesh)(q, k_cache, v_cache, md.seq_lens,
+                                            md.block_indices)
+            # (B, N, 1, H)
+            outputs = jnp.expand_dims(outputs, 2)
     
     new_kv_cache = (k_cache, v_cache)
     return new_kv_cache, outputs
@@ -97,9 +116,7 @@ class JaxAttentionWrapper(torch_nn.Module):
         self.scale = vllm_attn.impl.scale
         self.num_kv_heads = vllm_attn.num_kv_heads
         self.layer_idx = extract_layer_index(vllm_attn.layer_name)
-
-        self.flash_attention = sharded_flash_attention(mesh)
-        self.paged_attention = sharded_paged_attention(mesh)
+        self.mesh = mesh
 
     
     def forward(
@@ -361,6 +378,7 @@ class VllmModelWrapper:
         *args,
     ) -> Tuple[List[KVCache], jax.Array, jax.Array]:
 
+        print("is_prefill={}".format(is_prefill))
         print("input_ids={}".format(input_ids))
         print("input_ids.shape={}".format(input_ids.shape))
         print("input_positions={}".format(attention_metadata.input_positions))
@@ -399,10 +417,11 @@ class VllmModelWrapper:
             self.rng,
             self.mesh,
             logits.jax(),
-            attention_metadata.seq_lens if is_prefill else attention_metadata.seq_lens,
+            attention_metadata.seq_lens,
             temperatures,
             top_ps,
             top_ks,
+            attention_metadata.chunked_prefill_enabled,
         )
 
         return new_kv_caches, next_tokens, logits
