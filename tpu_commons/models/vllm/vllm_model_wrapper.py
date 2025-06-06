@@ -1,7 +1,5 @@
 from typing import List, Optional, Tuple
 import tempfile
-from contextlib import contextmanager
-from dataclasses import dataclass
 import functools
 import humanize
 
@@ -9,7 +7,6 @@ import humanize
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from flax import linen as nn
 from flax.typing import PRNGKey
 
 import torch
@@ -28,6 +25,11 @@ from tpu_commons.models.jax.layers.attention import (sharded_flash_attention,
 from tpu_commons.models.jax.layers.chunked_prefill_attention import (
     sharded_chunked_prefill_attention, sharded_chunked_prefill_update_cache)
 from tpu_commons.models.jax.layers.sampling import sample
+
+from tpu_commons.models.vllm.vllm_model_wrapper_context import (
+    get_vllm_model_wrapper_context,
+    set_vllm_model_wrapper_context,
+)
 
 
 from vllm.attention import Attention as VllmAttention
@@ -199,39 +201,6 @@ class JaxAttentionWrapper(torch_nn.Module):
         #     jax.debug.print("layer_idx={layer_idx}: after reshape outputs={outputs}", layer_idx=self.layer_idx, outputs=outputs.jax())
 
         return outputs
-
-
-@dataclass
-class VllmModelWrapperContext:
-    is_prefill: bool
-    kv_caches: List[KVCache]
-    attention_metadata: AttentionMetadata
-
-
-_vllm_model_wrapper_context: Optional[VllmModelWrapperContext] = None
-
-def get_vllm_model_wrapper_context() -> VllmModelWrapperContext:
-    assert _vllm_model_wrapper_context is not None, (
-        "VllmModelWrapperContext is not set. "
-        "Please use `set_vllm_model_wrapper_context` to set the VllmModelWrapperContext.")
-    return _vllm_model_wrapper_context
-
-@contextmanager
-def set_vllm_model_wrapper_context(*,
-                                   is_prefill: bool,
-                                   kv_caches: List[KVCache],
-                                   attention_metadata: AttentionMetadata,):
-    global _vllm_model_wrapper_context
-    prev_context = _vllm_model_wrapper_context
-    _vllm_model_wrapper_context = VllmModelWrapperContext(
-        is_prefill=is_prefill,
-        kv_caches=kv_caches,
-        attention_metadata=attention_metadata,)
-
-    try:
-        yield
-    finally:
-        _vllm_model_wrapper_context = prev_context
 
 
 def swap_attention_module(model: torch.nn.Module, mesh: Mesh) -> None:

@@ -339,12 +339,11 @@ class TPUModelRunner():
                     get_parameter_overview(self.params, include_stats="sharding"),
                 )
         else:  # self.model_impl_type == ModelImplEnum.JAX
-            self.model = get_vllm_model(
+            self.model, self.params = get_vllm_model(
                 self.vllm_config,
                 self.random_key,
                 self.mesh,
             )
-            self.params = None
 
         # https://source.corp.google.com/h/vertex-model-garden/hex-llm/+/main:hex_llm/worker/runner_jax.py#:~:text=143-,144,-145
         # Prepare buffers used by chunk prefill

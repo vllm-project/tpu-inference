@@ -42,11 +42,11 @@ def get_vllm_model(
     rng: PRNGKey,
     mesh: Mesh,
 ):
-    from tpu_commons.models.jax.vllm_model_wrapper import VllmModelWrapper
+    from tpu_commons.models.vllm.vllm_model_wrapper import VllmModelWrapper
 
     model = VllmModelWrapper(
         vllm_config=vllm_config,
         rng=rng,
         mesh=mesh,
     )
-    return model
+    return model, model.model_params_and_buffers
