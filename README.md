@@ -98,3 +98,6 @@ Run the test:
 ```
 pytest -v ./tests/ragged_paged_attention_test.py
 ```
+
+## How to run an End-To-End (E2E) benchmarking run?
+TODO @jacobplatin

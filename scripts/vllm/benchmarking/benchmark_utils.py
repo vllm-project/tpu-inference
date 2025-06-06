@@ -99,6 +99,7 @@ def postprocess_text(preds, targets):
 def eval_accuracy_mmlu(request_outputs):
     metric = evaluate.load("accuracy")
     nltk.download("punkt")
+    nltk.download("punkt_tab")
     preds = []
     targets = []
 
@@ -119,7 +120,8 @@ def eval_accuracy_mmlu(request_outputs):
 
 def eval_accuracy_mlperf(request_outputs):
     metric = evaluate.load("rouge")
-    nltk.download("punkt", quiet=True)
+    nltk.download("punkt")
+    nltk.download("punkt_tab")
 
     def postprocess_text(pred, target):
         """Process a single prediction-target pair"""

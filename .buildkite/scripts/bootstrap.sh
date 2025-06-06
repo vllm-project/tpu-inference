@@ -14,6 +14,8 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
     # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
   else
     echo "No 'ready' label found on PR. Skipping main pipeline upload."
+    # TODO (@jacobplatin): remove?
+    buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
     exit 0 # Exit with 0 to indicate success (no error, just skipped)
   fi
 else

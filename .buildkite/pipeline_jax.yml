@@ -12,6 +12,16 @@ steps:
      commands:
        - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_commons/tests/ragged_paged_attention_test.py
 
+   - label: "TPU Test 14: E2E vLLM MLPerf Benchmarking Run"
+     key: tpu_test_1
+     soft_fail: true
+     env:
+       TPU_BACKEND_TYPE: "jax"
+     agents:
+       queue: tpu_v6e_queue
+     commands:
+       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/llama3_8b_mmlu_single_prompt.sh
+
   # -----------------------------------------------------------------
   # NOTIFICATION STEP
   # -----------------------------------------------------------------
