@@ -135,3 +135,31 @@ BUILDKITE_COMMIT=3843efc .buildkite/scripts/run_in_docker.sh bash /workspace/tpu
 
 While this will run the code in a Docker image, you can also run the bare `tests/e2e/benchmarking/llama3.1_8b_mmlu_few_prompt.sh` script itself,
 being sure to pass the proper args for your machine.
+
+## How to build and test docker in different machines?
+
+### On the development machine (can be without TPU):
+
+Build docker image and push it to a remote repo
+
+```
+# On the first time, you may need it
+gcloud auth configure-docker
+
+bash build_docker.sh
+```
+
+### On the TPU-VM side:
+
+Pull the docker image and run it
+
+```
+# On the first time, you may need it
+gcloud auth configure-docker
+
+DOCKER_URI=gcr.io/cloud-nas-260507/tpu_commons:${USER}$
+docker pull $DOCKER_URI
+docker run -it -e HUGGING_FACE_HUB_TOKEN=<YOUR_HF_TOKEN> $DOCKER_URI
+```
+
+Note: if the $USER in your TPU-VM is different than that in the development machine, please change the image tag accordingly.
