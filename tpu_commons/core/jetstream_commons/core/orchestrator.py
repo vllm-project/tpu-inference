@@ -292,7 +292,7 @@ class Driver:
             raise ValueError("No prefill parameter provided.")
         if generate_params is None:
             raise ValueError("No generate parameter provided.")
-
+        self._prefill_mode = True
         self._prefill_adapterstore = prefill_adapterstore
         self._generate_adapterstore = generate_adapterstore
 
@@ -757,16 +757,14 @@ class Driver:
         logger.warning("Spinning up prefill thread %d.", idx)
         prefill_engine = self._prefill_engines[idx]
         prefill_params = self._prefill_params[idx]
-        adapter_tensorstore = None
-        if self._prefill_adapterstore and idx < len(
-                self._prefill_adapterstore):
-            adapter_tensorstore = self._prefill_adapterstore[idx]
         metadata = prefill_engine.get_tokenizer()
         tokenizer = prefill_engine.build_tokenizer(metadata)
         thread_name = f"Prefill thread {idx}"
         ThreadDebugLog(thread_name, f"Prefill params {idx} loaded.")
 
         while self.live:
+            if not self._prefill_mode:
+                continue
             my_transfer_backlog = self._transfer_backlogs[idx]
             # The prefill thread can just sleep until it has work to do.
             request = self._prefill_backlog.get(block=True)
@@ -774,12 +772,6 @@ class Driver:
             if request is None:
                 break
             request.metadata.prefill_dequeue_time = time.perf_counter()
-            ThreadDebugLog(
-                thread_name,
-                f"Executing prefilling for one ActiveRequest. Current prefill "
-                f"backlog size: {self._prefill_backlog.qsize()},"
-                f" has_bos: {request.has_bos}",
-            )
             # Tokenize and padding the text or token input.
             padded_tokens, true_length = self._process_prefill_content(
                 request,
@@ -787,7 +779,7 @@ class Driver:
                 prefill_engine.max_prefill_length,
             )
 
-            adapter_id = request.adapter_id
+            # adapter_id = request.adapter_id
 
             # Here we are applying the LoRA adapter params to the base params and
             # them. In the interleaved mode, the prefill and generate shares the
@@ -796,85 +788,14 @@ class Driver:
             # in parallel and sharing the same params. Issue arrise because prefill
             # uses pre-merged weights and generate uses only base weights.
             final_prefill_params = prefill_params
-            if adapter_id and adapter_tensorstore is not None:
-                try:
-                    lora_params = asyncio.run(
-                        adapter_tensorstore.get_lora_weights(
-                            adapter_id=adapter_id, load_if_not_loaded=True))
-                    lora_config = asyncio.run(
-                        adapter_tensorstore.get_lora_config(
-                            adapter_id=adapter_id, load_if_not_loaded=True))
-                    prefill_engine.apply_adapter(final_prefill_params,
-                                                 lora_config, lora_params)
-                except Exception as e:  # pylint: disable=broad-exception-caught
-                    request.num_samples = 1
-                    request.complete = np.zeros((request.num_samples, ),
-                                                np.bool_)
-                    error_message = f"An error occurred: {type(e).__name__} - {str(e)}"
-                    error_result = ReturnSample(text=[error_message],
-                                                token_ids=[])
-                    request.enqueue_samples([error_result])
-                    request.return_channel.close()
-                    continue
-
-            # Compute new kv cache for the prefill_content.
-            if self._multi_sampling:
-                prefill_result, first_token = prefill_engine.prefill_multisampling(
-                    params=final_prefill_params,
-                    padded_tokens=padded_tokens,
-                    true_length=true_length,
-                    num_samples=request.num_samples,
-                )
-                request.complete = np.zeros((request.num_samples, ), np.bool_)
-            else:
-                # if chunked_prefill is used, and the prompt is long enough
-                if (prefill_engine.use_chunked_prefill
-                        and true_length >= prefill_engine.prefill_chunk_size):
-                    if self._prefix_cache is not None:
-                        prefill_result, first_token = (
-                            self._do_chunked_prefill_with_prefix_cache(
-                                prefill_engine,
-                                final_prefill_params,
-                                tokenizer,
-                                padded_tokens[:true_length],
-                            ))
-                    else:
-                        prefill_result, first_token = self._do_chunked_prefill(
-                            prefill_engine,
-                            final_prefill_params,
-                            tokenizer,
-                            padded_tokens[:true_length],
-                        )
-
-                else:
-                    # Compute new kv cache for the prefill_content.
-                    prefill_result, first_token = prefill_engine.prefill(
-                        params=final_prefill_params,
-                        padded_tokens=padded_tokens,
-                        true_length=true_length,
-                    )
-
-                request.complete = np.zeros(
-                    (prefill_engine.samples_per_slot, ), np.bool_)
-
-            if adapter_id and adapter_tensorstore is not None:
-                try:
-                    lora_params = asyncio.run(
-                        adapter_tensorstore.get_lora_weights(adapter_id))
-                    lora_config = asyncio.run(
-                        adapter_tensorstore.get_lora_config(adapter_id))
-                    prefill_engine.unapply_adapter(final_prefill_params,
-                                                   lora_config, lora_params)
-                except Exception as e:  # pylint: disable=broad-exception-caught
-                    request.num_samples = 1
-                    request.complete = np.zeros((request.num_samples, ),
-                                                np.bool_)
-                    error_message = f"An error occurred: {type(e).__name__} - {str(e)}"
-                    error_result = ReturnSample(text=[error_message],
-                                                token_ids=[])
-                    request.enqueue_samples([error_result])
-                    request.return_channel.close()
-                    continue
+            prefill_result, first_token = prefill_engine.prefill(
+                params=final_prefill_params,
+                padded_tokens=padded_tokens,
+                true_length=true_length,
+            )
+            logger.warning("finished prefill for request!!")
+            request.complete = np.zeros((prefill_engine.samples_per_slot, ),
+                                        np.bool_)
 
             del final_prefill_params
             request.prefill_result = prefill_result
@@ -1214,6 +1135,8 @@ class Driver:
         time_of_last_generate = time.time()
         time_of_last_print = time.time()
         while self.live:
+            if self._prefill_mode:
+                continue
             if (time.time() - time_of_last_print) > 1:
                 ThreadDebugLog(
                     thread_name,
@@ -1647,7 +1570,6 @@ class LLMOrchestrator(jetstream_pb2_grpc.OrchestratorServicer):
         context: Optional[grpc.aio.ServicerContext] = None,
     ):
         """Decode."""
-        logger.warning("Here!!!")
         if context is None:
             logger.warning(
                 "LLM orchestrator is being used in offline test mode, and will not"
@@ -1668,7 +1590,6 @@ class LLMOrchestrator(jetstream_pb2_grpc.OrchestratorServicer):
             num_samples=request.num_samples if request.num_samples else 1,
             has_bos=request.has_bos,
         )
-        logger.warning("Jetstream wrapping!!!")
         # The first stage is being prefilled, all other stages are handled
         # inside the driver (transfer, generate*N, detokenize).
         try:
@@ -1682,44 +1603,7 @@ class LLMOrchestrator(jetstream_pb2_grpc.OrchestratorServicer):
                 ("The driver prefill queue is full and more requests cannot be"
                  " handled. You may retry this request."),
             )
-        logger.warning("Placed request on the prefill queue.", )
-        # When an active request is created a queue is instantiated. New tokens
-        # are placed there during the decoding loop, we pop from that queue by
-        # using the .next method on the active request.
-        # Yielding allows for the response to be a streaming grpc call - which
-        # can be called via iterating over a for loop on the client side.
-        # The DecodeResponse stream should consume all generated tokens in
-        # return_channel when complete signal is received (AsyncMultifuture
-        # promises this).
-        # for response in active_request.return_channel:
-        #   response = cast(list[ReturnSample], response)
-        #   if ttft == 0:
-        #     ttft = time.perf_counter() - request_start_time
-        #     if ttft > 2.0:
-        #       logger.info(  # pylint: disable=logging-fstring-interpolation
-        #           f"{datetime.now()}: "
-        #           f"Slow TTFT: {ttft:.2f}s,"
-        #           f" stats={active_request.metadata.stats()},"
-        #           f" prefill_qsize={self._driver.prefill_backlog_size()}",
-        #       )
-        # if is_client_side_tokenization:
-        #   # If is_client_side_tokenization, the client should request with token
-        #   # ids, and the JetStream server will return token ids as response.
-        #   # The client should take care of tokenization and detokenization.
-        #   yield self._process_client_side_tokenization_response(response)
-        # else:
-        #   # Buffer response mechanism is used to handle streaming
-        #   # detokenization with special character (For some edge cases with
-        #   # SentencePiece tokenizer, it requires to decode a complete sequence
-        #   # instead of a single token).
-        #   if self.should_buffer_response(response):
-        #     buffered_response_list.append(response)
-        #     continue
-        #   yield self._process_server_side_tokenization_response(
-        #       response, buffered_response_list
-        #   )
-        #   # Reset buffer after flushed.
-        #   buffered_response_list = []
+        logger.warning("Placed request on the prefill queue.")
 
     async def HealthCheck(  # pylint: disable=invalid-overridden-method
         self,

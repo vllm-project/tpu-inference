@@ -36,6 +36,8 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import EngineHandshakeMetadata, EngineZmqAddresses
 from vllm.version import __version__ as VLLM_VERSION
 
+from tpu_commons.core.jetstream_commons.core.proto import jetstream_pb2
+
 logger = init_logger(__name__)
 
 POLLING_TIMEOUT_S = 2.5
@@ -186,14 +188,6 @@ class EngineCore:
                 not self.scheduler.get_kv_connector()):
             logger.warning("Got kv_transfer_params, but no KVConnector found. "
                            "Disabling KVTransfer for this request.")
-        from tpu_commons.core.jetstream_commons.core.proto import jetstream_pb2
-        jetstream_request = jetstream_pb2.DecodeRequest(
-            token_content=jetstream_pb2.DecodeRequest.TokenContent(
-                token_ids=request.prompt_token_ids),
-            max_tokens=1024,
-        )
-        logger.info("Converted to jetstream request")
-        self.orchestrator.Decode(jetstream_request)
         self.scheduler.add_request(req)
 
     def abort_requests(self, request_ids: list[str]):
@@ -227,7 +221,32 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule()
+        scheduler_dict = scheduler_output.__dict__
+        for k in scheduler_dict:
+            logger.warning("Scheduler %s: %s", k, scheduler_dict[k])
         model_output = self.execute_model(scheduler_output)
+
+        def is_pure_decode(s):
+            return s.total_num_scheduled_tokens == len(s.num_scheduled_tokens)
+
+        logger.warning("is_pure_decode %s", is_pure_decode(scheduler_output))
+        # prefill request, possibly multiple prompts
+        if not is_pure_decode(scheduler_output):
+            for request_id in scheduler_output.num_scheduled_tokens:
+                req = self.scheduler.requests[request_id]
+                jetstream_request = jetstream_pb2.DecodeRequest(
+                    token_content=jetstream_pb2.DecodeRequest.TokenContent(
+                        token_ids=req.prompt_token_ids),
+                    max_tokens=1024,
+                )
+                logger.warning("Converted request %s to jetstream request",
+                               request_id)
+                self.orchestrator._prefill_mode = True
+                self.orchestrator.Decode(jetstream_request)
+        # decode
+        else:
+            self.orchestrator._prefill_mode = False
+
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output)  # type: ignore
 
