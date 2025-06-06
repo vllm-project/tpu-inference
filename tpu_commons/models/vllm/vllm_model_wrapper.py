@@ -14,7 +14,7 @@ import torch.nn as torch_nn
 from torch.utils import _pytree as pytree
 
 import torchax
-from torchax.interop import call_jax, extract_all_buffers, jax_jit
+from torchax.interop import jax_view, torch_view, extract_all_buffers, jax_jit
 from torchax.ops.mappings import j2t_dtype
 
 
@@ -171,15 +171,18 @@ class JaxAttentionWrapper(torch_nn.Module):
             jax.debug.print("layer_idx={layer_idx}: after reshape\nq={q}\nk={k}\nv={v}\nk_cache={k_cache}\nv_cache={v_cache}",
                             layer_idx=self.layer_idx, q=q.jax(), k=k.jax(), v=v.jax(), k_cache=k_cache.jax(), v_cache=v_cache.jax())
 
-        new_kv_cache, outputs = call_jax(
-            _jax_attn_func,
+        new_kv_cache, outputs = _jax_attn_func(
             vllm_model_wrapper_context.is_prefill,
-            vllm_model_wrapper_context.kv_caches[self.layer_idx],
-            q, k, v,
-            vllm_model_wrapper_context.attention_metadata,
+            jax_view(vllm_model_wrapper_context.kv_caches[self.layer_idx]),
+            jax_view(q),
+            jax_view(k),
+            jax_view(v),
+            jax_view(vllm_model_wrapper_context.attention_metadata),
             self.mesh,
             self.num_heads,
             self.num_kv_heads)
+        new_kv_cache = torch_view(new_kv_cache)
+        outputs = torch_view(outputs)
         vllm_model_wrapper_context.kv_caches[self.layer_idx] = new_kv_cache
 
         # print("outputs.shape={}".format(outputs.shape))
