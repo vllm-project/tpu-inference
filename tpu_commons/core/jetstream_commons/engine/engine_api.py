@@ -19,11 +19,13 @@ could want to call, enabling interleaved (continuous batching) inference.
 
 import abc
 import uuid
-from typing import Any, Callable, Optional, Tuple, Union
+from typing import Any, Callable, List, Optional, Tuple, Union
 
 import jax
 import numpy as np
 from flax import struct
+from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
+from vllm.v1.outputs import ModelRunnerOutput
 
 from tpu_commons.core.jetstream_commons.engine import (token_utils,
                                                        tokenizer_pb2)
@@ -158,14 +160,15 @@ class Engine(abc.ABC):
     @abc.abstractmethod
     def prefill(
         self,
-        *,
-        params: Params,
-        existing_prefix: Optional[ExistingPrefix] = None,
-        padded_tokens: jax.Array,
-        true_length: int,
-        sampler: Optional[Callable[[Any], Any]] = None,
-        request_id: Optional[uuid.UUID] = None,
-    ) -> Tuple[Prefix, ResultTokens]:
+        # *,
+        scheduler_output: VllmSchedulerOutput,
+        # params: Params,
+        # existing_prefix: Optional[ExistingPrefix] = None,
+        # padded_tokens: jax.Array,
+        # true_length: int,
+        # sampler: Optional[Callable[[Any], Any]] = None,
+        # request_id: Optional[uuid.UUID] = None,
+    ) -> Tuple[List[Tuple[jax.Array, jax.Array]], ModelRunnerOutput]:
         """Computes a kv-cache for a set of tokens conditional on existing cache.
 
     existing_prefix (if provided) represents a prefix that has already been
@@ -176,31 +179,35 @@ class Engine(abc.ABC):
     If sampler is passed, then the engine should use it do sample next token.
     """
 
-    @abc.abstractmethod
-    def prefill_multisampling(
-        self,
-        *,
-        params: Params,
-        existing_prefix: Optional[jax.Array] = None,
-        padded_tokens: jax.Array,
-        true_length: int,
-        sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
-        rng: Optional[PRNGKeyType] = None,
-        num_samples: int = 1,
-    ) -> Tuple[Prefix, ResultTokens]:
-        """Computes a kv-cache for a new generate request.
+    # NOTE(gpolovets) this should be supported by TPUModelRunner as an argument.
+    # @abc.abstractmethod
+    # def prefill_multisampling(
+    #     self,
+    #     *,
+    #     params: Params,
+    #     existing_prefix: Optional[jax.Array] = None,
+    #     padded_tokens: jax.Array,
+    #     true_length: int,
+    #     sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
+    #     rng: Optional[PRNGKeyType] = None,
+    #     num_samples: int = 1,
+    # ) -> Tuple[Prefix, ResultTokens]:
+    #     """Computes a kv-cache for a new generate request.
 
-    With multi-sampling, the engine will generate multiple first tokens in the
-    prefilling stage. The number of tokens is specified by num_samples.
-    """
+    # With multi-sampling, the engine will generate multiple first tokens in the
+    # prefilling stage. The number of tokens is specified by num_samples.
+    # """
 
     @abc.abstractmethod
     def generate(
         self,
-        params: Params,
-        decode_state: DecodeState,
-        sampler: Optional[Callable[[Any], Any]] = None,
-    ) -> Tuple[DecodeState, ResultTokens]:
+        scheduler_output: VllmSchedulerOutput,
+        kv_cache: List[Tuple[jax.Array, jax.Array]] = []
+        # params: Params,
+        # decode_state: DecodeState,
+        # sampler: Optional[Callable[[Any], Any]] = None,
+    # ) -> Tuple[DecodeState, ResultTokens]:
+    ) -> Tuple[List[Tuple[jax.Array, jax.Array]], ModelRunnerOutput]:
         """Generates tokens for each sequence being decoded in parallel.
 
     Generate takes a batch of pre-computed kv-caches, and computes:
@@ -404,8 +411,9 @@ class JetStreamEngine(Engine):
         return decode_state
 
     def generate(
-            self, params: Params,
-            decode_state: DecodeState) -> Tuple[DecodeState, ResultTokens]:
+        scheduler_output: VllmSchedulerOutput,
+        kv_cache: List[Tuple[jax.Array, jax.Array]] = []
+    ) -> Tuple[List[Tuple[jax.Array, jax.Array]], ModelRunnerOutput]:
         decode_state, sampled_tokens = self._downstream_engine.generate(
             params=params, decode_state=decode_state)
         return decode_state, sampled_tokens
