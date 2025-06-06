@@ -1,10 +1,8 @@
 # Here we try to bring as much code as possible from Hex-LLM, instead of `tpu_torch_xla_runner.py` -> jax conversion.
 # This runner is a port of https://source.corp.google.com/h/vertex-model-garden/hex-llm/+/main:hex_llm/worker/runner_jax.py
-import functools
 import math
 import os
-from dataclasses import dataclass
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -21,6 +19,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from vllm.v1.outputs import ModelRunnerOutput
 
 from tpu_commons.logger import init_logger
+from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.model_loader import get_model
 from tpu_commons.models.jax.utils.param_overview import get_parameter_overview
 from tpu_commons.runner.tpu_torch_xla_runner import _get_token_paddings
@@ -1093,43 +1092,6 @@ def pad_to_multiple(x: int,
     if max_limit is not None:
         x = min(x, max_limit)
     return x
-
-
-@functools.partial(
-    jax.tree_util.register_dataclass,
-    data_fields=[
-        "input_positions",
-        "seq_lens",
-        "block_indices",
-        "kv_cache_write_indices",
-        "decode_lengths",
-        "decode_page_indices",
-        "num_decode_seqs",
-        "prefill_lengths",
-        "prefill_page_indices",
-        "prefill_query_start_offsets",
-        "num_prefill_seqs",
-    ],
-    meta_fields=["chunked_prefill_enabled"],
-)
-@dataclass
-class AttentionMetadata(object):
-    input_positions: jax.Array
-    # If mix attention, this is a list of len 2
-    seq_lens: Union[jax.Array, List[jax.Array]]
-    # If mix attention, this is a list of len 2
-    block_indices: Union[jax.Array, List[jax.Array]]
-    # If mix attention, this is a list of len 2
-    kv_cache_write_indices: Union[jax.Array, List[jax.Array]]
-    # The following fields are set only when chunked prefill is enabled
-    chunked_prefill_enabled: bool = False
-    decode_lengths: jax.Array = None  # [max_num_decode_seqs]
-    decode_page_indices: jax.Array = None  # [max_num_decode_seqs, pages_per_sequence]
-    num_decode_seqs: jax.Array = None  # [1]
-    prefill_lengths: jax.Array = None  # [max_num_prefill_seqs]
-    prefill_page_indices: jax.Array = None  # [max_num_prefill_seqs, pages_per_sequence]
-    prefill_query_start_offsets: jax.Array = None  # [max_num_prefill_seqs + 1]
-    num_prefill_seqs: jax.Array = None  # [1]
 
 
 def write_outputs(

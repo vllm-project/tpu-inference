@@ -37,18 +37,8 @@ python vllm/examples/offline_inference/basic/generate.py \
     --model=meta-llama/Llama-3.1-8B \
     --tensor_parallel_size=4 \
     --task=generate \
-    --max_model_len=1024
-```
-
-(Fixing) Run `Llama 3.2 1B` offline inference on 1 TPU chip:
-
-```
-TPU_BACKEND_TYPE=jax
-python vllm/examples/offline_inference/basic/generate.py \
-    --model=meta-llama/Llama-3.2-1B \
-    --tensor_parallel_size=1 \
-    --task=generate \
-    --max_model_len=1024
+    --max_model_len=1024 \
+    --max_num_seqs=1
 ```
 
 ## Relevant env
