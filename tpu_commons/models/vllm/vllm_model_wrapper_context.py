@@ -1,6 +1,6 @@
-from typing import List, Optional, Tuple
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import List, Optional, Tuple
 
 import jax
 
@@ -15,25 +15,32 @@ class VllmModelWrapperContext:
     kv_caches: List[KVCache]
     attention_metadata: AttentionMetadata
 
+
 _vllm_model_wrapper_context: Optional[VllmModelWrapperContext] = None
+
 
 def get_vllm_model_wrapper_context() -> VllmModelWrapperContext:
     assert _vllm_model_wrapper_context is not None, (
         "VllmModelWrapperContext is not set. "
-        "Please use `set_vllm_model_wrapper_context` to set the VllmModelWrapperContext.")
+        "Please use `set_vllm_model_wrapper_context` to set the VllmModelWrapperContext."
+    )
     return _vllm_model_wrapper_context
 
+
 @contextmanager
-def set_vllm_model_wrapper_context(*,
-                                   is_prefill: bool,
-                                   kv_caches: List[KVCache],
-                                   attention_metadata: AttentionMetadata,):
+def set_vllm_model_wrapper_context(
+    *,
+    is_prefill: bool,
+    kv_caches: List[KVCache],
+    attention_metadata: AttentionMetadata,
+):
     global _vllm_model_wrapper_context
     prev_context = _vllm_model_wrapper_context
     _vllm_model_wrapper_context = VllmModelWrapperContext(
         is_prefill=is_prefill,
         kv_caches=kv_caches,
-        attention_metadata=attention_metadata,)
+        attention_metadata=attention_metadata,
+    )
 
     try:
         yield

@@ -1,38 +1,28 @@
-from typing import List, Optional, Tuple
-import tempfile
 import functools
-import humanize
-
+import tempfile
+from typing import List, Optional, Tuple
 
 import jax
-from jax.sharding import Mesh
-from flax.typing import PRNGKey
-
 import torch
 import torch.nn
-from torch.utils import _pytree as pytree
-
 import torchax
-from torchax.interop import extract_all_buffers, jax_view, call_torch
+from flax.typing import PRNGKey
+from jax.sharding import Mesh
+from torch.utils import _pytree as pytree
+from torchax.interop import call_torch, extract_all_buffers, jax_view
 from torchax.ops.mappings import j2t_dtype
-
+from vllm.attention import Attention as VllmAttention
+from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
+                                             init_distributed_environment)
+from vllm.model_executor.model_loader import get_model as vllm_get_model
+from vllm.sequence import IntermediateTensors
 
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.layers.sampling import sample
-from tpu_commons.models.vllm.vllm_model_wrapper_context import (
-    get_vllm_model_wrapper_context,
-    set_vllm_model_wrapper_context,
-)
 from tpu_commons.models.vllm.jax_attention_wrapper import JaxAttentionWrapper
-
-
-from vllm.attention import Attention as VllmAttention
-from vllm.config import VllmConfig
-from vllm.config import set_current_vllm_config
-from vllm.model_executor.model_loader import get_model as vllm_get_model
-from vllm.distributed.parallel_state import init_distributed_environment, ensure_model_parallel_initialized
-from vllm.sequence import IntermediateTensors
-
+from tpu_commons.models.vllm.vllm_model_wrapper_context import (
+    get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 
 KVCache = Tuple[jax.Array, jax.Array]
 
@@ -45,6 +35,7 @@ def swap_attention_module(model: torch.nn.Module, mesh: Mesh) -> None:
     Args:
         model: A vLLM model
     """
+
     def _process_module(module, name=None, parent=None):
         if isinstance(module, VllmAttention):
             wrapped_module = JaxAttentionWrapper(module, mesh)
@@ -58,21 +49,23 @@ def swap_attention_module(model: torch.nn.Module, mesh: Mesh) -> None:
 
 
 class ModelForLogits(torch.nn.Module):
+
     def __init__(self, vllm_model: torch.nn.Module):
         super().__init__()
 
         self.vllm_model = vllm_model
 
     def forward(
-            self,
-            input_ids: torch.Tensor,
-            positions: torch.Tensor,
-            intermediate_tensors: Optional[IntermediateTensors],
-            inputs_embeds: Optional[torch.Tensor],
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors],
+        inputs_embeds: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        hidden_state = self.vllm_model(input_ids, positions, intermediate_tensors,
-                                  inputs_embeds)
-        return self.vllm_model.compute_logits(hidden_state, sampling_metadata=None)
+        hidden_state = self.vllm_model(input_ids, positions,
+                                       intermediate_tensors, inputs_embeds)
+        return self.vllm_model.compute_logits(hidden_state,
+                                              sampling_metadata=None)
 
 
 class VllmModelWrapper:
@@ -81,18 +74,14 @@ class VllmModelWrapper:
     rng: PRNGKey
     mesh: Mesh
 
-    def __init__(
-            self,
-            vllm_config: VllmConfig,
-            rng: PRNGKey,
-            mesh: Mesh):
-        vllm_config.model_config.dtype = j2t_dtype(vllm_config.model_config.dtype.dtype)
+    def __init__(self, vllm_config: VllmConfig, rng: PRNGKey, mesh: Mesh):
+        vllm_config.model_config.dtype = j2t_dtype(
+            vllm_config.model_config.dtype.dtype)
         vllm_config.device_config.device = "xla"
 
         self.vllm_config = vllm_config
         self.rng = rng
         self.mesh = mesh
-
 
     def load_weights(self):
         # Initialize the vLLM distribution layer as a single chip environment,
@@ -108,7 +97,8 @@ class VllmModelWrapper:
             )
             ensure_model_parallel_initialized(
                 self.vllm_config.parallel_config.tensor_parallel_size,
-                self.vllm_config.parallel_config.pipeline_parallel_size,)
+                self.vllm_config.parallel_config.pipeline_parallel_size,
+            )
 
         # Load the vLLM model and wrap it into a new model whose forward
         # function calculates the hidden_state and logits in one go.
@@ -123,13 +113,13 @@ class VllmModelWrapper:
         with torchax.default_env():
             self.model_for_logits = model.to('jax')
             params, buffers = extract_all_buffers(self.model_for_logits)
-            params, buffers = pytree.tree_map_only(torch.Tensor, lambda x: x.to('jax'),
-                                                (params, buffers))
+            params, buffers = pytree.tree_map_only(torch.Tensor,
+                                                   lambda x: x.to('jax'),
+                                                   (params, buffers))
             params_and_buffers = {**params, **buffers}
 
         # Returning to the jax world, so we need to wrap it into a jax value.
         return jax_view(params_and_buffers)
-
 
     def jit_step_func(self):
 
@@ -143,7 +133,8 @@ class VllmModelWrapper:
             with set_vllm_model_wrapper_context(
                     is_prefill=is_prefill,
                     kv_caches=kv_caches,
-                    attention_metadata=attention_metadata,):
+                    attention_metadata=attention_metadata,
+            ):
                 logits = torch.func.functional_call(
                     self.model_for_logits,
                     params_and_buffers,
@@ -160,9 +151,9 @@ class VllmModelWrapper:
             return new_kv_caches, logits
 
         @functools.partial(
-                jax.jit,
-                static_argnums=(1, 2),  # is_prefill, do_sampling
-                donate_argnums=(3, ),  # donate kv_cache
+            jax.jit,
+            static_argnums=(1, 2),  # is_prefill, do_sampling
+            donate_argnums=(3, ),  # donate kv_cache
         )
         def step_fun(
             params_and_buffers,
@@ -183,7 +174,8 @@ class VllmModelWrapper:
                 is_prefill,
                 kv_caches,
                 input_ids,
-                attention_metadata,)
+                attention_metadata,
+            )
 
             next_tokens = sample(
                 is_prefill,

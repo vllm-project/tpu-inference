@@ -1,13 +1,14 @@
-from typing import Optional, Tuple
 import functools
+from typing import Optional, Tuple
+
 import jax
 import jax.numpy as jnp
-from jax.sharding import Mesh
-
 import torch
 import torch.nn
-
+from jax.sharding import Mesh
 from torchax.interop import jax_view, torch_view
+from vllm.attention import Attention as VllmAttention
+from vllm.model_executor.models.utils import extract_layer_index
 
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.layers.attention import (sharded_flash_attention,
@@ -15,34 +16,31 @@ from tpu_commons.models.jax.layers.attention import (sharded_flash_attention,
                                                      update_cache)
 from tpu_commons.models.jax.layers.chunked_prefill_attention import (
     sharded_chunked_prefill_attention, sharded_chunked_prefill_update_cache)
-from tpu_commons.models.vllm.vllm_model_wrapper_context import (
-    get_vllm_model_wrapper_context,\
-)
-
-from vllm.attention import Attention as VllmAttention
-from vllm.model_executor.models.utils import extract_layer_index
-
+from tpu_commons.models.vllm.vllm_model_wrapper_context import \
+    get_vllm_model_wrapper_context
 
 KVCache = Tuple[jax.Array, jax.Array]
 
 
 @functools.partial(
-        jax.jit,
-        static_argnums=(0, 6, 7, 8, 9, 10),  # is_prefill, mesh, scale, head_dim, num_heads, num_kv_heads
-        donate_argnums=(1, ),  # donate kv_cache
+    jax.jit,
+    static_argnums=(
+        0, 6, 7, 8, 9,
+        10),  # is_prefill, mesh, scale, head_dim, num_heads, num_kv_heads
+    donate_argnums=(1, ),  # donate kv_cache
 )
 def _jax_attn_func(
-        is_prefill: bool,
-        kv_cache: KVCache,
-        q: jax.Array,
-        k: jax.Array,
-        v: jax.Array,
-        attention_metadata: AttentionMetadata,
-        mesh: Mesh,
-        scale: float,
-        head_dim: int,
-        num_heads: int,
-        num_kv_heads: int,
+    is_prefill: bool,
+    kv_cache: KVCache,
+    q: jax.Array,
+    k: jax.Array,
+    v: jax.Array,
+    attention_metadata: AttentionMetadata,
+    mesh: Mesh,
+    scale: float,
+    head_dim: int,
+    num_heads: int,
+    num_kv_heads: int,
 ) -> Tuple[KVCache, jax.Array]:
 
     # Get shapes from vllm
@@ -83,10 +81,10 @@ def _jax_attn_func(
             attention_metadata.num_prefill_seqs,
         )
     else:
-        k_cache = update_cache(is_prefill, k_cache,
-                               md.kv_cache_write_indices, k)
-        v_cache = update_cache(is_prefill, v_cache,
-                               md.kv_cache_write_indices, v)
+        k_cache = update_cache(is_prefill, k_cache, md.kv_cache_write_indices,
+                               k)
+        v_cache = update_cache(is_prefill, v_cache, md.kv_cache_write_indices,
+                               v)
         if is_prefill:
             # (B, N, T, H)
             # TODO(xiang): support MQA and GQA
@@ -97,8 +95,9 @@ def _jax_attn_func(
         else:
             # (B, N, H)
             q = jnp.squeeze(q, 2)
-            outputs = sharded_paged_attention(mesh)(q, k_cache, v_cache, md.seq_lens,
-                                            md.block_indices)
+            outputs = sharded_paged_attention(mesh)(q, k_cache, v_cache,
+                                                    md.seq_lens,
+                                                    md.block_indices)
             # (B, N, 1, H)
             outputs = jnp.expand_dims(outputs, 2)
 
@@ -115,6 +114,7 @@ def _jax_attn_func(
 
 
 class JaxAttentionWrapper(torch.nn.Module):
+
     def __init__(
         self,
         vllm_attn: VllmAttention,
@@ -129,7 +129,6 @@ class JaxAttentionWrapper(torch.nn.Module):
         self.layer_idx = extract_layer_index(vllm_attn.layer_name)
         self.mesh = mesh
 
-    
     def forward(
         self,
         q: torch.Tensor,
@@ -144,15 +143,9 @@ class JaxAttentionWrapper(torch.nn.Module):
         new_kv_cache, outputs = _jax_attn_func(
             vllm_model_wrapper_context.is_prefill,
             jax_view(vllm_model_wrapper_context.kv_caches[self.layer_idx]),
-            jax_view(q),
-            jax_view(k),
-            jax_view(v),
-            jax_view(vllm_model_wrapper_context.attention_metadata),
-            self.mesh,
-            self.scale,
-            self.head_dim,
-            self.num_heads,
-            self.num_kv_heads)
+            jax_view(q), jax_view(k), jax_view(v),
+            jax_view(vllm_model_wrapper_context.attention_metadata), self.mesh,
+            self.scale, self.head_dim, self.num_heads, self.num_kv_heads)
         new_kv_cache = torch_view(new_kv_cache)
         outputs = torch_view(outputs)
         vllm_model_wrapper_context.kv_caches[self.layer_idx] = new_kv_cache

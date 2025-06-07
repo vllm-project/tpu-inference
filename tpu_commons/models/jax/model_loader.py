@@ -37,6 +37,7 @@ def get_model(
     params = model.load_weights(vllm_config.model_config.model)
     return model, params
 
+
 def get_vllm_model(
     vllm_config: VllmConfig,
     rng: PRNGKey,

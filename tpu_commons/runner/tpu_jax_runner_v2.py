@@ -1,10 +1,8 @@
 # Here we try to bring as much code as possible from Hex-LLM, instead of `tpu_torch_xla_runner.py` -> jax conversion.
 import enum
-import functools
 import math
 import os
-from dataclasses import dataclass
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -51,13 +49,16 @@ class TPUModelRunner():
         devices: List[Any],
         random_key: jax.random.PRNGKey,
     ):
-        env_var_model_impl_type = os.environ.get("MODEL_IMPL_TYPE", "jax").lower()
+        env_var_model_impl_type = os.environ.get("MODEL_IMPL_TYPE",
+                                                 "jax").lower()
         if env_var_model_impl_type == "jax":
             self.model_impl_type = ModelImplEnum.JAX
         elif env_var_model_impl_type == "vllm":
             self.model_impl_type = ModelImplEnum.VLLM
         else:
-            raise ValueError(f"Unknown model implmenentation type: {env_var_model_impl_type}")
+            raise ValueError(
+                f"Unknown model implmenentation type: {env_var_model_impl_type}"
+            )
 
         self.vllm_config = vllm_config
         self.eviction_algorithm = None
@@ -333,7 +334,8 @@ class TPUModelRunner():
             if os.getenv("INSPECT_MODEL") is not None:
                 print(
                     "Model params:\n%s",
-                    get_parameter_overview(self.params, include_stats="sharding"),
+                    get_parameter_overview(self.params,
+                                           include_stats="sharding"),
                 )
         else:  # self.model_impl_type == ModelImplEnum.VLLM
             self.model, self.params = get_vllm_model(
