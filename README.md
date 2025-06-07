@@ -99,15 +99,6 @@ Follow the above [step](#install-vllm-tpu) to install vllm for TPU backend.
 
 Follow the above step to install [tpu_commons](#install-tpu_commons)
 
-#### Install torchax
-
-```
-cd ~
-git clone git@github.com:pytorch/xla.git
-cd xla/torchax
-pip install -e . --no-deps
-```
-
 ### Run example script
 
 ```

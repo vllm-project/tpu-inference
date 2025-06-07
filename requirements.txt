@@ -10,3 +10,4 @@ google-cloud-storage
 --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html
 jaxtyping
 flax
+torchax
