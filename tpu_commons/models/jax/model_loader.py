@@ -49,4 +49,5 @@ def get_vllm_model(
         rng=rng,
         mesh=mesh,
     )
-    return model, model.model_params_and_buffers
+    params = model.load_weights()
+    return model, params

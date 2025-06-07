@@ -255,12 +255,9 @@ class TPUModelRunner():
         for inputs in self._prepare_inputs(scheduler_output):
             if inputs is not None:
                 model_inputs, (running_indices, output_token_indices) = inputs
-                if self.model_impl_type == ModelImplEnum.JAX:
-                    # TODO (jacobplatin): use logits and single_step_attn_scores_decode?
-                    self.kv_caches, next_tokens, logits = self.model_fn(
-                        self.params, *model_inputs)
-                else:  # self.model_impl_type == ModelImplEnum.JAX
-                    self.kv_caches, next_tokens, logtis = self.model_fn(*model_inputs)
+                # TODO (jacobplatin): use logits and single_step_attn_scores_decode?
+                self.kv_caches, next_tokens, logits = self.model_fn(
+                    self.params, *model_inputs)
                 self.output_cache = self.write_outputs(self.output_cache,
                                                        next_tokens,
                                                        running_indices,
@@ -338,7 +335,7 @@ class TPUModelRunner():
                     "Model params:\n%s",
                     get_parameter_overview(self.params, include_stats="sharding"),
                 )
-        else:  # self.model_impl_type == ModelImplEnum.JAX
+        else:  # self.model_impl_type == ModelImplEnum.VLLM
             self.model, self.params = get_vllm_model(
                 self.vllm_config,
                 self.random_key,
@@ -403,9 +400,8 @@ class TPUModelRunner():
                 static_argnums=(1, 2),
                 donate_argnums=3,
             )
-        else:  # self.model_impl_type == ModelImplEnum.JAX
-            self.model.init_jit()
-            self.model_fn = self.model.step_func
+        else:  # self.model_impl_type == ModelImplEnum.VLLM
+            self.model_fn = self.model.jit_step_func()
         self.outputs_sharding = NamedSharding(self.mesh, PartitionSpec(None))
         self.write_outputs = jax.jit(write_outputs,
                                      donate_argnums=0,

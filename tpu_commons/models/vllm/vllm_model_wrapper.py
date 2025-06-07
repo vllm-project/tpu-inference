@@ -13,7 +13,7 @@ import torch.nn
 from torch.utils import _pytree as pytree
 
 import torchax
-from torchax.interop import extract_all_buffers, jax_jit
+from torchax.interop import extract_all_buffers, jax_view, call_torch
 from torchax.ops.mappings import j2t_dtype
 
 
@@ -29,7 +29,7 @@ from tpu_commons.models.vllm.jax_attention_wrapper import JaxAttentionWrapper
 from vllm.attention import Attention as VllmAttention
 from vllm.config import VllmConfig
 from vllm.config import set_current_vllm_config
-from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.distributed.parallel_state import init_distributed_environment, ensure_model_parallel_initialized
 from vllm.sequence import IntermediateTensors
 
@@ -70,9 +70,9 @@ class ModelForLogits(torch.nn.Module):
             intermediate_tensors: Optional[IntermediateTensors],
             inputs_embeds: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        model_output = self.vllm_model(input_ids, positions, intermediate_tensors,
+        hidden_state = self.vllm_model(input_ids, positions, intermediate_tensors,
                                   inputs_embeds)
-        return self.vllm_model.compute_logits(model_output, sampling_metadata=None)
+        return self.vllm_model.compute_logits(hidden_state, sampling_metadata=None)
 
 
 class VllmModelWrapper:
@@ -93,6 +93,10 @@ class VllmModelWrapper:
         self.rng = rng
         self.mesh = mesh
 
+
+    def load_weights(self):
+        # Initialize the vLLM distribution layer as a single chip environment,
+        # we'll swap the model's parallel modules with TPU SPMD equivalents.
         with set_current_vllm_config(self.vllm_config):
             temp_file = tempfile.mkstemp()[1]
             init_distributed_environment(
@@ -106,38 +110,35 @@ class VllmModelWrapper:
                 self.vllm_config.parallel_config.tensor_parallel_size,
                 self.vllm_config.parallel_config.pipeline_parallel_size,)
 
-        model = ModelForLogits(get_model(vllm_config=self.vllm_config))
-        swap_attention_module(model, mesh)
+        # Load the vLLM model and wrap it into a new model whose forward
+        # function calculates the hidden_state and logits in one go.
+        model = ModelForLogits(vllm_get_model(vllm_config=self.vllm_config))
 
-        # model.model.layers = model.model.layers[0:2]
-        jax.config.update("jax_explain_cache_misses", True)
+        swap_attention_module(model, self.mesh)
 
+        # jax.config.update("jax_explain_cache_misses", True)
+
+        # Move the model into torchax 'jax' device so that jax code can interop
+        # with it and the overall program can be traced and compiled in XLA.
         with torchax.default_env():
             self.model_for_logits = model.to('jax')
             params, buffers = extract_all_buffers(self.model_for_logits)
             params, buffers = pytree.tree_map_only(torch.Tensor, lambda x: x.to('jax'),
                                                 (params, buffers))
-            self.model_params_and_buffers = {**params, **buffers}
+            params_and_buffers = {**params, **buffers}
+
+        # Returning to the jax world, so we need to wrap it into a jax value.
+        return jax_view(params_and_buffers)
 
 
-    def init_jit(self):
-        self.model_func = self.get_jitted_model_func()
+    def jit_step_func(self):
 
-
-    def get_jitted_model_func(self):
-        @functools.partial(
-            jax_jit,
-            kwargs_for_jax_jit={
-                "static_argnums": (1, ),
-                "donate_argnums": (2, ),  # kv_caches
-            },
-        )
-        def func(
-            model_params_and_buffers,
-            is_prefill: bool,
-            kv_caches: List[KVCache],
-            input_ids: jax.Array,
-            attention_metadata: AttentionMetadata,
+        def run_vllm_model_for_logits(
+            params_and_buffers,
+            is_prefill,
+            kv_caches,
+            input_ids,
+            attention_metadata,
         ):
             with set_vllm_model_wrapper_context(
                     is_prefill=is_prefill,
@@ -145,7 +146,7 @@ class VllmModelWrapper:
                     attention_metadata=attention_metadata,):
                 logits = torch.func.functional_call(
                     self.model_for_logits,
-                    model_params_and_buffers,
+                    params_and_buffers,
                     kwargs={
                         "input_ids": input_ids,
                         "positions": attention_metadata.input_positions,
@@ -158,73 +159,45 @@ class VllmModelWrapper:
                 new_kv_caches = vllm_model_wrapper_context.kv_caches
             return new_kv_caches, logits
 
-        # import inspect
-        # print(f"signature={inspect.signature(func)}")
-        return func
-
-
-    def step_func(
-        self,
-        is_prefill: bool,
-        do_sampling: bool,
-        kv_caches: List[KVCache],
-        input_ids: jax.Array,
-        attention_metadata: AttentionMetadata,
-        temperatures: jax.Array = None,
-        top_ps: jax.Array = None,
-        top_ks: jax.Array = None,
-        *args,
-    ) -> Tuple[List[KVCache], jax.Array, jax.Array]:
-
-        print("is_prefill={}".format(is_prefill))
-        print("input_ids={}".format(input_ids))
-        print("input_ids.shape={}".format(input_ids.shape))
-        print("input_positions={}".format(attention_metadata.input_positions))
-        print("input_positions.shape={}".format(attention_metadata.input_positions.shape))
-        print(f"attention_metadata.seq_lens={attention_metadata.seq_lens}")
-
-        fmt_size = functools.partial(humanize.naturalsize, binary=True)
-        for d in jax.local_devices():
-            stats = d.memory_stats()
-            used = stats['bytes_in_use']
-            limit = stats['bytes_limit']
-            print(f"TPU device using {fmt_size(used)} / {fmt_size(limit)} ({used/limit:%}) on {d}")
-
-        print(f"type(kv_caches[0][0])={type(kv_caches[0][0])}")
-        print(f"type(kv_caches[0][1])={type(kv_caches[0][1])}")
-        n_elems = 0
-        for kv_cache in kv_caches:
-            n_elems += kv_cache[0].size
-            n_elems += kv_cache[1].size
-        print(f"kv_caches n_elems={n_elems}")
-        print(f"kv_caches dtype = {kv_caches[0][0].dtype}")
-
-
-        new_kv_caches, logits = self.model_func(
-            self.model_params_and_buffers,
-            is_prefill,
-            kv_caches,
-            input_ids,
-            attention_metadata,)
-        new_kv_caches = [(k_cache.jax(), v_cache.jax()) for (k_cache, v_cache) in new_kv_caches]
-        print(f"logits.shape={logits.shape}")
-        print(f"type(logits)={type(logits)}")
-        print(f"logits={logits}")
-        print(f"new_kv_caches dtype = {new_kv_caches[0][0].dtype}")
-        print(f"type(new_kv_caches[0][0]) = {type(new_kv_caches[0][0])}")
-        print(f"type(new_kv_caches[0][1]) = {type(new_kv_caches[0][1])}")
-
-        next_tokens = sample(
-            is_prefill,
-            do_sampling,
-            self.rng,
-            self.mesh,
-            logits.jax(),
-            attention_metadata.seq_lens,
-            temperatures,
-            top_ps,
-            top_ks,
-            attention_metadata.chunked_prefill_enabled,
+        @functools.partial(
+                jax.jit,
+                static_argnums=(1, 2),  # is_prefill, do_sampling
+                donate_argnums=(3, ),  # donate kv_cache
         )
+        def step_fun(
+            params_and_buffers,
+            is_prefill: bool,
+            do_sampling: bool,
+            kv_caches: List[KVCache],
+            input_ids: jax.Array,
+            attention_metadata: AttentionMetadata,
+            temperatures: jax.Array,
+            top_ps: jax.Array,
+            top_ks: jax.Array,
+            *args,
+        ) -> Tuple[List[KVCache], jax.Array, jax.Array]:
 
-        return new_kv_caches, next_tokens, logits
+            new_kv_caches, logits = call_torch(
+                run_vllm_model_for_logits,
+                params_and_buffers,
+                is_prefill,
+                kv_caches,
+                input_ids,
+                attention_metadata,)
+
+            next_tokens = sample(
+                is_prefill,
+                do_sampling,
+                self.rng,
+                self.mesh,
+                logits,
+                attention_metadata.seq_lens,
+                temperatures,
+                top_ps,
+                top_ks,
+                attention_metadata.chunked_prefill_enabled,
+            )
+
+            return new_kv_caches, next_tokens, logits
+
+        return step_fun
