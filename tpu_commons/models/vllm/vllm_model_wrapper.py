@@ -46,7 +46,7 @@ KVCache = Tuple[jax.Array, jax.Array]
 
 @functools.partial(
         jax.jit,
-        static_argnums=(0, 6, 7, 8),  # is_prefill, mesh, num_heads, num_kv_heads
+        static_argnums=(0, 6, 7, 8, 9, 10),  # is_prefill, mesh, scale, head_dim, num_heads, num_kv_heads
         donate_argnums=(1, ),  # donate kv_cache
 )
 def _jax_attn_func(
@@ -57,13 +57,29 @@ def _jax_attn_func(
         v: jax.Array,
         attention_metadata: AttentionMetadata,
         mesh: Mesh,
+        scale: float,
+        head_dim: int,
         num_heads: int,
         num_kv_heads: int,
 ) -> Tuple[KVCache, jax.Array]:
-    # TODO: fix
-    q = q.astype(jnp.bfloat16)
-    k = k.astype(jnp.bfloat16)
-    v = v.astype(jnp.bfloat16)
+
+    # Get shapes from vllm
+    bs, q_len, q_compute_dim = q.shape
+    _, k_len, k_compute_dim = k.shape
+    assert k.shape == v.shape
+    assert k.shape[0] == bs
+    assert q_compute_dim == head_dim * num_heads
+    assert k_compute_dim == head_dim * num_kv_heads
+
+    # Convert the shapes from vLLM's convetion to what the attention function expects
+    # bs, num_heads, q_len, head_dim
+    q = q.reshape(bs, q_len, num_heads, head_dim).swapaxes(1, 2)
+    # bs, num_kv_heads, k_len, head_dim
+    k = k.reshape(bs, k_len, num_kv_heads, head_dim).swapaxes(1, 2)
+    v = v.reshape(bs, k_len, num_kv_heads, head_dim).swapaxes(1, 2)
+
+    # vLLM scales q in the common Attention class, but jax models scale it in each of the model code.
+    q = (q * scale).astype(q.dtype)
 
     md = attention_metadata
     k_cache, v_cache = kv_cache
@@ -103,7 +119,15 @@ def _jax_attn_func(
                                             md.block_indices)
             # (B, N, 1, H)
             outputs = jnp.expand_dims(outputs, 2)
-    
+
+    # Convert the shape back to vLLM's convention
+    assert outputs.shape[0] == bs
+    assert outputs.shape[1] == num_heads
+    assert outputs.shape[2] == q_len
+    assert outputs.shape[3] == head_dim
+    outputs = outputs.swapaxes(1, 2)  # bs, q_len, num_heads, head_dim
+    outputs = outputs.reshape(bs, q_len, q_compute_dim)
+
     new_kv_cache = (k_cache, v_cache)
     return new_kv_cache, outputs
 
@@ -117,7 +141,7 @@ class JaxAttentionWrapper(torch_nn.Module):
         super().__init__()
 
         self.num_heads = vllm_attn.num_heads
-        self.head_size = vllm_attn.head_size
+        self.head_dim = vllm_attn.head_size
         self.scale = vllm_attn.impl.scale
         self.num_kv_heads = vllm_attn.num_kv_heads
         self.layer_idx = extract_layer_index(vllm_attn.layer_name)
@@ -134,43 +158,7 @@ class JaxAttentionWrapper(torch_nn.Module):
         # definition specify the output tensor shape.
         output_shape: Optional[torch.Size] = None,
     ) -> torch.Tensor:
-        # if self.layer_idx <= 1:
-        #     jax.debug.print("layer_idx={layer_idx}: before reshape q={q}\nk={k}\nv={v}",
-        #                     layer_idx=self.layer_idx, q=q.jax(), k=k.jax(), v=v.jax())
-            #jax.debug.breakpoint()
-        
-        # print("q.shape={}".format(q.shape))
-        # print("k.shape={}".format(k.shape))
-        # print("v.shape={}".format(v.shape))
-        # print("k_cache.shape={}".format(kv_cache[0].shape))
-        # print("v_cache.shape={}".format(kv_cache[1].shape))
-
         vllm_model_wrapper_context = get_vllm_model_wrapper_context()
-
-        head_dim = self.head_size
-        bs, q_len, q_compute_dim = q.shape
-        num_heads = q_compute_dim // head_dim
-
-        _, k_len, k_compute_dim = k.shape
-        assert k.shape == v.shape
-        assert k.shape[0] == bs
-        num_kv_heads = k_compute_dim // head_dim
-
-        # bs, num_heads, q_len, head_dim
-        q = q.reshape(bs, q_len, num_heads, head_dim).swapaxes(1, 2)
-        # vllm scales q in the common Attention class, but hex-llm scales it in each of the model code.
-        q = q * self.scale
-        # bs, num_kv_heads, k_len, head_dim
-        k = k.reshape(bs, k_len, num_kv_heads, head_dim).swapaxes(1, 2)
-        v = v.reshape(bs, k_len, num_kv_heads, head_dim).swapaxes(1, 2)
-
-        if self.layer_idx <= 1:
-            kv_cache=vllm_model_wrapper_context.kv_caches[self.layer_idx]
-            k_cache = kv_cache[0]
-            v_cache = kv_cache[1]
-            jax.debug.print("layer_idx={layer_idx}: after reshape\nq={q}\nk={k}\nv={v}\nk_cache={k_cache}\nv_cache={v_cache}",
-                            layer_idx=self.layer_idx, q=q.jax(), k=k.jax(), v=v.jax(), k_cache=k_cache.jax(), v_cache=v_cache.jax())
-
         new_kv_cache, outputs = _jax_attn_func(
             vllm_model_wrapper_context.is_prefill,
             jax_view(vllm_model_wrapper_context.kv_caches[self.layer_idx]),
@@ -179,29 +167,13 @@ class JaxAttentionWrapper(torch_nn.Module):
             jax_view(v),
             jax_view(vllm_model_wrapper_context.attention_metadata),
             self.mesh,
+            self.scale,
+            self.head_dim,
             self.num_heads,
             self.num_kv_heads)
         new_kv_cache = torch_view(new_kv_cache)
         outputs = torch_view(outputs)
         vllm_model_wrapper_context.kv_caches[self.layer_idx] = new_kv_cache
-
-        # print("outputs.shape={}".format(outputs.shape))
-        if self.layer_idx <= 1:
-            kv_cache=vllm_model_wrapper_context.kv_caches[self.layer_idx]
-            k_cache = kv_cache[0]
-            v_cache = kv_cache[1]
-            jax.debug.print("layer_idx={layer_idx}: before reshape\noutputs={outputs}\nk_cache={k_cache}\nv_cache={v_cache}",
-                            layer_idx=self.layer_idx, outputs=outputs.jax(), k_cache=k_cache.jax(), v_cache=v_cache.jax())
-
-        assert outputs.shape[0] == bs
-        assert outputs.shape[1] == num_heads
-        assert outputs.shape[2] == q_len
-        assert outputs.shape[3] == head_dim
-        outputs = outputs.swapaxes(1, 2)  # bs, q_len, num_heads, head_dim
-        outputs = outputs.reshape(bs, q_len, num_heads*head_dim)
-
-        # if self.layer_idx <= 1:
-        #     jax.debug.print("layer_idx={layer_idx}: after reshape outputs={outputs}", layer_idx=self.layer_idx, outputs=outputs.jax())
 
         return outputs
 
