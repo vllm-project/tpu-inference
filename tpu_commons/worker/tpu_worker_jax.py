@@ -74,10 +74,6 @@ class TPUWorker(WorkerBase):
         utils.set_visible_device_ids(device_ids)
 
     def init_device(self):
-        if self.model_config.seed is None:
-            self.model_config.seed = 0
-        random_key = utils.init_random(self.model_config.seed)
-
         self.devices = jax.local_devices()
         self.global_devices = jax.devices()
 
@@ -86,8 +82,7 @@ class TPUWorker(WorkerBase):
                     f"hbm={utils.hbm_usage_gb(self.devices)}Gb | "
                     f"global_devices={len(self.global_devices)}")
 
-        self.model_runner = TPUModelRunner(self.vllm_config, self.devices,
-                                           random_key)
+        self.model_runner = TPUModelRunner(self.vllm_config, self.devices)
 
     def determine_available_memory(self) -> int:
         # We don't trigger a dummy batch run to calculate the usage,

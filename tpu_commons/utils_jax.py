@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import List, Tuple
+from typing import Any, List, Tuple
 
 import jax
-import numpy as np
 from ray._private.accelerators import TPUAcceleratorManager
 
 GBYTES = 1024 * 1024 * 1024
@@ -41,7 +40,7 @@ def get_num_kv_heads_by_tp(num_kv_heads: int, tp_size: int) -> int:
         return tp_size
 
 
-def hbm_usage_bytes(devices: jax.Device) -> List[Tuple[int, int]]:
+def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
     usage = []
     for device in devices:
         hbm_used = device.memory_stats()["bytes_in_use"]
@@ -50,17 +49,11 @@ def hbm_usage_bytes(devices: jax.Device) -> List[Tuple[int, int]]:
     return usage
 
 
-def hbm_usage_gb(devices: List[jax.Device]) -> List[Tuple[float, float]]:
+def hbm_usage_gb(devices: Any) -> List[Tuple[float, float]]:
     usage = hbm_usage_bytes(devices)
     usage = [(round(used / GBYTES, 2), round(limit / GBYTES, 2))
              for used, limit in usage]
     return usage
-
-
-def init_random(seed: int) -> jax.Array:
-    np.random.seed(seed)
-    key = jax.random.PRNGKey(seed)
-    return key
 
 
 def array_info(name: str, x: jax.Array) -> str:

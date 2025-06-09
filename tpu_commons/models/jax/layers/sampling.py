@@ -1,6 +1,5 @@
 import jax
 import jax.numpy as jnp
-from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
@@ -10,7 +9,7 @@ from tpu_commons.models.jax.layers.binary_search import topk_mask, topp_mask
 def sample(
     is_prefill: bool,
     do_sampling: bool,
-    rng: PRNGKey,
+    rng: jax.Array,
     mesh: Mesh,
     logits: jax.Array,
     seq_lens: jax.Array,

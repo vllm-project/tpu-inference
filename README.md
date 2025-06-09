@@ -66,11 +66,12 @@ To enable JAX path:
 TPU_BACKEND_TYPE=jax
 ```
 
-To use vLLM model implementations, set both:
+To switch different model implementations:
 
 ```
+MODEL_IMPL_TYPE=flax_nn
+MODEL_IMPL_TYPE=flax_nnx
 MODEL_IMPL_TYPE=vllm
-TPU_BACKEND_TYPE=jax
 ```
 
 To enable experimental scheduler:

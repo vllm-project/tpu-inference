@@ -5,7 +5,6 @@ import jax
 import jax.numpy as jnp
 from flax import linen as nn
 from flax.traverse_util import unflatten_dict
-from flax.typing import PRNGKey
 from jax.sharding import Mesh
 from transformers import LlamaConfig, modeling_flax_utils
 from vllm.config import VllmConfig
@@ -293,7 +292,7 @@ class LlamaModel(nn.Module):
 
 class LlamaForCausalLM(nn.Module):
     vllm_config: VllmConfig
-    rng: PRNGKey
+    rng: jax.Array
     mesh: Mesh
 
     def setup(self) -> None:
