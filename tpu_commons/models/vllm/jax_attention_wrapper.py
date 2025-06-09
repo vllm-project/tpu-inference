@@ -142,12 +142,10 @@ class JaxAttentionWrapper(torch.nn.Module):
         vllm_model_wrapper_context = get_vllm_model_wrapper_context()
         new_kv_cache, outputs = _jax_attn_func(
             vllm_model_wrapper_context.is_prefill,
-            jax_view(vllm_model_wrapper_context.kv_caches[self.layer_idx]),
-            jax_view(q), jax_view(k), jax_view(v),
-            jax_view(vllm_model_wrapper_context.attention_metadata), self.mesh,
+            vllm_model_wrapper_context.kv_caches[self.layer_idx], jax_view(q),
+            jax_view(k), jax_view(v),
+            vllm_model_wrapper_context.attention_metadata, self.mesh,
             self.scale, self.head_dim, self.num_heads, self.num_kv_heads)
-        new_kv_cache = torch_view(new_kv_cache)
-        outputs = torch_view(outputs)
         vllm_model_wrapper_context.kv_caches[self.layer_idx] = new_kv_cache
 
-        return outputs
+        return torch_view(outputs)

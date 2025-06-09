@@ -9,7 +9,7 @@ import torchax
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
 from torch.utils import _pytree as pytree
-from torchax.interop import call_torch, extract_all_buffers, jax_view
+from torchax.interop import extract_all_buffers, jax_view, torch_view
 from torchax.ops.mappings import j2t_dtype
 from vllm.attention import Attention as VllmAttention
 from vllm.config import VllmConfig, set_current_vllm_config
@@ -118,37 +118,10 @@ class VllmModelWrapper:
                                                    (params, buffers))
             params_and_buffers = {**params, **buffers}
 
-        # Returning to the jax world, so we need to wrap it into a jax value.
+        # Returning to the jax land, so we need to wrap it into a JaxValue.
         return jax_view(params_and_buffers)
 
     def jit_step_func(self):
-
-        def run_vllm_model_for_logits(
-            params_and_buffers,
-            is_prefill,
-            kv_caches,
-            input_ids,
-            attention_metadata,
-        ):
-            with set_vllm_model_wrapper_context(
-                    is_prefill=is_prefill,
-                    kv_caches=kv_caches,
-                    attention_metadata=attention_metadata,
-            ):
-                logits = torch.func.functional_call(
-                    self.model_for_logits,
-                    params_and_buffers,
-                    kwargs={
-                        "input_ids": input_ids,
-                        "positions": attention_metadata.input_positions,
-                        "intermediate_tensors": None,
-                        "inputs_embeds": None,
-                    },
-                    tie_weights=False,
-                    strict=True)
-                vllm_model_wrapper_context = get_vllm_model_wrapper_context()
-                new_kv_caches = vllm_model_wrapper_context.kv_caches
-            return new_kv_caches, logits
 
         @functools.partial(
             jax.jit,
@@ -156,7 +129,7 @@ class VllmModelWrapper:
             donate_argnums=(3, ),  # donate kv_cache
         )
         def step_fun(
-            params_and_buffers,
+            params_and_buffers,  # this has been wrapped into a torchax TorchValue
             is_prefill: bool,
             do_sampling: bool,
             kv_caches: List[KVCache],
@@ -168,14 +141,30 @@ class VllmModelWrapper:
             *args,
         ) -> Tuple[List[KVCache], jax.Array, jax.Array]:
 
-            new_kv_caches, logits = call_torch(
-                run_vllm_model_for_logits,
-                params_and_buffers,
-                is_prefill,
-                kv_caches,
-                input_ids,
-                attention_metadata,
-            )
+            with torchax.default_env(), set_vllm_model_wrapper_context(
+                    is_prefill=is_prefill,
+                    kv_caches=kv_caches,
+                    attention_metadata=attention_metadata,
+            ):
+                # We need to wrap args from jax land into TorchValue with
+                # torch_view in order to call the Torch function.
+                logits = torch.func.functional_call(
+                    self.model_for_logits,
+                    torch_view(params_and_buffers),
+                    kwargs={
+                        "input_ids": torch_view(input_ids),
+                        "positions":
+                        torch_view(attention_metadata.input_positions),
+                        "intermediate_tensors": None,
+                        "inputs_embeds": None,
+                    },
+                    tie_weights=False,
+                    strict=True)
+                vllm_model_wrapper_context = get_vllm_model_wrapper_context()
+                new_kv_caches = vllm_model_wrapper_context.kv_caches
+            # Wrap the logits from torch land into a JaxValue for the jax code
+            # to consume.
+            logits = jax_view(logits)
 
             next_tokens = sample(
                 is_prefill,
