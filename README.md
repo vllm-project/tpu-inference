@@ -27,8 +27,6 @@ pre-commit run --all-files
 
 ## Run JAX path examples
 
-**NOTE**: This is under development so the run may fail.
-
 Run `Llama 3.1 8B` offline inference on 4 TPU chips:
 
 ```
