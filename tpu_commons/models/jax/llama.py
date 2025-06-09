@@ -10,12 +10,8 @@ from transformers import LlamaConfig, modeling_flax_utils
 from vllm.config import VllmConfig
 
 from tpu_commons.logger import init_logger
+from tpu_commons.models.jax.attention_interface import KVCache, attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.models.jax.layers.attention import (sharded_flash_attention,
-                                                     sharded_paged_attention,
-                                                     update_cache)
-from tpu_commons.models.jax.layers.chunked_prefill_attention import (
-    sharded_chunked_prefill_attention, sharded_chunked_prefill_update_cache)
 from tpu_commons.models.jax.layers.misc import (Einsum, Embedder, RMSNorm,
                                                 shard_put)
 from tpu_commons.models.jax.layers.params import sharding_init
@@ -24,8 +20,6 @@ from tpu_commons.models.jax.layers.sampling import sample
 from tpu_commons.models.jax.utils.weight_utils import hf_model_weights_iterator
 
 logger = init_logger(__name__)
-
-KVCache = Tuple[jax.Array, jax.Array]
 
 
 class LlamaMLP(nn.Module):
@@ -102,8 +96,6 @@ class LlamaAttention(nn.Module):
             named_axes=("model", None, None),
             mesh=self.mesh,
         )
-        self.flash_attention = sharded_flash_attention(self.mesh)
-        self.paged_attention = sharded_paged_attention(self.mesh)
 
     def __call__(
         self,
@@ -137,54 +129,21 @@ class LlamaAttention(nn.Module):
         # v: (B, K, T, H)
         v = self.v_proj("BTD,KDH->BKTH", x)
 
-        # (K, L, S, H)
-        k_cache, v_cache = kv_cache
-        if md.chunked_prefill_enabled:
-            k_cache = sharded_chunked_prefill_update_cache(self.mesh)(
-                k_cache, md.kv_cache_write_indices, k, md.num_decode_seqs)
-            v_cache = sharded_chunked_prefill_update_cache(self.mesh)(
-                v_cache, md.kv_cache_write_indices, v, md.num_decode_seqs)
-            outputs = sharded_chunked_prefill_attention(self.mesh)(
-                q,
-                k_cache,
-                v_cache,
-                attention_metadata.decode_lengths,
-                attention_metadata.decode_page_indices,
-                attention_metadata.num_decode_seqs,
-                attention_metadata.prefill_lengths,
-                attention_metadata.prefill_page_indices,
-                attention_metadata.prefill_query_start_offsets,
-                attention_metadata.num_prefill_seqs,
-            )
-        else:
-            k_cache = update_cache(is_prefill, k_cache,
-                                   md.kv_cache_write_indices, k)
-            v_cache = update_cache(is_prefill, v_cache,
-                                   md.kv_cache_write_indices, v)
-            if is_prefill:
-                # (B, N, T, H)
-                # TODO(xiang): support MQA and GQA
-                if self.num_kv_heads != self.num_heads:
-                    k = jnp.repeat(k,
-                                   self.num_heads // self.num_kv_heads,
-                                   axis=1)
-                    v = jnp.repeat(v,
-                                   self.num_heads // self.num_kv_heads,
-                                   axis=1)
-                outputs = sharded_flash_attention(self.mesh)(q, k, v)
-            else:
-                # (B, N, H)
-                q = jnp.squeeze(q, 2)
-                outputs = sharded_paged_attention(self.mesh)(q, k_cache,
-                                                             v_cache,
-                                                             md.seq_lens,
-                                                             md.block_indices)
-                # (B, N, 1, H)
-                outputs = jnp.expand_dims(outputs, 2)
+        new_kv_cache, outputs = attention(
+            is_prefill,
+            kv_cache,
+            q,
+            k,
+            v,
+            attention_metadata,
+            self.mesh,
+            self.num_heads,
+            self.num_kv_heads,
+        )
 
         # (B, T, D)
         o = self.o_proj("BNTH,NHD->BTD", outputs)
-        return (k_cache, v_cache), o
+        return new_kv_cache, o
 
 
 class LlamaDecoderLayer(nn.Module):

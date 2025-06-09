@@ -18,13 +18,12 @@ from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.sequence import IntermediateTensors
 
+from tpu_commons.models.jax.attention_interface import KVCache
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.layers.sampling import sample
 from tpu_commons.models.vllm.jax_attention_wrapper import JaxAttentionWrapper
 from tpu_commons.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
-
-KVCache = Tuple[jax.Array, jax.Array]
 
 
 def swap_attention_module(model: torch.nn.Module, mesh: Mesh) -> None:
