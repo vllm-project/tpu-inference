@@ -8,7 +8,7 @@ from transformers import LlamaConfig, modeling_flax_utils
 from vllm.config import VllmConfig
 
 from tpu_commons.logger import init_logger
-from tpu_commons.models.jax.attention_interface import KVCache, attention
+from tpu_commons.models.jax.attention_interface import KVCache, QuantizedKVCache, attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.layers.rope import apply_rope
 from tpu_commons.models.jax.layers.sampling import sample
@@ -17,7 +17,6 @@ from tpu_commons.models.jax.utils.weight_utils import load_hf_weights
 logger = init_logger(__name__)
 
 init_fn = nnx.initializers.uniform()
-
 
 class LlamaMLP(nnx.Module):
 
@@ -105,7 +104,7 @@ class LlamaAttention(nnx.Module):
     def __call__(
         self,
         is_prefill: bool,
-        kv_cache: Optional[KVCache],
+        kv_cache: KVCache | QuantizedKVCache | None,
         x: jax.Array,
         attention_metadata: AttentionMetadata,
     ) -> Tuple[KVCache, jax.Array]:
@@ -177,7 +176,7 @@ class LlamaDecoderLayer(nnx.Module):
     def __call__(
         self,
         is_prefill: bool,
-        kv_cache: KVCache,
+        kv_cache: KVCache | QuantizedKVCache,
         x: jax.Array,
         attention_metadata: AttentionMetadata,
     ) -> Tuple[KVCache, jax.Array]:
@@ -281,7 +280,7 @@ class LlamaForCausalLM(nnx.Module):
         self,
         is_prefill: bool,
         do_sampling: bool,
-        kv_caches: List[KVCache],
+        kv_caches: List[KVCache | QuantizedKVCache],
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
         temperatures: jax.Array = None,

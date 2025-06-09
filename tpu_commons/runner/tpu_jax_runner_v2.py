@@ -1,6 +1,7 @@
 # Here we try to bring as much code as possible from Hex-LLM, instead of `tpu_torch_xla_runner.py` -> jax conversion.
 # This runner is a port of https://source.corp.google.com/h/vertex-model-garden/hex-llm/+/main:hex_llm/worker/runner_jax.py
 import math
+import os
 from typing import Any, List, Optional, Tuple
 
 import jax
@@ -22,7 +23,7 @@ from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.model_loader import get_model
 from tpu_commons.runner.input_batch_jax import CachedRequestState, InputBatch
 from tpu_commons.runner.tpu_torch_xla_runner import _get_token_paddings
-from tpu_commons.runner.utils import determine_do_sampling
+from tpu_commons.runner.utils import determine_do_sampling, get_jnp_dtype_from_str
 
 logger = init_logger(__name__)
 
@@ -189,7 +190,14 @@ class TPUModelRunner():
 
         kv_cache_spec = kv_cache_groups[0].kv_cache_spec
         layer_names = kv_cache_groups[0].layer_names
+        # TODO (jacobplatin): figure out how to make this part of the kv_cache_config instead of an env var
+        maybe_quantized_kv_cache_dtype = os.environ.get("QUANTIZED_KV_CACHE_DTYPE")
+        self.is_kv_cache_quantized = False
         cache_dtype = jnp.bfloat16
+        if maybe_quantized_kv_cache_dtype is not None:
+            self.is_kv_cache_quantized = True
+            cache_dtype = get_jnp_dtype_from_str(maybe_quantized_kv_cache_dtype)
+
         # TODO(xiang): fix this together with get_kv_cache_spec
         # cache_dtype = kv_cache_spec.dtype
 
@@ -205,19 +213,39 @@ class TPUModelRunner():
         logger.info(
             f"Init kv-cache | shape={len(layer_names)} * {cache_shape}")
 
+        scale_shape = None
+        if self.is_kv_cache_quantized:
+            scale_shape = (kv_cache_spec.num_kv_heads, kv_cache_config.num_blocks,
+                        kv_cache_spec.block_size, 1)
+
+            logger.info(
+                f"Init kv-cache scale | shape={len(layer_names)} * {scale_shape}")
+            logger.info(f"kv cache quantized | dtype={maybe_quantized_kv_cache_dtype}")
+
         # Shard the num_kv_heads dim along the 'model' axis.
         sharding = NamedSharding(self.mesh, PartitionSpec("model"))
 
-        def _allocate() -> Any:
-            return jnp.empty(
-                shape=cache_shape,
-                dtype=cache_dtype,
-            )
+        def _allocate(is_kv_cache_quantized: bool) -> Any:
+            if not is_kv_cache_quantized:
+                return jnp.empty(
+                    shape=cache_shape,
+                    dtype=cache_dtype,
+                )
+            else:
+                # Return a tuple where the first entry is the values and the second entry is the scales
+                return (jnp.empty(
+                    shape=cache_shape,
+                    dtype=cache_dtype,
+                ), jnp.empty(
+                    shape=scale_shape,
+                    dtype=cache_dtype,
+                ))
 
-        sharded_allocate = jax.jit(_allocate, out_shardings=sharding)
+        sharded_allocate = jax.jit(_allocate, out_shardings=sharding, static_argnums=(0,))
+        # sharded_allocate = _allocate
         for _ in layer_names:
-            k_cache = sharded_allocate()
-            v_cache = sharded_allocate()
+            k_cache = sharded_allocate(self.is_kv_cache_quantized)
+            v_cache = sharded_allocate(self.is_kv_cache_quantized)
             self.kv_caches.append((k_cache, v_cache))
 
         # From @pooyam to @xiangxu: Feel free to edit the output_cache however you want. I added to unblock testing.
@@ -269,6 +297,8 @@ class TPUModelRunner():
         # TODO(pooyam): We probably can use ragged attention for new_partial_prefills as well.
         if new_full_prefill_seqs and not new_partial_prefill_seqs and not subsequent_partial_prefill_seqs and not decoding_seqs:
             return self._prepare_prefill(scheduler_output)
+
+        raise ValueError("Not implemented KV Cache for chunked prefill")
 
         # All other cases fall into the "chunked prefill" category
         # TODO(pooyam): Change `prepare_prefill` to respect num scheduled tokens, so we can use prefill_kernel even for new partial prefills.
