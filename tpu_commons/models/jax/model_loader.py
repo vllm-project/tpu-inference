@@ -93,8 +93,26 @@ def get_nnx_model(
 
     # TODO(xiang): load weights from HF
 
-    # TODO(xiang): this runs ridiculously slow, need to jit model() further
-    return model
+    kv_cache_sharding = NamedSharding(mesh, PartitionSpec("model"))
+    outputs_sharding = NamedSharding(mesh, PartitionSpec(None))
+    logits_cache_sharding = NamedSharding(mesh, PartitionSpec(None))
+
+    @nnx.jit(out_shardings=(
+        kv_cache_sharding,
+        outputs_sharding,
+        logits_cache_sharding,
+    ),
+             static_argnums=(1, 2),
+             donate_argnums=3)
+    def run_model(model: nnx.Module, *args):
+        return model(*args)
+
+    def model_fn(model, *args):
+        with mesh:
+            return run_model(model, *args)
+
+    model_fn = functools.partial(model_fn, model)
+    return model_fn
 
 
 def get_vllm_model(
