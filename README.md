@@ -181,7 +181,7 @@ docker run \
   $DOCKER_URI
 ```
 
-Note: if the $USER in your TPU-VM is different than that in the development machine, please change the image tag accordingly.
+Note: if the `$USER` in your TPU-VM is different than that in the development machine, please change the image tag accordingly.
 
 Inside the docker, you need:
 
