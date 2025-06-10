@@ -30,6 +30,8 @@ RUN python3 -m pip install --no-cache-dir git+https://github.com/thuml/depyf.git
 WORKDIR /workspace/tpu_commons
 COPY . .
 RUN pip install -r requirements.txt
+# These are needed for the E2E benchmarking tests (i.e. tests/e2e/benchmarking/llama3.1_8b_mmlu_few_prompt.sh)
+RUN pip install -r requirements_benchmarking.txt
 RUN pip install -e .
 
 CMD ["/bin/bash"]

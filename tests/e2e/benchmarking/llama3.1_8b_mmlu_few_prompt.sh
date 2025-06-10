@@ -5,7 +5,7 @@
 # 2. Once the server is ready, run the single prompt MMLU benchmark
 # 3. Check the ROUGE score and throughput and exit cleanly if and only if they are both reasonably high
 
-# Example usage: bash tests/e2e/benchmarking/llama3.1_8b_mmlu_single_prompt.sh
+# Example usage: bash tests/e2e/benchmarking/llama3.1_8b_mmlu_few_prompt.sh
 # Logs the vLLM server output to a file
 LOG_FILE="server.log"
 BENCHMARK_LOG_FILE="benchmark.log"
@@ -171,7 +171,7 @@ if $did_find_ready_message && ! $timeout_hit; then
     --model "$model_name" \
     --dataset-name mlperf \
     --dataset-path "$dataset_path" \
-    --num-prompts 1 \
+    --num-prompts 10 \
     --run_eval 2>&1 | tee -a "$BENCHMARK_LOG_FILE"
 
     checkThroughputAndRouge

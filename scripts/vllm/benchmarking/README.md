@@ -8,6 +8,8 @@ In order to begin benchmarking TPU Commons (via vLLM), you'll want to copy all o
 * `scripts/vllm/benchmarking/benchmark_serving.py`
 * `scripts/vllm/benchmarking/benchmark_utils.py`
 
+You'll also want to install all the necessary requirements via `pip install -r requirements_benchmarking.txt`
+
 ## Downloading the Data
 To download and extract the MLPerf data, you can run:
 
@@ -33,7 +35,7 @@ dataset_path=data/test/
 In order to run the benchmarks, navigate to your vLLM root directory and spin up a server to serve your model, for example:
 
 ```
-TPU_BACKEND_TYPE=jax vllm serve meta-llama/Meta-Llama-3-8B-Instruct --max-model-len=1024 --disable-log-requests --tensor-parallel-size 8 --max-num-batched-tokens 8196 --max-num-seqs=1
+TPU_BACKEND_TYPE=jax vllm serve meta-llama/Llama-3.1-8B-Instruct --max-model-len=1024 --disable-log-requests --tensor-parallel-size 8 --max-num-batched-tokens 8196 --max-num-seqs=1
 ```
 
 Once the server has begun -- you should see a message such as `INFO:     Application startup complete.` -- you can now run the client benchmarking command (in a new terminal) in your local vLLM repo:
@@ -50,33 +52,33 @@ Once the server has begun -- you should see a message such as `INFO:     Applica
 
 Note that you can also specify `mmlu` for the `dataset-name` (but your results will be different).
 
-If all goes well, you should an output similar to (noting that your numbers might be different):
+If all goes well, you should an output similar to:
 
 ```
 ============ Serving Benchmark Result ============
-Successful requests:                     50
-Benchmark duration (s):                  68.70
-Total input tokens:                      2956
-Total generated tokens:                  7422
-Request throughput (req/s):              0.73
-Output token throughput (tok/s):         108.03
-Total Token throughput (tok/s):          151.06
+Successful requests:                     XX
+Benchmark duration (s):                  XX
+Total input tokens:                      XX
+Total generated tokens:                  XX
+Request throughput (req/s):              XX
+Output token throughput (tok/s):         XX
+Total Token throughput (tok/s):          XX
 ---------------Time to First Token----------------
-Mean TTFT (ms):                          38954.14
-Median TTFT (ms):                        32214.06
-P99 TTFT (ms):                           67659.68
+Mean TTFT (ms):                          XX
+Median TTFT (ms):                        XX
+P99 TTFT (ms):                           XX
 -----Time per Output Token (excl. 1st token)------
-Mean TPOT (ms):                          6.75
-Median TPOT (ms):                        5.80
-P99 TPOT (ms):                           30.52
+Mean TPOT (ms):                          XX
+Median TPOT (ms):                        XX
+P99 TPOT (ms):                           XX
 ---------------Inter-token Latency----------------
-Mean ITL (ms):                           7.16
-Median ITL (ms):                         5.77
-P99 ITL (ms):                            6.31
+Mean ITL (ms):                           XX
+Median ITL (ms):                         XX
+P99 ITL (ms):                            XX
 ==================================================
 Evaluating MLPerf...
 
 Results
 
-{'rouge1': 35.5177, 'rouge2': 16.4534, 'rougeL': 24.0036, 'rougeLsum': 34.2323, 'gen_num': 50}
+{'rouge1': XX, 'rouge2': XX, 'rougeL': XX, 'rougeLsum': XX, 'gen_num': XX}
 ```

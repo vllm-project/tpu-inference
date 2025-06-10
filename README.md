@@ -116,8 +116,8 @@ In order to run an [E2E benchmark test](https://github.com/vllm-project/tpu_comm
 following command locally:
 
 ```
-BUILDKITE_COMMIT=3843efc .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/llama3.1_8b_mmlu_single_prompt.sh
+BUILDKITE_COMMIT=3843efc .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/llama3.1_8b_mmlu_few_prompt.sh
 ```
 
-While this while run the code in a Docker image, you can also run the bare `tests/e2e/benchmarking/llama3.1_8b_mmlu_single_prompt.sh` script itself,
+While this will run the code in a Docker image, you can also run the bare `tests/e2e/benchmarking/llama3.1_8b_mmlu_few_prompt.sh` script itself,
 being sure to pass the proper args for your machine.

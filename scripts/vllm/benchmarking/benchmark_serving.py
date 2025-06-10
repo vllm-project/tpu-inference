@@ -1,3 +1,5 @@
+# Copied from vLLM: https://github.com/vllm-project/vllm/blob/02f0c7b/benchmarks/benchmark_serving.py
+
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 r"""Benchmark online serving throughput.
@@ -25,15 +27,12 @@ On the client side, run:
 import argparse
 import asyncio
 import gc
-import json
-import os
 import random
 import time
 import warnings
 from collections.abc import AsyncGenerator, Iterable
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any, Optional
+from typing import Optional
 
 import numpy as np
 from backend_request_func import (ASYNC_REQUEST_FUNCS,
@@ -53,17 +52,10 @@ except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
 # yapf: disable
-from benchmark_dataset import (AIMODataset, ASRDataset, BurstGPTDataset,
-                               ConversationDataset, CustomDataset,
-                               HuggingFaceDataset, InstructCoderDataset,
-                               MLPerfDataset, MMLUDataset, MTBenchDataset,
-                               NextEditPredictionDataset, RandomDataset,
-                               SampleRequest, ShareGPTDataset, SonnetDataset,
-                               VisionArenaDataset)
+from benchmark_dataset import MLPerfDataset, MMLUDataset, SampleRequest
 # yapf: disable
-from benchmark_utils import (convert_to_pytorch_benchmark_format,
-                             eval_benchmark_dataset_result,
-                             sample_warmup_requests, write_to_json)
+from benchmark_utils import (eval_benchmark_dataset_result,
+                             sample_warmup_requests)
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 
@@ -147,7 +139,6 @@ def calculate_metrics(
     outputs: list[RequestFuncOutput],
     dur_s: float,
     tokenizer: PreTrainedTokenizerBase,
-    selected_percentile_metrics: list[str],
     selected_percentiles: list[float],
     goodput_config_dict: dict[str, float],
 ) -> tuple[BenchmarkMetrics, list[int]]:
@@ -264,12 +255,10 @@ async def benchmark(
     burstiness: float,
     disable_tqdm: bool,
     profile: bool,
-    selected_percentile_metrics: list[str],
     selected_percentiles: list[float],
     ignore_eos: bool,
     goodput_config_dict: dict[str, float],
     max_concurrency: Optional[int],
-    lora_modules: Optional[Iterable[str]],
     extra_body: Optional[dict],
 ):
     if backend in ASYNC_REQUEST_FUNCS:
@@ -313,11 +302,6 @@ async def benchmark(
                     "Warmup failed - Please make sure benchmark arguments "
                     f"are correctly specified. Error: {test_output.error}")
         print(f"Warmup (mode: {args.warmup_mode}) has completed.")
-
-    if lora_modules:
-        # For each input request, choose a LoRA module at random.
-        lora_modules = iter(
-            [random.choice(lora_modules) for _ in range(len(input_requests))])
 
     if profile:
         print("Starting profiler...")
@@ -369,9 +353,6 @@ async def benchmark(
             request.multi_modal_data,
         )
         req_model_id, req_model_name = model_id, model_name
-        if lora_modules:
-            req_lora_module = next(lora_modules)
-            req_model_id, req_model_name = req_lora_module, req_lora_module
 
         request_func_input = RequestFuncInput(
             model=req_model_id,
@@ -416,7 +397,6 @@ async def benchmark(
         outputs=outputs,
         dur_s=benchmark_duration,
         tokenizer=tokenizer,
-        selected_percentile_metrics=selected_percentile_metrics,
         selected_percentiles=selected_percentiles,
         goodput_config_dict=goodput_config_dict,
     )
@@ -464,10 +444,6 @@ async def benchmark(
         # E.g., "Time to First Token"
         metric_header: str,
     ):
-        # This function prints and adds statistics of the specified
-        # metric.
-        if metric_attribute_name not in selected_percentile_metrics:
-            return
         print("{s:{c}^{n}}".format(s=metric_header, n=50, c="-"))
         print("{:<40} {:<10.2f}".format(
             f"Mean {metric_name} (ms):",
@@ -536,41 +512,6 @@ def parse_goodput(slo_pairs):
     return goodput_config_dict
 
 
-def save_to_pytorch_benchmark_format(args: argparse.Namespace,
-                                     results: dict[str, Any],
-                                     file_name: str) -> None:
-    metrics = [
-        "median_ttft_ms",
-        "mean_ttft_ms",
-        "std_ttft_ms",
-        "p99_ttft_ms",
-        "mean_tpot_ms",
-        "median_tpot_ms",
-        "std_tpot_ms",
-        "p99_tpot_ms",
-        "median_itl_ms",
-        "mean_itl_ms",
-        "std_itl_ms",
-        "p99_itl_ms",
-    ]
-    # These raw data might be useful, but they are rather big. They can be added
-    # later if needed
-    ignored_metrics = ["ttfts", "itls", "generated_texts", "errors"]
-    pt_records = convert_to_pytorch_benchmark_format(
-        args=args,
-        metrics={k: [results[k]]
-                 for k in metrics},
-        extra_info={
-            k: results[k]
-            for k in results if k not in metrics and k not in ignored_metrics
-        },
-    )
-    if pt_records:
-        # Don't use json suffix here as we don't want CI to pick it up
-        pt_file = f"{os.path.splitext(file_name)[0]}.pytorch.json"
-        write_to_json(pt_file, pt_records)
-
-
 def main(args: argparse.Namespace):
     print(args)
     random.seed(args.seed)
@@ -600,139 +541,30 @@ def main(args: argparse.Namespace):
             "Please specify '--dataset-name' and the corresponding "
             "'--dataset-path' if required.")
 
-    if args.dataset_name == "custom":
-        dataset = CustomDataset(dataset_path=args.dataset_path)
-        input_requests = dataset.sample(
-            num_requests=args.num_prompts,
-            tokenizer=tokenizer,
-            output_len=args.custom_output_len,
-            skip_chat_template=args.custom_skip_chat_template,
-        )
-
-    elif args.dataset_name == "sonnet":
-        dataset = SonnetDataset(dataset_path=args.dataset_path)
-        # For the "sonnet" dataset, formatting depends on the backend.
-        if args.backend == "openai-chat":
-            input_requests = dataset.sample(
-                num_requests=args.num_prompts,
-                input_len=args.sonnet_input_len,
-                output_len=args.sonnet_output_len,
-                prefix_len=args.sonnet_prefix_len,
-                tokenizer=tokenizer,
-                return_prompt_formatted=False,
-            )
-        else:
-            assert tokenizer.chat_template or tokenizer.default_chat_template, (
-                "Tokenizer/model must have chat template for sonnet dataset.")
-            input_requests = dataset.sample(
-                num_requests=args.num_prompts,
-                input_len=args.sonnet_input_len,
-                output_len=args.sonnet_output_len,
-                prefix_len=args.sonnet_prefix_len,
-                tokenizer=tokenizer,
-                return_prompt_formatted=True,
-            )
-
-    elif args.dataset_name == "hf":
-        # all following datasets are implemented from the
-        # HuggingFaceDataset base class
-        if args.dataset_path in VisionArenaDataset.SUPPORTED_DATASET_PATHS:
-            dataset_class = VisionArenaDataset
-            args.hf_split = "train"
-            args.hf_subset = None
-        elif args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS:
-            dataset_class = InstructCoderDataset
-            args.hf_split = "train"
-        elif args.dataset_path in MTBenchDataset.SUPPORTED_DATASET_PATHS:
-            dataset_class = MTBenchDataset
-            args.hf_split = "train"
-        elif args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS:
-            dataset_class = ConversationDataset
-        elif args.dataset_path in AIMODataset.SUPPORTED_DATASET_PATHS:
-            dataset_class = AIMODataset
-            args.hf_split = "train"
-        elif args.dataset_path in NextEditPredictionDataset.SUPPORTED_DATASET_PATHS:  # noqa: E501
-            dataset_class = NextEditPredictionDataset
-            args.hf_split = "train"
-        elif args.dataset_path in ASRDataset.SUPPORTED_DATASET_PATHS:
-            dataset_class = ASRDataset
-            args.hf_split = "train"
-        else:
-            supported_datasets = set([
-                dataset_name for cls in HuggingFaceDataset.__subclasses__()
-                for dataset_name in cls.SUPPORTED_DATASET_PATHS
-            ])
-            raise ValueError(
-                f"Unsupported dataset path: {args.dataset_path}. "
-                "Huggingface dataset only supports dataset_path"
-                f" from one of following: {supported_datasets}. "
-                "Please consider contributing if you would "
-                "like to add support for additional dataset formats.")
-
-        if dataset_class.IS_MULTIMODAL and backend not in [
-                "openai-chat",
-                "openai-audio",
-        ]:
-            # multi-modal benchmark is only available on OpenAI Chat backend.
-            raise ValueError(
-                "Multi-modal content is only supported on 'openai-chat' and "
-                "'openai-audio' backend.")
-        input_requests = dataset_class(
-            dataset_path=args.dataset_path,
-            dataset_subset=args.hf_subset,
-            dataset_split=args.hf_split,
-            random_seed=args.seed,
-        ).sample(
-            num_requests=args.num_prompts,
-            tokenizer=tokenizer,
-            output_len=args.hf_output_len,
-        )
-
-    else:
-        # For datasets that follow a similar structure, use a mapping.
-        dataset_mapping = {
-            "sharegpt":
-            lambda: ShareGPTDataset(random_seed=args.seed,
-                                    dataset_path=args.dataset_path).sample(
-                                        tokenizer=tokenizer,
-                                        num_requests=args.num_prompts,
-                                        output_len=args.sharegpt_output_len,
-                                    ),
-            "burstgpt":
-            lambda: BurstGPTDataset(random_seed=args.seed,
-                                    dataset_path=args.dataset_path).
-            sample(tokenizer=tokenizer, num_requests=args.num_prompts),
-            "random":
-            lambda: RandomDataset(dataset_path=args.dataset_path).sample(
-                tokenizer=tokenizer,
-                num_requests=args.num_prompts,
-                prefix_len=args.random_prefix_len,
-                input_len=args.random_input_len,
-                output_len=args.random_output_len,
-                range_ratio=args.random_range_ratio,
-            ),
-            "mmlu":
-            lambda: MMLUDataset(random_seed=args.seed,
-                                dataset_path=args.dataset_path,
-                                num_shots=args.mmlu_num_shots,
-                                mmlu_method=args.mmlu_method).sample(
+    # For datasets that follow a similar structure, use a mapping.
+    dataset_mapping = {
+        "mmlu":
+        lambda: MMLUDataset(random_seed=args.seed,
+                            dataset_path=args.dataset_path,
+                            num_shots=args.mmlu_num_shots,
+                            mmlu_method=args.mmlu_method).sample(
+                                tokenizer=tokenizer,
+                                num_requests=args.num_prompts,
+                                output_len=args.mmlu_output_len,
+                            ),
+        "mlperf":
+        lambda: MLPerfDataset(random_seed=args.seed,
+                                dataset_path=args.dataset_path).sample(
                                     tokenizer=tokenizer,
                                     num_requests=args.num_prompts,
-                                    output_len=args.mmlu_output_len,
+                                    output_len=args.mlperf_output_len,
                                 ),
-            "mlperf":
-            lambda: MLPerfDataset(random_seed=args.seed,
-                                  dataset_path=args.dataset_path).sample(
-                                      tokenizer=tokenizer,
-                                      num_requests=args.num_prompts,
-                                      output_len=args.mlperf_output_len,
-                                  ),
-        }
+    }
 
-        try:
-            input_requests = dataset_mapping[args.dataset_name]()
-        except KeyError as err:
-            raise ValueError(f"Unknown dataset: {args.dataset_name}") from err
+    try:
+        input_requests = dataset_mapping[args.dataset_name]()
+    except KeyError as err:
+        raise ValueError(f"Unknown dataset: {args.dataset_name}") from err
     goodput_config_dict = check_goodput_args(args)
 
     # Collect the sampling parameters.
@@ -764,7 +596,7 @@ def main(args: argparse.Namespace):
     gc.freeze()
 
     print("Using sampling parameters:", sampling_params)
-    benchmark_result, request_outputs = asyncio.run(
+    _, request_outputs = asyncio.run(
         benchmark(
             backend=backend,
             api_url=api_url,
@@ -778,84 +610,18 @@ def main(args: argparse.Namespace):
             burstiness=args.burstiness,
             disable_tqdm=args.disable_tqdm,
             profile=args.profile,
-            selected_percentile_metrics=args.percentile_metrics.split(","),
             selected_percentiles=[
                 float(p) for p in args.metric_percentiles.split(",")
             ],
             ignore_eos=args.ignore_eos,
             goodput_config_dict=goodput_config_dict,
             max_concurrency=args.max_concurrency,
-            lora_modules=args.lora_modules,
             extra_body=sampling_params,
         ))
 
+    # Run accuracy evaluation if required
     if args.run_eval:
         eval_benchmark_dataset_result(request_outputs, args.dataset_name)
-    # Save config and results to json
-    if args.save_result or args.append_result:
-        result_json: dict[str, Any] = {}
-
-        # Setup
-        current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
-        result_json["date"] = current_dt
-        result_json["backend"] = backend
-        result_json["model_id"] = model_id
-        result_json["tokenizer_id"] = tokenizer_id
-        result_json["num_prompts"] = args.num_prompts
-
-        # Metadata
-        if args.metadata:
-            for item in args.metadata:
-                if "=" in item:
-                    kvstring = item.split("=")
-                    result_json[kvstring[0].strip()] = kvstring[1].strip()
-                else:
-                    raise ValueError(
-                        "Invalid metadata format. Please use KEY=VALUE format."
-                    )
-        # Traffic
-        result_json["request_rate"] = (args.request_rate if args.request_rate
-                                       < float("inf") else "inf")
-        result_json["burstiness"] = args.burstiness
-        result_json["max_concurrency"] = args.max_concurrency
-
-        # Merge with benchmark result
-        result_json = {**result_json, **benchmark_result}
-
-        if not args.save_detailed:
-            # Remove fields with too many data points
-            for field in [
-                    "input_lens",
-                    "output_lens",
-                    "ttfts",
-                    "itls",
-                    "generated_texts",
-                    "errors",
-            ]:
-                if field in result_json:
-                    del result_json[field]
-                if field in benchmark_result:
-                    del benchmark_result[field]
-
-        # Save to file
-        base_model_id = model_id.split("/")[-1]
-        max_concurrency_str = (f"-concurrency{args.max_concurrency}"
-                               if args.max_concurrency is not None else "")
-        file_name = f"{backend}-{args.request_rate}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  # noqa
-        if args.result_filename:
-            file_name = args.result_filename
-        if args.result_dir:
-            os.makedirs(args.result_dir, exist_ok=True)
-            file_name = os.path.join(args.result_dir, file_name)
-        with open(file_name,
-                  mode="a+" if args.append_result else "w",
-                  encoding="utf-8") as outfile:
-            # Append a newline.
-            if args.append_result and outfile.tell() != 0:
-                outfile.write("\n")
-            json.dump(result_json, outfile)
-        save_to_pytorch_benchmark_format(args, result_json, file_name)
-
 
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(
@@ -980,46 +746,6 @@ if __name__ == "__main__":
         "VLLM_TORCH_PROFILER_DIR to enable profiler.",
     )
     parser.add_argument(
-        "--save-result",
-        action="store_true",
-        help="Specify to save benchmark results to a json file",
-    )
-    parser.add_argument(
-        "--save-detailed",
-        action="store_true",
-        help="When saving the results, whether to include per request "
-        "information such as response, error, ttfs, tpots, etc.",
-    )
-    parser.add_argument(
-        "--append-result",
-        action="store_true",
-        help="Append the benchmark result to the existing json file.",
-    )
-    parser.add_argument(
-        "--metadata",
-        metavar="KEY=VALUE",
-        nargs="*",
-        help="Key-value pairs (e.g, --metadata version=0.3.3 tp=1) "
-        "for metadata of this run to be saved in the result JSON file "
-        "for record keeping purposes.",
-    )
-    parser.add_argument(
-        "--result-dir",
-        type=str,
-        default=None,
-        help="Specify directory to save benchmark json results."
-        "If not specified, results are saved in the current directory.",
-    )
-    parser.add_argument(
-        "--result-filename",
-        type=str,
-        default=None,
-        help="Specify the filename to save benchmark json results."
-        "If not specified, results will be saved in "
-        "{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"
-        " format.",
-    )
-    parser.add_argument(
         "--ignore-eos",
         action="store_true",
         help="Set ignore_eos flag when sending the benchmark request."
@@ -1056,54 +782,6 @@ if __name__ == "__main__":
         "and the blog: https://hao-ai-lab.github.io/blogs/distserve",
     )
 
-    # group for dataset specific arguments
-    custom_group = parser.add_argument_group("custom dataset options")
-    custom_group.add_argument(
-        "--custom-output-len",
-        type=int,
-        default=256,
-        help=
-        "Number of output tokens per request, used only for custom dataset.",
-    )
-    custom_group.add_argument(
-        "--custom-skip-chat-template",
-        action="store_true",
-        help=
-        "Skip applying chat template to prompt, used only for custom dataset.",
-    )
-
-    sonnet_group = parser.add_argument_group("sonnet dataset options")
-    sonnet_group.add_argument(
-        "--sonnet-input-len",
-        type=int,
-        default=550,
-        help=
-        "Number of input tokens per request, used only for sonnet dataset.",
-    )
-    sonnet_group.add_argument(
-        "--sonnet-output-len",
-        type=int,
-        default=150,
-        help=
-        "Number of output tokens per request, used only for sonnet dataset.",
-    )
-    sonnet_group.add_argument(
-        "--sonnet-prefix-len",
-        type=int,
-        default=200,
-        help=
-        "Number of prefix tokens per request, used only for sonnet dataset.",
-    )
-
-    sharegpt_group = parser.add_argument_group("sharegpt dataset options")
-    sharegpt_group.add_argument(
-        "--sharegpt-output-len",
-        type=int,
-        default=None,
-        help="Output length for each request. Overrides the output length "
-        "from the ShareGPT dataset.",
-    )
-
     mmlu_group = parser.add_argument_group("mmlu dataset options")
     mmlu_group.add_argument(
         "--mmlu-output-len",
@@ -1133,59 +811,6 @@ if __name__ == "__main__":
         default=None,
         help="Output length for each request. Overrides the output length "
         "from the MLPerf dataset.",
-    )
-
-    random_group = parser.add_argument_group("random dataset options")
-    random_group.add_argument(
-        "--random-input-len",
-        type=int,
-        default=1024,
-        help=
-        "Number of input tokens per request, used only for random sampling.",
-    )
-    random_group.add_argument(
-        "--random-output-len",
-        type=int,
-        default=128,
-        help=
-        "Number of output tokens per request, used only for random sampling.",
-    )
-    random_group.add_argument(
-        "--random-range-ratio",
-        type=float,
-        default=0.0,
-        help="Range ratio for sampling input/output length, "
-        "used only for random sampling. Must be in the range [0, 1) to define "
-        "a symmetric sampling range"
-        "[length * (1 - range_ratio), length * (1 + range_ratio)].",
-    )
-    random_group.add_argument(
-        "--random-prefix-len",
-        type=int,
-        default=0,
-        help=("Number of fixed prefix tokens before the random context "
-              "in a request. "
-              "The total input length is the sum of `random-prefix-len` and "
-              "a random "
-              "context length sampled from [input_len * (1 - range_ratio), "
-              "input_len * (1 + range_ratio)]."),
-    )
-
-    hf_group = parser.add_argument_group("hf dataset options")
-    hf_group.add_argument("--hf-subset",
-                          type=str,
-                          default=None,
-                          help="Subset of the HF dataset.")
-    hf_group.add_argument("--hf-split",
-                          type=str,
-                          default=None,
-                          help="Split of the HF dataset.")
-    hf_group.add_argument(
-        "--hf-output-len",
-        type=int,
-        default=None,
-        help="Output length for each request. Overrides the output lengths "
-        "from the sampled HF dataset.",
     )
 
     sampling_group = parser.add_argument_group("sampling parameters")
@@ -1238,15 +863,6 @@ if __name__ == "__main__":
         help="The model name used in the API. "
         "If not specified, the model name will be the "
         "same as the ``--model`` argument. ",
-    )
-
-    parser.add_argument(
-        "--lora-modules",
-        nargs="+",
-        default=None,
-        help="A subset of LoRA module names passed in when "
-        "launching the server. For each request, the "
-        "script chooses a LoRA module at random.",
     )
 
     parser.add_argument(

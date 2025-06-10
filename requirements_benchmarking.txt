@@ -1,0 +1,5 @@
+# These are required for running any benchmarking
+# See more information at scripts/vllm/benchmarking/README.md
+nltk
+evaluate
+datasets
