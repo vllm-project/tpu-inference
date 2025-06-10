@@ -1,4 +1,9 @@
-class LOGICAL_MESH_AXIS_NAME(enum.Enum):
+class OPERATION_MODE(enum.Enum):
+  PREFILL = 1
+  DECODE = 2
+
+
+class LOGICAL_MESH_AXIS_NAME:
   # The constants as the name for mesh axis
   # logical equivalently, we could use 'x', 'y' or ('x', 'y'),
   # but specifying a name will give better readability. 
