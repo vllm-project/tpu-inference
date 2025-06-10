@@ -151,15 +151,48 @@ bash build_docker.sh
 
 ### On the TPU-VM side:
 
+Prepare the model locally (optional)
+
+```
+# first go to the folder you want to save the model
+MODEL=meta-llama/Llama-3.1-8B
+huggingface-cli download $MODEL --local-dir=$MODEL --local-dir-use-symlinks=False --exclude="*.pth" --exclude="*.bin" --exclude="original/*" --token=<YOUR_HF_TOKEN>
+```
+
 Pull the docker image and run it
 
 ```
 # On the first time, you may need it
 gcloud auth configure-docker
 
+TPU_BACKEND_TYPE=jax
 DOCKER_URI=gcr.io/cloud-nas-260507/tpu_commons:${USER}
 docker pull $DOCKER_URI
-docker run -it -e HUGGING_FACE_HUB_TOKEN=<YOUR_HF_TOKEN> $DOCKER_URI
+docker run \
+  --privileged \
+  --net host \
+  --shm-size=16G \
+  -v /mnt/disks/data:/models:ro \
+  --rm \
+  -it \
+  -e TPU_BACKEND_TYPE="$TPU_BACKEND_TYPE" \
+  -e HF_TOKEN=<YOUR_HF_TOKEN> \
+  -e VLLM_XLA_CHECK_RECOMPILATION=1 \
+  $DOCKER_URI
 ```
 
 Note: if the $USER in your TPU-VM is different than that in the development machine, please change the image tag accordingly.
+
+Inside the docker, you need:
+
+```
+cd ..
+python vllm/examples/offline_inference/basic/generate.py \
+    --model=/models/meta-llama/Llama-3.1-8B \
+    --tensor_parallel_size=4 \
+    --task=generate \
+    --max_model_len=1024 \
+    --max_num_seqs=1
+```
+
+Note: this example used pre-downloaded model which has been stored at /mnt/disks/data
