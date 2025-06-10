@@ -124,3 +124,14 @@ Run the test:
 ```
 pytest -v ./tests/ragged_paged_attention_test.py
 ```
+
+## How to run an End-To-End (E2E) benchmarking run?
+In order to run an [E2E benchmark test](https://github.com/vllm-project/tpu_commons/blob/main/scripts/vllm/benchmarking/README.md), which will spin up a vLLM server with Llama 3.1 8B and run a single request from the MLPerf dataset against it, you can run the
+following command locally:
+
+```
+BUILDKITE_COMMIT=3843efc .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/llama3.1_8b_mmlu_few_prompt.sh
+```
+
+While this will run the code in a Docker image, you can also run the bare `tests/e2e/benchmarking/llama3.1_8b_mmlu_few_prompt.sh` script itself,
+being sure to pass the proper args for your machine.

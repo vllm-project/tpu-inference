@@ -15,6 +15,9 @@ fi
 # shellcheck disable=1091
 source /etc/environment
 
+# TODO @jacobplatin: remove eventually
+export HF_TOKEN=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
+
 if [ -z "${BUILDKITE_COMMIT:-}" ]; then
   echo "ERROR: BUILDKITE_COMMIT environment variable is not set." >&2
   echo "This script expects BUILDKITE_COMMIT to tag the Docker image." >&2
