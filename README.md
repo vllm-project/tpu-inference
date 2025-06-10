@@ -30,7 +30,7 @@ pre-commit run --all-files
 Run `Llama 3.1 8B` offline inference on 4 TPU chips:
 
 ```
-TPU_BACKEND_TYPE=jax
+export TPU_BACKEND_TYPE=jax
 python vllm/examples/offline_inference/basic/generate.py \
     --model=meta-llama/Llama-3.1-8B \
     --tensor_parallel_size=4 \
@@ -44,8 +44,8 @@ python vllm/examples/offline_inference/basic/generate.py \
 Run the vLLM's implementation of `Llama 3.1 8B`, which is in Pytorch:
 
 ```
-MODEL_IMPL_TYPE=vllm
-TPU_BACKEND_TYPE=jax
+export MODEL_IMPL_TYPE=vllm
+export TPU_BACKEND_TYPE=jax
 python vllm/examples/offline_inference/basic/generate.py \
     --model=meta-llama/Llama-3.1-8B \
     --tensor_parallel_size=1 \
