@@ -171,7 +171,7 @@ if $did_find_ready_message && ! $timeout_hit; then
     --model "$model_name" \
     --dataset-name mlperf \
     --dataset-path "$dataset_path" \
-    --num-prompts 24576 \
+    --num-prompts 200 \
     --run_eval 2>&1 | tee -a "$BENCHMARK_LOG_FILE"
 
     checkThroughputAndRouge

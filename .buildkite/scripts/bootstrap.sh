@@ -2,8 +2,15 @@
 
 echo "--- Starting Buildkite Bootstrap ---"
 
+# Check if the current build is a scheduled build
+# TODO: ui -> schedule
+if [ "$BUILDKITE_SOURCE" == "ui" ]; then
+  echo "This is a scheduled build."
+  buildkite-agent pipeline upload .buildkite/pipeline_jax_daily.yml
+  exit 0
+
 # Check if the current build is a pull request
-if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
+elif [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
   echo "This is a Pull Request build."
   PR_LABELS=$(curl -s "https://api.github.com/repos/vllm-project/tpu_commons/pulls/$BUILDKITE_PULL_REQUEST" | jq -r '.labels[].name')
 

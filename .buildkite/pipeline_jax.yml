@@ -28,6 +28,7 @@ steps:
    - label: "TPU V1 Test Notification"
      depends_on:
        - tpu_test_0
+       - tpu_test_1
      agents:
        queue: tpu_v6e_queue
      commands: "bash .buildkite/scripts/check_results.sh"
