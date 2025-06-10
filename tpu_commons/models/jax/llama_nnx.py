@@ -15,7 +15,6 @@ from tpu_commons.models.jax.layers.sampling import sample
 
 logger = init_logger(__name__)
 
-# TODO(xiang): is this faster than nnx.initializers.zeros_init()?
 init_fn = nnx.initializers.uniform()
 
 
@@ -320,13 +319,3 @@ class LlamaForCausalLM(nnx.Module):
             attention_metadata.chunked_prefill_enabled,
         )
         return kv_caches, next_tokens, logits
-        # return explict_sharding(kv_caches, next_tokens, logits)
-
-
-# def explict_sharding(kv_caches, next_tokens, logits):
-#     kv_caches = jax.lax.with_sharding_constraint(kv_caches,
-#                                                  PartitionSpec("model"))
-#     next_tokens = jax.lax.with_sharding_constraint(next_tokens,
-#                                                    PartitionSpec(None))
-#     logits = jax.lax.with_sharding_constraint(logits, PartitionSpec(None))
-#     return kv_caches, next_tokens, logits
