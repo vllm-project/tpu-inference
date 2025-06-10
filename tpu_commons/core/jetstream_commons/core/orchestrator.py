@@ -269,6 +269,7 @@ class Driver:
 
     def __init__(
         self,
+        execute_model_f,
         prefill_engines: Optional[list[engine_api.Engine]] = None,
         generate_engines: Optional[list[engine_api.Engine]] = None,
         prefill_params: Optional[list[Any]] = None,
@@ -312,6 +313,11 @@ class Driver:
         self._metrics_collector = metrics_collector
         self._multi_sampling = multi_sampling
         self._prefix_cache = prefix_cache_inst
+        self.execute_model = execute_model_f
+        self.prefill_scheduler_output_queue = queue.Queue()
+        self.generate_scheduler_output_queue = queue.Queue()
+        self.model_output_queue = queue.Queue()
+        # self.generate_model_output_queue = queue.Queue()
 
         # Stages 1-4 represent the life cycle of a request.
         # Stage 1
@@ -330,7 +336,7 @@ class Driver:
         # while 1 transfer is enqueued while 1 is being transferred.
         # TODO: Make queue size configurable.
         self._transfer_backlogs = [
-            queue.Queue(1 if self._interleaved_mode else 4)
+            queue.Queue(8 if self._interleaved_mode else 4)
             for i in range(len(self._prefill_engines))
         ]
         if self._metrics_collector:
@@ -348,7 +354,7 @@ class Driver:
         # TODO: Make queue size configurable.
         self._generate_backlogs = {
             idx:
-            queue.Queue(1 if self.
+            queue.Queue(4 if self.
                         _interleaved_mode else engine.max_concurrent_decodes //
                         3)
             for idx, engine in enumerate(self._generate_engines)
@@ -755,29 +761,29 @@ class Driver:
     def _prefill_thread(self, idx: int):
         """Thread which runs in the background performing prefills."""
         logger.warning("Spinning up prefill thread %d.", idx)
-        prefill_engine = self._prefill_engines[idx]
-        prefill_params = self._prefill_params[idx]
-        metadata = prefill_engine.get_tokenizer()
-        tokenizer = prefill_engine.build_tokenizer(metadata)
+        # prefill_engine = self._prefill_engines[idx]
+        # prefill_params = self._prefill_params[idx]
+        # metadata = prefill_engine.get_tokenizer()
+        # tokenizer = prefill_engine.build_tokenizer(metadata)
         thread_name = f"Prefill thread {idx}"
         ThreadDebugLog(thread_name, f"Prefill params {idx} loaded.")
 
         while self.live:
             if not self._prefill_mode:
                 continue
-            my_transfer_backlog = self._transfer_backlogs[idx]
+            # my_transfer_backlog = self._transfer_backlogs[idx]
             # The prefill thread can just sleep until it has work to do.
-            request = self._prefill_backlog.get(block=True)
+            # request = self._prefill_backlog.get(block=True)
 
-            if request is None:
-                break
-            request.metadata.prefill_dequeue_time = time.perf_counter()
-            # Tokenize and padding the text or token input.
-            padded_tokens, true_length = self._process_prefill_content(
-                request,
-                tokenizer,
-                prefill_engine.max_prefill_length,
-            )
+            # if request is None:
+            #     break
+            # request.metadata.prefill_dequeue_time = time.perf_counter()
+            # # Tokenize and padding the text or token input.
+            # padded_tokens, true_length = self._process_prefill_content(
+            #     request,
+            #     tokenizer,
+            #     prefill_engine.max_prefill_length,
+            # )
 
             # adapter_id = request.adapter_id
 
@@ -787,48 +793,55 @@ class Driver:
             # there is no issues. Issue will arrise if prefill and decode is running
             # in parallel and sharing the same params. Issue arrise because prefill
             # uses pre-merged weights and generate uses only base weights.
-            final_prefill_params = prefill_params
-            prefill_result, first_token = prefill_engine.prefill(
-                params=final_prefill_params,
-                padded_tokens=padded_tokens,
-                true_length=true_length,
-            )
-            logger.warning("finished prefill for request!!")
-            request.complete = np.zeros((prefill_engine.samples_per_slot, ),
-                                        np.bool_)
+            # final_prefill_params = prefill_params
+            prefill_scheduler_output = self._prefill_backlog.get(block=True)
+            logger.warning("prefill scheduler output detected!! %s",
+                           prefill_scheduler_output.num_scheduled_tokens)
+            model_output = self.execute_model(prefill_scheduler_output)
+            logger.warning("finished prefill execution, %s",
+                           prefill_scheduler_output.num_scheduled_tokens)
+            output = self.vllm_scheduler.update_from_output(
+                prefill_scheduler_output, model_output)
+            self.model_output_queue.put(output)
+            logger.warning("put model output to output queue in jetstream, %s",
+                           prefill_scheduler_output.num_scheduled_tokens)
 
-            del final_prefill_params
-            request.prefill_result = prefill_result
+            # prefill_result, first_token = prefill_engine.prefill(
+            #     params=final_prefill_params,
+            #     padded_tokens=padded_tokens,
+            #     true_length=true_length,
+            # )
+            # logger.warning("finished prefill for request!!")
+            # request.complete = np.zeros((prefill_engine.samples_per_slot, ),
+            #                             np.bool_)
 
-            # put first token to detokenize queue
-            my_detokenize_backlog = self._detokenize_backlogs[idx]
-            request.metadata.transfer_enqueue_time = time.perf_counter()
-            my_detokenize_backlog.put(
-                (first_token, request, request.metadata.prefill_dequeue_time),
-                block=True,
-            )
+            # del final_prefill_params
+            # request.prefill_result = prefill_result
 
-            ThreadDebugLog(thread_name,
-                           "Completed prefilling for one ActiveRequest.")
-            # Once prefill is complete, place it on the transfer queue and block if
-            # full.
-            my_transfer_backlog.put(request, block=True)
-            ThreadDebugLog(
-                thread_name,
-                f"Placed request on transfer backlog {idx}. "
-                f"Current transfer backlog size: {my_transfer_backlog.qsize()}.",
-            )
-            if self._metrics_collector:
-                self._metrics_collector.get_request_input_length().observe(
-                    true_length)
+            # # put first token to detokenize queue
+            # my_detokenize_backlog = self._detokenize_backlogs[idx]
+            # request.metadata.transfer_enqueue_time = time.perf_counter()
+            # my_detokenize_backlog.put(
+            #     (first_token, request, request.metadata.prefill_dequeue_time),
+            #     block=True,
+            # )
 
-            if self._metrics_collector:
-                self._metrics_collector.get_time_per_prefill_token().observe(
-                    (request.metadata.transfer_enqueue_time -
-                     request.metadata.prefill_dequeue_time) / true_length)
+            # ThreadDebugLog(thread_name,
+            #                "Completed prefilling for one ActiveRequest.")
+            # # Once prefill is complete, place it on the transfer queue and block if
+            # # full.
+            # my_transfer_backlog.put(request, block=True)
+            # if self._metrics_collector:
+            #     self._metrics_collector.get_request_input_length().observe(
+            #         true_length)
 
-            del prefill_result
-            del request
+            # if self._metrics_collector:
+            #     self._metrics_collector.get_time_per_prefill_token().observe(
+            #         (request.metadata.transfer_enqueue_time -
+            #          request.metadata.prefill_dequeue_time) / true_length)
+
+            # del prefill_result
+            # del request
 
         logger.info("Prefill thread %d stopped.", idx)
 
@@ -881,6 +894,8 @@ class Driver:
             # Place the request on the correct generate backlog and block if full.
             new_request.metadata.generate_enqueue_time = time.perf_counter()
             self._generate_backlogs[target_idx].put(new_request, block=True)
+            logger.warning("generate backlog length : %s",
+                           self._generate_backlogs[target_idx].qsize())
             ThreadDebugLog(
                 thread_name,
                 f"Transferred ActiveRequest from prefill engine {idx} "
@@ -1114,115 +1129,123 @@ class Driver:
     def _generate_thread(self, idx: int):
         """Step token generation and insert prefills from backlog."""
         logger.warning("Spinning up generate thread %d.", idx)
-        generate_engine = self._generate_engines[idx]
-        my_slots = self._generate_slots[idx]
+        # generate_engine = self._generate_engines[idx]
+        # my_slots = self._generate_slots[idx]
         my_generate_backlog = self._generate_backlogs[idx]
-        my_detokenize_backlog = self._detokenize_backlogs[idx]
+        # my_detokenize_backlog = self._detokenize_backlogs[idx]
 
-        adapter_tensorstore = None
-        if self._generate_adapterstore and idx < len(
-                self._generate_adapterstore):
-            adapter_tensorstore = self._generate_adapterstore[idx]
+        # adapter_tensorstore = None
+        # if self._generate_adapterstore and idx < len(
+        #         self._generate_adapterstore):
+        #     adapter_tensorstore = self._generate_adapterstore[idx]
 
         # Keep track of what step tokens were generated at.
-        generate_timestep = 0
+        # generate_timestep = 0
         # State to store things like running kv cache in.
-        decode_state = generate_engine.init_decode_state()
+        # decode_state = generate_engine.init_decode_state()
 
-        generate_params = self._generate_params[idx]
+        # generate_params = self._generate_params[idx]
         thread_name = f"Generate thread {idx}"
         ThreadDebugLog(thread_name, f"Generate params {idx} loaded.")
-        time_of_last_generate = time.time()
+        # time_of_last_generate = time.time()
         time_of_last_print = time.time()
         while self.live:
             if self._prefill_mode:
                 continue
-            if (time.time() - time_of_last_print) > 1:
-                ThreadDebugLog(
-                    thread_name,
-                    f"Generate thread making a decision with:"
-                    f" prefill_backlog={self._prefill_backlog.qsize()}"
-                    f" generate_free_slots={my_slots.qsize()}",
-                )
+
+            if (time.time() - time_of_last_print) > 0.5:
+                logger.warning("prefill mode %s, generate backlog len %s",
+                               self._prefill_mode, my_generate_backlog.qsize())
                 time_of_last_print = time.time()
 
-            max_concurrent_decodes = generate_engine.max_concurrent_decodes
+            # max_concurrent_decodes = generate_engine.max_concurrent_decodes
 
-            if self._metrics_collector:
-                self._metrics_collector.get_slots_used_percentage_metric(
-                    idx).set_function(lambda: float(1 - (my_slots.qsize(
-                    ) / max_concurrent_decodes)))
+            # if self._metrics_collector:
+            #     self._metrics_collector.get_slots_used_percentage_metric(
+            #         idx).set_function(lambda: float(1 - (my_slots.qsize(
+            #         ) / max_concurrent_decodes)))
 
-            if self._multi_sampling:
-                decode_state = self._bulk_insert_if_possible(
-                    idx,
-                    thread_name,
-                    max_concurrent_decodes,
-                    generate_timestep,
-                    decode_state,
-                    my_slots,
-                    my_generate_backlog,
-                    generate_engine,
-                    my_detokenize_backlog,
-                )
-            else:
-                decode_state = self._insert_if_possible(
-                    idx,
-                    thread_name,
-                    max_concurrent_decodes,
-                    generate_timestep,
-                    decode_state,
-                    my_slots,
-                    my_generate_backlog,
-                    generate_engine,
-                    my_detokenize_backlog,
-                )
+            # if self._multi_sampling:
+            #     decode_state = self._bulk_insert_if_possible(
+            #         idx,
+            #         thread_name,
+            #         max_concurrent_decodes,
+            #         generate_timestep,
+            #         decode_state,
+            #         my_slots,
+            #         my_generate_backlog,
+            #         generate_engine,
+            #         my_detokenize_backlog,
+            #     )
+            # else:
+            #     decode_state = self._insert_if_possible(
+            #         idx,
+            #         thread_name,
+            #         max_concurrent_decodes,
+            #         generate_timestep,
+            #         decode_state,
+            #         my_slots,
+            #         my_generate_backlog,
+            #         generate_engine,
+            #         my_detokenize_backlog,
+            #     )
 
-            if decode_state is None:
-                break
+            # if decode_state is None:
+            #     break
 
             # Export the lora_request_info metric
-            self._export_lora_request_info()
 
             # At this point, we know that we have at least some slots filled.
-            assert (
-                my_slots.qsize() < max_concurrent_decodes
-            ), "At this point we must have some requests inserted into the slots."
+            # assert (
+            #     my_slots.qsize() < max_concurrent_decodes
+            # ), "At this point we must have some requests inserted into the slots."
 
-            if adapter_tensorstore:
-                decoding_adapters_params = adapter_tensorstore.decoding_adapters_cache
-                adapters_scale_factor = adapter_tensorstore.adapters_scale_factor
-                b = adapters_scale_factor.shape[0]
+            # if adapter_tensorstore:
+            #     decoding_adapters_params = adapter_tensorstore.decoding_adapters_cache
+            #     adapters_scale_factor = adapter_tensorstore.adapters_scale_factor
+            #     b = adapters_scale_factor.shape[0]
 
-                # Reshaped the scale_factors array to 4-D to align with shape of
-                # the vectors `(batch, hidden_size, num_heads, head_dim)`.
-                reshaped_scale_factors = adapters_scale_factor.reshape(
-                    (b, 1, 1, 1))
+            #     # Reshaped the scale_factors array to 4-D to align with shape of
+            #     # the vectors `(batch, hidden_size, num_heads, head_dim)`.
+            #     reshaped_scale_factors = adapters_scale_factor.reshape(
+            #         (b, 1, 1, 1))
 
-                lora_state = {}
-                lora_state["scale_factor"] = reshaped_scale_factors
-                lora_state["lora_params"] = decoding_adapters_params
+            #     lora_state = {}
+            #     lora_state["scale_factor"] = reshaped_scale_factors
+            #     lora_state["lora_params"] = decoding_adapters_params
 
-                if isinstance(decode_state, dict):
-                    decode_state["lora_state"] = lora_state
-                else:  # flax.struct.dataclass
-                    decode_state = decode_state.replace(lora_state=lora_state)
+            #     if isinstance(decode_state, dict):
+            #         decode_state["lora_state"] = lora_state
+            #     else:  # flax.struct.dataclass
+            #         decode_state = decode_state.replace(lora_state=lora_state)
 
             # Now we actually take a generate step on requests in the slots.
-            decode_state, sampled_tokens = generate_engine.generate(
-                generate_params, decode_state)
-            sampled_tokens.copy_to_host_async()
+            generate_scheduler_output = self.generate_scheduler_output_queue.get(
+                block=True)
+            logger.warning("get generate scheduler output %s",
+                           generate_scheduler_output.num_scheduled_tokens)
+            model_output = self.execute_model(generate_scheduler_output)
+            logger.warning("finished one step of generate %s",
+                           generate_scheduler_output.num_scheduled_tokens)
+            output = self.vllm_scheduler.update_from_output(
+                generate_scheduler_output, model_output)
+            self.model_output_queue.put(output)
+            logger.warning("put decode model output %s",
+                           generate_scheduler_output.num_scheduled_tokens)
+            # decode_state, sampled_tokens = generate_engine.generate(
+            #     generate_params, decode_state)
+            # sampled_tokens.copy_to_host_async()
             # Respond to detokenization backpressure.
-            my_detokenize_backlog.put((generate_timestep, sampled_tokens),
-                                      block=True)
-            generate_timestep += 1
-            ThreadDebugLog(
-                thread_name,
-                f"Step {generate_timestep} - slots free : {my_slots.qsize()} / "
-                f"{max_concurrent_decodes}, took "
-                f"{((time.time() - time_of_last_generate) * 10**3):.2f}ms",
-            )
-            time_of_last_generate = time.time()
+            # my_detokenize_backlog.put((generate_timestep, sampled_tokens),
+            #                           block=True)
+            # generate_timestep += 1
+            # ThreadDebugLog(
+            #     thread_name,
+            #     f"Step {generate_timestep} - slots free : {my_slots.qsize()} / "
+            #     f"{max_concurrent_decodes}, took "
+            #     f"{((time.time() - time_of_last_generate) * 10**3):.2f}ms",
+            # )
+            # time_of_last_generate = time.time()
 
         logger.info("Generate thread %d stopped.", idx)
 

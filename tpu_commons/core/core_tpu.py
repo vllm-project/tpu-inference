@@ -36,8 +36,6 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import EngineHandshakeMetadata, EngineZmqAddresses
 from vllm.version import __version__ as VLLM_VERSION
 
-from tpu_commons.core.jetstream_commons.core.proto import jetstream_pb2
-
 logger = init_logger(__name__)
 
 POLLING_TIMEOUT_S = 2.5
@@ -221,37 +219,23 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule()
-        scheduler_dict = scheduler_output.__dict__
-        for k in scheduler_dict:
-            logger.warning("Scheduler %s: %s", k, scheduler_dict[k])
-        model_output = self.execute_model(scheduler_output)
+        logger.warning("Scheduler %s", scheduler_output.num_scheduled_tokens)
 
         def is_pure_decode(s):
             return s.total_num_scheduled_tokens == len(s.num_scheduled_tokens)
 
-        logger.warning("is_pure_decode %s", is_pure_decode(scheduler_output))
         # prefill request, possibly multiple prompts
         if not is_pure_decode(scheduler_output):
-            for request_id in scheduler_output.num_scheduled_tokens:
-                req = self.scheduler.requests[request_id]
-                jetstream_request = jetstream_pb2.DecodeRequest(
-                    token_content=jetstream_pb2.DecodeRequest.TokenContent(
-                        token_ids=req.prompt_token_ids),
-                    max_tokens=1024,
-                )
-                logger.warning("Converted request %s to jetstream request",
-                               request_id)
-                self.orchestrator._prefill_mode = True
-                self.orchestrator.Decode(jetstream_request)
+            self.orchestrator._driver._prefill_mode = True
+            self.orchestrator._driver._prefill_backlog.put(scheduler_output)
+            logger.warning("get model output from output queue")
         # decode
         else:
-            self.orchestrator._prefill_mode = False
-
-        engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, model_output)  # type: ignore
-
-        return (engine_core_outputs,
-                scheduler_output.total_num_scheduled_tokens > 0)
+            logger.warning("vllm core switching to decode mode")
+            self.orchestrator._driver._prefill_mode = False
+            self.orchestrator._driver.generate_scheduler_output_queue.put(
+                scheduler_output)
+        return scheduler_output
 
     def shutdown(self):
         self.structured_output_manager.clear_backend()
@@ -499,6 +483,7 @@ class EngineCoreProc(EngineCore):
                                                      cache_length=1024,
                                                      weight=4.0)
             driver = orchestrator.Driver(
+                execute_model_f=self.execute_model,
                 prefill_engines=[prefill_engine],
                 generate_engines=[generate_engine],
                 prefill_params=[prefill_engine.load_params()],
@@ -508,7 +493,8 @@ class EngineCoreProc(EngineCore):
             )
             return driver
 
-        driver = _setup_driver(True)
+        driver = _setup_driver(self, interleaved_mode=True)
+        driver.vllm_scheduler = self.scheduler
         client = orchestrator.LLMOrchestrator(driver=driver)
         self.orchestrator = client
         logger.info("starting jetstream orchestrator")
@@ -517,7 +503,12 @@ class EngineCoreProc(EngineCore):
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
             # 2) Step the engine core and return the outputs.
-            self._process_engine_step()
+            model_output_queue = self.orchestrator._driver.model_output_queue
+            # outputs, model_executed = self.step_fn()
+            self.step_fn()
+            outputs = model_output_queue.get(block=True)
+            for output in (outputs.items() if outputs else ()):
+                self.output_queue.put_nowait(output)
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
@@ -542,12 +533,17 @@ class EngineCoreProc(EngineCore):
         """Called only when there are unfinished local requests."""
 
         # Step the engine core.
-        outputs, model_executed = self.step_fn()
-        # Put EngineCoreOutputs into the output queue.
+        model_output_queue = self.orchestrator._driver.model_output_queue
+        # outputs, model_executed = self.step_fn()
+        scheduler_output = self.step_fn()
+        model_output = model_output_queue.get(block=True)
+        outputs = self.scheduler.update_from_output(scheduler_output,
+                                                    model_output)
+
         for output in (outputs.items() if outputs else ()):
             self.output_queue.put_nowait(output)
 
-        return model_executed
+        return scheduler_output.total_num_scheduled_tokens > 0
 
     def _handle_client_request(self, request_type: EngineCoreRequestType,
                                request: Any) -> None:

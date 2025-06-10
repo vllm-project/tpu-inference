@@ -110,7 +110,8 @@ class ExperimentalScheduler(Scheduler):
             token_budget -= num_new_tokens
             request.status = RequestStatus.RUNNING
             request.num_computed_tokens = num_computed_tokens
-
+            if len(num_scheduled_tokens) > 0:
+                break
         # Put back any skipped requests at the head of the waiting queue
         if skipped_waiting_requests:
             self.waiting.extendleft(skipped_waiting_requests)
