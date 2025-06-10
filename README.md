@@ -157,7 +157,7 @@ Pull the docker image and run it
 # On the first time, you may need it
 gcloud auth configure-docker
 
-DOCKER_URI=gcr.io/cloud-nas-260507/tpu_commons:${USER}$
+DOCKER_URI=gcr.io/cloud-nas-260507/tpu_commons:${USER}
 docker pull $DOCKER_URI
 docker run -it -e HUGGING_FACE_HUB_TOKEN=<YOUR_HF_TOKEN> $DOCKER_URI
 ```
