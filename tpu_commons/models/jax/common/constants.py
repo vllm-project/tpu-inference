@@ -2,21 +2,23 @@ class OPERATION_MODE(enum.Enum):
   PREFILL = 1
   DECODE = 2
 
-
+# TODO we code the logical mesh axis name as a constant
+# we need to make it more flexible in case more names 
+# could be added for future models
 class LOGICAL_MESH_AXIS_NAME:
   # The constants as the name for mesh axis
   # logical equivalently, we could use 'x', 'y' or ('x', 'y'),
   # but specifying a name will give better readability. 
   # The axis should be 'x', 'y', 'z' by physical mesh
   # i.e. [x, y] -> [8, 8] for v6e-64
-  BATCH_AXIS_NAME = 'x'
-  SEQUENCE_AXIS_NAME = 'y'
-  ATTN_HEAD_AXIS_NAME #str | tuple(str)
-  ATTN_TENSOR_AXIS_NAME #str | tuple(str)
-  MLP_TENSOR_AXIS_NAME = ('x', 'y')
-  MOE_TENSOR_AXIS_NAME = 'x'
-  EXPERT_AXIS_NAME = 'y'
-  VOCAB_AXIS_NAME = ('x', 'y', 'z')
+  BATCH_AXIS_NAME = 'dp'
+  SEQUENCE_AXIS_NAME = 'sp'
+  ATTN_HEAD_AXIS_NAME = 'ep'
+  ATTN_TENSOR_AXIS_NAME  = 'tp'
+  MLP_TENSOR_AXIS_NAME = ('tp', 'ep')
+  MOE_TENSOR_AXIS_NAME = 'tp'
+  EXPERT_AXIS_NAME = 'ep'
+  VOCAB_AXIS_NAME = ('dp', 'sp', 'tp', 'ep')
 
 
 # MoE metrics to be monitored

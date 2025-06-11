@@ -97,13 +97,13 @@ class FFW(nnx.Module):
   def setup(self):
     self.create_sharding()
     self.kernel_gating_DF = nnx.Param(
-      self.kernel_init(cfg.d_model, cfg.hidden_size, cfg.dtype),
+      self.kernel_init((cfg.d_model, cfg.hidden_size), cfg.dtype),
       sharding=self.df_sharding)
     self.kernel_up_proj_DF = nnx.Param(
-      self.kernel_init(cfg.d_model, cfg.hidden_size, cfg.dtype),
+      self.kernel_init((cfg.d_model, cfg.hidden_size), cfg.dtype),
       sharding=self.df_sharding)
     self.kernel_down_proj_FD = nnx.Param(
-      self.kernel_init(cfg.hidden_size, cfg.d_model, cfg.dtype),
+      self.kernel_init((cfg.hidden_size, cfg.d_model), cfg.dtype),
       sharding=self.fd_sharding)
 
   def create_sharding():
@@ -123,31 +123,41 @@ class FFW(nnx.Module):
 class EmbedderConfig(Config):
   vocab_size: int
   d_model: int
+  dtype: Any = jnp.float32
   normalize_embeddings: bool = False
-
-  def make(self, name, runtime_param: Optional[layer.RuntimeParams] = None) -> Embdder:
-    ...
-    return Embedder(
-          cfg=self,
-          sharding_cfg=runtime_param.sharding_cfg,
-          quantization=runtime_param.quantization,      
-    )
 
 class Embedder(nnx.Module):
   cfg: EmbedderConfig
-  vocab: 
-  sharding_cfg: ShardingConfig = default_sharding()
-  quantization: Quantization | None = None
+  mesh: Mesh
+  embedding_init: Initializer # TODO create factories for initializer(?)
+  sharding_cfg: ShardingConfig
+  quant: Quantization | None = None
+
 
   def setup(self):
-    ...
-  def __call__(self, x):
-    ...
-    return self.decode(x)
+    self.input_embedding_table_VD = nnx.Param(
+      self.embedding_init((cfg.vocab_size, cfg.d_model), cfg.dtype),
+      sharding=self.dv_sharding)
+  def __call__(self, x, decode=False):
+    if decode:
+      return self.decode(x)
+    else:
+      return self.encode(x)
   def decode(self, x):
-    ...
-  def sharding():
-    ...
+    x_BSD = nnx.with_sharding_constraint(x, self.prelogit_bsd)
+    logits_BSV = jnp.einsum('BSD,DV -> BSV' , x_BSD, self.input_embedding_table)
+    return logits_BSV
+
+  def encode(self, x):
+    x_BSD = nnx.with_sharding_constraint(x, self.prelogit_bsd)
+    embedding_BSD = self.input_embedding_table_VD[(x, )]
+    return embedding_BSD
+
+  def create_sharding():
+    self.prelogit_bsd =  NamedSharding(
+      self.mesh, P(self.sharding_cfg.prelogit_bsd.get_axes()))
+    self.dv_sharding =  NamedSharding(
+      self.mesh, P(self.sharding_cfg.vocab_dv.get_axes()))
 
 
   

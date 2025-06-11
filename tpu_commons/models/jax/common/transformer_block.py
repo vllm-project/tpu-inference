@@ -4,10 +4,10 @@ class TransformerConfig(Config):
     light weighted transformer config, which includes config for all sub-modules
     it uses make() to create the live module from this config
     """
-    embeddingsConfig: EmbedderConfig 
-    attention: AttentionConfig
-    moe: MoEConfig = None
-    ffw: FFWConfig = None
+    embeddings_cfg: EmbedderConfig 
+    attention_cfg: AttentionConfig
+    moe_cfg: MoEConfig = None
+    ffw_cfg: FFWConfig = None
 
     num_groups: int
     routing: bool = False
