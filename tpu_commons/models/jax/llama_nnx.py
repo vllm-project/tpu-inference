@@ -12,7 +12,7 @@ from tpu_commons.models.jax.attention_interface import KVCache, attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.layers.rope import apply_rope
 from tpu_commons.models.jax.layers.sampling import sample
-from tpu_commons.models.jax.utils.weight_utils import load_params_weights
+from tpu_commons.models.jax.utils.weight_utils import load_hf_weights
 
 logger = init_logger(__name__)
 
@@ -337,8 +337,7 @@ class LlamaForCausalLM(nnx.Module):
             "model.layers.*.self_attn.v_proj.kernel",
             "model.norm": "model.norm.scale",
         }
-        params = load_params_weights(vllm_config=self.vllm_config,
-                                     params=nnx.state(self),
-                                     mappings=mappings,
-                                     mesh=self.mesh)
-        nnx.update(self, params)
+        load_hf_weights(vllm_config=self.vllm_config,
+                        model=self,
+                        mappings=mappings,
+                        mesh=self.mesh)

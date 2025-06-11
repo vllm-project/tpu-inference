@@ -94,9 +94,6 @@ def get_nnx_model(
         jit_model = create_sharded_model()
 
     jit_model.load_weights()
-    # if os.getenv("INSPECT_MODEL", False):
-    #     params = nnx.state(jit_model, nnx.Param)
-    #     print(params)
 
     kv_cache_sharding = NamedSharding(mesh, PartitionSpec("model"))
     outputs_sharding = NamedSharding(mesh, PartitionSpec(None))

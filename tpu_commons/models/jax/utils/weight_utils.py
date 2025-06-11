@@ -130,8 +130,8 @@ def get_param(params: nnx.State, path: str) -> nnx.State:
     return current_level
 
 
-def load_params_weights(vllm_config, params: nnx.State,
-                        mappings: Dict[str, str], mesh: Mesh):
+def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
+                    mesh: Mesh):
     transpose_keys = {
         "lm_head": (1, 0),
         "gate_proj": (1, 0),
@@ -151,28 +151,13 @@ def load_params_weights(vllm_config, params: nnx.State,
     hidden_size = hf_config.hidden_size
 
     reshape_keys = {
-        "q_proj": (
-            num_heads,
-            -1,
-            hidden_size,
-        ),
-        "k_proj": (
-            num_kv_heads,
-            -1,
-            hidden_size,
-        ),
-        "v_proj": (
-            num_kv_heads,
-            -1,
-            hidden_size,
-        ),
-        "o_proj": (
-            hidden_size,
-            num_heads,
-            -1,
-        ),
+        "q_proj": (num_heads, -1, hidden_size),
+        "k_proj": (num_kv_heads, -1, hidden_size),
+        "v_proj": (num_kv_heads, -1, hidden_size),
+        "o_proj": (hidden_size, num_heads, -1),
     }
 
+    params = nnx.state(model)
     for hf_key, hf_weight in hf_model_weights_iterator(model_path,
                                                        framework="flax"):
         hf_key = hf_key.removesuffix(".weight")
@@ -206,4 +191,4 @@ def load_params_weights(vllm_config, params: nnx.State,
         # Update the model weight
         model_weight.value = shard(hf_weight, model_weight.sharding)
 
-    return params
+    nnx.update(model, params)
