@@ -41,11 +41,11 @@ class JaxQKVParallelLinear(torch.nn.Module):
             assert self.k_bias is not None and self.v_bias is not None, \
                 "QKVParallelLinear should have q, k, and v biases together."
             self.q_bias.apply_jax_(jax.device_put,
-                                   NamedSharding(mesh, P('model', None)))
+                                   NamedSharding(mesh, P('model')))
             self.k_bias.apply_jax_(jax.device_put,
-                                   NamedSharding(mesh, P('model', None)))
+                                   NamedSharding(mesh, P('model')))
             self.v_bias.apply_jax_(jax.device_put,
-                                   NamedSharding(mesh, P('model', None)))
+                                   NamedSharding(mesh, P('model')))
 
     def _load_weights_from_qkv_linear(self, qkv_linear: torch.nn.Module):
         q_proj_size, k_proj_size, _ = qkv_linear.output_sizes
