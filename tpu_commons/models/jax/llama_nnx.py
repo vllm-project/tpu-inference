@@ -12,6 +12,7 @@ from tpu_commons.models.jax.attention_interface import KVCache, attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.layers.rope import apply_rope
 from tpu_commons.models.jax.layers.sampling import sample
+from tpu_commons.models.jax.utils.weight_utils import load_hf_weights
 
 logger = init_logger(__name__)
 
@@ -108,15 +109,6 @@ class LlamaAttention(nnx.Module):
         x: jax.Array,
         attention_metadata: AttentionMetadata,
     ) -> Tuple[KVCache, jax.Array]:
-        # B: batch_size
-        # T: seq_len
-        # N: num_heads
-        # K: num_kv_heads
-        # D: hidden_size
-        # H: head_dim
-        # L: num_blocks
-        # S: block_size
-
         md = attention_metadata
 
         # q: (B, N, T, H)
@@ -133,6 +125,7 @@ class LlamaAttention(nnx.Module):
         # v: (B, K, T, H)
         v = self.v_proj(x)
 
+        # o: (B, N, T, H)
         new_kv_cache, outputs = attention(
             is_prefill,
             kv_cache,
@@ -164,7 +157,7 @@ class LlamaDecoderLayer(nnx.Module):
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
         )
-        self.attention = LlamaAttention(config=config,
+        self.self_attn = LlamaAttention(config=config,
                                         dtype=dtype,
                                         rng=rng,
                                         mesh=mesh)
@@ -190,7 +183,7 @@ class LlamaDecoderLayer(nnx.Module):
     ) -> Tuple[KVCache, jax.Array]:
         # Self attention.
         hidden_states = self.input_layernorm(x)
-        kv_cache, attn_output = self.attention(
+        kv_cache, attn_output = self.self_attn(
             is_prefill,
             kv_cache,
             hidden_states,
@@ -222,7 +215,7 @@ class LlamaModel(nnx.Module):
                 dtype=dtype,
                 rng=rng,
                 mesh=mesh,
-            ) for i in range(hf_config.num_hidden_layers)
+            ) for _ in range(hf_config.num_hidden_layers)
         ]
         self.norm = nnx.RMSNorm(
             hidden_size,
@@ -261,6 +254,7 @@ class LlamaForCausalLM(nnx.Module):
         hidden_size = model_config.get_hidden_size()
         dtype = model_config.dtype
 
+        self.vllm_config = vllm_config
         self.rng = nnx.Rngs(rng)
         self.mesh = mesh
 
@@ -319,3 +313,31 @@ class LlamaForCausalLM(nnx.Module):
             attention_metadata.chunked_prefill_enabled,
         )
         return kv_caches, next_tokens, logits
+
+    def load_weights(self):
+        mappings = {
+            "lm_head": "lm_head",
+            "model.embed_tokens": "embed.embedding",
+            "model.layers.*.input_layernorm":
+            "model.layers.*.input_layernorm.scale",
+            "model.layers.*.mlp.down_proj":
+            "model.layers.*.mlp.down_proj.kernel",
+            "model.layers.*.mlp.gate_proj":
+            "model.layers.*.mlp.gate_proj.kernel",
+            "model.layers.*.mlp.up_proj": "model.layers.*.mlp.up_proj.kernel",
+            "model.layers.*.post_attention_layernorm":
+            "model.layers.*.post_attention_layernorm.scale",
+            "model.layers.*.self_attn.k_proj":
+            "model.layers.*.self_attn.k_proj.kernel",
+            "model.layers.*.self_attn.o_proj":
+            "model.layers.*.self_attn.o_proj.kernel",
+            "model.layers.*.self_attn.q_proj":
+            "model.layers.*.self_attn.q_proj.kernel",
+            "model.layers.*.self_attn.v_proj":
+            "model.layers.*.self_attn.v_proj.kernel",
+            "model.norm": "model.norm.scale",
+        }
+        load_hf_weights(vllm_config=self.vllm_config,
+                        model=self,
+                        mappings=mappings,
+                        mesh=self.mesh)

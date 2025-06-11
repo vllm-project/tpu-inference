@@ -1,13 +1,19 @@
 """Utilities for downloading model weights from HuggingFace."""
 
+import functools
 import glob
 import os
-from typing import Any, Generator
+import re
+from typing import Any, Dict, Generator
 
 import jax
+import jax.numpy as jnp
+from flax import nnx
+from jax.sharding import Mesh
 from safetensors import safe_open
 
 from tpu_commons.logger import init_logger
+from tpu_commons.models.jax.layers.misc import shard_put
 from tpu_commons.models.jax.utils import file_utils
 
 logger = init_logger(__name__)
@@ -108,3 +114,81 @@ def get_num_q_heads_by_tp(num_q_heads: int, num_kv_heads: int,
         q_repeats = kv_repeats
 
     return q_repeats * num_q_heads
+
+
+def get_param(params: nnx.State, path: str) -> nnx.State:
+    keys = path.split(".")
+    current_level = params
+    for key in keys:
+        if key.isdigit():
+            current_level = current_level[int(key)]
+        else:
+            if key in current_level:
+                current_level = current_level[key]
+            else:
+                raise ValueError(f"{path} is not a valid param path")
+    return current_level
+
+
+def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
+                    mesh: Mesh):
+    transpose_keys = {
+        "lm_head": (1, 0),
+        "gate_proj": (1, 0),
+        "up_proj": (1, 0),
+        "down_proj": (1, 0),
+        "q_proj": (0, 2, 1),
+        "k_proj": (0, 2, 1),
+        "v_proj": (0, 2, 1),
+        "o_proj": (1, 2, 0),
+    }
+    shard = functools.partial(shard_put, mesh=mesh)
+
+    model_path = vllm_config.model_config.model
+    hf_config = vllm_config.model_config.hf_config
+    num_heads = hf_config.num_attention_heads
+    num_kv_heads = hf_config.num_key_value_heads
+    hidden_size = hf_config.hidden_size
+
+    reshape_keys = {
+        "q_proj": (num_heads, -1, hidden_size),
+        "k_proj": (num_kv_heads, -1, hidden_size),
+        "v_proj": (num_kv_heads, -1, hidden_size),
+        "o_proj": (hidden_size, num_heads, -1),
+    }
+
+    params = nnx.state(model)
+    for hf_key, hf_weight in hf_model_weights_iterator(model_path,
+                                                       framework="flax"):
+        hf_key = hf_key.removesuffix(".weight")
+
+        # Find the corresponding model key using the HF key
+        if "layer" in hf_key:
+            layer_num = re.search(r"layers\.(\d+)", hf_key).group(1)
+            layer_key = re.sub(r"layers\.\d+", "layers.*", hf_key)
+            model_key = mappings[layer_key]
+            model_key = re.sub(r"layers\.\*", f"layers.{layer_num}", model_key)
+        else:
+            model_key = mappings[hf_key]
+        model_weight = get_param(params, model_key)
+
+        print(
+            f"{hf_key}: {hf_weight.shape}  -->  {model_key}: {model_weight.value.shape}"
+        )
+
+        # Reshape HF weight if needed
+        for key in reshape_keys:
+            if key in hf_key:
+                hf_weight = jnp.reshape(hf_weight, reshape_keys[key])
+                break
+        # Transpose HF weight if needed
+        for key in transpose_keys:
+            if key in hf_key:
+                hf_weight = jnp.transpose(hf_weight, transpose_keys[key])
+                break
+        assert model_weight.value.shape == hf_weight.shape
+
+        # Update the model weight
+        model_weight.value = shard(hf_weight, model_weight.sharding)
+
+    nnx.update(model, params)
