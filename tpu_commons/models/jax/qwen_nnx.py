@@ -1,51 +1,44 @@
-# from typing import Tuple
+from flax import nnx
 
-# import jax
-# from flax import nnx
-# from jax.sharding import Mesh
-# from vllm.config import VllmConfig
+from tpu_commons.logger import init_logger
 
-# from tpu_commons.logger import init_logger
-# from tpu_commons.models.jax.layers.misc import Embedder
+logger = init_logger(__name__)
 
-# logger = init_logger(__name__)
-
-# init_fn = nnx.initializers.uniform()
+init_fn = nnx.initializers.uniform()
 
 # class Qwen2Model(nnx.Module):
-#     vllm_config: VllmConfig
-#     mesh: Mesh
+
+#     def __init__(self, vllm_config: VllmConfig, rng: nnx.Rngs,
+#                  mesh: Mesh) -> None:
+#         model_config = vllm_config.model_config
+#         hf_config = model_config.hf_config
 
 # class Qwen2ForCausalLM(nnx.Module):
-#     config: VllmConfig
-#     rng: jax.Array
-#     mesh: Mesh
 
-#     @nnx.compact
-#     def setup(self) -> None:
-#         model_config = self.vllm_config.model_config
+#     def __init__(self, vllm_config: VllmConfig, rng: jax.Array,
+#                  mesh: Mesh) -> None:
+#         model_config = vllm_config.model_config
+#         vocab_size = model_config.get_vocab_size()
+#         hidden_size = model_config.get_hidden_size()
+#         dtype = model_config.dtype
 
-#         self.embed_tokens = Embedder(
-#             vocab_size=model_config.get_vocab_size(),
-#             hidden_size=model_config.get_hidden_size(),
-#             dtype=model_config.dtype,
-#             mesh=self.mesh,
+#         self.vllm_config = vllm_config
+#         self.rng = nnx.Rngs(rng)
+#         self.mesh = mesh
+
+#         self.embed = nnx.Embed(
+#             num_embeddings=vocab_size,
+#             features=hidden_size,
+#             param_dtype=dtype,
+#             embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
+#             rngs=self.rng,
 #         )
 #         self.model = Qwen2Model(
-#             vllm_config=self.vllm_config,
-#             mesh=self.mesh,
+#             vllm_config=vllm_config,
+#             rng=self.rng,
+#             mesh=mesh,
 #         )
-#         # try:
-#         #     self.lm_head = self.param(
-#         #         "lm_head",
-#         #         sharding_init(
-#         #             (None, "model"),
-#         #             self.mesh,
-#         #         ),
-#         #         (model_config.get_hidden_size(),
-#         #          model_config.get_vocab_size()),
-#         #         model_config.dtype,
-#         #     )
-#         # except Exception:
-#         #     self.lm_head = None
-#         self.lm_head = None
+#         self.lm_head = nnx.Param(
+#             init_fn(self.rng.params(), (hidden_size, vocab_size), dtype),
+#             sharding=(None, "model"),
+#         )
