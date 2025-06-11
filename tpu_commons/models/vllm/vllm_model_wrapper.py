@@ -1,3 +1,4 @@
+import copy
 import functools
 import tempfile
 from typing import List, Optional, Tuple
@@ -8,10 +9,8 @@ import torch.nn
 import torchax
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
-from torch.utils import _pytree as pytree
-from torchax.interop import extract_all_buffers, jax_view, torch_view
+from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import j2t_dtype
-from vllm.attention import Attention as VllmAttention
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
@@ -21,30 +20,9 @@ from vllm.sequence import IntermediateTensors
 from tpu_commons.models.jax.attention_interface import KVCache
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.layers.sampling import sample
-from tpu_commons.models.vllm.jax_attention_wrapper import JaxAttentionWrapper
+from tpu_commons.models.vllm.sharding import shard_model_to_tpu
 from tpu_commons.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
-
-
-def swap_attention_module(model: torch.nn.Module, mesh: Mesh) -> None:
-    """
-    Swap the Attention torhc.nn.Module used in the model with an implementation
-    in JAX, which uses the KVCache management and attention kernels for TPU.
-
-    Args:
-        model: A vLLM model
-    """
-
-    def _process_module(module, name=None, parent=None):
-        if isinstance(module, VllmAttention):
-            wrapped_module = JaxAttentionWrapper(module, mesh)
-            assert parent is not None and name is not None, (
-                "Top Level module is not expected to be wrapped.")
-            setattr(parent, name, wrapped_module)
-        for child_name, child_module in list(module.named_children()):
-            _process_module(child_module, child_name, module)
-
-    _process_module(model)
 
 
 class ModelForLogits(torch.nn.Module):
@@ -74,10 +52,6 @@ class VllmModelWrapper:
     mesh: Mesh
 
     def __init__(self, vllm_config: VllmConfig, rng: PRNGKey, mesh: Mesh):
-        vllm_config.model_config.dtype = j2t_dtype(
-            vllm_config.model_config.dtype.dtype)
-        vllm_config.device_config.device = "xla"
-
         self.vllm_config = vllm_config
         self.rng = rng
         self.mesh = mesh
@@ -95,27 +69,25 @@ class VllmModelWrapper:
                 backend="gloo",
             )
             ensure_model_parallel_initialized(
-                self.vllm_config.parallel_config.tensor_parallel_size,
-                self.vllm_config.parallel_config.pipeline_parallel_size,
+                tensor_model_parallel_size=1,
+                pipeline_model_parallel_size=1,
             )
+
+        # Set up to load the model into CPU first.
+        vllm_config_for_load = copy.deepcopy(self.vllm_config)
+        vllm_config_for_load.model_config.dtype = j2t_dtype(
+            self.vllm_config.model_config.dtype.dtype)
+        vllm_config_for_load.device_config.device = "cpu"
 
         # Load the vLLM model and wrap it into a new model whose forward
         # function calculates the hidden_state and logits in one go.
-        model = ModelForLogits(vllm_get_model(vllm_config=self.vllm_config))
-
-        swap_attention_module(model, self.mesh)
+        self.model_for_logits = ModelForLogits(
+            vllm_get_model(vllm_config=vllm_config_for_load))
 
         # jax.config.update("jax_explain_cache_misses", True)
 
-        # Move the model into torchax 'jax' device so that jax code can interop
-        # with it and the overall program can be traced and compiled in XLA.
-        with torchax.default_env():
-            self.model_for_logits = model.to('jax')
-            params, buffers = extract_all_buffers(self.model_for_logits)
-            params, buffers = pytree.tree_map_only(torch.Tensor,
-                                                   lambda x: x.to('jax'),
-                                                   (params, buffers))
-            params_and_buffers = {**params, **buffers}
+        params_and_buffers = shard_model_to_tpu(self.model_for_logits,
+                                                self.mesh)
 
         # Returning to the jax land, so we need to wrap it into a JaxValue.
         return jax_view(params_and_buffers)

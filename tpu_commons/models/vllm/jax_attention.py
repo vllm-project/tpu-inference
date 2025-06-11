@@ -77,7 +77,7 @@ def _jax_attn_func(
     return new_kv_cache, outputs
 
 
-class JaxAttentionWrapper(torch.nn.Module):
+class JaxAttention(torch.nn.Module):
 
     def __init__(
         self,

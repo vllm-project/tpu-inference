@@ -41,20 +41,18 @@ python vllm/examples/offline_inference/basic/generate.py \
 
 ## Run vLLM Pytorch models on the JAX path
 
-Run the vLLM's implementation of `Llama 3.1 8B`, which is in Pytorch:
+Run the vLLM's implementation of `Llama 3.1 8B`, which is in Pytorch. It is the same command as above with the extra env var `MODEL_IMPL_TYPE=vllm`:
 
 ```
 MODEL_IMPL_TYPE=vllm
 TPU_BACKEND_TYPE=jax
 python vllm/examples/offline_inference/basic/generate.py \
     --model=meta-llama/Llama-3.1-8B \
-    --tensor_parallel_size=1 \
+    --tensor_parallel_size=4 \
     --task=generate \
     --max_model_len=1024 \
     --max_num_seqs=1
 ```
-
-Currently only single chip is supported, so `--tensor_parallel_size=1`
 
 ## Relevant env
 
