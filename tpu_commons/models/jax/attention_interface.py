@@ -25,6 +25,15 @@ def attention(
     num_heads: int,
     num_kv_heads: int,
 ) -> Tuple[KVCache, jax.Array]:
+    # B: batch_size
+    # T: seq_len
+    # N: num_heads
+    # K: num_kv_heads
+    # D: hidden_size
+    # H: head_dim
+    # L: num_blocks
+    # S: block_size
+
     # (K, L, S, H)
     k_cache, v_cache = kv_cache
     md = attention_metadata

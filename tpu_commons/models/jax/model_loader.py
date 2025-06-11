@@ -79,7 +79,7 @@ def get_nnx_model(
     model_class = _get_model_architecture(vllm_config.model_config.hf_config)
 
     @nnx.jit
-    def _create_sharded_model():
+    def create_sharded_model():
         model = model_class(vllm_config, rng, mesh)
         state = nnx.state(model)
         pspecs = nnx.get_partition_spec(state)
@@ -88,30 +88,43 @@ def get_nnx_model(
         return model
 
     # Create the model instance with inited sharded weights
+    # TODO(xiang): create abstract model without weights allocated
+    # https://flax.readthedocs.io/en/latest/guides/surgery.html#creating-an-abstract-model-or-state-without-memory-allocation
     with mesh:
-        model = _create_sharded_model()
+        jit_model = create_sharded_model()
 
-    # TODO(xiang): load weights from HF
+    jit_model.load_weights()
+    # if os.getenv("INSPECT_MODEL", False):
+    #     params = nnx.state(jit_model, nnx.Param)
+    #     print(params)
 
     kv_cache_sharding = NamedSharding(mesh, PartitionSpec("model"))
     outputs_sharding = NamedSharding(mesh, PartitionSpec(None))
     logits_cache_sharding = NamedSharding(mesh, PartitionSpec(None))
 
-    @nnx.jit(out_shardings=(
-        kv_cache_sharding,
-        outputs_sharding,
-        logits_cache_sharding,
-    ),
-             static_argnums=(1, 2),
-             donate_argnums=3)
-    def run_model(model: nnx.Module, *args):
+    # For performance consideration, refer to:
+    # https://flax.readthedocs.io/en/latest/guides/performance.html
+    graphdef, state = nnx.split(jit_model)
+
+    @functools.partial(
+        jax.jit,
+        out_shardings=(
+            kv_cache_sharding,
+            outputs_sharding,
+            logits_cache_sharding,
+        ),
+        static_argnums=(2, 3),
+        donate_argnums=4,
+    )
+    def run_model(graphdef, state, *args):
+        model = nnx.merge(graphdef, state)
         return model(*args)
 
-    def model_fn(model, *args):
+    def model_fn(graphdef, state, *args):
         with mesh:
-            return run_model(model, *args)
+            return run_model(graphdef, state, *args)
 
-    model_fn = functools.partial(model_fn, model)
+    model_fn = functools.partial(model_fn, graphdef, state)
     return model_fn
 
 
