@@ -78,7 +78,7 @@ class TPUModelRunner():
         self.perplexity_reference_text = None
         self.decode_seqs_padding = 8
         self.cache_config.output_logits = False  # To make model run without error
-        self.scheduler_config.chunked_prefill_tokens_padding = 64
+        self.scheduler_config.chunked_prefill_tokens_padding = 256
 
         self.kv_caches: List[Tuple[jax.Array, jax.Array]] = []
         self._init_random()
@@ -86,11 +86,50 @@ class TPUModelRunner():
         self._init_model()
         self._init_jit()
 
+        self._verify_chunked_prefill_config()
+
     def _init_random(self):
         if self.model_config.seed is None:
             self.model_config.seed = 0
         np.random.seed(self.model_config.seed)
         self.rng_key = jax.random.key(self.model_config.seed)
+
+    def _verify_chunked_prefill_config(self):
+        if (self.scheduler_config.max_num_batched_tokens %
+                self.cache_config.block_size != 0):
+            raise ValueError(
+                "max_num_batched_tokens needs to be multiple of block_size.")
+
+        # TODO(pooyam): Explain why.
+        if (self.scheduler_config.max_num_batched_tokens //
+                self.cache_config.block_size == 1):
+            raise ValueError(
+                "max_num_batched_tokens must be at least 2x of block_size.")
+
+        if (self.scheduler_config.max_num_batched_tokens
+                < self.scheduler_config.max_num_seqs):
+            raise ValueError(
+                "max_num_batched_tokens needs to be larger than or equal to max_num_seqs."
+            )
+
+        if (self.scheduler_config.chunked_prefill_tokens_padding
+                < self.scheduler_config.max_num_seqs):
+            raise ValueError(
+                "chunked_prefill_tokens_padding needs to be larger than or equal to max_num_seqs."
+            )
+
+        # TODO(b/396129273): as the feature-cross compatibiltiy work is done, remove
+        # the following check.
+        if self.model_config.get_sliding_window():
+            raise ValueError(
+                "Chunked prefill is not yet supported for model with sliding window."
+            )
+
+        # TODO(pooyam): Detect and enable this.
+        # if self.model_config.is_mixed_attentions():
+        #     raise ValueError(
+        #         f"Chunked prefill is not yet supported for model with mixed attention."
+        #     )
 
     def load_model(self):
         pass
@@ -198,25 +237,31 @@ class TPUModelRunner():
         # We don't want to use ragged attention kernel all the time as paged attention is faster for decoding only.
         # NOTE(pooyam): For full prefill, is not clear which one is faster. We have to benchmark it.
         # NOTE(pooyam): If newer OSS ragged attention is also faster for decode, we should always used chunked prefill kernel and simplify the code.
-
-        new_prefilling_seqs, partial_prefilling_seqs, decoding_seqs = self._get_prefill_and_decode_seqs(
+        new_full_prefill_seqs, new_partial_prefill_seqs, subsequent_partial_prefill_seqs, decoding_seqs = self._get_prefill_and_decode_seqs(
             scheduler_output)
-        total_prefills = len(new_prefilling_seqs) + len(
-            partial_prefilling_seqs)
-        total_decodes = len(decoding_seqs)
-        if total_prefills + total_decodes == 0:
+
+        has_new_full = bool(new_full_prefill_seqs)
+        has_new_partial = bool(new_partial_prefill_seqs)
+        has_subsequent_partial = bool(subsequent_partial_prefill_seqs)
+        has_decoding = bool(decoding_seqs)
+
+        if not (has_new_full or has_new_partial or has_subsequent_partial
+                or has_decoding):
             return None
 
-        if total_prefills == 0:  # Just decode
-            yield self._prepare_decode(scheduler_output)
-        elif len(partial_prefilling_seqs):  # There are some partial prefills
-            yield self._prepare_chunked_prefill(scheduler_output)
-        elif len(decoding_seqs):  # There is a full prefill and a decode
-            yield self._prepare_chunked_prefill(scheduler_output)
-        else:  # There is just a full prefill
-            # Commenting below to debug correctness.
-            #yield self._prepare_prefill(scheduler_output)
-            yield self._prepare_chunked_prefill(scheduler_output)
+        # Check for the "no prefill" case
+        if not new_full_prefill_seqs and not new_partial_prefill_seqs and not subsequent_partial_prefill_seqs:
+            return self._prepare_decode(scheduler_output)
+
+        # Check for the "only full prefill" case
+        # TODO(pooyam): We probably can use ragged attention for new_partial_prefills as well.
+        if new_full_prefill_seqs and not new_partial_prefill_seqs and not subsequent_partial_prefill_seqs and not decoding_seqs:
+            return self._prepare_prefill(scheduler_output)
+
+        # All other cases fall into the "chunked prefill" category
+        # TODO(pooyam): Change `prepare_prefill` to respect num scheduled tokens, so we can use prefill_kernel even for new partial prefills.
+        # This is useful only if we conclude paged attention for prefill is still faster than ragged paged attention for prefill.
+        return self._prepare_chunked_prefill(scheduler_output)
 
     def _is_generating_new_token(self, scheduler_output: VllmSchedulerOutput,
                                  seq: list[NewRequestData
@@ -240,16 +285,15 @@ class TPUModelRunner():
     ) -> ModelRunnerOutput:
         self._update_states(scheduler_output)
 
-        for inputs in self._prepare_inputs(scheduler_output):
-            if inputs is not None:
-                model_inputs, (running_indices, output_token_indices) = inputs
-                # TODO (jacobplatin): use logits and single_step_attn_scores_decode?
-                self.kv_caches, next_tokens, logits = self.model_fn(
-                    *model_inputs)
-                self.output_cache = self.write_outputs(self.output_cache,
-                                                       next_tokens,
-                                                       running_indices,
-                                                       output_token_indices)
+        inputs = self._prepare_inputs(scheduler_output)
+        if inputs is not None:
+            model_inputs, (running_indices, output_token_indices) = inputs
+            # TODO (jacobplatin): use logits and single_step_attn_scores_decode?
+            self.kv_caches, next_tokens, logits = self.model_fn(*model_inputs)
+            self.output_cache = self.write_outputs(self.output_cache,
+                                                   next_tokens,
+                                                   running_indices,
+                                                   output_token_indices)
 
         prompt_logprobs_dict = {}
 
@@ -260,10 +304,6 @@ class TPUModelRunner():
 
         for i, seq in enumerate(all_reqs):
             # NOTE(pooyam): Unfinished prefills should not return anything to vLLM scheduler.
-            if not self._is_generating_new_token(scheduler_output, seq):
-                print(
-                    f"{seq.req_id} is not generating new token at this iter.")
-                continue
 
             index = self.input_batch.req_id_to_index[seq.req_id]
             output_token_index = max(
@@ -802,11 +842,26 @@ class TPUModelRunner():
         self, scheduler_output: VllmSchedulerOutput
     ) -> Tuple[List[NewRequestData], List[CachedRequestData],
                List[CachedRequestData]]:
-        new_prefilling_seqs = [
-            seq for seq in scheduler_output.scheduled_new_reqs
-        ]
+        # NOTE(pooyam): We categorize sequences into 4 different categories to have freedom to choose which kernel to use for each of them:
+        # 1. full prefill: A sequence which is scheduled for a full prefill -> We can use prefill or chunked prefill kernel.
+        # 2. new partial prefill: A sequence that its first chunk is scheduled for prefill -> We can use prefill or chunked prefill kernel.
+        # 3. subsequent partial prefill: A sequence that its subsequent chunks are scheduled for prefill -> We should use chunked prefill kernel.
+        # 4. decode: A sequence that has been completely prefilled already => We should use decode or chunked prefill kernel.
+        # NOTE(pooyam): If God helps and we benchmark that ragged attention is superior in every scenario, we can simplify all these and get rid of this misery.
+
+        new_full_prefill_seqs = []
+        new_partial_prefill_seqs = []
+        subsequent_partial_prefill_seqs = []
         decoding_seqs = []
-        partial_prefilling_seqs = []
+
+        for seq in scheduler_output.scheduled_new_reqs:
+            seq_index = self.input_batch.req_id_to_index[seq.req_id]
+            num_prompt_tokens = self.input_batch.num_prompt_tokens[seq_index]
+            if num_prompt_tokens == scheduler_output.num_scheduled_tokens[
+                    seq.req_id]:
+                new_full_prefill_seqs.append(seq)
+            else:
+                new_partial_prefill_seqs.append(seq)
 
         for seq in scheduler_output.scheduled_cached_reqs:
             seq_index = self.input_batch.req_id_to_index[seq.req_id]
@@ -814,22 +869,22 @@ class TPUModelRunner():
             num_computed_tokens = seq.num_computed_tokens
             remaining_prefill = max(0, num_prompt_tokens - num_computed_tokens)
             if remaining_prefill > 0:
-                partial_prefilling_seqs.append(seq)
+                subsequent_partial_prefill_seqs.append(seq)
             else:
                 decoding_seqs.append(seq)
 
-        return new_prefilling_seqs, partial_prefilling_seqs, decoding_seqs
+        return new_full_prefill_seqs, new_partial_prefill_seqs, subsequent_partial_prefill_seqs, decoding_seqs
 
     def _prepare_chunked_prefill(self,
                                  scheduler_output: VllmSchedulerOutput) -> Any:
         block_size = self.cache_config.block_size
         # in vLLMs scheduler output, scheduled_cached_reqs can mean two things: Subsequent prefill of an already seen request / or decode.
 
-        new_prefilling_seqs, partial_prefilling_seqs, decoding_seqs = self._get_prefill_and_decode_seqs(
+        new_full_prefill_seqs, new_partial_prefill_seqs, subsequent_partial_prefill_seqs, decoding_seqs = self._get_prefill_and_decode_seqs(
             scheduler_output)
         num_decode_seqs = len(decoding_seqs)
-        num_prefill_seqs = len(new_prefilling_seqs) + len(
-            partial_prefilling_seqs)
+        num_prefill_seqs = len(new_full_prefill_seqs) + len(
+            new_partial_prefill_seqs) + len(subsequent_partial_prefill_seqs)
         assert num_prefill_seqs > 0
         assert num_prefill_seqs <= MAX_PREFILL_SEQS_PER_TOKEN_BATCH
 
@@ -910,7 +965,9 @@ class TPUModelRunner():
         prefill_kv_cache_write_indices = np.full(
             (num_tokens_scheduled // block_size, ), -1, dtype=np.int32)
         prefill_input_ids = np.zeros((1, num_tokens_scheduled), dtype=np.int32)
-        for i, seq in enumerate(new_prefilling_seqs + partial_prefilling_seqs):
+        for i, seq in enumerate(new_full_prefill_seqs +
+                                new_partial_prefill_seqs +
+                                subsequent_partial_prefill_seqs):
             seq_index = self.input_batch.req_id_to_index[seq.req_id]
             whole_prompt_len = self.input_batch.num_prompt_tokens[seq_index]
             prefill_len = scheduler_output.num_scheduled_tokens[seq.req_id]
