@@ -304,6 +304,8 @@ class TPUModelRunner():
 
         for i, seq in enumerate(all_reqs):
             # NOTE(pooyam): Unfinished prefills should not return anything to vLLM scheduler.
+            if not self._is_generating_new_token(scheduler_output, seq):
+                continue
 
             index = self.input_batch.req_id_to_index[seq.req_id]
             output_token_index = max(
