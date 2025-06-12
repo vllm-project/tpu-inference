@@ -133,3 +133,34 @@ BUILDKITE_COMMIT=3843efc .buildkite/scripts/run_in_docker.sh bash /workspace/tpu
 
 While this will run the code in a Docker image, you can also run the bare `tests/e2e/benchmarking/llama3.1_8b_mmlu_few_prompt.sh` script itself,
 being sure to pass the proper args for your machine.
+
+## How to develop using docker images?
+
+### On the development machine (can be without TPU):
+
+Build docker image
+
+```
+docker build -f docker/Dockerfile -t <YOUR_IMAGE_NAME>:<YOUR_IMAGE_TAG> .
+```
+
+### On the TPU-VM side:
+Pull the docker image and run it
+
+```
+TPU_BACKEND_TYPE=jax
+DOCKER_URI=<YOUR_IMAGE_NAME>:<YOUR_IMAGE_TAG>
+docker pull $DOCKER_URI
+docker run \
+  --rm \
+  -e TPU_BACKEND_TYPE="$TPU_BACKEND_TYPE" \
+  -e HF_TOKEN=<YOUR_HF_TOKEN> \
+  -e VLLM_XLA_CHECK_RECOMPILATION=1 \
+  $DOCKER_URI \
+  python /workspace/vllm/examples/offline_inference/basic/generate.py \
+  --model=meta-llama/Llama-3.1-8B \
+  --tensor_parallel_size=4 \
+  --task=generate \
+  --max_model_len=1024 \
+  --max_num_seqs=1
+```
