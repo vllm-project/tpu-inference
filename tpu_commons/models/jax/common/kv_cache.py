@@ -1,75 +1,79 @@
-# the idea's from Gemax to create a hier as:
-# PartialCache(sharded Cache) <- KVCache(single layer) <- GlobalKVCache(multi-layer)
-class PartialCache:
-    # to decide which proto to use for k,v
-    keys: MaybeQuantizedKVCacheTensor
-    values: MaybeQuantizedKVCacheTensor
-    length: Int[ArrayT, ]
-    ....
+# Current implementation split the Cache and method.
+# TODO: we could discuss want to encapsulate the KVCache and updater into the same class
+# 
+@dataclass
+class KVCacheConfig(Config)::
+    """Configuration for KV cache."""
+    batch_size: int
+    cache_len: int
+    num_kv_heads: int
+    head_dim: int
+    dtype: jnp.dtype = jnp.float32
 
-    def zeros() -> 'PartialCache':
-        ...
-    def sharding(
-        ...
-    ) -> 'PartialCache':
-        ...
-    
 
 class KVCache:
     cfg: KVCacheConfig,
-    sharding: ShardingConfig,
-    prefill_kv_cache:  PartialCache,
-    generation_kv_cache:  PartialCache,
-    quant_kv_cache: bool,
+    key_cache: Dict[str, Float[ArrayT, '...']]
+    value_cache: Dict[str, Float[ArrayT, '...']]
+    length: Int[ArrayT, '...']
+    mesh: Mesh,
+    sharding_cfg: ShardingConfig,
 
-    def __init__(self):
-        ...
-    def make(self) -> 'KVCache':
-        ...
-    def update(
-        self,
-        k,
-        v,
-        op_mode,
-        ...
-    ) -> 'KVCache':
-        ...
-
-    def sharding(self) -> 'KVCache':
-        ...
+    def __init__(self, cfg, sharding_cfg, mesh):
+        self.cfg = cfg,
+        self.mesh = mesh
+        self.sharding_cfg = sharding_cfg
+        self.create_sharding()
+        self._initialize_caches()
     
-class GlobalKVCacheConfig(Config):
-    n_layer: int
+    def _initialize_caches(self,) -> 'KVCache':
+        cache_shape = (
+            self.cfg.batch_size,
+            self.cfg.cache_len,
+            self.cfg.num_kv_heads,
+            self.cfg.head_dim
+        )
+        self.key_cache['prefill'] = jnp.zeros(
+            cache_shape,
+            dtype=self.cfg.dtype,
+            sharding=self.kv_sharding['prefill'])
+        self.key_cache['decode']= jnp.zeros(
+            cache_shape,
+            dtype=self.cfg.dtype,
+            sharding=self.kv_sharding['decode'])
+        self.value_cache['prefill']  = jnp.zeros(
+            cache_shape,
+            dtype=self.cfg.dtype,
+            sharding=self.kv_sharding['prefill'])
+        self.value_cache['decode'] = jnp.zeros(
+            cache_shape,
+            dtype=self.cfg.dtype,
+            sharding=self.kv_sharding['decode'])
+        self.length_B = jnp.zeros((self.cfg.batch_size,), dtype=jnp.dtype),
 
-    def __init__(self):
-        ...
-    def make(self, runtime_param: Optional[layer.RuntimeParams] = None) -> 'GlobalKVCache':
-        cache = []
-        for i in cfg.layer:
-            layer_cache = KVCache.make()
-            cache.append(layer_cache)
-        
-        return GlobalKVCache(
-            cfg=self,
-            cache=cache,
-            sharding_cfg=layers.runtime_param.sharding_cfg,
-            quantization=layers.runtime_param.quantization)
+    def create_sharding(self, ):
+        self.kv_sharding = dict()
+        self.kv_sharding['prefill'] =  NamedSharding(
+            self.mesh, P(self.sharding_cfg.keyvalue_prefill_mode_cache_bsnh.get_axes()))
+        self.kv_sharding['decode'] =  NamedSharding(
+            self.mesh, P(self.sharding_cfg.keyvalue_generate_mode_cache_bsnh.get_axes()))
+    
+class KVCacheUpdater:
+    # Split update_cache for prefill and generate
+    def update_cache(self, operand, cache, sequence_len, dtype):
+        operand_BSNH = operand.astype(cache.dtype)
+        sequence_len = sequence_len_B
+        batch_size, max_seq_len = operand_BSNH.shape[:2] # it's usually 1 for generating, unless speculative-decoding
+        cache_size = cache.shape[-3] # How many tokens' KV would be stored
 
-class GlobalKVCache:
-    cfg: KVCacheConfig
-    # or better data type(dict) for each layer
-    cache: list['KVCache']
-    sharding_cfg: ShardingConfig = default_sharding()
-    quantization: Quantization | None = None
+        # [3, 1, 2] -> [[3], [1], [2]], seq0 has 3 tokens, seq1 has 1 token, etc
+        shift_B = sequence_len_B[:, None]
+        batch_idx = jnp.arange(batch_size)[:, None]
+        # [[3, 4, 5], [1, 2, 3], [2, 3, 4]]
+        offset = (iota(dtype, (batch_size, max_seq_len),  1) + shift) % cache_size
+        # update[i, j] will be stored in cache[batch_idx[i, j], offset[i, j]]
+        # namely cache[i, sequence_len[i] + j]
+        cache = cache.at[batch_idx, offset].set(operand, mode='drop')
 
-    def __init__(self):
-        ...
-    def get_cfg(self) -> 'GlobalKVCacheConfig':
-        ...
-    def sharding(self) -> 'GlobalKVCache':
-        ...
-    def update(self):
-        ...
-    def get_layer_kv_cache(layer:int):
-        ...
-        return self.cache[layer]
+        return cache
+

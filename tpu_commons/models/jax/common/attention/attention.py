@@ -17,8 +17,6 @@ class AttentionConfig(Config):
 class Attention(nnx.Module):
     """Attention Block"""
     cfg: AttentionConfig
-    attention_mask
-    query_pos
     mesh: Mesh,
     kernel_init: Initializer # TODO create factories for initializer(?)
     router: Router,
@@ -52,6 +50,8 @@ class Attention(nnx.Module):
         named_sharding = dict()
 
 
+    def generate_mask(self):
+        ...
 
     def create_sharding(self):
 
@@ -93,6 +93,7 @@ class Attention(nnx.Module):
         x,
         op_mode,
         kv_cache: KVCache,
+        kv_cache_updater: KVCacheUpdater = None,
         attention_metadata: AttentionMetadata,
     ):  
         md = attention_metadata

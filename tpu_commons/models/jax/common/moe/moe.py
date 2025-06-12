@@ -85,7 +85,6 @@ class MoE(nnx.Module):
         self.efd_sharding =  NamedSharding(
             self.mesh, P(self.sharding_cfg.moe_weights_efd.get_axes(op_mode)))
             
-        # NamedSharding(mesh, P((BATCH_AXIS_NAME, SEQUENCE_AXIS_NAME, None)))
         return 
 
 @dataclass
