@@ -198,6 +198,7 @@ class Attention(nnx.Module):
         x,
         is_prefill,
         kv_cache: KVCache,
+        kv_cache_updater: KVCacheUpdater = None,
         attention_metadata: AttentionMetadata,
     ):
         """Performs the forward pass of the attention module.
