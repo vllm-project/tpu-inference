@@ -102,6 +102,20 @@ class Qwen2Attention(nnx.Module):
             rngs=rng,
         )
 
+        # Qwen model introduces QKV bias
+        self.q_bias = nnx.Param(init_fn(rng.params(),
+                                        (self.num_heads, self.head_dim),
+                                        dtype),
+                                sharding=("model", None))
+        self.k_bias = nnx.Param(init_fn(rng.params(),
+                                        (self.num_kv_heads, self.head_dim),
+                                        dtype),
+                                sharding=("model", None))
+        self.v_bias = nnx.Param(init_fn(rng.params(),
+                                        (self.num_kv_heads, self.head_dim),
+                                        dtype),
+                                sharding=("model", None))
+
     def __call__(
         self,
         is_prefill: bool,
@@ -113,17 +127,22 @@ class Qwen2Attention(nnx.Module):
 
         # q: (B, N, T, H)
         q = self.q_proj(x)
+        q = q + self.q_bias.value.reshape(1, self.num_heads, 1, self.head_dim)
         q = apply_rope(q, md.input_positions, self.head_dim, self.rope_theta,
                        self.rope_scaling)
         q = q * self.head_dim**-0.5
 
         # k: (B, K, T, H)
         k = self.k_proj(x)
+        k = k + self.k_bias.value.reshape(1, self.num_kv_heads, 1,
+                                          self.head_dim)
         k = apply_rope(k, md.input_positions, self.head_dim, self.rope_theta,
                        self.rope_scaling)
 
         # v: (B, K, T, H)
         v = self.v_proj(x)
+        v = v + self.v_bias.value.reshape(1, self.num_kv_heads, 1,
+                                          self.head_dim)
 
         # o: (B, N, T, H)
         new_kv_cache, outputs = attention(
