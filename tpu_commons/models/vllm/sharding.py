@@ -1,3 +1,6 @@
+import functools
+
+import humanize
 import jax
 import torch
 import torchax
@@ -8,11 +11,13 @@ from torchax.interop import extract_all_buffers, torch_view
 from torchax.tensor import t2j
 from vllm.attention import Attention as VllmAttention
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 
 from tpu_commons.models.vllm.jax_attention import JaxAttention
+from tpu_commons.models.vllm.jax_fused_moe import JaxFusedMoE
 from tpu_commons.models.vllm.jax_qkv_parallel_linear import \
     JaxQKVParallelLinear
 
@@ -47,11 +52,18 @@ def shard_row_parallel_linear(layer: torch.nn.Module, mesh: Mesh):
     return layer
 
 
+def shard_fused_moe(layer: torch.nn.Module, mesh: Mesh):
+    assert isinstance(layer, FusedMoE)
+    jax_layer = JaxFusedMoE(layer, mesh)
+    return jax_layer
+
+
 MODULE_TYPE_TO_WRAPPING_FUNC = {
     VllmAttention: shard_attention,
     QKVParallelLinear: shard_qkv_parallel_linear,
     ColumnParallelLinear: shard_column_parallel_linear,
     RowParallelLinear: shard_row_parallel_linear,
+    FusedMoE: shard_fused_moe,
 }
 
 
@@ -103,6 +115,13 @@ def shard_model_to_tpu(model: torch.nn.Module, mesh: Mesh):
 
         # For other weight tensors, repliate them on all the TPU chips.
         params, buffers = extract_all_buffers(model)
+
+        fmt_size = functools.partial(humanize.naturalsize, binary=True)
+        for qual_name, x in {**params, **buffers}.items():
+            if _is_unmoved_tensor(x):
+                tensor_size = fmt_size(x.nbytes)
+                logger.debug(f"{qual_name=} is not sharded, {tensor_size=}")
+
         params, buffers = pytree.tree_map_only(_is_unmoved_tensor,
                                                _move_to_tpu_replicated,
                                                (params, buffers))
