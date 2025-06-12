@@ -69,7 +69,7 @@ class Qwen2Attention(nnx.Module):
         self.num_kv_heads = config.num_key_value_heads
         self.rope_theta = config.rope_theta
         self.rope_scaling = getattr(config, "rope_scaling", None)
-        self.head_dim = config.head_dim
+        self.head_dim = config.hidden_size // config.num_attention_heads
 
         self.mesh = mesh
 
