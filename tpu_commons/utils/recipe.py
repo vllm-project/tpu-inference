@@ -1,8 +1,9 @@
 import abc
 from collections import namedtuple
 from dataclasses import dataclass
-import shardings
 from typing import Any, Dict, List
+
+import shardings
 
 
 ################################
@@ -25,7 +26,7 @@ class ModelRecipe:
     use_qk_norm = True
     # Every fourth layer should NOT use RoPE
     nope_layer_interval = 4
-    
+
 
 @dataclass
 class MoEModelRecipe(ModelRecipe):
@@ -50,7 +51,7 @@ class AbstractLayerShardingRecipe(abc.ABC):
         self.prefill = None
         self.decode = None
         self.logical_axes_rules = None
-    
+
     def validate_overrides(self, override_rules):
         if override_rules:
             for mode in  override_rules:
@@ -77,7 +78,7 @@ class AbstractLayerShardingRecipe(abc.ABC):
     def base_recipe(self):
         pass
 
-    # def __init__(self, 
+    # def __init__(self,
     #              attention_type,
     #              feedforward_type,
     #              override_rules: Dict[str, Any]):
@@ -85,7 +86,7 @@ class AbstractLayerShardingRecipe(abc.ABC):
     #     self.feedforward = FFWLayerShardingRecipe(feedforward_type)
     #     # self.vocab = VocabShardingRecipe()
     #     self.override_rules = override_rules
-    
+
     # def validate_overrides(self):
     #     for sharding_layer in self.override_rules:
     #         if sharding_layer not in self.SUPPORTED_SHARDINGS:
@@ -118,10 +119,10 @@ class AttentionLayerShardingRecipe(AbstractLayerShardingRecipe):
     def base_recipe(self) -> shardings.AttentionLogicalAxesRules:
         if self.class_name not in self.SUPPORTED_CLASSES:
             raise ValueError("Sharding type {self.class_name} is not one of supported classes: {self.SUPPORTED_CLASSES}.")
-        
+
         if self.class_name == "attention":
             return shardings.AttentionLogicalAxesRules() # assuming it has initializations for attention layers (like in base.yml)
-    
+
 
 class FFWLayerShardingRecipe(AbstractLayerShardingRecipe):
     SUPPORTED_CLASSES = ["dense", "moe"]

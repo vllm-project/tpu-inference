@@ -1,6 +1,7 @@
-from constants import LOGICAL_MESH_AXIS_NAME
-import dataclass
 from typing import Int, List, Tuple
+
+import dataclass
+
 
 @dataclass
 class ICIParallelismSettings:
@@ -23,7 +24,7 @@ MESH_AXES = ['decode_data_prefill_seq', 'data', 'seq', 'tensor', 'expert']
 @dataclass
 class AttentionLogicalAxesRules:
     # demo only, suffix needs to be verified
-   
+
    # Activation for attn:
     activation_attention_batch: List[str]
 
@@ -32,7 +33,7 @@ class AttentionLogicalAxesRules:
 
     # Activation for attn out:
     activation_attention_out_bsd: List[str]
-    
+
     # Activation for q:
     activation_q_bsd: List[str]
 
@@ -41,22 +42,22 @@ class AttentionLogicalAxesRules:
 
     # Q vector:
     query_bshq: List[str]
-    
-    # K/V vector: 
+
+    # K/V vector:
     keyvalue_bsmq: List[str]
 
     # Attention Q weight:
     attn_q_weight_qdh: List[str]
-    
+
     # Attention K weight:
     attn_k_weight_mdh: List[str]
-    
+
     # Attention V weight
     attn_v_weight_mdh: List[str]
-    
+
     # Attention Out weight.
     attn_o_weight_qhd: List[str]
-    
+
     # K/V cache.
     keyvalue_generate_mode_cache_bsmh: List[str]
     keyvalue_prefill_mode_cache_bsmh: List[str]
@@ -71,7 +72,7 @@ class DenseLayerLogicalAxesRules:
     ffw_hidden_bsf: List[str]
     # FFW weight:
     ffw_weight_df: List[str]
-    # MoE weights 
+    # MoE weights
     moe_edf: List[str]
     ...
 
@@ -89,7 +90,7 @@ class OpSpecificLogicalAxesRules:
     norm_scale: List[str]
 
 # @dataclasses.dataclass
-# class ShardingConfig: 
+# class ShardingConfig:
 #     prefill: OpSpecificShardingConfig
 #     generate: OpSpecificShardingConfig
 
@@ -126,7 +127,7 @@ class OpSpecificLogicalAxesRules:
 #       device_grid = np.asarray(jax.devices()).reshape(physical_shape)
 #       mesh = Mesh(device_grid, LOGICAL_MESH_AXIS_NAME)
 #       ...
-      
+
 #       return mesh
 #       ...
 #     def make_sharding_config(self, op_mode) -> ShardingConfig:
@@ -160,4 +161,4 @@ class OpSpecificLogicalAxesRules:
 
 
 
-  
+
