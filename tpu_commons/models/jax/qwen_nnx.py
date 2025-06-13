@@ -76,22 +76,28 @@ class Qwen2Attention(nnx.Module):
         self.q_proj = nnx.Einsum(
             "BTD,NDH->BNTH",
             (self.num_heads, self.hidden_size, self.head_dim),
+            (self.num_heads, self.head_dim),  # bias shape [N, H]
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
+            bias_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
         )
         self.k_proj = nnx.Einsum(
             "BTD,KDH->BKTH",
             (self.num_kv_heads, self.hidden_size, self.head_dim),
+            (self.num_kv_heads, self.head_dim),  # bias shape [K, H])
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
+            bias_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
         )
         self.v_proj = nnx.Einsum(
             "BTD,KDH->BKTH",
             (self.num_kv_heads, self.hidden_size, self.head_dim),
+            (self.num_kv_heads, self.head_dim),  # bias shape [K, H])
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
+            bias_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
         )
         self.o_proj = nnx.Einsum(
@@ -101,20 +107,6 @@ class Qwen2Attention(nnx.Module):
             kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
             rngs=rng,
         )
-
-        # Qwen model introduces QKV bias
-        self.q_bias = nnx.Param(init_fn(rng.params(),
-                                        (self.num_heads, self.head_dim),
-                                        dtype),
-                                sharding=("model", None))
-        self.k_bias = nnx.Param(init_fn(rng.params(),
-                                        (self.num_kv_heads, self.head_dim),
-                                        dtype),
-                                sharding=("model", None))
-        self.v_bias = nnx.Param(init_fn(rng.params(),
-                                        (self.num_kv_heads, self.head_dim),
-                                        dtype),
-                                sharding=("model", None))
 
     def __call__(
         self,
@@ -127,22 +119,17 @@ class Qwen2Attention(nnx.Module):
 
         # q: (B, N, T, H)
         q = self.q_proj(x)
-        q = q + self.q_bias.value.reshape(1, self.num_heads, 1, self.head_dim)
         q = apply_rope(q, md.input_positions, self.head_dim, self.rope_theta,
                        self.rope_scaling)
         q = q * self.head_dim**-0.5
 
         # k: (B, K, T, H)
         k = self.k_proj(x)
-        k = k + self.k_bias.value.reshape(1, self.num_kv_heads, 1,
-                                          self.head_dim)
         k = apply_rope(k, md.input_positions, self.head_dim, self.rope_theta,
                        self.rope_scaling)
 
         # v: (B, K, T, H)
         v = self.v_proj(x)
-        v = v + self.v_bias.value.reshape(1, self.num_kv_heads, 1,
-                                          self.head_dim)
 
         # o: (B, N, T, H)
         new_kv_cache, outputs = attention(
@@ -352,6 +339,12 @@ class Qwen2ForCausalLM(nnx.Module):
             "model.layers.*.self_attn.q_proj.kernel",
             "model.layers.*.self_attn.v_proj":
             "model.layers.*.self_attn.v_proj.kernel",
+            "model.layers.*.self_attn.q_proj.bias":
+            "model.layers.*.self_attn.q_proj.bias",
+            "model.layers.*.self_attn.k_proj.bias":
+            "model.layers.*.self_attn.k_proj.bias",
+            "model.layers.*.self_attn.v_proj.bias":
+            "model.layers.*.self_attn.v_proj.bias",
             "model.norm": "model.norm.scale",
         }
         load_hf_weights(vllm_config=self.vllm_config,

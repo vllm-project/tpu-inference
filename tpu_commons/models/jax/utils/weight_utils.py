@@ -150,12 +150,27 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
     num_kv_heads = hf_config.num_key_value_heads
     hidden_size = hf_config.hidden_size
 
+    # if num_heads == 0:
+    #     head_dim = 0
+    #     if hidden_size > 0:
+    #         logger.warning(
+    #             "num_attention_heads is 0, head_dim calculation might be incorrect."
+    #         )
+    # else:
+    #     head_dim = hidden_size // num_heads
+
     reshape_keys = {
         "q_proj": (num_heads, -1, hidden_size),
         "k_proj": (num_kv_heads, -1, hidden_size),
         "v_proj": (num_kv_heads, -1, hidden_size),
         "o_proj": (hidden_size, num_heads, -1),
     }
+
+    # bias_reshape_rules = {
+    #     "q_proj.bias": (num_heads, head_dim),
+    #     "k_proj.bias": (num_kv_heads, head_dim),
+    #     "v_proj.bias": (num_kv_heads, head_dim)
+    # }
 
     params = nnx.state(model)
     for hf_key, hf_weight in hf_model_weights_iterator(model_path,
