@@ -89,6 +89,8 @@ class TPUModelRunner():
 
         self._verify_chunked_prefill_config()
 
+        self.phase = ""
+
     def _init_random(self):
         if self.model_config.seed is None:
             self.model_config.seed = 0
@@ -252,16 +254,19 @@ class TPUModelRunner():
 
         # Check for the "no prefill" case
         if not new_full_prefill_seqs and not new_partial_prefill_seqs and not subsequent_partial_prefill_seqs:
+            self.phase = "decode"
             return self._prepare_decode(scheduler_output)
 
         # Check for the "only full prefill" case
         # TODO(pooyam): We probably can use ragged attention for new_partial_prefills as well.
         if new_full_prefill_seqs and not new_partial_prefill_seqs and not subsequent_partial_prefill_seqs and not decoding_seqs:
+            self.phase = "prefill"
             return self._prepare_prefill(scheduler_output)
 
         # All other cases fall into the "chunked prefill" category
         # TODO(pooyam): Change `prepare_prefill` to respect num scheduled tokens, so we can use prefill_kernel even for new partial prefills.
         # This is useful only if we conclude paged attention for prefill is still faster than ragged paged attention for prefill.
+        self.phase = "chunked_prefill"
         return self._prepare_chunked_prefill(scheduler_output)
 
     def _is_generating_new_token(self, scheduler_output: VllmSchedulerOutput,
@@ -290,11 +295,13 @@ class TPUModelRunner():
         if inputs is not None:
             model_inputs, (running_indices, output_token_indices) = inputs
             # TODO (jacobplatin): use logits and single_step_attn_scores_decode?
-            self.kv_caches, next_tokens, logits = self.model_fn(*model_inputs)
-            self.output_cache = self.write_outputs(self.output_cache,
-                                                   next_tokens,
-                                                   running_indices,
-                                                   output_token_indices)
+            with jax.named_scope(self.phase):
+                with jax.profiler.TraceAnnotation(self.phase):
+                    self.kv_caches, next_tokens, logits = self.model_fn(
+                        *model_inputs)
+                    self.output_cache = self.write_outputs(
+                        self.output_cache, next_tokens, running_indices,
+                        output_token_indices)
 
         prompt_logprobs_dict = {}
 
@@ -683,6 +690,7 @@ class TPUModelRunner():
         eviction_score_mask = None
         return (
             False,  # is prefill
+            "decode",
             do_sampling,
             self.kv_caches,
             input_ids,
@@ -821,6 +829,7 @@ class TPUModelRunner():
 
         return (
             True,
+            "prefill",
             do_sampling,
             self.kv_caches,
             input_ids,
@@ -1091,6 +1100,7 @@ class TPUModelRunner():
         eviction_score_mask = None
         return (
             False,  # when chunked prefill is enabled, `is_prefill` is just a dummy value.
+            "chunked_prefill",
             do_sampling,
             self.kv_caches,
             input_ids,

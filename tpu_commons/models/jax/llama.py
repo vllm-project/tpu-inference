@@ -283,6 +283,7 @@ class LlamaForCausalLM(nn.Module):
     def __call__(
         self,
         is_prefill: bool,
+        phase: str,
         do_sampling: bool,
         kv_caches: List[KVCache],
         input_ids: jax.Array,
@@ -292,33 +293,36 @@ class LlamaForCausalLM(nn.Module):
         top_ks: jax.Array = None,
         *args,
     ) -> Tuple[List[KVCache], jax.Array, jax.Array]:
-        x = self.embed_tokens.encode(input_ids)
 
-        kv_caches, x = self.model(
-            is_prefill,
-            kv_caches,
-            x,
-            attention_metadata,
-        )
+        with jax.named_scope(phase):
+            with jax.profiler.TraceAnnotation(phase):
+                x = self.embed_tokens.encode(input_ids)
 
-        if self.lm_head is not None:
-            logits = jnp.dot(x, self.lm_head)
-        else:
-            logits = self.embed_tokens.decode(x)
+                kv_caches, x = self.model(
+                    is_prefill,
+                    kv_caches,
+                    x,
+                    attention_metadata,
+                )
 
-        next_tokens = sample(
-            is_prefill,
-            do_sampling,
-            self.rng,
-            self.mesh,
-            logits,
-            attention_metadata.seq_lens,
-            temperatures,
-            top_ps,
-            top_ks,
-            attention_metadata.chunked_prefill_enabled,
-        )
-        return kv_caches, next_tokens, logits
+                if self.lm_head is not None:
+                    logits = jnp.dot(x, self.lm_head)
+                else:
+                    logits = self.embed_tokens.decode(x)
+
+                next_tokens = sample(
+                    is_prefill,
+                    do_sampling,
+                    self.rng,
+                    self.mesh,
+                    logits,
+                    attention_metadata.seq_lens,
+                    temperatures,
+                    top_ps,
+                    top_ks,
+                    attention_metadata.chunked_prefill_enabled,
+                )
+                return kv_caches, next_tokens, logits
 
     # TODO(xiangxu): extract this to a common weights loading utility
     def load_weights(

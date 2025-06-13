@@ -64,8 +64,8 @@ def get_nn_model(
             outputs_sharding,
             logits_cache_sharding,
         ),
-        static_argnums=(1, 2),
-        donate_argnums=3,
+        static_argnums=(1, 2, 3),
+        donate_argnums=4,
     )
     model_fn = functools.partial(jit_model, params)
     return model_fn
