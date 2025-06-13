@@ -21,6 +21,7 @@ from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.model_loader import get_model
 from tpu_commons.runner.tpu_torch_xla_runner import _get_token_paddings
+from tpu_commons.runner.utils import determine_do_sampling
 from tpu_commons.worker.input_batch_jax import CachedRequestState, InputBatch
 
 logger = init_logger(__name__)
@@ -633,8 +634,7 @@ class TPUModelRunner():
             top_ps[i] = self.input_batch.top_p_cpu[seq_index]
             top_ks[i] = self.input_batch.top_k_cpu[seq_index]
             output_token_indices[i] = input_token_indices[i] + 1
-            if top_ks[i] != 1:
-                do_sampling = True
+            do_sampling = determine_do_sampling(top_ks[i], temperatures[i])
 
         running_indices = self._device_array(running_indices)
         input_token_indices = self._device_array(input_token_indices)
@@ -798,8 +798,8 @@ class TPUModelRunner():
             # TODO(pooyam): double check this.
             output_token_indices[i] = seq.num_computed_tokens
 
-            if seq.sampling_params.top_k != 1:
-                do_sampling = True
+            do_sampling = determine_do_sampling(
+                seq.sampling_params.top_k, seq.sampling_params.temperature)
             if eviction_score_mask is not None:
                 raise NotImplementedError("Evication not implemented.")
 
@@ -948,8 +948,7 @@ class TPUModelRunner():
             top_ps[i] = self.input_batch.top_p_cpu[seq_index]
             top_ks[i] = self.input_batch.top_k_cpu[seq_index]
             output_token_indices[i] = decode_input_token_indices[i] + 1
-            if top_ks[i] != 1:
-                do_sampling = True
+            do_sampling = determine_do_sampling(top_ks[i], temperatures[i])
 
         token_offset = num_decode_seqs
         if num_decode_seqs > 0 and num_prefill_seqs > 0:
@@ -1022,8 +1021,9 @@ class TPUModelRunner():
                 top_ks[last_prefill_token_idx] = self.input_batch.top_k_cpu[
                     seq_index]
 
-            if self.input_batch.top_k_cpu[seq_index] != 1:
-                do_sampling = True
+            do_sampling = determine_do_sampling(
+                self.input_batch.top_k_cpu[seq_index],
+                self.input_batch.temperature_cpu[seq_index])
             # Add padding tokens so that prefill segments are paged aligned
             token_offset = pad_to_multiple(token_offset + prefill_len,
                                            block_size)
