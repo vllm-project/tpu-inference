@@ -102,7 +102,8 @@ def postprocess_text_mmlu(preds: List[str],
     choices = ["A", "B", "C", "D", None]
 
     def _parse_answer(output):
-        re_str = r"\s*\(([A-D])\)\s*\w*"
+        # ? marks the close parenthesis as optional
+        re_str = r"\s*\(([A-D])\)?\s*\w*"
         match = re.search(re_str, output, re.IGNORECASE)
         predicted_answer = match.group(1).upper() if match else None
         return predicted_answer

@@ -633,7 +633,8 @@ class TPUModelRunner():
             top_ps[i] = self.input_batch.top_p_cpu[seq_index]
             top_ks[i] = self.input_batch.top_k_cpu[seq_index]
             output_token_indices[i] = input_token_indices[i] + 1
-            if top_ks[i] != 1:
+            # # If the temperature is 0.0 (i.e. greedy decoding), then we don't need to sample
+            if top_ks[i] != 1 and temperatures[i] != 0.0:
                 do_sampling = True
 
         running_indices = self._device_array(running_indices)
@@ -798,7 +799,8 @@ class TPUModelRunner():
             # TODO(pooyam): double check this.
             output_token_indices[i] = seq.num_computed_tokens
 
-            if seq.sampling_params.top_k != 1:
+            # If the temperature is 0.0 (i.e. greedy decoding), then we don't need to sample
+            if seq.sampling_params.top_k != 1 and seq.sampling_params.temperature != 0.0:
                 do_sampling = True
             if eviction_score_mask is not None:
                 raise NotImplementedError("Evication not implemented.")
@@ -948,7 +950,8 @@ class TPUModelRunner():
             top_ps[i] = self.input_batch.top_p_cpu[seq_index]
             top_ks[i] = self.input_batch.top_k_cpu[seq_index]
             output_token_indices[i] = decode_input_token_indices[i] + 1
-            if top_ks[i] != 1:
+            # If the temperature is 0.0 (i.e. greedy decoding), then we don't need to sample
+            if top_ks[i] != 1 and temperatures[i] != 0.0:
                 do_sampling = True
 
         token_offset = num_decode_seqs
