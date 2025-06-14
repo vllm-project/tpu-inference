@@ -172,7 +172,7 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
             model_key = mappings[hf_key]
         model_weight = get_param(params, model_key)
 
-        print(
+        logger.debug(
             f"{hf_key}: {hf_weight.shape}  -->  {model_key}: {model_weight.value.shape}"
         )
 
