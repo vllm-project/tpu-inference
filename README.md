@@ -1,4 +1,4 @@
-## Setup development environment
+## Develop on a TPU VM
 
 ### Install `vLLM-TPU`:
 
@@ -25,7 +25,7 @@ pre-commit install --hook-type pre-commit --hook-type commit-msg
 pre-commit run --all-files
 ```
 
-## Run JAX path examples
+### Run JAX path examples
 
 Run `Llama 3.1 8B` offline inference on 4 TPU chips:
 
@@ -39,7 +39,7 @@ python vllm/examples/offline_inference/basic/generate.py \
     --max_num_seqs=1
 ```
 
-## Run vLLM Pytorch models on the JAX path
+### Run vLLM Pytorch models on the JAX path
 
 Run the vLLM's implementation of `Llama 3.1 8B`, which is in Pytorch. It is the same command as above with the extra env var `MODEL_IMPL_TYPE=vllm`:
 
@@ -54,12 +54,14 @@ python vllm/examples/offline_inference/basic/generate.py \
     --max_num_seqs=1
 ```
 
-## Relevant env
+### Relevant env
 
-To enable JAX path:
+To switch different backends:
 
 ```
 TPU_BACKEND_TYPE=jax
+TPU_BACKEND_TYPE=torchax
+TPU_BACKEND_TYPE=pytorch_xla
 ```
 
 To switch different model implementations:
@@ -80,6 +82,44 @@ To inspect model weights sharding:
 
 ```
 INSPECT_MODEL=1
+```
+
+## Develop on a CPU VM and run docker on a TPU VM
+
+### On the CPU VM
+
+Build docker image:
+
+```
+cd ~
+git clone https://github.com/vllm-project/tpu_commons.git
+cd tpu_commons
+
+DOCKER_URI=<Specify a GCR URI>
+# example:
+# DOCKER_URI=gcr.io/cloud-nas-260507/ullm:$USER-test
+
+docker build -f docker/Dockerfile -t $DOCKER_URI .
+docker push $DOCKER_URI
+```
+
+### On the TPU-VM side:
+
+Pull the docker image and run it:
+
+```
+DOCKER_URI=<the same URI used in docker build>
+docker pull $DOCKER_URI
+docker run \
+  --rm \
+  -e TPU_BACKEND_TYPE=jax \
+  $DOCKER_URI \
+  python /workspace/vllm/examples/offline_inference/basic/generate.py \
+  --model=meta-llama/Llama-3.1-8B \
+  --tensor_parallel_size=4 \
+  --task=generate \
+  --max_model_len=1024 \
+  --max_num_seqs=1
 ```
 
 ## Torchax Guide
@@ -133,34 +173,3 @@ BUILDKITE_COMMIT=3843efc .buildkite/scripts/run_in_docker.sh bash /workspace/tpu
 
 While this will run the code in a Docker image, you can also run the bare `tests/e2e/benchmarking/llama3.1_8b_mmlu.sh` script itself,
 being sure to pass the proper args for your machine.
-
-## How to develop using docker images?
-
-### On the development machine (can be without TPU):
-
-Build docker image
-
-```
-docker build -f docker/Dockerfile -t <YOUR_IMAGE_NAME>:<YOUR_IMAGE_TAG> .
-```
-
-### On the TPU-VM side:
-Pull the docker image and run it
-
-```
-TPU_BACKEND_TYPE=jax
-DOCKER_URI=<YOUR_IMAGE_NAME>:<YOUR_IMAGE_TAG>
-docker pull $DOCKER_URI
-docker run \
-  --rm \
-  -e TPU_BACKEND_TYPE="$TPU_BACKEND_TYPE" \
-  -e HF_TOKEN=<YOUR_HF_TOKEN> \
-  -e VLLM_XLA_CHECK_RECOMPILATION=1 \
-  $DOCKER_URI \
-  python /workspace/vllm/examples/offline_inference/basic/generate.py \
-  --model=meta-llama/Llama-3.1-8B \
-  --tensor_parallel_size=4 \
-  --task=generate \
-  --max_model_len=1024 \
-  --max_num_seqs=1
-```
