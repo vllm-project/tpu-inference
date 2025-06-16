@@ -154,12 +154,10 @@ def jax_fused_moe_func(
 
     x = hidden_states[token_indices_sorted]
 
-    # x = torch.ops.xla.gmm(x, w1, group_sizes, transpose_rhs=True)
     x = sharded_gmm(x, w1, group_sizes, transpose_rhs=True, mesh=mesh)
 
     x = jax.nn.silu(x[..., :intermediate_size]) * x[..., intermediate_size:]
 
-    # x = torch.ops.xla.gmm(x, w2, group_sizes, transpose_rhs=True)
     x = sharded_gmm(x, w2, group_sizes, transpose_rhs=True, mesh=mesh)
 
     x = x[topk_argsort_revert_indices].reshape(-1, topk, hidden_size)
@@ -228,11 +226,17 @@ class JaxFusedMoE(torch.nn.Module):
         self._shard_weight(mesh)
 
     def _shard_weight(self, mesh: Mesh):
+        # The weight sharding for tensor parallelism is determined by the ideal
+        # sharding for the `rhs` arg of `sharded_gmm`, in which the rhs is
+        # transposed and thus the middle dim becomes the last dim and the
+        # non-contraction dim of the matmul.
+
         # Shard by the intermediate_size dim.
         self.w13_weight.apply_jax_(jax.device_put,
                                    NamedSharding(mesh, P(None, 'model', None)))
+        # Shard by the hidden_size dim.
         self.w2_weight.apply_jax_(jax.device_put,
-                                  NamedSharding(mesh, P(None, None, 'model')))
+                                  NamedSharding(mesh, P(None, 'model', None)))
 
     def _load_weights_from_vllm_layer(self, fused_moe: torch.nn.Module):
         w13_weight = torch_view(t2j(fused_moe.w13_weight.data))
