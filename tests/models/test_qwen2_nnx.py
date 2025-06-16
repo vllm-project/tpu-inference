@@ -5,7 +5,7 @@ import torch
 from flax import nnx
 from transformers import Qwen2Config
 # Import the PyTorch version for comparison
-from vllm.model_executor.models.qwen import QWenMLP as PytorchQWenMLP
+from vllm.model_executor.models.qwen2 import Qwen2MLP as VllmQwen2MLP
 
 from tpu_commons.models.jax.qwen_nnx import Qwen2MLP
 
@@ -53,22 +53,25 @@ def test_qwen2_mlp():
     assert output_jax.dtype == dtype
 
     # Initialize PyTorch QWenMLP
-    # Note: PyTorch QWenMLP's intermediate_size directly corresponds to Qwen2Config's intermediate_size here.
-    torch_mlp = PytorchQWenMLP(hidden_size=config.hidden_size,
-                               intermediate_size=config.intermediate_size)
+    # Note: vLLM Qwen2MLP's intermediate_size directly corresponds to Qwen2Config's intermediate_size here.
+    torch_mlp = VllmQwen2MLP(hidden_size=config.hidden_size,
+                             intermediate_size=config.intermediate_size,
+                             hidden_act=config.hidden_act)
     torch_mlp.to(torch_dtype)
 
     # Set weights for PyTorch MLP from JAX weights
     # PyTorch Linear layers expect (out_features, in_features)
     # JAX nnx.Linear kernel is (in_features, out_features)
     # MergedColumnParallelLinear stacks weights for gate and up
-    torch_mlp.gate_up_proj.weight.data = torch.cat([
-        torch.from_numpy(np.array(w_gate_jax.T)),
-        torch.from_numpy(np.array(w_up_jax.T))
-    ],
-                                                   dim=0).to(torch_dtype)
-    torch_mlp.c_proj.weight.data = torch.from_numpy(np.array(
-        w_down_jax.T)).to(torch_dtype)
+    torch_mlp.gate_up_proj.weight.data = torch.cat(
+        [
+            torch.from_numpy(np.array(w_gate_jax.T)),
+            torch.from_numpy(np.array(w_up_jax.T))
+        ],
+        dim=0).to(torch_dtype)  # type: ignore
+    torch_mlp.down_proj.weight.data = torch.from_numpy(
+        np.array(  # type: ignore
+            w_down_jax.T)).to(torch_dtype)
 
     # Prepare PyTorch input and run
     x_torch = torch.from_numpy(np.array(x_jax)).to(torch_dtype)
@@ -80,7 +83,7 @@ def test_qwen2_mlp():
         f"JAX and PyTorch MLP outputs differ.\nJAX:\n{output_jax}\nPyTorch:\n{output_torch_jax}"
 
     print(
-        "Successfully tested Qwen2MLP (JAX) against QWenMLP (PyTorch). Outputs match."
+        "Successfully tested Qwen2MLP (JAX) against vLLM Qwen2MLP (PyTorch). Outputs match."
     )
 
 
