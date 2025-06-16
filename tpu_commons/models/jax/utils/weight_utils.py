@@ -191,11 +191,6 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
                 if key in hf_key:
                     hf_weight = jnp.reshape(hf_weight, bias_reshape_keys[key])
                     break
-            # # Transpose HF weight if needed
-            # for key in transpose_keys:
-            #     if key in hf_key:
-            #         hf_weight = jnp.transpose(hf_weight, transpose_keys[key])
-            #         break
             print(f"{model_weight.value.shape}  -->  {hf_weight.shape}")
             assert model_weight.value.shape == hf_weight.shape
 

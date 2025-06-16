@@ -318,6 +318,35 @@ class Qwen2ForCausalLM(nnx.Module):
         )
         return kv_caches, next_tokens, logits
 
+    def _log_bias_weights(self, stage: str):
+        """Helper function to log bias weights for the first layer."""
+        if not self.model.layers:
+            logger.info(f"[{stage}] No layers found in the model.")
+            return
+
+        first_layer_attn = self.model.layers[0].self_attn
+        log_prefix = f"[{stage}] Layer 0"
+
+        if hasattr(first_layer_attn.q_proj,
+                   'bias') and first_layer_attn.q_proj.bias is not None:
+            logger.info(
+                f"{log_prefix} q_proj bias: {first_layer_attn.q_proj.bias.value.flatten()[:5]}"
+            )
+        if hasattr(first_layer_attn.k_proj,
+                   'bias') and first_layer_attn.k_proj.bias is not None:
+            logger.info(
+                f"{log_prefix} k_proj bias: {first_layer_attn.k_proj.bias.value.flatten()[:5]}"
+            )
+        if hasattr(first_layer_attn.v_proj,
+                   'bias') and first_layer_attn.v_proj.bias is not None:
+            logger.info(
+                f"{log_prefix} v_proj bias: {first_layer_attn.v_proj.bias.value.flatten()[:5]}"
+            )
+
+        # You can extend this to log more layers or other specific weights if needed.
+        # For example, to log for all layers:
+        # for i, layer in enumerate(self.model.layers):
+        #     # ... similar logging for layer.self_attn ...
     def load_weights(self):
         mappings = {
             "lm_head": "lm_head",
@@ -347,7 +376,14 @@ class Qwen2ForCausalLM(nnx.Module):
             "model.layers.*.self_attn.v_proj.bias",
             "model.norm": "model.norm.scale",
         }
+
+        # Log bias weights before loading
+        self._log_bias_weights("Before loading HF weights")
+
         load_hf_weights(vllm_config=self.vllm_config,
                         model=self,
                         mappings=mappings,
                         mesh=self.mesh)
+
+        # Log bias weights after loading
+        self._log_bias_weights("After loading HF weights")
