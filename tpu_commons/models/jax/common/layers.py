@@ -3,6 +3,49 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
+import dataclasses
+from dataclasses import dataclass, fields
+from typing import Any, Optional
+from jaxtyping import Float, Array, Int
+from typing import Any, Callable
+
+# Flax and JAX sharding imports
+from flax import nnx
+from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+
+# Local or project-specific imports (placeholders, adjust as needed)
+# It's assumed these would be defined elsewhere in your project.
+# For example, you might have: from .shared_types import KVCache, ShardingConfig, Quantization
+from tpu_commons.models.jax.common.constants import *
+from tpu_commons.models.jax.common.sharding import *
+
+
+class Quantization: pass
+class KVCache: pass
+
+# A dummy for modeling_flax_utils which might contain activation functions
+class MockFlaxUtils:
+    ACT2FN = {
+        'silu': nnx.silu,
+        'gelu': nnx.gelu,
+        'relu': nnx.relu,
+    }
+modeling_flax_utils = MockFlaxUtils()
+
+
+# Type alias for Initializer for cleaner type hints
+Initializer = Callable[..., jax.Array]
+
+@dataclasses.dataclass
+class ParamFactory:
+    """A factory for creating nnx.Param objects with shared RNGs and initializers."""
+    rngs: nnx.Rngs
+    initializer: Initializer
+
+    def create_kernel_init(self, shape: tuple[int, ...], sharding: NamedSharding, dtype: Any = jnp.float32) -> nnx.Param:
+        """Creates an nnx.Param using the factory's RNG stream and initializer."""
+        param_data = self.initializer(self.rngs.params(), shape, dtype)
+        return nnx.Param(param_data, sharding=sharding)
 
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding
