@@ -52,7 +52,9 @@ def test_qwen2_mlp():
     assert output_jax.shape == (batch_size, seq_len, config.hidden_size)
     assert output_jax.dtype == dtype
 
-    x_torch = torch.from_numpy(np.array(x_jax)).to(torch_dtype)
+    # Convert JAX array to NumPy array with a supported dtype first
+    x_numpy = np.array(x_jax, dtype=np.float32)
+    x_torch = torch.from_numpy(x_numpy).to(torch_dtype)
 
     # Initialize Hugging Face Transformers Qwen2MLP
     # The HF Qwen2MLP constructor takes the config object directly.
