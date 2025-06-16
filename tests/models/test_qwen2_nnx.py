@@ -4,8 +4,8 @@ import numpy as np
 import torch
 from flax import nnx
 from transformers import Qwen2Config
-# Import the PyTorch version for comparison
-from vllm.model_executor.models.qwen2 import Qwen2MLP as VllmQwen2MLP
+# Import HF Qwen2MLP
+from transformers.models.qwen2.modeling_qwen2 import Qwen2MLP as HfQwen2MLP
 
 from tpu_commons.models.jax.qwen_nnx import Qwen2MLP
 
@@ -52,38 +52,34 @@ def test_qwen2_mlp():
     assert output_jax.shape == (batch_size, seq_len, config.hidden_size)
     assert output_jax.dtype == dtype
 
-    # Initialize PyTorch QWenMLP
-    # Note: vLLM Qwen2MLP's intermediate_size directly corresponds to Qwen2Config's intermediate_size here.
-    torch_mlp = VllmQwen2MLP(hidden_size=config.hidden_size,
-                             intermediate_size=config.intermediate_size,
-                             hidden_act=config.hidden_act)
-    torch_mlp.to(torch_dtype)
-
-    # Set weights for PyTorch MLP from JAX weights
-    # PyTorch Linear layers expect (out_features, in_features)
-    # JAX nnx.Linear kernel is (in_features, out_features)
-    # MergedColumnParallelLinear stacks weights for gate and up
-    torch_mlp.gate_up_proj.weight.data = torch.cat(
-        [
-            torch.from_numpy(np.array(w_gate_jax.T)),
-            torch.from_numpy(np.array(w_up_jax.T))
-        ],
-        dim=0).to(torch_dtype)  # type: ignore
-    torch_mlp.down_proj.weight.data = torch.from_numpy(
-        np.array(  # type: ignore
-            w_down_jax.T)).to(torch_dtype)
-
-    # Prepare PyTorch input and run
     x_torch = torch.from_numpy(np.array(x_jax)).to(torch_dtype)
-    output_torch = torch_mlp(x_torch)
-    output_torch_jax = jnp.asarray(output_torch.detach().numpy(), dtype=dtype)
 
-    # Compare outputs
-    assert jnp.allclose(output_jax, output_torch_jax, atol=1e-2, rtol=1e-2), \
-        f"JAX and PyTorch MLP outputs differ.\nJAX:\n{output_jax}\nPyTorch:\n{output_torch_jax}"
+    # Initialize Hugging Face Transformers Qwen2MLP
+    # The HF Qwen2MLP constructor takes the config object directly.
+    torch_mlp_hf = HfQwen2MLP(config=config)
+    torch_mlp_hf.to(torch_dtype)
+
+    # Set weights for HF PyTorch MLP from JAX weights
+    # HF Linear layers also expect (out_features, in_features)
+    # JAX nnx.Linear kernel is (in_features, out_features)
+    torch_mlp_hf.gate_proj.weight.data = torch.from_numpy(
+        np.array(w_gate_jax.T)).to(torch_dtype)
+    torch_mlp_hf.up_proj.weight.data = torch.from_numpy(np.array(
+        w_up_jax.T)).to(torch_dtype)
+    torch_mlp_hf.down_proj.weight.data = torch.from_numpy(
+        np.array(w_down_jax.T)).to(torch_dtype)
+
+    # Run HF PyTorch MLP
+    output_hf_torch = torch_mlp_hf(x_torch)
+    output_hf_torch_jax = jnp.asarray(output_hf_torch.detach().numpy(),
+                                      dtype=dtype)
+
+    # Compare JAX output with HF PyTorch MLP output
+    assert jnp.allclose(output_jax, output_hf_torch_jax, atol=1e-2, rtol=1e-2), \
+        f"JAX and HF PyTorch MLP outputs differ.\nJAX:\n{output_jax}\nHF PyTorch:\n{output_hf_torch_jax}"
 
     print(
-        "Successfully tested Qwen2MLP (JAX) against vLLM Qwen2MLP (PyTorch). Outputs match."
+        "Successfully tested Qwen2MLP (JAX) against Hugging Face Transformers Qwen2MLP (PyTorch). Outputs match."
     )
 
 
