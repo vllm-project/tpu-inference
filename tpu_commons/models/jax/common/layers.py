@@ -20,9 +20,6 @@ from tpu_commons.models.jax.common.constants import *
 from tpu_commons.models.jax.common.sharding import *
 
 
-class Quantization: pass
-class KVCache: pass
-
 # A dummy for modeling_flax_utils which might contain activation functions
 class MockFlaxUtils:
     ACT2FN = {
