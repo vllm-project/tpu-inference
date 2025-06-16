@@ -52,9 +52,9 @@ def test_qwen2_mlp():
     assert output_jax.shape == (batch_size, seq_len, config.hidden_size)
     assert output_jax.dtype == dtype
 
-    # Convert JAX array to NumPy array with a supported dtype first
-    x_numpy = np.array(x_jax, dtype=np.float32)
-    x_torch = torch.from_numpy(x_numpy).to(torch_dtype)
+    # Convert JAX bfloat16 array to NumPy float32 array (via JAX float32) for PyTorch
+    x_torch = torch.from_numpy(np.array(x_jax.astype(
+        jnp.float32))).to(torch_dtype)
 
     # Initialize Hugging Face Transformers Qwen2MLP
     # The HF Qwen2MLP constructor takes the config object directly.
@@ -65,11 +65,11 @@ def test_qwen2_mlp():
     # HF Linear layers also expect (out_features, in_features)
     # JAX nnx.Linear kernel is (in_features, out_features)
     torch_mlp_hf.gate_proj.weight.data = torch.from_numpy(
-        np.array(w_gate_jax.T)).to(torch_dtype)
-    torch_mlp_hf.up_proj.weight.data = torch.from_numpy(np.array(
-        w_up_jax.T)).to(torch_dtype)
+        np.array(w_gate_jax.T.astype(jnp.float32))).to(torch_dtype)
+    torch_mlp_hf.up_proj.weight.data = torch.from_numpy(
+        np.array(w_up_jax.T.astype(jnp.float32))).to(torch_dtype)
     torch_mlp_hf.down_proj.weight.data = torch.from_numpy(
-        np.array(w_down_jax.T)).to(torch_dtype)
+        np.array(w_down_jax.T.astype(jnp.float32))).to(torch_dtype)
 
     # Run HF PyTorch MLP
     output_hf_torch = torch_mlp_hf(x_torch)
