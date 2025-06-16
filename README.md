@@ -4,6 +4,12 @@
 
 Follow this [guide](https://docs.vllm.ai/en/latest/getting_started/installation/ai_accelerator.html#set-up-using-python) to install vLLM from source.
 
+**NOTE**: Right after `git clone` vLLM repo and before running any `pip install` commands, run the following command to pin the version:
+
+```
+git checkout 53a5a0ce30dd623808ebd02947e5183f918b6c2f
+```
+
 ### Install `tpu_commons`:
 
 ```
