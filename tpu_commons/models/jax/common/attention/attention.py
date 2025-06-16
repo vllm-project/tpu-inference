@@ -87,7 +87,6 @@ class Attention(nnx.Module):
         op_mode,
         kv_cache: KVCache,
         attention_metadata: AttentionMetadata,
-        kv_cache_updater: KVCacheUpdaterBase = None,
     ):  
         md = attention_metadata
         is_prefill = True if op_mode == 'prefill' else False
@@ -102,7 +101,6 @@ class Attention(nnx.Module):
                 q_BSQH, md.input_positions, self.cfg.head_dim, self.cfg.rope_theta,
                 self.cfg.rope_scaling)
             q_BSQH = nnx.with_sharding_constraint(q_BSQH, self.query_bsqh[op_mode])
-
         with jax.named_scope("k_proj"):
             k_BSNH = jnp.einsum('BSD,NDH -> BSNH', x, self.kernel_k_proj_NDH.value)
             k_BSNH = apply_rope(
@@ -128,7 +126,7 @@ class Attention(nnx.Module):
             )
 
         with jax.named_scope("o_proj"):
-            o_BSNH = np.einsum('BSQH,QHD -> BSD', outputs_BSQH, self.kernel_o_proj_QHD.value)
+            o_BSNH = jnp.einsum('BSQH,QHD -> BSD', outputs_BSQH, self.kernel_o_proj_QHD.value)
             o_BSNH = nnx.with_sharding_constraint(o_BSNH, self.activation_attention_out_bsd[op_mode])
         return new_kv_cache, o_BSNH
 
@@ -140,12 +138,12 @@ class Attention(nnx.Module):
             self,
             is_prefill: bool,
             kv_cache: KVCache,
-            q_BSQH: jax.Array,        # Shape: (B, S, num_q_heads, H)
-            k_BTNH: jax.Array,        # Shape: (B, T, num_kv_heads, H)
-            v_BTNH: jax.Array,        # Shape: (B, T, num_kv_heads, H)
+            q_BSQH: jax.Array,
+            k_BTNH: jax.Array,
+            v_BTNH: jax.Array,
             attention_metadata: AttentionMetadata,
-            mesh: Mesh,          # Unused in this standard implementation
-            num_heads: int,      # num_q_heads
+            mesh: Mesh,
+            num_heads: int,
             num_kv_heads: int,
         ) -> Tuple[KVCache, jax.Array]:
             """
@@ -173,14 +171,12 @@ class Attention(nnx.Module):
             head_repeats = num_heads // num_kv_heads
 
             if is_prefill:
-                # --- PREFILL PATH ---
                 kv_cache.update(k_BTNH, v_BTNH, attention_metadata.seq_lens, op_mode="prefill")
                 # Repeat K and V heads if necessary for MQA/GQA
                 k_attn_BTQH = jnp.repeat(k_BTNH, head_repeats, axis=2) if head_repeats > 1 else k
                 v_attn_BTQH = jnp.repeat(v_BTNH, head_repeats, axis=2) if head_repeats > 1 else v
 
                 # Calculate attention scores using einsum
-                # q: (B, S, Q, H), k_attn: (B, T, Q, H) -> scores: (B, Q, S, T)
                 # Here, query sequence length S is the same as key sequence length T.
                 scores_BQST = jnp.einsum('BSQH,BTQH->BQST', q_BSQH, k_attn_BTQH) / jnp.sqrt(self.cfg.head_dim)
 
@@ -193,10 +189,9 @@ class Attention(nnx.Module):
                 attention_weights_BQST = jax.nn.softmax(scores_BQST, axis=-1)
 
                 # Compute output using einsum
-                # weights: (B, Q, S, T), v_attn: (B, T, Q, H) -> output: (B, S, Q, H)
                 output_BSQH = jnp.einsum('BQST,BTQH->BSQH', attention_weights_BQST, v_attn_BTQH)
 
-            else: # GENERATE PATH (Query Length I=1, Key Length J=CacheLength)
+            else:
                 # Retrieve the full K and V sequences from the cache
                 kv_cache.update(k_BTNH, v_BTNH, attention_metadata.seq_lens, op_mode="generate")
                 k_cache_full = kv_cache.key_cache[op_mode]
@@ -208,12 +203,11 @@ class Attention(nnx.Module):
                     v_cache_full = jnp.repeat(v_cache_full, head_repeats, axis=2)
 
                 # Calculate attention scores using einsum
-                # q:(B,I,N,H), k:(B,J,N,H) -> scores:(B,N,I,J)
                 scores_BQST = jnp.einsum('BSQH,BTQH->BQST', q_BSQH, k_cache_full) / jnp.sqrt(self.cfg.head_dim)
 
                 # Apply mask to ignore padding in the KV cache
                 current_lengths_B = attention_metadata.seq_lens + 1
-                max_cache_len = k_cache_full.shape[1] # Length of dimension J
+                max_cache_len = k_cache_full.shape[1]
                 mask = jnp.arange(max_cache_len) < current_lengths_B[:, None]
                 scores_BQST = jnp.where(mask[:, None, None, :], scores_BQST, -1e9)
 
@@ -221,7 +215,6 @@ class Attention(nnx.Module):
                 attention_weights_BQST = jax.nn.softmax(scores_BQST, axis=-1)
 
                 # Compute output using einsum
-                # weights:(B,N,I,J), v:(B,J,N,H) -> out:(B,I,N,H)
                 output_BSQH = jnp.einsum('BQST,BTQH->BSQH', attention_weights_BQST, v_cache_full)
 
             return kv_cache, output_BSQH

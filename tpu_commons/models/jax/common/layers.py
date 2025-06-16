@@ -18,9 +18,6 @@ from tpu_commons.models.jax.common.constants import *
 from tpu_commons.models.jax.common.sharding import *
 
 
-class Quantization: pass
-class KVCache: pass
-
 # A dummy for modeling_flax_utils which might contain activation functions
 class MockFlaxUtils:
     ACT2FN = {
@@ -49,9 +46,9 @@ class ParamFactory:
 class RuntimeParams:
 # A layer wised runtime parameters that may be needed when initializing the live blocks, i.e. Attention
 # That way, if a new block need to be added, i.e. lora, we won't have to update the interfaces for all blocks
-    kv_cache: Optional[KVCache] = None
-    sharding_cfg: Optional[ShardingConfig] = None
-    quantization: Optional[Quantization] = None 
+    kv_cache: Any = None
+    sharding_cfg: Any = None
+    quantization: Any = None 
 
 @dataclass
 class Config:
@@ -120,43 +117,36 @@ class FFWConfig(Config):
   act: str
   dtype: Any = jnp.float32
 
+@dataclass
 class FFW(nnx.Module):
   """Dense Feed Forward Layer"""
   cfg: FFWConfig
   mesh: Mesh
-  kernel_init: Initializer # TODO create factories for initializer(?)
-  quant: Quantization | None = None
+  param_factory: ParamFactory
   sharding_cfg: ShardingConfig
+  quant: Any | None = None
 
-  def __init__(
-      self,
-      cfg: FFWConfig,
-      mesh: Mesh,
-      sharding_cfg: ShardingConfig,
-      kernel_init: Initializer = nnx.initializers.lecun_normal(),
-      *,
-      rngs: nnx.Rngs,
-  ):
-    self.cfg = cfg
-    self.mesh = mesh
-    self.sharding_cfg = sharding_cfg
-    self.kernel_init = kernel_init
+
+  def __post_init__(self):
 
     self.create_sharding()
-    self.kernel_gating_DF = nnx.Param(
-      self.kernel_init(rngs.params(), (cfg.d_model, cfg.hidden_size), cfg.dtype),
-      sharding=self.df_sharding)
-    self.kernel_up_proj_DF = nnx.Param(
-      self.kernel_init(rngs.params(), (cfg.d_model, cfg.hidden_size), cfg.dtype),
-      sharding=self.df_sharding)
-    self.kernel_down_proj_FD = nnx.Param(
-      self.kernel_init(rngs.params(), (cfg.hidden_size, cfg.d_model), cfg.dtype),
-      sharding=self.fd_sharding)
+    self.kernel_gating_DF = self.param_factory.create_kernel_init(
+            shape=(self.cfg.d_model, self.cfg.hidden_size),
+            dtype=self.cfg.dtype,
+            sharding=self.df_sharding)
+    self.kernel_up_proj_DF = self.param_factory.create_kernel_init(
+            shape=(self.cfg.d_model, self.cfg.hidden_size),
+            dtype=self.cfg.dtype,
+            sharding=self.df_sharding)
+    self.kernel_down_proj_FD = self.param_factory.create_kernel_init(
+            shape=(self.cfg.hidden_size, self.cfg.d_model),
+            dtype=self.cfg.dtype,
+            sharding=self.fd_sharding)
 
   def __call__(self, x, op_mode):
     # TODO consider to create factories for einsum(?)
     x = jnp.asarray(x, jnp.float32)
-    x = nnx.with_sharding_constraint(x, self.activation_sharding[op_mode]) 
+    x = nnx.with_sharding_constraint(x, self.activation_ffw_bsd[op_mode]) 
 
     with jax.named_scope("wi_0"):
       gating_BSF = jnp.einsum('BSD,DF -> BSF' , x, self.kernel_gating_DF.value)
@@ -169,29 +159,27 @@ class FFW(nnx.Module):
     
     return output_BSD
 
-
-  def setup(self):
-    self.create_sharding()
-    self.kernel_gating_DF = nnx.Param(
-      self.kernel_init((cfg.d_model, cfg.hidden_size), cfg.dtype),
-      sharding=self.df_sharding)
-    self.kernel_up_proj_DF = nnx.Param(
-      self.kernel_init((cfg.d_model, cfg.hidden_size), cfg.dtype),
-      sharding=self.df_sharding)
-    self.kernel_down_proj_FD = nnx.Param(
-      self.kernel_init((cfg.hidden_size, cfg.d_model), cfg.dtype),
-      sharding=self.fd_sharding)
-
   def create_sharding(self):
-    self.activation_sharding = dict()
-    self.activation_sharding['prefill'] =  NamedSharding(
-      self.mesh, P(self.sharding_cfg.activation_ffw_bsd))
-    self.activation_sharding['decode'] =  NamedSharding(
-      self.mesh, P(self.sharding_cfg.activation_ffw_bsd))
+    mode_dependent_attrs = [
+        "activation_ffw_bsd",
+    ]
+    for attr_name in mode_dependent_attrs:
+        prefill_sharding_config = getattr(self.sharding_cfg.prefill_sharding_cfg, attr_name)
+        generate_sharding_config = getattr(self.sharding_cfg.generate_sharding_cfg, attr_name)
+
+        sharding_dict = {
+            'prefill': NamedSharding(
+                self.mesh, P(prefill_sharding_config)),
+            'generate': NamedSharding(
+                self.mesh, P(generate_sharding_config))
+        }
+        setattr(self, attr_name, sharding_dict)
+
+    # static sharding for kernel/weights
     self.df_sharding =  NamedSharding(
-      self.mesh, P(self.sharding_cfg.ffw_weight_df))
+      self.mesh, P(self.sharding_cfg.generate_sharding_cfg.ffw_weight_df))
     self.fd_sharding =  NamedSharding(
-      self.mesh, P(self.sharding_cfg.ffw_weight_fd))
+      self.mesh, P(self.sharding_cfg.generate_sharding_cfg.ffw_weight_fd))
 
     return 
 
@@ -237,8 +225,8 @@ class Embedder(nnx.Module):
     return embedding_BSD
 
   def create_sharding(self):
-    self.prelogit_bsd =  NamedSharding(self.mesh, PartitionSpec(self.sharding_cfg.prelogit_bsd))
-    self.dv_sharding =  NamedSharding(self.mesh, PartitionSpec(self.sharding_cfg.vocab_dv))
+    self.prelogit_bsd =  NamedSharding(self.mesh, PartitionSpec(self.sharding_cfg.generate_sharding_cfg.prelogit_bsd))
+    self.dv_sharding =  NamedSharding(self.mesh, PartitionSpec(self.sharding_cfg.generate_sharding_cfg.vocab_dv))
 
 
   

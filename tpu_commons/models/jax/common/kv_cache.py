@@ -68,19 +68,43 @@ class KVCache(nnx.Module):
             self.cfg.num_kv_heads,
             self.cfg.head_dim
         )
-        zeros_arr = jnp.zeros(cache_shape, dtype=self.cfg.dtype)
-        self.key_cache['prefill'] = nnx.Variable(jax.device_put(zeros_arr, self.kv_sharding['prefill']))
-        self.value_cache['prefill'] = nnx.Variable(jax.device_put(zeros_arr, self.kv_sharding['prefill']))
-        self.key_cache['generate'] = nnx.Variable(jax.device_put(zeros_arr, self.kv_sharding['generate']))
-        self.value_cache['generate'] = nnx.Variable(jax.device_put(zeros_arr, self.kv_sharding['generate']))
+        
+        self.key_cache['prefill'] = nnx.Variable(
+            jax.device_put(jnp.zeros(cache_shape, dtype=self.cfg.dtype),
+                           self.keyvalue_prefill_mode_cache_bsnh['prefill'])
+        )
+        self.value_cache['prefill'] = nnx.Variable(
+            jax.device_put(jnp.zeros(cache_shape, dtype=self.cfg.dtype),
+                           self.keyvalue_prefill_mode_cache_bsnh['prefill'])
+        )
+        self.key_cache['generate'] = nnx.Variable(
+            jax.device_put(jnp.zeros(cache_shape, dtype=self.cfg.dtype),
+                           self.keyvalue_prefill_mode_cache_bsnh['generate'])
+        )
+        self.value_cache['generate'] = nnx.Variable(
+            jax.device_put(jnp.zeros(cache_shape, dtype=self.cfg.dtype),
+                           self.keyvalue_prefill_mode_cache_bsnh['generate'])
+        )
 
 
     def create_sharding(self, ):
-        self.kv_sharding = dict()
-        self.kv_sharding['prefill'] =  NamedSharding(
-            self.mesh, P(self.sharding_cfg.prefill_sharding_cfg.keyvalue_prefill_mode_cache_bsnh))
-        self.kv_sharding['generate'] =  NamedSharding(
-            self.mesh, P(self.sharding_cfg.generate_sharding_cfg.keyvalue_generate_mode_cache_bsnh))
+
+        mode_dependent_attrs = [
+            "keyvalue_prefill_mode_cache_bsnh",
+        ]
+        for attr_name in mode_dependent_attrs:
+            prefill_sharding_config = getattr(self.sharding_cfg.prefill_sharding_cfg, attr_name)
+            generate_sharding_config = getattr(self.sharding_cfg.generate_sharding_cfg, attr_name)
+
+            sharding_dict = {
+                'prefill': NamedSharding(
+                    self.mesh, P(prefill_sharding_config)),
+                'generate': NamedSharding(
+                    self.mesh, P(generate_sharding_config))
+            }
+            setattr(self, attr_name, sharding_dict)
+
+        # static sharding for kernel/weights        
 
     def update(
         self,
@@ -89,12 +113,18 @@ class KVCache(nnx.Module):
         current_lengths: Int[Array, "B"],
         op_mode: str = 'prefill'
     ):
-        """Uses the external updater to modify the internal key and value caches."""
-        self.key_cache[op_mode] = self.updater.update_cache(
-            new_keys, self.key_cache[op_mode], current_lengths, self.cfg.dtype
+        key_cache_variable = self.key_cache[op_mode]
+        value_cache_variable = self.value_cache[op_mode]
+
+        new_key_value = self.updater.update_cache(
+            new_keys, key_cache_variable.value, current_lengths, self.cfg.dtype
         )
-        self.value_cache[op_mode] = self.updater.update_cache(
-            new_values, self.value_cache[op_mode], current_lengths, self.cfg.dtype
+        new_value_value = self.updater.update_cache(
+            new_values, value_cache_variable.value, current_lengths, self.cfg.dtype
         )
-        return self.key_cache[op_mode], self.value_cache[op_mode]
+
+        key_cache_variable.value = new_key_value
+        value_cache_variable.value = new_value_value
+
+        return key_cache_variable, value_cache_variable
 

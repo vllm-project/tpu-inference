@@ -22,12 +22,6 @@ class TransformerConfig(Config):
     light weighted transformer config, which includes config for all sub-modules
     it uses make() to create the live module from this config
     """
-    attention_cfg: AttentionConfig
-    kv_cache_cfg: KVCacheConfig
-    cfg: Any
-    moe_cfg: MoEConfig = None
-    ffw_cfg: FFWConfig = None
-    router_cfg: RoutingConfig = None
     routing: bool = False
 
     def from_cfg(self, flags_cfg):
@@ -74,27 +68,33 @@ class TransformerBlock(nnx.Module):
    
         self.mlp = self._create_module(FFW, cfg=self.cfg.ffw_cfg)
 
-        if cfg.routing:
+        if self.cfg.routing:
             self.router = self._create_module(Router, cfg=self.cfg.router_cfg)
-            self.moe = self._create_module(MoE, cfg=self.cfg.moe_cfg)
+            self.moe = self._create_module(MoE, cfg=self.cfg.moe_cfg, router=self.router)
         
-        self.post_attention_norm = self._create_module(
-            RMSNorm,
-            cfg={"dims": self.cfg.d_model},
+        self.post_attention_norm = RMSNorm(
+            dims=self.d_model,
+            mesh=self.mesh,
+            param_factory=self.param_factory,
+            sharding_cfg=self.sharding_cfg,
+            quant=self.quant
         )
-        self.post_mlp_norm = self._create_module(
-            RMSNorm,
-            cfg={"dims": self.cfg.d_model}
+        self.post_mlp_norm = RMSNorm(
+            dims=self.d_model,
+            mesh=self.mesh,
+            param_factory=self.param_factory,
+            sharding_cfg=self.sharding_cfg,
+            quant=self.quant
         )
 
     def __call__(
         self,
         x,
-        positions,
-        attn_cache,
+        attention_metadata,
         op_mode,
     ):
-        new_cache, score = self.self_attn(x, op_mode, self.kv_cache, attention_metadata)        
+        new_cache, score = self.attn(x, op_mode, self.kv_cache, attention_metadata)
+
         x = self.post_attention_norm(x + score)
         if self.cfg.routing:
             y = self.moe(x, op_mode)
@@ -103,7 +103,6 @@ class TransformerBlock(nnx.Module):
         logits = self.post_mlp_norm(x + y)
 
         return new_cache, logits
-
 
 
     

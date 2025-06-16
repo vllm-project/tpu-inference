@@ -40,7 +40,7 @@ class Router(nnx.Module):
 
     def __call__(self, x: Float[Array, 'B S D'], op_mode):
         x = jnp.asarray(x, self.cfg.dtype)
-        x = nnx.with_sharding_constraint(x, self.activation_sharding[op_mode])
+        x = nnx.with_sharding_constraint(x, self.activation_ffw_bsd[op_mode])
         router_logits_BSE = jnp.einsum('BSD,DE -> BSE', x, self.kernel_DE.value)
         activated_gating_BSF = nnx.softmax(router_logits_BSE.astype(jnp.float32), axis=-1)
         weights_BSK, selected_experts_BSK = jax.lax.top_k(activated_gating_BSF, self.cfg.num_experts_per_tok)
@@ -55,13 +55,24 @@ class Router(nnx.Module):
             sharding=self.ed_sharding)
 
     def create_sharding(self):
-        self.activation_sharding = dict()
-        self.activation_sharding['prefill'] =  NamedSharding(
-            self.mesh, P(self.sharding_cfg.activation_ffw_bsd))
-        self.activation_sharding['decode'] =  NamedSharding(
-            self.mesh, P(self.sharding_cfg.activation_ffw_bsd))
+        mode_dependent_attrs = [
+            "activation_ffw_bsd",
+        ]
+        for attr_name in mode_dependent_attrs:
+            prefill_sharding_config = getattr(self.sharding_cfg.prefill_sharding_cfg, attr_name)
+            generate_sharding_config = getattr(self.sharding_cfg.generate_sharding_cfg, attr_name)
+
+            sharding_dict = {
+                'prefill': NamedSharding(
+                    self.mesh, P(prefill_sharding_config)),
+                'generate': NamedSharding(
+                    self.mesh, P(generate_sharding_config))
+            }
+            setattr(self, attr_name, sharding_dict)
+
+        # static sharding for kernel/weights
         self.ed_sharding =  NamedSharding(
-            self.mesh, P(self.sharding_cfg.moe_router_de))
+            self.mesh, P(self.sharding_cfg.generate_sharding_cfg.moe_router_de))
 
         return 
 
@@ -73,7 +84,6 @@ class MoEConfig(Config):
     num_experts: int
     sequence_len: int
     act: str
-    router_config: RoutingConfig
     dtype: Any = jnp.float32
     apply_expert_weight_before_computation: bool = False
 
@@ -93,7 +103,7 @@ class MoE(nnx.Module):
 
     def __call__(self, x: Float[Array, 'B S D'], op_mode):
         x = jnp.asarray(x, jnp.float32)
-        x = nnx.with_sharding_constraint(x, self.activation_sharding[op_mode])       
+        x = nnx.with_sharding_constraint(x, self.activation_ffw_bsd[op_mode])       
         weights_BSK, indices_BSK  = self.router(x, op_mode)
         one_hot_indices_BSKE = jax.nn.one_hot(indices_BSK, num_classes=self.cfg.num_experts, dtype=self.cfg.dtype)
         full_weights_BSE = jnp.sum(one_hot_indices_BSKE * weights_BSK[..., None], axis=2)
@@ -133,7 +143,7 @@ class MoE(nnx.Module):
         basic moe forward without dropping, megablx etc
         """
         x = jnp.asarray(x, self.cfg.dtype)
-        x = nnx.with_sharding_constraint(x, self.activation_sharding[op_mode]) 
+        x = nnx.with_sharding_constraint(x, self.activation_ffw_bsd[op_mode]) 
 
         with jax.named_scope("gating"):
             gating_BSEF = jnp.einsum('BSD,EDF -> BSEF', x, self.kernel_gating_EDF.value)
@@ -151,14 +161,25 @@ class MoE(nnx.Module):
         return self.cfg
 
     def create_sharding(self):
-        self.activation_sharding = dict()
-        self.activation_sharding['prefill'] =  NamedSharding(
-            self.mesh, P(self.sharding_cfg.activation_ffw_bsd))
-        self.activation_sharding['decode'] =  NamedSharding(
-            self.mesh, P(self.sharding_cfg.activation_ffw_bsd))
+        mode_dependent_attrs = [
+            "activation_ffw_bsd",
+        ]
+        for attr_name in mode_dependent_attrs:
+            prefill_sharding_config = getattr(self.sharding_cfg.prefill_sharding_cfg, attr_name)
+            generate_sharding_config = getattr(self.sharding_cfg.generate_sharding_cfg, attr_name)
+
+            sharding_dict = {
+                'prefill': NamedSharding(
+                    self.mesh, P(prefill_sharding_config)),
+                'generate': NamedSharding(
+                    self.mesh, P(generate_sharding_config))
+            }
+            setattr(self, attr_name, sharding_dict)
+
+        # static sharding for kernel/weights
         self.edf_sharding =  NamedSharding(
-            self.mesh, P(self.sharding_cfg.moe_weights_edf))
+            self.mesh, P(self.sharding_cfg.generate_sharding_cfg.moe_weights_edf))
         self.efd_sharding =  NamedSharding(
-            self.mesh, P(self.sharding_cfg.moe_weights_efd))
+            self.mesh, P(self.sharding_cfg.generate_sharding_cfg.moe_weights_efd))
             
         return 
