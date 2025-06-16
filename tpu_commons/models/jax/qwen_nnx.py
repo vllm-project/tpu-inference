@@ -343,10 +343,6 @@ class Qwen2ForCausalLM(nnx.Module):
                 f"{log_prefix} v_proj bias: {first_layer_attn.v_proj.bias.value.flatten()[:5]}"
             )
 
-        # You can extend this to log more layers or other specific weights if needed.
-        # For example, to log for all layers:
-        # for i, layer in enumerate(self.model.layers):
-        #     # ... similar logging for layer.self_attn ...
     def load_weights(self):
         mappings = {
             "lm_head": "lm_head",
