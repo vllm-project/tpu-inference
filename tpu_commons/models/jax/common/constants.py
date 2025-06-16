@@ -1,3 +1,8 @@
+import enum
+class RouterType(enum.Enum):
+    """Enum for router types."""
+    TOP_K = 'top_k'
+
 class OPERATION_MODE(enum.Enum):
   PREFILL = 1
   DECODE = 2
@@ -5,7 +10,7 @@ class OPERATION_MODE(enum.Enum):
 # TODO we code the logical mesh axis name as a constant
 # we need to make it more flexible in case more names 
 # could be added for future models
-class LOGICAL_MESH_AXIS_NAME:
+class LOGICAL_MESH_AXIS_NAME(enum.Enum):
   # The constants as the name for mesh axis
   # logical equivalently, we could use 'x', 'y' or ('x', 'y'),
   # but specifying a name will give better readability. 
