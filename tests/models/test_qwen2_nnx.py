@@ -73,7 +73,8 @@ def test_qwen2_mlp():
 
     # Run HF PyTorch MLP
     output_hf_torch = torch_mlp_hf(x_torch)
-    output_hf_torch_jax = jnp.asarray(output_hf_torch.detach().numpy(),
+    output_hf_torch_jax = jnp.asarray(output_hf_torch.to(
+        torch.float32).detach().numpy(),
                                       dtype=dtype)
 
     # Compare JAX output with HF PyTorch MLP output
