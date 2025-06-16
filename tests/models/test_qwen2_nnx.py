@@ -86,9 +86,7 @@ class TestQwen2NnxParity(unittest.TestCase):
         jax_mlp_module = JaxQwen2MLP(config=self.hf_config,
                                      dtype=self.dtype_jax,
                                      rng=nnx.Rngs(params=key_params))
-        jax_mlp_graph = nnx.split(jax_mlp_module, nnx.Param)
-        jax_mlp_params = jax_mlp_graph.filter(nnx.Param)
-        jax_mlp_static = jax_mlp_graph.filter(nnx.Not(nnx.Param))
+        jax_mlp_params, jax_mlp_static = nnx.split(jax_mlp_module, nnx.Param)
 
         # Initialize PyTorch model
         torch_mlp = VllmQwen2MLP(
@@ -141,9 +139,8 @@ class TestQwen2NnxParity(unittest.TestCase):
                                             dtype=self.dtype_jax,
                                             rng=nnx.Rngs(params=key_params),
                                             mesh=self.mesh)
-        jax_attn_graph = nnx.split(jax_attn_module, nnx.Param)
-        jax_attn_params = jax_attn_graph.filter(nnx.Param)
-        jax_attn_static = jax_attn_graph.filter(nnx.Not(nnx.Param))
+        jax_attn_params, jax_attn_static = nnx.split(jax_attn_module,
+                                                     nnx.Param)
 
         # Initialize PyTorch model
         # VllmQwen2Attention requires CacheConfig
@@ -296,10 +293,9 @@ class TestQwen2NnxParity(unittest.TestCase):
                                             dtype=self.dtype_jax,
                                             rng=nnx.Rngs(params=key_params),
                                             mesh=self.mesh)
-        jax_attn_graph = nnx.split(jax_attn_module,
-                                   nnx.Param)  # Only need o_proj params
-        jax_attn_params = jax_attn_graph.filter(nnx.Param)
-        jax_attn_static = jax_attn_graph.filter(nnx.Not(nnx.Param))
+        # Only need o_proj params, but split will give all params and static parts
+        jax_attn_params, jax_attn_static = nnx.split(jax_attn_module,
+                                                     nnx.Param)
 
         cache_config = CacheConfig(block_size=self.block_size,
                                    gpu_memory_utilization=0.9,
