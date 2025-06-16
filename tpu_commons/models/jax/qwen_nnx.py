@@ -188,14 +188,18 @@ class Qwen2DecoderLayer(nnx.Module):
         attention_metadata: AttentionMetadata,
     ) -> Tuple[KVCache, jax.Array]:
         # Self attention.
+        # TODO: print x
         hidden_states = self.input_layernorm(x)
+        # TODO: print x
         kv_cache, attn_output = self.self_attn(
             is_prefill,
             kv_cache,
             hidden_states,
             attention_metadata,
         )
+        # TODO: print x
         attn_output += x
+        # TODO: print x (first 10 values, and the sum)
 
         # MLP.
         residual = attn_output
@@ -293,8 +297,9 @@ class Qwen2ForCausalLM(nnx.Module):
         top_ks: jax.Array = None,
         *args,
     ) -> Tuple[List[KVCache], jax.Array, jax.Array]:
+        # TODO: print token ids
         x = self.embed(input_ids)
-
+        # TODO: print x
         kv_caches, x = self.model(
             is_prefill,
             kv_caches,
