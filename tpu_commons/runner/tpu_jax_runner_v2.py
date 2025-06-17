@@ -23,6 +23,7 @@ from tpu_commons.models.jax.model_loader import get_model
 from tpu_commons.runner.tpu_torch_xla_runner import _get_token_paddings
 from tpu_commons.runner.utils import determine_do_sampling
 from tpu_commons.worker.input_batch_jax import CachedRequestState, InputBatch
+from vllm.v1.request import Request
 
 logger = init_logger(__name__)
 

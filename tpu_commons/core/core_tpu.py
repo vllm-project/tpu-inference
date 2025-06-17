@@ -126,7 +126,7 @@ class EngineCore:
                         self.batch_queue_size)
             self.batch_queue = queue.Queue(self.batch_queue_size)
         self.orchestrator = self._setup_driver(True)
-        logger.info("starting jetstream orchestrator")
+        logger.warning("starting jetstream orchestrator")
 
     def _initialize_kv_caches(
             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
@@ -204,6 +204,7 @@ class EngineCore:
         #     max_tokens=self.vllm_config.model_config.max_model_len,
         # )
         self.orchestrator.place_request_on_prefill_queue(req)
+        logger.warning("added req %s to jetstream orchestrator", req.req_id)
 
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""

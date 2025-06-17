@@ -89,13 +89,11 @@ from typing import Any, AsyncIterator, Optional, Tuple, cast
 
 import grpc
 import jax
-from jetstream.core.utils import async_multifuture
-from jetstream.core.utils.return_sample import ReturnSample
-from jetstream.engine import engine_api, tokenizer_api, token_utils
-from jetstream.core.metrics.prometheus import JetstreamMetricsCollector
+from tpu_commons.core.jetstream_commons.engine import engine_api, tokenizer_api, token_utils
 import numpy as np
 
 from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.request import Request
 
 root = logging.getLogger()
 root.setLevel(logging.DEBUG)
@@ -118,37 +116,37 @@ def delete_pytree(p):
   jax.tree_map(delete_leaf, p)
 
 
-@dataclasses.dataclass
-class ActiveRequest:
-  """Current state of the driver."""
+# @dataclasses.dataclass
+# class ActiveRequest:
+#   """Current state of the driver."""
 
-  #################### Information relevant for generation #####################
-  max_tokens: int
-  # We keep prefill and decode information together in the same object so that
-  # there is less indirection about where this return channel is.
-  # The return channel returns a list of strings, one per sample for that query.
-  return_channel: async_multifuture.AsyncMultifuture[list[ReturnSample]]
-  # [num_samples,] which corresponds to whether each sample is complete for the
-  # requests.
-  complete: Optional[np.ndarray] = None
-  prefill_result: Any = None
-  #################### Information relevant for prefill ########################
-  history_path: Optional[str] = None
-  prefill_content: Optional[str | list[int]] = None
-  ################## Information relevant for detokenization ###################
-  # Which generate step this was added at.
-  generate_timestep_added: Optional[int] = None
-  is_client_side_tokenization: Optional[bool] = False
+#   #################### Information relevant for generation #####################
+#   max_tokens: int
+#   # We keep prefill and decode information together in the same object so that
+#   # there is less indirection about where this return channel is.
+#   # The return channel returns a list of strings, one per sample for that query.
+#   return_channel: async_multifuture.AsyncMultifuture[list[ReturnSample]]
+#   # [num_samples,] which corresponds to whether each sample is complete for the
+#   # requests.
+#   complete: Optional[np.ndarray] = None
+#   prefill_result: Any = None
+#   #################### Information relevant for prefill ########################
+#   history_path: Optional[str] = None
+#   prefill_content: Optional[str | list[int]] = None
+#   ################## Information relevant for detokenization ###################
+#   # Which generate step this was added at.
+#   generate_timestep_added: Optional[int] = None
+#   is_client_side_tokenization: Optional[bool] = False
 
-  def enqueue_samples(self, generated_samples: list[ReturnSample]):
-    """Adds the generated sample(s) to return channel for current step.
+#   def enqueue_samples(self, generated_samples: list[ReturnSample]):
+#     """Adds the generated sample(s) to return channel for current step.
 
-    Args:
-      generated_samples: The generated sample(s) for current step.
+#     Args:
+#       generated_samples: The generated sample(s) for current step.
 
-    This should be called only from within the Drivers background thread.
-    """
-    self.return_channel.add_result(generated_samples)
+#     This should be called only from within the Drivers background thread.
+#     """
+#     self.return_channel.add_result(generated_samples)
 
 
 class JetThread(threading.Thread):
@@ -188,22 +186,22 @@ class Driver:
   _prefill_params: list[Any]
   _generate_params: list[Any]
   # Stage 1
-  _prefill_backlog: queue.Queue[ActiveRequest | None]
+  _prefill_backlog: queue.Queue[Request | None]
   # Stage 2
-  _transfer_backlogs: list[queue.Queue[ActiveRequest]] = []
+  _transfer_backlogs: list[queue.Queue[Any]] = []
   # Stage 3
   # We keep this as a dict to avoid a possibly expensive object comparison
   # when logging the index of the generate engine we send a prefill result
   # to, it allows us to natively have the index from the min operation, rather
   # than have to call .index()
-  _generate_backlogs: dict[int, queue.Queue[ActiveRequest]] = {}
+  _generate_backlogs: dict[int, queue.Queue[Any]] = {}
   # Stage 4
   # This can be a list because we can pass it as an arg to generate and
   # detokenize threads. It is a list of tokens to be detokenized.
-  _detokenize_backlogs: list[queue.Queue[engine_api.ResultTokens]] = []
+  _detokenize_backlogs: list[queue.Queue[Any]] = []
   _vllm_output_backlogs: list[queue.Queue[ModelRunnerOutput]] = []
   _generate_slots: list[queue.Queue[int]] = []
-  _active_requests: list[queue.Queue[tuple[int, ActiveRequest]]] = []
+#   _active_requests: list[queue.Queue[tuple[int, ActiveRequest]]] = []
 
   # For interleaved_mode, only generate if all slots are full
   # or corresponding prefill queue is empty.
@@ -213,7 +211,7 @@ class Driver:
   _jax_padding = True
 
   # All metrics we want to monitor should be collected with this
-  _metrics_collector: JetstreamMetricsCollector | None = None
+#   _metrics_collector: JetstreamMetricsCollector | None = None
 
   def __init__(
       self,
@@ -223,7 +221,7 @@ class Driver:
       generate_params: Optional[list[Any]] = None,
       interleaved_mode: bool = False,
       jax_padding: bool = True,
-      metrics_collector: JetstreamMetricsCollector | None = None,
+    #   metrics_collector: JetstreamMetricsCollector | None = None,
       is_ray_backend: bool = False,
   ):
     if prefill_engines is None:
@@ -245,16 +243,16 @@ class Driver:
     self._prefill_params = prefill_params
     self._generate_params = generate_params
     self._interleaved_mode = interleaved_mode
-    self._metrics_collector = metrics_collector
+    # self._metrics_collector = metrics_collector
 
     # Stages 1-4 represent the life cycle of a request.
     # Stage 1
     # At first, a request is placed here in order to get prefilled.
     self._prefill_backlog = queue.Queue()
-    if self._metrics_collector:
-      self._metrics_collector.get_prefill_backlog_metric().set_function(
-          lambda: float(self._prefill_backlog.qsize())
-      )
+    # if self._metrics_collector:
+    #   self._metrics_collector.get_prefill_backlog_metric().set_function(
+    #       lambda: float(self._prefill_backlog.qsize())
+    #   )
 
     # Stage 2
     # After prefilling, it is placed here in order to get transferred to
@@ -459,7 +457,7 @@ class Driver:
       if vllm_request is None:
         break
       logging.info(
-          "Prefilling on prefill engine %d : prefill queue size, %d,"
+          "Prefilling on prefill engine %d : prefill queue size, %d,", 
           idx,
           self._prefill_backlog.qsize(),
       )
@@ -482,7 +480,7 @@ class Driver:
       del request
 
   def _jax_transfer_prefill_result(
-      self, new_request: ActiveRequest, target_idx: int
+      self, new_request: Any, target_idx: int
   ):
     new_request.prefill_result = jax.device_put(
         new_request.prefill_result,
@@ -492,12 +490,12 @@ class Driver:
     jax.block_until_ready(new_request.prefill_result)
 
   def _ray_transfer_prefill_result(
-      self, new_request: ActiveRequest, target_idx: int
+      self, new_request: Any, target_idx: int
   ):
     self._generate_engines[target_idx].transfer(new_request.prefill_result)
 
   def _transfer_prefill_result(
-      self, new_request: ActiveRequest, target_idx: int
+      self, new_request: Any, target_idx: int
   ):
     if self._is_ray_backend:
       self._ray_transfer_prefill_result(new_request, target_idx)

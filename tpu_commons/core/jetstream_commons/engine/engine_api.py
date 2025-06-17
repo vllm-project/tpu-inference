@@ -28,6 +28,9 @@ from flax import struct
 from tpu_commons.core.jetstream_commons.engine import (token_utils,
                                                        tokenizer_pb2)
 
+from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.request import Request
+
 # The model parameters - their partitioning will be unique for different prefill
 # and decode topoologies.
 Params = Any

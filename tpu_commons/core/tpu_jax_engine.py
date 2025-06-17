@@ -64,41 +64,6 @@ Params = Any
 PRNGKeyType = Any
 
 
-# TODO(yuyanpeng): Should import ExistingPrefix from jetstream.engine.engine_api
-@struct.dataclass
-class ExistingPrefix:
-  """Represents a prefix that has already been processed.
-
-  Attributes:
-    cache: The kv-cache for the prefix get from model params cache.
-    common_prefix_tokens: The tokens that have already been processed without padding.
-  """
-
-  cache: Any
-  common_prefix_tokens: jax.Array
-
-
-class MaxEngineConfig:
-  """Engine specific config class to allow using multiple MaxEngine instances in an inference run.
-  TODO: evaluate the need for this given the restructured pyconfig.py
-  """
-
-  def __init__(self, keys):
-    # self.keys = keys
-    self.__dict__["keys"] = keys
-
-  def __getattr__(self, attr):
-    if attr not in self.keys:
-      raise ValueError(f"Requested key {attr}, not in config")
-    return self.keys[attr]
-
-  def __setattr__(self, attr, value):
-    raise ValueError
-
-  def get_keys(self):
-    return self.keys
-
-
 class JaxEngine(engine_api.Engine):
   """The computational core of the generative model server.
 
@@ -304,60 +269,3 @@ class JaxEngine(engine_api.Engine):
     """CPU devices colocated with the engine's accelerators."""
     raise NotImplementedError
 
-
-def set_engine_vars_from_base_engine(
-    engine: MaxEngine,
-    base_engine: MaxEngine,
-    rng: PRNGKeyType,
-):
-  """Set internal vars from base_engine, which has already loaded the checkpoint and has sharding,
-  mesh, and kv cache related vars set.
-  """
-  if base_engine.model.quant:
-    engine.model.quant.quant_mode = base_engine.model.quant.quant_mode
-  engine.state_mesh_annotations = base_engine.state_mesh_annotations
-  engine.abstract_params = base_engine.abstract_params
-  engine.kv_cache_annotations = maxtext_utils.get_kv_cache_annotations(engine.model, engine.config, rng, engine.mesh)  # pylint: disable=protected-access
-  engine.kv_cache_shardings = jax.tree_util.tree_map(
-      lambda x: jax.sharding.NamedSharding(engine.mesh, x),
-      engine.kv_cache_annotations,  # pylint: disable=protected-access
-  )
-
-
-def create_engine_from_config_flags(
-    maxengine_config_filepath, batch_size, max_prefill_predict_length, max_target_length, args_str
-):
-  """Create new MaxEngine instance with given batch_size, prefill and target lengths, and any config
-  params provided through `args_str`.
-  """
-  # batch and cache related
-  args = {
-      "scan_layers": "false",
-      "async_checkpointing": "false",
-      "ici_fsdp_parallelism": "1",
-      "ici_autoregressive_parallelism": "1",
-      "ici_tensor_parallelism": "-1",
-      "weight_dtype": "bfloat16",
-      "attention": "dot_product",
-      "max_prefill_predict_length": f"{max_prefill_predict_length}",
-      "max_target_length": f"{max_target_length}",
-      "per_device_batch_size": f"{batch_size}",
-  }
-
-  print(f"Command line args: {args_str}")
-  cmd_args = args_str.split(" ")
-  for cmd_arg in cmd_args:
-    if cmd_arg:
-      k, v = cmd_arg.split("=")
-      args[k.strip()] = v.strip()
-  assert "load_parameters_path" in args, "load_parameters_path must be defined"
-  if maxengine_config_filepath is None:
-    maxengine_config_filepath = os.path.join(PKG_DIR, "configs", "base.yml")
-  updated_args = [os.path.join(PKG_DIR, "maxengine_server.py"), maxengine_config_filepath]
-  for k, v in args.items():
-    option = f"{k}={v}"
-    updated_args.append(option)
-  print(f"Invoking maxengine with args:\n \t{updated_args}")
-  cfg = pyconfig.initialize(updated_args)
-  engine = MaxEngine(cfg)
-  return engine
