@@ -22,7 +22,8 @@ from vllm.v1.engine.core import EngineCore
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
 
-MODEL_NAME = "meta-llama/Llama-3.3-70B-Instruct"
+# TODO: change back to  "meta-llama/Llama-3.3-70B-Instruct"
+MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"
 PROMPT = "I love to"
 DEFAULT_BLOCK_SIZE = 64
 
@@ -146,6 +147,9 @@ def run_prefill(engine_core: EngineCore, tokenizer, prompt_ids: list[int],
             )
             break
     assert found_req_in_running, f"Request with ID {actual_processed_request_id} should be in scheduler.running after prefill step."
+
+    # Should this be 128 because of prefill padding?
+    total_prefill_tokens = engine_core.scheduler.running[0].num_computed_tokens
     print("Finished executing prefill.")
 
 
@@ -246,6 +250,9 @@ def main(args):
 
     if should_profile:
         assert profile_dir is not None, "Must specify profile_dir if profiling is enabled!"
+        # NOTE: this must be set before the EngineCore is created
+        # or else it won't be respected
+        os.environ["VLLM_TORCH_PROFILER_DIR"] = profile_dir
 
     engine_args = EngineArgs(**args)
     vllm_config = engine_args.create_engine_config()
@@ -257,14 +264,11 @@ def main(args):
     # TODO (jacobplatin): understand why this isn't being respected from the command line
     vllm_config.cache_config.block_size = block_size
 
-    # NOTE: this must be set before the EngineCore is created
-    # or else it won't be respected
-    os.environ["VLLM_TORCH_PROFILER_DIR"] = profile_dir
-
     engine_core = EngineCore(vllm_config=vllm_config,
                              executor_class=executor_class,
                              log_stats=True)
-
+    num_model_params = engine_core.model_executor.driver_worker.worker.model_runner.total_model_params_num
+    print(f"Num model params: {num_model_params}")
     run_prefill(engine_core, tokenizer, prompt_ids, should_profile)
     run_decode(engine_core, tokenizer, prompt_ids, should_profile)
 
