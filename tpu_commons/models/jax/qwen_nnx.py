@@ -239,9 +239,6 @@ class Qwen2Model(nnx.Module):
         rms_norm_eps = hf_config.rms_norm_eps
         hidden_size = hf_config.hidden_size
 
-        # TODO: this is a hack. Need to delete later
-        hf_config.num_hidden_layers = 1
-
         self.layers = [
             Qwen2DecoderLayer(
                 config=hf_config,
@@ -274,6 +271,10 @@ class Qwen2Model(nnx.Module):
                 attention_metadata,
             )
             kv_caches[i] = kv_cache
+
+            # TODO: remove it
+            # Hack: Stop after one layer
+            break
         x = self.norm(x)
         return kv_caches, x
 
