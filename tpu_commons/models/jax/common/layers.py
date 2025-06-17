@@ -9,6 +9,10 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from jaxtyping import Float, Int
 
+from tpu_commons.models.jax.common.attention import Attention, AttentionConfig, AttentionMetadata
+from tpu_commons.models.jax.common.kv_cache import (KVCacheConfig,
+                                                    StandardUpdater)
+from tpu_commons.models.jax.common.moe import MoE
 from tpu_commons.models.jax.common.sharding import ShardingConfig
 
 
