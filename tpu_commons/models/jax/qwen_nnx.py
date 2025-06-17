@@ -297,9 +297,21 @@ class Qwen2ForCausalLM(nnx.Module):
         top_ks: jax.Array = None,
         *args,
     ) -> Tuple[List[KVCache], jax.Array, jax.Array]:
-        # TODO: print token ids
+        jax.debug.print(
+            "input_ids shape: {shape}, first 10: {first_10}, sum: {sum}",
+            shape=input_ids.shape,
+            first_10=input_ids.flatten()[:10],
+            sum=jnp.sum(input_ids),
+        )
         x = self.embed(input_ids)
-        # TODO: print x
+        jax.debug.print(
+            "x (after embedding) shape: {shape}, first 10: {first_10}, sum: {sum}",
+            shape=x.shape,
+            first_10=x.flatten()[:10],
+            sum=jnp.sum(x),
+        )
+
+        # TODO: print x (after model)
         kv_caches, x = self.model(
             is_prefill,
             kv_caches,
