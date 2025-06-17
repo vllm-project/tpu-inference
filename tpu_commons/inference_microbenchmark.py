@@ -13,7 +13,6 @@ import os
 import time
 import uuid
 
-import jax
 from transformers import AutoTokenizer
 from utils_jax import calculate_prefill_tflops_per_device
 from vllm import SamplingParams
@@ -29,13 +28,14 @@ MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"
 PROMPT = "I love to"
 DEFAULT_BLOCK_SIZE = 64
 
+WARMUP_ITERS = 2
+
 
 def create_parser():
     """
     Create a parser for any CLI arguments to be passed to the EngineCore.
     """
     parser = FlexibleArgumentParser()
-    # Add engine args
     EngineArgs.add_cli_args(parser)
     parser.set_defaults(model=MODEL_NAME)
     parser.set_defaults(task="generate")
@@ -81,8 +81,11 @@ def make_request(prompt_token_ids: list[int], sampling_params: SamplingParams,
     )
 
 
-def run_prefill(engine_core: EngineCore, tokenizer, prompt_ids: list[int],
-                should_profile: bool):
+def run_prefill(engine_core: EngineCore,
+                tokenizer,
+                prompt_ids: list[int],
+                should_profile: bool,
+                verbose: bool = True):
     """
     Run an isolated prefill pass.
 
@@ -90,8 +93,10 @@ def run_prefill(engine_core: EngineCore, tokenizer, prompt_ids: list[int],
         engine_core: EngineCore instance.
         tokenizer: Tokenizer instance.
         prompt_ids: input prompt tokens.
+        verbose: Whether to print verbose output.
     """
-    print("\n--- Running Prefill ---")
+    if verbose:
+        print("\n--- Running Prefill ---")
 
     request_id_client = str(uuid.uuid4())
 
@@ -109,26 +114,19 @@ def run_prefill(engine_core: EngineCore, tokenizer, prompt_ids: list[int],
     req = Request.from_engine_core_request(engine_core_request)
 
     engine_core.scheduler.add_request(req)
-    print(
-        f"Added client request '{request_id_client}' to scheduler.waiting for prefill."
-    )
+
     assert len(engine_core.scheduler.waiting) == 1
     assert len(engine_core.scheduler.running) == 0
 
-    # --- Retrieve necessary data for TFLOPs calculation directly inside the function ---
-    # This maintains the function's original signature.
     num_model_params = engine_core.model_executor.driver_worker.worker.model_runner.total_model_params_num
     model_hf_config = engine_core.vllm_config.model_config.hf_config
-    # ----------------------------------------------------------------------------------
 
     if should_profile:
         engine_core.profile(is_start=True)
 
-    start_time = time.perf_counter()  # <--- Start timing
+    start_time = time.perf_counter()
     engine_core_output_step_0 = engine_core.step()
-    jax.block_until_ready(
-        engine_core.scheduler.running)  # Block until JAX execution completes
-    end_time = time.perf_counter()  # <--- Stop timing
+    end_time = time.perf_counter()
 
     if should_profile:
         engine_core.profile(is_start=False)
@@ -136,20 +134,12 @@ def run_prefill(engine_core: EngineCore, tokenizer, prompt_ids: list[int],
     prefill_average_ms = (end_time -
                           start_time) * 1000.0  # Calculate time in ms
 
-    if len(engine_core_output_step_0[0]
-           [0].outputs) > 0:  # Accessing EngineCoreOutputs.outputs[0]
-        # Access request_id from EngineCoreOutputs directly. This is the ID that was actually processed.
+    if len(engine_core_output_step_0[0][0].outputs) > 0:
         actual_processed_request_id = engine_core_output_step_0[0][0].outputs[
             0].request_id
-        print(
-            f"Scheduler processed request with actual ID: {actual_processed_request_id}"
-        )
     else:
         actual_processed_request_id = None  # No request processed, or problem
 
-    print(
-        f"Scheduler state after pure prefill step: waiting={len(engine_core.scheduler.waiting)}, running={len(engine_core.scheduler.running)}"
-    )
     assert len(engine_core.scheduler.waiting) == 0
     assert len(engine_core.scheduler.running) == 1
 
@@ -159,36 +149,35 @@ def run_prefill(engine_core: EngineCore, tokenizer, prompt_ids: list[int],
             found_req_in_running = True
             assert r.num_computed_tokens >= len(prompt_ids), \
                 f"Prefill not fully computed. Computed: {r.num_computed_tokens}, Prompt length: {len(prompt_ids)}"
-            print(
-                f"Request '{r.request_id}' prefill complete after first step: {r.num_computed_tokens}/{len(prompt_ids)} tokens computed."
-            )
             break
     assert found_req_in_running, f"Request with ID {actual_processed_request_id} should be in scheduler.running after prefill step."
 
     # Should this be 128 because of prefill padding?
     total_prefill_tokens = engine_core.scheduler.running[0].num_computed_tokens
 
-    print("Finished executing prefill.")
+    if verbose:
+        print("--- Prefill complete ---")
 
-    # --- NEW: Calculate and Print TFLOPs metrics ---
-    # Pass log=False for the main call to avoid duplicate breakdown print.
     total_tflops_per_device_value, _, _ = calculate_prefill_tflops_per_device(
-        num_model_params, total_prefill_tokens, model_hf_config, log=True)
+        num_model_params, total_prefill_tokens, model_hf_config, log=verbose)
 
-    # Calculate TFLOPs/sec/device
     tflops_per_sec_per_device = total_tflops_per_device_value / (
         prefill_average_ms / 1000.0)
 
-    # --- Print Results in MaxText-like Format ---
-    print(
-        f"\nPrefill benchmark results for length {total_prefill_tokens}:\n"  # Use actual tokens computed for reporting
-        f"\tPrefill step average time: {prefill_average_ms:.3f} ms\n"
-        f"\tPrefill total TFLOPs/device: {total_tflops_per_device_value:.3f}\n"
-        f"\tPrefill TFLOPs/sec/device: {tflops_per_sec_per_device:.3f}\n\n")
+    if verbose:
+        print(
+            f"\nPrefill benchmark results for length {total_prefill_tokens}:\n"
+            f"\tPrefill step average time: {prefill_average_ms:.3f} ms\n"
+            f"\tPrefill total TFLOPs/device: {total_tflops_per_device_value:.3f}\n"
+            f"\tPrefill TFLOPs/sec/device: {tflops_per_sec_per_device:.3f}\n\n"
+        )
 
 
-def run_decode(engine_core: EngineCore, tokenizer, prompt_ids: list[int],
-               should_profile: bool):
+def run_decode(engine_core: EngineCore,
+               tokenizer,
+               prompt_ids: list[int],
+               should_profile: bool,
+               verbose: bool = True):
     """
     Run an isolated decode pass.
 
@@ -196,44 +185,11 @@ def run_decode(engine_core: EngineCore, tokenizer, prompt_ids: list[int],
         engine_core: EngineCore instance.
         tokenizer: Tokenizer instance.
         prompt_ids: input prompt tokens.
+        should_profile: Whether to enable profiling.
+        verbose: Whether to print verbose output.
     """
-    print("\n--- Running Decode ---")
-    # Generate the client-side request_id for the initial request
-    # request_id_client_initial = str(uuid.uuid4())  # Keep this for reference
-
-    # sampling_params_decode_setup = SamplingParams(max_tokens=len(prompt_ids) +
-    #                                               5,
-    #                                               temperature=0.0,
-    #                                               ignore_eos=True)
-
-    # engine_core_request_initial = make_request(prompt_ids,
-    #                                            sampling_params_decode_setup, tokenizer)
-    # engine_core_request_initial.request_id = request_id_client_initial  # Set our client ID
-    # engine_core_request_initial.eos_token_id = tokenizer.eos_token_id
-    # req_initial = Request.from_engine_core_request(engine_core_request_initial)
-    # engine_core.scheduler.add_request(req_initial)
-    # print(
-    #     f"Added initial client request '{request_id_client_initial}' for prefill setup for decode."
-    # )
-    # TODO (jacobplatin): update this for future decoupled decodde/prefill support
-    assert len(engine_core.scheduler.waiting) == 0
-    assert len(engine_core.scheduler.running) == 1
-
-    # engine_core_output_prefill_setup = engine_core.step()
-
-    # # Extract the actual request ID processed in the prefill setup step
-    # if len(engine_core_output_prefill_setup[0][0].outputs) > 0:
-    #     actual_processed_request_id_prefill_setup = engine_core_output_prefill_setup[
-    #         0][0].outputs[0].request_id
-    #     print(
-    #         f"Scheduler processed initial request with actual ID: {actual_processed_request_id_prefill_setup}"
-    #     )
-    # else:
-    #     actual_processed_request_id_prefill_setup = None  # Problem
-
-    # print(
-    #     f"Scheduler state after prefill setup: waiting={len(engine_core.scheduler.waiting)}, running={len(engine_core.scheduler.running)}"
-    # )
+    if verbose:
+        print("\n--- Running Decode ---")
     assert len(engine_core.scheduler.waiting) == 0
     assert len(engine_core.scheduler.running) == 1
 
@@ -244,30 +200,28 @@ def run_decode(engine_core: EngineCore, tokenizer, prompt_ids: list[int],
         0].request_id
 
     found_req_in_running = False
-    # Use the actual ID from the *output* for subsequent checks on scheduler.running
     for r in engine_core.scheduler.running:
         if r.request_id == actual_processed_request_id_prefill_setup:
             found_req_in_running = True
             assert r.num_computed_tokens >= len(prompt_ids), \
                 f"Prefill not fully computed for decode setup. Computed: {r.num_computed_tokens}, Prompt length: {len(prompt_ids)}"
-            print(
-                f"Request '{r.request_id}' prefill complete for decode setup.")
             break
     assert found_req_in_running, f"Request with ID {actual_processed_request_id_prefill_setup} should be in scheduler.running after prefill setup step."  # <--- CHANGED: Updated error message
 
     if should_profile:
         engine_core.profile(is_start=True)
-    engine_core_output_decode = engine_core.step()
+    # NOTE: this will return engine_core_output if needed
+    engine_core.step()
     if should_profile:
         engine_core.profile(is_start=False)
-    print(
-        f"EngineCoreOutputs (Pure Decode Step):\n{engine_core_output_decode}")
 
     if actual_processed_request_id_prefill_setup:
         engine_core.scheduler.finish_requests(
             {actual_processed_request_id_prefill_setup},
             RequestStatus.FINISHED_LENGTH_CAPPED)
-    print("Finished executing decode.")
+    # @jiries only log the AR stats if verbose is True
+    if verbose:
+        print("--- Decode complete ---")
 
 
 def main(args):
@@ -303,6 +257,13 @@ def main(args):
                              log_stats=True)
     num_model_params = engine_core.model_executor.driver_worker.worker.model_runner.total_model_params_num
     print(f"Num model params: {num_model_params}")
+
+    print("\n\n--- Starting Warmup ---")
+    for _ in range(WARMUP_ITERS):
+        run_prefill(engine_core, tokenizer, prompt_ids, False, verbose=False)
+        run_decode(engine_core, tokenizer, prompt_ids, False, verbose=False)
+    print("--- Finished Warmup ---")
+
     run_prefill(engine_core, tokenizer, prompt_ids, should_profile)
     run_decode(engine_core, tokenizer, prompt_ids, should_profile)
 

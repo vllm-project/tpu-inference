@@ -367,7 +367,6 @@ class TPUModelRunner():
             self.mesh,
         )
 
-        # https://source.corp.google.com/h/vertex-model-garden/hex-llm/+/main:hex_llm/worker/runner_jax.py#:~:text=143-,144,-145
         # Prepare buffers used by chunk prefill
         max_num_running_seq = self.scheduler_config.max_num_seqs
         num_blocks_per_seq = (pad_to_multiple(
