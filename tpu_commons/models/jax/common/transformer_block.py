@@ -1,20 +1,17 @@
-import jax
-import jax.numpy as jnp
-from dataclasses import dataclass, fields
-from typing import Any, Optional, Type
-from jaxtyping import Float, Array
+from dataclasses import dataclass
+from typing import Any, Type
 
 # Flax and JAX sharding imports
 from flax import nnx
-from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+from jax.sharding import Mesh
 
-from dataclasses import dataclass, fields
-from tpu_commons.models.jax.common.sharding import *
-from tpu_commons.models.jax.common.constants import *
-from tpu_commons.models.jax.common.layers import *
 from tpu_commons.models.jax.common.attention.attention import *
+from tpu_commons.models.jax.common.constants import *
 from tpu_commons.models.jax.common.kv_cache import *
+from tpu_commons.models.jax.common.layers import *
 from tpu_commons.models.jax.common.moe.moe import *
+from tpu_commons.models.jax.common.sharding import *
+
 
 @dataclass
 class TransformerConfig(Config):
@@ -33,6 +30,7 @@ class TransformerConfig(Config):
         self.ffw_cfg = FFWConfig.from_cfg(flags_cfg)
         self.cfg = flags_cfg
 
+
 @dataclass
 class TransformerBlock(nnx.Module):
     """
@@ -44,8 +42,8 @@ class TransformerBlock(nnx.Module):
     sharding_cfg: ShardingConfig
     quant: Any | None = None
 
-
-    def _create_module(self, module_cls: Type[nnx.Module], cfg: Any, **overrides) -> nnx.Module:
+    def _create_module(self, module_cls: Type[nnx.Module], cfg: Any,
+                       **overrides) -> nnx.Module:
         args = {
             "mesh": self.mesh,
             "param_factory": self.param_factory,
@@ -56,7 +54,7 @@ class TransformerBlock(nnx.Module):
         return module_cls(cfg=cfg, **args)
 
     def __post_init__(self):
-        
+
         self.d_model = self.cfg.attention_cfg.d_model
         self.attn = self._create_module(Attention, cfg=self.cfg.attention_cfg)
         self.kv_cache = KVCache(
@@ -65,27 +63,25 @@ class TransformerBlock(nnx.Module):
             sharding_cfg=self.sharding_cfg,
             updater=StandardUpdater(),
         )
-   
+
         self.mlp = self._create_module(FFW, cfg=self.cfg.ffw_cfg)
 
         if self.cfg.routing:
             self.router = self._create_module(Router, cfg=self.cfg.router_cfg)
-            self.moe = self._create_module(MoE, cfg=self.cfg.moe_cfg, router=self.router)
-        
-        self.post_attention_norm = RMSNorm(
-            dims=self.d_model,
-            mesh=self.mesh,
-            param_factory=self.param_factory,
-            sharding_cfg=self.sharding_cfg,
-            quant=self.quant
-        )
-        self.post_mlp_norm = RMSNorm(
-            dims=self.d_model,
-            mesh=self.mesh,
-            param_factory=self.param_factory,
-            sharding_cfg=self.sharding_cfg,
-            quant=self.quant
-        )
+            self.moe = self._create_module(MoE,
+                                           cfg=self.cfg.moe_cfg,
+                                           router=self.router)
+
+        self.post_attention_norm = RMSNorm(dims=self.d_model,
+                                           mesh=self.mesh,
+                                           param_factory=self.param_factory,
+                                           sharding_cfg=self.sharding_cfg,
+                                           quant=self.quant)
+        self.post_mlp_norm = RMSNorm(dims=self.d_model,
+                                     mesh=self.mesh,
+                                     param_factory=self.param_factory,
+                                     sharding_cfg=self.sharding_cfg,
+                                     quant=self.quant)
 
     def __call__(
         self,
@@ -93,7 +89,8 @@ class TransformerBlock(nnx.Module):
         attention_metadata,
         op_mode,
     ):
-        new_cache, score = self.attn(x, op_mode, self.kv_cache, attention_metadata)
+        new_cache, score = self.attn(x, op_mode, self.kv_cache,
+                                     attention_metadata)
 
         x = self.post_attention_norm(x + score)
         if self.cfg.routing:
@@ -103,6 +100,3 @@ class TransformerBlock(nnx.Module):
         logits = self.post_mlp_norm(x + y)
 
         return new_cache, logits
-
-
-    

@@ -1,29 +1,33 @@
 import enum
+
+
 class RouterType(enum.Enum):
     """Enum for router types."""
     TOP_K = 'top_k'
 
+
 class OPERATION_MODE(enum.Enum):
-  PREFILL = 1
-  DECODE = 2
+    PREFILL = 1
+    DECODE = 2
+
 
 # TODO we code the logical mesh axis name as a constant
-# we need to make it more flexible in case more names 
+# we need to make it more flexible in case more names
 # could be added for future models
 class LOGICAL_MESH_AXIS_NAME(enum.Enum):
-  # The constants as the name for mesh axis
-  # logical equivalently, we could use 'x', 'y' or ('x', 'y'),
-  # but specifying a name will give better readability. 
-  # The axis should be 'x', 'y', 'z' by physical mesh
-  # i.e. [x, y] -> [8, 8] for v6e-64
-  BATCH_AXIS_NAME = 'dp'
-  SEQUENCE_AXIS_NAME = 'sp'
-  ATTN_HEAD_AXIS_NAME = 'ep'
-  ATTN_TENSOR_AXIS_NAME  = 'tp'
-  MLP_TENSOR_AXIS_NAME = ('tp', 'ep')
-  MOE_TENSOR_AXIS_NAME = 'tp'
-  EXPERT_AXIS_NAME = 'ep'
-  VOCAB_AXIS_NAME = ('dp', 'sp', 'tp', 'ep')
+    # The constants as the name for mesh axis
+    # logical equivalently, we could use 'x', 'y' or ('x', 'y'),
+    # but specifying a name will give better readability.
+    # The axis should be 'x', 'y', 'z' by physical mesh
+    # i.e. [x, y] -> [8, 8] for v6e-64
+    BATCH_AXIS_NAME = 'dp'
+    SEQUENCE_AXIS_NAME = 'sp'
+    ATTN_HEAD_AXIS_NAME = 'ep'
+    ATTN_TENSOR_AXIS_NAME = 'tp'
+    MLP_TENSOR_AXIS_NAME = ('tp', 'ep')
+    MOE_TENSOR_AXIS_NAME = 'tp'
+    EXPERT_AXIS_NAME = 'ep'
+    VOCAB_AXIS_NAME = ('dp', 'sp', 'tp', 'ep')
 
 
 # MoE metrics to be monitored
