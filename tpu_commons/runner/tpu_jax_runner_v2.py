@@ -893,8 +893,11 @@ class TPUModelRunner():
         assert num_prefill_seqs > 0
         assert num_prefill_seqs <= MAX_PREFILL_SEQS_PER_TOKEN_BATCH
 
+        # NOTE(pooyam): We add `block_size` here to compensate for the case when decodes are not page-aligned by the scheduler.
+        # Decodes not being page-aligned, does not cause correctness issue but will cause exceeding token budget by block_size amount.
+        # Once the scheduler makes sure both prefill and decodes are page-aligned, we can remove this addition.
         num_tokens_scheduled = pad_to_multiple(
-            scheduler_output.total_num_scheduled_tokens,
+            scheduler_output.total_num_scheduled_tokens + block_size,
             self.scheduler_config.chunked_prefill_tokens_padding,
         )
 
