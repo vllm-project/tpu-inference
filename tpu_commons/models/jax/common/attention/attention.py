@@ -15,6 +15,26 @@ from tpu_commons.models.jax.rope.generic_rope import apply_rope
 
 
 @dataclass
+class AttentionMetadata(object):
+    input_positions: jax.Array
+    # If mix attention, this is a list of len 2
+    seq_lens: Union[jax.Array, List[jax.Array]]
+    # If mix attention, this is a list of len 2
+    block_indices: Union[jax.Array, List[jax.Array]]
+    # If mix attention, this is a list of len 2
+    kv_cache_write_indices: Union[jax.Array, List[jax.Array]]
+
+    # The following fields are set only when chunked prefill is enabled
+    chunked_prefill_enabled: bool = False
+    decode_lengths: jax.Array = None  # [max_num_decode_seqs]
+    decode_page_indices: jax.Array = None  # [max_num_decode_seqs, pages_per_sequence]
+    num_decode_seqs: jax.Array = None  # [1]
+    prefill_lengths: jax.Array = None  # [max_num_prefill_seqs]
+    prefill_page_indices: jax.Array = None  # [max_num_prefill_seqs, pages_per_sequence]
+    prefill_query_start_offsets: jax.Array = None  # [max_num_prefill_seqs + 1]
+    num_prefill_seqs: jax.Array = None  # [1]
+
+@dataclass
 class AttentionConfig(Config):
     """Configuration for the Attention module.
 

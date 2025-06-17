@@ -4,14 +4,17 @@ from jax.sharding import Mesh
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 
+from tpu_commons.models.jax.llama import LlamaForCausalLM
+from tpu_commons.tpu_commons.models.jax.recipes.llama4 import Llama4Scout
+
 
 def _get_model_architecture(config: PretrainedConfig) -> nn.Module:
     # NOTE: Use inline imports here, otherwise the normal imports
     # would cause JAX init failure when using multi hosts with Ray.
-    from tpu_commons.models.jax.llama import LlamaForCausalLM
 
     _MODEL_REGISTRY = {
         "LlamaForCausalLM": LlamaForCausalLM,
+        "Llama4Scout": Llama4Scout,
     }
 
     architectures = getattr(config, "architectures", [])

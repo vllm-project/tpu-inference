@@ -126,7 +126,7 @@ class Router(nnx.Module):
 
 
 @dataclass
-class MoEConfig(Config):
+class MoEConfig(FFWConfig):
     """Configuration for the Mixture-of-Experts (MoE) layer.
 
     Attributes:
@@ -141,9 +141,8 @@ class MoEConfig(Config):
     d_model: int
     expert_hidden_size: int
     num_experts: int
-    sequence_len: int
-    act: str
-    dtype: Any = jnp.float32
+    expert_act: str
+    router_config: RoutingConfig
     apply_expert_weight_before_computation: bool = False
 
 
