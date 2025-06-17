@@ -107,6 +107,27 @@ class ShardingConfig:
     'prefill' phase and one for the 'generate' (or decode) phase of model
     execution. This allows tailoring sharding strategies to the different
     computational patterns of each phase.
+
+    Example Sharding Strategy and Configuration:
+
+    Sharding Strategy defines the high-level parallelism dimensions.
+    For a device mesh like `Mesh((2, 4, 4, 4), ('dp', 'sp', 'ep', 'tp'))` on 128 devices:
+    - dp: Data Parallelism (2-way)
+    - sp: Sequence Parallelism (4-way)
+    - ep: Expert Parallelism (4-way)
+    - tp: Tensor Parallelism (4-way)
+
+    ShardingConfig then maps tensor dimensions to these logical mesh axes.
+    For example, a tensor with shape (Batch, Sequence, Dimension) could be sharded
+    differently for prefill and decode/generate operations:
+
+    - Prefill (long sequences, small batch):
+    Sharding sequence dim on the 'sp' axis is often efficient.
+    `prefill_sharding_cfg.activation_attention_btd = (None, 'sp', 'tp')`
+
+    - Generate (short sequences, large batch):
+    Sharding batch dim on the 'dp' axis is often efficient.
+    `generate_sharding_cfg.activation_attention_btd = ('dp', None, 'tp')`
     """
 
     def __init__(self, prefill_sharding_cfg=None, generate_sharding_cfg=None):
