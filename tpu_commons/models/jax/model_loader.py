@@ -9,6 +9,7 @@ from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 
 from tpu_commons.models.jax.utils.param_overview import get_parameter_overview
+from tpu_commons.utils_jax import count_model_parameters # Import the helper
 
 
 def _get_model_architecture(config: PretrainedConfig) -> nn.Module:
@@ -54,6 +55,10 @@ def get_nn_model(
             get_parameter_overview(params, include_stats="sharding"),
         )
 
+    # --- NEW: Calculate total model parameters ---
+    total_model_params = count_model_parameters(params)
+    print(f"[TFLOPs] Total model parameters: {total_model_params}")
+
     kv_cache_sharding = NamedSharding(mesh, PartitionSpec("model"))
     outputs_sharding = NamedSharding(mesh, PartitionSpec(None))
     logits_cache_sharding = NamedSharding(mesh, PartitionSpec(None))
@@ -68,7 +73,9 @@ def get_nn_model(
         donate_argnums=4,
     )
     model_fn = functools.partial(jit_model, params)
-    return model_fn
+    
+    # --- NEW: Return total_model_params along with model_fn ---
+    return model_fn, total_model_params # Modified return
 
 
 def get_nnx_model(

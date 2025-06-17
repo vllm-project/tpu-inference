@@ -23,6 +23,7 @@ from tpu_commons.models.jax.model_loader import get_model
 from tpu_commons.runner.tpu_torch_xla_runner import _get_token_paddings
 from tpu_commons.runner.utils import determine_do_sampling
 from tpu_commons.worker.input_batch_jax import CachedRequestState, InputBatch
+from tpu_commons.utils_jax import calculate_prefill_tflops_per_device
 
 logger = init_logger(__name__)
 
@@ -240,7 +241,7 @@ class TPUModelRunner():
         # We don't want to use ragged attention kernel all the time as paged attention is faster for decoding only.
         # NOTE(pooyam): For full prefill, is not clear which one is faster. We have to benchmark it.
         # NOTE(pooyam): If newer OSS ragged attention is also faster for decode, we should always used chunked prefill kernel and simplify the code.
-        new_full_prefill_seqs, new_partial_prefill_seqs, subsequent_partial_prefill_seqs, decoding_seqs = self._get_prefill_and_decode_seqs(
+        new_full_prefill_seqs, new_partial_prefill_seqs, subsequent_partial_prefill_seqs, decoding_seqs, total_prefills = self._get_prefill_and_decode_seqs(
             scheduler_output)
 
         has_new_full = bool(new_full_prefill_seqs)
@@ -251,6 +252,20 @@ class TPUModelRunner():
         if not (has_new_full or has_new_partial or has_subsequent_partial
                 or has_decoding):
             return None
+
+        # --- NEW: Call TFLOPs calculation when prefill is active ---
+        # This captures both the "only full prefill" and "chunked prefill" cases.
+        if total_prefills > 0:
+            if hasattr(self, 'num_model_parameters') and self.num_model_parameters is not None:
+                calculate_prefill_tflops_per_device(
+                    self.num_model_parameters,
+                    total_prefills, # This is the prefill_length for the current batch
+                    self.model_config.hf_config, # This should be available from self
+                    log=True
+                )
+            else:
+                print("[TFLOPs Warning] num_model_parameters not set in runner, skipping TFLOPs calculation for this step.")
+
 
         # Check for the "no prefill" case
         if not new_full_prefill_seqs and not new_partial_prefill_seqs and not subsequent_partial_prefill_seqs:
@@ -361,13 +376,18 @@ class TPUModelRunner():
         logger.info(f"Init mesh | mesh={self.mesh}")
 
     def _init_model(self) -> None:
-        self.model_fn = get_model(
-            self.vllm_config,
-            self.rng_key,
-            self.mesh,
+        # --- MODIFIED: Separate unpacking and assignment to self. ---
+        model_fn_result, num_params_result = get_model( # Unpack into local variables first
+        self.vllm_config,
+        self.rng_key,
+        self.mesh,
         )
-
-        # https://source.corp.google.com/h/vertex-model-garden/hex-llm/+/main:hex_llm/worker/runner_jax.py#:~:text=143-,144,-145
+        self.model_fn = model_fn_result           # Assign to self.model_fn
+        self.num_model_parameters = num_params_result # Assign to self.num_model_parameters
+        
+        # Now, access self.num_model_parameters after it's explicitly assigned.
+        print(f"[TFLOPs] Model parameters stored in runner: {self.num_model_parameters}")        # https://source.corp.google.com/h/vertex-model-garden/hex-llm/+/main:hex_llm/worker/runner_jax.py#:~:text=143-,144,-145
+        
         # Prepare buffers used by chunk prefill
         max_num_running_seq = self.scheduler_config.max_num_seqs
         num_blocks_per_seq = (pad_to_multiple(
@@ -851,8 +871,9 @@ class TPUModelRunner():
 
     def _get_prefill_and_decode_seqs(
         self, scheduler_output: VllmSchedulerOutput
-    ) -> Tuple[List[NewRequestData], List[CachedRequestData],
-               List[CachedRequestData]]:
+    ) -> Tuple[List[NewRequestData], List[NewRequestData], 
+           List[CachedRequestData], List[CachedRequestData], 
+           int]:
         # NOTE(pooyam): We categorize sequences into 4 different categories to have freedom to choose which kernel to use for each of them:
         # 1. full prefill: A sequence which is scheduled for a full prefill -> We can use prefill or chunked prefill kernel.
         # 2. new partial prefill: A sequence that its first chunk is scheduled for prefill -> We can use prefill or chunked prefill kernel.
@@ -865,14 +886,21 @@ class TPUModelRunner():
         subsequent_partial_prefill_seqs = []
         decoding_seqs = []
 
+        # --- NEW: Calculate total_prefill_tokens here ---
+        calculated_total_prefill_tokens = 0 
+
         for seq in scheduler_output.scheduled_new_reqs:
             seq_index = self.input_batch.req_id_to_index[seq.req_id]
             num_prompt_tokens = self.input_batch.num_prompt_tokens[seq_index]
             if num_prompt_tokens == scheduler_output.num_scheduled_tokens[
                     seq.req_id]:
                 new_full_prefill_seqs.append(seq)
+                calculated_total_prefill_tokens += num_prompt_tokens
             else:
                 new_partial_prefill_seqs.append(seq)
+                # For new partial prefill, add the exact number of tokens scheduled in this step
+                calculated_total_prefill_tokens += scheduler_output.num_scheduled_tokens[seq.req_id]
+
 
         for seq in scheduler_output.scheduled_cached_reqs:
             seq_index = self.input_batch.req_id_to_index[seq.req_id]
@@ -881,10 +909,15 @@ class TPUModelRunner():
             remaining_prefill = max(0, num_prompt_tokens - num_computed_tokens)
             if remaining_prefill > 0:
                 subsequent_partial_prefill_seqs.append(seq)
+                # For subsequent partial prefill, add the exact number of tokens scheduled in this step
+                calculated_total_prefill_tokens += scheduler_output.num_scheduled_tokens[seq.req_id]
             else:
                 decoding_seqs.append(seq)
 
-        return new_full_prefill_seqs, new_partial_prefill_seqs, subsequent_partial_prefill_seqs, decoding_seqs
+        # --- MODIFIED RETURN STATEMENT: Add calculated_total_prefill_tokens ---
+        return new_full_prefill_seqs, new_partial_prefill_seqs, \
+               subsequent_partial_prefill_seqs, decoding_seqs, \
+               calculated_total_prefill_tokens 
 
     def _prepare_chunked_prefill(self,
                                  scheduler_output: VllmSchedulerOutput) -> Any:
