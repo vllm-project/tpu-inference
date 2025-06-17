@@ -38,12 +38,12 @@ from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
 
 
-from jetstream.core import config_lib
-from jetstream.engine import engine_api
-from jetstream.engine import token_utils
-from jetstream.engine import tokenizer_api
-from jetstream.engine.tokenizer_pb2 import TokenizerParameters
-from jetstream.engine.tokenizer_pb2 import TokenizerType
+from tpu_commons.core.jetstream_commons.core import config_lib
+from tpu_commons.core.jetstream_commons.engine import engine_api
+from tpu_commons.core.jetstream_commons.engine import token_utils
+from tpu_commons.core.jetstream_commons.engine import tokenizer_api
+from tpu_commons.core.jetstream_commons.engine.tokenizer_pb2 import TokenizerParameters
+from tpu_commons.core.jetstream_commons.engine.tokenizer_pb2 import TokenizerType
 
 # from MaxText import inference_utils
 # from MaxText import max_utils
@@ -220,6 +220,8 @@ class JaxEngine(engine_api.Engine):
     # kv cache is still full now
     self.model_runner.kv_caches = prefill_cache
 
+  def get_prefix_destination_sharding(self) -> Any:
+    return None
 
     @functools.partial(jax.jit, out_shardings=shardings)
     def initialize():
@@ -238,7 +240,7 @@ class JaxEngine(engine_api.Engine):
   @property
   def max_concurrent_decodes(self) -> int:
     """Free slots."""
-    return int(self.config.per_device_batch_size * jax.device_count())
+    return self.model_runner.input_batch.max_num_reqs
 
   @property
   def max_prefill_length(self) -> int:

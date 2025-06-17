@@ -96,10 +96,10 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request
 
 root = logging.getLogger()
-root.setLevel(logging.DEBUG)
+root.setLevel(logging.INFO)
 
 handler = logging.StreamHandler(sys.stdout)
-handler.setLevel(logging.DEBUG)
+handler.setLevel(logging.INFO)
 formatter = logging.Formatter(
     "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
@@ -359,16 +359,16 @@ class Driver:
         )
         for idx in range(len(self._generate_engines))
     ]
-    self.detokenize_threads = [
-        JetThread(
-            target=functools.partial(
-                self._detokenize_thread,
-                idx,
-            ),
-            name=f"detokenize-{idx}",
-        )
-        for idx in range(len(self._generate_engines))
-    ]
+    # self.detokenize_threads = [
+    #     JetThread(
+    #         target=functools.partial(
+    #             self._detokenize_thread,
+    #             idx,
+    #         ),
+    #         name=f"detokenize-{idx}",
+    #     )
+    #     for idx in range(len(self._generate_engines))
+    # ]
     self._all_threads = list(
         itertools.chain(
             self._prefill_threads,
@@ -445,8 +445,6 @@ class Driver:
     logging.info("---------Spinning up prefill thread %d.---------", idx)
     prefill_engine = self._prefill_engines[idx]
     prefill_params = self._prefill_params[idx]
-    metadata = prefill_engine.get_tokenizer()
-    tokenizer = prefill_engine.build_tokenizer(metadata)
     logging.info("---------Prefill params %d loaded.---------", idx)
 
     while self.live:
@@ -541,7 +539,7 @@ class Driver:
     generate_engine = self._generate_engines[idx]
     my_slots = self._generate_slots[idx]
     my_generate_backlog = self._generate_backlogs[idx]
-    my_detokenize_backlog = self._detokenize_backlogs[idx]
+    # my_detokenize_backlog = self._detokenize_backlogs[idx]
 
     # Keep track of what step tokens were generated at.
     generate_timestep = 0
@@ -617,7 +615,7 @@ class Driver:
             (generate_engine.samples_per_slot,), dtype=np.bool_
         )
         # Respond to detokenization backpressure.
-        my_detokenize_backlog.put((slot, new_request), block=True)
+        # my_detokenize_backlog.put((slot, new_request), block=True)
 
       # At this point, we know that we have at least some slots filled.
       assert (
