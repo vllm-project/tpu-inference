@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-from typing import TYPE_CHECKING, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Optional, Tuple, Union
 
 import jax.numpy as jnp
 import vllm.envs as envs
@@ -99,9 +99,9 @@ class TpuPlatform(Platform):
         from vllm.config import CompilationLevel
 
         cache_config = vllm_config.cache_config
-        # For v0, the default block size is 16.
+        # For TPU, the default block size is 32
         if cache_config and cache_config.block_size is None:
-            cache_config.block_size = cast(BlockSize, 16)
+            cache_config.block_size = 32
         compilation_config = vllm_config.compilation_config
 
         # TODO(xiang): fix the compilation level for jax
@@ -125,21 +125,17 @@ class TpuPlatform(Platform):
             vllm_config.model_config.dtype = _DTYPE.get(
                 vllm_config.model_config.dtype, jnp.bfloat16)
 
+        # TODO(xiang): Pytorch uses very large block size,
+        #              fix block size by either overriding or guarded kernel.
         if envs.VLLM_USE_V1:
             from vllm.v1.attention.backends.pallas import \
                 PallasAttentionBackend
-            cache_config.block_size = PallasAttentionBackend.get_page_size(
-                vllm_config)  # type: ignore[assignment]
             min_page_size = PallasAttentionBackend.get_min_page_size(
                 vllm_config)
             if min_page_size > cache_config.block_size:
                 logger.warning(
-                    "Increase the page size from %s to %s to make sure there's"
-                    "no SMEM OOM",
-                    cache_config.block_size,
-                    min_page_size,
+                    f"The block size {cache_config.block_size} is smaller than kernel recommended one {min_page_size}."
                 )
-                cache_config.block_size = min_page_size  # type: ignore[assignment]
 
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config

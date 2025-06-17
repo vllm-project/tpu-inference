@@ -194,6 +194,9 @@ class TPUModelRunner():
             kv_cache_spec.block_size,
             kv_cache_spec.head_size,
         )
+        logger.info(
+            f"Init kv-cache | shape={len(layer_names)} * {cache_shape}")
+
         # Shard the num_kv_heads dim along the 'model' axis.
         sharding = NamedSharding(self.mesh, PartitionSpec("model"))
 
