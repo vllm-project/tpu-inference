@@ -8,10 +8,14 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from jaxtyping import Float
 
+from tpu_commons.models.jax.common.base import (Config,
+                                                ParamFactory)
 from tpu_commons.models.jax.common.constants import RouterType
-from tpu_commons.models.jax.common.layers import (Config, ParamFactory,
-                                                  modeling_flax_utils)
 from tpu_commons.models.jax.common.sharding import ShardingConfig
+from tpu_commons.models.jax.common.layers import (FFWConfig,
+                                                  FlaxUtils)
+
+modeling_flax_utils = FlaxUtils()
 
 
 @dataclass
@@ -125,7 +129,7 @@ class Router(nnx.Module):
         return
 
 
-@dataclass
+@dataclass(kw_only=True)
 class MoEConfig(FFWConfig):
     """Configuration for the Mixture-of-Experts (MoE) layer.
 

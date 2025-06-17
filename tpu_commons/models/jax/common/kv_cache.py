@@ -2,19 +2,20 @@
 # TODO: we could discuss if we do want to encapsulate the KVCache and updater into the same class
 #
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Tuple, TypeAlias
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from jaxtyping import Float, Int
-
-from tpu_commons.models.jax.common.layers import Config
+from jaxtyping import Array, Float, Int
+from tpu_commons.models.jax.common.base import Config
 from tpu_commons.models.jax.common.sharding import ShardingConfig
 
 iota = jax.lax.broadcasted_iota
+
+KVCacheType: TypeAlias = Tuple[jax.Array, jax.Array]
 
 
 class KVCacheUpdaterBase:
@@ -135,7 +136,8 @@ class KVCache(nnx.Module):
         self.value_cache = {}
         self._initialize_caches()
 
-    def _initialize_caches(self) -> 'KVCache':
+    def _initialize_caches(self, ):
+
         """Creates and initializes the key and value cache tensors.
 
         Initializes the cache tensors as nnx.Variables with zeros, placing them

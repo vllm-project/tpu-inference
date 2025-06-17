@@ -1,6 +1,5 @@
-import dataclasses
-from dataclasses import dataclass, fields
-from typing import Any, Callable, Mapping, Optional, Type
+from dataclasses import dataclass
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -10,10 +9,7 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from jaxtyping import Float, Int
 
-from tpu_commons.models.jax.common.attention import Attention, AttentionConfig, AttentionMetadata
-from tpu_commons.models.jax.common.kv_cache import (KVCacheConfig,
-                                                    StandardUpdater)
-from tpu_commons.models.jax.common.moe import MoE
+from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.sharding import ShardingConfig
 
 
@@ -28,44 +24,6 @@ class FlaxUtils:
 
 
 modeling_flax_utils = FlaxUtils()
-
-# Type alias for Initializer for cleaner type hints
-Initializer = Callable[..., jax.Array]
-
-
-@dataclasses.dataclass
-class ParamFactory:
-    """A factory for creating nnx.Param objects with shared RNGs and initializers.
-
-    This class simplifies the creation of parameters by holding common
-    configuration like the RNG stream and the weight initialization function.
-
-    Attributes:
-        rngs: An `nnx.Rngs` object to provide RNG streams for parameter initialization.
-        initializer: A callable (e.g., a kernel initializer from JAX) used to
-            generate parameter data.
-    """
-    rngs: nnx.Rngs
-    initializer: Initializer
-
-    def create_kernel_init(self,
-                           shape: tuple[int, ...],
-                           sharding: NamedSharding,
-                           dtype: Any = jnp.float32) -> nnx.Param:
-        """Creates an nnx.Param using the factory's RNG stream and initializer.
-
-        Args:
-            shape: The shape of the parameter tensor to create.
-            sharding: The `NamedSharding` object that specifies how the parameter
-                should be distributed across devices.
-            dtype: The data type of the parameter.
-
-        Returns:
-            An `nnx.Param` instance containing the initialized data and sharding info.
-        """
-        param_data = self.initializer(self.rngs.params(), shape, dtype)
-        return nnx.Param(param_data, sharding=sharding)
-
 
 @dataclass
 class RuntimeParams:
@@ -85,55 +43,6 @@ class RuntimeParams:
     kv_cache: Any = None
     sharding_cfg: Any = None
     quantization: Any = None
-
-
-@dataclass
-class Config:
-    """Base configuration class with a robust factory method.
-
-    This class provides a `from_cfg` classmethod that allows creating a config
-    instance from a dictionary, ensuring that all required fields are present
-    and ignoring any extraneous keys.
-    """
-
-    @classmethod
-    def from_cfg(cls, cfg: dict[str, Any] | None = None, **kwargs):
-        """Creates a config instance from a dictionary and/or keyword arguments.
-
-        This factory method validates that all fields without default values
-        are provided in the input dictionary or keyword arguments.
-
-        Args:
-            cfg: A dictionary of configuration parameters.
-            **kwargs: Additional configuration parameters passed as keyword arguments.
-
-        Returns:
-            An instance of the configuration class.
-
-        Raises:
-            ValueError: If any required parameters are missing.
-        """
-        if cfg is None:
-            cfg = {}
-        cfg.update(kwargs)
-
-        required_params = {
-            f.name
-            for f in fields(cls) if f.default is dataclasses.MISSING
-            and f.default_factory is dataclasses.MISSING
-        }
-
-        # Check if any of the truly required parameters are missing from the provided config.
-        missing_params = required_params - set(cfg.keys())
-        if missing_params:
-            raise ValueError(
-                f"Missing required parameters for {cls.__name__}: {', '.join(sorted(list(missing_params)))}"
-            )
-
-        known_params = {f.name for f in fields(cls)}
-        filtered_cfg = {k: v for k, v in cfg.items() if k in known_params}
-
-        return cls(**filtered_cfg)
 
 
 @dataclass
@@ -394,7 +303,7 @@ class Embedder(nnx.Module):
         self.prelogit_btd = NamedSharding(
             self.mesh, P(self.sharding_cfg.generate_sharding_cfg.prelogit_btd))
         self.dv_sharding = NamedSharding(
-            self.mesh, PartitionSpec(self.sharding_cfg.vocab_dv))
+            self.mesh, P(self.sharding_cfg.generate_sharding_cfg.vocab_dv))
 
     def __post_init__(self):
         self.create_sharding()
@@ -402,105 +311,3 @@ class Embedder(nnx.Module):
             shape=(self.cfg.vocab_size, self.cfg.d_model),
             sharding=self.dv_sharding,
             dtype=self.cfg.dtype)
-
-class TransformerBlockConfig(Config):
-    """
-    light weighted transformer config, which includes config for all sub-modules
-    it uses make() to create the live module from this config
-    """
-    attention: AttentionConfig
-    kv_cache: KVCacheConfig
-    ffw: FFWConfig = None
-    block_type: str = None
-    rmsnorm_epsilon: float = None
-    overrides: Mapping[str, Any] = None
-
-    def _block_type_cls(self) -> FFW:
-        if self.block_type.lower() == "moe":
-            return MoE
-        elif self.block_type.lower() == "dense":
-            return FFW
-        else:
-            raise ValueError(f"Invalid block type: {self.block_type}")
-
-    def from_cfg(self, flags_cfg):
-        self.attention = AttentionConfig.from_cfg(flags_cfg)
-        self.kv_cache = KVCacheConfig.from_cfg(flags_cfg)
-        block_class = self._block_type_cls()
-        self.ffw = block_class.from_cfg(flags_cfg)
-        self.cfg = flags_cfg
-
-
-@dataclass
-class TransformerBlock(nnx.Module):
-    """
-    A heavy weight module which serves as the stateful live blocks in serving
-    """
-    cfg: TransformerBlockConfig
-    block_type: str
-    param_factory: ParamFactory
-    mesh: Mesh
-    sharding_cfg: ShardingConfig
-    quant: Any | None = None
-
-    def _create_module(self, module_cls: Type[nnx.Module], cfg: Any,
-                       **overrides) -> nnx.Module:
-        args = {
-            "mesh": self.mesh,
-            "param_factory": self.param_factory,
-            "sharding_cfg": self.sharding_cfg,
-            "quant": self.quant
-        }
-        args.update(overrides)
-        return module_cls(cfg=cfg, **args)
-
-    def __post_init__(self):
-
-        self.d_model = self.cfg.attention.d_model
-        self.attn = self._create_module(Attention, cfg=self.cfg.attention)
-        self.kv_cache = KVCache(
-            cfg=self.cfg.kv_cache,
-            mesh=self.mesh,
-            sharding_cfg=self.sharding_cfg,
-            updater=StandardUpdater(),
-        )
-
-        self.mlp = self._create_module(FFW, cfg=self.cfg.ffw_cfg)
-
-        if self.block_type == "moe":
-            self.moe = self._create_module(MoE, cfg=self.cfg.ffw_cfg)
-
-        self.post_attention_norm = self._create_module(
-            RMSNorm,
-            cfg={"dims": self.cfg.d_model},
-        )
-        self.post_mlp_norm = self._create_module(
-            RMSNorm, cfg={"dims": self.cfg.d_model})
-
-    # TODO:
-    def __call__(
-        self,
-        x,
-        op_mode,
-        is_prefill: bool,
-        do_sampling: bool,
-        kv_caches: List[KVCache_type],
-        input_ids: jax.Array,
-        attention_metadata: AttentionMetadata,
-        temperatures: jax.Array = None,
-        top_ps: jax.Array = None,
-        top_ks: jax.Array = None,
-        *args, **kwargs) -> Tuple[List[KVCache_type], jax.Array, jax.Array]:
-        new_cache, score = self.self_attn(x, op_mode, self.kv_cache,
-                                          attention_metadata)
-        x = self.post_attention_norm(x + score)
-        if self.block_type == "moe":
-            y = self.moe(x, op_mode)
-        elif self.block_type == "dense":
-            y = self.mlp(x, op_mode)
-        else:
-            raise ValueError(f"Invalid block type: {self.block_type}")
-        
-        logits = self.post_mlp_norm(x + y)
-
-        return new_cache, logits

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -7,9 +7,8 @@ from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
-from tpu_commons.models.jax.attention_metadata import AttentionMetadata
+from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.kv_cache import KVCache
-from tpu_commons.models.jax.common.layers import Config, ParamFactory
 from tpu_commons.models.jax.common.sharding import ShardingConfig
 from tpu_commons.models.jax.rope.generic_rope import apply_rope
 
@@ -33,6 +32,7 @@ class AttentionMetadata(object):
     prefill_page_indices: jax.Array = None  # [max_num_prefill_seqs, pages_per_sequence]
     prefill_query_start_offsets: jax.Array = None  # [max_num_prefill_seqs + 1]
     num_prefill_seqs: jax.Array = None  # [1]
+
 
 @dataclass
 class AttentionConfig(Config):
@@ -133,7 +133,7 @@ class Attention(nnx.Module):
     def __call__(
         self,
         x,
-        op_mode,
+        is_prefill,
         kv_cache: KVCache,
         attention_metadata: AttentionMetadata,
     ):
@@ -156,8 +156,8 @@ class Attention(nnx.Module):
                 - The attention output tensor of shape
                   `(batch_size, seq_len, d_model)`.
         """
+        op_mode = "prefill" if is_prefill else "generate"
         md = attention_metadata
-        is_prefill = True if op_mode == 'prefill' else False
         x = jnp.asarray(x, self.cfg.dtype)
         x_BSD = nnx.with_sharding_constraint(
             x, self.activation_attention_btd[op_mode])

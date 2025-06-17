@@ -147,6 +147,7 @@ class ShardingConfig:
         )
 
 
+@dataclass
 class Sharding:
     """Generates and manages sharding configurations based on a high-level strategy.
 
@@ -160,10 +161,6 @@ class Sharding:
         sharding_cfg: The generated `ShardingConfig` with detailed rules.
         mesh: The JAX `Mesh` object representing the device grid.
     """
-    sharding_strategy: ShardingStrategy
-    sharding_cfg: ShardingConfig
-    LOGICAL_MESH_AXIS_NAME: LOGICAL_MESH_AXIS_NAME
-
     def __init__(self,
                  strategy_dict: dict,
                  prefill_sharding_cfg: dict | None = None,

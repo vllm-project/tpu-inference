@@ -1,14 +1,18 @@
 import abc
-from typing import Any, Mapping
+from dataclasses import dataclass
+from typing import Any, List, Mapping, Tuple
 
-from flax.typing import PRNGKey
 import jax
+from flax import nnx
+from flax.typing import PRNGKey
 from jax.sharding import Mesh
 from vllm.config import VllmConfig
 
-from tpu_commons.models.jax.common.attention import AttentionMetadata
-from tpu_commons.models.jax.common.kv_cache import KVCache_type
-from tpu_commons.models.jax.common.layers import (EmbedderConfig, TransformerBlockConfig)
+from tpu_commons.models.jax.common.attention.attention import AttentionMetadata
+from tpu_commons.models.jax.common.kv_cache import KVCacheType
+from tpu_commons.models.jax.common.layers import EmbedderConfig
+from tpu_commons.models.jax.common.transformer_block import \
+    TransformerBlockConfig
 
 
 @dataclass
@@ -27,20 +31,20 @@ class ModelConfig():
 
 
 class Model(nnx.Module, abc.ABC):
-    vllm_config: VllmConfig
-    rng: PRNGKey
-    mesh: Mesh
+
+    def __init__(self, vllm_config: VllmConfig, rng: PRNGKey, mesh: Mesh):
+        raise NotImplementedError
 
     @abc.abstractmethod
     def __call__(self,
                  is_prefill: bool,
                  do_sampling: bool,
-                 kv_caches: List[KVCache_type],
+                 kv_caches: List[KVCacheType],
                  input_ids: jax.Array,
                  attention_metadata: AttentionMetadata,
                  temperatures: jax.Array = None,
                  top_ps: jax.Array = None,
                  top_ks: jax.Array = None,
                  *args,
-                 **kwargs) -> Tuple[List[KVCache_type], jax.Array, jax.Array]:
+                 **kwargs) -> Tuple[List[KVCacheType], jax.Array, jax.Array]:
         raise NotImplementedError
