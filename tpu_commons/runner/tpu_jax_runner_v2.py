@@ -361,7 +361,7 @@ class TPUModelRunner():
         logger.info(f"Init mesh | mesh={self.mesh}")
 
     def _init_model(self) -> None:
-        self.model_fn = get_model(
+        self.model_fn, self.total_model_params_num = get_model(  # Unpack into local variables firstAdd commentMore actions
             self.vllm_config,
             self.rng_key,
             self.mesh,

@@ -13,7 +13,9 @@ import os
 import time
 import uuid
 
+import jax
 from transformers import AutoTokenizer
+from utils_jax import calculate_prefill_tflops_per_device
 from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.utils import FlexibleArgumentParser
@@ -113,11 +115,26 @@ def run_prefill(engine_core: EngineCore, tokenizer, prompt_ids: list[int],
     assert len(engine_core.scheduler.waiting) == 1
     assert len(engine_core.scheduler.running) == 0
 
+    # --- Retrieve necessary data for TFLOPs calculation directly inside the function ---
+    # This maintains the function's original signature.
+    num_model_params = engine_core.model_executor.driver_worker.worker.model_runner.total_model_params_num
+    model_hf_config = engine_core.vllm_config.model_config.hf_config
+    # ----------------------------------------------------------------------------------
+
     if should_profile:
         engine_core.profile(is_start=True)
+
+    start_time = time.perf_counter()  # <--- Start timing
     engine_core_output_step_0 = engine_core.step()
+    jax.block_until_ready(
+        engine_core.scheduler.running)  # Block until JAX execution completes
+    end_time = time.perf_counter()  # <--- Stop timing
+
     if should_profile:
         engine_core.profile(is_start=False)
+
+    prefill_average_ms = (end_time -
+                          start_time) * 1000.0  # Calculate time in ms
 
     if len(engine_core_output_step_0[0]
            [0].outputs) > 0:  # Accessing EngineCoreOutputs.outputs[0]
@@ -150,7 +167,24 @@ def run_prefill(engine_core: EngineCore, tokenizer, prompt_ids: list[int],
 
     # Should this be 128 because of prefill padding?
     total_prefill_tokens = engine_core.scheduler.running[0].num_computed_tokens
+
     print("Finished executing prefill.")
+
+    # --- NEW: Calculate and Print TFLOPs metrics ---
+    # Pass log=False for the main call to avoid duplicate breakdown print.
+    total_tflops_per_device_value, _, _ = calculate_prefill_tflops_per_device(
+        num_model_params, total_prefill_tokens, model_hf_config, log=True)
+
+    # Calculate TFLOPs/sec/device
+    tflops_per_sec_per_device = total_tflops_per_device_value / (
+        prefill_average_ms / 1000.0)
+
+    # --- Print Results in MaxText-like Format ---
+    print(
+        f"\nPrefill benchmark results for length {total_prefill_tokens}:\n"  # Use actual tokens computed for reporting
+        f"\tPrefill step average time: {prefill_average_ms:.3f} ms\n"
+        f"\tPrefill total TFLOPs/device: {total_tflops_per_device_value:.3f}\n"
+        f"\tPrefill TFLOPs/sec/device: {tflops_per_sec_per_device:.3f}\n\n")
 
 
 def run_decode(engine_core: EngineCore, tokenizer, prompt_ids: list[int],
