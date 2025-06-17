@@ -252,12 +252,12 @@ class TPUModelRunner():
 
         # Check for the "no prefill" case
         if not new_full_prefill_seqs and not new_partial_prefill_seqs and not subsequent_partial_prefill_seqs:
-            return self._prepare_decode(scheduler_output)
+            return self._prepare_decode(scheduler_output.scheduled_cached_reqs)
 
         # Check for the "only full prefill" case
         # TODO(pooyam): We probably can use ragged attention for new_partial_prefills as well.
         if new_full_prefill_seqs and not new_partial_prefill_seqs and not subsequent_partial_prefill_seqs and not decoding_seqs:
-            return self._prepare_prefill(scheduler_output)
+            return self._prepare_prefill(scheduler_output.scheduled_new_reqs)
 
         # All other cases fall into the "chunked prefill" category
         # TODO(pooyam): Change `prepare_prefill` to respect num scheduled tokens, so we can use prefill_kernel even for new partial prefills.
@@ -520,11 +520,11 @@ class TPUModelRunner():
         return len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
 
     # Modified from https://source.corp.google.com/h/vertex-model-garden/hex-llm/+/main:hex_llm/worker/runner_jax.py;drc=3ed287d21d5f95a053cb5fe3b249373064ac2f23;l=803.
-    def _prepare_decode(self, scheduler_output: VllmSchedulerOutput) -> Any:
-        if not len(scheduler_output.scheduled_cached_reqs):
+    def _prepare_decode(self, scheduled_cached_reqs: list[Request]) -> Any:
+        if not len(scheduled_cached_reqs):
             return None
 
-        num_seqs = len(scheduler_output.scheduled_cached_reqs)
+        num_seqs = len(scheduled_cached_reqs)
         block_size = self.cache_config.block_size
         sliding_window = self.model_config.get_sliding_window()
         sink_size = self.cache_config.sink_size
@@ -538,7 +538,7 @@ class TPUModelRunner():
         else:
             max_possible_num_blocks = math.ceil(max_model_len / block_size)
             max_num_blocks = 0
-            for seq in scheduler_output.scheduled_cached_reqs:
+            for seq in scheduled_cached_reqs:
                 seq_index = self.input_batch.req_id_to_index[seq.req_id]
                 max_num_blocks = max(
                     max_num_blocks, self.input_batch.block_table.
@@ -590,7 +590,7 @@ class TPUModelRunner():
             if self.eviction_algorithm is not None
             and self.eviction_algorithm != "streamingllm" else None)
 
-        for i, seq in enumerate(scheduler_output.scheduled_cached_reqs):
+        for i, seq in enumerate(scheduled_cached_reqs):
             seq_index = self.input_batch.req_id_to_index[seq.req_id]
             # num cached tokens + token of this decode
             seq_len = self.input_batch.num_computed_tokens_cpu[seq_index] + 1
@@ -651,7 +651,7 @@ class TPUModelRunner():
             input_ids = input_ids.at[0, 0].set(
                 self.perplexity_reference_text[seq_len - 1])
 
-        for seq in scheduler_output.scheduled_cached_reqs:
+        for seq in scheduled_cached_reqs:
             req_id = seq.req_id
             seq_index = self.input_batch.req_id_to_index[req_id]
 
@@ -700,20 +700,20 @@ class TPUModelRunner():
             output_token_indices,
         )
 
-    def _prepare_prefill(self, scheduler_output: VllmSchedulerOutput) -> Any:
-        if not len(scheduler_output.scheduled_new_reqs):
+    def _prepare_prefill(self, new_reqs: list[Request]) -> Any:
+        if not len(new_reqs):
             return None
 
         block_size = self.vllm_config.cache_config.block_size
         sliding_window = self.vllm_config.model_config.get_sliding_window()
 
         # TODO: pad batch_size
-        batch_size = len(scheduler_output.scheduled_new_reqs)
+        batch_size = len(new_reqs)
 
         # Full prompt length.
         max_prompt_len = max([
             len(seq.prompt_token_ids)
-            for seq in scheduler_output.scheduled_new_reqs
+            for seq in new_reqs
         ])
 
         # Unfilled prompt length.
@@ -763,7 +763,7 @@ class TPUModelRunner():
 
         eviction_score_mask = None
 
-        for i, seq in enumerate(scheduler_output.scheduled_new_reqs):
+        for i, seq in enumerate(new_reqs):
             seq_index = self.input_batch.req_id_to_index[seq.req_id]
 
             effective_cached_prompt_len = 0
