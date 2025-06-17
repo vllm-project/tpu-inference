@@ -17,7 +17,7 @@ from tpu_commons.models.jax.common.sharding import ShardingConfig
 
 
 @dataclass
-class TransformerConfig(Config):
+class TransformerBlockConfig(Config):
     """
     light weighted transformer config, which includes config for all sub-modules
     it uses make() to create the live module from this config
@@ -39,7 +39,7 @@ class TransformerBlock(nnx.Module):
     """
     A heavy weight module which serves as the stateful live blocks in serving
     """
-    cfg: TransformerConfig
+    cfg: TransformerBlockConfig
     param_factory: ParamFactory
     mesh: Mesh
     sharding_cfg: ShardingConfig

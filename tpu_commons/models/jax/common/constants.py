@@ -30,21 +30,6 @@ class LOGICAL_MESH_AXIS_NAME(enum.Enum):
     VOCAB_AXIS_NAME = ('dp', 'sp', 'tp', 'ep')
 
 
-# MoE metrics to be monitored
-MOE_METRICS = (
-    'per_layer_load_balancing_loss',
-    'rms_logits',
-    'per_layer_max_router_logits',
-    'over_capacity',
-    'expert_assignment_fraction',
-    'dispatched_to_0',
-    'dispatched_to_1',
-    'dispatched_to_2',
-    'total_dispatch_weight',
-    'router_w_clusterfactor',
-    'average_entropy',
-    'entropy_average',
-)
 """
 Current Used Abbreviation for Tensor Dimensions:
 B: Batch size

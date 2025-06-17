@@ -8,7 +8,7 @@ from tpu_commons.models.jax.common.constants import LOGICAL_MESH_AXIS_NAME
 
 
 @dataclass
-class Sharding_Strategy:
+class ShardingStrategy:
     """Defines the high-level parallelism strategy.
 
     This class specifies how many ways each type of parallelism (tensor, expert,
@@ -29,6 +29,7 @@ class Sharding_Strategy:
     data_parallelism: int = 1
 
 
+#TODO split this into block unique sharding config, i.e. attentionShardingConfig, MoEShardingConfig
 @dataclass
 class OpShardingConfig:
     """Holds detailed sharding configurations for individual tensors, namely logical rules.
@@ -149,29 +150,40 @@ class ShardingConfig:
 class Sharding:
     """Generates and manages sharding configurations based on a high-level strategy.
 
-    This class takes a `Sharding_Strategy`, builds the corresponding JAX `Mesh`
+    This class takes a `ShardingStrategy`, builds the corresponding JAX `Mesh`
     of devices, and populates a `ShardingConfig` with detailed tensor sharding
-    rules for both prefill and generation phases.
+    rules for both prefill and generation phases. It also allows for runtime
+    overrides of these rules.
 
     Attributes:
-        sharding_strategy: The high-level `Sharding_Strategy` instance.
+        sharding_strategy: The high-level `ShardingStrategy` instance.
         sharding_cfg: The generated `ShardingConfig` with detailed rules.
         mesh: The JAX `Mesh` object representing the device grid.
     """
-    sharding_strategy: Sharding_Strategy
+    sharding_strategy: ShardingStrategy
     sharding_cfg: ShardingConfig
     LOGICAL_MESH_AXIS_NAME: LOGICAL_MESH_AXIS_NAME
 
-    def __init__(self, strategy_dict: dict):
+    def __init__(self,
+                 strategy_dict: dict,
+                 prefill_sharding_cfg: dict | None = None,
+                 generate_sharding_cfg: dict | None = None):
         """Initializes the Sharding manager.
 
         Args:
             strategy_dict: A dictionary mapping parallelism types (e.g.,
                 'tensor_parallelism') to their degrees.
+            prefill_sharding_cfg: A dictionary of overrides for the prefill
+                sharding config. Keys are attribute names in `OpShardingConfig`,
+                and values are the new sharding tuples.
+            generate_sharding_cfg: A dictionary of overrides for the generate
+                sharding config.
         """
-        self.sharding_strategy = Sharding_Strategy(**strategy_dict)
+        self.sharding_strategy = ShardingStrategy(**strategy_dict)
         self.mesh = self.build_mesh(self.sharding_strategy)
-        self.sharding_cfg = self.make_sharding_config()
+        self.sharding_cfg = self.make_sharding_config(
+            prefill_overrides=prefill_sharding_cfg,
+            generate_overrides=generate_sharding_cfg)
 
     def validate_sharding_strategy(self, ):
         """Validates if the sharding strategy is compatible with the environment.
@@ -187,7 +199,7 @@ class Sharding:
         """Returns the generated sharding configuration."""
         return self.sharding_cfg
 
-    def build_mesh(self, strategy: Sharding_Strategy) -> Mesh:
+    def build_mesh(self, strategy: ShardingStrategy) -> Mesh:
         """Constructs a JAX device mesh from a sharding strategy.
 
         This method creates a logical grid of devices based on the parallelism
@@ -195,7 +207,7 @@ class Sharding:
         'sp', 'tp') are used to map tensor dimensions to the physical device grid.
 
         Args:
-            strategy: The `Sharding_Strategy` defining the mesh shape.
+            strategy: The `ShardingStrategy` defining the mesh shape.
 
         Returns:
             A JAX `Mesh` object.
@@ -224,17 +236,50 @@ class Sharding:
         devices = np.asarray(jax.devices()).reshape(mesh_shape)
         return Mesh(devices, axis_names=tuple(mesh_axis_names))
 
-    #TODO: add method to read sharding config directly user specified config file
+    def _apply_overrides(self, config_obj: OpShardingConfig,
+                         overrides: dict | None):
+        """Applies runtime overrides to a sharding configuration object.
 
-    def make_sharding_config(self) -> ShardingConfig:
-        """Creates the detailed `ShardingConfig` with specific partitioning rules.
+        Args:
+            config_obj: The sharding configuration object (e.g., prefill_sharding_cfg)
+                to be updated.
+            overrides: A dictionary where keys are attribute names of the config
+                object and values are the new sharding tuples.
+
+        Raises:
+            AttributeError: If a key in the overrides dictionary is not a valid
+                attribute of the configuration object.
+        """
+        if overrides:
+            for key, value in overrides.items():
+                if hasattr(config_obj, key):
+                    setattr(config_obj, key, value)
+                else:
+                    # Raise an error for invalid keys to prevent silent failures
+                    raise AttributeError(
+                        f"'{key}' is not a valid attribute of {type(config_obj).__name__}"
+                    )
+
+    def make_sharding_config(
+            self,
+            prefill_overrides: dict | None = None,
+            generate_overrides: dict | None = None) -> ShardingConfig:
+        """Creates the detailed `ShardingConfig` with specific partitioning rules
+        and applies any runtime overrides.
 
         This method populates the `prefill_sharding_cfg` and
         `generate_sharding_cfg` with hardcoded sharding rules that are generally
-        effective for transformer models.
+        effective for transformer models, and then updates them with any provided
+        overrides.
+
+        Args:
+            prefill_overrides: A dictionary with attribute names and their new values
+                for the prefill sharding configuration.
+            generate_overrides: A dictionary with attribute names and their new values
+                for the generate sharding configuration.
 
         Returns:
-            The populated `ShardingConfig` object.
+            The populated and overridden `ShardingConfig` object.
         """
         #TODO: organize into update_prefill() and update_decode for each axis
         #TODO: verify the sharding axes
@@ -283,4 +328,14 @@ class Sharding:
             LOGICAL_MESH_AXIS_NAME.EXPERT_AXIS_NAME,
             LOGICAL_MESH_AXIS_NAME.MOE_TENSOR_AXIS_NAME, None)
 
+        # Apply overriding the runtime sharding rules
+        self._apply_overrides(prefill_sharding_cfg, prefill_overrides)
+        self._apply_overrides(generate_sharding_cfg, generate_overrides)
+
         return self.sharding_cfg
+
+
+class ShardingInfo:
+    #TODO a sharding info class for visualizing & debugging the sharding performance
+    # Will implement it for the next version
+    pass

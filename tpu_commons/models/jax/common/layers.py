@@ -197,7 +197,7 @@ class FFWConfig(Config):
 
 @dataclass
 class FFW(nnx.Module):
-    """A Feed-Forward Network (FFN) layer.
+    """A Gated Feed-Forward Network (FFN) layer.
 
     This module consists of two linear projections (gating and up-projection),
     an element-wise multiplication of the activated gating projection and the
