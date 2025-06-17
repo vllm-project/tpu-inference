@@ -7,14 +7,14 @@ import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from jaxtyping import Array, Float, Int
+from jaxtyping import Float, Int
 
-from tpu_commons.models.jax.common.constants import *
-from tpu_commons.models.jax.common.sharding import *
+from tpu_commons.models.jax.common.sharding import ShardingConfig
 
 
 # A dummy for modeling_flax_utils which might contain activation functions
 class FlaxUtils:
+    """A dummy class to namespace activation functions, mimicking external utilities."""
     ACT2FN = {
         'silu': nnx.silu,
         'gelu': nnx.gelu,
@@ -30,7 +30,16 @@ Initializer = Callable[..., jax.Array]
 
 @dataclasses.dataclass
 class ParamFactory:
-    """A factory for creating nnx.Param objects with shared RNGs and initializers."""
+    """A factory for creating nnx.Param objects with shared RNGs and initializers.
+
+    This class simplifies the creation of parameters by holding common
+    configuration like the RNG stream and the weight initialization function.
+
+    Attributes:
+        rngs: An `nnx.Rngs` object to provide RNG streams for parameter initialization.
+        initializer: A callable (e.g., a kernel initializer from JAX) used to
+            generate parameter data.
+    """
     rngs: nnx.Rngs
     initializer: Initializer
 
@@ -38,7 +47,17 @@ class ParamFactory:
                            shape: tuple[int, ...],
                            sharding: NamedSharding,
                            dtype: Any = jnp.float32) -> nnx.Param:
-        """Creates an nnx.Param using the factory's RNG stream and initializer."""
+        """Creates an nnx.Param using the factory's RNG stream and initializer.
+
+        Args:
+            shape: The shape of the parameter tensor to create.
+            sharding: The `NamedSharding` object that specifies how the parameter
+                should be distributed across devices.
+            dtype: The data type of the parameter.
+
+        Returns:
+            An `nnx.Param` instance containing the initialized data and sharding info.
+        """
         param_data = self.initializer(self.rngs.params(), shape, dtype)
         return nnx.Param(param_data, sharding=sharding)
 
