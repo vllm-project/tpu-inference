@@ -1,39 +1,28 @@
-"""
-Current Used abbreviation.
-#TODO follow dragon book
-B: batch
-S: sequence length
-T: token len
-D: d_model
-F: d_ff, hidden_dim of ffw/expert
-V: vocab size
-C: expert capacity
-K: top K per token
-G: number of groups
-H: head dim in Attention
-Q: number of query heads
-N: number of KV heads
-E: number of experts
-"""
-"""
-Sharding_Strategy ->
-Sharding:
-self.Mesh i.e. Mesh((2,4,4,4), ('dp', 'sp', 'ep', 'tp')) 128 devices
-self.ShardingConfig
-    prefill_axes i.e. activation_attention_bsd = (None, 'dp', 'ep')
-    decode_axes i.e. activation_attention_bsd = ('dp', None, 'ep')
-"""
 from dataclasses import dataclass
 
 import jax
 import numpy as np
 from jax.sharding import Mesh
 
-from tpu_commons.models.jax.common.constants import *
+from tpu_commons.models.jax.common.constants import LOGICAL_MESH_AXIS_NAME
 
 
 @dataclass
 class Sharding_Strategy:
+    """Defines the high-level parallelism strategy.
+
+    This class specifies how many ways each type of parallelism (tensor, expert,
+    sequence, data) should be distributed across the available devices.
+
+    Attributes:
+        tensor_parallelism: The degree of tensor parallelism (e.g., splitting
+            weights of a single layer).
+        expert_parallelism: The degree of expert parallelism for MoE models.
+        sequence_parallelism: The degree of sequence parallelism (splitting
+            activations along the sequence length dimension).
+        data_parallelism: The degree of data parallelism (splitting the batch
+            across devices).
+    """
     tensor_parallelism: int = 1
     expert_parallelism: int = 1
     sequence_parallelism: int = 1
@@ -41,85 +30,94 @@ class Sharding_Strategy:
 
 
 @dataclass
-class logical_mesh_axes:
-    prefill_axes: tuple[str, ...] | None = None
-    decode_axes: tuple[str, ...] | None = None  # (None, 'dp', 'ep')
-
-    def update(self, axes: tuple[str, ...], op_mode: OPERATION_MODE):
-        if op_mode == OPERATION_MODE.PREFILL:
-            self.prefill_axes = axes
-        elif op_mode == OPERATION_MODE.DECODE:
-            self.decode_axes = axes
-
-    def get_axes(self, op_mode: OPERATION_MODE = OPERATION_MODE.DECODE):
-        if op_mode == OPERATION_MODE.PREFILL:
-            return self.prefill_axes
-        elif op_mode == OPERATION_MODE.DECODE:
-            return self.decode_axes
-
-
-@dataclass
 class OpShardingConfig:
+    """Holds detailed sharding configurations for individual tensors, namely logical rules.
 
-    # Activation for attn:
-    # an example: logical_mesh_axes(prefill_axes=(None, 'sp', 'tp'), decode_axes=('sp', None, 'ep')
-    activation_attention_bsd: LOGICAL_MESH_AXIS_NAME | None = None
-    # Activation for attn out:
-    activation_attention_out_bsd: LOGICAL_MESH_AXIS_NAME | None = None
-    # Activation for q:
-    activation_q_bsd: LOGICAL_MESH_AXIS_NAME | None = None
-    # Attention Out activation
-    attn_o_bsqh: LOGICAL_MESH_AXIS_NAME | None = None
-    # Q vector:
-    query_bsqh: LOGICAL_MESH_AXIS_NAME | None = None
-    # K/V vector:
-    keyvalue_bsnh: LOGICAL_MESH_AXIS_NAME | None = None
+    Each attribute in this class corresponds to a specific weight or activation
+    tensor within a transformer model. The value of each attribute is a
+    tuple of logical mesh axis names (e.g., 'dp', 'sp', 'tp'), which defines
+    how the corresponding tensor's dimensions are partitioned across the device mesh.
+    The dimension order in the attribute name (e.g., `btd` for batch, sequence,
+    d_model) maps directly to the sharding tuple.
 
-    # Attention Q weight:
-    attn_q_weight_qdh: LOGICAL_MESH_AXIS_NAME | None = None
-    # Attention K weight:
-    attn_k_weight_ndh: LOGICAL_MESH_AXIS_NAME | None = None
-    # Attention V weight
-    attn_v_weight_ndh: LOGICAL_MESH_AXIS_NAME | None = None
-    # Attention Out weight.
-    attn_o_weight_qhd: LOGICAL_MESH_AXIS_NAME | None = None
+    TODO: update the mesh axis names to be clear and reduce confusion between prefill & generate
+    """
 
-    # K/V cache.
-    keyvalue_generate_mode_cache_bsnh: LOGICAL_MESH_AXIS_NAME | None = None
-    keyvalue_prefill_mode_cache_bsnh: LOGICAL_MESH_AXIS_NAME | None = None
+    # Activation for attn input: (Batch, Sequence, Dim)
+    activation_attention_btd: LOGICAL_MESH_AXIS_NAME | None = None
+    # Activation for attn out: (Batch, Sequence, Dim)
+    activation_attention_out_btd: LOGICAL_MESH_AXIS_NAME | None = None
+    # Activation for q projection input: (Batch, Sequence, Dim)
+    activation_q_btd: LOGICAL_MESH_AXIS_NAME | None = None
+    # Attention Out activation after projection: (Batch, Sequence, NumHeads, HeadDim)
+    attn_o_btnh: LOGICAL_MESH_AXIS_NAME | None = None
+    # Q vector: (Batch, Sequence, NumHeads, HeadDim)
+    query_btnh: LOGICAL_MESH_AXIS_NAME | None = None
+    # K/V vector: (Batch, Sequence, NumKVHeads, HeadDim)
+    keyvalue_bskh: LOGICAL_MESH_AXIS_NAME | None = None
 
-    # Activation for ffw:
-    activation_ffw_bsd: LOGICAL_MESH_AXIS_NAME | None = None
-    # FFW hidden activation:
-    ffw_hidden_bsf: LOGICAL_MESH_AXIS_NAME | None = None
+    # Attention Q weight: (NumHeads, Dim, HeadDim)
+    attn_q_weight_ndh: LOGICAL_MESH_AXIS_NAME | None = None
+    # Attention K weight: (NumKVHeads, Dim, HeadDim)
+    attn_k_weight_kdh: LOGICAL_MESH_AXIS_NAME | None = None
+    # Attention V weight: (NumKVHeads, Dim, HeadDim)
+    attn_v_weight_kdh: LOGICAL_MESH_AXIS_NAME | None = None
+    # Attention Out weight: (NumHeads, HeadDim, Dim)
+    attn_o_weight_nhd: LOGICAL_MESH_AXIS_NAME | None = None
 
-    # FFW weight:
+    # K/V cache for generation: (Batch, Sequence, NumKVHeads, HeadDim)
+    keyvalue_generate_mode_cache_bskh: LOGICAL_MESH_AXIS_NAME | None = None
+    # K/V cache for prefill: (Batch, Sequence, NumKVHeads, HeadDim)
+    keyvalue_prefill_mode_cache_bskh: LOGICAL_MESH_AXIS_NAME | None = None
+
+    # Activation for ffw input: (Batch, Sequence, Dim)
+    activation_ffw_btd: LOGICAL_MESH_AXIS_NAME | None = None
+    # FFW hidden activation: (Batch, Sequence, FfwDim)
+    ffw_hidden_btf: LOGICAL_MESH_AXIS_NAME | None = None
+
+    # FFW up/gate weight: (Dim, FfwDim)
     ffw_weight_df: LOGICAL_MESH_AXIS_NAME | None = None
-    # FFW weight:
+    # FFW down weight: (FfwDim, Dim)
     ffw_weight_fd: LOGICAL_MESH_AXIS_NAME | None = None
-    # MoE weights
+    # MoE gate/up weights: (NumExperts, Dim, FfwDim)
     moe_weights_edf: LOGICAL_MESH_AXIS_NAME | None = None
+    # MoE down weights: (NumExperts, FfwDim, Dim)
     moe_weights_efd: LOGICAL_MESH_AXIS_NAME | None = None
+    # MoE router weights: (Dim, NumExperts)
     moe_router_de: LOGICAL_MESH_AXIS_NAME | None = None
 
-    # Embedding
+    # Embedding weight: (VocabSize, Dim)
     emb_weight_vd: LOGICAL_MESH_AXIS_NAME | None = None
-    # Activation between layer:
-    activation_bsd: LOGICAL_MESH_AXIS_NAME | None = None
-    # Final activation:
-    prelogit_bsd: LOGICAL_MESH_AXIS_NAME | None = None
-    # Logit activation:
-    logits_bsv: LOGICAL_MESH_AXIS_NAME | None = None
-    # RMS norm scale weight
+    # Activation between layers: (Batch, Sequence, Dim)
+    activation_btd: LOGICAL_MESH_AXIS_NAME | None = None
+    # Final activation before logits: (Batch, Sequence, Dim)
+    prelogit_btd: LOGICAL_MESH_AXIS_NAME | None = None
+    # Logit activation: (Batch, Sequence, VocabSize)
+    logits_btv: LOGICAL_MESH_AXIS_NAME | None = None
+    # RMS norm scale weight: (Dim,)
     norm_scale: LOGICAL_MESH_AXIS_NAME | None = None
-    # vocab sharding
+    # Vocab projection weight (tied embeddings): (Dim, VocabSize)
     vocab_dv: LOGICAL_MESH_AXIS_NAME | None = None
 
 
 class ShardingConfig:
-    """Container for operation-specific sharding configurations."""
+    """Container for operation-specific sharding configurations.
+
+    This class holds two separate `OpShardingConfig` objects, one for the
+    'prefill' phase and one for the 'generate' (or decode) phase of model
+    execution. This allows tailoring sharding strategies to the different
+    computational patterns of each phase.
+    """
 
     def __init__(self, prefill_sharding_cfg=None, generate_sharding_cfg=None):
+        """Initializes the ShardingConfig.
+
+        Args:
+            prefill_sharding_cfg: An `OpShardingConfig` for the prefill phase.
+                If None, a default config is created.
+            generate_sharding_cfg: An `OpShardingConfig` for the generate phase.
+                If None, a default config is created.
+        """
         # Use a factory pattern to avoid mutable default arguments
         self.prefill_sharding_cfg = prefill_sharding_cfg if prefill_sharding_cfg is not None else OpShardingConfig(
         )
@@ -128,41 +126,67 @@ class ShardingConfig:
 
 
 class Sharding:
-    """
-    Sharding block, which stores and generates the ShardingConfig
-    for tensors based on the Sharding_Strategy.
+    """Generates and manages sharding configurations based on a high-level strategy.
+
+    This class takes a `Sharding_Strategy`, builds the corresponding JAX `Mesh`
+    of devices, and populates a `ShardingConfig` with detailed tensor sharding
+    rules for both prefill and generation phases.
+
+    Attributes:
+        sharding_strategy: The high-level `Sharding_Strategy` instance.
+        sharding_cfg: The generated `ShardingConfig` with detailed rules.
+        mesh: The JAX `Mesh` object representing the device grid.
     """
     sharding_strategy: Sharding_Strategy
     sharding_cfg: ShardingConfig
     LOGICAL_MESH_AXIS_NAME: LOGICAL_MESH_AXIS_NAME
 
     def __init__(self, strategy_dict: dict):
+        """Initializes the Sharding manager.
+
+        Args:
+            strategy_dict: A dictionary mapping parallelism types (e.g.,
+                'tensor_parallelism') to their degrees.
+        """
         self.sharding_strategy = Sharding_Strategy(**strategy_dict)
         self.mesh = self.build_mesh(self.sharding_strategy)
         self.sharding_cfg = self.make_sharding_config()
 
     def validate_sharding_strategy(self, ):
-        """
-        Validate if the sharding strategy is correct and be able to fit in devices
-        """
+        """Validates if the sharding strategy is compatible with the environment.
 
-        #TODO check num_devices % parallelism == 0
-
-        #TODO check num_devices == multiply(parallelism(with inferred))
+        This method is a placeholder now, and will check if the product of parallelism degrees
+        matches the number of available devices.
+        """
+        #TODO: check num_devices % parallelism == 0
+        #TODO: check num_devices == multiply(parallelism(with inferred))
         return
 
     def get_sharding_cfg(self) -> ShardingConfig:
+        """Returns the generated sharding configuration."""
         return self.sharding_cfg
 
     def build_mesh(self, strategy: Sharding_Strategy) -> Mesh:
-        # TODO to decide if we should name as x,y,z or 'data','tensor', 'expert' etc
+        """Constructs a JAX device mesh from a sharding strategy.
+
+        This method creates a logical grid of devices based on the parallelism
+        degrees defined in the strategy. The logical axis names ('dp', 'ep',
+        'sp', 'tp') are used to map tensor dimensions to the physical device grid.
+
+        Args:
+            strategy: The `Sharding_Strategy` defining the mesh shape.
+
+        Returns:
+            A JAX `Mesh` object.
+        """
+        # TODO: to decide if we should name as x,y,z or 'data','tensor', 'expert' etc
         axis_order = {
             "dp": strategy.data_parallelism,
             "ep": strategy.expert_parallelism,
             "sp": strategy.sequence_parallelism,
             "tp": strategy.tensor_parallelism,
         }
-        # TODO add logic to infer axis when the degree is -1
+        # TODO: add logic to infer axis when the degree is -1
         mesh_axis_names = []
         mesh_shape = []
         for axis, dim in axis_order.items():
@@ -172,50 +196,65 @@ class Sharding:
 
         if not mesh_shape:
             mesh_shape = [1]
-            mesh_axis_names = ['dp']  # default
+            mesh_axis_names = [
+                'dp'
+            ]  # default to data parallelism if no other strategy is specified
 
         devices = np.asarray(jax.devices()).reshape(mesh_shape)
         return Mesh(devices, axis_names=tuple(mesh_axis_names))
 
-    #TODO add method to read sharding config directly user specified config file
+    #TODO: add method to read sharding config directly user specified config file
 
     def make_sharding_config(self) -> ShardingConfig:
-        #TODO organize into update_prefill() and update_decode for each axis
-        #TODO verify the sharding axes
+        """Creates the detailed `ShardingConfig` with specific partitioning rules.
+
+        This method populates the `prefill_sharding_cfg` and
+        `generate_sharding_cfg` with hardcoded sharding rules that are generally
+        effective for transformer models.
+
+        Returns:
+            The populated `ShardingConfig` object.
+        """
+        #TODO: organize into update_prefill() and update_decode for each axis
+        #TODO: verify the sharding axes
         self.sharding_cfg = ShardingConfig()
         prefill_sharding_cfg = self.sharding_cfg.prefill_sharding_cfg
         generate_sharding_cfg = self.sharding_cfg.generate_sharding_cfg
 
         # Populate Prefill Config
-        prefill_sharding_cfg.activation_attention_bsd = (
+        # During prefill, sequence length is long, so we shard along the sequence axis.
+        prefill_sharding_cfg.activation_attention_btd = (
             None, LOGICAL_MESH_AXIS_NAME.SEQUENCE_AXIS_NAME,
             LOGICAL_MESH_AXIS_NAME.ATTN_TENSOR_AXIS_NAME)
-        prefill_sharding_cfg.activation_attention_out_bsd = (
+        prefill_sharding_cfg.activation_attention_out_btd = (
             None, LOGICAL_MESH_AXIS_NAME.SEQUENCE_AXIS_NAME,
             LOGICAL_MESH_AXIS_NAME.ATTN_TENSOR_AXIS_NAME)
 
         # Populate Generate (Decode) Config
-        generate_sharding_cfg.activation_attention_bsd = (
+        # During decode, batch size is the large dimension, so we shard along the batch axis.
+        generate_sharding_cfg.activation_attention_btd = (
             LOGICAL_MESH_AXIS_NAME.BATCH_AXIS_NAME, None,
             LOGICAL_MESH_AXIS_NAME.ATTN_TENSOR_AXIS_NAME)
-        generate_sharding_cfg.activation_attention_out_bsd = (
+        generate_sharding_cfg.activation_attention_out_btd = (
             None, None, LOGICAL_MESH_AXIS_NAME.ATTN_TENSOR_AXIS_NAME)
-        generate_sharding_cfg.activation_q_bsd = (
+        generate_sharding_cfg.activation_q_btd = (
             None, None, LOGICAL_MESH_AXIS_NAME.ATTN_TENSOR_AXIS_NAME)
-        generate_sharding_cfg.attn_o_bsqh = (
+        generate_sharding_cfg.attn_o_btnh = (
             None, None, LOGICAL_MESH_AXIS_NAME.ATTN_HEAD_AXIS_NAME,
             LOGICAL_MESH_AXIS_NAME.ATTN_TENSOR_AXIS_NAME)
-        generate_sharding_cfg.query_bshq = (
+        generate_sharding_cfg.query_btnh = (
             None, None, LOGICAL_MESH_AXIS_NAME.ATTN_HEAD_AXIS_NAME,
             LOGICAL_MESH_AXIS_NAME.ATTN_TENSOR_AXIS_NAME)
-        generate_sharding_cfg.activation_ffw_bsd = (
+        generate_sharding_cfg.activation_ffw_btd = (
             None, None, LOGICAL_MESH_AXIS_NAME.MLP_TENSOR_AXIS_NAME)
-        generate_sharding_cfg.ffw_hidden_bsf = (
+        generate_sharding_cfg.ffw_hidden_btf = (
             None, None, LOGICAL_MESH_AXIS_NAME.MLP_TENSOR_AXIS_NAME)
+        # FFW weights are typically sharded along the hidden dimension (F).
         generate_sharding_cfg.ffw_weight_df = (
-            None, None, LOGICAL_MESH_AXIS_NAME.MLP_TENSOR_AXIS_NAME)
+            None, LOGICAL_MESH_AXIS_NAME.MLP_TENSOR_AXIS_NAME)
         generate_sharding_cfg.ffw_weight_fd = (
             LOGICAL_MESH_AXIS_NAME.MLP_TENSOR_AXIS_NAME, None)
+        # MoE weights are sharded along the expert axis and the hidden dimension.
         generate_sharding_cfg.moe_weights_edf = (
             LOGICAL_MESH_AXIS_NAME.EXPERT_AXIS_NAME, None,
             LOGICAL_MESH_AXIS_NAME.MOE_TENSOR_AXIS_NAME)
