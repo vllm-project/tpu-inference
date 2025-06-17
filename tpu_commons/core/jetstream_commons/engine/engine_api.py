@@ -157,15 +157,10 @@ class Engine(abc.ABC):
 
     @abc.abstractmethod
     def prefill(
-        self,
-        *,
-        params: Params,
-        existing_prefix: Optional[ExistingPrefix] = None,
-        padded_tokens: jax.Array,
-        true_length: int,
-        sampler: Optional[Callable[[Any], Any]] = None,
-        request_id: Optional[uuid.UUID] = None,
-    ) -> Tuple[Prefix, ResultTokens]:
+      self,  # pytype: disable=signature-mismatch
+      *,
+      vllm_req_data: Optional[Request] = None,
+    ) -> Tuple[Prefix, ModelRunnerOutput]:
         """Computes a kv-cache for a set of tokens conditional on existing cache.
 
     existing_prefix (if provided) represents a prefix that has already been
@@ -177,30 +172,7 @@ class Engine(abc.ABC):
     """
 
     @abc.abstractmethod
-    def prefill_multisampling(
-        self,
-        *,
-        params: Params,
-        existing_prefix: Optional[jax.Array] = None,
-        padded_tokens: jax.Array,
-        true_length: int,
-        sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
-        rng: Optional[PRNGKeyType] = None,
-        num_samples: int = 1,
-    ) -> Tuple[Prefix, ResultTokens]:
-        """Computes a kv-cache for a new generate request.
-
-    With multi-sampling, the engine will generate multiple first tokens in the
-    prefilling stage. The number of tokens is specified by num_samples.
-    """
-
-    @abc.abstractmethod
-    def generate(
-        self,
-        params: Params,
-        decode_state: DecodeState,
-        sampler: Optional[Callable[[Any], Any]] = None,
-    ) -> Tuple[DecodeState, ResultTokens]:
+    def generate(self) -> ModelRunnerOutput:
         """Generates tokens for each sequence being decoded in parallel.
 
     Generate takes a batch of pre-computed kv-caches, and computes:
@@ -216,13 +188,7 @@ class Engine(abc.ABC):
     """
 
     @abc.abstractmethod
-    def insert(
-        self,
-        prefix: Prefix,
-        decode_state: DecodeState,
-        slot: int,
-        request_id: Optional[uuid.UUID] = None,
-    ) -> DecodeState:
+    def insert(self, prefix: Prefix) -> None:
         """Adds `new_request` into `caches` at 'slot'.
 
     When decoding multiple requests in parallel, when one request finishes, a
@@ -236,16 +202,6 @@ class Engine(abc.ABC):
     a [0, n) range of slots and converted internally.
     """
 
-    @abc.abstractmethod
-    def bulk_insert(
-        self,
-        prefix: Prefix,
-        decode_state: DecodeState,
-        slots: list[int],
-    ) -> DecodeState:
-        """Insert a single computed prefill cache into multiple slots in
-    KV cache.
-    """
 
     def free_resource(
             self,
@@ -259,13 +215,6 @@ class Engine(abc.ABC):
     """
         return None
 
-    @abc.abstractmethod
-    def load_params(self, *args, **kwargs) -> Params:
-        """Loads parameters.
-
-    May not be used in full production form, where weights are part of the saved
-    model.
-    """
 
     @abc.abstractmethod
     def get_prefix_destination_sharding(self) -> Any:

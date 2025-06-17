@@ -125,8 +125,7 @@ class EngineCore:
             logger.info("Batch queue is enabled with size %d",
                         self.batch_queue_size)
             self.batch_queue = queue.Queue(self.batch_queue_size)
-        driver = self._setup_driver(True)
-        self.orchestrator = orchestrator.LLMOrchestrator(driver=driver)
+        self.orchestrator = self._setup_driver(True)
         logger.info("starting jetstream orchestrator")
 
     def _initialize_kv_caches(
@@ -172,9 +171,7 @@ class EngineCore:
                      "warmup model) took %.2f seconds"), elapsed)
         return num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config
 
-    def _setup_driver(self,
-                        interleaved_mode: bool = True,
-                        multi_sampling: bool = False):
+    def _setup_driver(self, interleaved_mode: bool = True):
         prefill_engine = JaxEngine(self.model_executor)
         # Create a generate engine with a different set of weights
         # so that we can test that the right one is in use at a given time.
@@ -199,13 +196,14 @@ class EngineCore:
         #         not self.scheduler.get_kv_connector()):
         #     logger.warning("Got kv_transfer_params, but no KVConnector found. "
         #                    "Disabling KVTransfer for this request.")
-        self.scheduler.add_request(req)
-        jetstream_request = jetstream_pb2.DecodeRequest(
-            token_content=jetstream_pb2.DecodeRequest.TokenContent(
-                token_ids=req.prompt_token_ids),
-            max_tokens=self.vllm_config.model_config.max_model_len,
-        )
-        self.orchestrator.Decode(jetstream_request)
+        # self.scheduler.add_request(req)
+        # self.model_executor.driver_worker.model_runner
+        # jetstream_request = jetstream_pb2.DecodeRequest(
+        #     token_content=jetstream_pb2.DecodeRequest.TokenContent(
+        #         token_ids=req.prompt_token_ids),
+        #     max_tokens=self.vllm_config.model_config.max_model_len,
+        # )
+        self.orchestrator.place_request_on_prefill_queue(req)
 
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
@@ -519,15 +517,17 @@ class EngineCoreProc(EngineCore):
             req = self.input_queue.get_nowait()
             self._handle_client_request(*req)
 
-    def _process_output_queue(self) -> bool:
+    def _process_output_queue(self):
         """Called only when there are unfinished local requests."""
 
         # Step the engine core.
-        outputs, model_executed = self.orchestrator.output_queue.get(block = True)
-        # Put EngineCoreOutputs into the output queue.
-        for output in (outputs.items() if outputs else ()):
+        while self.orchestrator._vllm_output_backlogs.qsize() > 0:
+            output = self.orchestrator._vllm_output_backlogs.get(block = True)
             self.output_queue.put_nowait(output)
-        return model_executed
+        # Put EngineCoreOutputs into the output queue.
+        # for output in (outputs.items() if outputs else ()):
+        #     self.output_queue.put_nowait(output)
+        # return model_executed
 
     def _handle_client_request(self, request_type: EngineCoreRequestType,
                                request: Any) -> None:

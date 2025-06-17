@@ -117,6 +117,8 @@ class JaxEngine(engine_api.Engine):
       *,
       vllm_req_data: Optional[Request] = None,
   ) -> Tuple[Prefix, ModelRunnerOutput]:
+    if self.req_id_to_req.get(vllm_req_data.req_id) == None:
+      self.req_id_to_req[vllm_req_data.req_id] = vllm_req_data
     input_batch = self.model_runner.input_batch
     inputs = self.model_runner._prepare_prefill([vllm_req_data])
     if inputs is not None:
@@ -178,6 +180,7 @@ class JaxEngine(engine_api.Engine):
       "next_tokens": next_tokens,
       "running_indices": running_indices,
       "output_token_indices": output_token_indices, 
+      "attention_metadata": model_inputs[5], #Ask people to structurize this
     }  
     return prefix, runner_output
 
@@ -245,112 +248,13 @@ class JaxEngine(engine_api.Engine):
       )
 
 
-  def insert(
-      self,
-      prefix: Prefix,
-      slot: int,
-  ) -> None:
+  def insert(self, prefix: Prefix) -> None:
     """Non-JIT wrapper for inserting prefill cache."""
+    slot = prefix["attention_metadata"].kv_cache_write_indices
     prefill_cache = prefix["cache"]
+    # kv cache is still full now
+    self.model_runner.kv_caches = prefill_cache
 
-    current_page_state = None
-    if self.config.attention == "paged" and self.page_manager is not None:
-      if self.page_state is None:
-        self.page_state = self.page_manager.get_initial_page_state()
-      current_page_state = self.page_state
-
-    updated_decode_state = self._insert_jit(
-        prefix=prefix,
-        decode_state=decode_state,
-        slot=slot,
-        page_state_in=current_page_state,
-    )
-
-    # Update the PageState after the JIT call
-    if self.config.attention == "paged" and self.page_manager is not None and self.page_state is not None:
-      new_has_active_page = self.page_state.has_active_page.at[slot].set(True)
-      self.page_state = self.page_state.replace(has_active_page=new_has_active_page)
-    return updated_decode_state
-
-
-  def init_decode_state(
-      self,
-      *args,  # pylint: disable=unused-argument
-      rng: Optional[PRNGKeyType] = None,
-      **kwargs,  # pylint: disable=unused-argument
-  ) -> DecodeState:
-    """Initialises any state which a generation step transforms."""
-    if rng is None:
-      rng = jax.random.PRNGKey(0)
-    page_state = None
-    if self.config.attention == "paged" and self.page_manager is not None:
-      page_state = self.page_manager.get_initial_page_state()  # pytype: disable=attribute-error
-
-    # pylint: disable=unused-argument
-    def init(abstract_params, page_state):
-      x = jnp.ones(
-          (int(self.config.per_device_batch_size * jax.device_count()), 1),
-          dtype=jnp.int32,
-      )
-      dummy_image = jnp.ones(
-          (
-              int(self.config.per_device_batch_size * jax.device_count()),
-              maxtext_utils.NUM_IMAGES_PER_SEQUENCE,
-              self.config.image_size_for_vit,
-              self.config.image_size_for_vit,
-              maxtext_utils.NUM_IMAGE_CHANNELS,
-          ),
-      )
-      _, cache = self.model.apply(
-          abstract_params,
-          x,
-          x,
-          encoder_images=dummy_image if self.config.use_multimodal else None,
-          enable_dropout=False,
-          model_mode=MODEL_MODE_AUTOREGRESSIVE,
-          rngs={"params": rng},
-          mutable=["cache"],
-          page_state=page_state,
-          slot=0,
-      )
-
-      next_pos = jnp.zeros(
-          (int(self.config.per_device_batch_size * jax.device_count()), 1),
-          dtype=jnp.int32,
-      )
-      generated_tokens = jnp.zeros(
-          (int(self.config.per_device_batch_size * jax.device_count()), 1),
-          dtype=jnp.int32,
-      )
-      tokens = jnp.zeros(
-          (int(self.config.per_device_batch_size * jax.device_count()), 1),
-          dtype=jnp.int32,
-      )
-      return {
-          "logits": jnp.zeros(
-              (
-                  int(self.config.per_device_batch_size * jax.device_count()),
-                  1,
-                  self.config.vocab_size,
-              )
-          ),
-          "cache": cache["cache"],
-          "next_pos": next_pos,
-          "generated_tokens": generated_tokens,
-          "tokens": tokens,
-      }
-
-    with nn_partitioning.axis_rules(self.config.logical_axis_rules):
-      abstract_outputs = jax.eval_shape(init, self.abstract_params, page_state)
-    logical_annotations = nn.get_partition_spec(abstract_outputs)
-
-    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
-      mesh_annotations = nn.logical_to_mesh(logical_annotations)
-
-    shardings = jax.tree_util.tree_map(
-        lambda mesh_annotation: jax.sharding.NamedSharding(self._mesh, mesh_annotation),
-        mesh_annotations,
-    )
 
     @functools.partial(jax.jit, out_shardings=shardings)
     def initialize():
