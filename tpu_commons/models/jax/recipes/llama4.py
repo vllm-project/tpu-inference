@@ -79,6 +79,7 @@ class Llama4ScoutModelConfig(ModelConfig):
 
 
 
+
 class Llama4ScoutShardingConfig(ShardingConfig):
     pass
 
