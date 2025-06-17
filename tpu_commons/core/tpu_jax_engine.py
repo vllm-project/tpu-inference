@@ -99,21 +99,17 @@ class MaxEngineConfig:
     return self.keys
 
 
-class MaxEngine(engine_api.Engine):
+class JaxEngine(engine_api.Engine):
   """The computational core of the generative model server.
 
   Engine defines an API that models must adhere to as they plug into the
   JetStream efficient serving infrastructure.
   """
 
-  def __init__(self, 
-    config: Any,
-    vllm_executor, 
-    devices: config_lib.Devices | None = None
-):
+  def __init__(self, vllm_executor):
     self.model_runner = vllm_executor.driver_worker.model_runner
     self.req_id_to_req = {}
-    self.config = config
+    # self.config = config
 
   # Public non-JIT prefill method that updates page state
   def prefill(
@@ -255,6 +251,7 @@ class MaxEngine(engine_api.Engine):
       slot: int,
   ) -> None:
     """Non-JIT wrapper for inserting prefill cache."""
+    prefill_cache = prefix["cache"]
 
     current_page_state = None
     if self.config.attention == "paged" and self.page_manager is not None:
