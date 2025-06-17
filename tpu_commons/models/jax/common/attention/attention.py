@@ -80,6 +80,7 @@ class AttentionMetadata(object):
     prefill_query_start_offsets: jax.Array = None  # [max_num_prefill_seqs + 1]
     num_prefill_seqs: jax.Array = None  # [1]
 
+
 @dataclass
 class AttentionConfig(Config):
     """Configuration for the Attention module.

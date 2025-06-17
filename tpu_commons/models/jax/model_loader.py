@@ -9,7 +9,7 @@ from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 
 from tpu_commons.models.jax.llama import LlamaForCausalLM
-from tpu_commons.tpu_commons.models.jax.recipes.llama4 import Llama4Scout
+from tpu_commons.models.jax.recipes.llama4 import Llama4Scout
 
 
 def _get_model_architecture(config: PretrainedConfig) -> nn.Module:
