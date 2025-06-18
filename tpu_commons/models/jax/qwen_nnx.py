@@ -344,6 +344,13 @@ class Qwen2ForCausalLM(nnx.Module):
             attention_metadata,
         )
 
+        jax.debug.print(
+            "[Qwen2ForCausalLM.__call__]x (before lm_head) shape: {shape}, first 10: {first_10}, sum: {sum}",
+            shape=x.shape,
+            first_10=x.flatten()[:10],
+            sum=jnp.sum(x),
+        )
+
         logits = jnp.dot(x, self.lm_head.value)
 
         jax.debug.print(
