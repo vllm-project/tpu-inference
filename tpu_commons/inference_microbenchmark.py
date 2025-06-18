@@ -15,9 +15,8 @@ import uuid
 
 import jax
 from transformers import AutoTokenizer
-from utils_jax import (  # ADDED get_kv_cache_size_bytes, get_model_size_bytes
-    calculate_prefill_tflops_per_device, get_kv_cache_size_bytes,
-    get_model_size_bytes)
+from utils_jax import (calculate_prefill_tflops_per_device,
+                       get_kv_cache_size_bytes, get_model_size_bytes)
 from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.utils import FlexibleArgumentParser
@@ -31,7 +30,7 @@ MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"
 PROMPT = "I love to"
 DEFAULT_BLOCK_SIZE = 64
 WARMUP_ITERS = 2
-_BENCHMARK_ITERS = 10  # Default iterations for actual performance measurement
+BENCHMARK_ITERS = 10
 
 
 def create_parser():
@@ -192,19 +191,13 @@ def run_decode(engine_core: EngineCore,
         verbose: Whether to print verbose output.
     """
     if verbose:
-        print("\n--- Running Decode Benchmark (Single Execution) ---"
-              )  # Modified print for clarity
+        print("\n--- Running Decode Benchmark (Single Execution) ---")
 
-    # --- Initial Setup for Decode: Add and Prefill a Request ---
-    # This block ensures a request is in the running state for the decode step.
-
-    # Ensure scheduler is clean before this scenario starts (should be from prefill cleanup)
     assert len(engine_core.scheduler.waiting) == 0 and len(
         engine_core.scheduler.running) == 0
 
     request_id_decode_setup = str(uuid.uuid4())
     # Set max_tokens high enough for prompt + 1 decode token + buffer (since only 1 decode step)
-    # The 'benchmark_iters' dependency is removed from max_tokens calculation.
     sampling_params_decode_setup = SamplingParams(max_tokens=len(prompt_ids) +
                                                   5,
                                                   temperature=0.0,
@@ -218,21 +211,15 @@ def run_decode(engine_core: EngineCore,
     req_initial = Request.from_engine_core_request(engine_core_request_initial)
 
     engine_core.scheduler.add_request(req_initial)
-    if verbose:
-        print(
-            f"Added initial client request '{request_id_decode_setup}' for prefill setup for decode benchmark."
-        )
-    assert len(engine_core.scheduler.waiting) == 1
-    assert len(
-        engine_core.scheduler.running) == 0  # Initial state before setup step
 
-    _ = engine_core.step()  # Execute the prefill step for this request
-    jax.block_until_ready(
-        engine_core.scheduler.running)  # Block until JAX execution completes
+    assert len(engine_core.scheduler.waiting) == 1
+    assert len(engine_core.scheduler.running) == 0
+
+    _ = engine_core.step()
+    jax.block_until_ready(engine_core.scheduler.running)
 
     assert len(engine_core.scheduler.waiting) == 0
-    assert len(
-        engine_core.scheduler.running) == 1  # Request should now be in running
+    assert len(engine_core.scheduler.running) == 1
 
     # Verify prefill is complete for this running request
     found_req_prefilled = False
@@ -248,18 +235,14 @@ def run_decode(engine_core: EngineCore,
             break
     assert found_req_prefilled, f"Request with ID {request_id_decode_setup} should be in scheduler.running after prefill setup step."
 
-    # --- Retrieve Sizing Info for Memory Bandwidth (inside run_decode) ---
-    # These parameters are available locally within this function's scope.
     num_model_params = engine_core.model_executor.driver_worker.worker.model_runner.total_model_params_num
     vllm_model_config = engine_core.vllm_config.model_config
 
     model_size_bytes = get_model_size_bytes(num_model_params,
                                             vllm_model_config)
     kv_cache_size_bytes = get_kv_cache_size_bytes(
-        engine_core.vllm_config.cache_config,
-        vllm_model_config)  # Access cache_config from vllm_config
+        engine_core.vllm_config.cache_config, vllm_model_config)
 
-    # --- Timed Single Decode Execution ---
     if verbose:
         print("Executing single decode step...")
 
@@ -267,21 +250,21 @@ def run_decode(engine_core: EngineCore,
         engine_core.profile(is_start=True)
 
     start_time = time.perf_counter()
-    engine_core_output_decode = engine_core.step()  # Execute one decode step
+    engine_core_output_decode = engine_core.step()
     jax.block_until_ready(engine_core.scheduler.running)
     end_time = time.perf_counter()
 
     if should_profile:
         engine_core.profile(is_start=False)
 
-    decode_average_ms = (
-        end_time - start_time) * 1000.0  # Time for this single decode step
+    decode_average_ms = (end_time - start_time) * 1000.0
 
     tokens_this_step = 0
     if len(engine_core_output_decode[0][0].outputs) > 0:
         tokens_this_step = len(
             engine_core_output_decode[0][0].outputs[0].new_token_ids)
-    total_tokens_decoded = tokens_this_step  # For a single step, this is just tokens_this_step
+    total_tokens_decoded = tokens_this_step
+    assert total_tokens_decoded == 1, "Should only have decoded 1 token per decode step"
     tokens_per_sec = total_tokens_decoded / (
         decode_average_ms / 1000.0) if decode_average_ms > 0 else 0
 
@@ -291,13 +274,11 @@ def run_decode(engine_core: EngineCore,
     ar_average_ms_per_seq = decode_average_ms / ar_global_batch_size if ar_global_batch_size > 0 else 0
 
     # Calculate memory bandwidth
-    seconds_per_step_actual = (decode_average_ms / 1000.0
-                               )  # Time for the single step
+    seconds_per_step_actual = (decode_average_ms / 1000.0)
     GB_per_step_per_device = (model_size_bytes +
                               kv_cache_size_bytes) / 1e9 / jax.device_count()
     bw_per_device = GB_per_step_per_device / seconds_per_step_actual if seconds_per_step_actual > 0 else 0
 
-    # --- Print Results in MaxText-like Format ---
     if verbose:
         print(
             f"\nDecode benchmark results:\n"
@@ -307,56 +288,26 @@ def run_decode(engine_core: EngineCore,
             f"\tAR throughput: {tokens_per_sec:.3f} tokens/second\n"
             f"\tAR memory bandwidth per device: {bw_per_device:.3f} GB/s\n\n")
 
-    # # --- Final Cleanup for Decode Scenario ---
-    # actual_processed_request_id_decode_final = None
-    # if len(engine_core.scheduler.running) > 0:
-    #     actual_processed_request_id_decode_final = engine_core.scheduler.running[0].request_id
 
-    # if actual_processed_request_id_decode_final:
-    #     engine_core.scheduler.finish_requests(
-    #         {actual_processed_request_id_decode_final},
-    #         RequestStatus.FINISHED_LENGTH_CAPPED)
-    #     jax.block_until_ready(engine_core.scheduler.running)
-    # if verbose:
-    #     print("Finished executing decode benchmark.")
-
-
-# --- NEW HELPER FUNCTION: Forcefully clear scheduler state ---
-def _clear_scheduler_state(engine_core: EngineCore, verbose=True):
+def clear_scheduler_state(engine_core: EngineCore):
     """
     Forcefully clears the active state of the scheduler for benchmarking purposes.
-    This is an intrusive operation and should only be used between isolated benchmark runs.
+
+    Args:
+        engine_core: EngineCore instance.
     """
     if len(engine_core.scheduler.waiting) > 0:
-        if verbose:
-            print(
-                f"DEBUG: Clearing {len(engine_core.scheduler.waiting)} requests from scheduler.waiting."
-            )
-        engine_core.scheduler.waiting.clear()  # Directly clear the deque
+        engine_core.scheduler.waiting.clear()
 
     if len(engine_core.scheduler.running) > 0:
-        if verbose:
-            print(
-                f"DEBUG: Clearing {len(engine_core.scheduler.running)} requests from scheduler.running."
-            )
-        # For running requests, ideally, their KV cache blocks should be freed.
-        # Since this is for a benchmark reset, we'll just remove them from the list.
-        # Proper block freeing happens via vLLM's `finish_requests` and `_update_states`.
-        # This direct clear is for test isolation when `finish_requests` isn't enough.
-        engine_core.scheduler.running.clear()  # Directly clear the list
+        engine_core.scheduler.running.clear()
 
     if hasattr(engine_core.scheduler, 'swapped') and len(
             engine_core.scheduler.swapped) > 0:
-        if verbose:
-            print(
-                f"DEBUG: Clearing {len(engine_core.scheduler.swapped)} requests from scheduler.swapped."
-            )
-        engine_core.scheduler.swapped.clear()  # Clear swapped if it exists
+        engine_core.scheduler.swapped.clear()
 
-    # Assert after clearing to confirm the state
     assert len(engine_core.scheduler.waiting) == 0
     assert len(engine_core.scheduler.running) == 0
-    if verbose: print("DEBUG: Scheduler state forcefully cleared.")
 
 
 def main(args):
@@ -393,36 +344,23 @@ def main(args):
     num_model_params = engine_core.model_executor.driver_worker.worker.model_runner.total_model_params_num
     print(f"Num model params: {num_model_params}")
 
-    # --- MODIFIED: Warmup loop uses _clear_scheduler_state ---
     print("\n\n--- Starting Warmup ---")
     for _ in range(WARMUP_ITERS):
-        _clear_scheduler_state(
-            engine_core)  # <--- NEW: Clear state before prefill warmup
+        # TODO: is this necessary?
+        clear_scheduler_state(engine_core)
         run_prefill(engine_core, tokenizer, prompt_ids, False, verbose=False)
-
-        _clear_scheduler_state(
-            engine_core)  # <--- NEW: Clear state before decode warmup
+        clear_scheduler_state(engine_core)
         run_decode(engine_core, tokenizer, prompt_ids, False, verbose=False)
 
     print("--- Finished Warmup ---")
 
-    # --- MODIFIED: Actual benchmark runs use _clear_scheduler_state ---
-    _clear_scheduler_state(
-        engine_core)  # <--- NEW: Clear state before actual prefill
+    clear_scheduler_state(engine_core)
     run_prefill(engine_core, tokenizer, prompt_ids, should_profile)
 
-    _clear_scheduler_state(
-        engine_core)  # <--- NEW: Clear state before actual decode
+    clear_scheduler_state(engine_core)
     run_decode(engine_core, tokenizer, prompt_ids, should_profile)
 
-    # --- Final Cleanup after all scenarios ---
-    # This final cleanup now relies on _clear_scheduler_state
-    _clear_scheduler_state(engine_core)  # <--- NEW: Final clear
-    print(
-        f"\n--- Final state check: waiting={len(engine_core.scheduler.waiting)}, running={len(engine_core.scheduler.running)}"
-    )
-    assert len(engine_core.scheduler.waiting) == 0
-    assert len(engine_core.scheduler.running) == 0
+    clear_scheduler_state(engine_core)
 
 
 if __name__ == "__main__":
