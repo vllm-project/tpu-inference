@@ -6,7 +6,6 @@ import jax.numpy as jnp
 import numpy as np
 from vllm.logger import init_logger
 from vllm.utils import cdiv
-from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)
 
@@ -95,15 +94,11 @@ class MultiGroupBlockTable:
 
     def __init__(self, max_num_reqs: int, max_model_len: int,
                  max_num_batched_tokens: int, pin_memory: bool, device: Any,
-                 kv_cache_config: KVCacheConfig) -> None:
-        max_num_blocks_per_req = [
-            cdiv(max_model_len, g.kv_cache_spec.block_size)
-            for g in kv_cache_config.kv_cache_groups
-        ]
+                 block_sizes: list[int]) -> None:
         self.block_tables = [
-            BlockTable(max_num_reqs, max_num_blocks_per_req[i],
+            BlockTable(max_num_reqs, cdiv(max_model_len, block_size),
                        max_num_batched_tokens, pin_memory, device)
-            for i in range(len(kv_cache_config.kv_cache_groups))
+            for block_size in block_sizes
         ]
 
     def append_row(self, block_ids: list[list[int]], row_idx: int) -> None:

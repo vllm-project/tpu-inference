@@ -1,8 +1,14 @@
-## Setup development environment
+## Develop on a TPU VM
 
 ### Install `vLLM-TPU`:
 
 Follow this [guide](https://docs.vllm.ai/en/latest/getting_started/installation/ai_accelerator.html#set-up-using-python) to install vLLM from source.
+
+**NOTE**: Right after `git clone` vLLM repo and before running any `pip install` commands, run the following command to pin the version:
+
+```
+git checkout 12575cfa7aa176e017735dd2883513b12be54c32
+```
 
 ### Install `tpu_commons`:
 
@@ -25,13 +31,13 @@ pre-commit install --hook-type pre-commit --hook-type commit-msg
 pre-commit run --all-files
 ```
 
-## Run JAX path examples
+### Run JAX path examples
 
 Run `Llama 3.1 8B` offline inference on 4 TPU chips:
 
 ```
 export TPU_BACKEND_TYPE=jax
-python vllm/examples/offline_inference/basic/generate.py \
+python tpu_commons/examples/offline_inference.py \
     --model=meta-llama/Llama-3.1-8B \
     --tensor_parallel_size=4 \
     --task=generate \
@@ -39,14 +45,14 @@ python vllm/examples/offline_inference/basic/generate.py \
     --max_num_seqs=1
 ```
 
-## Run vLLM Pytorch models on the JAX path
+### Run vLLM Pytorch models on the JAX path
 
 Run the vLLM's implementation of `Llama 3.1 8B`, which is in Pytorch. It is the same command as above with the extra env var `MODEL_IMPL_TYPE=vllm`:
 
 ```
 export MODEL_IMPL_TYPE=vllm
 export TPU_BACKEND_TYPE=jax
-python vllm/examples/offline_inference/basic/generate.py \
+python tpu_commons/examples/offline_inference.py \
     --model=meta-llama/Llama-3.1-8B \
     --tensor_parallel_size=4 \
     --task=generate \
@@ -54,12 +60,28 @@ python vllm/examples/offline_inference/basic/generate.py \
     --max_num_seqs=1
 ```
 
-## Relevant env
+Run the vLLM Pytorch `Qwen3-30B-A3B` MoE model, use `--enable-expert-parallel` for expert parallelism, otherwise it defaults to tensor parallelism:
 
-To enable JAX path:
+```
+export MODEL_IMPL_TYPE=vllm
+export TPU_BACKEND_TYPE=jax
+python vllm/examples/offline_inference/basic/generate.py \
+    --model=Qwen/Qwen3-30B-A3B \
+    --tensor_parallel_size=4 \
+    --task=generate \
+    --max_model_len=1024 \
+    --max_num_seqs=1 \
+    --enable-expert-parallel
+```
+
+### Relevant env
+
+To switch different backends:
 
 ```
 TPU_BACKEND_TYPE=jax
+TPU_BACKEND_TYPE=torchax
+TPU_BACKEND_TYPE=pytorch_xla
 ```
 
 To switch different model implementations:
@@ -70,16 +92,54 @@ MODEL_IMPL_TYPE=flax_nnx
 MODEL_IMPL_TYPE=vllm
 ```
 
+To enable profiling:
+
+```
+VLLM_TORCH_PROFILER_DIR=$PWD
+```
+
 To enable experimental scheduler:
 
 ```
 EXP_SCHEDULER=1
 ```
 
-To inspect model weights sharding:
+## Develop on a CPU VM and run docker on a TPU VM
+
+### On the CPU VM
+
+Build docker image:
 
 ```
-INSPECT_MODEL=1
+cd ~
+git clone https://github.com/vllm-project/tpu_commons.git
+cd tpu_commons
+
+DOCKER_URI=<Specify a GCR URI>
+# example:
+# DOCKER_URI=gcr.io/cloud-nas-260507/ullm:$USER-test
+
+docker build -f docker/Dockerfile -t $DOCKER_URI .
+docker push $DOCKER_URI
+```
+
+### On the TPU-VM side:
+
+Pull the docker image and run it:
+
+```
+DOCKER_URI=<the same URI used in docker build>
+docker pull $DOCKER_URI
+docker run \
+  --rm \
+  -e TPU_BACKEND_TYPE=jax \
+  $DOCKER_URI \
+  python /workspace/tpu_commons/examples/offline_inference.py \
+  --model=meta-llama/Llama-3.1-8B \
+  --tensor_parallel_size=4 \
+  --task=generate \
+  --max_model_len=1024 \
+  --max_num_seqs=1
 ```
 
 ## Torchax Guide
@@ -134,33 +194,4 @@ BUILDKITE_COMMIT=3843efc .buildkite/scripts/run_in_docker.sh bash /workspace/tpu
 While this will run the code in a Docker image, you can also run the bare `tests/e2e/benchmarking/llama3.1_8b_mmlu.sh` script itself,
 being sure to pass the proper args for your machine.
 
-## How to develop using docker images?
-
-### On the development machine (can be without TPU):
-
-Build docker image
-
-```
-docker build -f docker/Dockerfile -t <YOUR_IMAGE_NAME>:<YOUR_IMAGE_TAG> .
-```
-
-### On the TPU-VM side:
-Pull the docker image and run it
-
-```
-TPU_BACKEND_TYPE=jax
-DOCKER_URI=<YOUR_IMAGE_NAME>:<YOUR_IMAGE_TAG>
-docker pull $DOCKER_URI
-docker run \
-  --rm \
-  -e TPU_BACKEND_TYPE="$TPU_BACKEND_TYPE" \
-  -e HF_TOKEN=<YOUR_HF_TOKEN> \
-  -e VLLM_XLA_CHECK_RECOMPILATION=1 \
-  $DOCKER_URI \
-  python /workspace/vllm/examples/offline_inference/basic/generate.py \
-  --model=meta-llama/Llama-3.1-8B \
-  --tensor_parallel_size=4 \
-  --task=generate \
-  --max_model_len=1024 \
-  --max_num_seqs=1
-```
+You might need to run the benchmark client *twice* to make sure all compilations are cached server-side.

@@ -26,7 +26,7 @@ class JaxQKVParallelLinear(torch.nn.Module):
         self.q_bias: Optional[Parameter]
         self.k_bias: Optional[Parameter]
         self.v_bias: Optional[Parameter]
-        self._load_weights_from_qkv_linear(qkv_linear)
+        self._load_weights_from_vllm_layer(qkv_linear)
         self._shard_weight(mesh)
 
     def _shard_weight(self, mesh: Mesh):
@@ -47,7 +47,7 @@ class JaxQKVParallelLinear(torch.nn.Module):
             self.v_bias.apply_jax_(jax.device_put,
                                    NamedSharding(mesh, P('model')))
 
-    def _load_weights_from_qkv_linear(self, qkv_linear: torch.nn.Module):
+    def _load_weights_from_vllm_layer(self, qkv_linear: torch.nn.Module):
         q_proj_size, k_proj_size, _ = qkv_linear.output_sizes
         # The weight of qkv linear is a concatenation of q, k, and v weights
         # along the output dimension.

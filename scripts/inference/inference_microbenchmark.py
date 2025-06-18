@@ -17,7 +17,6 @@ import uuid
 import jax
 import jax.numpy as jnp
 from transformers import AutoTokenizer
-from utils_jax import calculate_prefill_tflops_per_device, pad_tokens
 from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.utils import FlexibleArgumentParser
@@ -25,6 +24,9 @@ from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request
+
+from tpu_commons.utils_jax import (calculate_prefill_tflops_per_device,
+                                   pad_tokens)
 
 # TODO: change back to  "meta-llama/Llama-3.3-70B-Instruct"
 MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"

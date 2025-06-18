@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh
-from transformers import LlamaConfig, modeling_flax_utils
+from transformers import Qwen2Config, modeling_flax_utils
 from vllm.config import VllmConfig
 
 from tpu_commons.logger import init_logger
@@ -19,9 +19,9 @@ logger = init_logger(__name__)
 init_fn = nnx.initializers.uniform()
 
 
-class LlamaMLP(nnx.Module):
+class Qwen2MLP(nnx.Module):
 
-    def __init__(self, config: LlamaConfig, dtype: jnp.dtype, rng: nnx.Rngs):
+    def __init__(self, config: Qwen2Config, dtype: jnp.dtype, rng: nnx.Rngs):
         hidden_size = config.hidden_size
         intermediate_size = config.intermediate_size
         act = config.hidden_act
@@ -60,38 +60,44 @@ class LlamaMLP(nnx.Module):
         return result
 
 
-class LlamaAttention(nnx.Module):
+class Qwen2Attention(nnx.Module):
 
-    def __init__(self, config: LlamaConfig, dtype: jnp.dtype, rng: nnx.Rngs,
+    def __init__(self, config: Qwen2Config, dtype: jnp.dtype, rng: nnx.Rngs,
                  mesh: Mesh):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
         self.rope_theta = config.rope_theta
         self.rope_scaling = getattr(config, "rope_scaling", None)
-        self.head_dim = config.head_dim
+        self.head_dim = config.hidden_size // config.num_attention_heads
 
         self.mesh = mesh
 
         self.q_proj = nnx.Einsum(
             "BTD,NDH->BNTH",
             (self.num_heads, self.hidden_size, self.head_dim),
+            (self.num_heads, self.head_dim),  # bias shape [N, H]
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
+            bias_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
         )
         self.k_proj = nnx.Einsum(
             "BTD,KDH->BKTH",
             (self.num_kv_heads, self.hidden_size, self.head_dim),
+            (self.num_kv_heads, self.head_dim),  # bias shape [K, H])
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
+            bias_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
         )
         self.v_proj = nnx.Einsum(
             "BTD,KDH->BKTH",
             (self.num_kv_heads, self.hidden_size, self.head_dim),
+            (self.num_kv_heads, self.head_dim),  # bias shape [K, H])
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
+            bias_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
         )
         self.o_proj = nnx.Einsum(
@@ -143,9 +149,9 @@ class LlamaAttention(nnx.Module):
         return new_kv_cache, o
 
 
-class LlamaDecoderLayer(nnx.Module):
+class Qwen2DecoderLayer(nnx.Module):
 
-    def __init__(self, config: LlamaConfig, dtype: jnp.dtype, rng: nnx.Rngs,
+    def __init__(self, config: Qwen2Config, dtype: jnp.dtype, rng: nnx.Rngs,
                  mesh: Mesh):
         rms_norm_eps = config.rms_norm_eps
         hidden_size = config.hidden_size
@@ -157,7 +163,7 @@ class LlamaDecoderLayer(nnx.Module):
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
         )
-        self.self_attn = LlamaAttention(config=config,
+        self.self_attn = Qwen2Attention(config=config,
                                         dtype=dtype,
                                         rng=rng,
                                         mesh=mesh)
@@ -168,7 +174,7 @@ class LlamaDecoderLayer(nnx.Module):
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
         )
-        self.mlp = LlamaMLP(
+        self.mlp = Qwen2MLP(
             config=config,
             dtype=dtype,
             rng=rng,
@@ -183,12 +189,14 @@ class LlamaDecoderLayer(nnx.Module):
     ) -> Tuple[KVCache, jax.Array]:
         # Self attention.
         hidden_states = self.input_layernorm(x)
+
         kv_cache, attn_output = self.self_attn(
             is_prefill,
             kv_cache,
             hidden_states,
             attention_metadata,
         )
+
         attn_output += x
 
         # MLP.
@@ -199,7 +207,7 @@ class LlamaDecoderLayer(nnx.Module):
         return kv_cache, outputs
 
 
-class LlamaModel(nnx.Module):
+class Qwen2Model(nnx.Module):
 
     def __init__(self, vllm_config: VllmConfig, rng: nnx.Rngs,
                  mesh: Mesh) -> None:
@@ -210,7 +218,7 @@ class LlamaModel(nnx.Module):
         hidden_size = hf_config.hidden_size
 
         self.layers = [
-            LlamaDecoderLayer(
+            Qwen2DecoderLayer(
                 config=hf_config,
                 dtype=dtype,
                 rng=rng,
@@ -245,7 +253,7 @@ class LlamaModel(nnx.Module):
         return kv_caches, x
 
 
-class LlamaForCausalLM(nnx.Module):
+class Qwen2ForCausalLM(nnx.Module):
 
     def __init__(self, vllm_config: VllmConfig, rng: jax.Array,
                  mesh: Mesh) -> None:
@@ -265,17 +273,20 @@ class LlamaForCausalLM(nnx.Module):
             embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=self.rng,
         )
-        self.model = LlamaModel(
+        self.model = Qwen2Model(
             vllm_config=vllm_config,
             rng=self.rng,
             mesh=mesh,
         )
 
-        # TODO(xiang): Llama3.2 does not use lm_head
-        self.lm_head = nnx.Param(
-            init_fn(self.rng.params(), (hidden_size, vocab_size), dtype),
-            sharding=(None, "model"),
-        )
+        hf_config = model_config.hf_config
+        if hf_config.tie_word_embeddings:
+            self.lm_head = self.embed.embedding
+        else:
+            self.lm_head = nnx.Param(
+                init_fn(self.rng.params(), (hidden_size, vocab_size), dtype),
+                sharding=(None, "model"),
+            )
 
     def __call__(
         self,
@@ -289,6 +300,7 @@ class LlamaForCausalLM(nnx.Module):
         top_ks: jax.Array = None,
         *args,
     ) -> Tuple[List[KVCache], jax.Array, jax.Array]:
+
         x = self.embed(input_ids)
 
         kv_caches, x = self.model(
@@ -298,7 +310,13 @@ class LlamaForCausalLM(nnx.Module):
             attention_metadata,
         )
 
-        logits = jnp.dot(x, self.lm_head.value)
+        hf_config = self.vllm_config.model_config.hf_config
+        if hf_config.tie_word_embeddings:
+            # self.lm_head.value is (vocab_size, hidden_size)
+            logits = jnp.dot(x, self.lm_head.value.T)
+        else:
+            # self.lm_head.value is (hidden_size, vocab_size)
+            logits = jnp.dot(x, self.lm_head.value)
 
         next_tokens = sample(
             is_prefill,
@@ -316,7 +334,6 @@ class LlamaForCausalLM(nnx.Module):
 
     def load_weights(self):
         mappings = {
-            "lm_head": "lm_head",
             "model.embed_tokens": "embed.embedding",
             "model.layers.*.input_layernorm":
             "model.layers.*.input_layernorm.scale",
@@ -335,8 +352,20 @@ class LlamaForCausalLM(nnx.Module):
             "model.layers.*.self_attn.q_proj.kernel",
             "model.layers.*.self_attn.v_proj":
             "model.layers.*.self_attn.v_proj.kernel",
+            "model.layers.*.self_attn.q_proj.bias":
+            "model.layers.*.self_attn.q_proj.bias",
+            "model.layers.*.self_attn.k_proj.bias":
+            "model.layers.*.self_attn.k_proj.bias",
+            "model.layers.*.self_attn.v_proj.bias":
+            "model.layers.*.self_attn.v_proj.bias",
             "model.norm": "model.norm.scale",
         }
+
+        # Add lm_head mapping only if it's not tied to embeddings
+        hf_config = self.vllm_config.model_config.hf_config
+        if not hf_config.tie_word_embeddings:
+            mappings["lm_head"] = "lm_head"
+
         load_hf_weights(vllm_config=self.vllm_config,
                         model=self,
                         mappings=mappings,

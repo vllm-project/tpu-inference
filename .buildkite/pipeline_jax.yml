@@ -1,8 +1,8 @@
 steps:
   # -----------------------------------------------------------------
-  # TEST STEPS - Calling wrapper, using python3 -m pytest
+  # TEST STEPS - Calling wrapper
   # -----------------------------------------------------------------
-   - label: "TPU Test 13: ragged_paged_attention_test.py"
+   - label: "ragged_paged_attention_test.py"
      key: tpu_test_0
      soft_fail: true
      env:
@@ -12,7 +12,7 @@ steps:
      commands:
        - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_commons/tests/ragged_paged_attention_test.py
 
-   - label: "TPU Test 14: E2E vLLM MLPerf Benchmarking Run"
+   - label: "benchmarking/llama3.1_8b_mmlu.sh"
      key: tpu_test_1
      soft_fail: true
      env:
@@ -25,9 +25,10 @@ steps:
   # -----------------------------------------------------------------
   # NOTIFICATION STEP
   # -----------------------------------------------------------------
-   - label: "TPU V1 Test Notification"
+   - label: "TPU Test Notification"
      depends_on:
        - tpu_test_0
+       - tpu_test_1
      agents:
        queue: tpu_v6e_queue
      commands: "bash .buildkite/scripts/check_results.sh"

@@ -11,12 +11,11 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
-from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
 
-from tpu_commons.worker.block_table_jax import MultiGroupBlockTable
+from tpu_commons.runner.block_table_jax import MultiGroupBlockTable
 
 _SAMPLING_EPS = 1e-5
 
@@ -66,7 +65,7 @@ class InputBatch:
         device: Any,
         pin_memory: bool,
         vocab_size: int,
-        kv_cache_config: KVCacheConfig,
+        block_sizes: list[int],
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
@@ -101,7 +100,7 @@ class InputBatch:
             max_num_batched_tokens=max_num_batched_tokens,
             pin_memory=pin_memory,
             device=device,
-            kv_cache_config=kv_cache_config,
+            block_sizes=block_sizes,
         )
 
         # Sampling-related.
