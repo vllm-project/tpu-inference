@@ -88,7 +88,7 @@ class JaxEngine(engine_api.Engine):
                                                       new_computed_blocks=computed_blocks)
     new_block_ids = self.kv_cache_manager.get_block_ids(vllm_req_data.request_id)
     request = NewRequestData.from_request(vllm_req_data, new_block_ids)
-    logger.info("Finished allocating blocks for prefill req %s", request.__dict__)
+    logger.info("Finished allocating blocks for prefill req %s", request.req_id)
     if self.req_id_to_req.get(request.req_id) == None:
       self.req_id_to_req[request.req_id] = vllm_req_data
     input_batch = self.model_runner.input_batch
@@ -109,7 +109,7 @@ class JaxEngine(engine_api.Engine):
     if inputs is not None:
       model_inputs, (running_indices, output_token_indices) = inputs
       # TODO change the model interface such that prefill returns 
-      kv_caches, next_tokens, logits = self.model_runner.model_fn(*model_inputs)
+      self.model_runner.kv_caches, next_tokens, logits = self.model_runner.model_fn(*model_inputs)
       self.model_runner.output_cache = \
       self.model_runner.write_outputs(self.model_runner.output_cache,
                                       next_tokens,
@@ -161,11 +161,11 @@ class JaxEngine(engine_api.Engine):
     )
     prefix = {
       "seq": vllm_req_data,
-      "cache": kv_caches,
+      "cache": self.model_runner.kv_caches,
       "next_tokens": next_tokens,
       "running_indices": running_indices,
       "output_token_indices": output_token_indices, 
-      "attention_metadata": model_inputs[5], #Ask people to structurize this
+      "attention_metadata": model_inputs[4], #Ask people to structurize this
     }  
     return prefix, runner_output
 
@@ -238,7 +238,7 @@ class JaxEngine(engine_api.Engine):
     slot = prefix["attention_metadata"].kv_cache_write_indices
     prefill_cache = prefix["cache"]
     # kv cache is still full now
-    self.model_runner.kv_caches = prefill_cache
+    # self.model_runner.kv_caches = prefill_cache
 
   def get_prefix_destination_sharding(self) -> Any:
     return None
