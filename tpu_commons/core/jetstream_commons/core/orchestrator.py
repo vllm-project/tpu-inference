@@ -89,7 +89,7 @@ from typing import Any, AsyncIterator, Optional, Tuple, cast
 
 import grpc
 import jax
-from tpu_commons.core.jetstream_commons.engine import engine_api, tokenizer_api, token_utils
+from tpu_commons.core.jetstream_commons.engine import engine_api
 import numpy as np
 
 from vllm.v1.outputs import ModelRunnerOutput
@@ -669,14 +669,7 @@ class Driver:
 
         for slot, request in my_live_requests.items():
           if request is not None:
-            results, complete = token_utils.process_result_tokens(
-                tokenizer=tokenizer,
-                slot=slot,
-                slot_max_length=request.max_tokens,
-                result_tokens=result_tokens,
-                is_client_side_tokenization=request.is_client_side_tokenization,
-                complete=request.complete,
-            )
+            results, complete = None, True
             request.complete = complete
             # Return some output samples.
             request.enqueue_samples(results)

@@ -37,10 +37,8 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import EngineHandshakeMetadata, EngineZmqAddresses
 from vllm.version import __version__ as VLLM_VERSION
 from tpu_commons.core.jetstream_commons.core import orchestrator
-from tpu_commons.core.jetstream_commons.engine import mock_engine
 from tpu_commons.core.tpu_jax_engine import JaxEngine
 
-from tpu_commons.core.jetstream_commons.core.proto import jetstream_pb2
 
 logger = init_logger(__name__)
 

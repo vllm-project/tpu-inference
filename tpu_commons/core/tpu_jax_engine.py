@@ -40,12 +40,7 @@ from vllm.v1.core.sched.output import CachedRequestData, NewRequestData
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.logger import init_logger
 
-from tpu_commons.core.jetstream_commons.core import config_lib
 from tpu_commons.core.jetstream_commons.engine import engine_api
-from tpu_commons.core.jetstream_commons.engine import token_utils
-from tpu_commons.core.jetstream_commons.engine import tokenizer_api
-from tpu_commons.core.jetstream_commons.engine.tokenizer_pb2 import TokenizerParameters
-from tpu_commons.core.jetstream_commons.engine.tokenizer_pb2 import TokenizerType
 
 from tpu_commons.worker.input_batch_jax import CachedRequestState, InputBatch
 
