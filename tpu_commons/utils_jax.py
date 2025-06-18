@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Any, List, Tuple
+from bisect import bisect_left
+from typing import Any, List, Tuple, Union
 
 import jax
 import jax.numpy as jnp
 import jax.tree_util
+import numpy as np
 from ray._private.accelerators import TPUAcceleratorManager
 
 GBYTES = 1024 * 1024 * 1024
@@ -64,12 +66,10 @@ def array_info(name: str, x: jax.Array) -> str:
 
 
 def calculate_prefill_tflops_per_device(
-    num_model_parameters: int,
-    prefill_length: int,
-    vllm_model_config:
-    Any,  # <--- MODIFIED: Now takes vLLM's ModelConfig (e.g., vllm_config.model_config)
-    log: bool = True
-) -> Tuple[float, float, float]:
+        num_model_parameters: int,
+        prefill_length: int,
+        vllm_model_config: Any,
+        log: bool = True) -> Tuple[float, float, float]:
     """
   Calculates the TFLOPs per device for a prefill step based on model parameters and sequence length.
   Based on the formula from MaxText (arxiv.org/pdf/2204.02311.pdf Appendix B).
@@ -88,9 +88,9 @@ def calculate_prefill_tflops_per_device(
     A tuple containing: (total_tflops, learnable_weight_tflops, causal_attention_tflops)
   """
     # Extract relevant config parameters from the Hugging Face model config NESTED inside vllm_model_config
-    num_query_heads = vllm_model_config.hf_config.num_attention_heads  # <--- MODIFIED
-    num_decoder_layers = vllm_model_config.hf_config.num_hidden_layers  # <--- MODIFIED
-    head_dim = vllm_model_config.hf_config.hidden_size // vllm_model_config.hf_config.num_attention_heads  # <--- MODIFIED
+    num_query_heads = vllm_model_config.hf_config.num_attention_heads
+    num_decoder_layers = vllm_model_config.hf_config.num_hidden_layers
+    head_dim = vllm_model_config.hf_config.hidden_size // vllm_model_config.hf_config.num_attention_heads
 
     learnable_weight_tflops = 2 * num_model_parameters * prefill_length / jax.device_count(
     ) / 1e12
@@ -122,9 +122,8 @@ def count_model_parameters(params: Any) -> int:
         lambda x, y: x + y, jax.tree_util.tree_map(lambda x: x.size, params))
 
 
-def get_kv_cache_size_bytes(
-    kv_cache_config: Any, vllm_model_config: Any
-) -> int:  # <--- MODIFIED: Now takes vLLM's ModelConfig
+def get_kv_cache_size_bytes(kv_cache_config: Any,
+                            vllm_model_config: Any) -> int:
     """
     Calculates the total size of the KV cache in bytes.
 
@@ -142,20 +141,18 @@ def get_kv_cache_size_bytes(
     block_size = kv_cache_config.block_size  # Number of tokens stored per block
 
     # Access from vllm_model_config
-    num_kv_heads = vllm_model_config.get_total_num_kv_heads()  # <--- MODIFIED
-    head_size = vllm_model_config.get_head_size()  # <--- MODIFIED
+    num_kv_heads = vllm_model_config.get_total_num_kv_heads()
+    head_size = vllm_model_config.get_head_size()
 
     # Access dtype from vllm_model_config
-    dtype_itemsize = jnp.dtype(
-        vllm_model_config.dtype).itemsize  # <--- MODIFIED
+    dtype_itemsize = jnp.dtype(vllm_model_config.dtype).itemsize
 
     total_kv_cache_bytes = num_blocks * block_size * num_kv_heads * head_size * 2 * dtype_itemsize
     return total_kv_cache_bytes
 
 
-def get_model_size_bytes(
-    num_model_parameters: int, vllm_model_config: Any
-) -> int:  # <--- MODIFIED: Now takes vLLM's ModelConfig
+def get_model_size_bytes(num_model_parameters: int,
+                         vllm_model_config: Any) -> int:
     """
     Calculates the total size of model parameters in bytes.
 
@@ -167,7 +164,59 @@ def get_model_size_bytes(
         int: Total memory size of model parameters in bytes.
     """
     # Access dtype from vllm_model_config
-    dtype_itemsize = jnp.dtype(
-        vllm_model_config.dtype).itemsize  # <--- MODIFIED
+    dtype_itemsize = jnp.dtype(vllm_model_config.dtype).itemsize
 
     return num_model_parameters * dtype_itemsize
+
+
+def take_nearest_length(lengths: list[int], length: int) -> int:
+    """Gets the nearest length to the right in a set of lengths.
+
+  Args:
+    lengths: A list of integers.
+    length: An integer.
+
+  Returns:
+    The nearest length to the right in the list.
+  """
+    pos = bisect_left(lengths, length)
+    if pos == len(lengths):
+        return lengths[-1]
+    return lengths[pos]
+
+
+def pad_tokens(
+    tokens: Union[List[int], np.ndarray],
+    pad_id: int,
+    prefill_lengths: List[int],
+    return_as_list: bool = True,
+) -> Tuple[Union[jax.Array, np.ndarray], int]:
+    """Pads tokens to the nearest prefill length that is equal to or greater
+     than the token length.
+
+  Args:
+    tokens: Tokens.
+    pad_id: Pad ID.
+    prefill_lengths: Buckets to pad the sequence to for static compilation.
+    return_as_list: Whether to return the padded tokens as a list.
+
+  Returns:
+    tokens: Tokenized into integers.
+    true_length: Actual length of the non-padded sequence.
+  """
+    assert pad_id == 0, "Further logic required if pad_id not 0."
+    if isinstance(tokens, list):
+        tokens = np.array(tokens)
+    true_length = tokens.shape[-1]
+    padded_length = take_nearest_length(prefill_lengths, true_length)
+    padding = padded_length - true_length
+    if padding < 0:
+        print("Provided sequence longer than available.")
+        # Take the last N tokens if we have too many.
+        padded_tokens = tokens[-padded_length:]
+    else:
+        padded_tokens = np.pad(tokens, (0, padding),
+                               constant_values=(pad_id, ))
+    if return_as_list:
+        padded_tokens = padded_tokens.tolist()
+    return padded_tokens, true_length
