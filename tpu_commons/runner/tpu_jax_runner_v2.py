@@ -306,24 +306,20 @@ class TPUModelRunner():
 
         running_indices = []
         output_token_indices = []
+        req_ids = []
 
         for i, seq in enumerate(all_reqs):
             # NOTE(pooyam): Unfinished prefills should not return anything to vLLM scheduler.
             if not self._is_generating_new_token(scheduler_output, seq):
                 continue
 
+            req_ids.append(seq.req_id)
             index = self.input_batch.req_id_to_index[seq.req_id]
             output_token_index = max(
                 self.input_batch.num_computed_tokens_cpu[index] -
                 self.input_batch.num_prompt_tokens[index] + 1, 0)
             running_indices.append(index)
             output_token_indices.append(output_token_index)
-            seq_len = max(self.input_batch.num_prompt_tokens[index],
-                          self.input_batch.num_computed_tokens_cpu[index])
-            self.input_batch.token_ids_cpu[
-                index,
-                seq_len] = self.input_batch.token_ids_cpu[index, seq_len -
-                                                          1] + 1  # Dummy
 
             # TODO(pooyam): Figure out why all three of `num_tokens`, `num_prompt_tokens`, and 'num_computed_tokens_cpu` exist.
             prompt_logprobs_dict[seq.req_id] = None
@@ -339,8 +335,22 @@ class TPUModelRunner():
             # NOTE(pooyam): vLLM scheduler reads via `sampled_token_ids[req_index]` where sampled_token_ids is `list[list[int]]`.
             # Not sure why they didn't make it dictionary because not all running sequences will be scheduled at each iter and
             # we are sending pointless [] as the output of such requests. I think it's possible to optimize this if we just send a dict.
-            for running_index, output in zip(running_indices, outputs):
+            for req_id, running_index, output, output_token_index in zip(
+                    req_ids,
+                    running_indices,
+                    outputs,
+                    output_token_indices,
+                    strict=True):
+                req_state = self.requests[req_id]
+                seq_len = (req_state.num_computed_tokens +
+                           scheduler_output.num_scheduled_tokens[req_id])
+                assert seq_len <= req_state.num_tokens
+                assert output_token_index >= 0
                 sampled_token_ids[running_index] = [output]
+
+                self.input_batch.token_ids_cpu[running_index, seq_len] = output
+                req_state.output_token_ids.append(output)
+                self.input_batch.num_tokens[running_index] += 1
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
