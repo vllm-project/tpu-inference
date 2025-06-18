@@ -37,7 +37,7 @@ Run `Llama 3.1 8B` offline inference on 4 TPU chips:
 
 ```
 export TPU_BACKEND_TYPE=jax
-python vllm/examples/offline_inference/basic/generate.py \
+python tpu_commons/examples/offline_inference.py \
     --model=meta-llama/Llama-3.1-8B \
     --tensor_parallel_size=4 \
     --task=generate \
@@ -52,7 +52,7 @@ Run the vLLM's implementation of `Llama 3.1 8B`, which is in Pytorch. It is the 
 ```
 export MODEL_IMPL_TYPE=vllm
 export TPU_BACKEND_TYPE=jax
-python vllm/examples/offline_inference/basic/generate.py \
+python tpu_commons/examples/offline_inference.py \
     --model=meta-llama/Llama-3.1-8B \
     --tensor_parallel_size=4 \
     --task=generate \
@@ -78,16 +78,16 @@ MODEL_IMPL_TYPE=flax_nnx
 MODEL_IMPL_TYPE=vllm
 ```
 
+To enable profiling:
+
+```
+VLLM_TORCH_PROFILER_DIR=$PWD
+```
+
 To enable experimental scheduler:
 
 ```
 EXP_SCHEDULER=1
-```
-
-To inspect model weights sharding:
-
-```
-INSPECT_MODEL=1
 ```
 
 ## Develop on a CPU VM and run docker on a TPU VM
@@ -120,7 +120,7 @@ docker run \
   --rm \
   -e TPU_BACKEND_TYPE=jax \
   $DOCKER_URI \
-  python /workspace/vllm/examples/offline_inference/basic/generate.py \
+  python /workspace/tpu_commons/examples/offline_inference.py \
   --model=meta-llama/Llama-3.1-8B \
   --tensor_parallel_size=4 \
   --task=generate \
