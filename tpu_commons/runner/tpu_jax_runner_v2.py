@@ -191,12 +191,14 @@ class TPUModelRunner():
         kv_cache_spec = kv_cache_groups[0].kv_cache_spec
         layer_names = kv_cache_groups[0].layer_names
         # TODO (jacobplatin): figure out how to make this part of the kv_cache_config instead of an env var
-        maybe_quantized_kv_cache_dtype = os.environ.get("QUANTIZED_KV_CACHE_DTYPE")
+        maybe_quantized_kv_cache_dtype = os.environ.get(
+            "QUANTIZED_KV_CACHE_DTYPE")
         self.is_kv_cache_quantized = False
         cache_dtype = jnp.bfloat16
         if maybe_quantized_kv_cache_dtype is not None:
             self.is_kv_cache_quantized = True
-            cache_dtype = get_jnp_dtype_from_str(maybe_quantized_kv_cache_dtype)
+            cache_dtype = get_jnp_dtype_from_str(
+                maybe_quantized_kv_cache_dtype)
 
         # TODO(xiang): fix this together with get_kv_cache_spec
         # cache_dtype = kv_cache_spec.dtype
@@ -215,12 +217,15 @@ class TPUModelRunner():
 
         scale_shape = None
         if self.is_kv_cache_quantized:
-            scale_shape = (kv_cache_spec.num_kv_heads, kv_cache_config.num_blocks,
-                        kv_cache_spec.block_size, 1)
+            scale_shape = (kv_cache_spec.num_kv_heads,
+                           kv_cache_config.num_blocks,
+                           kv_cache_spec.block_size, 1)
 
             logger.info(
-                f"Init kv-cache scale | shape={len(layer_names)} * {scale_shape}")
-            logger.info(f"kv cache quantized | dtype={maybe_quantized_kv_cache_dtype}")
+                f"Init kv-cache scale | shape={len(layer_names)} * {scale_shape}"
+            )
+            logger.info(
+                f"kv cache quantized | dtype={maybe_quantized_kv_cache_dtype}")
 
         # Shard the num_kv_heads dim along the 'model' axis.
         sharding = NamedSharding(self.mesh, PartitionSpec("model"))
@@ -233,15 +238,19 @@ class TPUModelRunner():
                 )
             else:
                 # Return a tuple where the first entry is the values and the second entry is the scales
+                # NOTE: it's crucial to use bfloat16 as the scale_dtype or else you'll face gibberish,
+                # repeating outputs
                 return (jnp.empty(
                     shape=cache_shape,
                     dtype=cache_dtype,
                 ), jnp.empty(
                     shape=scale_shape,
-                    dtype=cache_dtype,
+                    dtype=jnp.bfloat16,
                 ))
 
-        sharded_allocate = jax.jit(_allocate, out_shardings=sharding, static_argnums=(0,))
+        sharded_allocate = jax.jit(_allocate,
+                                   out_shardings=sharding,
+                                   static_argnums=(0, ))
         # sharded_allocate = _allocate
         for _ in layer_names:
             k_cache = sharded_allocate(self.is_kv_cache_quantized)
