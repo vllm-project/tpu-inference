@@ -29,7 +29,7 @@ logger = init_logger(__name__)
 MIN_NUM_SEQS = 8
 # When chunked prefill is enabled, this is the max number of prefill segments that
 # could scheduled in one token batch.
-MAX_PREFILL_SEQS_PER_TOKEN_BATCH = 5
+MAX_PREFILL_SEQS_PER_TOKEN_BATCH = None
 MAX_ALLOWED_PAGE_INDICES_N = (
     128 * 1024
 )  # Based on experiments on v5e, 256x1024 results in smem oom but 128x1024 not. TODO: Adjust this based on TPU version.
@@ -64,6 +64,12 @@ class TPUModelRunner():
         # padded max value to pre-allocate data structures and pre-compile.
         self.max_num_tokens = self.num_tokens_paddings[-1]
         self.vocab_size = self.model_config.get_vocab_size()
+
+        global MAX_PREFILL_SEQS_PER_TOKEN_BATCH
+        # NOTE(pooyam): Currently we don't have a logic in vLLM scheduler to enfore certain upper-bound for number of prefilling seqs.
+        # We can remove this and make it configurable once we have such thing in vLLM scheduler.
+        # Also gxd@ mentioned to me he had not benchmarked the previous number which was `5` so it's not clear even if it's needed or not.
+        MAX_PREFILL_SEQS_PER_TOKEN_BATCH = self.scheduler_config.max_num_seqs
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
@@ -904,13 +910,14 @@ class TPUModelRunner():
         assert num_prefill_seqs > 0
         assert num_prefill_seqs <= MAX_PREFILL_SEQS_PER_TOKEN_BATCH
 
-        # NOTE(pooyam): We add `block_size` here to compensate for the case when decodes are not page-aligned by the scheduler.
-        # Decodes not being page-aligned, does not cause correctness issue but will cause exceeding token budget by block_size amount.
-        # Once the scheduler makes sure both prefill and decodes are page-aligned, we can remove this addition.
+        # NOTE(pooyam): It's possible to remove this loop by approximating by upper bound.
+        num_tokens_scheduled = pad_to_multiple(num_decode_seqs, block_size)
+        for seq in new_full_prefill_seqs + new_partial_prefill_seqs + subsequent_partial_prefill_seqs:
+            num_tokens_scheduled += pad_to_multiple(
+                scheduler_output.num_scheduled_tokens[seq.req_id], block_size)
         num_tokens_scheduled = pad_to_multiple(
-            scheduler_output.total_num_scheduled_tokens + block_size,
-            self.scheduler_config.chunked_prefill_tokens_padding,
-        )
+            num_tokens_scheduled,
+            self.scheduler_config.chunked_prefill_tokens_padding)
 
         if num_decode_seqs > 0:
             decode_input_token_indices = np.full((num_tokens_scheduled, ),
