@@ -150,6 +150,15 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
     num_kv_heads = hf_config.num_key_value_heads
     hidden_size = hf_config.hidden_size
 
+    if num_heads == 0:
+        head_dim = 0
+        if hidden_size > 0:
+            logger.warning(
+                "num_attention_heads is 0, head_dim calculation might be incorrect."
+            )
+    else:
+        head_dim = hidden_size // num_heads
+
     reshape_keys = {
         "q_proj": (num_heads, -1, hidden_size),
         "k_proj": (num_kv_heads, -1, hidden_size),
@@ -157,10 +166,18 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
         "o_proj": (hidden_size, num_heads, -1),
     }
 
+    bias_reshape_keys = {
+        "q_proj.bias": (num_heads, head_dim),
+        "k_proj.bias": (num_kv_heads, head_dim),
+        "v_proj.bias": (num_kv_heads, head_dim)
+    }
+
     params = nnx.state(model)
     for hf_key, hf_weight in hf_model_weights_iterator(model_path,
                                                        framework="flax"):
-        hf_key = hf_key.removesuffix(".weight")
+
+        if hf_key.endswith(".weight"):
+            hf_key = hf_key.removesuffix(".weight")
 
         # Find the corresponding model key using the HF key
         if "layer" in hf_key:
@@ -172,20 +189,26 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
             model_key = mappings[hf_key]
         model_weight = get_param(params, model_key)
 
-        print(
+        logger.debug(
             f"{hf_key}: {hf_weight.shape}  -->  {model_key}: {model_weight.value.shape}"
         )
 
-        # Reshape HF weight if needed
-        for key in reshape_keys:
-            if key in hf_key:
-                hf_weight = jnp.reshape(hf_weight, reshape_keys[key])
-                break
-        # Transpose HF weight if needed
-        for key in transpose_keys:
-            if key in hf_key:
-                hf_weight = jnp.transpose(hf_weight, transpose_keys[key])
-                break
+        if hf_key.endswith(".bias"):
+            for key in bias_reshape_keys:
+                if key in hf_key:
+                    hf_weight = jnp.reshape(hf_weight, bias_reshape_keys[key])
+                    break
+        else:
+            # Reshape HF weight if needed
+            for key in reshape_keys:
+                if key in hf_key:
+                    hf_weight = jnp.reshape(hf_weight, reshape_keys[key])
+                    break
+            # Transpose HF weight if needed
+            for key in transpose_keys:
+                if key in hf_key:
+                    hf_weight = jnp.transpose(hf_weight, transpose_keys[key])
+                    break
         assert model_weight.value.shape == hf_weight.shape
 
         # Update the model weight

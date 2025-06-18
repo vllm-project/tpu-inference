@@ -73,6 +73,11 @@ class TPUWorker(WorkerBase):
             ))
         utils.set_visible_device_ids(device_ids)
 
+    def initialize_cache(self, num_gpu_blocks: int,
+                         num_cpu_blocks: int) -> None:
+        self.cache_config.num_gpu_blocks = num_gpu_blocks
+        self.cache_config.num_cpu_blocks = num_cpu_blocks
+
     def init_device(self):
         self.devices = jax.local_devices()
         self.global_devices = jax.devices()

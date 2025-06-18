@@ -16,16 +16,18 @@ def _get_model_architecture(config: PretrainedConfig) -> nn.Module:
     # NOTE: Use inline imports here, otherwise the normal imports
     # would cause JAX init failure when using multi hosts with Ray.
 
-    impl = os.getenv("MODEL_IMPL_TYPE", "flax_nn").lower()
+    impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
     if impl == "flax_nn":
-        from tpu_commons.models.jax.llama import LlamaForCausalLM
+        from tpu_commons.models.jax.llama_nn import LlamaForCausalLM
     elif impl == "flax_nnx":
-        from tpu_commons.models.jax.llama_nnx import LlamaForCausalLM
+        from tpu_commons.models.jax.llama import LlamaForCausalLM
     else:
         raise NotImplementedError("Unsupported MODEL_IMPL_TYPE")
 
+    # TODO: need a fix from Wenlong on the below
     _MODEL_REGISTRY = {
         "LlamaForCausalLM": LlamaForCausalLM,
+        # "Qwen2ForCausalLM": Qwen2ForCausalLM,
     }
 
     architectures = getattr(config, "architectures", [])
@@ -153,10 +155,10 @@ def get_model(
     rng: jax.Array,
     mesh: Mesh,
 ) -> nn.Module:
-    impl = os.getenv("MODEL_IMPL_TYPE", "flax_nn").lower()
+    impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
     if impl == "flax_nn":
         return get_nn_model(vllm_config, rng, mesh)
-    if impl == "flax_nnx":
+    elif impl == "flax_nnx":
         return get_nnx_model(vllm_config, rng, mesh)
     elif impl == "vllm":
         return get_vllm_model(vllm_config, rng, mesh)

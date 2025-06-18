@@ -20,16 +20,16 @@ from vllm.v1.outputs import ModelRunnerOutput
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.model_loader import get_model
+from tpu_commons.runner.input_batch_jax import CachedRequestState, InputBatch
 from tpu_commons.runner.tpu_torch_xla_runner import _get_token_paddings
 from tpu_commons.runner.utils import determine_do_sampling
-from tpu_commons.worker.input_batch_jax import CachedRequestState, InputBatch
 
 logger = init_logger(__name__)
 
 MIN_NUM_SEQS = 8
 # When chunked prefill is enabled, this is the max number of prefill segments that
 # could scheduled in one token batch.
-MAX_PREFILL_SEQS_PER_TOKEN_BATCH = 5
+MAX_PREFILL_SEQS_PER_TOKEN_BATCH = None
 MAX_ALLOWED_PAGE_INDICES_N = (
     128 * 1024
 )  # Based on experiments on v5e, 256x1024 results in smem oom but 128x1024 not. TODO: Adjust this based on TPU version.
@@ -65,6 +65,12 @@ class TPUModelRunner():
         self.max_num_tokens = self.num_tokens_paddings[-1]
         self.vocab_size = self.model_config.get_vocab_size()
 
+        global MAX_PREFILL_SEQS_PER_TOKEN_BATCH
+        # NOTE(pooyam): Currently we don't have a logic in vLLM scheduler to enfore certain upper-bound for number of prefilling seqs.
+        # We can remove this and make it configurable once we have such thing in vLLM scheduler.
+        # Also gxd@ mentioned to me he had not benchmarked the previous number which was `5` so it's not clear even if it's needed or not.
+        MAX_PREFILL_SEQS_PER_TOKEN_BATCH = self.scheduler_config.max_num_seqs
+
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
 
@@ -74,12 +80,23 @@ class TPUModelRunner():
 
         # TODO(pooyam): These should be set from vllm side with some defaults.
         self.cache_config.sink_size = None
-        self.scheduler_config.decode_blocks_padding = 8
+        self.scheduler_config.decode_blocks_padding = 128
         self.scheduler_config.prefill_len_padding = 128
         self.perplexity_reference_text = None
         self.decode_seqs_padding = 8
         self.cache_config.output_logits = False  # To make model run without error
         self.scheduler_config.chunked_prefill_tokens_padding = 256
+        self.prefill_seqs_padding = 8
+
+        self.input_batch = InputBatch(
+            max_num_reqs=self.max_num_reqs,
+            max_model_len=self.max_model_len,
+            max_num_batched_tokens=self.max_num_tokens,
+            device=None,
+            pin_memory=False,
+            vocab_size=self.model_config.get_vocab_size(),
+            block_sizes=[self.block_size],
+        )
 
         self.kv_caches: List[Tuple[jax.Array, jax.Array]] = []
         self._init_random()
@@ -165,15 +182,6 @@ class TPUModelRunner():
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         self.kv_cache_config = kv_cache_config
-        self.input_batch = InputBatch(
-            max_num_reqs=self.max_num_reqs,
-            max_model_len=self.max_model_len,
-            max_num_batched_tokens=self.max_num_tokens,
-            device=None,
-            pin_memory=False,
-            vocab_size=self.model_config.get_vocab_size(),
-            kv_cache_config=kv_cache_config,
-        )
 
         kv_cache_groups = kv_cache_config.kv_cache_groups
         if len(kv_cache_groups) > 1:
@@ -196,6 +204,9 @@ class TPUModelRunner():
             kv_cache_spec.block_size,
             kv_cache_spec.head_size,
         )
+        logger.info(
+            f"Init kv-cache | shape={len(layer_names)} * {cache_shape}")
+
         # Shard the num_kv_heads dim along the 'model' axis.
         sharding = NamedSharding(self.mesh, PartitionSpec("model"))
 
@@ -273,16 +284,14 @@ class TPUModelRunner():
                                  seq: list[NewRequestData
                                            | CachedRequestData]):
         index = self.input_batch.req_id_to_index[seq.req_id]
-        whole_prompt_len = self.input_batch.num_prompt_tokens[index]
-        prefill_len = scheduler_output.num_scheduled_tokens[seq.req_id]
-        num_prefilled_tokens = self.input_batch.num_computed_tokens_cpu[index]
+        num_tokens = self.input_batch.num_tokens[index]
+        num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
+            seq.req_id]
+        num_computed_tokens = self.input_batch.num_computed_tokens_cpu[index]
 
-        if self.input_batch.num_computed_tokens_cpu[
-                index] >= whole_prompt_len:  # it's being decoded
-            return True
-        else:  # It's being prefilled. It will generate a token only if computed_tokens + scheduled_tokens == prompt_len
-            assert prefill_len + num_prefilled_tokens <= whole_prompt_len
-            return prefill_len + num_prefilled_tokens == whole_prompt_len
+        assert num_computed_tokens + num_scheduled_tokens <= num_tokens
+
+        return not (num_computed_tokens + num_scheduled_tokens < num_tokens)
 
     def execute_model(
         self,
@@ -309,24 +318,20 @@ class TPUModelRunner():
 
         running_indices = []
         output_token_indices = []
+        req_ids = []
 
         for i, seq in enumerate(all_reqs):
             # NOTE(pooyam): Unfinished prefills should not return anything to vLLM scheduler.
             if not self._is_generating_new_token(scheduler_output, seq):
                 continue
 
+            req_ids.append(seq.req_id)
             index = self.input_batch.req_id_to_index[seq.req_id]
             output_token_index = max(
                 self.input_batch.num_computed_tokens_cpu[index] -
                 self.input_batch.num_prompt_tokens[index] + 1, 0)
             running_indices.append(index)
             output_token_indices.append(output_token_index)
-            seq_len = max(self.input_batch.num_prompt_tokens[index],
-                          self.input_batch.num_computed_tokens_cpu[index])
-            self.input_batch.token_ids_cpu[
-                index,
-                seq_len] = self.input_batch.token_ids_cpu[index, seq_len -
-                                                          1] + 1  # Dummy
 
             # TODO(pooyam): Figure out why all three of `num_tokens`, `num_prompt_tokens`, and 'num_computed_tokens_cpu` exist.
             prompt_logprobs_dict[seq.req_id] = None
@@ -342,8 +347,22 @@ class TPUModelRunner():
             # NOTE(pooyam): vLLM scheduler reads via `sampled_token_ids[req_index]` where sampled_token_ids is `list[list[int]]`.
             # Not sure why they didn't make it dictionary because not all running sequences will be scheduled at each iter and
             # we are sending pointless [] as the output of such requests. I think it's possible to optimize this if we just send a dict.
-            for running_index, output in zip(running_indices, outputs):
+            for req_id, running_index, output, output_token_index in zip(
+                    req_ids,
+                    running_indices,
+                    outputs,
+                    output_token_indices,
+                    strict=True):
+                req_state = self.requests[req_id]
+                seq_len = (req_state.num_computed_tokens +
+                           scheduler_output.num_scheduled_tokens[req_id])
+                assert seq_len <= req_state.num_tokens
+                assert output_token_index >= 0
                 sampled_token_ids[running_index] = [output]
+
+                self.input_batch.token_ids_cpu[running_index, seq_len] = output
+                req_state.output_token_ids.append(output)
+                self.input_batch.num_tokens[running_index] += 1
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
@@ -569,7 +588,6 @@ class TPUModelRunner():
             self.max_num_reqs,
             keep_one=keep_one,
         )
-        batch_size = num_seqs
 
         do_sampling = False
         running_indices = np.full((batch_size, ), -1, dtype=np.int32)
@@ -714,8 +732,13 @@ class TPUModelRunner():
         block_size = self.vllm_config.cache_config.block_size
         sliding_window = self.vllm_config.model_config.get_sliding_window()
 
-        # TODO: pad batch_size
         batch_size = len(scheduler_output.scheduled_new_reqs)
+        batch_size = pad_to_multiple(
+            batch_size,
+            self.prefill_seqs_padding,
+            self.scheduler_config.max_num_seqs,
+            True,
+        )
 
         # Full prompt length.
         max_prompt_len = max([
@@ -864,24 +887,48 @@ class TPUModelRunner():
         subsequent_partial_prefill_seqs = []
         decoding_seqs = []
 
-        for seq in scheduler_output.scheduled_new_reqs:
-            seq_index = self.input_batch.req_id_to_index[seq.req_id]
-            num_prompt_tokens = self.input_batch.num_prompt_tokens[seq_index]
-            if num_prompt_tokens == scheduler_output.num_scheduled_tokens[
-                    seq.req_id]:
-                new_full_prefill_seqs.append(seq)
-            else:
-                new_partial_prefill_seqs.append(seq)
+        # NOTE(pooyam): The lesson learned was that `num_prompt_tokens` is not a reliable field to decide prefilling state based on solely.
+        # The reason is that once a request is preempated and added back later, `num_prompt_tokens` still points to original number of prompts.
+        # However, once the request is added back, we need to prefill previous prompt tokens AND previous output tokens again.
+        # We should use `num_scheduled_tokens`, `num_computed_tokens` and **`num_tokens`** in most of the logics.
+        for seq in (scheduler_output.scheduled_new_reqs +
+                    scheduler_output.scheduled_cached_reqs):
+            index = self.input_batch.req_id_to_index[seq.req_id]
+            num_tokens = self.input_batch.num_tokens[index]
+            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
+                seq.req_id]
+            num_computed_tokens = self.input_batch.num_computed_tokens_cpu[
+                index]
 
-        for seq in scheduler_output.scheduled_cached_reqs:
-            seq_index = self.input_batch.req_id_to_index[seq.req_id]
-            num_prompt_tokens = self.input_batch.num_prompt_tokens[seq_index]
-            num_computed_tokens = seq.num_computed_tokens
-            remaining_prefill = max(0, num_prompt_tokens - num_computed_tokens)
-            if remaining_prefill > 0:
-                subsequent_partial_prefill_seqs.append(seq)
+            assert num_computed_tokens + num_scheduled_tokens <= num_tokens
+
+            if num_computed_tokens + num_scheduled_tokens < num_tokens:
+                if num_computed_tokens == 0:
+                    new_partial_prefill_seqs.append(seq)
+                else:
+                    subsequent_partial_prefill_seqs.append(seq)
             else:
-                decoding_seqs.append(seq)
+                if num_computed_tokens == 0:
+                    new_full_prefill_seqs.append(seq)
+                elif num_scheduled_tokens != 1:
+                    subsequent_partial_prefill_seqs.append(seq)
+                elif num_scheduled_tokens == 1:
+                    # We need to distinguish the following cases:
+                    # Case 1: not preempted at all:  prompt: 10 | output tokens: 4 | num_computed: 13 | num scheduled: 1 | num tokens: 14 => decoding and it has written sth before => write to position i=4 in output cache.
+                    # Case 2: preempted and added back:  prompt: 10 | output tokens: 4 | num_computed: 13 | num_scheduled: 1 | num tokens: 14 => prefilling and it has not written sth before => write to position 0 in output cache.
+                    # As you see, metadata related to Case 1 and Case 2 are exactly the same. Then how to distinguish? One idea is to use `resumed_from_preemption` field.
+                    is_cached_req = isinstance(seq, CachedRequestData)
+                    is_resumed_from_preemption = is_cached_req and seq.resumed_from_preemption
+                    if not is_resumed_from_preemption:
+                        if num_computed_tokens < self.input_batch.num_prompt_tokens[
+                                index]:
+                            subsequent_partial_prefill_seqs.append(seq)
+                        else:
+                            decoding_seqs.append(seq)
+                    else:
+                        subsequent_partial_prefill_seqs.append(seq)
+                else:
+                    raise ValueError("This should not happen.")
 
         return new_full_prefill_seqs, new_partial_prefill_seqs, subsequent_partial_prefill_seqs, decoding_seqs
 
@@ -898,10 +945,15 @@ class TPUModelRunner():
         assert num_prefill_seqs > 0
         assert num_prefill_seqs <= MAX_PREFILL_SEQS_PER_TOKEN_BATCH
 
+        # NOTE(pooyam): It's possible to remove this loop by approximating by upper bound.
         num_tokens_scheduled = pad_to_multiple(
-            scheduler_output.total_num_scheduled_tokens,
-            self.scheduler_config.chunked_prefill_tokens_padding,
-        )
+            num_decode_seqs, block_size) if num_decode_seqs > 0 else 0
+        for seq in new_full_prefill_seqs + new_partial_prefill_seqs + subsequent_partial_prefill_seqs:
+            num_tokens_scheduled += pad_to_multiple(
+                scheduler_output.num_scheduled_tokens[seq.req_id], block_size)
+        num_tokens_scheduled = pad_to_multiple(
+            num_tokens_scheduled,
+            self.scheduler_config.chunked_prefill_tokens_padding)
 
         if num_decode_seqs > 0:
             decode_input_token_indices = np.full((num_tokens_scheduled, ),
@@ -978,18 +1030,16 @@ class TPUModelRunner():
                                 new_partial_prefill_seqs +
                                 subsequent_partial_prefill_seqs):
             seq_index = self.input_batch.req_id_to_index[seq.req_id]
-            whole_prompt_len = self.input_batch.num_prompt_tokens[seq_index]
+            num_tokens = self.input_batch.num_tokens[seq_index]
             prefill_len = scheduler_output.num_scheduled_tokens[seq.req_id]
             num_prefilled_tokens = self.input_batch.num_computed_tokens_cpu[
                 seq_index]
-            assert prefill_len + num_prefilled_tokens <= whole_prompt_len
-
-            num_prompt_tokens = self.input_batch.num_prompt_tokens[seq_index]
-            prompt_token_ids = self.input_batch.token_ids_cpu[
-                seq_index, :num_prompt_tokens]
-            prefill_input_ids[:, token_offset:token_offset + prefill_len] = (
-                prompt_token_ids[num_prefilled_tokens:num_prefilled_tokens +
-                                 prefill_len])
+            # TODO(pooyam): How to make sure we are not reading beyond prefill?
+            prefill_input_ids[:, token_offset:token_offset +
+                              prefill_len] = (self.input_batch.token_ids_cpu[
+                                  seq_index,
+                                  num_prefilled_tokens:num_prefilled_tokens +
+                                  prefill_len])
             input_positions[:, token_offset:token_offset + prefill_len] = list(
                 range(
                     num_prefilled_tokens,
@@ -1011,13 +1061,15 @@ class TPUModelRunner():
                                                block_size:math.ceil(
                                                    (num_prefilled_tokens +
                                                     prefill_len) / block_size)]
-            if num_prefilled_tokens + prefill_len == whole_prompt_len:
+
+            assert num_prefilled_tokens + prefill_len <= num_tokens
+
+            if num_prefilled_tokens + prefill_len == num_tokens:
                 # only in this case, a new decode token will be generated
                 last_prefill_token_idx = token_offset + prefill_len - 1
                 running_indices[last_prefill_token_idx] = seq_index
 
                 # Hex-LLM equivalent: output_token_indices[last_prefill_token_idx] = seq.get_decoded_len()
-                assert seq.num_computed_tokens <= whole_prompt_len
                 # NOTE(pooyam): Is there a case where this shouldn't be 0?
                 output_token_indices[last_prefill_token_idx] = 0
 

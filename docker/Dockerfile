@@ -14,12 +14,10 @@ RUN apt-get update && apt-get install -y \
 # Build vLLM
 WORKDIR /workspace/vllm
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-ARG VLLM_COMMIT_SHA=53a5a0ce30dd623808ebd02947e5183f918b6c2f
+ARG VLLM_COMMIT_SHA=12575cfa7aa176e017735dd2883513b12be54c32
 RUN git clone $VLLM_REPO /workspace/vllm
 RUN git reset --hard $VLLM_COMMIT_SHA
 RUN pip install -r requirements/tpu.txt
-# This hack disables the pytorch/xla and torchax code path in tpu_commons
-# RUN sed -i '/TpuPlatform = TpuCommonsPlatform/d' vllm/platforms/tpu.py
 RUN VLLM_TARGET_DEVICE="tpu" pip install -e .
 
 # Install test dependencies

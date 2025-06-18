@@ -9,6 +9,7 @@ Options:
     --profile: Enable profiling (if enabled, must specify --profile-dir)
     --profile_dir: Directory to save profiling data
 """
+import datetime
 import os
 import time
 import uuid
@@ -16,7 +17,6 @@ import uuid
 import jax
 import jax.numpy as jnp
 from transformers import AutoTokenizer
-from utils_jax import calculate_prefill_tflops_per_device, pad_tokens
 from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.utils import FlexibleArgumentParser
@@ -25,8 +25,12 @@ from vllm.v1.engine.core import EngineCore
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request
 
+from tpu_commons.utils_jax import (calculate_prefill_tflops_per_device,
+                                   pad_tokens)
+
 # TODO: change back to  "meta-llama/Llama-3.3-70B-Instruct"
 MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"
+# NOTE: we will pad this to the nearest prefill length (128 currently)
 PROMPT = "I love to"
 DEFAULT_BLOCK_SIZE = 64
 WARMUP_ITERS = 2
@@ -114,7 +118,6 @@ def run_prefill(engine_core: EngineCore,
             f"\n--- Running Prefill Benchmark ({benchmark_iters} Iterations) ---"
         )
 
-    num_model_params = engine_core.model_executor.driver_worker.worker.model_runner.total_model_params_num
     vllm_model_config = engine_core.vllm_config.model_config
 
     total_time_s = 0.0
@@ -188,6 +191,7 @@ def run_prefill(engine_core: EngineCore,
     if verbose:
         print(
             f"\nPrefill benchmark results for length {prefill_len_for_tflops}:\n"
+            f"WARNING: these results include some overhead from the scheduler, so they may not reflect true prefill performance and we recommend checking the profiles directly!\n"
             f"\tPrefill step average time: {prefill_average_ms:.3f} ms\n"
             f"\tPrefill total TFLOPs/device: {total_tflops_per_device_value:.3f}\n"
             f"\tPrefill TFLOPs/sec/device: {tflops_per_sec_per_device:.3f}\n\n"
@@ -310,6 +314,7 @@ def run_decode(
     if verbose:
         print(
             f"\nDecode benchmark results:\n"
+            f"WARNING: these results include some overhead from the scheduler, so they may not reflect true prefill performance and we recommend checking the profiles directly!\n"
             f"\tAR step average time: {decode_average_ms:.3f} ms\n"
             f"\tAR step average time per seq: {ar_average_ms_per_seq:.3f} ms\n"
             f"\tAR global batch size: {ar_global_batch_size}\n"  # TODO: is this really 1? Or is it 8?
@@ -388,6 +393,29 @@ def print_kv_cache_and_model_summary_stats(num_model_params: int,
         f"\tAvg size: {avg_kv_cache_param_size:.3f} bytes\n")
 
 
+def update_vllm_profile_dir(engine_core: EngineCore, profile_dir: str):
+    """
+    Since the profile_dir is an attribute of the worker (and is only configured during
+    initialization), we need to (hackily) set it in the following way.
+
+    Args:
+        engine_core: EngineCore instance.
+        profile_dir: Path to the new profile directory.
+    """
+    engine_core.model_executor.driver_worker.worker.profile_dir = profile_dir
+
+
+def get_current_timestamp() -> str:
+    """
+    Returns the current timestamp in the format YYYY_MM_DD_HH_MM_SS
+
+    Returns:
+        str: Current timestamp in the format YYYY_MM_DD_HH_MM_SS
+    """
+    now = datetime.datetime.now()
+    return f"{now.year}_{now.month:02d}_{now.day:02d}_{now.hour:02d}_{now.minute:02d}_{now.second:02d}"
+
+
 def main(args):
     """
     Main entry point for the script.
@@ -422,7 +450,7 @@ def main(args):
     engine_core = EngineCore(vllm_config=vllm_config,
                              executor_class=executor_class,
                              log_stats=True)
-    global kv_cache_size_bytes, model_size_bytes
+    global kv_cache_size_bytes, model_size_bytes, num_model_params
     num_model_params = engine_core.model_executor.driver_worker.worker.model_runner.total_model_params_num
     model_size_bytes = num_model_params * jnp.dtype(
         vllm_model_config.dtype).itemsize
@@ -441,21 +469,30 @@ def main(args):
                                            kv_cache_num_params,
                                            kv_cache_size_bytes)
 
+    # Run prefill for the various lengths
+    current_timestamp = get_current_timestamp()
     for prefill_length in prefill_lengths:
         assert prefill_length % prefill_len_padding == 0, f"Expected prefill length to be a multiple of {prefill_len_padding}!"
         print(f"\n\n--- Running Prefill for Length {prefill_length} ---")
         # NOTE: this will return the original prompt length as well
         prompt_ids_padded_to_prefill_length, _ = pad_tokens(
             prompt_ids, PAD_TOKEN_ID, [prefill_length], return_as_list=True)
+        profile_dir_for_prefill = os.path.join(
+            profile_dir,
+            f"prefill_length_{prefill_length}_{current_timestamp}")
+        update_vllm_profile_dir(engine_core, profile_dir_for_prefill)
         run_warmup(engine_core, tokenizer, prompt_ids_padded_to_prefill_length)
 
         clear_scheduler_state(engine_core)
         run_prefill(engine_core, tokenizer,
                     prompt_ids_padded_to_prefill_length, should_profile)
 
+    # Run decode
     run_warmup(engine_core, tokenizer, prompt_ids)
-
     clear_scheduler_state(engine_core)
+    profile_dir_for_prefill = os.path.join(profile_dir,
+                                           f"decode_{current_timestamp}")
+    update_vllm_profile_dir(engine_core, profile_dir_for_prefill)
     run_decode(engine_core, tokenizer, prompt_ids, should_profile)
 
     clear_scheduler_state(engine_core)
