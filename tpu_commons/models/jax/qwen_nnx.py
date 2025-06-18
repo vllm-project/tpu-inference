@@ -186,7 +186,6 @@ class Qwen2DecoderLayer(nnx.Module):
         kv_cache: KVCache,
         x: jax.Array,
         attention_metadata: AttentionMetadata,
-        layer_idx: int,
     ) -> Tuple[KVCache, jax.Array]:
         # Self attention.
         hidden_states = self.input_layernorm(x)
@@ -248,7 +247,6 @@ class Qwen2Model(nnx.Module):
                 kv_cache,
                 x,
                 attention_metadata,
-                i,  # Pass layer index
             )
             kv_caches[i] = kv_cache
         x = self.norm(x)

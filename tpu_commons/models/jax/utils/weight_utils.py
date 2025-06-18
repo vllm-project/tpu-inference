@@ -175,9 +175,7 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
     params = nnx.state(model)
     for hf_key, hf_weight in hf_model_weights_iterator(model_path,
                                                        framework="flax"):
-        # TODO: (Wenlong) need to handle bias
         if hf_key.endswith(".bias"):
-            logger.info(f"Skipping bias term (TODO): {hf_key}")
             layer_num = re.search(r"layers\.(\d+)", hf_key).group(1)
             layer_key = re.sub(r"layers\.\d+", "layers.*", hf_key)
             model_key = mappings[layer_key]
@@ -191,7 +189,6 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
                 if key in hf_key:
                     hf_weight = jnp.reshape(hf_weight, bias_reshape_keys[key])
                     break
-            print(f"{model_weight.value.shape}  -->  {hf_weight.shape}")
             assert model_weight.value.shape == hf_weight.shape
 
             # Update the model weight
