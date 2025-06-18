@@ -394,6 +394,7 @@ class Driver:
             self._transfer_backlogs,
             self._generate_backlogs.values(),
             self._detokenize_backlogs,
+            self._vllm_output_backlogs,
         )
     )
 
@@ -465,7 +466,7 @@ class Driver:
 
       # Compute new kv cache for the prefill_content.
       prefix, vllm_model_runner_output = prefill_engine.prefill(vllm_req_data = vllm_request)
-      logging.warning("finished prefill for request %s", vllm_request.request_id)
+      logging.warning("finished prefill for request %s output %s", vllm_request.request_id, vllm_model_runner_output.__dict__)
       # request.prefill_result = prefill_result
       # Once prefill is complete, place it on the generation queue and block if
       # full.
@@ -545,6 +546,7 @@ class Driver:
     generate_engine = self._generate_engines[idx]
     my_slots = self._generate_slots[idx]
     my_generate_backlog = self._generate_backlogs[idx]
+    my_vllm_output_backlog = self._vllm_output_backlogs[idx]
     # my_detokenize_backlog = self._detokenize_backlogs[idx]
 
     # Keep track of what step tokens were generated at.
@@ -568,10 +570,10 @@ class Driver:
           break
         block = len(input_batch.req_id_to_index) == 0
 
-        # # We block when the decode slots are all free since we need to get a
-        # # prefilled request to insert. We add timeout for the block to handle
-        # # the case when the prefill backlog is cancelled and we end up with no
-        # # more useful prefill work to do.
+        # We block when the decode slots are all free since we need to get a
+        # prefilled request to insert. We add timeout for the block to handle
+        # the case when the prefill backlog is cancelled and we end up with no
+        # more useful prefill work to do.
         if self._interleaved_mode:
           # For interleaved mode, we also blocks when prefill backlog
           # is not empty or there are transfer work to do.

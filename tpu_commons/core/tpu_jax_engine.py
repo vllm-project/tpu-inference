@@ -72,9 +72,10 @@ class JaxEngine(engine_api.Engine):
 
   def __init__(self, vllm_config, kv_cache_manager, vllm_executor):
     self.model_runner = vllm_executor.driver_worker.model_runner
-    self.req_id_to_req = {}
     self.kv_cache_manager = kv_cache_manager
     # self.config = config
+    input_batch = self.model_runner.input_batch
+    self.model_runner.all_requests = {}
 
   # Public non-JIT prefill method that updates page state
   def prefill(
@@ -88,10 +89,12 @@ class JaxEngine(engine_api.Engine):
                                                       new_computed_blocks=computed_blocks)
     new_block_ids = self.kv_cache_manager.get_block_ids(vllm_req_data.request_id)
     request = NewRequestData.from_request(vllm_req_data, new_block_ids)
+    #assume all tokens will get prefilled.
+    request.num_computed_tokens = vllm_req_data.num_tokens
     logger.info("Finished allocating blocks for prefill req %s", request.req_id)
-    if self.req_id_to_req.get(request.req_id) == None:
-      self.req_id_to_req[request.req_id] = vllm_req_data
     input_batch = self.model_runner.input_batch
+    if self.model_runner.all_requests.get(request.req_id) == None:
+      self.model_runner.all_requests[request.req_id] = vllm_req_data
     request_to_add = CachedRequestState(
       req_id=request.req_id,
       prompt_token_ids=request.prompt_token_ids,
@@ -100,21 +103,25 @@ class JaxEngine(engine_api.Engine):
       sampling_params=request.sampling_params,
       generator=None,
       block_ids=request.block_ids,
-      num_computed_tokens=request.num_computed_tokens,
+      num_computed_tokens=vllm_req_data.num_tokens,
       output_token_ids=[],
       lora_request=request.lora_request,
     )
     input_batch.add_request(request_to_add, None)
+    self.model_runner.requests[request.req_id] = request_to_add
     inputs = self.model_runner._prepare_prefill([request])
     if inputs is not None:
       model_inputs, (running_indices, output_token_indices) = inputs
       # TODO change the model interface such that prefill returns 
       self.model_runner.kv_caches, next_tokens, logits = self.model_runner.model_fn(*model_inputs)
-      self.model_runner.output_cache = \
-      self.model_runner.write_outputs(self.model_runner.output_cache,
-                                      next_tokens,
+      logger.info("finished model_fn %s; next token %s running_indices %s output_token_indices %s", request.req_id, next_tokens,
                                       running_indices,
                                       output_token_indices)
+      # self.model_runner.output_cache = \
+      # self.model_runner.write_outputs(self.model_runner.output_cache,
+      #                                 next_tokens,
+      #                                 running_indices,
+      #                                 output_token_indices)
 
       prompt_logprobs_dict = {}
       running_indices = []
@@ -141,16 +148,16 @@ class JaxEngine(engine_api.Engine):
     # TODO(pooyam): device-to-host transfer step by step is inefficient. Should we execute for longer decoding steps?
     # Not sure yet how that would work with vLLM engine that calls `execute_model`
     sampled_token_ids = [[] for _ in range(input_batch.num_reqs)]
-
-    if running_indices:
-      outputs = self.model_runner.output_cache.at[running_indices,
-                                      output_token_indices].get()
-      outputs = jax.device_get(outputs).tolist()
-      # NOTE(pooyam): vLLM scheduler reads via `sampled_token_ids[req_index]` where sampled_token_ids is `list[list[int]]`.
-      # Not sure why they didn't make it dictionary because not all running sequences will be scheduled at each iter and
-      # we are sending pointless [] as the output of such requests. I think it's possible to optimize this if we just send a dict.
-      for running_index, output in zip(running_indices, outputs):
-          sampled_token_ids[running_index] = [output]
+    sampled_token_ids[running_indices[0]] = [int(next_tokens[0])]
+    # if running_indices:
+    #   outputs = self.model_runner.output_cache.at[running_indices,
+    #                                   output_token_indices].get()
+    #   outputs = jax.device_get(outputs).tolist()
+    #   # NOTE(pooyam): vLLM scheduler reads via `sampled_token_ids[req_index]` where sampled_token_ids is `list[list[int]]`.
+    #   # Not sure why they didn't make it dictionary because not all running sequences will be scheduled at each iter and
+    #   # we are sending pointless [] as the output of such requests. I think it's possible to optimize this if we just send a dict.
+    #   for running_index, output in zip(running_indices, outputs):
+    #       sampled_token_ids[running_index] = [output]
     runner_output = ModelRunnerOutput(
       req_ids=input_batch.req_ids,
       req_id_to_index=input_batch.req_id_to_index,
@@ -159,6 +166,7 @@ class JaxEngine(engine_api.Engine):
       spec_token_ids=None,
       sampled_token_ids=sampled_token_ids,
     )
+
     prefix = {
       "seq": vllm_req_data,
       "cache": self.model_runner.kv_caches,
@@ -173,9 +181,35 @@ class JaxEngine(engine_api.Engine):
   def generate(self) -> ModelRunnerOutput:
     """Public API for generate that updates page state outside JIT."""
     input_batch = self.model_runner.input_batch
-    scheduled_cached_reqs = [
-      CachedRequestData.from_request(self.req_id_to_req[req_id]) 
-      for req_id in input_batch.req_id_to_index]
+    req_to_new_block_ids = {}
+    logger.info("model runner req dictionary: %s", self.model_runner.all_requests.keys())
+    cached_reqs = [self.model_runner.requests[request_id] for request_id in input_batch.req_id_to_index]
+    scheduled_cached_reqs = []
+    for request in cached_reqs:
+      logger.info("Generate scheduling request: %s", request.__dict__)
+      new_blocks = self.kv_cache_manager.allocate_slots(request, 1)
+      req_to_new_block_ids[request.request_id] = new_blocks.get_block_ids()
+      new_token_ids = request.all_token_ids[request.num_computed_tokens:request.num_computed_tokens+1]
+      req_data = CachedRequestData.from_request(request, 
+                                                False, 
+                                                new_token_ids, 
+                                                req_to_new_block_ids[request.request_id])
+      scheduled_cached_reqs.append(req_data)
+      req_state = self.model_runner.requests[request.request_id]
+      req_state.num_computed_tokens = req_data.num_computed_tokens
+      for block_ids, new_block_ids in zip(req_state.block_ids,
+                                          req_data.new_block_ids,
+                                          strict=True):
+        block_ids.extend(new_block_ids)
+      req_index = input_batch.req_id_to_index.get(request.request_id)
+      if req_index is None:
+        # The request is not in the persistent batch.
+        # The request was either preempted and resumed later, or was not
+        # scheduled in the previous step and needs to be added again.
+        req_ids_to_add.append(request.request_id)
+        continue
+      input_batch.num_computed_tokens_cpu[req_index] = req_data.num_computed_tokens
+      input_batch.block_table.append_row(req_data.new_block_ids, req_index)
     inputs = self.model_runner._prepare_decode(scheduled_cached_reqs)
     if inputs is not None:
       model_inputs, (running_indices, output_token_indices) = inputs
