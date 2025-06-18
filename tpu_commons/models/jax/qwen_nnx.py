@@ -189,62 +189,62 @@ class Qwen2DecoderLayer(nnx.Module):
         layer_idx: int,
     ) -> Tuple[KVCache, jax.Array]:
         # Self attention.
-        jax.debug.print(
-            "[Qwen2DecoderLayer {layer_idx}] x before input_layernorm:\n"
-            "  shape: {shape}\n"
-            "  dtype: {dtype}\n"
-            "  first 10: {first_10}\n"
-            "  sum: {sum}",
-            shape=x.shape,
-            first_10=x.flatten()[:10],
-            sum=jnp.sum(x),
-            dtype=x.dtype,
-            layer_idx=layer_idx,
-            ordered=True,
-        )
+        # jax.debug.print(
+        #     "[Qwen2DecoderLayer {layer_idx}] x before input_layernorm:\n"
+        #     "  shape: {shape}\n"
+        #     "  dtype: {dtype}\n"
+        #     "  first 10: {first_10}\n"
+        #     "  sum: {sum}",
+        #     shape=x.shape,
+        #     first_10=x.flatten()[:10],
+        #     sum=jnp.sum(x),
+        #     dtype=x.dtype,
+        #     layer_idx=layer_idx,
+        #     ordered=True,
+        # )
         hidden_states = self.input_layernorm(x)
-        jax.debug.print(
-            "[Qwen2DecoderLayer {layer_idx}] hidden_states after input_layernorm:\n"
-            "  shape: {shape}\n"
-            "  dtype: {dtype}\n"
-            "  first 10: {first_10}\n"
-            "  sum: {sum}",
-            shape=hidden_states.shape,
-            first_10=hidden_states.flatten()[:10],
-            sum=jnp.sum(hidden_states),
-            dtype=x.dtype,
-            layer_idx=layer_idx,
-            ordered=True,
-        )
+        # jax.debug.print(
+        #     "[Qwen2DecoderLayer {layer_idx}] hidden_states after input_layernorm:\n"
+        #     "  shape: {shape}\n"
+        #     "  dtype: {dtype}\n"
+        #     "  first 10: {first_10}\n"
+        #     "  sum: {sum}",
+        #     shape=hidden_states.shape,
+        #     first_10=hidden_states.flatten()[:10],
+        #     sum=jnp.sum(hidden_states),
+        #     dtype=x.dtype,
+        #     layer_idx=layer_idx,
+        #     ordered=True,
+        # )
         kv_cache, attn_output = self.self_attn(
             is_prefill,
             kv_cache,
             hidden_states,
             attention_metadata,
         )
-        jax.debug.print(
-            "[Qwen2DecoderLayer {layer_idx}] attn_output after self_attn:\n"
-            "  shape: {shape}\n"
-            "  first 10: {first_10}\n"
-            "  sum: {sum}",
-            shape=attn_output.shape,
-            first_10=attn_output.flatten()[:10],
-            sum=jnp.sum(attn_output),
-            layer_idx=layer_idx,
-            ordered=True,
-        )
+        # jax.debug.print(
+        #     "[Qwen2DecoderLayer {layer_idx}] attn_output after self_attn:\n"
+        #     "  shape: {shape}\n"
+        #     "  first 10: {first_10}\n"
+        #     "  sum: {sum}",
+        #     shape=attn_output.shape,
+        #     first_10=attn_output.flatten()[:10],
+        #     sum=jnp.sum(attn_output),
+        #     layer_idx=layer_idx,
+        #     ordered=True,
+        # )
         attn_output += x
-        jax.debug.print(
-            "[Qwen2DecoderLayer {layer_idx}] attn_output after residual connection:\n"
-            "  shape: {shape}\n"
-            "  first 10: {first_10}\n"
-            "  sum: {sum}",
-            shape=attn_output.shape,
-            first_10=attn_output.flatten()[:10],
-            sum=jnp.sum(attn_output),
-            layer_idx=layer_idx,
-            ordered=True,
-        )
+        # jax.debug.print(
+        #     "[Qwen2DecoderLayer {layer_idx}] attn_output after residual connection:\n"
+        #     "  shape: {shape}\n"
+        #     "  first 10: {first_10}\n"
+        #     "  sum: {sum}",
+        #     shape=attn_output.shape,
+        #     first_10=attn_output.flatten()[:10],
+        #     sum=jnp.sum(attn_output),
+        #     layer_idx=layer_idx,
+        #     ordered=True,
+        # )
 
         # MLP.
         residual = attn_output
@@ -352,27 +352,27 @@ class Qwen2ForCausalLM(nnx.Module):
         top_ks: jax.Array = None,
         *args,
     ) -> Tuple[List[KVCache], jax.Array, jax.Array]:
-        jax.debug.print(
-            "[Qwen2ForCausalLM.__call__] input_ids:\n"
-            "  shape: {shape}\n"
-            "  first 10: {first_10}\n"
-            "  sum: {sum}",
-            shape=input_ids.shape,
-            first_10=input_ids.flatten()[:10],
-            sum=jnp.sum(input_ids),
-            ordered=True,
-        )
+        # jax.debug.print(
+        #     "[Qwen2ForCausalLM.__call__] input_ids:\n"
+        #     "  shape: {shape}\n"
+        #     "  first 10: {first_10}\n"
+        #     "  sum: {sum}",
+        #     shape=input_ids.shape,
+        #     first_10=input_ids.flatten()[:10],
+        #     sum=jnp.sum(input_ids),
+        #     ordered=True,
+        # )
         x = self.embed(input_ids)
-        jax.debug.print(
-            "[Qwen2ForCausalLM.__call__] x (after embedding):\n"
-            "  shape: {shape}\n"
-            "  first 10: {first_10}\n"
-            "  sum: {sum}",
-            shape=x.shape,
-            first_10=x.flatten()[:10],
-            sum=jnp.sum(x),
-            ordered=True,
-        )
+        # jax.debug.print(
+        #     "[Qwen2ForCausalLM.__call__] x (after embedding):\n"
+        #     "  shape: {shape}\n"
+        #     "  first 10: {first_10}\n"
+        #     "  sum: {sum}",
+        #     shape=x.shape,
+        #     first_10=x.flatten()[:10],
+        #     sum=jnp.sum(x),
+        #     ordered=True,
+        # )
 
         kv_caches, x = self.model(
             is_prefill,
@@ -380,16 +380,16 @@ class Qwen2ForCausalLM(nnx.Module):
             x,
             attention_metadata,
         )
-        jax.debug.print(
-            "[Qwen2ForCausalLM.__call__] x (before lm_head):\n"
-            "  shape: {shape}\n"
-            "  first 10: {first_10}\n"
-            "  sum: {sum}",
-            shape=x.shape,
-            first_10=x.flatten()[:10],
-            sum=jnp.sum(x),
-            ordered=True,
-        )
+        # jax.debug.print(
+        #     "[Qwen2ForCausalLM.__call__] x (before lm_head):\n"
+        #     "  shape: {shape}\n"
+        #     "  first 10: {first_10}\n"
+        #     "  sum: {sum}",
+        #     shape=x.shape,
+        #     first_10=x.flatten()[:10],
+        #     sum=jnp.sum(x),
+        #     ordered=True,
+        # )
 
         hf_config = self.vllm_config.model_config.hf_config
         if hf_config.tie_word_embeddings:
@@ -398,16 +398,16 @@ class Qwen2ForCausalLM(nnx.Module):
         else:
             # self.lm_head.value is (hidden_size, vocab_size)
             logits = jnp.dot(x, self.lm_head.value)
-        jax.debug.print(
-            "[Qwen2ForCausalLM.__call__] logits:\n"
-            "  shape: {shape}\n"
-            "  first 10: {first_10}\n"
-            "  sum: {sum}",
-            shape=logits.shape,
-            first_10=logits.flatten()[:10],
-            sum=jnp.sum(logits),
-            ordered=True,
-        )
+        # jax.debug.print(
+        #     "[Qwen2ForCausalLM.__call__] logits:\n"
+        #     "  shape: {shape}\n"
+        #     "  first 10: {first_10}\n"
+        #     "  sum: {sum}",
+        #     shape=logits.shape,
+        #     first_10=logits.flatten()[:10],
+        #     sum=jnp.sum(logits),
+        #     ordered=True,
+        # )
 
         next_tokens = sample(
             is_prefill,
