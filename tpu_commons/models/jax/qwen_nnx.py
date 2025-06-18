@@ -330,10 +330,15 @@ class Qwen2ForCausalLM(nnx.Module):
             rng=self.rng,
             mesh=mesh,
         )
-        self.lm_head = nnx.Param(
-            init_fn(self.rng.params(), (hidden_size, vocab_size), dtype),
-            sharding=(None, "model"),
-        )
+
+        hf_config = model_config.hf_config
+        if hf_config.tie_word_embeddings:
+            self.lm_head = self.embed.embedding
+        else:
+            self.lm_head = nnx.Param(
+                init_fn(self.rng.params(), (hidden_size, vocab_size), dtype),
+                sharding=(None, "model"),
+            )
 
     def __call__(
         self,
@@ -439,7 +444,6 @@ class Qwen2ForCausalLM(nnx.Module):
 
     def load_weights(self):
         mappings = {
-            "lm_head": "lm_head",
             "model.embed_tokens": "embed.embedding",
             "model.layers.*.input_layernorm":
             "model.layers.*.input_layernorm.scale",
@@ -466,6 +470,11 @@ class Qwen2ForCausalLM(nnx.Module):
             "model.layers.*.self_attn.v_proj.bias",
             "model.norm": "model.norm.scale",
         }
+
+        # Add lm_head mapping only if it's not tied to embeddings
+        hf_config = self.vllm_config.model_config.hf_config
+        if not hf_config.tie_word_embeddings:
+            mappings["lm_head.weight"] = "lm_head"
 
         # Log bias weights before loading
         self._log_bias_weights("Before loading HF weights")
