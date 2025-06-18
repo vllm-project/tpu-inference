@@ -20,9 +20,9 @@ from vllm.v1.outputs import ModelRunnerOutput
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.model_loader import get_model
+from tpu_commons.runner.input_batch_jax import CachedRequestState, InputBatch
 from tpu_commons.runner.tpu_torch_xla_runner import _get_token_paddings
 from tpu_commons.runner.utils import determine_do_sampling
-from tpu_commons.worker.input_batch_jax import CachedRequestState, InputBatch
 
 logger = init_logger(__name__)
 
