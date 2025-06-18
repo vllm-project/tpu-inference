@@ -154,3 +154,99 @@ def update_cache_quantized(
         scale_cache = scale_cache.reshape(K, L, S, 1)
 
     return quantized_data_cache, scale_cache
+
+
+def chunked_prefill_update_cache_quantized(
+        quantized_data_cache: jax.Array,  # int8 cache, e.g., (K, L, S, H)
+        scale_cache: jax.Array,  # float scale cache, e.g., (K, L, S, 1)
+        quant_dtype: jnp.dtype,  # The quantization dtype (e.g., jnp.int8)
+        indices: jax.Array,  # Indices for writing
+        operand: jax.Array,  # float operand (B, K, T, H)
+        num_decode_seqs: jax.Array,  # (1,) array with number of decode tokens
+) -> Tuple[jax.Array, jax.Array]:
+    """
+    Updates the quantized KV cache for chunked prefill, where an operand contains
+    both decode and prefill tokens.
+    """
+    B, K, T, H = operand.shape
+    K_c, L, S, H_c = quantized_data_cache.shape
+    assert K == K_c and H == H_c, "Cache and operand dimensions must match"
+    assert scale_cache.shape == (K, L, S, 1), "Scale cache shape is incorrect"
+    assert B == 1, "Chunked prefill assumes batch size of 1"
+
+    operand = jnp.squeeze(operand, 0)
+    # operand now: (K, T, H)
+
+    # Handle Decode tokens kv cache update.
+    decode_indices = jax.lax.slice(indices, (0, ), (T, ))
+
+    # Number of valid indice update could be much smaller
+    # than T. We improve performance by skipping the
+    # update for those padded indices as much as possible.
+    # TODO(b/396129273): tune the value of DECODE_TOKEN_CACHE_UPDATE_BLOCK_SIZE
+    # base on benchmarking
+    DECODE_TOKEN_CACHE_UPDATE_BLOCK_SIZE = 16
+    assert T % DECODE_TOKEN_CACHE_UPDATE_BLOCK_SIZE == 0
+
+    decode_indices = decode_indices.reshape((
+        T // DECODE_TOKEN_CACHE_UPDATE_BLOCK_SIZE,
+        DECODE_TOKEN_CACHE_UPDATE_BLOCK_SIZE,
+    ))
+    decode_update_operand = operand.reshape(
+        K,
+        T // DECODE_TOKEN_CACHE_UPDATE_BLOCK_SIZE,
+        DECODE_TOKEN_CACHE_UPDATE_BLOCK_SIZE,
+        H,
+    )
+
+    # Quantize the part of the operand for decode updates
+    quant_decode_operand, decode_scales = quantize(decode_update_operand,
+                                                   quant_dtype)
+    # quant_decode_operand shape: (K, T/block, block, H)
+    # decode_scales shape: (K, T/block, block, 1)
+
+    quantized_data_cache = quantized_data_cache.reshape(K, L * S, H)
+    scale_cache = scale_cache.reshape(K, L * S, 1)
+
+    def decode_update_body(i, caches):
+        q_cache, s_cache = caches
+        q_cache_updated = q_cache.at[jnp.arange(K)[..., None],
+                                     decode_indices[i], :].set(
+                                         quant_decode_operand[:, i, :, :])
+        s_cache_updated = s_cache.at[jnp.arange(K)[..., None],
+                                     decode_indices[i], :].set(
+                                         decode_scales[:, i, :, :])
+        return q_cache_updated, s_cache_updated
+
+    # Loop over the decode blocks and update both caches
+    quantized_data_cache, scale_cache = jax.lax.fori_loop(
+        0,
+        jnp.ceil(num_decode_seqs[0] /
+                 DECODE_TOKEN_CACHE_UPDATE_BLOCK_SIZE).astype(jnp.int32),
+        body_fun=decode_update_body,
+        init_val=(quantized_data_cache, scale_cache),
+    )
+
+    quantized_data_cache = quantized_data_cache.reshape(K, L, S, H)
+    scale_cache = scale_cache.reshape(K, L, S, 1)
+
+    # Handle Prefill tokens kv cache update.
+    # ruff: noqa: E741
+    I = T // S
+    prefill_indices = jax.lax.slice(indices, (T, ), (T + I, ))
+    # cache: (K, L, S, H)
+    # prefill_operand: (K, T, H) -> (K, I, S, H)
+    # prefill_indices: (I,)
+    prefill_operand = operand.reshape(K, I, S, H)
+
+    # Quantize the part of the operand for prefill updates
+    quant_prefill_operand, prefill_scales = quantize(prefill_operand,
+                                                     quant_dtype)
+
+    # Update both caches with the prefill blocks
+    quantized_data_cache = quantized_data_cache.at[:,
+                                                   prefill_indices, :, :].set(
+                                                       quant_prefill_operand)
+    scale_cache = scale_cache.at[:, prefill_indices, :, :].set(prefill_scales)
+
+    return quantized_data_cache, scale_cache

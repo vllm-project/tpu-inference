@@ -20,13 +20,12 @@ def _get_model_architecture(config: PretrainedConfig) -> nn.Module:
         from tpu_commons.models.jax.llama_nn import LlamaForCausalLM
     elif impl == "flax_nnx":
         from tpu_commons.models.jax.llama import LlamaForCausalLM
-        from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
     else:
         raise NotImplementedError("Unsupported MODEL_IMPL_TYPE")
 
     _MODEL_REGISTRY = {
         "LlamaForCausalLM": LlamaForCausalLM,
-        "Qwen2ForCausalLM": Qwen2ForCausalLM,
+        # "Qwen2ForCausalLM": Qwen2ForCausalLM,
     }
 
     architectures = getattr(config, "architectures", [])

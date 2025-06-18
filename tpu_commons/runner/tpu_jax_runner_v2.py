@@ -23,7 +23,8 @@ from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.model_loader import get_model
 from tpu_commons.runner.input_batch_jax import CachedRequestState, InputBatch
 from tpu_commons.runner.tpu_torch_xla_runner import _get_token_paddings
-from tpu_commons.runner.utils import determine_do_sampling, get_jnp_dtype_from_str
+from tpu_commons.runner.utils import (determine_do_sampling,
+                                      get_jnp_dtype_from_str)
 
 logger = init_logger(__name__)
 
@@ -306,8 +307,6 @@ class TPUModelRunner():
         # TODO(pooyam): We probably can use ragged attention for new_partial_prefills as well.
         if new_full_prefill_seqs and not new_partial_prefill_seqs and not subsequent_partial_prefill_seqs and not decoding_seqs:
             return self._prepare_prefill(scheduler_output)
-
-        raise ValueError("Not implemented KV Cache for chunked prefill")
 
         # All other cases fall into the "chunked prefill" category
         # TODO(pooyam): Change `prepare_prefill` to respect num scheduled tokens, so we can use prefill_kernel even for new partial prefills.
