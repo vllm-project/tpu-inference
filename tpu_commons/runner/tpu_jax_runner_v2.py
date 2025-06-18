@@ -900,7 +900,20 @@ class TPUModelRunner():
                 elif num_scheduled_tokens != 1:
                     subsequent_partial_prefill_seqs.append(seq)
                 elif num_scheduled_tokens == 1:
-                    decoding_seqs.append(seq)
+                    # We need to distinguish the following cases:
+                    # Case 1: not preempted at all:  prompt: 10 | output tokens: 4 | num_computed: 13 | num scheduled: 1 | num tokens: 14 => decoding and it has written sth before => write to position i=4 in output cache.
+                    # Case 2: preempted and added back:  prompt: 10 | output tokens: 4 | num_computed: 13 | num_scheduled: 1 | num tokens: 14 => prefilling and it has not written sth before => write to position 0 in output cache.
+                    # As you see, metadata related to Case 1 and Case 2 are exactly the same. Then how to distinguish? One idea is to use `resumed_from_preemption` field.
+                    is_cached_req = isinstance(seq, CachedRequestData)
+                    is_resumed_from_preemption = is_cached_req and seq.resumed_from_preemption
+                    if not is_resumed_from_preemption:
+                        if num_computed_tokens < self.input_batch.num_prompt_tokens[
+                                index]:
+                            subsequent_partial_prefill_seqs.append(seq)
+                        else:
+                            decoding_seqs.append(seq)
+                    else:
+                        subsequent_partial_prefill_seqs.append(seq)
                 else:
                     raise ValueError("This should not happen.")
 
