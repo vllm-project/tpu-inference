@@ -391,7 +391,13 @@ class Qwen2ForCausalLM(nnx.Module):
             ordered=True,
         )
 
-        logits = jnp.dot(x, self.lm_head.value)
+        hf_config = self.vllm_config.model_config.hf_config
+        if hf_config.tie_word_embeddings:
+            # self.lm_head.value is (vocab_size, hidden_size)
+            logits = jnp.dot(x, self.lm_head.value.T)
+        else:
+            # self.lm_head.value is (hidden_size, vocab_size)
+            logits = jnp.dot(x, self.lm_head.value)
         jax.debug.print(
             "[Qwen2ForCausalLM.__call__] logits:\n"
             "  shape: {shape}\n"
