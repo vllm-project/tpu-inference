@@ -364,7 +364,7 @@ class Qwen2ForCausalLM(nnx.Module):
         # Add lm_head mapping only if it's not tied to embeddings
         hf_config = self.vllm_config.model_config.hf_config
         if not hf_config.tie_word_embeddings:
-            mappings["lm_head.weight"] = "lm_head"
+            mappings["lm_head"] = "lm_head"
 
         load_hf_weights(vllm_config=self.vllm_config,
                         model=self,
