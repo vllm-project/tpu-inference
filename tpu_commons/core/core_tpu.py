@@ -22,6 +22,7 @@ from vllm.utils import make_zmq_socket, resolve_obj_by_qualname
 from vllm.v1.core.kv_cache_utils import (get_kv_cache_config,
                                          unify_kv_cache_configs)
 from vllm.v1.core.sched.interface import SchedulerInterface
+from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
@@ -109,10 +110,14 @@ class EngineCore:
         #     > 1,
         #     log_stats=self.log_stats,
         # )
-
+        self.kv_cache_manager = KVCacheManager(
+            kv_cache_config=kv_cache_config,
+            max_model_len=vllm_config.scheduler_config.max_model_len,
+            enable_caching=False,
+        )
         # Setup MM Input Mapper.
-        # self.mm_input_cache_server = MirroredProcessingCache(
-        #     vllm_config.model_config)
+        self.mm_input_cache_server = MirroredProcessingCache(
+            vllm_config.model_config)
 
         # Setup batch queue for pipeline parallelism.
         # Batch queue for scheduled batches. This enables us to asynchronously
@@ -125,7 +130,7 @@ class EngineCore:
             logger.info("Batch queue is enabled with size %d",
                         self.batch_queue_size)
             self.batch_queue = queue.Queue(self.batch_queue_size)
-        self.orchestrator = self._setup_driver(True)
+        self.orchestrator = self._setup_driver(vllm_config, self.kv_cache_manager, True)
         logger.warning("starting jetstream orchestrator")
 
     def _initialize_kv_caches(
@@ -171,11 +176,11 @@ class EngineCore:
                      "warmup model) took %.2f seconds"), elapsed)
         return num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config
 
-    def _setup_driver(self, interleaved_mode: bool = True):
-        prefill_engine = JaxEngine(self.model_executor)
+    def _setup_driver(self, vllm_config, kv_cache_manager, interleaved_mode= True):
+        prefill_engine = JaxEngine(vllm_config, kv_cache_manager, self.model_executor)
         # Create a generate engine with a different set of weights
         # so that we can test that the right one is in use at a given time.
-        generate_engine = JaxEngine(self.model_executor)
+        generate_engine = JaxEngine(vllm_config, kv_cache_manager, self.model_executor)
         driver = orchestrator.Driver(
             prefill_engines=[prefill_engine],
             generate_engines=[generate_engine],
@@ -185,7 +190,6 @@ class EngineCore:
 
     def add_request(self, request: EngineCoreRequest):
         """Add request to the scheduler."""
-        logger.info("Request %s", request)
 
         req = Request.from_engine_core_request(request)
         if req.use_structured_output:
@@ -204,7 +208,7 @@ class EngineCore:
         #     max_tokens=self.vllm_config.model_config.max_model_len,
         # )
         self.orchestrator.place_request_on_prefill_queue(req)
-        logger.warning("added req %s to jetstream orchestrator", req.req_id)
+        logger.warning("added req %s to jetstream orchestrator.", req.request_id)
 
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
@@ -277,6 +281,14 @@ class EngineCore:
         # if self.scheduler:
         #     self.scheduler.shutdown()
 
+    def reset_mm_cache(self):
+        # NOTE: Since this is mainly for debugging, we don't attempt to
+        # re-sync the internal caches (P0 processor, P0 mirror, P1 mirror)
+        # if self.scheduler.has_unfinished_requests():
+        #     logger.warning("Resetting the multi-modal cache when requests are "
+        #                    "in progress may lead to desynced internal caches.")
+
+        self.mm_input_cache_server.reset()
     def profile(self, is_start: bool = True):
         self.model_executor.profile(is_start)
 
@@ -381,8 +393,8 @@ class EngineCoreProc(EngineCore):
                              executor_fail_callback)
 
             self.engine_index = engine_index
-            self.step_fn = (self.step if self.batch_queue is None else
-                            self.step_with_batch_queue)
+            # self.step_fn = (self.step if self.batch_queue is None else
+            #                 self.step_with_batch_queue)
             self.engines_running = False
             self.last_counts = (0, 0)
 
@@ -503,7 +515,7 @@ class EngineCoreProc(EngineCore):
         """Exits when an engine step needs to be performed."""
 
         waited = False
-        while not self.engines_running and not self.scheduler.has_requests():
+        while True:
             if logger.isEnabledFor(DEBUG) and self.input_queue.empty():
                 logger.debug("EngineCore waiting for work.")
                 waited = True

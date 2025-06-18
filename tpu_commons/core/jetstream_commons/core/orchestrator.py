@@ -374,7 +374,7 @@ class Driver:
             self._prefill_threads,
             self._transfer_threads,
             self._generate_threads,
-            self.detokenize_threads,
+            # self.detokenize_threads,
         )
     )
     self.live = True
@@ -444,7 +444,7 @@ class Driver:
     """Thread which runs in the background performing prefills."""
     logging.info("---------Spinning up prefill thread %d.---------", idx)
     prefill_engine = self._prefill_engines[idx]
-    prefill_params = self._prefill_params[idx]
+    # prefill_params = self._prefill_params[idx]
     logging.info("---------Prefill params %d loaded.---------", idx)
 
     while self.live:

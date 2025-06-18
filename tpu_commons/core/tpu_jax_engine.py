@@ -32,11 +32,13 @@ import jax.numpy as jnp
 # from flax.linen import partitioning as nn_partitioning
 # import flax
 
-import tpu_commons.runner.tpu_jax_runner_v2
+# from tpu_commons.runner.tpu_jax_runner_v2
 from vllm.v1.request import Request
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
-
+from vllm.v1.core.sched.output import CachedRequestData, NewRequestData
+from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.logger import init_logger
 
 from tpu_commons.core.jetstream_commons.core import config_lib
 from tpu_commons.core.jetstream_commons.engine import engine_api
@@ -62,7 +64,7 @@ Prefix = Any
 PackedPrefix = Any
 Params = Any
 PRNGKeyType = Any
-
+logger = init_logger(__name__)
 
 class JaxEngine(engine_api.Engine):
   """The computational core of the generative model server.
@@ -71,9 +73,10 @@ class JaxEngine(engine_api.Engine):
   JetStream efficient serving infrastructure.
   """
 
-  def __init__(self, vllm_executor):
+  def __init__(self, vllm_config, kv_cache_manager, vllm_executor):
     self.model_runner = vllm_executor.driver_worker.model_runner
     self.req_id_to_req = {}
+    self.kv_cache_manager = kv_cache_manager
     # self.config = config
 
   # Public non-JIT prefill method that updates page state
@@ -82,10 +85,17 @@ class JaxEngine(engine_api.Engine):
       *,
       vllm_req_data: Optional[Request] = None,
   ) -> Tuple[Prefix, ModelRunnerOutput]:
-    if self.req_id_to_req.get(vllm_req_data.req_id) == None:
-      self.req_id_to_req[vllm_req_data.req_id] = vllm_req_data
+    computed_blocks, _ = self.kv_cache_manager.get_computed_blocks(vllm_req_data)
+    new_blocks = self.kv_cache_manager.allocate_slots(vllm_req_data, 
+                                                      vllm_req_data.num_tokens,
+                                                      new_computed_blocks=computed_blocks)
+    new_block_ids = self.kv_cache_manager.get_block_ids(vllm_req_data.request_id)
+    request = NewRequestData.from_request(vllm_req_data, new_block_ids)
+    logger.warning("Finished allocating blocks for prefill req %s", req.__dict__)
+    if self.req_id_to_req.get(request.request_id) == None:
+      self.req_id_to_req[request.request_id] = vllm_req_data
     input_batch = self.model_runner.input_batch
-    inputs = self.model_runner._prepare_prefill([vllm_req_data])
+    inputs = self.model_runner._prepare_prefill([request])
     if inputs is not None:
       model_inputs, (running_indices, output_token_indices) = inputs
       # TODO change the model interface such that prefill returns 
@@ -104,7 +114,7 @@ class JaxEngine(engine_api.Engine):
       # if not self._is_generating_new_token(scheduler_output, vllm_req_data):
       #     continue
 
-      index = input_batch.req_id_to_index[seq.req_id]
+      index = input_batch.req_id_to_index[request.req_id]
       output_token_index = max(
           input_batch.num_computed_tokens_cpu[index] -
           input_batch.num_prompt_tokens[index] + 1, 0)
@@ -116,7 +126,7 @@ class JaxEngine(engine_api.Engine):
       input_batch.token_ids_cpu[index, seq_len - 1] + 1  # Dummy
 
       # TODO(pooyam): Figure out why all three of `num_tokens`, `num_prompt_tokens`, and 'num_computed_tokens_cpu` exist.
-      prompt_logprobs_dict[seq.req_id] = None
+      prompt_logprobs_dict[request.req_id] = None
 
     # TODO(pooyam): device-to-host transfer step by step is inefficient. Should we execute for longer decoding steps?
     # Not sure yet how that would work with vLLM engine that calls `execute_model`
@@ -154,7 +164,7 @@ class JaxEngine(engine_api.Engine):
     """Public API for generate that updates page state outside JIT."""
     input_batch = self.model_runner.input_batch
     scheduled_cached_reqs = [
-      self.req_id_to_req[req_id] 
+      CachedRequestData.from_request(self.req_id_to_req[req_id]) 
       for req_id in input_batch.req_id_to_index]
     inputs = self.model_runner._prepare_decode(scheduled_cached_reqs)
     if inputs is not None:
@@ -175,7 +185,7 @@ class JaxEngine(engine_api.Engine):
         # if not self.model_runner._is_generating_new_token(scheduler_output, seq):
         #     continue
 
-        index = input_batch.req_id_to_index[seq.req_id]
+        index = input_batch.req_id_to_index[vllm_req_data.request_id]
         output_token_index = max(
             input_batch.num_computed_tokens_cpu[index] -
             input_batch.num_prompt_tokens[index] + 1, 0)
@@ -187,7 +197,7 @@ class JaxEngine(engine_api.Engine):
         input_batch.token_ids_cpu[index, seq_len - 1] + 1  # Dummy
 
         # TODO(pooyam): Figure out why all three of `num_tokens`, `num_prompt_tokens`, and 'num_computed_tokens_cpu` exist.
-        prompt_logprobs_dict[seq.req_id] = None
+        prompt_logprobs_dict[vllm_req_data.request_id] = None
 
         # TODO(pooyam): device-to-host transfer step by step is inefficient. Should we execute for longer decoding steps?
         # Not sure yet how that would work with vLLM engine that calls `execute_model`
