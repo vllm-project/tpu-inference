@@ -189,17 +189,19 @@ class Qwen2DecoderLayer(nnx.Module):
     ) -> Tuple[KVCache, jax.Array]:
         # Self attention.
         jax.debug.print(
-            "[Qwen2DecoderLayer.__call__] x before input_layernorm: shape={shape}, first 100: {first_10}, sum: {sum}",
+            "[Qwen2DecoderLayer.__call__] x before input_layernorm: shape={shape}, dtype={dtype}, first 100: {first_10}, sum: {sum}",
             shape=x.shape,
             first_10=x.flatten()[:100],
             sum=jnp.sum(x),
+            dtype=x.dtype,
         )
         hidden_states = self.input_layernorm(x)
         jax.debug.print(
-            "[Qwen2DecoderLayer.__call__] hidden_states after input_layernorm: shape={shape}, first 100: {first_10}, sum: {sum}",
+            "[Qwen2DecoderLayer.__call__] hidden_states after input_layernorm: shape={shape}, dtype={dtype}, first 100: {first_10}, sum: {sum}",
             shape=hidden_states.shape,
             first_10=hidden_states.flatten()[:100],
             sum=jnp.sum(hidden_states),
+            dtype=x.dtype,
         )
         kv_cache, attn_output = self.self_attn(
             is_prefill,
