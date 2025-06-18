@@ -16,7 +16,8 @@ import uuid
 import jax
 from transformers import AutoTokenizer
 from utils_jax import (calculate_prefill_tflops_per_device,
-                       get_kv_cache_size_bytes, get_model_size_bytes)
+                       get_kv_cache_size_bytes, get_model_size_bytes,
+                       pad_tokens)
 from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.utils import FlexibleArgumentParser
@@ -31,6 +32,8 @@ PROMPT = "I love to"
 DEFAULT_BLOCK_SIZE = 64
 WARMUP_ITERS = 2
 BENCHMARK_ITERS = 10
+
+PAD_TOKEN_ID = 0
 
 
 def create_parser():
@@ -51,6 +54,10 @@ def create_parser():
     parser.add_argument("--prompt", type=str, default=PROMPT)
     parser.add_argument("--profile", action="store_true")
     parser.add_argument("--profile-dir", type=str)
+    parser.add_argument("--prefill-lengths",
+                        type=str,
+                        default="128",
+                        help="Comma-separated list of prefill lengths")
 
     return parser
 
@@ -97,9 +104,6 @@ def run_prefill(engine_core: EngineCore,
         prompt_ids: input prompt tokens.
         verbose: Whether to print verbose output.
     """
-    if verbose:
-        print("\n--- Running Prefill ---")
-
     request_id_client = str(uuid.uuid4())
 
     sampling_params_prefill = SamplingParams(max_tokens=len(prompt_ids) + 5,
@@ -156,9 +160,6 @@ def run_prefill(engine_core: EngineCore,
 
     # Should this be 128 because of prefill padding?
     total_prefill_tokens = engine_core.scheduler.running[0].num_computed_tokens
-
-    if verbose:
-        print("--- Prefill complete ---")
 
     total_tflops_per_device_value, _, _ = calculate_prefill_tflops_per_device(
         num_model_params, total_prefill_tokens, vllm_model_config, log=verbose)
@@ -228,10 +229,6 @@ def run_decode(engine_core: EngineCore,
             found_req_prefilled = True
             assert r.num_computed_tokens >= len(prompt_ids), \
                 f"Prefill not fully computed for decode setup. Computed: {r.num_computed_tokens}, Prompt length: {len(prompt_ids)}"
-            if verbose:
-                print(
-                    f"Request '{r.request_id}' prefill complete for decode benchmark setup."
-                )
             break
     assert found_req_prefilled, f"Request with ID {request_id_decode_setup} should be in scheduler.running after prefill setup step."
 
@@ -310,6 +307,24 @@ def clear_scheduler_state(engine_core: EngineCore):
     assert len(engine_core.scheduler.running) == 0
 
 
+def run_warmup(engine_core: EngineCore, tokenizer: AutoTokenizer,
+               prompt_ids: list[int]):
+    """
+    Run a warmup pass before the actual benchmark.
+
+    Args:
+        engine_core: EngineCore instance.
+        tokenizer: Tokenizer instance.
+        prompt_ids: input prompt tokens.
+    """
+    for _ in range(WARMUP_ITERS):
+        # TODO: is this necessary?
+        clear_scheduler_state(engine_core)
+        run_prefill(engine_core, tokenizer, prompt_ids, False, verbose=False)
+        clear_scheduler_state(engine_core)
+        run_decode(engine_core, tokenizer, prompt_ids, False, verbose=False)
+
+
 def main(args):
     """
     Main entry point for the script.
@@ -321,6 +336,9 @@ def main(args):
     profile_dir = args.pop("profile_dir", None)
     prompt = args.pop("prompt", PROMPT)
     block_size = args.pop("block_size") or DEFAULT_BLOCK_SIZE
+    prefill_lengths = args.pop("prefill_lengths")
+    assert prefill_lengths is not None and len(prefill_lengths) > 0
+    prefill_lengths = [int(i) for i in prefill_lengths.split(",")]
 
     if should_profile:
         assert profile_dir is not None, "Must specify profile_dir if profiling is enabled!"
@@ -333,7 +351,6 @@ def main(args):
     executor_class = Executor.get_class(vllm_config)
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    prompt_ids = tokenizer(prompt).input_ids
 
     # TODO (jacobplatin): understand why this isn't being respected from the command line
     vllm_config.cache_config.block_size = block_size
@@ -342,20 +359,27 @@ def main(args):
                              executor_class=executor_class,
                              log_stats=True)
     num_model_params = engine_core.model_executor.driver_worker.worker.model_runner.total_model_params_num
+
+    prefill_len_padding = engine_core.model_executor.driver_worker.worker.model_runner.scheduler_config.prefill_len_padding
+    assert prefill_len_padding == 128
+
+    prompt_ids = tokenizer(prompt).input_ids
+
     print(f"Num model params: {num_model_params}")
 
-    print("\n\n--- Starting Warmup ---")
-    for _ in range(WARMUP_ITERS):
-        # TODO: is this necessary?
-        clear_scheduler_state(engine_core)
-        run_prefill(engine_core, tokenizer, prompt_ids, False, verbose=False)
-        clear_scheduler_state(engine_core)
-        run_decode(engine_core, tokenizer, prompt_ids, False, verbose=False)
+    for prefill_length in prefill_lengths:
+        assert prefill_length % prefill_len_padding == 0, f"Expected prefill length to be a multiple of {prefill_len_padding}!"
+        print(f"\n\n--- Running Prefill for Length {prefill_length} ---")
+        # NOTE: this will return the original prompt length as well
+        prompt_ids_padded_to_prefill_length, _ = pad_tokens(
+            prompt_ids, PAD_TOKEN_ID, [prefill_length], return_as_list=True)
+        run_warmup(engine_core, tokenizer, prompt_ids_padded_to_prefill_length)
 
-    print("--- Finished Warmup ---")
+        clear_scheduler_state(engine_core)
+        run_prefill(engine_core, tokenizer,
+                    prompt_ids_padded_to_prefill_length, should_profile)
 
-    clear_scheduler_state(engine_core)
-    run_prefill(engine_core, tokenizer, prompt_ids, should_profile)
+    run_warmup(engine_core, tokenizer, prompt_ids)
 
     clear_scheduler_state(engine_core)
     run_decode(engine_core, tokenizer, prompt_ids, should_profile)

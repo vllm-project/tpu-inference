@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Any, List, Tuple
+from bisect import bisect_left
+from typing import Any, List, Tuple, Union
 
 import jax
 import jax.numpy as jnp
 import jax.tree_util
+import numpy as np
 from ray._private.accelerators import TPUAcceleratorManager
 
 GBYTES = 1024 * 1024 * 1024
@@ -171,3 +173,56 @@ def get_model_size_bytes(
         vllm_model_config.dtype).itemsize  # <--- MODIFIED
 
     return num_model_parameters * dtype_itemsize
+
+
+def take_nearest_length(lengths: list[int], length: int) -> int:
+    """Gets the nearest length to the right in a set of lengths.
+
+  Args:
+    lengths: A list of integers.
+    length: An integer.
+
+  Returns:
+    The nearest length to the right in the list.
+  """
+    pos = bisect_left(lengths, length)
+    if pos == len(lengths):
+        return lengths[-1]
+    return lengths[pos]
+
+
+def pad_tokens(
+    tokens: Union[List[int], np.ndarray],
+    pad_id: int,
+    prefill_lengths: List[int],
+    return_as_list: bool = True,
+) -> Tuple[Union[jax.Array, np.ndarray], int]:
+    """Pads tokens to the nearest prefill length that is equal to or greater
+     than the token length.
+
+  Args:
+    tokens: Tokens.
+    pad_id: Pad ID.
+    prefill_lengths: Buckets to pad the sequence to for static compilation.
+    return_as_list: Whether to return the padded tokens as a list.
+
+  Returns:
+    tokens: Tokenized into integers.
+    true_length: Actual length of the non-padded sequence.
+  """
+    assert pad_id == 0, "Further logic required if pad_id not 0."
+    if isinstance(tokens, list):
+        tokens = np.array(tokens)
+    true_length = tokens.shape[-1]
+    padded_length = take_nearest_length(prefill_lengths, true_length)
+    padding = padded_length - true_length
+    if padding < 0:
+        print("Provided sequence longer than available.")
+        # Take the last N tokens if we have too many.
+        padded_tokens = tokens[-padded_length:]
+    else:
+        padded_tokens = np.pad(tokens, (0, padding),
+                               constant_values=(pad_id, ))
+    if return_as_list:
+        padded_tokens = padded_tokens.tolist()
+    return padded_tokens, true_length
