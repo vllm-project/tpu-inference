@@ -278,16 +278,14 @@ class TPUModelRunner():
                                  seq: list[NewRequestData
                                            | CachedRequestData]):
         index = self.input_batch.req_id_to_index[seq.req_id]
-        whole_prompt_len = self.input_batch.num_prompt_tokens[index]
-        prefill_len = scheduler_output.num_scheduled_tokens[seq.req_id]
-        num_prefilled_tokens = self.input_batch.num_computed_tokens_cpu[index]
+        num_tokens = self.input_batch.num_tokens[index]
+        num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
+            seq.req_id]
+        num_computed_tokens = self.input_batch.num_computed_tokens_cpu[index]
 
-        if self.input_batch.num_computed_tokens_cpu[
-                index] >= whole_prompt_len:  # it's being decoded
-            return True
-        else:  # It's being prefilled. It will generate a token only if computed_tokens + scheduled_tokens == prompt_len
-            assert prefill_len + num_prefilled_tokens <= whole_prompt_len
-            return prefill_len + num_prefilled_tokens == whole_prompt_len
+        assert num_computed_tokens + num_scheduled_tokens <= num_tokens
+
+        return not (num_computed_tokens + num_scheduled_tokens < num_tokens)
 
     def execute_model(
         self,
@@ -876,24 +874,35 @@ class TPUModelRunner():
         subsequent_partial_prefill_seqs = []
         decoding_seqs = []
 
-        for seq in scheduler_output.scheduled_new_reqs:
-            seq_index = self.input_batch.req_id_to_index[seq.req_id]
-            num_prompt_tokens = self.input_batch.num_prompt_tokens[seq_index]
-            if num_prompt_tokens == scheduler_output.num_scheduled_tokens[
-                    seq.req_id]:
-                new_full_prefill_seqs.append(seq)
-            else:
-                new_partial_prefill_seqs.append(seq)
+        # NOTE(pooyam): The lesson learned was that `num_prompt_tokens` is not a reliable field to decide prefilling state based on solely.
+        # The reason is that once a request is preempated and added back later, `num_prompt_tokens` still points to original number of prompts.
+        # However, once the request is added back, we need to prefill previous prompt tokens AND previous output tokens again.
+        # We should use `num_scheduled_tokens`, `num_computed_tokens` and **`num_tokens`** in most of the logics.
+        for seq in (scheduler_output.scheduled_new_reqs +
+                    scheduler_output.scheduled_cached_reqs):
+            index = self.input_batch.req_id_to_index[seq.req_id]
+            num_tokens = self.input_batch.num_tokens[index]
+            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
+                seq.req_id]
+            num_computed_tokens = self.input_batch.num_computed_tokens_cpu[
+                index]
 
-        for seq in scheduler_output.scheduled_cached_reqs:
-            seq_index = self.input_batch.req_id_to_index[seq.req_id]
-            num_prompt_tokens = self.input_batch.num_prompt_tokens[seq_index]
-            num_computed_tokens = seq.num_computed_tokens
-            remaining_prefill = max(0, num_prompt_tokens - num_computed_tokens)
-            if remaining_prefill > 0:
-                subsequent_partial_prefill_seqs.append(seq)
+            assert num_computed_tokens + num_scheduled_tokens <= num_tokens
+
+            if num_computed_tokens + num_scheduled_tokens < num_tokens:
+                if num_computed_tokens == 0:
+                    new_partial_prefill_seqs.append(seq)
+                else:
+                    subsequent_partial_prefill_seqs.append(seq)
             else:
-                decoding_seqs.append(seq)
+                if num_computed_tokens == 0:
+                    new_full_prefill_seqs.append(seq)
+                elif num_scheduled_tokens != 1:
+                    subsequent_partial_prefill_seqs.append(seq)
+                elif num_scheduled_tokens == 1:
+                    decoding_seqs.append(seq)
+                else:
+                    raise ValueError("This should not happen.")
 
         return new_full_prefill_seqs, new_partial_prefill_seqs, subsequent_partial_prefill_seqs, decoding_seqs
 
@@ -994,18 +1003,16 @@ class TPUModelRunner():
                                 new_partial_prefill_seqs +
                                 subsequent_partial_prefill_seqs):
             seq_index = self.input_batch.req_id_to_index[seq.req_id]
-            whole_prompt_len = self.input_batch.num_prompt_tokens[seq_index]
+            num_tokens = self.input_batch.num_tokens[seq_index]
             prefill_len = scheduler_output.num_scheduled_tokens[seq.req_id]
             num_prefilled_tokens = self.input_batch.num_computed_tokens_cpu[
                 seq_index]
-            assert prefill_len + num_prefilled_tokens <= whole_prompt_len
-
-            num_prompt_tokens = self.input_batch.num_prompt_tokens[seq_index]
-            prompt_token_ids = self.input_batch.token_ids_cpu[
-                seq_index, :num_prompt_tokens]
-            prefill_input_ids[:, token_offset:token_offset + prefill_len] = (
-                prompt_token_ids[num_prefilled_tokens:num_prefilled_tokens +
-                                 prefill_len])
+            # TODO(pooyam): How to make sure we are not reading beyond prefill?
+            prefill_input_ids[:, token_offset:token_offset +
+                              prefill_len] = (self.input_batch.token_ids_cpu[
+                                  seq_index,
+                                  num_prefilled_tokens:num_prefilled_tokens +
+                                  prefill_len])
             input_positions[:, token_offset:token_offset + prefill_len] = list(
                 range(
                     num_prefilled_tokens,
@@ -1027,13 +1034,15 @@ class TPUModelRunner():
                                                block_size:math.ceil(
                                                    (num_prefilled_tokens +
                                                     prefill_len) / block_size)]
-            if num_prefilled_tokens + prefill_len == whole_prompt_len:
+
+            assert num_prefilled_tokens + prefill_len <= num_tokens
+
+            if num_prefilled_tokens + prefill_len == num_tokens:
                 # only in this case, a new decode token will be generated
                 last_prefill_token_idx = token_offset + prefill_len - 1
                 running_indices[last_prefill_token_idx] = seq_index
 
                 # Hex-LLM equivalent: output_token_indices[last_prefill_token_idx] = seq.get_decoded_len()
-                assert seq.num_computed_tokens <= whole_prompt_len
                 # NOTE(pooyam): Is there a case where this shouldn't be 0?
                 output_token_indices[last_prefill_token_idx] = 0
 
