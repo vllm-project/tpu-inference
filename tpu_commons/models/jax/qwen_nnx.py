@@ -186,10 +186,11 @@ class Qwen2DecoderLayer(nnx.Module):
         kv_cache: KVCache,
         x: jax.Array,
         attention_metadata: AttentionMetadata,
+        layer_idx: int,
     ) -> Tuple[KVCache, jax.Array]:
         # Self attention.
         jax.debug.print(
-            "[Qwen2DecoderLayer.__call__] x before input_layernorm:\n"
+            "[Qwen2DecoderLayer {layer_idx}] x before input_layernorm:\n"
             "  shape: {shape}\n"
             "  dtype: {dtype}\n"
             "  first 10: {first_10}\n"
@@ -198,11 +199,12 @@ class Qwen2DecoderLayer(nnx.Module):
             first_10=x.flatten()[:10],
             sum=jnp.sum(x),
             dtype=x.dtype,
+            layer_idx=layer_idx,
             ordered=True,
         )
         hidden_states = self.input_layernorm(x)
         jax.debug.print(
-            "[Qwen2DecoderLayer.__call__] hidden_states after input_layernorm:\n"
+            "[Qwen2DecoderLayer {layer_idx}] hidden_states after input_layernorm:\n"
             "  shape: {shape}\n"
             "  dtype: {dtype}\n"
             "  first 10: {first_10}\n"
@@ -211,6 +213,7 @@ class Qwen2DecoderLayer(nnx.Module):
             first_10=hidden_states.flatten()[:10],
             sum=jnp.sum(hidden_states),
             dtype=x.dtype,
+            layer_idx=layer_idx,
             ordered=True,
         )
         kv_cache, attn_output = self.self_attn(
@@ -220,24 +223,26 @@ class Qwen2DecoderLayer(nnx.Module):
             attention_metadata,
         )
         jax.debug.print(
-            "[Qwen2DecoderLayer.__call__] attn_output after self_attn:\n"
+            "[Qwen2DecoderLayer {layer_idx}] attn_output after self_attn:\n"
             "  shape: {shape}\n"
             "  first 10: {first_10}\n"
             "  sum: {sum}",
             shape=attn_output.shape,
             first_10=attn_output.flatten()[:10],
             sum=jnp.sum(attn_output),
+            layer_idx=layer_idx,
             ordered=True,
         )
         attn_output += x
         jax.debug.print(
-            "[Qwen2DecoderLayer.__call__] attn_output after residual connection:\n"
+            "[Qwen2DecoderLayer {layer_idx}] attn_output after residual connection:\n"
             "  shape: {shape}\n"
             "  first 10: {first_10}\n"
             "  sum: {sum}",
             shape=attn_output.shape,
             first_10=attn_output.flatten()[:10],
             sum=jnp.sum(attn_output),
+            layer_idx=layer_idx,
             ordered=True,
         )
 
@@ -289,6 +294,7 @@ class Qwen2Model(nnx.Module):
                 kv_cache,
                 x,
                 attention_metadata,
+                i,  # Pass layer index
             )
             kv_caches[i] = kv_cache
 
