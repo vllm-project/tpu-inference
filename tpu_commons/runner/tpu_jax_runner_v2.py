@@ -81,6 +81,16 @@ class TPUModelRunner():
         self.cache_config.output_logits = False  # To make model run without error
         self.scheduler_config.chunked_prefill_tokens_padding = 256
 
+        self.input_batch = InputBatch(
+            max_num_reqs=self.max_num_reqs,
+            max_model_len=self.max_model_len,
+            max_num_batched_tokens=self.max_num_tokens,
+            device=None,
+            pin_memory=False,
+            vocab_size=self.model_config.get_vocab_size(),
+            block_sizes=[self.block_size],
+        )
+
         self.kv_caches: List[Tuple[jax.Array, jax.Array]] = []
         self._init_random()
         self._init_mesh()
@@ -163,15 +173,6 @@ class TPUModelRunner():
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         self.kv_cache_config = kv_cache_config
-        self.input_batch = InputBatch(
-            max_num_reqs=self.max_num_reqs,
-            max_model_len=self.max_model_len,
-            max_num_batched_tokens=self.max_num_tokens,
-            device=None,
-            pin_memory=False,
-            vocab_size=self.model_config.get_vocab_size(),
-            kv_cache_config=kv_cache_config,
-        )
 
         kv_cache_groups = kv_cache_config.kv_cache_groups
         if len(kv_cache_groups) > 1:
