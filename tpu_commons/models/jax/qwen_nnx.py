@@ -346,6 +346,13 @@ class Qwen2ForCausalLM(nnx.Module):
 
         logits = jnp.dot(x, self.lm_head.value)
 
+        jax.debug.print(
+            "[Qwen2ForCausalLM.__call__]logits shape: {shape}, first 10: {first_10}, sum: {sum}",
+            shape=logits.shape,
+            first_10=logits.flatten()[:10],
+            sum=jnp.sum(logits),
+        )
+
         next_tokens = sample(
             is_prefill,
             do_sampling,
