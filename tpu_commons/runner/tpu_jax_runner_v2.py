@@ -80,12 +80,13 @@ class TPUModelRunner():
 
         # TODO(pooyam): These should be set from vllm side with some defaults.
         self.cache_config.sink_size = None
-        self.scheduler_config.decode_blocks_padding = 8
+        self.scheduler_config.decode_blocks_padding = 128
         self.scheduler_config.prefill_len_padding = 128
         self.perplexity_reference_text = None
         self.decode_seqs_padding = 8
         self.cache_config.output_logits = False  # To make model run without error
         self.scheduler_config.chunked_prefill_tokens_padding = 256
+        self.prefill_seqs_padding = 8
 
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
@@ -581,7 +582,6 @@ class TPUModelRunner():
             self.max_num_reqs,
             keep_one=keep_one,
         )
-        batch_size = num_seqs
 
         do_sampling = False
         running_indices = np.full((batch_size, ), -1, dtype=np.int32)
@@ -725,8 +725,13 @@ class TPUModelRunner():
         block_size = self.vllm_config.cache_config.block_size
         sliding_window = self.vllm_config.model_config.get_sliding_window()
 
-        # TODO: pad batch_size
         batch_size = len(scheduler_output.scheduled_new_reqs)
+        batch_size = pad_to_multiple(
+            batch_size,
+            self.prefill_seqs_padding,
+            self.scheduler_config.max_num_seqs,
+            True,
+        )
 
         # Full prompt length.
         max_prompt_len = max([
@@ -920,7 +925,8 @@ class TPUModelRunner():
         assert num_prefill_seqs <= MAX_PREFILL_SEQS_PER_TOKEN_BATCH
 
         # NOTE(pooyam): It's possible to remove this loop by approximating by upper bound.
-        num_tokens_scheduled = pad_to_multiple(num_decode_seqs, block_size)
+        num_tokens_scheduled = pad_to_multiple(
+            num_decode_seqs, block_size) if num_decode_seqs > 0 else 0
         for seq in new_full_prefill_seqs + new_partial_prefill_seqs + subsequent_partial_prefill_seqs:
             num_tokens_scheduled += pad_to_multiple(
                 scheduler_output.num_scheduled_tokens[seq.req_id], block_size)
