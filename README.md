@@ -60,6 +60,20 @@ python vllm/examples/offline_inference/basic/generate.py \
     --max_num_seqs=1
 ```
 
+Run the vLLM Pytorch `Qwen3-30B-A3B` MoE model, use `--enable-expert-parallel` for expert parallelism, otherwise it defaults to tensor parallelism:
+
+```
+export MODEL_IMPL_TYPE=vllm
+export TPU_BACKEND_TYPE=jax
+python vllm/examples/offline_inference/basic/generate.py \
+    --model=Qwen/Qwen3-30B-A3B \
+    --tensor_parallel_size=4 \
+    --task=generate \
+    --max_model_len=1024 \
+    --max_num_seqs=1 \
+    --enable-expert-parallel
+```
+
 ### Relevant env
 
 To switch different backends:
