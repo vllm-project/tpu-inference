@@ -448,6 +448,9 @@ class Driver:
     logging.info("---------Prefill params %d loaded.---------", idx)
 
     while self.live:
+      input_batch = prefill_engine.model_runner.input_batch
+      if len(input_batch.req_id_to_index) == input_batch.max_num_reqs:
+        continue
       my_transfer_backlog = self._transfer_backlogs[idx]
       # The prefill thread can just sleep until it has work to do.
       vllm_request = self._prefill_backlog.get(block=True)
@@ -462,7 +465,7 @@ class Driver:
 
       # Compute new kv cache for the prefill_content.
       prefix, vllm_model_runner_output = prefill_engine.prefill(vllm_req_data = vllm_request)
-      logging.warning("finished prefill, model_runner_output: %s", vllm_model_runner_output)
+      logging.warning("finished prefill for request %s", vllm_request.request_id)
       # request.prefill_result = prefill_result
       # Once prefill is complete, place it on the generation queue and block if
       # full.
@@ -528,10 +531,12 @@ class Driver:
       # Place the request on the correct generate backlog and block if full.
       self._generate_backlogs[target_idx].put(prefix, block=True)
       logging.info(
-          "Successfully transferred prefill "
-          "from prefill engine %d to generate engine %d.",
+          "Successfully transferred prefill request %s"
+          "from prefill engine %d to generate engine %d. generate backlog len %d",
+          prefix["seq"].request_id,
           idx,
           target_idx,
+          self._generate_backlogs[target_idx].qsize(),
       )
 
   def _generate_thread(self, idx: int):
@@ -549,17 +554,8 @@ class Driver:
     # generate_params = self._generate_params[idx]
     # logging.info("---------Generate params %d loaded.---------", idx)
     time_of_last_generate = time.time()
-    time_of_last_print = time.time()
+    time_of_last_print = time.time() - 1
     while self.live:
-      if (time.time() - time_of_last_print) > 1:
-        logging.info(
-            "Generate thread making a decision with:"
-            " prefill_backlog=%d"
-            " generate_free_slots=%d",
-            self._prefill_backlog.qsize(),
-            my_slots.qsize(),
-        )
-        time_of_last_print = time.time()
 
       max_concurrent_decodes = generate_engine.max_concurrent_decodes
 
@@ -567,20 +563,15 @@ class Driver:
       # we can still generate if we can't insert. We do this in a while loop to
       # insert as many sequences as possible.
       while True:
-        my_slots_size = my_slots.qsize()
-
-        try:
-          slot = my_slots.get(block=False)
-          # Found a slot, now see if we can fill it.
-        except queue.Empty:
-          # Exit this while loop as we have no free slots to insert into.
+        input_batch = generate_engine.model_runner.input_batch
+        if len(input_batch.req_id_to_index) == input_batch.max_num_reqs:
           break
+        block = len(input_batch.req_id_to_index) == 0
 
-        # We block when the decode slots are all free since we need to get a
-        # prefilled request to insert. We add timeout for the block to handle
-        # the case when the prefill backlog is cancelled and we end up with no
-        # more useful prefill work to do.
-        block = my_slots_size == max_concurrent_decodes
+        # # We block when the decode slots are all free since we need to get a
+        # # prefilled request to insert. We add timeout for the block to handle
+        # # the case when the prefill backlog is cancelled and we end up with no
+        # # more useful prefill work to do.
         if self._interleaved_mode:
           # For interleaved mode, we also blocks when prefill backlog
           # is not empty or there are transfer work to do.
@@ -591,36 +582,36 @@ class Driver:
           # Got free slot and new request, use them.
         except queue.Empty:
           # No new requests, we can't insert, so put back slot.
-          my_slots.put(slot, block=False)
           # If we were blocking and hit the timeout, then retry the loop.
           # Otherwise, we can exit and proceed to generation.
           if block:
             continue
           else:
             break
-
+        # if (time.time() - time_of_last_print) > 1:
+        #   logging.warning("input batch req ids : %s", input_batch.req_id_to_index)
+        #   time_of_last_print = time.time()
         # Signal to kill the thread.
         if prefix is None:
           return
+        else:
+          logging.info("get prefix of request %s from generate backlog. input batch req ids : %s ",
+                        prefix["seq"].request_id,
+                        input_batch.req_id_to_index)
 
-        logging.info(
-            "Generate slice %d filling slot %d at step %d.",
-            idx,
-            slot,
-            generate_timestep,
-        )
         generate_engine.insert(prefix)
         # delete_pytree(prefix)
-        new_request.generate_timestep_added = generate_timestep
-        new_request.complete = np.zeros(
-            (generate_engine.samples_per_slot,), dtype=np.bool_
-        )
+        # new_request.generate_timestep_added = generate_timestep
+        # new_request.complete = np.zeros(
+        #     (generate_engine.samples_per_slot,), dtype=np.bool_
+        # )
         # Respond to detokenization backpressure.
         # my_detokenize_backlog.put((slot, new_request), block=True)
 
       # At this point, we know that we have at least some slots filled.
+      input_batch = generate_engine.model_runner.input_batch
       assert (
-          my_slots.qsize() < max_concurrent_decodes
+        len(input_batch.req_id_to_index) != 0
       ), "At this point we must have some requests inserted into the slots."
 
       # Now we actually take a generate step on requests in the slots.
