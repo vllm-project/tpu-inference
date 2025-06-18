@@ -2,6 +2,7 @@
 from typing import Any, List, Tuple
 
 import jax
+import jax.numpy as jnp
 import jax.tree_util
 from ray._private.accelerators import TPUAcceleratorManager
 
@@ -63,10 +64,12 @@ def array_info(name: str, x: jax.Array) -> str:
 
 
 def calculate_prefill_tflops_per_device(
-        num_model_parameters: int,
-        prefill_length: int,
-        model_hf_config: Any,
-        log: bool = True) -> Tuple[float, float, float]:
+    num_model_parameters: int,
+    prefill_length: int,
+    vllm_model_config:
+    Any,  # <--- MODIFIED: Now takes vLLM's ModelConfig (e.g., vllm_config.model_config)
+    log: bool = True
+) -> Tuple[float, float, float]:
     """
   Calculates the TFLOPs per device for a prefill step based on model parameters and sequence length.
   Based on the formula from MaxText (arxiv.org/pdf/2204.02311.pdf Appendix B).
@@ -74,26 +77,26 @@ def calculate_prefill_tflops_per_device(
   Args:
     num_model_parameters: Total count of learnable parameters in the model.
     prefill_length: The length of the input prompt/sequence being prefilled.
-    model_hf_config: The Hugging Face model configuration object. Expected to have:
-                     .num_attention_heads (for num_query_heads)
-                     .num_hidden_layers (for num_decoder_layers)
-                     .hidden_size (to derive head_dim)
+    vllm_model_config: The vLLM ModelConfig object. Expected to have:
+                       .hf_config.num_attention_heads
+                       .hf_config.num_hidden_layers
+                       .hf_config.hidden_size
+                       .dtype (for model parameters dtype)
     log: If True, prints the TFLOPs breakdown.
 
   Returns:
     A tuple containing: (total_tflops, learnable_weight_tflops, causal_attention_tflops)
   """
-    num_query_heads = model_hf_config.num_attention_heads
-    num_decoder_layers = model_hf_config.num_hidden_layers
+    # Extract relevant config parameters from the Hugging Face model config NESTED inside vllm_model_config
+    num_query_heads = vllm_model_config.hf_config.num_attention_heads  # <--- MODIFIED
+    num_decoder_layers = vllm_model_config.hf_config.num_hidden_layers  # <--- MODIFIED
+    head_dim = vllm_model_config.hf_config.hidden_size // vllm_model_config.hf_config.num_attention_heads  # <--- MODIFIED
 
-    head_dim = model_hf_config.hidden_size // model_hf_config.num_attention_heads
     learnable_weight_tflops = 2 * num_model_parameters * prefill_length / jax.device_count(
     ) / 1e12
-
     noncasual_attention_flops = (4 * num_query_heads * num_decoder_layers *
                                  head_dim * prefill_length**2 /
                                  jax.device_count() / 1e12)
-
     causal_attention_tflops = noncasual_attention_flops / 2
 
     total_tflops = learnable_weight_tflops + causal_attention_tflops
@@ -117,3 +120,54 @@ def count_model_parameters(params: Any) -> int:
     """
     return jax.tree_util.tree_reduce(
         lambda x, y: x + y, jax.tree_util.tree_map(lambda x: x.size, params))
+
+
+def get_kv_cache_size_bytes(
+    kv_cache_config: Any, vllm_model_config: Any
+) -> int:  # <--- MODIFIED: Now takes vLLM's ModelConfig
+    """
+    Calculates the total size of the KV cache in bytes.
+
+    Args:
+        kv_cache_config: The KV cache configuration object (e.g., vllm_config.cache_config).
+                         Expected attributes: .num_blocks, .block_size.
+        vllm_model_config: The vLLM ModelConfig object. Expected attributes:
+                           .get_total_num_kv_heads(), .get_head_size(),
+                           and .dtype (for the model's data type, which KV cache typically matches).
+
+    Returns:
+        int: Total memory size of the KV cache in bytes.
+    """
+    num_blocks = kv_cache_config.num_gpu_blocks  # Total number of allocated KV cache blocks
+    block_size = kv_cache_config.block_size  # Number of tokens stored per block
+
+    # Access from vllm_model_config
+    num_kv_heads = vllm_model_config.get_total_num_kv_heads()  # <--- MODIFIED
+    head_size = vllm_model_config.get_head_size()  # <--- MODIFIED
+
+    # Access dtype from vllm_model_config
+    dtype_itemsize = jnp.dtype(
+        vllm_model_config.dtype).itemsize  # <--- MODIFIED
+
+    total_kv_cache_bytes = num_blocks * block_size * num_kv_heads * head_size * 2 * dtype_itemsize
+    return total_kv_cache_bytes
+
+
+def get_model_size_bytes(
+    num_model_parameters: int, vllm_model_config: Any
+) -> int:  # <--- MODIFIED: Now takes vLLM's ModelConfig
+    """
+    Calculates the total size of model parameters in bytes.
+
+    Args:
+        num_model_parameters: Total count of individual learnable parameters in the model.
+        vllm_model_config: The vLLM ModelConfig object. Expected attribute: .dtype (for the model parameters' data type).
+
+    Returns:
+        int: Total memory size of model parameters in bytes.
+    """
+    # Access dtype from vllm_model_config
+    dtype_itemsize = jnp.dtype(
+        vllm_model_config.dtype).itemsize  # <--- MODIFIED
+
+    return num_model_parameters * dtype_itemsize
