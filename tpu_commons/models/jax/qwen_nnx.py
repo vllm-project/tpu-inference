@@ -189,16 +189,16 @@ class Qwen2DecoderLayer(nnx.Module):
     ) -> Tuple[KVCache, jax.Array]:
         # Self attention.
         jax.debug.print(
-            "[Qwen2DecoderLayer.__call__] x before input_layernorm: shape={shape}, first 10: {first_10}, sum: {sum}",
+            "[Qwen2DecoderLayer.__call__] x before input_layernorm: shape={shape}, first 100: {first_10}, sum: {sum}",
             shape=x.shape,
-            first_10=x.flatten()[:10],
+            first_10=x.flatten()[:100],
             sum=jnp.sum(x),
         )
         hidden_states = self.input_layernorm(x)
         jax.debug.print(
-            "[Qwen2DecoderLayer.__call__] hidden_states after input_layernorm: shape={shape}, first 10: {first_10}, sum: {sum}",
+            "[Qwen2DecoderLayer.__call__] hidden_states after input_layernorm: shape={shape}, first 100: {first_10}, sum: {sum}",
             shape=hidden_states.shape,
-            first_10=hidden_states.flatten()[:10],
+            first_10=hidden_states.flatten()[:100],
             sum=jnp.sum(hidden_states),
         )
         kv_cache, attn_output = self.self_attn(
@@ -208,16 +208,16 @@ class Qwen2DecoderLayer(nnx.Module):
             attention_metadata,
         )
         jax.debug.print(
-            "[Qwen2DecoderLayer.__call__] attn_output after self_attn: shape={shape}, first 10: {first_10}, sum: {sum}",
+            "[Qwen2DecoderLayer.__call__] attn_output after self_attn: shape={shape}, first 100: {first_10}, sum: {sum}",
             shape=attn_output.shape,
-            first_10=attn_output.flatten()[:10],
+            first_10=attn_output.flatten()[:100],
             sum=jnp.sum(attn_output),
         )
         attn_output += x
         jax.debug.print(
-            "[Qwen2DecoderLayer.__call__] attn_output after residual connection: shape={shape}, first 10: {first_10}, sum: {sum}",
+            "[Qwen2DecoderLayer.__call__] attn_output after residual connection: shape={shape}, first 100: {first_10}, sum: {sum}",
             shape=attn_output.shape,
-            first_10=attn_output.flatten()[:10],
+            first_10=attn_output.flatten()[:100],
             sum=jnp.sum(attn_output),
         )
 
@@ -322,16 +322,16 @@ class Qwen2ForCausalLM(nnx.Module):
         *args,
     ) -> Tuple[List[KVCache], jax.Array, jax.Array]:
         jax.debug.print(
-            "[Qwen2ForCausalLM.__call__]input_ids shape: {shape}, first 10: {first_10}, sum: {sum}",
+            "[Qwen2ForCausalLM.__call__]input_ids shape: {shape}, first 100: {first_10}, sum: {sum}",
             shape=input_ids.shape,
-            first_10=input_ids.flatten()[:10],
+            first_10=input_ids.flatten()[:100],
             sum=jnp.sum(input_ids),
         )
         x = self.embed(input_ids)
         jax.debug.print(
-            "[Qwen2ForCausalLM.__call__]x (after embedding) shape: {shape}, first 10: {first_10}, sum: {sum}",
+            "[Qwen2ForCausalLM.__call__]x (after embedding) shape: {shape}, first 100: {first_10}, sum: {sum}",
             shape=x.shape,
-            first_10=x.flatten()[:10],
+            first_10=x.flatten()[:100],
             sum=jnp.sum(x),
         )
 
