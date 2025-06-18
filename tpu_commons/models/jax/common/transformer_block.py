@@ -5,20 +5,14 @@ from typing import Any, List, Mapping, Tuple, Type
 from flax import nnx
 from jax.sharding import Mesh
 
-from tpu_commons.models.jax.common.attention.attention import (Attention,
-                                                               AttentionConfig,
-                                                               AttentionMetadata)
-from tpu_commons.models.jax.common.base import (Config,
-                                                ParamFactory)
-from tpu_commons.models.jax.common.kv_cache import (KVCache,
-                                                    KVCacheConfig,
+from tpu_commons.models.jax.common.attention.attention import (
+    Attention, AttentionConfig, AttentionMetadata)
+from tpu_commons.models.jax.common.base import Config, ParamFactory
+from tpu_commons.models.jax.common.kv_cache import (KVCache, KVCacheConfig,
                                                     KVCacheType,
                                                     StandardUpdater)
-from tpu_commons.models.jax.common.layers import (FFW,
-                                                  FFWConfig,
-                                                  RMSNorm)
-from tpu_commons.models.jax.common.moe.moe import (MoE,
-                                                   Router)
+from tpu_commons.models.jax.common.layers import FFW, FFWConfig, RMSNorm
+from tpu_commons.models.jax.common.moe.moe import MoE, Router
 from tpu_commons.models.jax.common.sharding import *
 
 
@@ -91,7 +85,8 @@ class TransformerBlock(nnx.Module):
 
         if self.block_type == "moe":
             self.router = self._create_module(Router, cfg=self.cfg.ffw)
-            self.moe = self._create_module(MoE, cfg=self.cfg.ffw,
+            self.moe = self._create_module(MoE,
+                                           cfg=self.cfg.ffw,
                                            router=self.router)
 
         self.post_attention_norm = RMSNorm(

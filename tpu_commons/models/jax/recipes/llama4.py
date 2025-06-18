@@ -21,6 +21,7 @@ from typing import List, Mapping, Optional, Tuple
 import jax
 import jax.numpy as jnp
 from flax import nnx
+from flax.core import pretty_repr
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
 from vllm.config import VllmConfig
@@ -34,8 +35,7 @@ from tpu_commons.models.jax.common.layers import (Embedder, EmbedderConfig,
                                                   RMSNorm)
 from tpu_commons.models.jax.common.model import Model, ModelConfig
 from tpu_commons.models.jax.common.moe.moe import MoEConfig, RoutingConfig
-from tpu_commons.models.jax.common.sharding import (Sharding,
-                                                    ShardingConfig)
+from tpu_commons.models.jax.common.sharding import Sharding, ShardingConfig
 from tpu_commons.models.jax.common.transformer_block import (
     TransformerBlock, TransformerBlockConfig)
 
@@ -72,7 +72,8 @@ class Llama4ScoutModelConfig(ModelConfig):
                 act="silu",
                 dtype=jnp.bfloat16,
                 expert_hidden_size=8192,  ## TODO: Is this correct?
-                num_experts=16,  ## TODO: Is this correct?
+                # num_experts=16,  ## TODO: Is this correct?
+                num_experts=1,  ## TODO REVERT
                 expert_act="silu",
                 apply_expert_weight_before_computation=False,
                 router_config=RoutingConfig(
@@ -96,8 +97,8 @@ class Llama4ScoutModelConfig(ModelConfig):
     interleave_moe_layer_step: int = 1
     # num_layers: int = 48
     # num_moe_layers: int = 48
-    num_layers: int = 16
-    num_moe_layers: int = 16
+    num_layers: int = 16 ## TODO REVERT
+    num_moe_layers: int = 16 ## TODO REVERT
 
 
 class Llama4ScoutShardingConfig(ShardingConfig):
@@ -205,12 +206,15 @@ class Llama4Scout(Model):
                      cache_dir: Optional[str] = None):
         # jax.debug.breakpoint()
         # return self.init(self.param_factory.rngs)['params']
-        return nnx.state(self).filter(nnx.Param)
+        params = nnx.state(self).filter(nnx.Param)
+        jax.debug.print("Randomly initializing the following weight shapes:\n{params_repr}",
+                        params_repr=pretty_repr(params))
+        return params
 
     def __call__(self,
                  is_prefill: bool,
                  do_sampling: bool,
-                 kv_caches: List[KVCacheType],
+                 kv_caches: List[KVCacheType], # TODO: Make sure to use this instead of creating in model.
                  input_ids: jax.Array,
                  attention_metadata: AttentionMetadata,
                  temperatures: jax.Array = None,
