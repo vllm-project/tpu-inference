@@ -17,7 +17,8 @@ from tpu_commons.models.jax.common.kv_cache import (KVCache,
 from tpu_commons.models.jax.common.layers import (FFW,
                                                   FFWConfig,
                                                   RMSNorm)
-from tpu_commons.models.jax.common.moe.moe import MoE
+from tpu_commons.models.jax.common.moe.moe import (MoE,
+                                                   Router)
 from tpu_commons.models.jax.common.sharding import *
 
 
@@ -86,17 +87,31 @@ class TransformerBlock(nnx.Module):
             updater=StandardUpdater(),
         )
 
-        self.mlp = self._create_module(FFW, cfg=self.cfg.ffw_cfg)
+        self.mlp = self._create_module(FFW, cfg=self.cfg.ffw)
 
         if self.block_type == "moe":
-            self.moe = self._create_module(MoE, cfg=self.cfg.ffw_cfg)
+            self.router = self._create_module(Router, cfg=self.cfg.ffw)
+            self.moe = self._create_module(MoE, cfg=self.cfg.ffw,
+                                           router=self.router)
 
-        self.post_attention_norm = self._create_module(
-            RMSNorm,
-            cfg={"dims": self.cfg.d_model},
+        self.post_attention_norm = RMSNorm(
+            dims=self.cfg.ffw.d_model,
+            mesh=self.mesh,
+            param_factory=self.param_factory,
+            sharding_cfg=self.sharding_cfg,
+            epsilon=self.cfg.rmsnorm_epsilon,
+            with_scale=True,
+            dtype=self.cfg.ffw.dtype,
         )
-        self.post_mlp_norm = self._create_module(
-            RMSNorm, cfg={"dims": self.cfg.d_model})
+        self.post_mlp_norm = RMSNorm(
+            dims=self.cfg.ffw.d_model,
+            mesh=self.mesh,
+            param_factory=self.param_factory,
+            sharding_cfg=self.sharding_cfg,
+            epsilon=self.cfg.rmsnorm_epsilon,
+            with_scale=True,
+            dtype=self.cfg.ffw.dtype,
+        )
 
     # TODO:
     def __call__(self,

@@ -94,8 +94,10 @@ class Llama4ScoutModelConfig(ModelConfig):
             rmsnorm_epsilon=1e-5,
             block_type="MoE"))
     interleave_moe_layer_step: int = 1
-    num_layers: int = 48
-    num_moe_layers: int = 48
+    # num_layers: int = 48
+    # num_moe_layers: int = 48
+    num_layers: int = 16
+    num_moe_layers: int = 16
 
 
 class Llama4ScoutShardingConfig(ShardingConfig):
@@ -138,7 +140,7 @@ class Llama4Scout(Model):
 
     def __init__(self, vllm_config: VllmConfig, rng: PRNGKey, mesh: Mesh):
         self.vllm_config = vllm_config
-        self.rng = rng
+        self.rng = nnx.Rngs(rng)
         self.mesh = mesh
         # jax.debug.breakpoint()
         self.cfg = Llama4ScoutConfig(
@@ -165,7 +167,7 @@ class Llama4Scout(Model):
                                  sharding_cfg=self.cfg.sharding)
         # a better way to guarantee the order of initialization
         # i.e. sharding_cfg, quantization should be ready before global_KV_cache etc
-        self.global_KV_cache = self.create_KV_cache()
+        # self.global_KV_cache = self.create_KV_cache()
 
         # TODO: Confirm against MaxText
         # dense_blocks = [
@@ -181,7 +183,7 @@ class Llama4Scout(Model):
                              param_factory=param_factory,
                              mesh=self.mesh,
                              sharding_cfg=self.cfg.sharding)
-            for i in self.cfg.moe_layers
+            for i in range(self.cfg.model.num_moe_layers)
         ]
         self.final_norm = RMSNorm(
             dims=self.cfg.model.layers.ffw.d_model,
