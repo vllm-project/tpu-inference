@@ -3,7 +3,6 @@ from bisect import bisect_left
 from typing import Any, List, Tuple, Union
 
 import jax
-import jax.numpy as jnp
 import jax.tree_util
 import numpy as np
 from ray._private.accelerators import TPUAcceleratorManager
@@ -122,57 +121,6 @@ def count_model_parameters(params: Any) -> int:
     """
     return jax.tree_util.tree_reduce(
         lambda x, y: x + y, jax.tree_util.tree_map(lambda x: x.size, params))
-
-
-def get_kv_cache_size_bytes(
-    kv_cache_config: Any, vllm_model_config: Any
-) -> int:  # <--- MODIFIED: Now takes vLLM's ModelConfig
-    """
-    Calculates the total size of the KV cache in bytes.
-
-    Args:
-        kv_cache_config: The KV cache configuration object (e.g., vllm_config.cache_config).
-                         Expected attributes: .num_blocks, .block_size.
-        vllm_model_config: The vLLM ModelConfig object. Expected attributes:
-                           .get_total_num_kv_heads(), .get_head_size(),
-                           and .dtype (for the model's data type, which KV cache typically matches).
-
-    Returns:
-        int: Total memory size of the KV cache in bytes.
-    """
-    num_blocks = kv_cache_config.num_gpu_blocks  # Total number of allocated KV cache blocks
-    block_size = kv_cache_config.block_size  # Number of tokens stored per block
-
-    # Access from vllm_model_config
-    num_kv_heads = vllm_model_config.get_total_num_kv_heads()  # <--- MODIFIED
-    head_size = vllm_model_config.get_head_size()  # <--- MODIFIED
-
-    # Access dtype from vllm_model_config
-    dtype_itemsize = jnp.dtype(
-        vllm_model_config.dtype).itemsize  # <--- MODIFIED
-
-    total_kv_cache_bytes = num_blocks * block_size * num_kv_heads * head_size * 2 * dtype_itemsize
-    return total_kv_cache_bytes
-
-
-def get_model_size_bytes(
-    num_model_parameters: int, vllm_model_config: Any
-) -> int:  # <--- MODIFIED: Now takes vLLM's ModelConfig
-    """
-    Calculates the total size of model parameters in bytes.
-
-    Args:
-        num_model_parameters: Total count of individual learnable parameters in the model.
-        vllm_model_config: The vLLM ModelConfig object. Expected attribute: .dtype (for the model parameters' data type).
-
-    Returns:
-        int: Total memory size of model parameters in bytes.
-    """
-    # Access dtype from vllm_model_config
-    dtype_itemsize = jnp.dtype(
-        vllm_model_config.dtype).itemsize  # <--- MODIFIED
-
-    return num_model_parameters * dtype_itemsize
 
 
 def take_nearest_length(lengths: list[int], length: int) -> int:

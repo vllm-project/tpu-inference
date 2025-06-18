@@ -14,10 +14,9 @@ import time
 import uuid
 
 import jax
+import jax.numpy as jnp
 from transformers import AutoTokenizer
-from utils_jax import (calculate_prefill_tflops_per_device,
-                       get_kv_cache_size_bytes, get_model_size_bytes,
-                       pad_tokens)
+from utils_jax import calculate_prefill_tflops_per_device, pad_tokens
 from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.utils import FlexibleArgumentParser
@@ -36,9 +35,12 @@ BENCHMARK_ITERS = 10
 PAD_TOKEN_ID = 0
 
 
-def create_parser():
+def create_parser() -> FlexibleArgumentParser:
     """
     Create a parser for any CLI arguments to be passed to the EngineCore.
+
+    Returns:
+        A flexible argument parser, whose filtered args will be passed to the EngineCore
     """
     parser = FlexibleArgumentParser()
     EngineArgs.add_cli_args(parser)
@@ -232,14 +234,6 @@ def run_decode(engine_core: EngineCore,
             break
     assert found_req_prefilled, f"Request with ID {request_id_decode_setup} should be in scheduler.running after prefill setup step."
 
-    num_model_params = engine_core.model_executor.driver_worker.worker.model_runner.total_model_params_num
-    vllm_model_config = engine_core.vllm_config.model_config
-
-    model_size_bytes = get_model_size_bytes(num_model_params,
-                                            vllm_model_config)
-    kv_cache_size_bytes = get_kv_cache_size_bytes(
-        engine_core.vllm_config.cache_config, vllm_model_config)
-
     if verbose:
         print("Executing single decode step...")
 
@@ -325,6 +319,38 @@ def run_warmup(engine_core: EngineCore, tokenizer: AutoTokenizer,
         run_decode(engine_core, tokenizer, prompt_ids, False, verbose=False)
 
 
+def print_kv_cache_and_model_summary_stats(num_model_params: int,
+                                           model_size_bytes: int,
+                                           num_kv_cache_params: int,
+                                           kv_cache_size_bytes: int):
+    """
+    Print summary statistics for the model and KV cache.
+
+    Args:
+        num_model_params: Number of model parameters.
+        model_size_bytes: Size of the model in bytes.
+        num_kv_cache_params: Number of KV cache parameters.
+        kv_cache_size_bytes: Size of the KV cache in bytes.
+    """
+    num_model_params_in_billions = num_model_params / 1e9
+    total_model_param_size_in_gb = model_size_bytes / 1e9
+    avg_model_param_size = model_size_bytes / num_model_params
+
+    num_kv_cache_params_in_billions = num_kv_cache_params / 1e9
+    total_kv_cache_size_in_gb = kv_cache_size_bytes / 1e9
+    avg_kv_cache_param_size = kv_cache_size_bytes / num_kv_cache_params
+    print(
+        f"Model stats: \n"
+        f"\tTotal number of params: {num_model_params_in_billions:.3f} billion \n"
+        f"\tTotal memory usage: {total_model_param_size_in_gb:.3f} GB \n"
+        f"\tAvg size: {avg_model_param_size:.3f} bytes\n")
+    print(
+        f"Prefill stats: \n"
+        f"\tTotal number of params: {num_kv_cache_params_in_billions:.3f} billion \n"
+        f"\tTotal memory usage: {total_kv_cache_size_in_gb:.3f} GB \n"
+        f"\tAvg size: {avg_kv_cache_param_size:.3f} bytes\n")
+
+
 def main(args):
     """
     Main entry point for the script.
@@ -348,6 +374,7 @@ def main(args):
 
     engine_args = EngineArgs(**args)
     vllm_config = engine_args.create_engine_config()
+    vllm_model_config = vllm_config.model_config
     executor_class = Executor.get_class(vllm_config)
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
@@ -358,14 +385,24 @@ def main(args):
     engine_core = EngineCore(vllm_config=vllm_config,
                              executor_class=executor_class,
                              log_stats=True)
+    global kv_cache_size_bytes, model_size_bytes
     num_model_params = engine_core.model_executor.driver_worker.worker.model_runner.total_model_params_num
+    model_size_bytes = num_model_params * jnp.dtype(
+        vllm_model_config.dtype).itemsize
+    # This will be a list of length num decoder layers where each entry is a tuple of (key cache, value cache)
+    kv_caches = engine_core.model_executor.driver_worker.worker.model_runner.kv_caches
+    # total KV cache size is number of layers * 2 (for key and value caches) * KV cache size
+    kv_cache_num_params = len(kv_caches) * 2 * kv_caches[0][0].size
+    kv_cache_size_bytes = kv_cache_num_params * kv_caches[0][1].dtype.itemsize
 
     prefill_len_padding = engine_core.model_executor.driver_worker.worker.model_runner.scheduler_config.prefill_len_padding
     assert prefill_len_padding == 128
 
     prompt_ids = tokenizer(prompt).input_ids
 
-    print(f"Num model params: {num_model_params}")
+    print_kv_cache_and_model_summary_stats(num_model_params, model_size_bytes,
+                                           kv_cache_num_params,
+                                           kv_cache_size_bytes)
 
     for prefill_length in prefill_lengths:
         assert prefill_length % prefill_len_padding == 0, f"Expected prefill length to be a multiple of {prefill_len_padding}!"
