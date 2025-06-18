@@ -87,101 +87,149 @@ def run_prefill(engine_core: EngineCore,
                 tokenizer,
                 prompt_ids: list[int],
                 should_profile: bool,
-                verbose: bool = True):
+                verbose: bool = True,
+                benchmark_iters: int = BENCHMARK_ITERS):
     """
-    Run an isolated prefill pass.
+    Run an isolated prefill pass and measure its performance over multiple iterations.
 
     Args:
         engine_core: EngineCore instance.
         tokenizer: Tokenizer instance.
         prompt_ids: input prompt tokens.
+        should_profile: Whether to enable JAX profiling.
         verbose: Whether to print verbose output.
+        benchmark_iters: Number of iterations to run for benchmarking.
     """
     if verbose:
-        print("\n--- Running Prefill ---")
-
-    request_id_client = str(uuid.uuid4())
-
-    sampling_params_prefill = SamplingParams(max_tokens=len(prompt_ids) + 5,
-                                             temperature=0.0,
-                                             ignore_eos=True)
-
-    engine_core_request = make_request(prompt_ids, sampling_params_prefill,
-                                       tokenizer)
-    engine_core_request.request_id = request_id_client
-    engine_core_request.eos_token_id = tokenizer.eos_token_id
-
-    # Convert from an EngineCore request to vllm.v1.request.Request (used in the v1 scheduler)
-    # NOTE: can we just construct the Request directly?
-    req = Request.from_engine_core_request(engine_core_request)
-
-    engine_core.scheduler.add_request(req)
-
-    assert len(engine_core.scheduler.waiting) == 1
-    assert len(engine_core.scheduler.running) == 0
+        print(
+            f"\n--- Running Prefill Benchmark ({benchmark_iters} Iterations) ---"
+        )
 
     num_model_params = engine_core.model_executor.driver_worker.worker.model_runner.total_model_params_num
     vllm_model_config = engine_core.vllm_config.model_config
 
-    if should_profile:
-        engine_core.profile(is_start=True)
+    total_time_s = 0.0
 
-    start_time = time.perf_counter()
-    engine_core_output_step_0 = engine_core.step()
-    end_time = time.perf_counter()
+    prefill_len_for_tflops = len(prompt_ids)
 
-    if should_profile:
-        engine_core.profile(is_start=False)
+    # --- Timed Benchmark Loop ---
+    for i in range(benchmark_iters):
+        # Ensure scheduler is clean for each iteration's fresh start.
+        clear_scheduler_state(engine_core)
 
-    prefill_average_ms = (end_time -
-                          start_time) * 1000.0  # Calculate time in ms
+        request_id_client = str(uuid.uuid4())
 
-    if len(engine_core_output_step_0[0][0].outputs) > 0:
-        actual_processed_request_id = engine_core_output_step_0[0][0].outputs[
-            0].request_id
-    else:
-        actual_processed_request_id = None  # No request processed, or problem
+        sampling_params_prefill = SamplingParams(max_tokens=len(prompt_ids) +
+                                                 5,
+                                                 temperature=0.0,
+                                                 ignore_eos=True)
 
-    assert len(engine_core.scheduler.waiting) == 0
-    assert len(engine_core.scheduler.running) == 1
+        engine_core_request = make_request(prompt_ids, sampling_params_prefill,
+                                           tokenizer)
+        engine_core_request.request_id = request_id_client
+        engine_core_request.eos_token_id = tokenizer.eos_token_id
 
-    found_req_in_running = False
-    for r in engine_core.scheduler.running:
-        if r.request_id == actual_processed_request_id:
-            found_req_in_running = True
-            assert r.num_computed_tokens >= len(prompt_ids), \
-                f"Prefill not fully computed. Computed: {r.num_computed_tokens}, Prompt length: {len(prompt_ids)}"
-            break
-    assert found_req_in_running, f"Request with ID {actual_processed_request_id} should be in scheduler.running after prefill step."
+        req = Request.from_engine_core_request(engine_core_request)
 
-    # Should this be 128 because of prefill padding?
-    total_prefill_tokens = engine_core.scheduler.running[0].num_computed_tokens
+        # Ensure scheduler is clean before adding this request for current iteration
+        assert len(engine_core.scheduler.waiting) == 0 and len(
+            engine_core.scheduler.running) == 0
+
+        engine_core.scheduler.add_request(req)
+        if verbose and i == 0:
+            print(
+                f"Added client request '{request_id_client}' to scheduler.waiting for prefill (Iteration {i+1})."
+            )
+        assert len(engine_core.scheduler.waiting) == 1
+        assert len(engine_core.scheduler.running) == 0
+
+        if should_profile and i == 0:
+            engine_core.profile(is_start=True)
+
+        start_time_iter = time.perf_counter()
+        _ = engine_core.step()
+        jax.block_until_ready(engine_core.scheduler.running)
+        end_time_iter = time.perf_counter()
+
+        if should_profile and i == 0:
+            engine_core.profile(is_start=False)
+
+        total_time_s += (end_time_iter - start_time_iter)
+
+        actual_processed_request_id = engine_core.scheduler.running[
+            0].request_id if engine_core.scheduler.running else None
+
+        if verbose and i == 0:
+            if actual_processed_request_id:
+                print(
+                    f"Scheduler processed request with actual ID: {actual_processed_request_id} (Iteration {i+1})."
+                )
+            else:
+                print(
+                    f"Warning: Prefill step did not produce a running request for cleanup (Iteration {i+1})."
+                )
+
+            print(
+                f"Scheduler state after prefill step (Iteration {i+1}): waiting={len(engine_core.scheduler.waiting)}, running={len(engine_core.scheduler.running)}"
+            )
+
+        assert len(engine_core.scheduler.waiting) == 0
+        assert len(
+            engine_core.scheduler.running
+        ) == 1  # Request should always be in running after a successful step
+
+        found_req_in_running = False
+        for r in engine_core.scheduler.running:
+            if r.request_id == actual_processed_request_id:
+                found_req_in_running = True
+                assert r.num_computed_tokens >= len(prompt_ids), \
+                    f"Prefill not fully computed. Computed: {r.num_computed_tokens}, Prompt length: {len(prompt_ids)}"
+                if verbose and i == 0:  # Only print this once
+                    print(
+                        f"Request '{r.request_id}' prefill complete after first step: {r.num_computed_tokens}/{len(prompt_ids)} tokens computed (Iteration {i+1})."
+                    )
+                break
+        assert found_req_in_running, f"Request with ID {actual_processed_request_id} should be in scheduler.running after prefill step."
+
+    # --- End of Timed Benchmark Loop ---
+
+    prefill_average_ms = (total_time_s / benchmark_iters) * 1000.0
 
     if verbose:
-        print("--- Prefill complete ---")
+        print("Finished executing prefill loops.")
 
+    # --- Calculate and Print TFLOPs metrics ---
     total_tflops_per_device_value, _, _ = calculate_prefill_tflops_per_device(
-        num_model_params, total_prefill_tokens, vllm_model_config, log=verbose)
+        num_model_params, prefill_len_for_tflops, vllm_model_config, log=False)
 
     tflops_per_sec_per_device = total_tflops_per_device_value / (
         prefill_average_ms / 1000.0)
 
     if verbose:
         print(
-            f"\nPrefill benchmark results for length {total_prefill_tokens}:\n"
+            f"\nPrefill benchmark results for length {prefill_len_for_tflops}:\n"
             f"\tPrefill step average time: {prefill_average_ms:.3f} ms\n"
             f"\tPrefill total TFLOPs/device: {total_tflops_per_device_value:.3f}\n"
             f"\tPrefill TFLOPs/sec/device: {tflops_per_sec_per_device:.3f}\n\n"
         )
 
+    if verbose:
+        print("Detailed TFLOPs breakdown:")
+        calculate_prefill_tflops_per_device(num_model_params,
+                                            prefill_len_for_tflops,
+                                            vllm_model_config,
+                                            log=True)
 
-def run_decode(engine_core: EngineCore,
-               tokenizer,
-               prompt_ids: list[int],
-               should_profile: bool,
-               verbose: bool = True):
+
+def run_decode(
+        engine_core: EngineCore,
+        tokenizer,
+        prompt_ids: list[int],
+        should_profile: bool,
+        verbose: bool = True,  # Added verbose parameter
+        benchmark_iters: int = BENCHMARK_ITERS):
     """
-    Run an isolated decode pass and measure its performance for a single execution.
+    Run an isolated decode pass and measure its performance.
 
     Args:
         engine_core: EngineCore instance.
@@ -189,17 +237,19 @@ def run_decode(engine_core: EngineCore,
         prompt_ids: input prompt tokens.
         should_profile: Whether to enable profiling.
         verbose: Whether to print verbose output.
+        benchmark_iters: Number of iterations to run for benchmarking.
     """
     if verbose:
-        print("\n--- Running Decode Benchmark (Single Execution) ---")
+        print("\n--- Running Decode Benchmark ---")
 
+    # Ensure scheduler is clean before this scenario starts (should be from prefill cleanup)
     assert len(engine_core.scheduler.waiting) == 0 and len(
         engine_core.scheduler.running) == 0
 
     request_id_decode_setup = str(uuid.uuid4())
-    # Set max_tokens high enough for prompt + 1 decode token + buffer (since only 1 decode step)
+    # Set max_tokens high enough to allow prompt + all benchmark iterations + buffer
     sampling_params_decode_setup = SamplingParams(max_tokens=len(prompt_ids) +
-                                                  5,
+                                                  benchmark_iters + 5,
                                                   temperature=0.0,
                                                   ignore_eos=True)
 
@@ -211,15 +261,20 @@ def run_decode(engine_core: EngineCore,
     req_initial = Request.from_engine_core_request(engine_core_request_initial)
 
     engine_core.scheduler.add_request(req_initial)
-
+    if verbose:
+        print(
+            f"Added initial client request '{request_id_decode_setup}' for prefill setup for decode benchmark."
+        )
     assert len(engine_core.scheduler.waiting) == 1
     assert len(engine_core.scheduler.running) == 0
 
-    _ = engine_core.step()
-    jax.block_until_ready(engine_core.scheduler.running)
+    _ = engine_core.step()  # Execute the prefill step for this request
+    jax.block_until_ready(
+        engine_core.scheduler.running)  # Block until JAX execution completes
 
     assert len(engine_core.scheduler.waiting) == 0
-    assert len(engine_core.scheduler.running) == 1
+    assert len(
+        engine_core.scheduler.running) == 1  # Request should now be in running
 
     # Verify prefill is complete for this running request
     found_req_prefilled = False
@@ -235,38 +290,55 @@ def run_decode(engine_core: EngineCore,
             break
     assert found_req_prefilled, f"Request with ID {request_id_decode_setup} should be in scheduler.running after prefill setup step."
 
+    # --- Retrieve Sizing Info for Memory Bandwidth (inside run_decode) ---
     num_model_params = engine_core.model_executor.driver_worker.worker.model_runner.total_model_params_num
     vllm_model_config = engine_core.vllm_config.model_config
 
     model_size_bytes = get_model_size_bytes(num_model_params,
                                             vllm_model_config)
     kv_cache_size_bytes = get_kv_cache_size_bytes(
-        engine_core.vllm_config.cache_config, vllm_model_config)
+        engine_core.vllm_config.cache_config,
+        vllm_model_config)  # vllm_config for cache_config
 
+    # --- Timed Benchmark Loop for Decode ---
     if verbose:
-        print("Executing single decode step...")
+        print(f"Running decode benchmark for {benchmark_iters} iterations...")
+    total_time_s = 0.0
+    total_tokens_decoded = 0
 
     if should_profile:
         engine_core.profile(is_start=True)
 
-    start_time = time.perf_counter()
-    engine_core_output_decode = engine_core.step()
-    jax.block_until_ready(engine_core.scheduler.running)
-    end_time = time.perf_counter()
+    for i in range(benchmark_iters):
+        start_time = time.perf_counter()
+        engine_core_output_decode = engine_core.step()
+        jax.block_until_ready(engine_core.scheduler.running)
+        end_time = time.perf_counter()
+
+        total_time_s += (end_time - start_time)
+
+        tokens_this_step = 0
+        if len(engine_core_output_decode[0][0].outputs) > 0:
+            tokens_this_step = len(
+                engine_core_output_decode[0][0].outputs[0].new_token_ids)
+        total_tokens_decoded += tokens_this_step
+
+        if len(engine_core.scheduler.running
+               ) == 0 or engine_core_output_decode[0][0].outputs[
+                   0].finish_reason is not None:
+            if verbose:
+                print(
+                    f"Warning: Decode request finished early after {i+1} steps. Reason: {engine_core_output_decode[0][0].outputs[0].finish_reason}"
+                )
+            benchmark_iters = i + 1  # Adjust total iterations if it finished early (for accurate average)
+            break
 
     if should_profile:
         engine_core.profile(is_start=False)
 
-    decode_average_ms = (end_time - start_time) * 1000.0
-
-    tokens_this_step = 0
-    if len(engine_core_output_decode[0][0].outputs) > 0:
-        tokens_this_step = len(
-            engine_core_output_decode[0][0].outputs[0].new_token_ids)
-    total_tokens_decoded = tokens_this_step
-    assert total_tokens_decoded == 1, "Should only have decoded 1 token per decode step"
-    tokens_per_sec = total_tokens_decoded / (
-        decode_average_ms / 1000.0) if decode_average_ms > 0 else 0
+    decode_average_ms = (
+        total_time_s / benchmark_iters) * 1000.0 if benchmark_iters > 0 else 0
+    tokens_per_sec = total_tokens_decoded / total_time_s if total_time_s > 0 else 0
 
     # AR global batch size is the number of sequences concurrently decoding. For our test, it's 1.
     ar_global_batch_size = len(engine_core.scheduler.running) if len(
@@ -274,10 +346,11 @@ def run_decode(engine_core: EngineCore,
     ar_average_ms_per_seq = decode_average_ms / ar_global_batch_size if ar_global_batch_size > 0 else 0
 
     # Calculate memory bandwidth
-    seconds_per_step_actual = (decode_average_ms / 1000.0)
+    seconds_per_step = total_time_s / benchmark_iters if benchmark_iters > 0 else 0
     GB_per_step_per_device = (model_size_bytes +
                               kv_cache_size_bytes) / 1e9 / jax.device_count()
-    bw_per_device = GB_per_step_per_device / seconds_per_step_actual if seconds_per_step_actual > 0 else 0
+    bw_per_device = (GB_per_step_per_device /
+                     seconds_per_step) if seconds_per_step > 0 else 0
 
     if verbose:
         print(
