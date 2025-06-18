@@ -99,7 +99,7 @@ root = logging.getLogger()
 root.setLevel(logging.INFO)
 
 handler = logging.StreamHandler(sys.stdout)
-handler.setLevel(logging.INFO)
+handler.setLevel(logging.WARNING)
 formatter = logging.Formatter(
     "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
@@ -462,7 +462,8 @@ class Driver:
 
       # Compute new kv cache for the prefill_content.
       prefix, vllm_model_runner_output = prefill_engine.prefill(vllm_req_data = vllm_request)
-      request.prefill_result = prefill_result
+      logging.warning("finished prefill, model_runner_output: %s", vllm_model_runner_output)
+      # request.prefill_result = prefill_result
       # Once prefill is complete, place it on the generation queue and block if
       # full.
       my_transfer_backlog.put(prefix, block=True)
@@ -473,9 +474,9 @@ class Driver:
       )
       my_vllm_output_backlog = self._vllm_output_backlogs[idx]
       my_vllm_output_backlog.put(vllm_model_runner_output, block = True)
-      del prefill_result
+      del prefix
       del vllm_model_runner_output
-      del request
+      del vllm_request
 
   def _jax_transfer_prefill_result(
       self, new_request: Any, target_idx: int

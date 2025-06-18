@@ -47,6 +47,8 @@ from tpu_commons.core.jetstream_commons.engine import tokenizer_api
 from tpu_commons.core.jetstream_commons.engine.tokenizer_pb2 import TokenizerParameters
 from tpu_commons.core.jetstream_commons.engine.tokenizer_pb2 import TokenizerType
 
+from tpu_commons.worker.input_batch_jax import CachedRequestState, InputBatch
+
 # from MaxText import inference_utils
 # from MaxText import max_utils
 # from MaxText import maxtext_utils
@@ -91,10 +93,23 @@ class JaxEngine(engine_api.Engine):
                                                       new_computed_blocks=computed_blocks)
     new_block_ids = self.kv_cache_manager.get_block_ids(vllm_req_data.request_id)
     request = NewRequestData.from_request(vllm_req_data, new_block_ids)
-    logger.warning("Finished allocating blocks for prefill req %s", req.__dict__)
-    if self.req_id_to_req.get(request.request_id) == None:
-      self.req_id_to_req[request.request_id] = vllm_req_data
+    logger.info("Finished allocating blocks for prefill req %s", request.__dict__)
+    if self.req_id_to_req.get(request.req_id) == None:
+      self.req_id_to_req[request.req_id] = vllm_req_data
     input_batch = self.model_runner.input_batch
+    request_to_add = CachedRequestState(
+      req_id=request.req_id,
+      prompt_token_ids=request.prompt_token_ids,
+      mm_inputs=request.mm_inputs,
+      mm_positions=request.mm_positions,
+      sampling_params=request.sampling_params,
+      generator=None,
+      block_ids=request.block_ids,
+      num_computed_tokens=request.num_computed_tokens,
+      output_token_ids=[],
+      lora_request=request.lora_request,
+    )
+    input_batch.add_request(request_to_add, None)
     inputs = self.model_runner._prepare_prefill([request])
     if inputs is not None:
       model_inputs, (running_indices, output_token_indices) = inputs
