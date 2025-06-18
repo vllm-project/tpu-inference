@@ -65,12 +65,10 @@ def array_info(name: str, x: jax.Array) -> str:
 
 
 def calculate_prefill_tflops_per_device(
-    num_model_parameters: int,
-    prefill_length: int,
-    vllm_model_config:
-    Any,  # <--- MODIFIED: Now takes vLLM's ModelConfig (e.g., vllm_config.model_config)
-    log: bool = True
-) -> Tuple[float, float, float]:
+        num_model_parameters: int,
+        prefill_length: int,
+        vllm_model_config: Any,
+        log: bool = True) -> Tuple[float, float, float]:
     """
   Calculates the TFLOPs per device for a prefill step based on model parameters and sequence length.
   Based on the formula from MaxText (arxiv.org/pdf/2204.02311.pdf Appendix B).
@@ -89,9 +87,9 @@ def calculate_prefill_tflops_per_device(
     A tuple containing: (total_tflops, learnable_weight_tflops, causal_attention_tflops)
   """
     # Extract relevant config parameters from the Hugging Face model config NESTED inside vllm_model_config
-    num_query_heads = vllm_model_config.hf_config.num_attention_heads  # <--- MODIFIED
-    num_decoder_layers = vllm_model_config.hf_config.num_hidden_layers  # <--- MODIFIED
-    head_dim = vllm_model_config.hf_config.hidden_size // vllm_model_config.hf_config.num_attention_heads  # <--- MODIFIED
+    num_query_heads = vllm_model_config.hf_config.num_attention_heads
+    num_decoder_layers = vllm_model_config.hf_config.num_hidden_layers
+    head_dim = vllm_model_config.hf_config.hidden_size // vllm_model_config.hf_config.num_attention_heads
 
     learnable_weight_tflops = 2 * num_model_parameters * prefill_length / jax.device_count(
     ) / 1e12
