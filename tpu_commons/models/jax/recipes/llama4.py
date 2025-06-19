@@ -24,6 +24,7 @@ from flax import nnx
 from flax.core import pretty_repr
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
+import jax.tree_util as tree_util
 from vllm.config import VllmConfig
 
 from tpu_commons.models.jax.common.attention.attention import (
@@ -142,7 +143,7 @@ class Llama4Scout(Model):
     def __init__(self, vllm_config: VllmConfig, rng: PRNGKey, mesh: Mesh):
         self.vllm_config = vllm_config
         self.rng = nnx.Rngs(rng)
-        self.mesh = mesh
+        # self.mesh = mesh
         # jax.debug.breakpoint()
         self.cfg = Llama4ScoutConfig(
             model=Llama4ScoutModelConfig(),
@@ -158,12 +159,12 @@ class Llama4Scout(Model):
     def setup(self) -> None:
         param_factory = ParamFactory(
             rngs=self.rng,
-            initializer=nnx.initializers.ones)  # Default for RMSNorm scale
+            initializer=jnp.ones)  # Default for RMSNorm scale
         self.sharding = Sharding(
             # cfg=self.cfg.sharding,
             strategy_dict={"tensor_parallelism": 8})
         self.embedder = Embedder(cfg=self.cfg.model.emb,
-                                 mesh=self.mesh,
+                                 mesh=self.sharding.mesh,
                                  param_factory=param_factory,
                                  sharding_cfg=self.cfg.sharding)
         # a better way to guarantee the order of initialization
@@ -182,13 +183,13 @@ class Llama4Scout(Model):
             TransformerBlock(cfg=self.cfg.model.layers,
                              block_type="moe",
                              param_factory=param_factory,
-                             mesh=self.mesh,
-                             sharding_cfg=self.cfg.sharding)
+                             mesh=self.sharding.mesh,
+                             sharding_cfg=self.sharding.sharding_cfg)
             for i in range(self.cfg.model.num_moe_layers)
         ]
         self.final_norm = RMSNorm(
             dims=self.cfg.model.layers.ffw.d_model,
-            mesh=self.mesh,
+            mesh=self.sharding.mesh,
             param_factory=param_factory,  # TODO: what to set this to?
             sharding_cfg=self.cfg.sharding,  # Kept for API consistency
             epsilon=self.cfg.model.layers.rmsnorm_epsilon,
@@ -200,6 +201,41 @@ class Llama4Scout(Model):
 
     def apply(self, variables, *args, **kwargs):
         return self.__call__(*args, **kwargs)
+    
+    def get_sharding_repr(self, pytree):
+        """
+        Traverses a PyTree and replaces JAX arrays with a dictionary of their
+        sharding information for pretty printing.
+        """
+        def get_leaf_repr(x):
+            # We only care about JAX arrays
+            if isinstance(x, jax.Array):
+                # Case 1: It's a distributed array (e.g., GlobalDeviceArray)
+                if hasattr(x, 'local_shards') and x.local_shards:
+                    local_shard = x.local_shards[0]
+                    return {
+                        "type": "distributed",
+                        "global_shape": x.shape,
+                        "dtype": x.dtype,
+                        "sharding": repr(x.sharding),
+                        "local_shape": local_shard.shape,
+                        "num_devices": len(x.devices()),
+                    }
+                # Case 2: It's a standard, single-device array
+                else:
+                    return {
+                        "type": "single_device",
+                        "global_shape": x.shape,
+                        "dtype": x.dtype,
+                        "sharding": repr(x.sharding),
+                        "device": repr(x.device),
+                    }
+            # If it's not a JAX array (e.g., an nnx.Param wrapper), recurse
+            return x
+
+
+        return tree_util.tree_map(get_leaf_repr, pytree)
+
 
     def load_weights(self,
                      model_name_or_path: str,
@@ -207,8 +243,9 @@ class Llama4Scout(Model):
         # jax.debug.breakpoint()
         # return self.init(self.param_factory.rngs)['params']
         params = nnx.state(self).filter(nnx.Param)
+        sharding_info = self.get_sharding_repr(params)
         jax.debug.print("Randomly initializing the following weight shapes:\n{params_repr}",
-                        params_repr=pretty_repr(params))
+                        params_repr=pretty_repr(sharding_info))
         return params
 
     def __call__(self,

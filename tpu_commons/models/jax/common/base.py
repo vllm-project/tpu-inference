@@ -88,5 +88,8 @@ class ParamFactory:
         Returns:
             An `nnx.Param` instance containing the initialized data and sharding info.
         """
-        param_data = self.initializer(self.rngs.params(), shape, dtype)
+        try:
+            param_data = self.initializer(self.rngs.params(), shape, dtype, out_sharding=sharding)
+        except TypeError:
+            param_data = self.initializer(shape, dtype, device=sharding)
         return nnx.Param(param_data, sharding=sharding)

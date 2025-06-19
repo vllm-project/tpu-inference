@@ -1,4 +1,6 @@
+from collections import namedtuple
 import enum
+from dataclasses import dataclass
 
 
 class RouterType(enum.Enum):
@@ -14,20 +16,21 @@ class OPERATION_MODE(enum.Enum):
 # TODO we code the logical mesh axis name as a constant
 # we need to make it more flexible in case more names
 # could be added for future models
-class LOGICAL_MESH_AXIS_NAME(enum.Enum):
+@dataclass(frozen=True)
+class LOGICAL_MESH_AXIS_NAME():
     # The constants as the name for mesh axis
     # logical equivalently, we could use 'x', 'y' or ('x', 'y'),
     # but specifying a name will give better readability.
     # The axis should be 'x', 'y', 'z' by physical mesh
     # i.e. [x, y] -> [8, 8] for v6e-64
-    BATCH_AXIS_NAME = 'dp'
-    SEQUENCE_AXIS_NAME = 'sp'
-    ATTN_HEAD_AXIS_NAME = 'ep'
-    ATTN_TENSOR_AXIS_NAME = 'tp'
-    MLP_TENSOR_AXIS_NAME = ('tp', 'ep')
-    MOE_TENSOR_AXIS_NAME = 'tp'
-    EXPERT_AXIS_NAME = 'ep'
-    VOCAB_AXIS_NAME = ('dp', 'sp', 'tp', 'ep')
+    BATCH_AXIS_NAME = 'data'
+    SEQUENCE_AXIS_NAME = 'seq'
+    ATTN_HEAD_AXIS_NAME = 'expert'
+    ATTN_TENSOR_AXIS_NAME = 'tensor'
+    MLP_TENSOR_AXIS_NAME = ('tensor', 'expert')
+    MOE_TENSOR_AXIS_NAME = 'tensor'
+    EXPERT_AXIS_NAME = 'expert'
+    VOCAB_AXIS_NAME = ('data', 'seq', 'tensor', 'expert')
 
 
 """

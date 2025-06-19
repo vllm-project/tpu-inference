@@ -5,12 +5,12 @@ import jax
 import jax.numpy as jnp
 # Flax and JAX sharding imports
 from flax import nnx
-from jax.sharding import Mesh, NamedSharding
+from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from jaxtyping import Float, Int
 
 from tpu_commons.models.jax.common.base import Config, ParamFactory
-from tpu_commons.models.jax.common.sharding import ShardingConfig
+from tpu_commons.models.jax.common.sharding import NamedSharding, ShardingConfig
 
 
 # A dummy for modeling_flax_utils which might contain activation functions
@@ -71,7 +71,7 @@ class RMSNorm(nnx.Module):
     def __post_init__(self):
         """Initializes the scale parameter."""
         # No Sharding on the scale parameter
-        scale_sharding = NamedSharding(self.mesh, P())
+        scale_sharding = NamedSharding(self.mesh, None)
         self.scale = self.param_factory.create_kernel_init(
             shape=(self.dims, ), sharding=scale_sharding, dtype=self.dtype)
 
@@ -188,19 +188,19 @@ class FFW(nnx.Module):
 
             sharding_dict = {
                 'prefill': NamedSharding(self.mesh,
-                                         P(prefill_sharding_config)),
+                                         prefill_sharding_config),
                 'generate': NamedSharding(self.mesh,
-                                          P(generate_sharding_config))
+                                          generate_sharding_config)
             }
             setattr(self, attr_name, sharding_dict)
 
         # static sharding for kernel/weights
         self.df_sharding = NamedSharding(
             self.mesh,
-            P(self.sharding_cfg.generate_sharding_cfg.ffw_weight_df))
+            self.sharding_cfg.generate_sharding_cfg.ffw_weight_df)
         self.fd_sharding = NamedSharding(
             self.mesh,
-            P(self.sharding_cfg.generate_sharding_cfg.ffw_weight_fd))
+            self.sharding_cfg.generate_sharding_cfg.ffw_weight_fd)
 
         return
 
@@ -301,9 +301,9 @@ class Embedder(nnx.Module):
     def create_sharding(self):
         """Creates and sets sharding attributes for weights and activations."""
         self.prelogit_btd = NamedSharding(
-            self.mesh, P(self.sharding_cfg.generate_sharding_cfg.prelogit_btd))
+            self.mesh, self.sharding_cfg.generate_sharding_cfg.prelogit_btd)
         self.dv_sharding = NamedSharding(
-            self.mesh, P(self.sharding_cfg.generate_sharding_cfg.vocab_dv))
+            self.mesh, self.sharding_cfg.generate_sharding_cfg.vocab_dv)
 
     def __post_init__(self):
         self.create_sharding()

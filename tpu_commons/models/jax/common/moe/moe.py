@@ -4,14 +4,15 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from jax.sharding import Mesh, NamedSharding
+from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from jaxtyping import Float
 
 from tpu_commons.models.jax.common.base import (Config,
                                                 ParamFactory)
 from tpu_commons.models.jax.common.constants import RouterType
-from tpu_commons.models.jax.common.sharding import ShardingConfig
+from tpu_commons.models.jax.common.sharding import (ShardingConfig,
+                                                    NamedSharding)
 from tpu_commons.models.jax.common.layers import (FFWConfig,
                                                   FlaxUtils)
 
@@ -115,16 +116,16 @@ class Router(nnx.Module):
 
             sharding_dict = {
                 'prefill': NamedSharding(self.mesh,
-                                         P(prefill_sharding_config)),
+                                         prefill_sharding_config),
                 'generate': NamedSharding(self.mesh,
-                                          P(generate_sharding_config))
+                                          generate_sharding_config)
             }
             setattr(self, attr_name, sharding_dict)
 
         # static sharding for kernel/weights
         self.ed_sharding = NamedSharding(
             self.mesh,
-            P(self.sharding_cfg.generate_sharding_cfg.moe_router_de))
+            self.sharding_cfg.generate_sharding_cfg.moe_router_de)
 
         return
 
@@ -271,18 +272,19 @@ class MoE(nnx.Module):
 
             sharding_dict = {
                 'prefill': NamedSharding(self.mesh,
-                                         P(prefill_sharding_config)),
+                                         prefill_sharding_config),
                 'generate': NamedSharding(self.mesh,
-                                          P(generate_sharding_config))
+                                          generate_sharding_config)
             }
             setattr(self, attr_name, sharding_dict)
 
         # static sharding for kernel/weights
+        jax.debug.print("Sharding config = {sharding_config}", sharding_config=self.sharding_cfg)
         self.edf_sharding = NamedSharding(
             self.mesh,
-            P(self.sharding_cfg.generate_sharding_cfg.moe_weights_edf))
+            self.sharding_cfg.generate_sharding_cfg.moe_weights_edf)
         self.efd_sharding = NamedSharding(
             self.mesh,
-            P(self.sharding_cfg.generate_sharding_cfg.moe_weights_efd))
+            self.sharding_cfg.generate_sharding_cfg.moe_weights_efd)
 
         return

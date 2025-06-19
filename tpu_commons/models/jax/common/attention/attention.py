@@ -4,12 +4,12 @@ from typing import Any, Dict, List, Tuple, Union
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from jax.sharding import Mesh, NamedSharding
+from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
 from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.kv_cache import KVCache
-from tpu_commons.models.jax.common.sharding import ShardingConfig
+from tpu_commons.models.jax.common.sharding import ShardingConfig, NamedSharding
 from tpu_commons.models.jax.rope.generic_rope import apply_rope
 
 
@@ -101,6 +101,8 @@ class Attention(nnx.Module):
 
     def create_sharding(self):
         """Creates sharding rules for activations and weights."""
+
+        # TODO: it seems "keyvalue_bskh" is not used/set in sharidngs.py.
         mode_dependent_attrs = [
             "activation_attention_btd", "activation_q_btd", "query_btnh",
             "keyvalue_bskh", "activation_attention_out_btd"
@@ -113,22 +115,22 @@ class Attention(nnx.Module):
 
             sharding_dict = {
                 'prefill': NamedSharding(self.mesh,
-                                         P(prefill_sharding_config)),
+                                         prefill_sharding_config),
                 'generate': NamedSharding(self.mesh,
-                                          P(generate_sharding_config))
+                                          generate_sharding_config)
             }
             setattr(self, attr_name, sharding_dict)
 
         # static sharding for kernel/weights
         self.ndh_sharding = NamedSharding(
             self.mesh,
-            P(self.sharding_cfg.generate_sharding_cfg.attn_q_weight_ndh))
+            self.sharding_cfg.generate_sharding_cfg.attn_q_weight_ndh)
         self.kdh_sharding = NamedSharding(
             self.mesh,
-            P(self.sharding_cfg.generate_sharding_cfg.attn_k_weight_kdh))
+            self.sharding_cfg.generate_sharding_cfg.attn_k_weight_kdh)
         self.nhd_sharding = NamedSharding(
             self.mesh,
-            P(self.sharding_cfg.generate_sharding_cfg.attn_o_weight_nhd))
+            self.sharding_cfg.generate_sharding_cfg.attn_o_weight_nhd)
 
     def __call__(
         self,

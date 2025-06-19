@@ -2,10 +2,22 @@ from dataclasses import dataclass
 
 import jax
 import numpy as np
-from jax.sharding import Mesh
+from jax.sharding import (Mesh,
+                          PartitionSpec as P)
+from typing import Tuple
 
 from tpu_commons.models.jax.common.constants import LOGICAL_MESH_AXIS_NAME
 
+
+#########
+# utils
+#########
+def NamedSharding(mesh: Mesh, logical_axes: Tuple[LOGICAL_MESH_AXIS_NAME | None] | None):
+    if logical_axes:
+        pspec = P(*logical_axes)
+    else:
+        pspec = P()
+    return jax.sharding.NamedSharding(mesh, pspec)
 
 @dataclass
 class ShardingStrategy:
@@ -211,23 +223,23 @@ class Sharding:
         """
         # TODO: to decide if we should name as x,y,z or 'data','tensor', 'expert' etc
         axis_order = {
-            "dp": strategy.data_parallelism,
-            "ep": strategy.expert_parallelism,
-            "sp": strategy.sequence_parallelism,
-            "tp": strategy.tensor_parallelism,
+            "data": strategy.data_parallelism,
+            "expert": strategy.expert_parallelism,
+            "seq": strategy.sequence_parallelism,
+            "tensor": strategy.tensor_parallelism,
         }
         # TODO: add logic to infer axis when the degree is -1
         mesh_axis_names = []
         mesh_shape = []
         for axis, dim in axis_order.items():
-            if dim > 1:
-                mesh_axis_names.append(axis)
-                mesh_shape.append(dim)
+            # if dim > 1:
+            mesh_axis_names.append(axis)
+            mesh_shape.append(dim)
 
         if not mesh_shape:
             mesh_shape = [1]
             mesh_axis_names = [
-                'dp'
+                'data'
             ]  # default to data parallelism if no other strategy is specified
 
         devices = np.asarray(jax.devices()).reshape(mesh_shape)
@@ -292,6 +304,30 @@ class Sharding:
         prefill_sharding_cfg.activation_attention_out_btd = (
             None, LOGICAL_MESH_AXIS_NAME.SEQUENCE_AXIS_NAME,
             LOGICAL_MESH_AXIS_NAME.ATTN_TENSOR_AXIS_NAME)
+        prefill_sharding_cfg.activation_q_btd = (
+            None, None, LOGICAL_MESH_AXIS_NAME.ATTN_TENSOR_AXIS_NAME)
+        prefill_sharding_cfg.attn_o_btnh = (
+            None, None, LOGICAL_MESH_AXIS_NAME.ATTN_HEAD_AXIS_NAME,
+            LOGICAL_MESH_AXIS_NAME.ATTN_TENSOR_AXIS_NAME)
+        prefill_sharding_cfg.query_btnh = (
+            None, None, LOGICAL_MESH_AXIS_NAME.ATTN_HEAD_AXIS_NAME,
+            LOGICAL_MESH_AXIS_NAME.ATTN_TENSOR_AXIS_NAME)
+        prefill_sharding_cfg.activation_ffw_btd = (
+            None, None, LOGICAL_MESH_AXIS_NAME.MLP_TENSOR_AXIS_NAME)
+        prefill_sharding_cfg.ffw_hidden_btf = (
+            None, None, LOGICAL_MESH_AXIS_NAME.MLP_TENSOR_AXIS_NAME)
+        # FFW weights are typically sharded along the hidden dimension (F).
+        prefill_sharding_cfg.ffw_weight_df = (
+            None, LOGICAL_MESH_AXIS_NAME.MLP_TENSOR_AXIS_NAME)
+        prefill_sharding_cfg.ffw_weight_fd = (
+            LOGICAL_MESH_AXIS_NAME.MLP_TENSOR_AXIS_NAME, None)
+        # MoE weights are sharded along the expert axis and the hidden dimension.
+        prefill_sharding_cfg.moe_weights_edf = (
+            LOGICAL_MESH_AXIS_NAME.EXPERT_AXIS_NAME, None,
+            LOGICAL_MESH_AXIS_NAME.MOE_TENSOR_AXIS_NAME)
+        prefill_sharding_cfg.moe_weights_efd = (
+            LOGICAL_MESH_AXIS_NAME.EXPERT_AXIS_NAME,
+            LOGICAL_MESH_AXIS_NAME.MOE_TENSOR_AXIS_NAME, None)
 
         # Populate Generate (Decode) Config
         # During decode, batch size is the large dimension, so we shard along the batch axis.
@@ -328,6 +364,8 @@ class Sharding:
         # Apply overriding the runtime sharding rules
         self._apply_overrides(prefill_sharding_cfg, prefill_overrides)
         self._apply_overrides(generate_sharding_cfg, generate_overrides)
+        self.sharding_cfg.prefill_sharding_cfg = prefill_sharding_cfg
+        self.sharding_cfg.generate_sharding_cfg = generate_sharding_cfg
 
         return self.sharding_cfg
 
