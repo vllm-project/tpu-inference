@@ -533,7 +533,8 @@ class EngineCoreProc(EngineCore):
 
         # Step the engine core.
         while self.orchestrator._vllm_output_backlogs.qsize() > 0:
-            output = self.orchestrator._vllm_output_backlogs.get(block = True)
+            output = self.orchestrator._vllm_output_backlogs[0].get(block = False)
+            logger.info("Got output %s from orchestrator vllm output queue", output)
             self.output_queue.put_nowait(output)
         # Put EngineCoreOutputs into the output queue.
         # for output in (outputs.items() if outputs else ()):

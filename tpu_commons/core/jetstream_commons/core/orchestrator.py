@@ -86,6 +86,7 @@ import threading
 import time
 import traceback
 from typing import Any, AsyncIterator, Optional, Tuple, cast
+from collections import defaultdict
 
 import grpc
 import jax
@@ -94,6 +95,8 @@ import numpy as np
 
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request
+from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
+                            EngineCoreOutputs)
 
 root = logging.getLogger()
 root.setLevel(logging.INFO)
@@ -360,22 +363,22 @@ class Driver:
         )
         for idx in range(len(self._generate_engines))
     ]
-    # self.detokenize_threads = [
-    #     JetThread(
-    #         target=functools.partial(
-    #             self._detokenize_thread,
-    #             idx,
-    #         ),
-    #         name=f"detokenize-{idx}",
-    #     )
-    #     for idx in range(len(self._generate_engines))
-    # ]
+    self.detokenize_threads = [
+        JetThread(
+            target=functools.partial(
+                self._detokenize_thread,
+                idx,
+            ),
+            name=f"detokenize-{idx}",
+        )
+        for idx in range(len(self._generate_engines))
+    ]
     self._all_threads = list(
         itertools.chain(
             self._prefill_threads,
             self._transfer_threads,
             self._generate_threads,
-            # self.detokenize_threads,
+            self.detokenize_threads,
         )
     )
     self.live = True
@@ -456,6 +459,7 @@ class Driver:
       my_transfer_backlog = self._transfer_backlogs[idx]
       # The prefill thread can just sleep until it has work to do.
       vllm_request = self._prefill_backlog.get(block=True)
+      my_detokenize_backlog = self._detokenize_backlogs[idx]
 
       if vllm_request is None:
         break
@@ -485,7 +489,8 @@ class Driver:
           req_id, idx,
       )
       my_vllm_output_backlog = self._vllm_output_backlogs[idx]
-      my_vllm_output_backlog.put(vllm_model_runner_output, block = True)
+      my_detokenize_backlog.put(vllm_model_runner_output, block = True)
+      # logging.info("Put vllm_model_runner_output %s to detokenize backlog, qsize %s \n", vllm_model_runner_output.__dict__, my_detokenize_backlog.qsize())
       del prefix
       del vllm_model_runner_output
       del vllm_request
@@ -555,7 +560,7 @@ class Driver:
     my_slots = self._generate_slots[idx]
     my_generate_backlog = self._generate_backlogs[idx]
     my_vllm_output_backlog = self._vllm_output_backlogs[idx]
-    # my_detokenize_backlog = self._detokenize_backlogs[idx]
+    my_detokenize_backlog = self._detokenize_backlogs[idx]
 
     # Keep track of what step tokens were generated at.
     generate_timestep = 0
@@ -630,20 +635,21 @@ class Driver:
       # Now we actually take a generate step on requests in the slots.
       vllm_model_runner_output = generate_engine.generate(self.requests)
       logging.info("Got generate output %s", vllm_model_runner_output.__dict__)
-      my_vllm_output_backlog.put(vllm_model_runner_output, block = True)
+      my_detokenize_backlog.put(vllm_model_runner_output, block = True)
+      # logging.info("Put vllm_model_runner_output to detokenize backlog, qsize %s \n", my_detokenize_backlog.qsize())
 
     #   sampled_tokens.copy_to_host_async()
     #   # Respond to detokenization backpressure.
     #   my_detokenize_backlog.put((generate_timestep, sampled_tokens), block=True)
       generate_timestep += 1
-      logging.info(
-          "Generate engine %d step %d - slots free : %d / %d, took %.2fms",
-          idx,
-          generate_timestep,
-          my_slots_size,
-          max_concurrent_decodes,
-          (time.time() - time_of_last_generate) * 10**3,
-      )
+      # logging.info(
+      #     "Generate engine %d step %d - slots free : %d / %d, took %.2fms",
+      #     idx,
+      #     generate_timestep,
+      #     my_slots_size,
+      #     max_concurrent_decodes,
+      #     (time.time() - time_of_last_generate) * 10**3,
+      # )
       time_of_last_generate = time.time()
 
   def _detokenize_thread(self, idx: int):
@@ -654,41 +660,36 @@ class Driver:
     my_detokenize_backlog = self._detokenize_backlogs[idx]
     my_generate_engine = self._generate_engines[idx]
     my_slots = self._generate_slots[idx]
+    my_vllm_output_backlog = self._vllm_output_backlogs[idx]
+    outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
 
-    metadata = my_generate_engine.get_tokenizer()
-    tokenizer = my_generate_engine.build_tokenizer(metadata)
-    my_live_requests = {
-        i: None for i in range(my_generate_engine.max_concurrent_decodes)
-    }
     while self.live:
-      data = my_detokenize_backlog.get(block=True)
-      if data is None:
-        break
-      start_detokenize_time = time.time()
-      if isinstance(data[1], engine_api.ResultTokens):
-        # We want to detokenize them.
-        generate_timestep_added, result_tokens = data
-        # Disable attribute error because pytype doesn't know this
-        # is a result tokens, and we can't annotate the tuple.
-        result_tokens = result_tokens.convert_to_numpy()
+      # pass
+      model_runner_output = my_detokenize_backlog.get(block = True)
+      # for request in model_runner_output.req_id_to_index:
 
-        for slot, request in my_live_requests.items():
-          if request is not None:
-            results, complete = None, True
-            request.complete = complete
-            # Return some output samples.
-            request.enqueue_samples(results)
-            if request.complete.all():
-              request.return_channel.close()
-              # Place the slot back on the free queue.
-              my_live_requests[slot] = None
-              my_slots.put(slot, block=False)  # This should always have space.
-        logging.info(
-            "Detokenizing generate step %d took %.2fms",
-            generate_timestep_added,
-            (time.time() - start_detokenize_time) * 10**3,
+      #   sampled_token_id = model_runner_output.sampled_token_ids[]
+      req_ids = list(model_runner_output.prompt_logprobs_dict.keys())
+      for req_id in req_ids:
+        request = self.requests[req_id]
+        sampled_token_index = model_runner_output.req_id_to_index[req_id]
+        sampled_token_id = model_runner_output.sampled_token_ids[sampled_token_index]
+        outputs[request.client_index].append(
+          EngineCoreOutput(
+            request_id=req_id,
+            new_token_ids=sampled_token_id,
+            finish_reason=request.get_finished_reason(),
+            new_logprobs=None,
+            new_prompt_logprobs_tensors=None,
+            stop_reason=request.stop_reason,
+            events=request.take_events(),
+            # kv_transfer_params=kv_transfer_params,
+            num_cached_tokens=request.num_cached_tokens,
+          )
         )
-      else:
-        # We want to update a slot with the new channel.
-        slot, active_request = data
-        my_live_requests[slot] = active_request
+      engine_core_outputs = {
+        client_index: EngineCoreOutputs(outputs=outs)
+        for client_index, outs in outputs.items()
+      }
+      logging.info("Put engine core outputs %s to vllm output backlog", req_ids)
+      my_vllm_output_backlog.put(engine_core_outputs, block = True)
