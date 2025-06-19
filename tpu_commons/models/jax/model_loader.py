@@ -19,15 +19,15 @@ def _get_model_architecture(config: PretrainedConfig) -> nn.Module:
     impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
     if impl == "flax_nn":
         from tpu_commons.models.jax.llama_nn import LlamaForCausalLM
+        from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
     elif impl == "flax_nnx":
         from tpu_commons.models.jax.llama import LlamaForCausalLM
     else:
         raise NotImplementedError("Unsupported MODEL_IMPL_TYPE")
 
-    # TODO: need a fix from Wenlong on the below
     _MODEL_REGISTRY = {
         "LlamaForCausalLM": LlamaForCausalLM,
-        # "Qwen2ForCausalLM": Qwen2ForCausalLM,
+        "Qwen2ForCausalLM": Qwen2ForCausalLM,
     }
 
     architectures = getattr(config, "architectures", [])
@@ -67,8 +67,8 @@ def get_nn_model(
             outputs_sharding,
             logits_cache_sharding,
         ),
-        static_argnums=(1, 2, 3),
-        donate_argnums=4,
+        static_argnums=(1, 2),
+        donate_argnums=3,
     )
     model_fn = functools.partial(jit_model, params)
     total_model_params = count_model_parameters(params)

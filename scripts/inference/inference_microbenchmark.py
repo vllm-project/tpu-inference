@@ -160,6 +160,8 @@ def run_prefill(engine_core: EngineCore,
 
         if should_profile and i == 0:
             engine_core.profile(is_start=False)
+            # TODO: we need to update this to also cover chunked prefill probably
+            assert engine_core.model_executor.driver_worker.worker.model_runner.phase == "prefill"
 
         total_time_s += (end_time_iter - start_time_iter)
 
@@ -273,6 +275,7 @@ def run_decode(
     for i in range(benchmark_iters):
         if should_profile and i == 0:
             engine_core.profile(is_start=True)
+
         start_time = time.perf_counter()
         engine_core_output_decode = engine_core.step()
         jax.block_until_ready(engine_core.scheduler.running)
@@ -280,6 +283,7 @@ def run_decode(
 
         if should_profile and i == 0:
             engine_core.profile(is_start=False)
+            assert engine_core.model_executor.driver_worker.worker.model_runner.phase == "decode"
 
         total_time_s += (end_time - start_time)
 
