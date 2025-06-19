@@ -182,7 +182,7 @@ class JaxEngine(engine_api.Engine):
     cached_reqs = [all_requests[request_id] for request_id in input_batch.req_id_to_index]
     scheduled_cached_reqs = []
     for request in cached_reqs:
-      logger.info("Converting scheduling request %s to cached request", request.request_id)
+      # logger.info("Converting scheduling request %s to cached request", request.request_id)
       new_blocks = self.kv_cache_manager.allocate_slots(request, 1)
       req_to_new_block_ids[request.request_id] = new_blocks.get_block_ids()
       num_computed_tokens = request.num_computed_tokens

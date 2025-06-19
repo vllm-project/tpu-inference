@@ -119,38 +119,6 @@ def delete_pytree(p):
   jax.tree_map(delete_leaf, p)
 
 
-# @dataclasses.dataclass
-# class ActiveRequest:
-#   """Current state of the driver."""
-
-#   #################### Information relevant for generation #####################
-#   max_tokens: int
-#   # We keep prefill and decode information together in the same object so that
-#   # there is less indirection about where this return channel is.
-#   # The return channel returns a list of strings, one per sample for that query.
-#   return_channel: async_multifuture.AsyncMultifuture[list[ReturnSample]]
-#   # [num_samples,] which corresponds to whether each sample is complete for the
-#   # requests.
-#   complete: Optional[np.ndarray] = None
-#   prefill_result: Any = None
-#   #################### Information relevant for prefill ########################
-#   history_path: Optional[str] = None
-#   prefill_content: Optional[str | list[int]] = None
-#   ################## Information relevant for detokenization ###################
-#   # Which generate step this was added at.
-#   generate_timestep_added: Optional[int] = None
-#   is_client_side_tokenization: Optional[bool] = False
-
-#   def enqueue_samples(self, generated_samples: list[ReturnSample]):
-#     """Adds the generated sample(s) to return channel for current step.
-
-#     Args:
-#       generated_samples: The generated sample(s) for current step.
-
-#     This should be called only from within the Drivers background thread.
-#     """
-#     self.return_channel.add_result(generated_samples)
-
 
 class JetThread(threading.Thread):
   """Thread that kills the program if it fails.
@@ -165,18 +133,6 @@ class JetThread(threading.Thread):
       print(f"Thread {self.name} encountered an error: {e}")
       traceback.print_exc()
       os.kill(os.getpid(), signal.SIGKILL)
-
-
-async def _abort_or_raise(
-    context: grpc.aio.ServicerContext | None,
-    code: grpc.StatusCode,
-    details: str,
-):
-  """Safely aborts a gRPC context if available, or raises an Exception."""
-  if context is None:
-    raise RuntimeError(details)
-
-  await context.abort(code, details)
 
 
 class Driver:
