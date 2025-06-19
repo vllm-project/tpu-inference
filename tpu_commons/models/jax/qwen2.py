@@ -317,9 +317,9 @@ class Qwen2ForCausalLM(nnx.Module):
         jax.debug.print(
             "[Qwen2ForCausalLM] next_tokens: shape={shape}, dtype={dtype}, first 10: {first_10}, sum: {sum}",
             shape=next_tokens.shape,
-            first_10=x.flatten()[:10],
-            sum=jnp.sum(x),
-            dtype=x.dtype,
+            first_10=next_tokens.flatten()[:10],
+            sum=jnp.sum(next_tokens),
+            dtype=next_tokens.dtype,
         )
 
         return kv_caches, next_tokens, logits

@@ -44,10 +44,11 @@ def main(args: dict):
 
     # Generate texts from the prompts. The output is a list of RequestOutput
     # objects that contain the prompt, generated text, and other information.
-    prompts = [
-        "The president of the United States is", "The capital of France is",
-        "The future of AI is", "The colors of the rainbow are"
-    ]
+    # prompts = [
+    #     "The president of the United States is", "The capital of France is",
+    #     "The future of AI is", "The colors of the rainbow are"
+    # ]
+    prompts = ["The capital of France is"]
     if envs.VLLM_TORCH_PROFILER_DIR is not None:
         llm.start_profile()
     outputs = llm.generate(prompts, sampling_params)
