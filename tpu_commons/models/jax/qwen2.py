@@ -314,6 +314,8 @@ class Qwen2ForCausalLM(nnx.Module):
             top_ks,
             attention_metadata.chunked_prefill_enabled,
         )
+        logger.debug(f"next_tokens: {next_tokens}")
+
         return kv_caches, next_tokens, logits
 
     def load_weights(self, rng_key: jax.Array):
