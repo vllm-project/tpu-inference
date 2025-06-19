@@ -466,22 +466,23 @@ class Driver:
       )
 
       # Compute new kv cache for the prefill_content.
-      prefix, vllm_model_runner_output, request_to_add = prefill_engine.prefill(vllm_req_data = vllm_request)
-      req_id = request_to_add.req_id
+      prefix, vllm_model_runner_output, request = prefill_engine.prefill(vllm_req_data = vllm_request)
+      req_id = request.request_id
       new_token_ids = vllm_model_runner_output.sampled_token_ids[vllm_model_runner_output.req_id_to_index[req_id]]
-      request_to_add.output_token_ids.extend(new_token_ids)
-      if self.requests.get(request_to_add.req_id) == None:
-        self.requests[request_to_add.req_id] = request_to_add
+      request.append_output_token_ids(new_token_ids)
+      request.num_computed_tokens = request.num_prompt_tokens + 1
+      request.num_cached_tokens = request.num_prompt_tokens
+      if self.requests.get(request.request_id) == None:
+        self.requests[req_id] = request
       # logging.warning("finished prefill for request %s output %s \n", vllm_request.request_id, vllm_model_runner_output.__dict__)
-      # logging.warning("added %s to requests dictionary \n", self.requests[request_to_add.req_id])
+      # logging.warning("added %s to requests dictionary \n", self.requests[req_id].__dict__)
       # request.prefill_result = prefill_result
       # Once prefill is complete, place it on the generation queue and block if
       # full.
       my_transfer_backlog.put(prefix, block=True)
       logging.info(
-          "Placed request on transfer queue %d, %d queued requests.",
-          idx,
-          my_transfer_backlog.qsize(),
+          "Finished prefill %s, Placed request on transfer queue %s",
+          req_id, idx,
       )
       my_vllm_output_backlog = self._vllm_output_backlogs[idx]
       my_vllm_output_backlog.put(vllm_model_runner_output, block = True)
@@ -628,6 +629,7 @@ class Driver:
 
       # Now we actually take a generate step on requests in the slots.
       vllm_model_runner_output = generate_engine.generate(self.requests)
+      logging.info("Got generate output %s", vllm_model_runner_output.__dict__)
       my_vllm_output_backlog.put(vllm_model_runner_output, block = True)
 
     #   sampled_tokens.copy_to_host_async()
