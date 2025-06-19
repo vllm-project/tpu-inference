@@ -243,6 +243,7 @@ class Driver:
     self._prefill_params = prefill_params
     self._generate_params = generate_params
     self._interleaved_mode = interleaved_mode
+    self.requests = {}
     # self._metrics_collector = metrics_collector
 
     # Stages 1-4 represent the life cycle of a request.
@@ -465,8 +466,14 @@ class Driver:
       )
 
       # Compute new kv cache for the prefill_content.
-      prefix, vllm_model_runner_output = prefill_engine.prefill(vllm_req_data = vllm_request)
-      logging.warning("finished prefill for request %s output %s", vllm_request.request_id, vllm_model_runner_output.__dict__)
+      prefix, vllm_model_runner_output, request_to_add = prefill_engine.prefill(vllm_req_data = vllm_request)
+      req_id = request_to_add.req_id
+      new_token_ids = vllm_model_runner_output.sampled_token_ids[vllm_model_runner_output.req_id_to_index[req_id]]
+      request_to_add.output_token_ids.extend(new_token_ids)
+      if self.requests.get(request_to_add.req_id) == None:
+        self.requests[request_to_add.req_id] = request_to_add
+      # logging.warning("finished prefill for request %s output %s \n", vllm_request.request_id, vllm_model_runner_output.__dict__)
+      # logging.warning("added %s to requests dictionary \n", self.requests[request_to_add.req_id])
       # request.prefill_result = prefill_result
       # Once prefill is complete, place it on the generation queue and block if
       # full.
@@ -567,7 +574,10 @@ class Driver:
       while True:
         input_batch = generate_engine.model_runner.input_batch
         if len(input_batch.req_id_to_index) == input_batch.max_num_reqs:
-          break
+          if set(input_batch.req_id_to_index.keys()).issubset(set(self.requests.keys())):
+            break
+          else:
+            continue
         block = len(input_batch.req_id_to_index) == 0
 
         # We block when the decode slots are all free since we need to get a
@@ -617,7 +627,7 @@ class Driver:
       ), "At this point we must have some requests inserted into the slots."
 
       # Now we actually take a generate step on requests in the slots.
-      vllm_model_runner_output = generate_engine.generate()
+      vllm_model_runner_output = generate_engine.generate(self.requests)
       my_vllm_output_backlog.put(vllm_model_runner_output, block = True)
 
     #   sampled_tokens.copy_to_host_async()

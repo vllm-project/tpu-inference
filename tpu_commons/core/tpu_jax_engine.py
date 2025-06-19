@@ -75,14 +75,13 @@ class JaxEngine(engine_api.Engine):
     self.kv_cache_manager = kv_cache_manager
     # self.config = config
     input_batch = self.model_runner.input_batch
-    self.model_runner.all_requests = {}
 
   # Public non-JIT prefill method that updates page state
   def prefill(
       self,  # pytype: disable=signature-mismatch
       *,
       vllm_req_data: Optional[Request] = None,
-  ) -> Tuple[Prefix, ModelRunnerOutput]:
+  ) -> Tuple[Prefix, ModelRunnerOutput, CachedRequestState]:
     computed_blocks, _ = self.kv_cache_manager.get_computed_blocks(vllm_req_data)
     new_blocks = self.kv_cache_manager.allocate_slots(vllm_req_data, 
                                                       vllm_req_data.num_tokens,
@@ -93,8 +92,6 @@ class JaxEngine(engine_api.Engine):
     request.num_computed_tokens = vllm_req_data.num_tokens
     logger.info("Finished allocating blocks for prefill req %s", request.req_id)
     input_batch = self.model_runner.input_batch
-    if self.model_runner.all_requests.get(request.req_id) == None:
-      self.model_runner.all_requests[request.req_id] = vllm_req_data
     request_to_add = CachedRequestState(
       req_id=request.req_id,
       prompt_token_ids=request.prompt_token_ids,
@@ -108,7 +105,6 @@ class JaxEngine(engine_api.Engine):
       lora_request=request.lora_request,
     )
     input_batch.add_request(request_to_add, None)
-    self.model_runner.requests[request.req_id] = request_to_add
     inputs = self.model_runner._prepare_prefill([request])
     if inputs is not None:
       model_inputs, (running_indices, output_token_indices) = inputs
@@ -130,7 +126,7 @@ class JaxEngine(engine_api.Engine):
       # NOTE(pooyam): Unfinished prefills should not return anything to vLLM scheduler.
       # if not self._is_generating_new_token(scheduler_output, vllm_req_data):
       #     continue
-
+      
       index = input_batch.req_id_to_index[request.req_id]
       output_token_index = max(
           input_batch.num_computed_tokens_cpu[index] -
@@ -175,27 +171,27 @@ class JaxEngine(engine_api.Engine):
       "output_token_indices": output_token_indices, 
       "attention_metadata": model_inputs[4], #Ask people to structurize this
     }  
-    return prefix, runner_output
+    return prefix, runner_output, request_to_add
 
 
-  def generate(self) -> ModelRunnerOutput:
+  def generate(self, all_requests) -> ModelRunnerOutput:
     """Public API for generate that updates page state outside JIT."""
     input_batch = self.model_runner.input_batch
     req_to_new_block_ids = {}
-    logger.info("model runner req dictionary: %s", self.model_runner.all_requests.keys())
-    cached_reqs = [self.model_runner.requests[request_id] for request_id in input_batch.req_id_to_index]
+    logger.info("orchestrator req dictionary: %s", all_requests.keys())
+    cached_reqs = [all_requests[request_id] for request_id in input_batch.req_id_to_index]
     scheduled_cached_reqs = []
     for request in cached_reqs:
       logger.info("Generate scheduling request: %s", request.__dict__)
       new_blocks = self.kv_cache_manager.allocate_slots(request, 1)
-      req_to_new_block_ids[request.request_id] = new_blocks.get_block_ids()
-      new_token_ids = request.all_token_ids[request.num_computed_tokens:request.num_computed_tokens+1]
+      req_to_new_block_ids[request.req_id] = new_blocks.get_block_ids()
+      new_token_ids = [0]
       req_data = CachedRequestData.from_request(request, 
                                                 False, 
                                                 new_token_ids, 
                                                 req_to_new_block_ids[request.request_id])
       scheduled_cached_reqs.append(req_data)
-      req_state = self.model_runner.requests[request.request_id]
+      req_state = all_requests[request.request_id]
       req_state.num_computed_tokens = req_data.num_computed_tokens
       for block_ids, new_block_ids in zip(req_state.block_ids,
                                           req_data.new_block_ids,
