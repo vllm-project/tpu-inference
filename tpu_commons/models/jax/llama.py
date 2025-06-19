@@ -299,6 +299,13 @@ class LlamaForCausalLM(nnx.Module):
             top_ks,
             attention_metadata.chunked_prefill_enabled,
         )
+        jax.debug.print(
+            "[LlamaForCausalLM] next_tokens: shape={shape}, dtype={dtype}, first 10: {first_10}, sum: {sum}",
+            shape=next_tokens.shape,
+            first_10=x.flatten()[:10],
+            sum=jnp.sum(x),
+            dtype=x.dtype,
+        )
         return kv_caches, next_tokens, logits
 
     def load_weights(self, rng_key: jax.Array):
