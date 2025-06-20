@@ -38,10 +38,24 @@ def attention(
     k_cache, v_cache = kv_cache
     md = attention_metadata
     if md.chunked_prefill_enabled:
-        k_cache = sharded_chunked_prefill_update_cache(mesh)(
-            k_cache, md.kv_cache_write_indices, k, md.num_decode_seqs)
-        v_cache = sharded_chunked_prefill_update_cache(mesh)(
-            v_cache, md.kv_cache_write_indices, v, md.num_decode_seqs)
+        if attention_metadata.page_aligned_update:
+            # The e2e performance improvement of this was ~5% back in 2024/03 per gxd@. This might have changed now.
+            k_cache = sharded_chunked_prefill_update_cache(mesh)(
+                k_cache, md.kv_cache_write_indices, k, md.num_decode_seqs)
+            v_cache = sharded_chunked_prefill_update_cache(mesh)(
+                v_cache, md.kv_cache_write_indices, v, md.num_decode_seqs)
+        else:
+            # TODO(pooyam): Try the following ideas to optimize this.
+            # Idea 1: use lax loop similar to to chunked_prefill_update_cache above.
+            # Idea 2: Convert a prefill of size m*PAGE_SIZE + n, to a prefill of size m*PAGE_SIZE AND n decodes (But in fact they are all the same seq.)
+            # This will however make the code much more complicated.
+            k = k.swapaxes(0, 2)
+            v = v.swapaxes(0, 2)
+            k_cache = update_cache(False, k_cache, md.kv_cache_write_indices,
+                                   k)
+            v_cache = update_cache(False, v_cache, md.kv_cache_write_indices,
+                                   v)
+
         outputs = sharded_chunked_prefill_attention(mesh)(
             q,
             k_cache,

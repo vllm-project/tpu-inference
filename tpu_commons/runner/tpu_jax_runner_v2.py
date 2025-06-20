@@ -89,6 +89,9 @@ class TPUModelRunner():
         self.scheduler_config.chunked_prefill_tokens_padding = 256
         self.prefill_seqs_padding = 8
 
+        self.scheduler_config.page_aligned_scheduling = getattr(
+            self.scheduler_config, 'page_aligned_scheduling', None)
+
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
@@ -114,16 +117,19 @@ class TPUModelRunner():
         self.rng_key = jax.random.key(self.model_config.seed)
 
     def _verify_chunked_prefill_config(self):
-        if (self.scheduler_config.max_num_batched_tokens %
-                self.cache_config.block_size != 0):
-            raise ValueError(
-                "max_num_batched_tokens needs to be multiple of block_size.")
+        if self.scheduler_config.page_aligned_scheduling:
+            if (self.scheduler_config.max_num_batched_tokens %
+                    self.cache_config.block_size != 0):
+                raise ValueError(
+                    "max_num_batched_tokens needs to be multiple of block_size."
+                )
 
-        # TODO(pooyam): Explain why.
-        if (self.scheduler_config.max_num_batched_tokens //
-                self.cache_config.block_size == 1):
-            raise ValueError(
-                "max_num_batched_tokens must be at least 2x of block_size.")
+            # TODO(pooyam): Explain why.
+            if (self.scheduler_config.max_num_batched_tokens //
+                    self.cache_config.block_size == 1):
+                raise ValueError(
+                    "max_num_batched_tokens must be at least 2x of block_size."
+                )
 
         if (self.scheduler_config.max_num_batched_tokens
                 < self.scheduler_config.max_num_seqs):
@@ -936,15 +942,21 @@ class TPUModelRunner():
         assert num_prefill_seqs > 0
         assert num_prefill_seqs <= MAX_PREFILL_SEQS_PER_TOKEN_BATCH
 
-        # NOTE(pooyam): It's possible to remove this loop by approximating by upper bound.
-        num_tokens_scheduled = pad_to_multiple(
-            num_decode_seqs, block_size) if num_decode_seqs > 0 else 0
-        for seq in new_full_prefill_seqs + new_partial_prefill_seqs + subsequent_partial_prefill_seqs:
-            num_tokens_scheduled += pad_to_multiple(
-                scheduler_output.num_scheduled_tokens[seq.req_id], block_size)
-        num_tokens_scheduled = pad_to_multiple(
-            num_tokens_scheduled,
-            self.scheduler_config.chunked_prefill_tokens_padding)
+        if self.scheduler_config.page_aligned_scheduling:
+            # NOTE(pooyam): It's possible to remove this loop by approximating by upper bound.
+            num_tokens_scheduled = pad_to_multiple(
+                num_decode_seqs, block_size) if num_decode_seqs > 0 else 0
+            for seq in new_full_prefill_seqs + new_partial_prefill_seqs + subsequent_partial_prefill_seqs:
+                num_tokens_scheduled += pad_to_multiple(
+                    scheduler_output.num_scheduled_tokens[seq.req_id],
+                    block_size)
+            num_tokens_scheduled = pad_to_multiple(
+                num_tokens_scheduled,
+                self.scheduler_config.chunked_prefill_tokens_padding)
+        else:
+            num_tokens_scheduled = pad_to_multiple(
+                scheduler_output.total_num_scheduled_tokens,
+                self.scheduler_config.chunked_prefill_tokens_padding)
 
         if num_decode_seqs > 0:
             decode_input_token_indices = np.full((num_tokens_scheduled, ),
@@ -1002,20 +1014,29 @@ class TPUModelRunner():
             do_sampling = determine_do_sampling(top_ks[i], temperatures[i])
 
         token_offset = num_decode_seqs
-        if num_decode_seqs > 0 and num_prefill_seqs > 0:
-            # Add padding tokens so that prefill segments are paged aligned
-            if num_decode_seqs % block_size != 0:
-                token_offset = pad_to_multiple(num_decode_seqs, block_size)
+
+        if self.scheduler_config.page_aligned_scheduling:
+            if num_decode_seqs > 0 and num_prefill_seqs > 0:
+                # Add padding tokens so that prefill segments are paged aligned
+                if num_decode_seqs % block_size != 0:
+                    token_offset = pad_to_multiple(num_decode_seqs, block_size)
 
         # Then fill the token batch with prefill tokens.
         prefill_seq_lens = self.prefill_seq_lens
         prefill_seq_lens[num_prefill_seqs:] = 0
         prefill_block_indices = self.prefill_block_indices
         prefill_query_start_offsets = self.prefill_query_start_offsets
-        # One cache update index per page for prefill.
-        assert num_tokens_scheduled % block_size == 0
-        prefill_kv_cache_write_indices = np.full(
-            (num_tokens_scheduled // block_size, ), -1, dtype=np.int32)
+
+        if self.scheduler_config.page_aligned_scheduling:
+            # One cache update index per page for prefill.
+            assert num_tokens_scheduled % block_size == 0
+            prefill_kv_cache_write_indices = np.full(
+                (num_tokens_scheduled // block_size, ), -1, dtype=np.int32)
+        else:
+            prefill_kv_cache_write_indices = np.full((num_tokens_scheduled, ),
+                                                     -1,
+                                                     dtype=np.int32)
+
         prefill_input_ids = np.zeros((1, num_tokens_scheduled), dtype=np.int32)
         for i, seq in enumerate(new_full_prefill_seqs +
                                 new_partial_prefill_seqs +
@@ -1036,8 +1057,13 @@ class TPUModelRunner():
                     num_prefilled_tokens,
                     num_prefilled_tokens + prefill_len,
                 ))
-            prefill_seq_lens[i] = pad_to_multiple(
-                num_prefilled_tokens + prefill_len, block_size)
+
+            if self.scheduler_config.page_aligned_scheduling:
+                prefill_seq_lens[i] = pad_to_multiple(
+                    num_prefilled_tokens + prefill_len, block_size)
+            else:
+                prefill_seq_lens[i] = num_prefilled_tokens + prefill_len
+
             prefill_query_start_offsets[i] = token_offset
             num_blocks = self.input_batch.block_table.block_tables[
                 0].num_blocks_per_row[seq_index]
@@ -1045,13 +1071,25 @@ class TPUModelRunner():
                 0].block_table_cpu[seq_index, :num_blocks]
 
             prefill_block_indices[i][:len(block_table)] = block_table
-            prefill_kv_cache_write_indices[
-                token_offset // block_size:math.ceil(
-                    (token_offset + prefill_len) /
-                    block_size)] = block_table[num_prefilled_tokens //
-                                               block_size:math.ceil(
-                                                   (num_prefilled_tokens +
-                                                    prefill_len) / block_size)]
+
+            if self.scheduler_config.page_aligned_scheduling:
+                prefill_kv_cache_write_indices[
+                    token_offset // block_size:math.ceil(
+                        (token_offset + prefill_len) /
+                        block_size)] = block_table[num_prefilled_tokens //
+                                                   block_size:math.ceil(
+                                                       (num_prefilled_tokens +
+                                                        prefill_len) /
+                                                       block_size)]
+            else:
+                for j in range(prefill_len):
+                    position = num_prefilled_tokens + j
+                    block_index = position // block_size
+                    assert block_index <= len(block_table) - 1
+                    block_offset = position % block_size
+                    prefill_kv_cache_write_indices[
+                        token_offset + j] = block_table[
+                            block_index] * block_size + block_offset
 
             assert num_prefilled_tokens + prefill_len <= num_tokens
 
@@ -1075,14 +1113,25 @@ class TPUModelRunner():
             do_sampling = determine_do_sampling(
                 self.input_batch.top_k_cpu[seq_index],
                 self.input_batch.temperature_cpu[seq_index])
-            # Add padding tokens so that prefill segments are paged aligned
-            token_offset = pad_to_multiple(token_offset + prefill_len,
-                                           block_size)
+
+            if self.scheduler_config.page_aligned_scheduling:
+                # Add padding tokens so that prefill segments are paged aligned
+                token_offset = pad_to_multiple(token_offset + prefill_len,
+                                               block_size)
+            else:
+                token_offset += prefill_len
+
         prefill_query_start_offsets[num_prefill_seqs:] = token_offset
 
-        # Concat the kv cache write indices for decode tokens and prefill tokens
-        kv_cache_write_indices = np.concatenate(
-            (decode_kv_cache_write_indices, prefill_kv_cache_write_indices))
+        if self.scheduler_config.page_aligned_scheduling:
+            # Concat the kv cache write indices for decode tokens and prefill tokens
+            kv_cache_write_indices = np.concatenate(
+                (decode_kv_cache_write_indices,
+                 prefill_kv_cache_write_indices))
+        else:
+            kv_cache_write_indices = jnp.where(
+                jnp.arange(num_tokens_scheduled) < num_decode_seqs,
+                decode_kv_cache_write_indices, prefill_kv_cache_write_indices)
         num_decode_seqs_arr = np.array([num_decode_seqs], np.int32)
         num_prefill_seqs_arr = np.array([num_prefill_seqs], np.int32)
 
@@ -1159,6 +1208,8 @@ class TPUModelRunner():
                 prefill_page_indices=prefill_block_indices,
                 prefill_query_start_offsets=prefill_query_start_offsets,
                 num_prefill_seqs=num_prefill_seqs_arr,
+                page_aligned_update=self.scheduler_config.
+                page_aligned_scheduling,
             ),
             temperatures,
             top_ps,

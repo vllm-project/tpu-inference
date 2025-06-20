@@ -35,7 +35,7 @@ dataset_path=data/test/
 In order to run the benchmarks, navigate to your vLLM root directory and spin up a server to serve your model, for example:
 
 ```
-TPU_BACKEND_TYPE=jax vllm serve meta-llama/Llama-3.1-8B-Instruct --max-model-len=1024 --disable-log-requests --tensor-parallel-size 8 --max-num-batched-tokens 8192 --max-num-seqs=1
+TPU_BACKEND_TYPE=jax vllm serve meta-llama/Llama-3.1-8B-Instruct --max-model-len=1024 --disable-log-requests --tensor-parallel-size 8 --max-num-batched-tokens 8192
 ```
 
 Once the server has begun -- you should see a message such as `INFO:     Application startup complete.` -- you can now run the client benchmarking command (in a new terminal) in your local vLLM repo:
