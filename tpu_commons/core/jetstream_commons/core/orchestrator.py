@@ -645,5 +645,6 @@ class Driver:
         client_index: EngineCoreOutputs(outputs=outs)
         for client_index, outs in outputs.items()
       }
+      outputs = defaultdict(list)
       logging.info("Put engine core outputs %s to vllm output backlog, queue len %s", req_ids, my_vllm_output_backlog.qsize())
       my_vllm_output_backlog.put(engine_core_outputs, block = True)

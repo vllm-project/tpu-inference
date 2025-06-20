@@ -513,12 +513,12 @@ class EngineCoreProc(EngineCore):
         """Exits when an engine step needs to be performed."""
 
         waited = False
-        while True:
-            if logger.isEnabledFor(DEBUG) and self.input_queue.empty():
-                logger.debug("EngineCore waiting for work.")
-                waited = True
-            req = self.input_queue.get()
-            self._handle_client_request(*req)
+        # while True:
+        #     if logger.isEnabledFor(DEBUG) and self.input_queue.empty():
+        #         logger.debug("EngineCore waiting for work.")
+        #         waited = True
+        #     req = self.input_queue.get()
+        #     self._handle_client_request(*req)
 
         if waited:
             logger.debug("EngineCore loop active.")
@@ -529,12 +529,11 @@ class EngineCoreProc(EngineCore):
             self._handle_client_request(*req)
 
     def _process_output_queue(self):
-        logging.info("entering process output queue")
         """Called only when there are unfinished local requests."""
         # Step the engine core.
         for my_vllm_output_backlog in self.orchestrator._vllm_output_backlogs:
             while my_vllm_output_backlog.qsize() > 0:
-                output = my_vllm_output_backlog[0].get(block = False)
+                output = my_vllm_output_backlog.get(block = False)
                 logger.info("Got output %s from orchestrator vllm output queue", output)
                 self.output_queue.put_nowait(output)
         # Put EngineCoreOutputs into the output queue.
