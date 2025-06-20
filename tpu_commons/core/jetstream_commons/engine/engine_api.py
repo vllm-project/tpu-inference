@@ -160,7 +160,7 @@ class Engine(abc.ABC):
       self,  # pytype: disable=signature-mismatch
       *,
       vllm_req_data: Optional[Request] = None,
-    ) -> Tuple[Prefix, ModelRunnerOutput]:
+    ) -> Tuple[Prefix, ModelRunnerOutput, Request]:
         """Computes a kv-cache for a set of tokens conditional on existing cache.
 
     existing_prefix (if provided) represents a prefix that has already been
@@ -172,7 +172,7 @@ class Engine(abc.ABC):
     """
 
     @abc.abstractmethod
-    def generate(self) -> ModelRunnerOutput:
+    def generate(self, all_requests) -> Tuple[Any, ModelRunnerOutput]:
         """Generates tokens for each sequence being decoded in parallel.
 
     Generate takes a batch of pre-computed kv-caches, and computes:

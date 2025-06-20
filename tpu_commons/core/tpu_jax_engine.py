@@ -80,16 +80,16 @@ class JaxEngine(engine_api.Engine):
   def prefill(
       self,  # pytype: disable=signature-mismatch
       *,
-      vllm_req_data: Optional[Request] = None,
+      vllm_request: Optional[Request] = None,
   ) -> Tuple[Prefix, ModelRunnerOutput, Request]:
-    computed_blocks, _ = self.kv_cache_manager.get_computed_blocks(vllm_req_data)
-    new_blocks = self.kv_cache_manager.allocate_slots(vllm_req_data, 
-                                                      vllm_req_data.num_tokens,
+    computed_blocks, _ = self.kv_cache_manager.get_computed_blocks(vllm_request)
+    new_blocks = self.kv_cache_manager.allocate_slots(vllm_request, 
+                                                      vllm_request.num_tokens,
                                                       new_computed_blocks=computed_blocks)
-    new_block_ids = self.kv_cache_manager.get_block_ids(vllm_req_data.request_id)
-    request = NewRequestData.from_request(vllm_req_data, new_block_ids)
+    new_block_ids = self.kv_cache_manager.get_block_ids(vllm_request.request_id)
+    request = NewRequestData.from_request(vllm_request, new_block_ids)
     #assume all tokens will get prefilled.
-    request.num_computed_tokens = vllm_req_data.num_tokens
+    request.num_computed_tokens = vllm_request.num_tokens
     input_batch = self.model_runner.input_batch
     request_to_add = CachedRequestState(
       req_id=request.req_id,
@@ -99,7 +99,7 @@ class JaxEngine(engine_api.Engine):
       sampling_params=request.sampling_params,
       generator=None,
       block_ids=request.block_ids,
-      num_computed_tokens=vllm_req_data.num_tokens,
+      num_computed_tokens=vllm_request.num_tokens,
       output_token_ids=[],
       lora_request=request.lora_request,
     )
@@ -124,7 +124,7 @@ class JaxEngine(engine_api.Engine):
       output_token_indices = []
 
       # NOTE(pooyam): Unfinished prefills should not return anything to vLLM scheduler.
-      # if not self._is_generating_new_token(scheduler_output, vllm_req_data):
+      # if not self._is_generating_new_token(scheduler_output, vllm_request):
       #     continue
       
       index = input_batch.req_id_to_index[request.req_id]
@@ -164,17 +164,21 @@ class JaxEngine(engine_api.Engine):
     )
 
     prefix = {
-      "seq": vllm_req_data,
+      "seq": vllm_request,
       "cache": self.model_runner.kv_caches,
       "next_tokens": next_tokens,
       "running_indices": running_indices,
       "output_token_indices": output_token_indices, 
       "attention_metadata": model_inputs[4], #Ask people to structurize this
-    }  
-    return prefix, runner_output, vllm_req_data
+    }
+    new_token_ids = runner_output.sampled_token_ids[runner_output.req_id_to_index[vllm_request.request_id]]
+    vllm_request.append_output_token_ids(new_token_ids)
+    vllm_request.num_computed_tokens = vllm_request.num_prompt_tokens + 1
+    vllm_request.num_cached_tokens = vllm_request.num_prompt_tokens
+    return prefix, runner_output, vllm_request
 
 
-  def generate(self, all_requests) -> ModelRunnerOutput:
+  def generate(self, all_requests) -> Tuple[Any, ModelRunnerOutput]:
     """Public API for generate that updates page state outside JIT."""
     input_batch = self.model_runner.input_batch
     req_to_new_block_ids = {}
@@ -254,8 +258,14 @@ class JaxEngine(engine_api.Engine):
           # we are sending pointless [] as the output of such requests. I think it's possible to optimize this if we just send a dict.
           for running_index, output in zip(running_indices, outputs):
               sampled_token_ids[running_index] = [output]
-
-      return ModelRunnerOutput(
+      
+      for req_id in input_batch.req_id_to_index:
+        new_token_ids = sampled_token_ids[input_batch.req_id_to_index[req_id]]
+        all_requests[req_id].append_output_token_ids(new_token_ids)
+        all_requests[req_id].num_computed_tokens += 1
+        all_requests[req_id].num_cached_tokens += 1
+        # logger.info("all_request: %s", all_requests[req_id].__dict__)
+      return all_requests, ModelRunnerOutput(
           req_ids=input_batch.req_ids,
           req_id_to_index=input_batch.req_id_to_index,
           prompt_logprobs_dict=prompt_logprobs_dict,

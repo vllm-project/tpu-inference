@@ -426,14 +426,10 @@ class Driver:
       )
 
       # Compute new kv cache for the prefill_content.
-      prefix, vllm_model_runner_output, request = prefill_engine.prefill(vllm_req_data = vllm_request)
+      prefix, vllm_model_runner_output, request = prefill_engine.prefill(vllm_request = vllm_request)
       req_id = request.request_id
-      new_token_ids = vllm_model_runner_output.sampled_token_ids[vllm_model_runner_output.req_id_to_index[req_id]]
-      request.append_output_token_ids(new_token_ids)
-      request.num_computed_tokens = request.num_prompt_tokens + 1
-      request.num_cached_tokens = request.num_prompt_tokens
-      if self.requests.get(request.request_id) == None:
-        self.requests[req_id] = request
+      self.requests[req_id] = request
+      logging.info("Put request %s in req dict", req_id,)
       # logging.warning("finished prefill for request %s output %s \n", vllm_request.request_id, vllm_model_runner_output.__dict__)
       # logging.warning("added %s to requests dictionary \n", self.requests[req_id].__dict__)
       # request.prefill_result = prefill_result
@@ -589,8 +585,10 @@ class Driver:
       ), "At this point we must have some requests inserted into the slots."
 
       # Now we actually take a generate step on requests in the slots.
-      vllm_model_runner_output = generate_engine.generate(self.requests)
-      logging.info("Got generate output %s", vllm_model_runner_output.__dict__)
+      self.requests, vllm_model_runner_output = generate_engine.generate(self.requests)
+      logging.info("Finished one generate step %s \n", vllm_model_runner_output.__dict__)
+      # for request in self.requests:
+      #   logging.info("Request %s", request.__dict__)
       my_detokenize_backlog.put(vllm_model_runner_output, block = True)
       # logging.info("Put vllm_model_runner_output to detokenize backlog, qsize %s \n", my_detokenize_backlog.qsize())
 
@@ -647,5 +645,5 @@ class Driver:
         client_index: EngineCoreOutputs(outputs=outs)
         for client_index, outs in outputs.items()
       }
-      logging.info("Put engine core outputs %s to vllm output backlog", req_ids)
+      logging.info("Put engine core outputs %s to vllm output backlog, queue len %s", req_ids, my_vllm_output_backlog.qsize())
       my_vllm_output_backlog.put(engine_core_outputs, block = True)

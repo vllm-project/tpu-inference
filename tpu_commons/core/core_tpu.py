@@ -529,13 +529,14 @@ class EngineCoreProc(EngineCore):
             self._handle_client_request(*req)
 
     def _process_output_queue(self):
+        logging.info("entering process output queue")
         """Called only when there are unfinished local requests."""
-
         # Step the engine core.
-        while self.orchestrator._vllm_output_backlogs.qsize() > 0:
-            output = self.orchestrator._vllm_output_backlogs[0].get(block = False)
-            logger.info("Got output %s from orchestrator vllm output queue", output)
-            self.output_queue.put_nowait(output)
+        for my_vllm_output_backlog in self.orchestrator._vllm_output_backlogs:
+            while my_vllm_output_backlog.qsize() > 0:
+                output = my_vllm_output_backlog[0].get(block = False)
+                logger.info("Got output %s from orchestrator vllm output queue", output)
+                self.output_queue.put_nowait(output)
         # Put EngineCoreOutputs into the output queue.
         # for output in (outputs.items() if outputs else ()):
         #     self.output_queue.put_nowait(output)
