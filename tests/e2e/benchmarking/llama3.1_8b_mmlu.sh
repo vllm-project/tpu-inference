@@ -23,7 +23,7 @@ TIMEOUT_SECONDS=300
 TARGET_ROUGE1="30"
 TARGET_THROUGHPUT="50"
 
-model_name=meta-llama/Llama-3.1-8B-Instruct
+model_name=Qwen/Qwen2.5-1.5B-Instruct
 root_dir=/workspace
 dataset_name=mlperf
 dataset_path=""
