@@ -33,7 +33,7 @@ import jax.numpy as jnp
 # import flax
 
 # from tpu_commons.runner.tpu_jax_runner_v2
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData
@@ -175,6 +175,7 @@ class JaxEngine(engine_api.Engine):
     vllm_request.append_output_token_ids(new_token_ids)
     vllm_request.num_computed_tokens = vllm_request.num_prompt_tokens + 1
     vllm_request.num_cached_tokens = vllm_request.num_prompt_tokens
+    vllm_request.status = RequestStatus.RUNNING
     return prefix, runner_output, vllm_request
 
 

@@ -97,6 +97,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
                             EngineCoreOutputs)
+from vllm.v1.core.sched.utils import check_stop
 
 root = logging.getLogger()
 root.setLevel(logging.INFO)
@@ -429,7 +430,7 @@ class Driver:
       prefix, vllm_model_runner_output, request = prefill_engine.prefill(vllm_request = vllm_request)
       req_id = request.request_id
       self.requests[req_id] = request
-      logging.info("Put request %s in req dict", req_id,)
+      logging.info("Put request %s in req dict. request.num_tokens: %s", req_id, request.num_tokens)
       # logging.warning("finished prefill for request %s output %s \n", vllm_request.request_id, vllm_model_runner_output.__dict__)
       # logging.warning("added %s to requests dictionary \n", self.requests[req_id].__dict__)
       # request.prefill_result = prefill_result
@@ -586,7 +587,7 @@ class Driver:
 
       # Now we actually take a generate step on requests in the slots.
       self.requests, vllm_model_runner_output = generate_engine.generate(self.requests)
-      logging.info("Finished one generate step %s \n", vllm_model_runner_output.__dict__)
+      logging.info("Finished one generate step %s \n", vllm_model_runner_output.req_ids)
       # for request in self.requests:
       #   logging.info("Request %s", request.__dict__)
       my_detokenize_backlog.put(vllm_model_runner_output, block = True)
@@ -626,6 +627,7 @@ class Driver:
       req_ids = list(model_runner_output.prompt_logprobs_dict.keys())
       for req_id in req_ids:
         request = self.requests[req_id]
+        stopped = check_stop(request, request.sampling_params.max_tokens)
         sampled_token_index = model_runner_output.req_id_to_index[req_id]
         sampled_token_id = model_runner_output.sampled_token_ids[sampled_token_index]
         outputs[request.client_index].append(

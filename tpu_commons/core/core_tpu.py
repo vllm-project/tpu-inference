@@ -533,9 +533,10 @@ class EngineCoreProc(EngineCore):
         # Step the engine core.
         for my_vllm_output_backlog in self.orchestrator._vllm_output_backlogs:
             while my_vllm_output_backlog.qsize() > 0:
-                output = my_vllm_output_backlog.get(block = False)
-                logger.info("Got output %s from orchestrator vllm output queue", output)
-                self.output_queue.put_nowait(output)
+                outputs = my_vllm_output_backlog.get(block = False)
+                # logger.info("Got output %s from orchestrator vllm output queue", output)
+                for output in (outputs.items() if outputs else ()):
+                    self.output_queue.put_nowait(output)
         # Put EngineCoreOutputs into the output queue.
         # for output in (outputs.items() if outputs else ()):
         #     self.output_queue.put_nowait(output)
@@ -690,6 +691,7 @@ class EngineCoreProc(EngineCore):
                 assert not isinstance(output, bytes)
                 client_index, outputs = output
                 outputs.engine_index = engine_index
+                outputs.scheduler_stats = {}
 
                 if client_index == -1:
                     # Don't reuse buffer for coordinator message
