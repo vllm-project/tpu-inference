@@ -24,7 +24,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 
 from tpu_commons.core.jetstream_commons.engine import engine_api
-from tpu_commons.worker.input_batch_jax import CachedRequestState
+from tpu_commons.runner.input_batch_jax import CachedRequestState
 
 # from flax import linen as nn
 # from flax import struct
@@ -129,6 +129,8 @@ class JaxEngine(engine_api.Engine):
                           input_batch.num_computed_tokens_cpu[index])
             input_batch.token_ids_cpu[index, seq_len] =\
             input_batch.token_ids_cpu[index, seq_len - 1] + 1  # Dummy
+            input_batch.num_computed_tokens_cpu[
+                index] = request.num_computed_tokens
 
             # TODO(pooyam): Figure out why all three of `num_tokens`, `num_prompt_tokens`, and 'num_computed_tokens_cpu` exist.
             prompt_logprobs_dict[request.req_id] = None
@@ -167,7 +169,7 @@ class JaxEngine(engine_api.Engine):
         new_token_ids = runner_output.sampled_token_ids[
             runner_output.req_id_to_index[vllm_request.request_id]]
         vllm_request.append_output_token_ids(new_token_ids)
-        vllm_request.num_computed_tokens = vllm_request.num_prompt_tokens + 1
+        vllm_request.num_computed_tokens = vllm_request.num_prompt_tokens
         vllm_request.num_cached_tokens = vllm_request.num_prompt_tokens
         vllm_request.status = RequestStatus.RUNNING
         return prefix, runner_output, vllm_request
@@ -182,6 +184,9 @@ class JaxEngine(engine_api.Engine):
             for request_id in input_batch.req_id_to_index
         ]
         scheduled_cached_reqs = []
+        logger.info(
+            "input batch: num_computed_tokens %s, num_prompt_tokens %s",
+            input_batch.num_computed_tokens_cpu, input_batch.num_prompt_tokens)
         for request in cached_reqs:
             # logger.info("Converting scheduling request %s to cached request", request.request_id)
             new_blocks = self.kv_cache_manager.allocate_slots(request, 1)
@@ -216,7 +221,11 @@ class JaxEngine(engine_api.Engine):
             model_inputs, (running_indices, output_token_indices) = inputs
             self.model_runner.kv_caches, next_tokens, logits = self.model_runner.model_fn(
                 *model_inputs)
-            logger.info("generated next tokens: %s", next_tokens)
+            logger.info(
+                "finished model_fn %s; next token %s running_indices %s output_token_indices %s",
+                input_batch.req_id_to_index, next_tokens, running_indices,
+                output_token_indices)
+            # logger.info("generated next tokens: %s", next_tokens)
             self.model_runner.output_cache = \
             self.model_runner.write_outputs(self.model_runner.output_cache,
                                             next_tokens,

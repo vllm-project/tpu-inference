@@ -182,6 +182,7 @@ class EngineCore:
         generate_engine = JaxEngine(vllm_config, kv_cache_manager,
                                     self.model_executor)
         driver = orchestrator.Driver(
+            vllm_config=vllm_config,
             prefill_engines=[prefill_engine],
             generate_engines=[generate_engine],
             interleaved_mode=interleaved_mode,
@@ -275,10 +276,10 @@ class EngineCore:
     #         scheduler_output.total_num_scheduled_tokens > 0)
 
     def shutdown(self):
-        pass
+        self.orchestrator.stop()
         # self.structured_output_manager.clear_backend()
-        # if self.model_executor:
-        #     self.model_executor.shutdown()
+        if self.model_executor:
+            self.model_executor.shutdown()
         # if self.scheduler:
         #     self.scheduler.shutdown()
 

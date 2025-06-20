@@ -86,6 +86,7 @@ from collections import defaultdict
 from typing import Any, Optional
 
 import jax
+from vllm.config import VllmConfig
 from vllm.v1.core.sched.utils import check_stop
 from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.outputs import ModelRunnerOutput
@@ -168,6 +169,7 @@ class Driver:
 
     def __init__(
         self,
+        vllm_config: VllmConfig,
         prefill_engines: Optional[list[engine_api.Engine]] = None,
         generate_engines: Optional[list[engine_api.Engine]] = None,
         prefill_params: Optional[list[Any]] = None,
@@ -191,6 +193,7 @@ class Driver:
             len(prefill_engines),
             len(generate_engines),
         )
+        self.vllm_config = vllm_config
         self._prefill_engines = prefill_engines
         self._generate_engines = generate_engines
         self._prefill_params = prefill_params
@@ -557,9 +560,7 @@ class Driver:
             # Now we actually take a generate step on requests in the slots.
             self.requests, vllm_model_runner_output = generate_engine.generate(
                 self.requests)
-            logging.info(
-                "Finished one generate step %s \n, generate timestep %d",
-                vllm_model_runner_output.req_ids, generate_timestep)
+            logging.info("Finished  generate step %d", generate_timestep)
             # for request in self.requests:
             #   logging.info("Request %s", request.__dict__)
             my_detokenize_backlog.put(vllm_model_runner_output, block=True)
@@ -594,12 +595,14 @@ class Driver:
             # pass
             model_runner_output = my_detokenize_backlog.get(block=True)
             # for request in model_runner_output.req_id_to_index:
-
+            if not self.live:
+                break
             #   sampled_token_id = model_runner_output.sampled_token_ids[]
             req_ids = list(model_runner_output.prompt_logprobs_dict.keys())
             for req_id in req_ids:
                 request = self.requests[req_id]
-                _ = check_stop(request, request.sampling_params.max_tokens)
+                _ = check_stop(request,
+                               self.vllm_config.model_config.max_model_len)
                 sampled_token_index = model_runner_output.req_id_to_index[
                     req_id]
                 sampled_token_id = model_runner_output.sampled_token_ids[
