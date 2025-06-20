@@ -16,6 +16,7 @@ from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.request import Request
 
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
@@ -23,7 +24,6 @@ from tpu_commons.models.jax.model_loader import get_model
 from tpu_commons.runner.tpu_torch_xla_runner import _get_token_paddings
 from tpu_commons.runner.utils import determine_do_sampling
 from tpu_commons.worker.input_batch_jax import CachedRequestState, InputBatch
-from vllm.v1.request import Request
 
 logger = init_logger(__name__)
 
@@ -646,8 +646,8 @@ class TPUModelRunner():
         # For perplexity experiments
         if self.perplexity_reference_text is not None:
             raise NotImplementedError("Not implemented.")
-            assert len(scheduler_output.scheduled_seqs) == 1
-            seq = scheduler_output.scheduled_seqs[0]
+            assert len(scheduled_cached_reqs) == 1
+            seq = scheduled_cached_reqs[0]
             seq_len = seq.get_prompt_len() + seq.get_decoded_len()
             input_ids = input_ids.at[0, 0].set(
                 self.perplexity_reference_text[seq_len - 1])
@@ -712,10 +712,7 @@ class TPUModelRunner():
         batch_size = len(new_reqs)
 
         # Full prompt length.
-        max_prompt_len = max([
-            len(seq.prompt_token_ids)
-            for seq in new_reqs
-        ])
+        max_prompt_len = max([len(seq.prompt_token_ids) for seq in new_reqs])
 
         # Unfilled prompt length.
         # TODO: Fix this for prefix caching.

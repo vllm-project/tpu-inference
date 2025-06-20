@@ -18,13 +18,11 @@ could want to call, enabling interleaved (continuous batching) inference.
 """
 
 import abc
-import uuid
-from typing import Any, Callable, Optional, Tuple, Union
+from typing import Any, Optional, Tuple, Union
 
 import jax
 import numpy as np
 from flax import struct
-
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request
 
@@ -157,9 +155,9 @@ class Engine(abc.ABC):
 
     @abc.abstractmethod
     def prefill(
-      self,  # pytype: disable=signature-mismatch
-      *,
-      vllm_req_data: Optional[Request] = None,
+        self,  # pytype: disable=signature-mismatch
+        *,
+        vllm_req_data: Optional[Request] = None,
     ) -> Tuple[Prefix, ModelRunnerOutput, Request]:
         """Computes a kv-cache for a set of tokens conditional on existing cache.
 
@@ -202,7 +200,6 @@ class Engine(abc.ABC):
     a [0, n) range of slots and converted internally.
     """
 
-
     def free_resource(
             self,
             slot: int,  # pylint: disable=unused-argument
@@ -214,7 +211,6 @@ class Engine(abc.ABC):
     resource and reuse for coming requests.
     """
         return None
-
 
     @abc.abstractmethod
     def get_prefix_destination_sharding(self) -> Any:
@@ -269,4 +265,3 @@ class Engine(abc.ABC):
     @abc.abstractmethod
     def prefill_chunk_size(self) -> int:
         """Prefill chunk size."""
-

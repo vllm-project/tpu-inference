@@ -7,38 +7,34 @@ from collections import deque
 from concurrent.futures import Future
 from contextlib import ExitStack
 from inspect import isclass, signature
-from logging import DEBUG
 from typing import Any, Callable, Optional, TypeVar, Union
 
 import msgspec
 import zmq
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.logger import init_logger
-from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.config import \
     maybe_register_config_serialize_by_value
-from vllm.utils import make_zmq_socket, resolve_obj_by_qualname
+from vllm.utils import make_zmq_socket
+from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (get_kv_cache_config,
                                          unify_kv_cache_configs)
-from vllm.v1.core.sched.interface import SchedulerInterface
-from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.request import Request, RequestStatus
+from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import EngineHandshakeMetadata, EngineZmqAddresses
 from vllm.version import __version__ as VLLM_VERSION
+
 from tpu_commons.core.jetstream_commons.core import orchestrator
 from tpu_commons.core.tpu_jax_engine import JaxEngine
-
 
 logger = init_logger(__name__)
 
@@ -128,7 +124,8 @@ class EngineCore:
             logger.info("Batch queue is enabled with size %d",
                         self.batch_queue_size)
             self.batch_queue = queue.Queue(self.batch_queue_size)
-        self.orchestrator = self._setup_driver(vllm_config, self.kv_cache_manager, True)
+        self.orchestrator = self._setup_driver(vllm_config,
+                                               self.kv_cache_manager, True)
         logger.warning("starting jetstream orchestrator")
 
     def _initialize_kv_caches(
@@ -174,11 +171,16 @@ class EngineCore:
                      "warmup model) took %.2f seconds"), elapsed)
         return num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config
 
-    def _setup_driver(self, vllm_config, kv_cache_manager, interleaved_mode= True):
-        prefill_engine = JaxEngine(vllm_config, kv_cache_manager, self.model_executor)
+    def _setup_driver(self,
+                      vllm_config,
+                      kv_cache_manager,
+                      interleaved_mode=True):
+        prefill_engine = JaxEngine(vllm_config, kv_cache_manager,
+                                   self.model_executor)
         # Create a generate engine with a different set of weights
         # so that we can test that the right one is in use at a given time.
-        generate_engine = JaxEngine(vllm_config, kv_cache_manager, self.model_executor)
+        generate_engine = JaxEngine(vllm_config, kv_cache_manager,
+                                    self.model_executor)
         driver = orchestrator.Driver(
             prefill_engines=[prefill_engine],
             generate_engines=[generate_engine],
@@ -206,7 +208,8 @@ class EngineCore:
         #     max_tokens=self.vllm_config.model_config.max_model_len,
         # )
         self.orchestrator.place_request_on_prefill_queue(req)
-        logger.warning("added req %s to jetstream orchestrator.", req.request_id)
+        logger.warning("added req %s to jetstream orchestrator.",
+                       req.request_id)
 
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
@@ -244,32 +247,32 @@ class EngineCore:
     #         logger.warning("Scheduler %s: %s", k, scheduler_dict[k])
     #     model_output = self.execute_model(scheduler_output)
 
-        # def is_pure_decode(s):
-        #     return s.total_num_scheduled_tokens == len(s.num_scheduled_tokens)
+    # def is_pure_decode(s):
+    #     return s.total_num_scheduled_tokens == len(s.num_scheduled_tokens)
 
-        # logger.warning("is_pure_decode %s", is_pure_decode(scheduler_output))
-        # # prefill request, possibly multiple prompts
-        # if not is_pure_decode(scheduler_output):
-        #     for request_id in scheduler_output.num_scheduled_tokens:
-        #         req = self.scheduler.requests[request_id]
-        #         jetstream_request = jetstream_pb2.DecodeRequest(
-        #             token_content=jetstream_pb2.DecodeRequest.TokenContent(
-        #                 token_ids=req.prompt_token_ids),
-        #             max_tokens=1024,
-        #         )
-        #         logger.warning("Converted request %s to jetstream request",
-        #                        request_id)
-        #         self.orchestrator._prefill_mode = True
-        #         self.orchestrator.Decode(jetstream_request)
-        # # decode
-        # else:
-        #     self.orchestrator._prefill_mode = False
+    # logger.warning("is_pure_decode %s", is_pure_decode(scheduler_output))
+    # # prefill request, possibly multiple prompts
+    # if not is_pure_decode(scheduler_output):
+    #     for request_id in scheduler_output.num_scheduled_tokens:
+    #         req = self.scheduler.requests[request_id]
+    #         jetstream_request = jetstream_pb2.DecodeRequest(
+    #             token_content=jetstream_pb2.DecodeRequest.TokenContent(
+    #                 token_ids=req.prompt_token_ids),
+    #             max_tokens=1024,
+    #         )
+    #         logger.warning("Converted request %s to jetstream request",
+    #                        request_id)
+    #         self.orchestrator._prefill_mode = True
+    #         self.orchestrator.Decode(jetstream_request)
+    # # decode
+    # else:
+    #     self.orchestrator._prefill_mode = False
 
-        # engine_core_outputs = self.scheduler.update_from_output(
-        #     scheduler_output, model_output)  # type: ignore
+    # engine_core_outputs = self.scheduler.update_from_output(
+    #     scheduler_output, model_output)  # type: ignore
 
-        # return (engine_core_outputs,
-        #         scheduler_output.total_num_scheduled_tokens > 0)
+    # return (engine_core_outputs,
+    #         scheduler_output.total_num_scheduled_tokens > 0)
 
     def shutdown(self):
         pass
@@ -287,9 +290,9 @@ class EngineCore:
         #                    "in progress may lead to desynced internal caches.")
 
         self.mm_input_cache_server.reset()
+
     def profile(self, is_start: bool = True):
         self.model_executor.profile(is_start)
-
 
     def reset_prefix_cache(self):
         self.scheduler.reset_prefix_cache()
@@ -533,7 +536,7 @@ class EngineCoreProc(EngineCore):
         # Step the engine core.
         for my_vllm_output_backlog in self.orchestrator._vllm_output_backlogs:
             while my_vllm_output_backlog.qsize() > 0:
-                outputs = my_vllm_output_backlog.get(block = False)
+                outputs = my_vllm_output_backlog.get(block=False)
                 # logger.info("Got output %s from orchestrator vllm output queue", output)
                 for output in (outputs.items() if outputs else ()):
                     self.output_queue.put_nowait(output)
