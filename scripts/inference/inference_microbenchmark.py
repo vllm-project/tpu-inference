@@ -32,7 +32,7 @@ from tpu_commons.utils_jax import (calculate_prefill_tflops_per_device,
 MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"
 # NOTE: we will pad this to the nearest prefill length (128 currently)
 PROMPT = "I love to"
-DEFAULT_BLOCK_SIZE = 64
+DEFAULT_BLOCK_SIZE = 128
 WARMUP_ITERS = 2
 BENCHMARK_ITERS = 10
 
