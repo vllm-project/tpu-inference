@@ -3,3 +3,4 @@
 nltk
 evaluate
 datasets
+rouge_score
