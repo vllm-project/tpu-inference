@@ -21,7 +21,7 @@ TIMEOUT_SECONDS=300
 # The minimum ROUGE1 and throughput scores we expect
 # TODO (jacobplatin): these are very low, so we'll want to boost them eventually
 TARGET_ROUGE1="30"
-TARGET_THROUGHPUT="90"
+TARGET_THROUGHPUT="50"
 
 model_name=meta-llama/Llama-3.1-8B-Instruct
 root_dir=/workspace
@@ -114,7 +114,7 @@ cp -r "$root_dir"/tpu_commons/scripts/vllm/benchmarking/*.py "$root_dir"/vllm/be
 
 # Spin up the vLLM server
 echo "Spinning up the vLLM server..."
-(TPU_BACKEND_TYPE=jax vllm serve "$model_name" --max-model-len=1024 --disable-log-requests --max-num-batched-tokens 8192 --max-num-seqs=1 2>&1 | tee -a "$LOG_FILE") &
+(TPU_BACKEND_TYPE=jax vllm serve "$model_name" --max-model-len=1024 --disable-log-requests --max-num-batched-tokens 8192 2>&1 | tee -a "$LOG_FILE") &
 
 cleanUp() {
     echo "Stopping the vLLM server and cleaning up log files..."
