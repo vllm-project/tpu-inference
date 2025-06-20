@@ -304,13 +304,11 @@ class TPUModelRunner():
         if inputs is not None:
             model_inputs, (running_indices, output_token_indices) = inputs
             # TODO (jacobplatin): use logits and single_step_attn_scores_decode?
-            with jax.named_scope(self.phase):
-                with jax.profiler.TraceAnnotation(self.phase):
-                    self.kv_caches, next_tokens, logits = self.model_fn(
-                        *model_inputs)
-                    self.output_cache = self.write_outputs(
-                        self.output_cache, next_tokens, running_indices,
-                        output_token_indices)
+            self.kv_caches, next_tokens, logits = self.model_fn(*model_inputs)
+            self.output_cache = self.write_outputs(self.output_cache,
+                                                   next_tokens,
+                                                   running_indices,
+                                                   output_token_indices)
 
         prompt_logprobs_dict = {}
 
@@ -707,7 +705,6 @@ class TPUModelRunner():
         eviction_score_mask = None
         return (
             False,  # is prefill
-            "decode",
             do_sampling,
             self.kv_caches,
             input_ids,
@@ -851,7 +848,6 @@ class TPUModelRunner():
 
         return (
             True,
-            "prefill",
             do_sampling,
             self.kv_caches,
             input_ids,
@@ -1151,7 +1147,6 @@ class TPUModelRunner():
         eviction_score_mask = None
         return (
             False,  # when chunked prefill is enabled, `is_prefill` is just a dummy value.
-            "chunked_prefill",
             do_sampling,
             self.kv_caches,
             input_ids,
