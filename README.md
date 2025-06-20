@@ -7,7 +7,7 @@ Follow this [guide](https://docs.vllm.ai/en/latest/getting_started/installation/
 **NOTE**: Right after `git clone` vLLM repo and before running any `pip install` commands, run the following command to pin the version:
 
 ```
-git checkout 53a5a0ce30dd623808ebd02947e5183f918b6c2f
+git checkout 12575cfa7aa176e017735dd2883513b12be54c32
 ```
 
 ### Install `tpu_commons`:
@@ -37,7 +37,7 @@ Run `Llama 3.1 8B` offline inference on 4 TPU chips:
 
 ```
 export TPU_BACKEND_TYPE=jax
-python vllm/examples/offline_inference/basic/generate.py \
+python tpu_commons/examples/offline_inference.py \
     --model=meta-llama/Llama-3.1-8B \
     --tensor_parallel_size=4 \
     --task=generate \
@@ -52,12 +52,26 @@ Run the vLLM's implementation of `Llama 3.1 8B`, which is in Pytorch. It is the 
 ```
 export MODEL_IMPL_TYPE=vllm
 export TPU_BACKEND_TYPE=jax
-python vllm/examples/offline_inference/basic/generate.py \
+python tpu_commons/examples/offline_inference.py \
     --model=meta-llama/Llama-3.1-8B \
     --tensor_parallel_size=4 \
     --task=generate \
     --max_model_len=1024 \
     --max_num_seqs=1
+```
+
+Run the vLLM Pytorch `Qwen3-30B-A3B` MoE model, use `--enable-expert-parallel` for expert parallelism, otherwise it defaults to tensor parallelism:
+
+```
+export MODEL_IMPL_TYPE=vllm
+export TPU_BACKEND_TYPE=jax
+python vllm/examples/offline_inference/basic/generate.py \
+    --model=Qwen/Qwen3-30B-A3B \
+    --tensor_parallel_size=4 \
+    --task=generate \
+    --max_model_len=1024 \
+    --max_num_seqs=1 \
+    --enable-expert-parallel
 ```
 
 ### Relevant env
@@ -78,16 +92,16 @@ MODEL_IMPL_TYPE=flax_nnx
 MODEL_IMPL_TYPE=vllm
 ```
 
+To enable profiling:
+
+```
+VLLM_TORCH_PROFILER_DIR=$PWD
+```
+
 To enable experimental scheduler:
 
 ```
 EXP_SCHEDULER=1
-```
-
-To inspect model weights sharding:
-
-```
-INSPECT_MODEL=1
 ```
 
 ## Develop on a CPU VM and run docker on a TPU VM
@@ -120,7 +134,7 @@ docker run \
   --rm \
   -e TPU_BACKEND_TYPE=jax \
   $DOCKER_URI \
-  python /workspace/vllm/examples/offline_inference/basic/generate.py \
+  python /workspace/tpu_commons/examples/offline_inference.py \
   --model=meta-llama/Llama-3.1-8B \
   --tensor_parallel_size=4 \
   --task=generate \
@@ -179,3 +193,5 @@ BUILDKITE_COMMIT=3843efc .buildkite/scripts/run_in_docker.sh bash /workspace/tpu
 
 While this will run the code in a Docker image, you can also run the bare `tests/e2e/benchmarking/llama3.1_8b_mmlu.sh` script itself,
 being sure to pass the proper args for your machine.
+
+You might need to run the benchmark client *twice* to make sure all compilations are cached server-side.

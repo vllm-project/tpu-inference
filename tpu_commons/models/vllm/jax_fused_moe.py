@@ -9,6 +9,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from torchax.tensor import t2j
+from vllm.config import ParallelConfig
 from vllm.model_executor.layers.fused_moe import FusedMoE
 
 P = PartitionSpec
@@ -79,7 +80,7 @@ def _get_tiling_size_for_gmm_kernel(m: int, k: int, n: int,
     return tm, tk, tn
 
 
-def sharded_gmm(
+def tensor_sharded_gmm(
     lhs: jax.Array,
     rhs: jax.Array,
     group_sizes: jax.Array,
@@ -108,6 +109,137 @@ def sharded_gmm(
     )(lhs, rhs, group_sizes)
 
 
+def expert_sharded_gmm(
+    lhs: jax.Array,
+    rhs: jax.Array,
+    group_sizes: jax.Array,
+    transpose_rhs: bool,
+    mesh: Mesh,
+    num_experts: int,
+    ep_size: int,
+) -> jax.Array:
+    # adapted from https://github.com/pytorch/xla/blob/1d409399474197c484894be90b75d9855393dda5/torch_xla/experimental/custom_kernel.py#L1401
+    m, k, g = lhs.shape[0], lhs.shape[1], rhs.shape[0]
+    n = rhs.shape[1] if transpose_rhs else rhs.shape[2]
+    tm, tk, tn = _get_tiling_size_for_gmm_kernel(m, k, n, g)
+
+    num_experts_per_shard = num_experts // ep_size
+    group_offset = jnp.arange(0, num_experts, num_experts_per_shard)
+    group_offset = jax.lax.with_sharding_constraint(
+        group_offset, NamedSharding(mesh, P('model')))
+
+    def _gmm(lhs, rhs, group_sizes, group_offset):
+        # Group offset for this shard. `group_offset` is sharded, and in this sharded
+        # function, it has only 1 element and `group_offset.shape` is (1,) but gmm kernel requires
+        # the group_offset to be a ()-shaped array, so we group_offset[0].
+        group_offset_of_shard = group_offset[0]
+        return gmm(lhs=lhs,
+                   rhs=rhs,
+                   group_sizes=group_sizes,
+                   preferred_element_type=lhs.dtype,
+                   tiling=(tm, tk, tn),
+                   transpose_rhs=transpose_rhs,
+                   group_offset=group_offset_of_shard)
+
+    # The result from gmm on each shard has the same shape, but only the rows for this shard has non-zero values. Taking below as an working example:
+    #       A, A, A, A     0, 0, 0, 0     0, 0, 0, 0     0, 0, 0, 0
+    #       A, A, A, A     0, 0, 0, 0     0, 0, 0, 0     0, 0, 0, 0
+    #       A, A, A, A     0, 0, 0, 0     0, 0, 0, 0     0, 0, 0, 0
+    #       0, 0, 0, 0     B, B, B, B     0, 0, 0, 0     0, 0, 0, 0
+    #       0, 0, 0, 0     B, B, B, B     0, 0, 0, 0     0, 0, 0, 0
+    #       0, 0, 0, 0     0, 0, 0, 0     C, C, C, C     0, 0, 0, 0
+    #       0, 0, 0, 0     0, 0, 0, 0     C, C, C, C     0, 0, 0, 0
+    #       0, 0, 0, 0     0, 0, 0, 0     C, C, C, C     0, 0, 0, 0
+    #       0, 0, 0, 0     0, 0, 0, 0     C, C, C, C     0, 0, 0, 0
+    #       0, 0, 0, 0     0, 0, 0, 0     C, C, C, C     0, 0, 0, 0
+    #       0, 0, 0, 0     0, 0, 0, 0     0, 0, 0, 0     D, D, D, D
+    #       0, 0, 0, 0     0, 0, 0, 0     0, 0, 0, 0     D, D, D, D
+    #       0, 0, 0, 0     0, 0, 0, 0     0, 0, 0, 0     D, D, D, D
+    #       0, 0, 0, 0     0, 0, 0, 0     0, 0, 0, 0     D, D, D, D
+    #        shard-0        shard-1        shard-2        shard-3
+    # The shard 0,1,2,3 each has 3 (A rows), 2 (B rows), 5 (C rows) and 4 (D rows).
+    gmm_res = shard_map(
+        _gmm,
+        mesh=mesh,
+        in_specs=(P(), P('model', None, None), P(), P('model')),
+        out_specs=(P('model', None)),
+        check_rep=False,
+    )(lhs, rhs, group_sizes, group_offset)
+
+    # For i-th shard, it is responsible groups (AKA experts) from i*num_experts_per_shard to (i+1)*num_experts_per_shard
+    # We sum them up to get total rows in that shard, and that is the size for shard to send to its peers. This is also
+    # the number of non-zero rows from the gmm results.
+    # In the working example, send_sizes would be [3, 2, 5, 4]
+    send_sizes = jnp.array([
+        group_sizes[i * num_experts_per_shard:(i + 1) *
+                    num_experts_per_shard].sum() for i in range(ep_size)
+    ])
+    # In the working example, input_offsets would be [0, 3, 5, 10]
+    input_offsets = jnp.concatenate((jnp.array([0]), send_sizes.cumsum()[:-1]))
+    output_offsets = input_offsets
+    recv_sizes = send_sizes
+
+    input_offsets = jax.lax.with_sharding_constraint(
+        input_offsets, NamedSharding(mesh, P('model')))
+    send_sizes = jax.lax.with_sharding_constraint(
+        send_sizes, NamedSharding(mesh, P('model')))
+    output_offsets = jax.lax.with_sharding_constraint(
+        output_offsets, NamedSharding(mesh, P('model')))
+
+    def _ragged_all_to_all(operand, input_offsets, send_sizes, output_offsets,
+                           recv_sizes):
+        output = jnp.zeros_like(operand)
+
+        # input_offsets, send_sizes and output_offsets are sharded and there is only 1 elemnt in each shard, we
+        # are taking the 0-th element from them just so that jnp.repeat generates the arrays with correct shape.
+        input_offsets_of_shard = jnp.repeat(input_offsets[0], ep_size)
+        send_sizes_of_shard = jnp.repeat(send_sizes[0], ep_size)
+        output_offsets_of_shard = jnp.repeat(output_offsets[0], ep_size)
+
+        # recv_sizes is replicated across shards, because all the shards receive the same data and write to the
+        # output in the same way (same output_offsets and same recv_sizes) and thus generates replicated output.
+        recv_sizes_of_shard = recv_sizes
+
+        # In the working example, for each shard, the values of the offsets and sizes would be:
+        #                                shard-0         shard-1         shard-2         shard-3
+        # input_offsets_of_shard       [0, 0, 0, 0]    [3, 3, 3, 3]    [5, 5, 5, 5]    [10,10,10,10]
+        # send_sizes_of_shard          [3, 3, 3, 3]    [2, 2, 2, 2]    [5, 5, 5, 5]    [4, 4, 4, 4 ]
+        # output_offsets_of_shard      [0, 0, 0, 0]    [0, 0, 0, 0]    [0, 0, 0, 0]    [10,10,10,10]
+        # recv_sizes_of_shard          [3, 2, 5, 4]    [3, 2, 5, 4]    [3, 2, 5, 4]    [3, 2, 5, 4]
+        return jax.lax.ragged_all_to_all(operand,
+                                         output,
+                                         input_offsets_of_shard,
+                                         send_sizes_of_shard,
+                                         output_offsets_of_shard,
+                                         recv_sizes_of_shard,
+                                         axis_name='model')
+
+    # Use ragged_all_to_all to send the result from gmm for each expert to all the shards.
+    # In the working example, the result would be:
+    #       A, A, A, A     A, A, A, A     A, A, A, A     A, A, A, A
+    #       A, A, A, A     A, A, A, A     A, A, A, A     A, A, A, A
+    #       A, A, A, A     A, A, A, A     A, A, A, A     A, A, A, A
+    #       B, B, B, B     B, B, B, B     B, B, B, B     B, B, B, B
+    #       B, B, B, B     B, B, B, B     B, B, B, B     B, B, B, B
+    #       C, C, C, C     C, C, C, C     C, C, C, C     C, C, C, C
+    #       C, C, C, C     C, C, C, C     C, C, C, C     C, C, C, C
+    #       C, C, C, C     C, C, C, C     C, C, C, C     C, C, C, C
+    #       C, C, C, C     C, C, C, C     C, C, C, C     C, C, C, C
+    #       C, C, C, C     C, C, C, C     C, C, C, C     C, C, C, C
+    #       D, D, D, D     D, D, D, D     D, D, D, D     D, D, D, D
+    #       D, D, D, D     D, D, D, D     D, D, D, D     D, D, D, D
+    #       D, D, D, D     D, D, D, D     D, D, D, D     D, D, D, D
+    #       D, D, D, D     D, D, D, D     D, D, D, D     D, D, D, D
+    #        shard-0        shard-1        shard-2        shard-3
+    return shard_map(
+        _ragged_all_to_all,
+        mesh=mesh,
+        in_specs=(P('model', None), P('model'), P('model'), P('model'), P()),
+        out_specs=(P()),
+        check_rep=False,
+    )(gmm_res, input_offsets, send_sizes, output_offsets, recv_sizes)
+
+
 def jax_fused_moe_func(
     hidden_states: jax.Array,
     w1: jax.Array,
@@ -118,6 +250,7 @@ def jax_fused_moe_func(
     renormalize: bool,
     reduce_results: bool,
     mesh: Mesh,
+    use_ep: bool,
 ):
     """
     Args:
@@ -130,6 +263,8 @@ def jax_fused_moe_func(
     orig_shape = hidden_states.shape
     hidden_size = hidden_states.shape[-1]
     num_tokens = hidden_states.size // hidden_size
+    assert global_num_experts == w1.shape[0]
+    ep_size = mesh.shape['model']  # only used if use_ep is True.
     intermediate_size = w2.shape[-1]
     dtype = hidden_states.dtype
     assert (num_tokens * topk) % 16 == 0, (
@@ -154,13 +289,37 @@ def jax_fused_moe_func(
 
     x = hidden_states[token_indices_sorted]
 
-    # x = torch.ops.xla.gmm(x, w1, group_sizes, transpose_rhs=True)
-    x = sharded_gmm(x, w1, group_sizes, transpose_rhs=True, mesh=mesh)
+    if use_ep:
+        x = expert_sharded_gmm(x,
+                               w1,
+                               group_sizes,
+                               transpose_rhs=True,
+                               mesh=mesh,
+                               num_experts=global_num_experts,
+                               ep_size=ep_size)
+    else:
+        x = tensor_sharded_gmm(x,
+                               w1,
+                               group_sizes,
+                               transpose_rhs=True,
+                               mesh=mesh)
 
     x = jax.nn.silu(x[..., :intermediate_size]) * x[..., intermediate_size:]
 
-    # x = torch.ops.xla.gmm(x, w2, group_sizes, transpose_rhs=True)
-    x = sharded_gmm(x, w2, group_sizes, transpose_rhs=True, mesh=mesh)
+    if use_ep:
+        x = expert_sharded_gmm(x,
+                               w2,
+                               group_sizes,
+                               transpose_rhs=True,
+                               mesh=mesh,
+                               num_experts=global_num_experts,
+                               ep_size=ep_size)
+    else:
+        x = tensor_sharded_gmm(x,
+                               w2,
+                               group_sizes,
+                               transpose_rhs=True,
+                               mesh=mesh)
 
     x = x[topk_argsort_revert_indices].reshape(-1, topk, hidden_size)
     x = x * jnp.expand_dims(topk_weights, axis=-1)
@@ -182,6 +341,7 @@ def jax_fused_moe_func_padded(
     renormalize: bool,
     reduce_results: bool,
     mesh: Mesh,
+    use_ep: bool,
 ):
     # TODO(fanhongmin@google.com): Once the jax runner pads the input, we no longer need this.
     hidden_size = hidden_states.shape[-1]
@@ -200,18 +360,19 @@ def jax_fused_moe_func_padded(
         expanded_x = jax_fused_moe_func(expanded_hidden_states, w1, w2,
                                         expanded_gating_output, topk,
                                         global_num_experts, renormalize,
-                                        reduce_results, mesh)
+                                        reduce_results, mesh, use_ep)
         x = expanded_x[:hidden_states.shape[0]]
         return x
     else:
         return jax_fused_moe_func(hidden_states, w1, w2, gating_output, topk,
                                   global_num_experts, renormalize,
-                                  reduce_results, mesh)
+                                  reduce_results, mesh, use_ep)
 
 
 class JaxFusedMoE(torch.nn.Module):
 
-    def __init__(self, fused_moe: torch.nn.Module, mesh: Mesh):
+    def __init__(self, fused_moe: torch.nn.Module, mesh: Mesh,
+                 vllm_parallel_config: ParallelConfig):
         super().__init__()
         assert isinstance(fused_moe, FusedMoE)
 
@@ -220,6 +381,7 @@ class JaxFusedMoE(torch.nn.Module):
         self.global_num_experts = fused_moe.global_num_experts
         self.renormalize = fused_moe.renormalize
         self.reduce_results = fused_moe.reduce_results
+        self.use_ep = vllm_parallel_config.enable_expert_parallel
 
         self.w13_weight: Parameter
         self.w2_weight: Parameter
@@ -228,11 +390,24 @@ class JaxFusedMoE(torch.nn.Module):
         self._shard_weight(mesh)
 
     def _shard_weight(self, mesh: Mesh):
-        # Shard by the intermediate_size dim.
-        self.w13_weight.apply_jax_(jax.device_put,
-                                   NamedSharding(mesh, P(None, 'model', None)))
-        self.w2_weight.apply_jax_(jax.device_put,
-                                  NamedSharding(mesh, P(None, None, 'model')))
+        if self.use_ep:
+            # Shard both of the weight tensors by the expert dim, which is the 0th dim.
+            self.w13_weight.apply_jax_(
+                jax.device_put, NamedSharding(mesh, P('model', None, None)))
+            self.w2_weight.apply_jax_(
+                jax.device_put, NamedSharding(mesh, P('model', None, None)))
+        else:
+            # The weight sharding for tensor parallelism is determined by the ideal
+            # sharding for the `rhs` arg of `sharded_gmm`, in which the rhs is
+            # transposed and thus the middle dim becomes the last dim and the
+            # non-contraction dim of the matmul.
+
+            # Shard by the intermediate_size dim.
+            self.w13_weight.apply_jax_(
+                jax.device_put, NamedSharding(mesh, P(None, 'model', None)))
+            # Shard by the hidden_size dim.
+            self.w2_weight.apply_jax_(
+                jax.device_put, NamedSharding(mesh, P(None, 'model', None)))
 
     def _load_weights_from_vllm_layer(self, fused_moe: torch.nn.Module):
         w13_weight = torch_view(t2j(fused_moe.w13_weight.data))
@@ -249,14 +424,14 @@ class JaxFusedMoE(torch.nn.Module):
             jax.jit(jax_fused_moe_func_padded,
                     static_argnames=[
                         "topk", "global_num_experts", "renormalize",
-                        "reduce_results", "mesh"
+                        "reduce_results", "mesh", "use_ep"
                     ]),
             topk=self.top_k,
             global_num_experts=self.global_num_experts,
             renormalize=self.renormalize,
             reduce_results=self.reduce_results,
             mesh=self.mesh,
-        )
+            use_ep=self.use_ep)
 
         output = _fused_moe_func(
             jax_view(hidden_states),
