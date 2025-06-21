@@ -70,6 +70,7 @@ class EngineCore:
             self.model_executor.register_failure_callback(
                 executor_fail_callback)
 
+        logger.info("executor created.")
         # Setup KV Caches and update CacheConfig after profiling.
         num_gpu_blocks, num_cpu_blocks, kv_cache_config = \
             self._initialize_kv_caches(vllm_config)
@@ -77,7 +78,9 @@ class EngineCore:
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
 
+        logger.info("KV cache initialized.")
         self.structured_output_manager = StructuredOutputManager(vllm_config)
+        logger.info("structure output manager created.")
 
         # Setup scheduler.
         # if isinstance(vllm_config.scheduler_config.scheduler_cls, str):
@@ -109,9 +112,11 @@ class EngineCore:
             max_model_len=vllm_config.scheduler_config.max_model_len,
             enable_caching=False,
         )
+        logger.info("kv cache manager created.")
         # Setup MM Input Mapper.
         self.mm_input_cache_server = MirroredProcessingCache(
             vllm_config.model_config)
+        logger.info("mirrored processing cache created.")
 
         # Setup batch queue for pipeline parallelism.
         # Batch queue for scheduled batches. This enables us to asynchronously
@@ -124,6 +129,7 @@ class EngineCore:
             logger.info("Batch queue is enabled with size %d",
                         self.batch_queue_size)
             self.batch_queue = queue.Queue(self.batch_queue_size)
+        logger.warning("set up jetstream driver")
         self.orchestrator = self._setup_driver(vllm_config,
                                                self.kv_cache_manager, True)
         logger.warning("starting jetstream orchestrator")
