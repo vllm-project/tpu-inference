@@ -732,7 +732,6 @@ class TPUModelRunner():
         block_size = self.vllm_config.cache_config.block_size
         sliding_window = self.vllm_config.model_config.get_sliding_window()
 
-
         batch_size = len(new_reqs)
         batch_size = pad_to_multiple(
             batch_size,
