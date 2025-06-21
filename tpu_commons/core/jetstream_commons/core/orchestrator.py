@@ -87,7 +87,6 @@ from typing import Any, Optional
 
 import jax
 from vllm.config import VllmConfig
-from vllm.v1.core.sched.utils import check_stop
 from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request
@@ -200,6 +199,7 @@ class Driver:
         self._generate_params = generate_params
         self._interleaved_mode = interleaved_mode
         self.requests = {}
+        self.reqs_to_remove = []
         # self._metrics_collector = metrics_collector
 
         # Stages 1-4 represent the life cycle of a request.
@@ -390,7 +390,12 @@ class Driver:
         while self.live:
             input_batch = prefill_engine.model_runner.input_batch
             if len(input_batch.req_id_to_index) == input_batch.max_num_reqs:
-                continue
+                if self.reqs_to_remove != []:
+                    for req in self.reqs_to_remove:
+                        input_batch.remove_request(req)
+                    self.reqs_to_remove = []
+                else:
+                    continue
             my_transfer_backlog = self._transfer_backlogs[idx]
             # The prefill thread can just sleep until it has work to do.
             vllm_request = self._prefill_backlog.get(block=True)
@@ -398,11 +403,6 @@ class Driver:
 
             if vllm_request is None:
                 break
-            logging.info(
-                "Prefilling on prefill engine %d : prefill queue size, %d,",
-                idx,
-                self._prefill_backlog.qsize(),
-            )
 
             # Compute new kv cache for the prefill_content.
             prefix, vllm_model_runner_output, request = prefill_engine.prefill(
@@ -418,7 +418,7 @@ class Driver:
             # full.
             my_transfer_backlog.put(prefix, block=True)
             logging.info(
-                "Finished prefill %s, Placed request on transfer queue %s",
+                "Finished prefill req %s, Placed request on transfer queue %s",
                 req_id,
                 idx,
             )
@@ -502,6 +502,9 @@ class Driver:
             # insert as many sequences as possible.
             while True:
                 input_batch = generate_engine.model_runner.input_batch
+                if not self._prefill_backlog.empty() and len(
+                        self.reqs_to_remove) != 0:
+                    continue
                 if len(input_batch.req_id_to_index
                        ) == input_batch.max_num_reqs:
                     if set(input_batch.req_id_to_index.keys()).issubset(
@@ -519,6 +522,7 @@ class Driver:
                     # For interleaved mode, we also blocks when prefill backlog
                     # is not empty or there are transfer work to do.
                     block |= not self._prefill_backlog.empty()
+                    # block |= (len(self.reqs_to_remove) != 0)
                     block |= not self._transfer_backlogs[idx].empty()
                 try:
                     prefix = my_generate_backlog.get(block=block, timeout=1.0)
@@ -538,9 +542,10 @@ class Driver:
                 if prefix is None:
                     return
                 else:
-                    logging.info(
-                        "get prefix of request %s from generate backlog. input batch req ids : %s ",
-                        prefix["seq"].request_id, input_batch.req_id_to_index)
+                    pass
+                    # logging.info(
+                    #     "get prefix of request %s from generate backlog. input batch req ids : %s ",
+                    #     prefix["seq"].request_id, input_batch.req_id_to_index)
 
                 generate_engine.insert(prefix)
                 # delete_pytree(prefix)
@@ -556,11 +561,19 @@ class Driver:
             assert (
                 len(input_batch.req_id_to_index) != 0
             ), "At this point we must have some requests inserted into the slots."
-
             # Now we actually take a generate step on requests in the slots.
-            self.requests, vllm_model_runner_output = generate_engine.generate(
+            self.requests, vllm_model_runner_output, reqs_to_remove = generate_engine.generate(
                 self.requests)
-            logging.info("Finished  generate step %d", generate_timestep)
+            # change to reference by value to avoid deletion
+            vllm_model_runner_output.req_ids = [
+                req_id for req_id in vllm_model_runner_output.req_ids
+            ]
+            vllm_model_runner_output.req_id_to_index = {
+                k: v
+                for (k, v) in vllm_model_runner_output.req_id_to_index.items()
+            }
+            if len(reqs_to_remove) != 0:
+                self.reqs_to_remove = reqs_to_remove
             # for request in self.requests:
             #   logging.info("Request %s", request.__dict__)
             my_detokenize_backlog.put(vllm_model_runner_output, block=True)
@@ -570,6 +583,10 @@ class Driver:
             #   # Respond to detokenization backpressure.
             #   my_detokenize_backlog.put((generate_timestep, sampled_tokens), block=True)
             generate_timestep += 1
+            logging.info(
+                "Finished generate step %s, req_ids %s, output tokens %s \n",
+                generate_timestep, vllm_model_runner_output.req_ids,
+                vllm_model_runner_output.sampled_token_ids)
             # logging.info(
             #     "Generate engine %d step %d - slots free : %d / %d, took %.2fms",
             #     idx,
@@ -598,11 +615,10 @@ class Driver:
             if not self.live:
                 break
             #   sampled_token_id = model_runner_output.sampled_token_ids[]
+            # logging.info("Detokenize model runner output: %s", model_runner_output)
             req_ids = list(model_runner_output.prompt_logprobs_dict.keys())
             for req_id in req_ids:
                 request = self.requests[req_id]
-                _ = check_stop(request,
-                               self.vllm_config.model_config.max_model_len)
                 sampled_token_index = model_runner_output.req_id_to_index[
                     req_id]
                 sampled_token_id = model_runner_output.sampled_token_ids[
