@@ -8,7 +8,7 @@
 
 # You can also manually invoke this script to run an E2E benchmark on any given model and dataset, making sure
 # you specify the --dataset-name, --dataset-path, and --root-dir flags
-# Example usage: bash tests/e2e/benchmarking/llama3.1_8b_mmlu.sh -r /mnt/disks/jacobplatin -d mmlu -p /mnt/disks/jacobplatin/mmlu/data/test
+# Example usage: bash tests/e2e/benchmarking/mmlu.sh -r /mnt/disks/jacobplatin -d mmlu -p /mnt/disks/jacobplatin/mmlu/data/test
 
 # Logs the vLLM server output to a file
 LOG_FILE="server.log"
@@ -23,7 +23,7 @@ TIMEOUT_SECONDS=300
 TARGET_ROUGE1="30"
 TARGET_THROUGHPUT="50"
 
-model_list="/mnt/disks/data/Qwen/Qwen2.5-1.5B-Instruct /mnt/disks/data/Qwen/Qwen2.5-1.5B"
+model_list="Qwen/Qwen2.5-1.5B-Instruct meta-llama/Llama-3.1-8B-Instruct"
 root_dir=/workspace
 dataset_name=mlperf
 dataset_path=""
@@ -37,7 +37,7 @@ helpFunction()
    echo -e "\t-r The path your root directory containing both 'vllm' and 'tpu_commons' (default: /workspace/, which is used in the Dockerfile)"
    echo -e "\t-d The dataset name (default: mlperf, which will download the dataset)"
    echo -e "\t-p The path to the processed MLPerf dataset (default: None, which will download the dataset)"
-   echo -e "\t-m A space-separated list of HuggingFace model ids to use (default: Qwen/Qwen2.5-1.5B-Instruct and Qwen/Qwen2.5-1.5B)"
+   echo -e "\t-m A space-separated list of HuggingFace model ids to use (default: Qwen/Qwen2.5-1.5B-Instruct and meta-llama/Llama-3.1-8B-Instruct)"
    echo -e "\t-n Number of prompts to use for the benchmark (default: 10)"
    exit 1
 }
