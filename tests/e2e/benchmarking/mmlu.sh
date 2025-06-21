@@ -80,7 +80,6 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 echo "Using the root directory at $root_dir"
-# echo "Using the model $model_"
 echo "Using $num_prompts prompts"
 
 
@@ -200,7 +199,6 @@ checkThroughputAndRouge() {
 }
 
 
-exit_code=0
 for model_name in $model_list; do
     echo "--------------------------------------------------"
     echo "Running benchmark for model: $model_name"
