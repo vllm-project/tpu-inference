@@ -51,6 +51,7 @@ def create_parser() -> FlexibleArgumentParser:
     parser.set_defaults(max_model_len=1024)
     parser.set_defaults(max_num_batched_tokens=8192)
     parser.set_defaults(block_size=DEFAULT_BLOCK_SIZE)
+    parser.set_defaults(enable_prefix_caching=False)
 
     parser.add_argument("--prompt", type=str, default=PROMPT)
     parser.add_argument("--profile", action="store_true")
@@ -89,6 +90,31 @@ def make_request(prompt_token_ids: list[int], sampling_params: SamplingParams,
         cache_salt=None,
         data_parallel_rank=None,
     )
+
+
+def clear_scheduler_state(engine_core: EngineCore):
+    """
+    Forcefully clears the active state of the scheduler for benchmarking purposes.
+
+    Args:
+        engine_core: EngineCore instance.
+    """
+    if len(engine_core.scheduler.waiting) > 0:
+        engine_core.scheduler.waiting.clear()
+
+    if len(engine_core.scheduler.running) > 0:
+        engine_core.scheduler.running.clear()
+
+    if len(engine_core.scheduler.requests) > 0:
+        engine_core.scheduler.requests.clear()
+
+    if hasattr(engine_core.scheduler, 'swapped') and len(
+            engine_core.scheduler.swapped) > 0:
+        engine_core.scheduler.swapped.clear()
+
+    assert len(engine_core.scheduler.waiting) == 0
+    assert len(engine_core.scheduler.running) == 0
+    assert len(engine_core.scheduler.requests) == 0
 
 
 def run_prefill(engine_core: EngineCore,
@@ -321,27 +347,6 @@ def run_decode(
             f"\tAR global batch size: {ar_global_batch_size}\n"  # TODO: is this really 1? Or is it 8?
             f"\tAR throughput: {tokens_per_sec:.3f} tokens/second\n"
             f"\tAR memory bandwidth per device: {bw_per_device:.3f} GB/s\n\n")
-
-
-def clear_scheduler_state(engine_core: EngineCore):
-    """
-    Forcefully clears the active state of the scheduler for benchmarking purposes.
-
-    Args:
-        engine_core: EngineCore instance.
-    """
-    if len(engine_core.scheduler.waiting) > 0:
-        engine_core.scheduler.waiting.clear()
-
-    if len(engine_core.scheduler.running) > 0:
-        engine_core.scheduler.running.clear()
-
-    if hasattr(engine_core.scheduler, 'swapped') and len(
-            engine_core.scheduler.swapped) > 0:
-        engine_core.scheduler.swapped.clear()
-
-    assert len(engine_core.scheduler.waiting) == 0
-    assert len(engine_core.scheduler.running) == 0
 
 
 def run_warmup(engine_core: EngineCore, tokenizer: AutoTokenizer,
