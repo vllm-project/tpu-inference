@@ -51,6 +51,9 @@ def main(args: dict):
     if envs.VLLM_TORCH_PROFILER_DIR is not None:
         llm.start_profile()
     outputs = llm.generate(prompts, sampling_params)
+    if envs.VLLM_TORCH_PROFILER_DIR is not None:
+        llm.stop_profile()
+
     # Print the outputs.
     print("-" * 50)
     for output in outputs:
@@ -58,8 +61,6 @@ def main(args: dict):
         generated_text = output.outputs[0].text
         print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
         print("-" * 50)
-    if envs.VLLM_TORCH_PROFILER_DIR is not None:
-        llm.stop_profile()
 
 
 if __name__ == "__main__":

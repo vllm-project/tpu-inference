@@ -107,7 +107,11 @@ class TPUWorker(WorkerBase):
 
     def profile(self, is_start: bool = True):
         if is_start:
-            jax.profiler.start_trace(self.profile_dir)
+            options = jax.profiler.ProfileOptions()
+            # Set this to 1 to enable python stack trace
+            options.python_tracer_level = 0
+            jax.profiler.start_trace(self.profile_dir,
+                                     profiler_options=options)
         else:
             jax.profiler.stop_trace()
 
