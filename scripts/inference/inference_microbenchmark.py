@@ -4,10 +4,7 @@ Runs a pure prefill and decode pass.
 
 Exaple cmd: TPU_BACKEND_TYPE=jax python inference_microbenchmark.py
 
-Options:
-    --prompt: Input prompt (optional)
-    --profile: Enable profiling (if enabled, must specify --profile-dir)
-    --profile_dir: Directory to save profiling data
+Please see scripts/inference/README.md for usage and more details
 """
 import datetime
 import os
@@ -28,11 +25,10 @@ from vllm.v1.request import Request
 from tpu_commons.utils_jax import (calculate_prefill_tflops_per_device,
                                    pad_tokens)
 
-# TODO: change back to  "meta-llama/Llama-3.3-70B-Instruct"
-MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"
+MODEL_NAME = "meta-llama/Llama-3.3-70B-Instruct"
 # NOTE: we will pad this to the nearest prefill length (128 currently)
 PROMPT = "I love to"
-DEFAULT_BLOCK_SIZE = 128
+DEFAULT_BLOCK_SIZE = 32
 WARMUP_ITERS = 2
 BENCHMARK_ITERS = 10
 
@@ -52,10 +48,9 @@ def create_parser() -> FlexibleArgumentParser:
     parser.set_defaults(task="generate")
     parser.set_defaults(tensor_parallel_size=8)
     parser.set_defaults(max_num_seqs=1)
-    parser.set_defaults(
-        max_model_len=1024)  # TODO (jacobplatin): probably want to update this
-    parser.set_defaults(max_num_batched_tokens=8192
-                        )  # TODO (jacobplatin): probably want to update this
+    parser.set_defaults(max_model_len=1024)
+    parser.set_defaults(max_num_batched_tokens=8192)
+    parser.set_defaults(block_size=DEFAULT_BLOCK_SIZE)
 
     parser.add_argument("--prompt", type=str, default=PROMPT)
     parser.add_argument("--profile", action="store_true")
@@ -160,8 +155,9 @@ def run_prefill(engine_core: EngineCore,
 
         if should_profile and i == 0:
             engine_core.profile(is_start=False)
-            # TODO: we need to update this to also cover chunked prefill probably
-            assert engine_core.model_executor.driver_worker.worker.model_runner.phase == "prefill"
+
+        # TODO: we need to update this to also cover chunked prefill probably
+        assert engine_core.model_executor.driver_worker.worker.model_runner.phase == "prefill"
 
         total_time_s += (end_time_iter - start_time_iter)
 
@@ -283,7 +279,8 @@ def run_decode(
 
         if should_profile and i == 0:
             engine_core.profile(is_start=False)
-            assert engine_core.model_executor.driver_worker.worker.model_runner.phase == "decode"
+
+        assert engine_core.model_executor.driver_worker.worker.model_runner.phase == "decode"
 
         total_time_s += (end_time - start_time)
 
@@ -358,7 +355,6 @@ def run_warmup(engine_core: EngineCore, tokenizer: AutoTokenizer,
         prompt_ids: input prompt tokens.
     """
     for _ in range(WARMUP_ITERS):
-        # TODO: is this necessary?
         clear_scheduler_state(engine_core)
         run_prefill(engine_core, tokenizer, prompt_ids, False, verbose=False)
         clear_scheduler_state(engine_core)
@@ -448,7 +444,6 @@ def main(args):
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
-    # TODO (jacobplatin): understand why this isn't being respected from the command line
     vllm_config.cache_config.block_size = block_size
 
     engine_core = EngineCore(vllm_config=vllm_config,
@@ -481,10 +476,11 @@ def main(args):
         # NOTE: this will return the original prompt length as well
         prompt_ids_padded_to_prefill_length, _ = pad_tokens(
             prompt_ids, PAD_TOKEN_ID, [prefill_length], return_as_list=True)
-        profile_dir_for_prefill = os.path.join(
-            profile_dir,
-            f"prefill_length_{prefill_length}_{current_timestamp}")
-        update_vllm_profile_dir(engine_core, profile_dir_for_prefill)
+        if should_profile:
+            profile_dir_for_prefill = os.path.join(
+                profile_dir,
+                f"prefill_length_{prefill_length}_{current_timestamp}")
+            update_vllm_profile_dir(engine_core, profile_dir_for_prefill)
         run_warmup(engine_core, tokenizer, prompt_ids_padded_to_prefill_length)
 
         clear_scheduler_state(engine_core)
@@ -494,9 +490,12 @@ def main(args):
     # Run decode
     run_warmup(engine_core, tokenizer, prompt_ids)
     clear_scheduler_state(engine_core)
-    profile_dir_for_prefill = os.path.join(profile_dir,
-                                           f"decode_{current_timestamp}")
-    update_vllm_profile_dir(engine_core, profile_dir_for_prefill)
+
+    if should_profile:
+        profile_dir_for_prefill = os.path.join(profile_dir,
+                                               f"decode_{current_timestamp}")
+        update_vllm_profile_dir(engine_core, profile_dir_for_prefill)
+
     run_decode(engine_core, tokenizer, prompt_ids, should_profile)
 
     clear_scheduler_state(engine_core)
