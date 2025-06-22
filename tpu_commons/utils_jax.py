@@ -71,22 +71,17 @@ def calculate_prefill_tflops_per_device(
         log: bool = True) -> Tuple[float, float, float]:
     """
   Calculates the TFLOPs per device for a prefill step based on model parameters and sequence length.
-  Based on the formula from MaxText (arxiv.org/pdf/2204.02311.pdf Appendix B).
+  Based on the formula from MaxText (https://github.com/AI-Hypercomputer/maxtext/blob/028bc3ca0a352a8836e979121f3cb4c6bc60b3ed/MaxText/maxtext_utils.py#L322).
 
   Args:
     num_model_parameters: Total count of learnable parameters in the model.
     prefill_length: The length of the input prompt/sequence being prefilled.
-    vllm_model_config: The vLLM ModelConfig object. Expected to have:
-                       .hf_config.num_attention_heads
-                       .hf_config.num_hidden_layers
-                       .hf_config.hidden_size
-                       .dtype (for model parameters dtype)
+    vllm_model_config: The vLLM ModelConfig object.
     log: If True, prints the TFLOPs breakdown.
 
   Returns:
     A tuple containing: (total_tflops, learnable_weight_tflops, causal_attention_tflops)
   """
-    # Extract relevant config parameters from the Hugging Face model config NESTED inside vllm_model_config
     num_query_heads = vllm_model_config.hf_config.num_attention_heads
     num_decoder_layers = vllm_model_config.hf_config.num_hidden_layers
     head_dim = vllm_model_config.hf_config.hidden_size // vllm_model_config.hf_config.num_attention_heads

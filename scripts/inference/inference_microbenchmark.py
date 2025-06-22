@@ -171,6 +171,7 @@ def run_prefill(engine_core: EngineCore,
         assert len(engine_core.scheduler.waiting) == 1
         assert len(engine_core.scheduler.running) == 0
 
+        # Profile only for the first iteration
         if should_profile and i == 0:
             engine_core.profile(is_start=True)
 
@@ -182,8 +183,9 @@ def run_prefill(engine_core: EngineCore,
         if should_profile and i == 0:
             engine_core.profile(is_start=False)
 
-        # TODO: we need to update this to also cover chunked prefill probably
-        assert engine_core.model_executor.driver_worker.worker.model_runner.phase == "prefill"
+        # TODO (jacobplatin): we'll probably want to include the scope of this function to
+        # cover chunked prefill as well
+        assert engine_core.model_executor.driver_worker.worker.model_runner.inference_phase == "prefill"
 
         total_time_s += (end_time_iter - start_time_iter)
 
@@ -220,8 +222,6 @@ def run_prefill(engine_core: EngineCore,
             f"\tPrefill total TFLOPs/device: {total_tflops_per_device_value:.3f}\n"
             f"\tPrefill TFLOPs/sec/device: {tflops_per_sec_per_device:.3f}\n\n"
         )
-
-    if verbose:
         print("Detailed TFLOPs breakdown:")
         calculate_prefill_tflops_per_device(num_model_params,
                                             prefill_len_for_tflops,
@@ -229,13 +229,12 @@ def run_prefill(engine_core: EngineCore,
                                             log=True)
 
 
-def run_decode(
-        engine_core: EngineCore,
-        tokenizer,
-        prompt_ids: list[int],
-        should_profile: bool,
-        verbose: bool = True,  # Added verbose parameter
-        benchmark_iters: int = BENCHMARK_ITERS):
+def run_decode(engine_core: EngineCore,
+               tokenizer,
+               prompt_ids: list[int],
+               should_profile: bool,
+               verbose: bool = True,
+               benchmark_iters: int = BENCHMARK_ITERS):
     """
     Run an isolated decode pass and measure its performance.
 
@@ -274,8 +273,7 @@ def run_decode(
     assert len(engine_core.scheduler.running) == 0
 
     _ = engine_core.step()  # Execute the prefill step for this request
-    jax.block_until_ready(
-        engine_core.scheduler.running)  # Block until JAX execution completes
+    jax.block_until_ready(engine_core.scheduler.running)
 
     assert len(engine_core.scheduler.waiting) == 0
     assert len(
@@ -295,6 +293,7 @@ def run_decode(
     total_tokens_decoded = 0
 
     for i in range(benchmark_iters):
+        # Profile only for the first iteration
         if should_profile and i == 0:
             engine_core.profile(is_start=True)
 
@@ -306,7 +305,7 @@ def run_decode(
         if should_profile and i == 0:
             engine_core.profile(is_start=False)
 
-        assert engine_core.model_executor.driver_worker.worker.model_runner.phase == "decode"
+        assert engine_core.model_executor.driver_worker.worker.model_runner.inference_phase == "decode"
 
         total_time_s += (end_time - start_time)
 
@@ -481,6 +480,8 @@ def main(args):
         # NOTE: this will return the original prompt length as well
         prompt_ids_padded_to_prefill_length, _ = pad_tokens(
             prompt_ids, PAD_TOKEN_ID, [prefill_length], return_as_list=True)
+        # This is a bit hacky, but this logic will ensure that the prefill traces are saved to a subdirectory
+        # of the profile_dir for prefill, called "prefill_length_XXX_YYYY_MM_DD_HH_MM_SS"
         if should_profile:
             profile_dir_for_prefill = os.path.join(
                 profile_dir,
@@ -496,10 +497,12 @@ def main(args):
     run_warmup(engine_core, tokenizer, prompt_ids)
     clear_scheduler_state(engine_core)
 
+    # Like above, this is also a bit hacky but ensures that the decode traces are saved to a subdirectory
+    # of the profile_dir called "decode_YYYY_MM_DD_HH_MM_SS"
     if should_profile:
-        profile_dir_for_prefill = os.path.join(profile_dir,
-                                               f"decode_{current_timestamp}")
-        update_vllm_profile_dir(engine_core, profile_dir_for_prefill)
+        profile_dir_for_decode = os.path.join(profile_dir,
+                                              f"decode_{current_timestamp}")
+        update_vllm_profile_dir(engine_core, profile_dir_for_decode)
 
     run_decode(engine_core, tokenizer, prompt_ids, should_profile)
 

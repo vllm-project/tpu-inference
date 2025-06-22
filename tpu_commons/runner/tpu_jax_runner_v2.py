@@ -106,7 +106,8 @@ class TPUModelRunner():
 
         self._verify_chunked_prefill_config()
 
-        self.phase = ""
+        # This indicates what phase of inference we are in (i.e. prefill, chunked_prefill, decode).
+        self.inference_phase = ""
 
     def _init_random(self):
         if self.model_config.seed is None:
@@ -265,19 +266,19 @@ class TPUModelRunner():
 
         # Check for the "no prefill" case
         if not new_full_prefill_seqs and not new_partial_prefill_seqs and not subsequent_partial_prefill_seqs:
-            self.phase = "decode"
+            self.inference_phase = "decode"
             return self._prepare_decode(scheduler_output)
 
         # Check for the "only full prefill" case
         # TODO(pooyam): We probably can use ragged attention for new_partial_prefills as well.
         if new_full_prefill_seqs and not new_partial_prefill_seqs and not subsequent_partial_prefill_seqs and not decoding_seqs:
-            self.phase = "prefill"
+            self.inference_phase = "prefill"
             return self._prepare_prefill(scheduler_output)
 
         # All other cases fall into the "chunked prefill" category
         # TODO(pooyam): Change `prepare_prefill` to respect num scheduled tokens, so we can use prefill_kernel even for new partial prefills.
         # This is useful only if we conclude paged attention for prefill is still faster than ragged paged attention for prefill.
-        self.phase = "chunked_prefill"
+        self.inference_phase = "chunked_prefill"
         return self._prepare_chunked_prefill(scheduler_output)
 
     def _is_generating_new_token(self, scheduler_output: VllmSchedulerOutput,
@@ -384,6 +385,7 @@ class TPUModelRunner():
             self.mesh,
         )
 
+        # https://source.corp.google.com/h/vertex-model-garden/hex-llm/+/main:hex_llm/worker/runner_jax.py#:~:text=143-,144,-145
         # Prepare buffers used by chunk prefill
         max_num_running_seq = self.scheduler_config.max_num_seqs
         num_blocks_per_seq = (pad_to_multiple(

@@ -1,15 +1,18 @@
 # Inference Microbenchmark Script
 
-This script is designed as a vLLM analog to MaxText's own [inference microbenchmark](https://github.com/AI-Hypercomputer/maxtext/blob/main/MaxText/inference_microbenchmark.py).  Specifically, it attempts to isolate and benchmark (with as little overhead as possible) prefill and decode for a given number of benchmark iterations (10 by default) after running a brief warmup. # TODO (jacobplatin): add chunked prefill?
+This script is designed as a vLLM analog to MaxText's own [inference microbenchmark](https://github.com/AI-Hypercomputer/maxtext/blob/main/MaxText/inference_microbenchmark.py).  Specifically, it attempts to isolate and benchmark (with as little overhead as possible) prefill and decode for a given number of benchmark iterations (10 by default) after running a brief warmup.
 
 Note that our main entrypoint to vLLM is the [`EngineCore`](https://github.com/vllm-project/vllm/blob/799397e/vllm/v1/engine/core.py#L55) class, rather than something higher level like the [`LLM`](https://github.com/vllm-project/vllm/blob/799397ee4f57b90ee1b5f12f88b12f4de0de0d1d/vllm/entrypoints/llm.py#L60) class, which gives us a bit more finegrained control, especially with accessing the TPU model runner and scheduler.
 
+> **Warning:** The timing numbers reported by the inference microbenchmark script include a bit of overhead and thus we recommend *always* obtaining a profile to capture accuracy numbers!
+
 ## Example Command
 
-This command runs the benchmark with default settings for the `Llama-3.1-8B-Instruct` model.
+This command runs the benchmark for the `Llama-3.1-8B-Instruct` model.  Note that the vLLM-specific arguments we are passing will be respected
+by vLLM.
 
 ```bash
-TPU_BACKEND_TYPE=jax python scripts/inference/inference_microbenchmark.py --max-model-len 2048 --max-num-seqs 1 --max-num-batched-tokens 4096 --profile --profile-dir inference-microbenchmark --prefill-lengths "128, 256"
+TPU_BACKEND_TYPE=jax python scripts/inference/inference_microbenchmark.py --max-model-len 2048 --max-num-seqs 1 --max-num-batched-tokens 4096 --profile --profile-dir inference-microbenchmark --prefill-lengths "128,256"
 ```
 
 ## Command-Line Options
