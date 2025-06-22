@@ -109,6 +109,7 @@ class TPUModelRunner():
         self._init_jit()
 
         self._verify_chunked_prefill_config()
+        logger.info("TPUModelRunner created!")
 
     def _init_random(self):
         if self.model_config.seed is None:
@@ -211,6 +212,7 @@ class TPUModelRunner():
         )
         logger.info(
             f"Init kv-cache | shape={len(layer_names)} * {cache_shape}")
+        logger.info(jax.lib.xla_bridge.get_backend().platform_version)
 
         # Shard the num_kv_heads dim along the 'model' axis.
         sharding = NamedSharding(self.mesh, PartitionSpec("model"))
@@ -221,14 +223,20 @@ class TPUModelRunner():
                 dtype=cache_dtype,
             )
 
+        logger.info("Trace allocate fn.")
         sharded_allocate = jax.jit(_allocate, out_shardings=sharding)
-        for _ in layer_names:
+        logger.info(f"allocate kv cache: {sharding}")
+        for name in layer_names:
+            logger.info(f"allocate for {name}")
             k_cache = sharded_allocate()
             v_cache = sharded_allocate()
             self.kv_caches.append((k_cache, v_cache))
 
+        logger.info(f"allocate kv cache: {sharding}, done")
         # From @pooyam to @xiangxu: Feel free to edit the output_cache however you want. I added to unblock testing.
         self.output_cache = self.init_output_cache()
+        logger.info(
+            f"Init kv-cache | shape={len(layer_names)} * {cache_shape}, Done!")
 
     def init_output_cache(self):
         output_size = (
@@ -374,9 +382,14 @@ class TPUModelRunner():
         )
 
     def _init_mesh(self) -> None:
-        mesh_shape = (1, len(self.devices))
         axis_names = ("data", "model")
-        self.mesh = jax.make_mesh(mesh_shape, axis_names)
+        # In case we are in disagg mode, the number of devices can exceed 8.
+        # TODO(fhzhang): fix this properly as we implement disagg serving.
+        if len(self.devices) > 8:
+            self.devices = self.devices[:8]
+        mesh_shape = (1, len(self.devices))
+        self.mesh = jax.make_mesh(mesh_shape, axis_names, devices=self.devices)
+
         logger.info(f"Init mesh | mesh={self.mesh}")
 
     def _init_model(self) -> None:

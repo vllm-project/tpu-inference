@@ -15,10 +15,13 @@
 
 from importlib import util
 
+PATHWAYS_ENABLED = False
+
 if util.find_spec("pathwaysutils"):
     import pathwaysutils
 
     pathwaysutils.initialize()
+    PATHWAYS_ENABLED = True
 else:
     print("Running JetStream without Pathways. "
           "Module pathwaysutils is not imported.")

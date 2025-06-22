@@ -168,6 +168,7 @@ class JaxEngine(engine_api.Engine):
         cached_reqs = [
             all_requests[request_id]
             for request_id in input_batch.req_id_to_index
+            if request_id in all_requests
         ]
         scheduled_cached_reqs = []
         for request in cached_reqs:
