@@ -80,22 +80,19 @@ def get_nnx_model(
 ):
     model_class = _get_model_architecture(vllm_config.model_config.hf_config)
 
-    @nnx.jit
-    def create_sharded_model():
-        model = model_class(vllm_config, rng, mesh)
-        state = nnx.state(model)
-        pspecs = nnx.get_partition_spec(state)
-        sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
-        nnx.update(model, sharded_state)
-        return model
-
-    # Create the model instance with inited sharded weights
-    # TODO(xiang): create abstract model without weights allocated
-    # https://flax.readthedocs.io/en/latest/guides/surgery.html#creating-an-abstract-model-or-state-without-memory-allocation
-    with mesh:
-        jit_model = create_sharded_model()
-
-    jit_model.load_weights()
+    # We first create an abstract model without allocating any weights,
+    # then fill in its weigths during load_weights from HF.
+    # This shows 3 advantages than the normal way:
+    # 1. The model weights will only be allocated once. Otherwise the normal way
+    #    will random-init the model weights first, then load the real weights.
+    #    The two pass weights allocation causes model loading slow.
+    # 2. The model loading won't be OOM. Otherwise the normal way will hold
+    #    a full model weights after random-init, then duplicate a layer during
+    #    the load_weights. This would be easy to OOM if the layer is super large.
+    # 3. The model architecture definition won't need to worry about the sharding.
+    #    The sharding definition is taken over by the load_weights instead.
+    model = nnx.eval_shape(lambda: model_class(vllm_config, rng, mesh))
+    model.load_weights(rng)
 
     kv_cache_sharding = NamedSharding(mesh, PartitionSpec("model"))
     outputs_sharding = NamedSharding(mesh, PartitionSpec(None))
@@ -103,7 +100,7 @@ def get_nnx_model(
 
     # For performance consideration, refer to:
     # https://flax.readthedocs.io/en/latest/guides/performance.html
-    graphdef, state = nnx.split(jit_model)
+    graphdef, state = nnx.split(model)
 
     @functools.partial(
         jax.jit,
@@ -119,11 +116,7 @@ def get_nnx_model(
         model = nnx.merge(graphdef, state)
         return model(*args)
 
-    def model_fn(graphdef, state, *args):
-        with mesh:
-            return run_model(graphdef, state, *args)
-
-    model_fn = functools.partial(model_fn, graphdef, state)
+    model_fn = functools.partial(run_model, graphdef, state)
     return model_fn
 
 
