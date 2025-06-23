@@ -297,7 +297,7 @@ class Qwen2ForCausalLM(nnx.Module):
             "[Qwen2ForCausalLM] input after embedding: shape={shape}, dtype={dtype}, first 10: {first_10}, sum: {sum}",
             shape=x.shape,
             first_10=x.flatten()[:10],
-            sum=jnp.sum(x),
+            sum=jnp.sum(x[:, :5, :]),  # Sum of the first 5 token embeddings
             dtype=x.dtype,
         )
 
