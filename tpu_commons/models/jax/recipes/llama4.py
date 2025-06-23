@@ -72,10 +72,10 @@ class Llama4ScoutModelConfig(ModelConfig):
             rmsnorm_epsilon=1e-5,
             block_type="MoE"))
     interleave_moe_layer_step: int = 1
-    # num_layers: int = 48
-    # num_moe_layers: int = 48
-    num_layers: int = 16 ## TODO REVERT
-    num_moe_layers: int = 16 ## TODO REVERT
+    num_layers: int = 48
+    num_moe_layers: int = 48
+    # num_layers: int = 24 ## TODO REVERT
+    # num_moe_layers: int = 24 ## TODO REVERT
 
 
 
