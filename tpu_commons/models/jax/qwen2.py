@@ -285,7 +285,21 @@ class Qwen2ForCausalLM(nnx.Module):
         *args,
     ) -> Tuple[List[KVCache], jax.Array, jax.Array]:
 
+        jax.debug.print(
+            "[Qwen2ForCausalLM] input_ids: shape={shape}, dtype={dtype}, first 10: {first_10}, sum: {sum}",
+            shape=input_ids.shape,
+            first_10=input_ids.flatten()[:10],
+            sum=jnp.sum(input_ids),
+            dtype=input_ids.dtype,
+        )
         x = self.embed(input_ids)
+        jax.debug.print(
+            "[Qwen2ForCausalLM] input after embedding: shape={shape}, dtype={dtype}, first 10: {first_10}, sum: {sum}",
+            shape=x.shape,
+            first_10=x.flatten()[:10],
+            sum=jnp.sum(x),
+            dtype=x.dtype,
+        )
 
         kv_caches, x = self.model(
             is_prefill,
@@ -313,13 +327,6 @@ class Qwen2ForCausalLM(nnx.Module):
             top_ps,
             top_ks,
             attention_metadata.chunked_prefill_enabled,
-        )
-        jax.debug.print(
-            "[Qwen2ForCausalLM] next_tokens: shape={shape}, dtype={dtype}, first 10: {first_10}, sum: {sum}",
-            shape=next_tokens.shape,
-            first_10=next_tokens.flatten()[:10],
-            sum=jnp.sum(next_tokens),
-            dtype=next_tokens.dtype,
         )
 
         return kv_caches, next_tokens, logits
