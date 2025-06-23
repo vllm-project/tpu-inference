@@ -35,6 +35,14 @@ EXPERT_AXIS_NAME = 'expert'
 VOCAB_AXIS_NAME = ('data', 'expert', 'seq', 'model')
 
 
+BATCH_AXIS_NAME = 'data'
+SEQUENCE_AXIS_NAME = 'data'
+ATTN_HEAD_AXIS_NAME = 'expert'
+ATTN_TENSOR_AXIS_NAME = 'model'
+MLP_TENSOR_AXIS_NAME = ('model', 'expert')
+MOE_TENSOR_AXIS_NAME = 'model'
+EXPERT_AXIS_NAME = 'expert'
+VOCAB_AXIS_NAME = ('data', 'expert', 'seq', 'model')
 
 @dataclass
 class ShardingStrategy:
