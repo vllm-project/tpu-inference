@@ -132,17 +132,6 @@ def get_param(params: nnx.State, path: str) -> nnx.State:
 
 def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
                     mesh: Mesh):
-    shard = functools.partial(shard_put, mesh=mesh)
-
-    model_config = vllm_config.model_config
-    model_path = model_config.model
-    hf_config = model_config.hf_config
-
-    num_heads = hf_config.num_attention_heads
-    num_kv_heads = hf_config.num_key_value_heads
-    hidden_size = model_config.get_hidden_size()
-    head_dim = model_config.get_head_size()
-
     transpose_keys = {
         "lm_head": (1, 0),
         "gate_proj": (1, 0),
@@ -153,6 +142,23 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
         "v_proj": (0, 2, 1),
         "o_proj": (1, 2, 0),
     }
+    shard = functools.partial(shard_put, mesh=mesh)
+
+    model_path = vllm_config.model_config.model
+    hf_config = vllm_config.model_config.hf_config
+    num_heads = hf_config.num_attention_heads
+    num_kv_heads = hf_config.num_key_value_heads
+    hidden_size = hf_config.hidden_size
+
+    if num_heads == 0:
+        head_dim = 0
+        if hidden_size > 0:
+            logger.warning(
+                "num_attention_heads is 0, head_dim calculation might be incorrect."
+            )
+    else:
+        head_dim = hidden_size // num_heads
+
     reshape_keys = {
         "q_proj": (num_heads, -1, hidden_size),
         "k_proj": (num_kv_heads, -1, hidden_size),
@@ -177,14 +183,14 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
         if "layer" in hf_key:
             layer_num = re.search(r"layers\.(\d+)", hf_key).group(1)
             layer_key = re.sub(r"layers\.\d+", "layers.*", hf_key)
-            model_key, model_sharding = mappings[layer_key]
+            model_key = mappings[layer_key]
             model_key = re.sub(r"layers\.\*", f"layers.{layer_num}", model_key)
         else:
-            model_key, model_sharding = mappings[hf_key]
+            model_key = mappings[hf_key]
         model_weight = get_param(params, model_key)
 
         logger.debug(
-            f"{hf_key}: {hf_weight.shape}  -->  {model_key}: {model_weight.value.shape} {model_sharding}"
+            f"{hf_key}: {hf_weight.shape}  -->  {model_key}: {model_weight.value.shape}"
         )
 
         if hf_key.endswith(".bias"):
@@ -206,6 +212,6 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
         assert model_weight.value.shape == hf_weight.shape
 
         # Update the model weight
-        model_weight.value = shard(hf_weight, model_sharding)
+        model_weight.value = shard(hf_weight, model_weight.sharding)
 
     nnx.update(model, params)
