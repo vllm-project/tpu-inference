@@ -97,7 +97,7 @@ def get_nnx_model(
     # Although the created model can already work, we still need to jit
     # the model creation again, otherwise the model forward will have
     # non-trivial overhead in PjitFunction.
-    @nnx.jit
+    @nnx.jit(donate_argnums=(0, ))
     def create_sharded_model(model):
         state = nnx.state(model)
         nnx.update(model, state)
