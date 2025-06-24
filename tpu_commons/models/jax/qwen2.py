@@ -236,14 +236,24 @@ class Qwen2Model(nnx.Module):
                 attention_metadata,
             )
             kv_caches[i] = kv_cache
-            jax.debug.print(
-                "[Qwen2Model] hidden_states after layer {layer_idx}: shape={shape}, dtype={dtype}, first 10: {first_10}, sum: {sum}",
-                layer_idx=i,
-                shape=x.shape,
-                first_10=x.flatten()[:10],
-                sum=jnp.sum(x[:, :5, :]),
-                dtype=x.dtype,
-            )
+            if is_prefill:
+                jax.debug.print(
+                    "[Qwen2Model][Prefill] hidden_states after layer {layer_idx}: shape={shape}, dtype={dtype}, first 10: {first_10}, sum: {sum}",
+                    layer_idx=i,
+                    shape=x.shape,
+                    first_10=x.flatten()[:10],
+                    sum=jnp.sum(x[:, :5, :]),
+                    dtype=x.dtype,
+                )
+            else:
+                jax.debug.print(
+                    "[Qwen2Model][Decode] hidden_states after layer {layer_idx}: shape={shape}, dtype={dtype}, first 10: {first_10}, sum: {sum}",
+                    layer_idx=i,
+                    shape=x.shape,
+                    first_10=x.flatten()[:10],
+                    sum=jnp.sum(x[:, :1, :]),
+                    dtype=x.dtype,
+                )
         x = self.norm(x)
         return kv_caches, x
 
@@ -293,21 +303,21 @@ class Qwen2ForCausalLM(nnx.Module):
         *args,
     ) -> Tuple[List[KVCache], jax.Array, jax.Array]:
 
-        jax.debug.print(
-            "[Qwen2ForCausalLM] input_ids: shape={shape}, dtype={dtype}, first 10: {first_10}, sum: {sum}",
-            shape=input_ids.shape,
-            first_10=input_ids.flatten()[:10],
-            sum=jnp.sum(input_ids),
-            dtype=input_ids.dtype,
-        )
+        # jax.debug.print(
+        #     "[Qwen2ForCausalLM] input_ids: shape={shape}, dtype={dtype}, first 10: {first_10}, sum: {sum}",
+        #     shape=input_ids.shape,
+        #     first_10=input_ids.flatten()[:10],
+        #     sum=jnp.sum(input_ids),
+        #     dtype=input_ids.dtype,
+        # )
         x = self.embed(input_ids)
-        jax.debug.print(
-            "[Qwen2ForCausalLM] input after embedding: shape={shape}, dtype={dtype}, first 10: {first_10}, sum: {sum}",
-            shape=x.shape,
-            first_10=x.flatten()[:10],
-            sum=jnp.sum(x[:, :5, :]),  # Sum of the first 5 token embeddings
-            dtype=x.dtype,
-        )
+        # jax.debug.print(
+        #     "[Qwen2ForCausalLM] input after embedding: shape={shape}, dtype={dtype}, first 10: {first_10}, sum: {sum}",
+        #     shape=x.shape,
+        #     first_10=x.flatten()[:10],
+        #     sum=jnp.sum(x[:, :5, :]),  # Sum of the first 5 token embeddings
+        #     dtype=x.dtype,
+        # )
 
         kv_caches, x = self.model(
             is_prefill,
