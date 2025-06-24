@@ -236,6 +236,14 @@ class Qwen2Model(nnx.Module):
                 attention_metadata,
             )
             kv_caches[i] = kv_cache
+            jax.debug.print(
+                "[Qwen2Model] hidden_states after layer {layer_idx}: shape={shape}, dtype={dtype}, first 10: {first_10}, sum: {sum}",
+                layer_idx=i,
+                shape=x.shape,
+                first_10=x.flatten()[:10],
+                sum=jnp.sum(x[:, :5, :]),
+                dtype=x.dtype,
+            )
         x = self.norm(x)
         return kv_caches, x
 
