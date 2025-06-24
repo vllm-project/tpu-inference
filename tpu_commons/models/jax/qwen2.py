@@ -314,7 +314,7 @@ class Qwen2ForCausalLM(nnx.Module):
             top_ks,
             attention_metadata.chunked_prefill_enabled,
         )
-        return kv_caches, next_tokens, logits
+        return kv_caches, next_tokens, None
 
     def load_weights(self, rng_key: jax.Array):
         # NOTE: Since we are using nnx.eval_shape to init the model,
