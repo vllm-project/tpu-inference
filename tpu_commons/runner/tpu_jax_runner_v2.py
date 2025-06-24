@@ -16,7 +16,6 @@ from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.request import Request
 
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
@@ -278,12 +277,36 @@ class TPUModelRunner():
 
         # Check for the "no prefill" case
         if not new_full_prefill_seqs and not new_partial_prefill_seqs and not subsequent_partial_prefill_seqs:
-            return self._prepare_decode(scheduler_output.scheduled_cached_reqs)
+            return self._prepare_decode(decoding_seqs, scheduler_output)
 
-        # Check for the "only full prefill" case
-        # TODO(pooyam): We probably can use ragged attention for new_partial_prefills as well.
-        if new_full_prefill_seqs and not new_partial_prefill_seqs and not subsequent_partial_prefill_seqs and not decoding_seqs:
-            return self._prepare_prefill(scheduler_output.scheduled_new_reqs)
+        def _tokens_after_padding_in_prefill_mode(scheduler_output, reqs):
+            batch_size = len(reqs)
+            batch_size = pad_to_multiple(batch_size, self.prefill_seqs_padding,
+                                         self.scheduler_config.max_num_seqs,
+                                         True)
+            max_prompt_len = max([
+                scheduler_output.num_scheduled_tokens[req.req_id]
+                for req in reqs
+            ])
+            padded_prompt_len = pad_to_multiple(
+                max_prompt_len, self.scheduler_config.prefill_len_padding,
+                self.model_config.max_model_len)
+
+            return batch_size * padded_prompt_len
+
+        # NOTE(pooyam): Based on my benchmark, ragged kernel itself had superior performance compared to flash attention and splash attention across 1K, 2K, 4K, and 8K lengths.
+        # However, step time for < 4K tokens is higher for ragged kernel due to inefficient update cache, which will be fixed with the new upcoming update cache kernel or the ideas I have mentioned in `attention_interface.py`.
+        # Before then, we will use the following condition but once we improve the step time for ragged kernel in every scenario, we should just use ragged kernel.
+        if (new_full_prefill_seqs or new_partial_prefill_seqs
+            ) and not subsequent_partial_prefill_seqs and not decoding_seqs:
+            if _tokens_after_padding_in_prefill_mode(
+                    scheduler_output,
+                    new_full_prefill_seqs + new_partial_prefill_seqs) <= 2048:
+                return self._prepare_prefill(
+                    new_full_prefill_seqs + new_partial_prefill_seqs,
+                    scheduler_output)
+            else:
+                return self._prepare_chunked_prefill(scheduler_output)
 
         # All other cases fall into the "chunked prefill" category
         # TODO(pooyam): Change `prepare_prefill` to respect num scheduled tokens, so we can use prefill_kernel even for new partial prefills.
@@ -559,11 +582,12 @@ class TPUModelRunner():
         return len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
 
     # Modified from https://source.corp.google.com/h/vertex-model-garden/hex-llm/+/main:hex_llm/worker/runner_jax.py;drc=3ed287d21d5f95a053cb5fe3b249373064ac2f23;l=803.
-    def _prepare_decode(self, scheduled_cached_reqs: list[Request]) -> Any:
-        if not len(scheduled_cached_reqs):
+    def _prepare_decode(self, reqs: List[NewRequestData | CachedRequestData],
+                        scheduler_output: VllmSchedulerOutput) -> Any:
+        if not len(reqs):
             return None
 
-        num_seqs = len(scheduled_cached_reqs)
+        num_seqs = len(reqs)
         block_size = self.cache_config.block_size
         sliding_window = self.model_config.get_sliding_window()
         sink_size = self.cache_config.sink_size
@@ -577,7 +601,7 @@ class TPUModelRunner():
         else:
             max_possible_num_blocks = math.ceil(max_model_len / block_size)
             max_num_blocks = 0
-            for seq in scheduled_cached_reqs:
+            for seq in reqs:
                 seq_index = self.input_batch.req_id_to_index[seq.req_id]
                 max_num_blocks = max(
                     max_num_blocks, self.input_batch.block_table.
@@ -628,7 +652,7 @@ class TPUModelRunner():
             if self.eviction_algorithm is not None
             and self.eviction_algorithm != "streamingllm" else None)
 
-        for i, seq in enumerate(scheduled_cached_reqs):
+        for i, seq in enumerate(reqs):
             seq_index = self.input_batch.req_id_to_index[seq.req_id]
             # num cached tokens + token of this decode
             seq_len = self.input_batch.num_computed_tokens_cpu[seq_index] + 1
@@ -683,13 +707,8 @@ class TPUModelRunner():
         # For perplexity experiments
         if self.perplexity_reference_text is not None:
             raise NotImplementedError("Not implemented.")
-            assert len(scheduled_cached_reqs) == 1
-            seq = scheduled_cached_reqs[0]
-            seq_len = seq.get_prompt_len() + seq.get_decoded_len()
-            input_ids = input_ids.at[0, 0].set(
-                self.perplexity_reference_text[seq_len - 1])
 
-        for seq in scheduled_cached_reqs:
+        for seq in reqs:
             req_id = seq.req_id
             seq_index = self.input_batch.req_id_to_index[req_id]
 
@@ -738,14 +757,15 @@ class TPUModelRunner():
             output_token_indices,
         )
 
-    def _prepare_prefill(self, new_reqs: list[Request]) -> Any:
-        if not len(new_reqs):
+    def _prepare_prefill(self, reqs: List[NewRequestData | CachedRequestData],
+                         scheduler_output: VllmSchedulerOutput) -> Any:
+        if not len(reqs):
             return None
 
         block_size = self.vllm_config.cache_config.block_size
         sliding_window = self.vllm_config.model_config.get_sliding_window()
 
-        batch_size = len(new_reqs)
+        batch_size = len(reqs)
         batch_size = pad_to_multiple(
             batch_size,
             self.prefill_seqs_padding,
@@ -754,7 +774,9 @@ class TPUModelRunner():
         )
 
         # Full prompt length.
-        max_prompt_len = max([len(seq.prompt_token_ids) for seq in new_reqs])
+        max_prompt_len = max([
+            scheduler_output.num_scheduled_tokens[req.req_id] for req in reqs
+        ])
 
         # Unfilled prompt length.
         # TODO: Fix this for prefix caching.
@@ -803,15 +825,18 @@ class TPUModelRunner():
 
         eviction_score_mask = None
 
-        for i, seq in enumerate(new_reqs):
+        for i, seq in enumerate(reqs):
             seq_index = self.input_batch.req_id_to_index[seq.req_id]
 
             effective_cached_prompt_len = 0
             num_effective_cached_blocks = 0
             prompt_token_ids = seq.prompt_token_ids[
                 effective_cached_prompt_len:]
-            prompt_len = len(prompt_token_ids)
-            input_ids[i][:prompt_len] = prompt_token_ids
+            scheduled_tokens = scheduler_output.num_scheduled_tokens[
+                seq.req_id]
+            assert scheduled_tokens <= len(prompt_token_ids)
+            prompt_len = scheduled_tokens
+            input_ids[i][:prompt_len] = prompt_token_ids[:prompt_len]
             input_positions[i][:prompt_len] = list(
                 range(
                     effective_cached_prompt_len,

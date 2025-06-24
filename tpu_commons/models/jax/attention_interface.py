@@ -73,9 +73,11 @@ def attention(
                                k)
         v_cache = update_cache(is_prefill, v_cache, md.kv_cache_write_indices,
                                v)
+
         if is_prefill:
             # (B, N, T, H)
-            # TODO(xiang): support MQA and GQA
+            # NOTE(pooyam): Based on my benchmarks, We should not use splash kernel for normal settings (e.g., 32 heads, 8 kv heads) as flash attention is faster.
+            # I think splash kernel is faster only in presence of sparsity otherwise flash attention is faster.
             if num_kv_heads != num_heads:
                 k = jnp.repeat(k, num_heads // num_kv_heads, axis=1)
                 v = jnp.repeat(v, num_heads // num_kv_heads, axis=1)
