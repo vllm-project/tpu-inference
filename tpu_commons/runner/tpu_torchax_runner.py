@@ -941,32 +941,33 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                     positions=self.position_ids,
                     inputs_embeds=inputs_embeds,
                 )
-        hidden_states = self.select_hidden_states(hidden_states,
-                                                  logits_indices)
-        if not VLLM_TORCHAX_EAGER:
-            logits = self.compute_logits_func(self.params_and_buffers,
-                                              hidden_states, None)
-        else:
-            logits = self.compute_logits(hidden_states)
-        tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
-            from_input_batch(self.input_batch, padded_num_reqs, self.device)
-        if scheduler_output.grammar_bitmask is not None:
-            require_struct_decoding, grammar_bitmask_padded, arange = \
-                self.prepare_structured_decoding_input(logits, scheduler_output)
-            logits = self.structured_decode(require_struct_decoding,
-                                            grammar_bitmask_padded, logits,
-                                            arange)
-        selected_token_ids = self.sample_from_logits_func(
-            logits, tpu_sampling_metadata)
-        # NOTE (NickLucche) Use the original logits (before any penalties or
-        # temperature scaling) for the top-k logprobs. We can't enforce it due
-        # to recompilations outside torch.compiled code, so just make sure
-        # `sample_from_logits` does not modify the logits in-place.
-        logprobs = self.gather_logprobs(logits, selected_token_ids) \
-            if tpu_sampling_metadata.logprobs else None
+        with torchax.default_env():
+            hidden_states = self.select_hidden_states(hidden_states,
+                                                      logits_indices)
+            if not VLLM_TORCHAX_EAGER:
+                logits = self.compute_logits_func(self.params_and_buffers,
+                                                  hidden_states, None)
+            else:
+                logits = self.compute_logits(hidden_states)
+            tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
+                from_input_batch(self.input_batch, padded_num_reqs, self.device)
+            if scheduler_output.grammar_bitmask is not None:
+                require_struct_decoding, grammar_bitmask_padded, arange = \
+                    self.prepare_structured_decoding_input(logits, scheduler_output)
+                logits = self.structured_decode(require_struct_decoding,
+                                                grammar_bitmask_padded, logits,
+                                                arange)
+            selected_token_ids = self.sample_from_logits_func(
+                logits, tpu_sampling_metadata)
+            # NOTE (NickLucche) Use the original logits (before any penalties or
+            # temperature scaling) for the top-k logprobs. We can't enforce it due
+            # to recompilations outside torch.compiled code, so just make sure
+            # `sample_from_logits` does not modify the logits in-place.
+            logprobs = self.gather_logprobs(logits, selected_token_ids) \
+                if tpu_sampling_metadata.logprobs else None
 
-        # Remove padding on cpu and keep dynamic op outside of xla graph.
-        selected_token_ids = selected_token_ids.cpu()[:num_reqs]
+            # Remove padding on cpu and keep dynamic op outside of xla graph.
+            selected_token_ids = selected_token_ids.cpu()[:num_reqs]
         logprobs_lists = logprobs.tolists() \
             if tpu_sampling_metadata.logprobs else None
 
