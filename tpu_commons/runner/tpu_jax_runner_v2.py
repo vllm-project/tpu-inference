@@ -16,6 +16,7 @@ from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.request import Request
 
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
@@ -88,6 +89,9 @@ class TPUModelRunner():
         self.scheduler_config.chunked_prefill_tokens_padding = 256
         self.prefill_seqs_padding = 8
 
+        self.scheduler_config.page_aligned_scheduling = getattr(
+            self.scheduler_config, 'page_aligned_scheduling', None)
+
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
@@ -105,6 +109,7 @@ class TPUModelRunner():
         self._init_jit()
 
         self._verify_chunked_prefill_config()
+        logger.info("TPUModelRunner created!")
 
         # This indicates what phase of inference we are in (i.e. prefill, chunked_prefill, decode).
         self.inference_phase = ""
@@ -116,16 +121,19 @@ class TPUModelRunner():
         self.rng_key = jax.random.key(self.model_config.seed)
 
     def _verify_chunked_prefill_config(self):
-        if (self.scheduler_config.max_num_batched_tokens %
-                self.cache_config.block_size != 0):
-            raise ValueError(
-                "max_num_batched_tokens needs to be multiple of block_size.")
+        if self.scheduler_config.page_aligned_scheduling:
+            if (self.scheduler_config.max_num_batched_tokens %
+                    self.cache_config.block_size != 0):
+                raise ValueError(
+                    "max_num_batched_tokens needs to be multiple of block_size."
+                )
 
-        # TODO(pooyam): Explain why.
-        if (self.scheduler_config.max_num_batched_tokens //
-                self.cache_config.block_size == 1):
-            raise ValueError(
-                "max_num_batched_tokens must be at least 2x of block_size.")
+            # TODO(pooyam): Explain why.
+            if (self.scheduler_config.max_num_batched_tokens //
+                    self.cache_config.block_size == 1):
+                raise ValueError(
+                    "max_num_batched_tokens must be at least 2x of block_size."
+                )
 
         if (self.scheduler_config.max_num_batched_tokens
                 < self.scheduler_config.max_num_seqs):
@@ -207,6 +215,7 @@ class TPUModelRunner():
         )
         logger.info(
             f"Init kv-cache | shape={len(layer_names)} * {cache_shape}")
+        logger.info(jax.lib.xla_bridge.get_backend().platform_version)
 
         # Shard the num_kv_heads dim along the 'model' axis.
         sharding = NamedSharding(self.mesh, PartitionSpec("model"))
@@ -217,14 +226,20 @@ class TPUModelRunner():
                 dtype=cache_dtype,
             )
 
+        logger.info("Trace allocate fn.")
         sharded_allocate = jax.jit(_allocate, out_shardings=sharding)
-        for _ in layer_names:
+        logger.info(f"allocate kv cache: {sharding}")
+        for name in layer_names:
+            logger.info(f"allocate for {name}")
             k_cache = sharded_allocate()
             v_cache = sharded_allocate()
             self.kv_caches.append((k_cache, v_cache))
 
+        logger.info(f"allocate kv cache: {sharding}, done")
         # From @pooyam to @xiangxu: Feel free to edit the output_cache however you want. I added to unblock testing.
         self.output_cache = self.init_output_cache()
+        logger.info(
+            f"Init kv-cache | shape={len(layer_names)} * {cache_shape}, Done!")
 
     def init_output_cache(self):
         output_size = (
@@ -267,13 +282,13 @@ class TPUModelRunner():
         # Check for the "no prefill" case
         if not new_full_prefill_seqs and not new_partial_prefill_seqs and not subsequent_partial_prefill_seqs:
             self.inference_phase = "decode"
-            return self._prepare_decode(scheduler_output)
+            return self._prepare_decode(scheduler_output.scheduled_cached_reqs)
 
         # Check for the "only full prefill" case
         # TODO(pooyam): We probably can use ragged attention for new_partial_prefills as well.
         if new_full_prefill_seqs and not new_partial_prefill_seqs and not subsequent_partial_prefill_seqs and not decoding_seqs:
             self.inference_phase = "prefill"
-            return self._prepare_prefill(scheduler_output)
+            return self._prepare_prefill(scheduler_output.scheduled_new_reqs)
 
         # All other cases fall into the "chunked prefill" category
         # TODO(pooyam): Change `prepare_prefill` to respect num scheduled tokens, so we can use prefill_kernel even for new partial prefills.
@@ -373,13 +388,18 @@ class TPUModelRunner():
         )
 
     def _init_mesh(self) -> None:
-        mesh_shape = (1, len(self.devices))
         axis_names = ("data", "model")
-        self.mesh = jax.make_mesh(mesh_shape, axis_names)
+        # In case we are in disagg mode, the number of devices can exceed 8.
+        # TODO(fhzhang): fix this properly as we implement disagg serving.
+        if len(self.devices) > 8:
+            self.devices = self.devices[:8]
+        mesh_shape = (1, len(self.devices))
+        self.mesh = jax.make_mesh(mesh_shape, axis_names, devices=self.devices)
+
         logger.info(f"Init mesh | mesh={self.mesh}")
 
     def _init_model(self) -> None:
-        self.model_fn, self.total_model_params_num = get_model(  # Unpack into local variables firstAdd commentMore actions
+        self.model_fn, self.total_model_params_num = get_model(
             self.vllm_config,
             self.rng_key,
             self.mesh,
@@ -545,11 +565,11 @@ class TPUModelRunner():
         return len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
 
     # Modified from https://source.corp.google.com/h/vertex-model-garden/hex-llm/+/main:hex_llm/worker/runner_jax.py;drc=3ed287d21d5f95a053cb5fe3b249373064ac2f23;l=803.
-    def _prepare_decode(self, scheduler_output: VllmSchedulerOutput) -> Any:
-        if not len(scheduler_output.scheduled_cached_reqs):
+    def _prepare_decode(self, scheduled_cached_reqs: list[Request]) -> Any:
+        if not len(scheduled_cached_reqs):
             return None
 
-        num_seqs = len(scheduler_output.scheduled_cached_reqs)
+        num_seqs = len(scheduled_cached_reqs)
         block_size = self.cache_config.block_size
         sliding_window = self.model_config.get_sliding_window()
         sink_size = self.cache_config.sink_size
@@ -563,7 +583,7 @@ class TPUModelRunner():
         else:
             max_possible_num_blocks = math.ceil(max_model_len / block_size)
             max_num_blocks = 0
-            for seq in scheduler_output.scheduled_cached_reqs:
+            for seq in scheduled_cached_reqs:
                 seq_index = self.input_batch.req_id_to_index[seq.req_id]
                 max_num_blocks = max(
                     max_num_blocks, self.input_batch.block_table.
@@ -614,7 +634,7 @@ class TPUModelRunner():
             if self.eviction_algorithm is not None
             and self.eviction_algorithm != "streamingllm" else None)
 
-        for i, seq in enumerate(scheduler_output.scheduled_cached_reqs):
+        for i, seq in enumerate(scheduled_cached_reqs):
             seq_index = self.input_batch.req_id_to_index[seq.req_id]
             # num cached tokens + token of this decode
             seq_len = self.input_batch.num_computed_tokens_cpu[seq_index] + 1
@@ -669,13 +689,13 @@ class TPUModelRunner():
         # For perplexity experiments
         if self.perplexity_reference_text is not None:
             raise NotImplementedError("Not implemented.")
-            assert len(scheduler_output.scheduled_seqs) == 1
-            seq = scheduler_output.scheduled_seqs[0]
+            assert len(scheduled_cached_reqs) == 1
+            seq = scheduled_cached_reqs[0]
             seq_len = seq.get_prompt_len() + seq.get_decoded_len()
             input_ids = input_ids.at[0, 0].set(
                 self.perplexity_reference_text[seq_len - 1])
 
-        for seq in scheduler_output.scheduled_cached_reqs:
+        for seq in scheduled_cached_reqs:
             req_id = seq.req_id
             seq_index = self.input_batch.req_id_to_index[req_id]
 
@@ -724,14 +744,14 @@ class TPUModelRunner():
             output_token_indices,
         )
 
-    def _prepare_prefill(self, scheduler_output: VllmSchedulerOutput) -> Any:
-        if not len(scheduler_output.scheduled_new_reqs):
+    def _prepare_prefill(self, new_reqs: list[Request]) -> Any:
+        if not len(new_reqs):
             return None
 
         block_size = self.vllm_config.cache_config.block_size
         sliding_window = self.vllm_config.model_config.get_sliding_window()
 
-        batch_size = len(scheduler_output.scheduled_new_reqs)
+        batch_size = len(new_reqs)
         batch_size = pad_to_multiple(
             batch_size,
             self.prefill_seqs_padding,
@@ -740,10 +760,7 @@ class TPUModelRunner():
         )
 
         # Full prompt length.
-        max_prompt_len = max([
-            len(seq.prompt_token_ids)
-            for seq in scheduler_output.scheduled_new_reqs
-        ])
+        max_prompt_len = max([len(seq.prompt_token_ids) for seq in new_reqs])
 
         # Unfilled prompt length.
         # TODO: Fix this for prefix caching.
@@ -792,7 +809,7 @@ class TPUModelRunner():
 
         eviction_score_mask = None
 
-        for i, seq in enumerate(scheduler_output.scheduled_new_reqs):
+        for i, seq in enumerate(new_reqs):
             seq_index = self.input_batch.req_id_to_index[seq.req_id]
 
             effective_cached_prompt_len = 0
@@ -943,15 +960,21 @@ class TPUModelRunner():
         assert num_prefill_seqs > 0
         assert num_prefill_seqs <= MAX_PREFILL_SEQS_PER_TOKEN_BATCH
 
-        # NOTE(pooyam): It's possible to remove this loop by approximating by upper bound.
-        num_tokens_scheduled = pad_to_multiple(
-            num_decode_seqs, block_size) if num_decode_seqs > 0 else 0
-        for seq in new_full_prefill_seqs + new_partial_prefill_seqs + subsequent_partial_prefill_seqs:
-            num_tokens_scheduled += pad_to_multiple(
-                scheduler_output.num_scheduled_tokens[seq.req_id], block_size)
-        num_tokens_scheduled = pad_to_multiple(
-            num_tokens_scheduled,
-            self.scheduler_config.chunked_prefill_tokens_padding)
+        if self.scheduler_config.page_aligned_scheduling:
+            # NOTE(pooyam): It's possible to remove this loop by approximating by upper bound.
+            num_tokens_scheduled = pad_to_multiple(
+                num_decode_seqs, block_size) if num_decode_seqs > 0 else 0
+            for seq in new_full_prefill_seqs + new_partial_prefill_seqs + subsequent_partial_prefill_seqs:
+                num_tokens_scheduled += pad_to_multiple(
+                    scheduler_output.num_scheduled_tokens[seq.req_id],
+                    block_size)
+            num_tokens_scheduled = pad_to_multiple(
+                num_tokens_scheduled,
+                self.scheduler_config.chunked_prefill_tokens_padding)
+        else:
+            num_tokens_scheduled = pad_to_multiple(
+                scheduler_output.total_num_scheduled_tokens,
+                self.scheduler_config.chunked_prefill_tokens_padding)
 
         if num_decode_seqs > 0:
             decode_input_token_indices = np.full((num_tokens_scheduled, ),
@@ -1009,20 +1032,29 @@ class TPUModelRunner():
             do_sampling = determine_do_sampling(top_ks[i], temperatures[i])
 
         token_offset = num_decode_seqs
-        if num_decode_seqs > 0 and num_prefill_seqs > 0:
-            # Add padding tokens so that prefill segments are paged aligned
-            if num_decode_seqs % block_size != 0:
-                token_offset = pad_to_multiple(num_decode_seqs, block_size)
+
+        if self.scheduler_config.page_aligned_scheduling:
+            if num_decode_seqs > 0 and num_prefill_seqs > 0:
+                # Add padding tokens so that prefill segments are paged aligned
+                if num_decode_seqs % block_size != 0:
+                    token_offset = pad_to_multiple(num_decode_seqs, block_size)
 
         # Then fill the token batch with prefill tokens.
         prefill_seq_lens = self.prefill_seq_lens
         prefill_seq_lens[num_prefill_seqs:] = 0
         prefill_block_indices = self.prefill_block_indices
         prefill_query_start_offsets = self.prefill_query_start_offsets
-        # One cache update index per page for prefill.
-        assert num_tokens_scheduled % block_size == 0
-        prefill_kv_cache_write_indices = np.full(
-            (num_tokens_scheduled // block_size, ), -1, dtype=np.int32)
+
+        if self.scheduler_config.page_aligned_scheduling:
+            # One cache update index per page for prefill.
+            assert num_tokens_scheduled % block_size == 0
+            prefill_kv_cache_write_indices = np.full(
+                (num_tokens_scheduled // block_size, ), -1, dtype=np.int32)
+        else:
+            prefill_kv_cache_write_indices = np.full((num_tokens_scheduled, ),
+                                                     -1,
+                                                     dtype=np.int32)
+
         prefill_input_ids = np.zeros((1, num_tokens_scheduled), dtype=np.int32)
         for i, seq in enumerate(new_full_prefill_seqs +
                                 new_partial_prefill_seqs +
@@ -1043,8 +1075,13 @@ class TPUModelRunner():
                     num_prefilled_tokens,
                     num_prefilled_tokens + prefill_len,
                 ))
-            prefill_seq_lens[i] = pad_to_multiple(
-                num_prefilled_tokens + prefill_len, block_size)
+
+            if self.scheduler_config.page_aligned_scheduling:
+                prefill_seq_lens[i] = pad_to_multiple(
+                    num_prefilled_tokens + prefill_len, block_size)
+            else:
+                prefill_seq_lens[i] = num_prefilled_tokens + prefill_len
+
             prefill_query_start_offsets[i] = token_offset
             num_blocks = self.input_batch.block_table.block_tables[
                 0].num_blocks_per_row[seq_index]
@@ -1052,13 +1089,25 @@ class TPUModelRunner():
                 0].block_table_cpu[seq_index, :num_blocks]
 
             prefill_block_indices[i][:len(block_table)] = block_table
-            prefill_kv_cache_write_indices[
-                token_offset // block_size:math.ceil(
-                    (token_offset + prefill_len) /
-                    block_size)] = block_table[num_prefilled_tokens //
-                                               block_size:math.ceil(
-                                                   (num_prefilled_tokens +
-                                                    prefill_len) / block_size)]
+
+            if self.scheduler_config.page_aligned_scheduling:
+                prefill_kv_cache_write_indices[
+                    token_offset // block_size:math.ceil(
+                        (token_offset + prefill_len) /
+                        block_size)] = block_table[num_prefilled_tokens //
+                                                   block_size:math.ceil(
+                                                       (num_prefilled_tokens +
+                                                        prefill_len) /
+                                                       block_size)]
+            else:
+                for j in range(prefill_len):
+                    position = num_prefilled_tokens + j
+                    block_index = position // block_size
+                    assert block_index <= len(block_table) - 1
+                    block_offset = position % block_size
+                    prefill_kv_cache_write_indices[
+                        token_offset + j] = block_table[
+                            block_index] * block_size + block_offset
 
             assert num_prefilled_tokens + prefill_len <= num_tokens
 
@@ -1082,14 +1131,25 @@ class TPUModelRunner():
             do_sampling = determine_do_sampling(
                 self.input_batch.top_k_cpu[seq_index],
                 self.input_batch.temperature_cpu[seq_index])
-            # Add padding tokens so that prefill segments are paged aligned
-            token_offset = pad_to_multiple(token_offset + prefill_len,
-                                           block_size)
+
+            if self.scheduler_config.page_aligned_scheduling:
+                # Add padding tokens so that prefill segments are paged aligned
+                token_offset = pad_to_multiple(token_offset + prefill_len,
+                                               block_size)
+            else:
+                token_offset += prefill_len
+
         prefill_query_start_offsets[num_prefill_seqs:] = token_offset
 
-        # Concat the kv cache write indices for decode tokens and prefill tokens
-        kv_cache_write_indices = np.concatenate(
-            (decode_kv_cache_write_indices, prefill_kv_cache_write_indices))
+        if self.scheduler_config.page_aligned_scheduling:
+            # Concat the kv cache write indices for decode tokens and prefill tokens
+            kv_cache_write_indices = np.concatenate(
+                (decode_kv_cache_write_indices,
+                 prefill_kv_cache_write_indices))
+        else:
+            kv_cache_write_indices = jnp.where(
+                jnp.arange(num_tokens_scheduled) < num_decode_seqs,
+                decode_kv_cache_write_indices, prefill_kv_cache_write_indices)
         num_decode_seqs_arr = np.array([num_decode_seqs], np.int32)
         num_prefill_seqs_arr = np.array([num_prefill_seqs], np.int32)
 
@@ -1166,6 +1226,8 @@ class TPUModelRunner():
                 prefill_page_indices=prefill_block_indices,
                 prefill_query_start_offsets=prefill_query_start_offsets,
                 num_prefill_seqs=num_prefill_seqs_arr,
+                page_aligned_update=self.scheduler_config.
+                page_aligned_scheduling,
             ),
             temperatures,
             top_ps,

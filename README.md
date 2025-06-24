@@ -41,8 +41,7 @@ python tpu_commons/examples/offline_inference.py \
     --model=meta-llama/Llama-3.1-8B \
     --tensor_parallel_size=4 \
     --task=generate \
-    --max_model_len=1024 \
-    --max_num_seqs=1
+    --max_model_len=1024
 ```
 
 ### Run vLLM Pytorch models on the JAX path
@@ -56,8 +55,7 @@ python tpu_commons/examples/offline_inference.py \
     --model=meta-llama/Llama-3.1-8B \
     --tensor_parallel_size=4 \
     --task=generate \
-    --max_model_len=1024 \
-    --max_num_seqs=1
+    --max_model_len=1024
 ```
 
 Run the vLLM Pytorch `Qwen3-30B-A3B` MoE model, use `--enable-expert-parallel` for expert parallelism, otherwise it defaults to tensor parallelism:
@@ -70,7 +68,6 @@ python vllm/examples/offline_inference/basic/generate.py \
     --tensor_parallel_size=4 \
     --task=generate \
     --max_model_len=1024 \
-    --max_num_seqs=1 \
     --enable-expert-parallel
 ```
 
@@ -139,7 +136,6 @@ docker run \
   --tensor_parallel_size=4 \
   --task=generate \
   --max_model_len=1024 \
-  --max_num_seqs=1
 ```
 
 ## Torchax Guide

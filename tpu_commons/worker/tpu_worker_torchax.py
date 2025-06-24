@@ -10,6 +10,7 @@ from typing import Optional
 import torch
 import torch.distributed
 import torch.nn as nn
+
 import vllm.envs as envs
 
 VLLM_TORCHAX_ENABLED = os.environ.get('VLLM_TORCHAX_ENABLED', '0') == '1'
@@ -109,6 +110,11 @@ class TPUWorker:
         if self.model_config.seed is None:
             self.model_config.seed = 0
 
+    def initialize_cache(self, num_gpu_blocks: int,
+                         num_cpu_blocks: int) -> None:
+        self.cache_config.num_gpu_blocks = num_gpu_blocks
+        self.cache_config.num_cpu_blocks = num_cpu_blocks
+
     @with_torchax_global
     def init_device(self):
         os.environ["PJRT_DEVICE"] = "TPU"
@@ -117,7 +123,11 @@ class TPUWorker:
         # `xla_tpu_force_1d_allreduce_at_chunk_count` is a temporary solution to
         # fix this. It will be removed after the bug in XLA compiler is fixed.
         os.environ["LIBTPU_INIT_ARGS"] = (
-            "--xla_tpu_force_1d_allreduce_at_chunk_count=1")
+            os.environ.get("LIBTPU_INIT_ARGS", "") +
+            " --xla_tpu_force_1d_allreduce_at_chunk_count=1"
+            " --xla_jf_conv_input_fusion=False")
+        # --xla_jf_conv_input_fusion=False is used to improve the perf of
+        # quantized matmul.
         torch.set_grad_enabled(False)
         torch.set_default_dtype(self.model_config.dtype)
 

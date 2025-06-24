@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 from typing import Optional
 
 import jax
@@ -107,7 +108,10 @@ class TPUWorker(WorkerBase):
 
     def profile(self, is_start: bool = True):
         if is_start:
-            jax.profiler.start_trace(self.profile_dir)
+            options = jax.profiler.ProfileOptions()
+            options.python_tracer_level = os.getenv("PYTHON_TRACER_LEVEL", 0)
+            jax.profiler.start_trace(self.profile_dir,
+                                     profiler_options=options)
         else:
             jax.profiler.stop_trace()
 

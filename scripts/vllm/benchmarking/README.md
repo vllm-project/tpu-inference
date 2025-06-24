@@ -18,7 +18,7 @@ curl https://rclone.org/install.sh | bash
 rclone config create mlc-inference s3 provider=Cloudflare access_key_id=f65ba5eef400db161ea49967de89f47b secret_access_key=fbea333914c292b854f14d3fe232bad6c5407bf0ab1bebf78833c2b359bdfd2b endpoint=https://c2686074cb2caf5cbaf6d134bdba8b47.r2.cloudflarestorage.com
 rclone copy mlc-inference:mlcommons-inference-wg-public/open_orca ./open_orca -P
 gzip -d open_orca/open_orca_gpt4_tokenized_llama.sampled_24576.pkl.gz
-dataset_path=open_orca/open_orca_gpt4_tokenized_llama.sampled_24576.pkl.
+dataset_path=open_orca/open_orca_gpt4_tokenized_llama.sampled_24576.pkl
 ```
 
 To download and extract the MMLU data, you can run:
@@ -35,7 +35,7 @@ dataset_path=data/test/
 In order to run the benchmarks, navigate to your vLLM root directory and spin up a server to serve your model, for example:
 
 ```
-TPU_BACKEND_TYPE=jax vllm serve meta-llama/Llama-3.1-8B-Instruct --max-model-len=1024 --disable-log-requests --tensor-parallel-size 8 --max-num-batched-tokens 8192 --max-num-seqs=1
+TPU_BACKEND_TYPE=jax vllm serve meta-llama/Llama-3.1-8B-Instruct --max-model-len=1024 --disable-log-requests --tensor-parallel-size 8 --max-num-batched-tokens 8192
 ```
 
 Once the server has begun -- you should see a message such as `INFO:     Application startup complete.` -- you can now run the client benchmarking command (in a new terminal) in your local vLLM repo:
@@ -43,7 +43,7 @@ Once the server has begun -- you should see a message such as `INFO:     Applica
 ```
  python benchmarks/benchmark_serving.py \
     --backend vllm \
-    --model meta-llama/Meta-Llama-3-8B-Instruct \
+    --model meta-llama/Llama-3.1-8B-Instruct \
     --dataset-name mlperf \
     --dataset-path [local path to your dataset]\
     --num-prompts 50 \
