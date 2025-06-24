@@ -95,14 +95,12 @@ def get_nnx_model(
     model.load_weights(rng)
 
     # Although the created model can already work, we still need to jit
-    # the model creation again with sharding, otherwise the model forward
-    # will have non-trivial overhead in PjitFunction.
+    # the model creation again, otherwise the model forward will have
+    # non-trivial overhead in PjitFunction.
     @nnx.jit
     def create_sharded_model(model):
         state = nnx.state(model)
-        pspecs = nnx.get_partition_spec(state)
-        sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
-        nnx.update(model, sharded_state)
+        nnx.update(model, state)
         return model
 
     with mesh:
