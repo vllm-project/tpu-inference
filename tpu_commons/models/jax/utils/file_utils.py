@@ -17,7 +17,7 @@ logger = init_logger(__name__)
 hfs = HfFileSystem()
 
 GCS_PREFIX = "gs://"
-LOCAL_MODEL_DIR = "/tmp/model"
+LOCAL_MODEL_DIR = os.getenv("HF_HOME", "/tmp/model")
 LOCAL_LORA_DIR = "/tmp/lora"
 LOCK_DIR = "/tmp/lock"
 
