@@ -26,7 +26,10 @@ def _get_model_architecture(config: PretrainedConfig) -> nn.Module:
         from tpu_commons.models.jax.llama_nn import LlamaForCausalLM
         _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
     elif impl == "flax_nnx":
-        from tpu_commons.models.jax.llama import LlamaForCausalLM
+        if os.getenv("USE_JAX_V1", False):
+            from tpu_commons.models.jax.llama_v1 import LlamaForCausalLM
+        else:
+            from tpu_commons.models.jax.llama import LlamaForCausalLM
         _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
         from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
         _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
@@ -82,6 +85,7 @@ def get_nn_model(
     return model_fn
 
 
+# TODO(xiang): refactor this
 def get_nnx_model(
     vllm_config: VllmConfig,
     rng: jax.Array,
@@ -89,8 +93,8 @@ def get_nnx_model(
 ):
     model_class = _get_model_architecture(vllm_config.model_config.hf_config)
 
-
-    if issubclass(model_class, Model): # TODO: Get this to wrok for nnx.eval_shape.
+    if issubclass(model_class,
+                  Model):  # TODO: Get this to wrok for nnx.eval_shape.
         model = model_class(vllm_config, rng, mesh)
         model.load_weights(model)
         jit_model = model
@@ -134,7 +138,7 @@ def get_nnx_model(
             with mesh:
                 jit_model = create_jit_model(model)
 
-    kv_cache_sharding = NamedSharding(mesh, PartitionSpec("model"))
+    kv_cache_sharding = NamedSharding(mesh, PartitionSpec(None, None, "model"))
     outputs_sharding = NamedSharding(mesh, PartitionSpec(None))
     logits_cache_sharding = NamedSharding(mesh, PartitionSpec(None))
 
