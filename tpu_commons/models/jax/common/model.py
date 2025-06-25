@@ -15,6 +15,7 @@ from tpu_commons.models.jax.common.transformer_block import \
     TransformerBlockConfig
 
 
+# TODO: Probably makes sense to move this to base.py
 @dataclass
 class ModelConfig():
     emb: EmbedderConfig

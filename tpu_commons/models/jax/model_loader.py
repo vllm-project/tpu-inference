@@ -8,8 +8,12 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 
+from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.llama import LlamaForCausalLM
+from tpu_commons.models.jax.recipes.llama3 import Llama3_8B
 from tpu_commons.models.jax.recipes.llama4 import Llama4Scout
+
+logger = init_logger(__name__)
 
 
 def _get_model_architecture(config: PretrainedConfig) -> nn.Module:
