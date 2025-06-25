@@ -44,6 +44,7 @@ MOE_TENSOR_AXIS_NAME = 'model'
 EXPERT_AXIS_NAME = 'expert'
 VOCAB_AXIS_NAME = ('data', 'expert', 'seq', 'model')
 
+
 @dataclass
 class ShardingStrategy:
     """Defines the high-level parallelism strategy.
@@ -395,7 +396,8 @@ class Sharding:
     def make_sharding_config(
             self,
             prefill_overrides: dict | None = None,
-            generate_overrides: dict | None = None) -> ShardingConfig:
+            generate_overrides: dict | None = None,
+            default_ops_cls=OpShardingConfig) -> ShardingConfig:
         """Creates the detailed `ShardingConfig` with specific partitioning rules
         and applies any runtime overrides.
 
@@ -415,7 +417,7 @@ class Sharding:
         """
         #TODO: organize into update_prefill() and update_decode for each axis
         #TODO: verify the sharding axes
-        sharding_cfg = ShardingConfig()
+        sharding_cfg = ShardingConfig(default_ops_cls=default_ops_cls)
         prefill_sharding_cfg = sharding_cfg.prefill_sharding_cfg
         generate_sharding_cfg = sharding_cfg.generate_sharding_cfg
 
