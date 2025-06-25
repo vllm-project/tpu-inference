@@ -9,11 +9,18 @@ import torch_xla.core.xla_model as xm
 import torch_xla.distributed.spmd as xs
 import torchax
 from vllm.config import ModelConfig, VllmConfig
-from vllm.distributed.tpu_distributed_utils import get_fqn, shard_model
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.utils import (
     initialize_model, process_weights_after_loading, set_default_torch_dtype)
+
+VLLM_TORCHAX_ENABLED = os.environ.get('VLLM_TORCHAX_ENABLED', '0') == '1'
+if VLLM_TORCHAX_ENABLED:
+    try:
+        from tpu_commons.distributed.tpu_distributed_utils import (get_fqn,
+                                                                   shard_model)
+    except ImportError:
+        from vllm.distributed.tpu_distributed_utils import get_fqn, shard_model
 
 logger = init_logger(__name__)
 
@@ -74,16 +81,17 @@ class TPUModelLoader(DefaultModelLoader):
             model = model.to('xla')
             shard_model(model, mesh)
         else:
-            # TODO: use torchax.enable_globally()
-            with torchax.default_env():
-                model = model.to('jax')
+            if mesh is not None:
+                shard_model(model, mesh)
+            else:
+                with torchax.default_env():
+                    model = model.to('jax')
         counter_after_partition = time.perf_counter()
         logger.info("Partition model took %.2f seconds",
                     counter_after_partition - counter_before_partition)
 
         if VLLM_TORCHAX_ENABLED:
-            # If torchax is enabled, we return the model directly.
-            # The model is already partitioned and compiled.
+            self._check_model_is_loaded_torchax(mesh, model)
             return model
         # Ensure the model is properly loaded.
         self._check_model_is_loaded(mesh, model)
@@ -96,6 +104,17 @@ class TPUModelLoader(DefaultModelLoader):
             model.language_model.model = \
                 torch.compile(model.language_model.model, backend="openxla")
         return model
+
+    def _check_model_is_loaded_torchax(self, mesh, model: nn.Module) -> None:
+        num_devices = mesh.size if mesh is not None else 1
+        # Check parameters
+        for _, param in model.named_parameters():
+            jax_t = param.data.jax()
+            assert len(jax_t.global_shards) == num_devices
+
+        for _, buffer in model.named_buffers():
+            jax_t = buffer.jax()
+            assert len(jax_t.global_shards) == num_devices
 
     def _check_model_is_loaded(self, mesh: Optional[xs.Mesh],
                                model: nn.Module) -> None:

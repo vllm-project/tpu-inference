@@ -299,7 +299,9 @@ class LlamaForCausalLM(nnx.Module):
             top_ks,
             attention_metadata.chunked_prefill_enabled,
         )
-        return kv_caches, next_tokens, logits
+        # NOTE(pooyam): Returning full unsharded logits is costly and results in expensive all-gather. It's ~6ms for 2K tokens with 128K vocab.
+        # In future, if we need returning logits, it should be through topK not the entire logits, or at least through a flag not a default.
+        return kv_caches, next_tokens, None
 
     def load_weights(self, rng_key: jax.Array):
         # NOTE: Since we are using nnx.eval_shape to init the model,

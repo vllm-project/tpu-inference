@@ -59,13 +59,7 @@ class PallasAttentionBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         padded_head_size = cdiv(
             head_size, TPU_HEAD_SIZE_ALIGNMENT) * TPU_HEAD_SIZE_ALIGNMENT
-        num_blocks = num_blocks * head_size // padded_head_size
-        if padded_head_size != head_size:
-            logger.warning_once(
-                "head size is padded to %d, and num_blocks is adjusted to %d"
-                " accordingly", padded_head_size, num_blocks)
-        head_size = padded_head_size
-        return (num_blocks, block_size, num_kv_heads * 2, head_size)
+        return (num_blocks, block_size, num_kv_heads * 2, padded_head_size)
 
     @staticmethod
     def swap_blocks(
@@ -291,7 +285,6 @@ def write_to_kv_cache(
 
     key = key.view(-1, num_kv_heads, head_size)
     value = value.view(-1, num_kv_heads, head_size)
-
     kv = torch.cat([key, value], axis=-1).reshape(-1, num_combined_kv_heads,
                                                   head_size)
 
