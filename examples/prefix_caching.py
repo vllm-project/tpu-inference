@@ -130,6 +130,23 @@ def main(args: dict):
         "Question: what is the age of Zack Blue? Your answer: The age of Zack Blue is ",
     )
 
+    # Querying the age of John Doe
+    get_generation_time(
+        llm,
+        sampling_params,
+        LONG_PROMPT +
+        "Question: what is the age of John Doe? Your answer: The age of John Doe is ",
+    )
+
+    # Querying the age of Zack Blue
+    # This query will be faster since vllm avoids computing the KV cache of LONG_PROMPT again.
+    get_generation_time(
+        llm,
+        sampling_params,
+        LONG_PROMPT +
+        "Question: what is the age of Zack Blue? Your answer: The age of Zack Blue is ",
+    )
+
 
 if __name__ == "__main__":
     parser = create_parser()
