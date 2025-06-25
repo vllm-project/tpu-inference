@@ -98,7 +98,7 @@ def main(args: dict):
     top_k = args.pop("top_k")
 
     # Create an LLM
-    llm = LLM(**args)
+    llm = LLM(**args, enable_prefix_caching=False)
 
     # # set enable_prefix_caching=True to enable APC
     # llm = LLM(model="lmsys/longchat-13b-16k", enable_prefix_caching=True)
