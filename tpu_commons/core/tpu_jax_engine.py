@@ -24,7 +24,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 
 from tpu_commons.core.jetstream_commons.engine import engine_api
-from tpu_commons.runner.input_batch_jax import CachedRequestState
+from tpu_commons.runner.jax.input_batch_jax import CachedRequestState
 
 warnings.simplefilter("ignore", category=FutureWarning)
 DecodeState = Any
