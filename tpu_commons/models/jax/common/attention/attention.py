@@ -80,6 +80,13 @@ class AttentionMetadata(object):
     prefill_query_start_offsets: jax.Array = None  # [max_num_prefill_seqs + 1]
     num_prefill_seqs: jax.Array = None  # [1]
 
+from tpu_commons.models.jax.common.base import Config, ParamFactory
+from tpu_commons.models.jax.common.sharding import ShardingConfig
+from tpu_commons.models.jax.layers.rope import apply_rope_scaling
+from tpu_commons.models.jax.layers.attention import update_cache
+from tpu_commons.utils_jax import get_megacore
+
+KVCache = Tuple[jax.Array, jax.Array]
 
 @dataclass
 class AttentionMetadata(object):

@@ -167,10 +167,7 @@ class ShardingConfig:
     `generate_sharding_cfg.activation_attention_btd = ('data', None, 'tensor')`
     """
 
-    def __init__(self,
-                 prefill_sharding_cfg=None,
-                 generate_sharding_cfg=None,
-                 default_ops_cls=OpShardingConfig):
+    def __init__(self, prefill_sharding_cfg=None, generate_sharding_cfg=None):
         """Initializes the ShardingConfig.
 
         Args:
@@ -180,9 +177,9 @@ class ShardingConfig:
                 If None, a default config is created.
         """
         # Use a factory pattern to avoid mutable default arguments
-        self.prefill_sharding_cfg = prefill_sharding_cfg if prefill_sharding_cfg is not None else default_ops_cls(
+        self.prefill_sharding_cfg = prefill_sharding_cfg if prefill_sharding_cfg is not None else OpShardingConfig(
         )
-        self.generate_sharding_cfg = generate_sharding_cfg if generate_sharding_cfg is not None else default_ops_cls(
+        self.generate_sharding_cfg = generate_sharding_cfg if generate_sharding_cfg is not None else OpShardingConfig(
         )
 
 
@@ -200,12 +197,10 @@ class Sharding:
         sharding_cfg: The generated `ShardingConfig` with detailed rules.
         mesh: The JAX `Mesh` object representing the device grid.
     """
-
     def __init__(self,
                  strategy_dict: dict,
                  prefill_sharding_cfg: dict | None = None,
-                 generate_sharding_cfg: dict | None = None,
-                 mesh: Mesh = None):
+                 generate_sharding_cfg: dict | None = None):
         """Initializes the Sharding manager.
 
         Args:
@@ -218,10 +213,7 @@ class Sharding:
                 sharding config.
         """
         self.sharding_strategy = ShardingStrategy(**strategy_dict)
-        if mesh:
-            self.mesh = mesh
-        else:
-            self.mesh = self.build_mesh(self.sharding_strategy)
+        self.mesh = self.build_mesh(self.sharding_strategy)
         self.sharding_cfg = self.make_sharding_config(
             prefill_overrides=prefill_sharding_cfg,
             generate_overrides=generate_sharding_cfg)
@@ -396,8 +388,7 @@ class Sharding:
     def make_sharding_config(
             self,
             prefill_overrides: dict | None = None,
-            generate_overrides: dict | None = None,
-            default_ops_cls=OpShardingConfig) -> ShardingConfig:
+            generate_overrides: dict | None = None) -> ShardingConfig:
         """Creates the detailed `ShardingConfig` with specific partitioning rules
         and applies any runtime overrides.
 
@@ -417,7 +408,7 @@ class Sharding:
         """
         #TODO: organize into update_prefill() and update_decode for each axis
         #TODO: verify the sharding axes
-        sharding_cfg = ShardingConfig(default_ops_cls=default_ops_cls)
+        sharding_cfg = ShardingConfig()
         prefill_sharding_cfg = sharding_cfg.prefill_sharding_cfg
         generate_sharding_cfg = sharding_cfg.generate_sharding_cfg
 
@@ -429,8 +420,6 @@ class Sharding:
         self._apply_overrides(generate_sharding_cfg, generate_overrides)
 
         return sharding_cfg
-
-    #TODO: Add __repr__
 
 
 class ShardingInfo:

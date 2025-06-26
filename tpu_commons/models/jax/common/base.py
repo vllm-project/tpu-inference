@@ -1,15 +1,13 @@
 import dataclasses
 from dataclasses import dataclass, fields
-from typing import Any, Callable, Mapping
-
+from flax import nnx
 import jax
 import jax.numpy as jnp
-from flax import nnx
 from jax.sharding import NamedSharding
+from typing import Any, Callable
 
 # Type alias for Initializer for cleaner type hints
 Initializer = Callable[..., jax.Array]
-
 
 @dataclass
 class Config:
@@ -58,7 +56,7 @@ class Config:
         filtered_cfg = {k: v for k, v in cfg.items() if k in known_params}
 
         return cls(**filtered_cfg)
-
+    
 
 @dataclasses.dataclass
 class ParamFactory:

@@ -10,7 +10,7 @@ from jax.sharding import PartitionSpec as P
 from tpu_commons.models.jax.layers.params import sharding_init
 
 
-def shard_put(x: jax.Array, sharding_names: Tuple[str, ...] | P,
+def shard_put(x: jax.Array, sharding_names: Tuple[str, ...],
               mesh: jax.sharding.Mesh) -> jax.Array:
     # Single device sharding requires this special handling
     # to avoid the recursive jit error.

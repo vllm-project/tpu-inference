@@ -1,24 +1,18 @@
 """Utilities for downloading model weights from HuggingFace."""
 
-import abc
 import functools
 import glob
 import os
 import re
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Dict, Generator, Mapping, Optional, Tuple
+from typing import Any, Dict, Generator
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh
 from safetensors import safe_open
-from vllm.config import VllmConfig
 
 from tpu_commons.logger import init_logger
-from tpu_commons.models.jax.common.model import ModelConfig
-from tpu_commons.models.jax.common.sharding import ShardingConfig
 from tpu_commons.models.jax.layers.misc import shard_put
 from tpu_commons.models.jax.utils import file_utils
 
@@ -28,118 +22,46 @@ HF_WEIGHTS_FORMAT = "*.safetensors"
 FULL_DOWNLOAD_DISK_RATIO = 0.9
 
 
-class ParameterType(str, Enum):
-    weight = "weight"
-    bias = "bias"
-
-
-@dataclass
-class TransformationConfig:
-    transpose: Mapping[str, Any] = field(default_factory=dict)
-    reshape: Mapping[str, Any] = field(default_factory=dict)
-
-
-class WeightLoader(abc.ABC):
-
-    def __init__(self,
-                 vllm_config: VllmConfig,
-                 model_config: ModelConfig,
-                 framework: str = "flax",
-                 cache_dir: Optional[str] = None,
-                 sharding_cfg: Optional[ShardingConfig] = None):
-        self.vllm_config = vllm_config
-        self.model_config = model_config
-        self.sharding_cfg = sharding_cfg
-        self.framework = framework
-        self.cache_dir = cache_dir
-        self.transformation_cfg = TransformationConfig()
-        self.setup()
-
-    def setup(self):
-        self.names_and_weights_generator = hf_model_weights_iterator(
-            model_name_or_path=self.vllm_config.model_config.model,
-            framework=self.framework)
-
-    def set_transpose_param_map(self,
-                                transpose_param_dict: Mapping[str,
-                                                              Tuple[int]]):
-        self.transformation_cfg.transpose = transpose_param_dict
-
-    def set_reshape_param_map(self, param_reshape_dict: Mapping[str,
-                                                                Tuple[int]],
-                              param_type: str):
-        self.transformation_cfg.reshape[param_type] = param_reshape_dict
-
-    def set_loaded_to_standardized_keys(
-            self, loaded_to_standardized_keys: Mapping[str, str]):
-        self.loaded_to_standardized_keys = loaded_to_standardized_keys
-
-    def transpose_params(self, param_key: str, param_tensor: jax.Array):
-        for key in self.transformation_cfg.transpose:
-            if key in param_key:
-                return jnp.transpose(param_tensor,
-                                     self.transformation_cfg.transpose[key])
-        return param_tensor  # Base case / no-op
-
-    def reshape_params(self, param_key: str, param_tensor: jax.Array,
-                       param_type: str):
-        for key in self.transformation_cfg.reshape[param_type]:
-            if key in param_key:
-                if "k_proj" in param_key:
-                    logger.info(f"key:{key} in param_key: {param_key}!")
-                reshape_shape = self.transformation_cfg.reshape[param_type][
-                    key]
-                return jnp.reshape(param_tensor, reshape_shape)
-        return param_tensor  # Base case / no-op
-
-    abc.abstractmethod
-
-    def load_weights(self, model_for_loading: nnx.Module):
-        raise NotImplementedError
-
-
 def hf_model_weights_iterator(
-    model_name_or_path: str,
+    model_name: str,
     framework: str,
-) -> Generator[Tuple[str, jax.Array], None, None]:
+) -> Generator[tuple, Any, None]:
     weights_files = []
     weights_location = "local"
-    if os.path.isdir(model_name_or_path):
-        weights_files = glob.glob(
-            os.path.join(model_name_or_path, HF_WEIGHTS_FORMAT))
-    elif file_utils.is_gcs_path(model_name_or_path):
+    if os.path.isdir(model_name):
+        weights_files = glob.glob(os.path.join(model_name, HF_WEIGHTS_FORMAT))
+    elif file_utils.is_gcs_path(model_name):
         local_free_disk_size = file_utils.get_free_disk_size()
         model_size = file_utils.get_gcs_model_weights_size(
-            model_name_or_path, HF_WEIGHTS_FORMAT)
+            model_name, HF_WEIGHTS_FORMAT)
         if model_size < local_free_disk_size * FULL_DOWNLOAD_DISK_RATIO:
-            logger.info(f"Downloading weights from GCS {model_name_or_path}")
+            logger.info(f"Downloading weights from GCS {model_name}")
             weights_files = file_utils.download_model_weights_from_gcs(
-                model_name_or_path, HF_WEIGHTS_FORMAT)
+                model_name, HF_WEIGHTS_FORMAT)
         else:
-            weights_files = file_utils.list_gcs_dir(model_name_or_path,
+            weights_files = file_utils.list_gcs_dir(model_name,
                                                     HF_WEIGHTS_FORMAT)
             weights_location = "gcs"
-    elif file_utils.is_hf_repo(model_name_or_path):
+    elif file_utils.is_hf_repo(model_name):
         local_free_disk_size = file_utils.get_free_disk_size()
         model_size = file_utils.get_hf_model_weights_size(
-            model_name_or_path, HF_WEIGHTS_FORMAT)
+            model_name, HF_WEIGHTS_FORMAT)
         if model_size < local_free_disk_size * FULL_DOWNLOAD_DISK_RATIO:
-            logger.info(f"Downloading weights from HF {model_name_or_path}")
+            logger.info(f"Downloading weights from HF {model_name}")
             weights_files = file_utils.download_model_weights_from_hf(
-                model_name_or_path, HF_WEIGHTS_FORMAT)
+                model_name, HF_WEIGHTS_FORMAT)
         else:
-            weights_files = file_utils.list_hf_repo(model_name_or_path,
+            weights_files = file_utils.list_hf_repo(model_name,
                                                     HF_WEIGHTS_FORMAT)
             weights_location = "hf"
     else:
         raise ValueError(
-            f"{model_name_or_path} must be a local path, or a gcs path, or a HF model id."
+            f"{model_name} must be a local path, or a gcs path, or a HF model id."
         )
 
     if len(weights_files) == 0:
         raise RuntimeError(
-            f"Cannot find any {HF_WEIGHTS_FORMAT} files in {model_name_or_path}."
-        )
+            f"Cannot find any {HF_WEIGHTS_FORMAT} files in {model_name}.")
 
     if weights_location != "local":
         logger.warning(
@@ -153,10 +75,10 @@ def hf_model_weights_iterator(
         logger.info(f"Loading weights from {st_file}")
         if weights_location == "gcs":
             st_file = file_utils.download_model_weights_from_gcs(
-                model_name_or_path, os.path.basename(st_file))[0]
+                model_name, os.path.basename(st_file))[0]
         elif weights_location == "hf":
             st_file = file_utils.download_model_weights_from_hf(
-                model_name_or_path, os.path.basename(st_file))[0]
+                model_name, os.path.basename(st_file))[0]
         # NOTE: We enforce loading tensors on CPU here.
         # Because otherwise the tensor will be loaded on TPU:0 by default,
         # although the tensor would eventually be sharded across multiple TPUs,
