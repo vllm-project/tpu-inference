@@ -8,6 +8,7 @@ import torch
 # Required to register custom ops.
 import torch_xla.experimental.custom_kernel  # noqa: F401
 from jax.tree_util import register_pytree_node_class
+from torchax.interop import call_jax
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
@@ -15,6 +16,8 @@ from vllm.config import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.utils import cdiv, next_power_of_2
+
+from tpu_commons.kernels.ragged_kv_cache_update import kv_cache_update
 
 VLLM_TORCHAX_ENABLED = os.environ.get('VLLM_TORCHAX_ENABLED', '0') == '1'
 
@@ -30,6 +33,8 @@ logger = init_logger(__name__)
 
 # TPU requires the head size to be a multiple of 128.
 TPU_HEAD_SIZE_ALIGNMENT = 128
+# Block size used for kv cache updating kernel
+NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK = 8
 
 
 class PallasAttentionBackend(AttentionBackend):
@@ -264,18 +269,16 @@ class PallasAttentionBackendImpl(AttentionImpl):
         return output.reshape(num_tokens, hidden_size)
 
 
-def write_to_kv_cache(
-    key: torch.Tensor,
-    value: torch.Tensor,
-    kv_cache: torch.Tensor,
-    slot_mapping: torch.Tensor,
-) -> torch.Tensor:
+def write_to_kv_cache(key: torch.Tensor, value: torch.Tensor,
+                      kv_cache: torch.Tensor,
+                      slot_mapping: torch.Tensor) -> torch.Tensor:
     """ Write the key and values to the KV cache.
 
     Args:
         key: shape = [num_tokens, num_kv_heads * head_size]
         value: shape = [num_tokens, num_kv_heads *  head_size]
         kv_cache = [num_blocks, block_size, num_kv_heads * 2, head_size]
+        slot_mapping = [3, padded_num_slices]
 
     """
     num_blocks, block_size, num_combined_kv_heads, head_size = kv_cache.shape
@@ -292,7 +295,13 @@ def write_to_kv_cache(
         torch.ops.xla.dynamo_set_buffer_donor_(kv_cache, True)
 
     kv_cache = kv_cache.reshape(-1, num_combined_kv_heads, head_size)
-    kv_cache = kv_cache.index_copy(0, slot_mapping, kv)
+    kv_cache = call_jax(
+        kv_cache_update,
+        kv,
+        slot_mapping,
+        kv_cache,
+        page_size=block_size,
+        num_slices_per_block=NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK)
     kv_cache = kv_cache.reshape(num_blocks, block_size, num_combined_kv_heads,
                                 head_size)
     return kv_cache
