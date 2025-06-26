@@ -97,10 +97,10 @@ def calculate_prefill_tflops_per_device(
 
     learnable_weight_tflops = 2 * num_model_parameters * prefill_length / jax.device_count(
     ) / 1e12
-    noncasual_attention_flops = (4 * num_query_heads * num_decoder_layers *
+    noncausal_attention_flops = (4 * num_query_heads * num_decoder_layers *
                                  head_dim * prefill_length**2 /
                                  jax.device_count() / 1e12)
-    causal_attention_tflops = noncasual_attention_flops / 2
+    causal_attention_tflops = noncausal_attention_flops / 2
 
     total_tflops = learnable_weight_tflops + causal_attention_tflops
 
@@ -121,8 +121,7 @@ def count_model_parameters(params: Any) -> int:
     Counts the total number of parameters (individual scalar values) in a JAX PyTree.
     This includes all arrays within the PyTree.
     """
-    return jax.tree_util.tree_reduce(
-        lambda x, y: x + y, jax.tree_util.tree_map(lambda x: x.size, params))
+    return sum(x.size for x in jax.tree.leaves(params))
 
 
 def take_nearest_length(lengths: list[int], length: int) -> int:
@@ -167,7 +166,9 @@ def pad_tokens(
     padded_length = take_nearest_length(prefill_lengths, true_length)
     padding = padded_length - true_length
     if padding < 0:
-        print("Provided sequence longer than available.")
+        print(
+            f"WARNING: Provided sequence longer than available.  There are {len(tokens)} tokens, but only taking the last {padded_length} tokens."
+        )
         # Take the last N tokens if we have too many.
         padded_tokens = tokens[-padded_length:]
     else:

@@ -11,6 +11,7 @@ steps:
        queue: tpu_v6e_queue
      commands:
        - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_commons/tests/ragged_paged_attention_test.py
+       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_commons/tests/ragged_kv_cache_update_test.py
 
    - label: "benchmarking/mmlu.sh"
      key: tpu_test_1

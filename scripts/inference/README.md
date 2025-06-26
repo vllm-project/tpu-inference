@@ -1,6 +1,6 @@
 # Inference Microbenchmark Script
 
-This script is designed as a vLLM analog to MaxText's own [inference microbenchmark](https://github.com/AI-Hypercomputer/maxtext/blob/main/MaxText/inference_microbenchmark.py).  Specifically, it attempts to isolate and benchmark (with as little overhead as possible) prefill and decode for a given number of benchmark iterations (10 by default) after running a brief warmup.
+This script attempts to isolate and benchmark (with as little overhead as possible) prefill and decode for a given number of benchmark iterations (10 by default) after running a brief warmup.
 
 Note that our main entrypoint to vLLM is the [`EngineCore`](https://github.com/vllm-project/vllm/blob/799397e/vllm/v1/engine/core.py#L55) class, rather than something higher level like the [`LLM`](https://github.com/vllm-project/vllm/blob/799397ee4f57b90ee1b5f12f88b12f4de0de0d1d/vllm/entrypoints/llm.py#L60) class, which gives us a bit more finegrained control, especially with accessing the TPU model runner and scheduler.
 
