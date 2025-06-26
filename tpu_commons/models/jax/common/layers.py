@@ -3,7 +3,7 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
-# Flax and JAX sharding imports
+
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
