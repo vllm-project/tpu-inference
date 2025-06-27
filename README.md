@@ -7,7 +7,7 @@ Follow this [guide](https://docs.vllm.ai/en/latest/getting_started/installation/
 **NOTE**: Right after `git clone` vLLM repo and before running any `pip install` commands, run the following command to pin the version:
 
 ```
-git checkout 12575cfa7aa176e017735dd2883513b12be54c32
+git checkout 3c545c0c3b98ee642373a308197d750d0e449403
 ```
 
 ### Install `tpu_commons`:
