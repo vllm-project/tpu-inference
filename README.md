@@ -95,6 +95,12 @@ To enable profiling:
 VLLM_TORCH_PROFILER_DIR=$PWD
 ```
 
+To run JAX path without loading real model weights:
+
+```
+JAX_RANDOM_WEIGHTS=1
+```
+
 To enable experimental scheduler:
 
 ```
