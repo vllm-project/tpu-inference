@@ -137,7 +137,10 @@ class ShardingConfig:
     `generate_sharding_cfg.activation_attention_btd = ('data', None, 'tensor')`
     """
 
-    def __init__(self, prefill_sharding_cfg=None, generate_sharding_cfg=None):
+    def __init__(self,
+                 prefill_sharding_cfg=None,
+                 generate_sharding_cfg=None,
+                 default_ops_cls=OpShardingConfig):
         """Initializes the ShardingConfig.
 
         Args:
@@ -145,11 +148,12 @@ class ShardingConfig:
                 If None, a default config is created.
             generate_sharding_cfg: An `OpShardingConfig` for the generate phase.
                 If None, a default config is created.
+            default_ops_cls: The default sharding rules (class) to use.
         """
         # Use a factory pattern to avoid mutable default arguments
-        self.prefill_sharding_cfg = prefill_sharding_cfg if prefill_sharding_cfg is not None else OpShardingConfig(
+        self.prefill_sharding_cfg = prefill_sharding_cfg if prefill_sharding_cfg is not None else default_ops_cls(
         )
-        self.generate_sharding_cfg = generate_sharding_cfg if generate_sharding_cfg is not None else OpShardingConfig(
+        self.generate_sharding_cfg = generate_sharding_cfg if generate_sharding_cfg is not None else default_ops_cls(
         )
 
 
@@ -170,7 +174,8 @@ class Sharding:
     def __init__(self,
                  strategy_dict: dict,
                  prefill_sharding_cfg: dict | None = None,
-                 generate_sharding_cfg: dict | None = None):
+                 generate_sharding_cfg: dict | None = None,
+                 mesh: Mesh = None):
         """Initializes the Sharding manager.
 
         Args:
@@ -181,9 +186,13 @@ class Sharding:
                 and values are the new sharding tuples.
             generate_sharding_cfg: A dictionary of overrides for the generate
                 sharding config.
+            mesh: A jax mesh to use for the sharding.
         """
         self.sharding_strategy = ShardingStrategy(**strategy_dict)
-        self.mesh = self.build_mesh(self.sharding_strategy)
+        if mesh:
+            self.mesh = mesh
+        else:
+            self.mesh = self.build_mesh(self.sharding_strategy)
         self.sharding_cfg = self.make_sharding_config(
             prefill_overrides=prefill_sharding_cfg,
             generate_overrides=generate_sharding_cfg)
@@ -390,6 +399,8 @@ class Sharding:
         self._apply_overrides(generate_sharding_cfg, generate_overrides)
 
         return sharding_cfg
+    
+    #TODO: Add __repr__
 
 
 class ShardingInfo:

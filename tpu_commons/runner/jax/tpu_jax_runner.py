@@ -18,8 +18,10 @@ from vllm.v1.outputs import ModelRunnerOutput
 
 from tpu_commons.core.jetstream_commons.engine import PATHWAYS_ENABLED
 from tpu_commons.logger import init_logger
+from tpu_commons.models.jax.common.model import Model
 from tpu_commons.models.jax.common.sharding import Sharding
-from tpu_commons.models.jax.model_loader import get_model
+from tpu_commons.models.jax.model_loader import (_get_model_architecture,
+                                                 get_model)
 from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
                                                     InputBatch)
 from tpu_commons.runner.jax.input_prep import InputPrep
@@ -354,12 +356,13 @@ class TPUModelRunner():
 
     def _init_mesh(self) -> None:
         hf_config = self.model_config.hf_config
-        architectures = getattr(hf_config, "architectures", [])
+        model_class = _get_model_architecture(hf_config)
         #TODO merge the if-else branches when new design is ready
         # Llama4Scout is only used for new model design,
         # so that we use it as a flag for testing the new model design
-        if architectures == ["Llama4Scout"]:
+        if issubclass(model_class, Model):
             try:
+                # TODO: Update override steps.
                 sharding_strategy = \
                     self.vllm_config.additional_config["overrides"]["sharding"]["sharding_strategy"]
             except KeyError:
