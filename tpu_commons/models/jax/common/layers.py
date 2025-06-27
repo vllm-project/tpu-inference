@@ -25,10 +25,6 @@ class FlaxUtils:
 
 modeling_flax_utils = FlaxUtils()
 
-# Type alias for Initializer for cleaner type hints
-Initializer = Callable[..., jax.Array]
-
-
 @dataclasses.dataclass
 class ParamFactory:
     """A factory for creating nnx.Param objects with shared RNGs and initializers.
