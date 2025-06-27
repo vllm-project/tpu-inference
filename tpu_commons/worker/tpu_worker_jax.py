@@ -20,14 +20,13 @@ logger = init_logger(__name__)
 
 class TPUWorker(WorkerBase):
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        local_rank: int,
-        rank: int,
-        distributed_init_method: str,
-        is_driver_worker: bool = False,
-    ):
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 local_rank: int,
+                 rank: int,
+                 distributed_init_method: str,
+                 is_driver_worker: bool = False,
+                 devices=[]):
         super().__init__(
             vllm_config=vllm_config,
             local_rank=local_rank,
@@ -57,7 +56,7 @@ class TPUWorker(WorkerBase):
             self.profile_dir = envs.VLLM_TORCH_PROFILER_DIR
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         self.profile_dir)
-
+        self.devices = devices
         self._set_visible_devices()
 
     def _set_visible_devices(self):
@@ -80,13 +79,14 @@ class TPUWorker(WorkerBase):
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
     def init_device(self):
-        self.devices = jax.local_devices()
-        self.global_devices = jax.devices()
+        if not self.devices:
+            self.devices = jax.local_devices()
+            self.global_devices = jax.devices()
 
         logger.info(f"Init devices | "
+                    f"devices={self.devices} | "
                     f"local_devices={len(self.devices)} | "
-                    f"hbm={utils.hbm_usage_gb(self.devices)}Gb | "
-                    f"global_devices={len(self.global_devices)}")
+                    f"hbm={utils.hbm_usage_gb(self.devices)}Gb")
 
         self.model_runner = TPUModelRunner(self.vllm_config, self.devices)
 
