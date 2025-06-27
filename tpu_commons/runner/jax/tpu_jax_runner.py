@@ -17,13 +17,13 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from vllm.v1.outputs import ModelRunnerOutput
 
 from tpu_commons.logger import init_logger
+from tpu_commons.models.jax.common.sharding import Sharding
 from tpu_commons.models.jax.model_loader import get_model
 from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
                                                     InputBatch)
 from tpu_commons.runner.jax.input_prep import InputPrep
 from tpu_commons.runner.tpu_torch_xla_runner import _get_token_paddings
 
-from tpu_commons.models.jax.common.sharding import Sharding
 logger = init_logger(__name__)
 
 MIN_NUM_SEQS = 8
@@ -338,14 +338,13 @@ class TPUModelRunner():
             logprobs=None,
             spec_token_ids=None,
             sampled_token_ids=sampled_token_ids,
-            pooler_output=[]
         )
 
     def _init_mesh(self) -> None:
         hf_config = self.model_config.hf_config
         architectures = getattr(hf_config, "architectures", [])
         #TODO merge the if-else branches when new design is ready
-        # Llama4Scout is only used for new model design, 
+        # Llama4Scout is only used for new model design,
         # so that we use it as a flag for testing the new model design
         if architectures == ["Llama4Scout"]:
             try:
@@ -367,7 +366,9 @@ class TPUModelRunner():
             if len(self.devices) > 8:
                 self.devices = self.devices[:8]
             mesh_shape = (1, len(self.devices))
-            self.mesh = jax.make_mesh(mesh_shape, axis_names, devices=self.devices)
+            self.mesh = jax.make_mesh(mesh_shape,
+                                      axis_names,
+                                      devices=self.devices)
             logger.info(f"Init mesh | mesh={self.mesh}")
 
     def _init_model(self) -> None:
