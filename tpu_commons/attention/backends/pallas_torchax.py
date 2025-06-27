@@ -119,11 +119,11 @@ class PallasMetadata:
     context_lens: torch.Tensor
     query_start_loc: torch.Tensor
     num_seqs: torch.Tensor
-    num_pages: torch.Tensor
+    num_slices: torch.Tensor
 
     def tree_flatten(self):
         children = (self.slot_mapping, self.block_tables, self.context_lens,
-                    self.query_start_loc, self.num_seqs, self.num_pages)
+                    self.query_start_loc, self.num_seqs, self.num_slices)
         aux_data = None
         return (children, aux_data)
 
@@ -236,7 +236,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
             # Skip this if sharing KV cache with an earlier attention layer.
             slot_mapping = attn_metadata.slot_mapping
             kv_cache = write_to_kv_cache(key, value, kv_cache, slot_mapping,
-                                         attn_metadata.num_pages)
+                                         attn_metadata.num_slices)
             if VLLM_TORCHAX_ENABLED:
                 forward_context: ForwardContext = get_forward_context()
                 layer.kv_cache[forward_context.virtual_engine] = kv_cache
@@ -273,7 +273,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
 
 def write_to_kv_cache(key: torch.Tensor, value: torch.Tensor,
                       kv_cache: torch.Tensor, slot_mapping: torch.Tensor,
-                      num_pages: torch.Tensor) -> torch.Tensor:
+                      num_slices: torch.Tensor) -> torch.Tensor:
     """ Write the key and values to the KV cache.
 
     Args:
@@ -281,7 +281,7 @@ def write_to_kv_cache(key: torch.Tensor, value: torch.Tensor,
         value: shape = [num_tokens, num_kv_heads *  head_size]
         kv_cache = [num_blocks, block_size, num_kv_heads * 2, head_size]
         slot_mapping = [3, padded_num_slices]
-        num_pages = [1]
+        num_slices = [1]
 
     """
     num_blocks, block_size, num_combined_kv_heads, head_size = kv_cache.shape
@@ -303,7 +303,7 @@ def write_to_kv_cache(key: torch.Tensor, value: torch.Tensor,
         kv,
         slot_mapping,
         kv_cache,
-        num_pages,
+        num_slices,
         page_size=block_size,
         num_slices_per_block=NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK)
     kv_cache = kv_cache.reshape(num_blocks, block_size, num_combined_kv_heads,
