@@ -23,6 +23,7 @@ from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
 from tpu_commons.runner.jax.input_prep import InputPrep
 from tpu_commons.runner.tpu_torch_xla_runner import _get_token_paddings
 
+from tpu_commons.models.jax.common.sharding import Sharding
 logger = init_logger(__name__)
 
 MIN_NUM_SEQS = 8
@@ -337,18 +338,37 @@ class TPUModelRunner():
             logprobs=None,
             spec_token_ids=None,
             sampled_token_ids=sampled_token_ids,
+            pooler_output=[]
         )
 
     def _init_mesh(self) -> None:
-        axis_names = ("data", "model")
-        # In case we are in disagg mode, the number of devices can exceed 8.
-        # TODO(fhzhang): fix this properly as we implement disagg serving.
-        if len(self.devices) > 8:
-            self.devices = self.devices[:8]
-        mesh_shape = (1, len(self.devices))
-        self.mesh = jax.make_mesh(mesh_shape, axis_names, devices=self.devices)
-
-        logger.info(f"Init mesh | mesh={self.mesh}")
+        hf_config = self.model_config.hf_config
+        architectures = getattr(hf_config, "architectures", [])
+        #TODO merge the if-else branches when new design is ready
+        # Llama4Scout is only used for new model design, 
+        # so that we use it as a flag for testing the new model design
+        if architectures == ["Llama4Scout"]:
+            try:
+                sharding_strategy = \
+                    self.vllm_config.additional_config["overrides"]["sharding"]["sharding_strategy"]
+            except KeyError:
+                logger.warning(
+                    f"No sharding strategy passed! Using default of full model parallelism={len(self.devices)}"
+                )
+                sharding_strategy = {"tensor_parallelism": len(self.devices)}
+            sharding = Sharding(strategy_dict=sharding_strategy)
+            self.mesh = sharding.mesh
+            logger.info(f"Init mesh | mesh={self.mesh}")
+        else:
+            # Support for legacy tpu_commons.
+            axis_names = ("data", "model")
+            # In case we are in disagg mode, the number of devices can exceed 8.
+            # TODO(fhzhang): fix this properly as we implement disagg serving.
+            if len(self.devices) > 8:
+                self.devices = self.devices[:8]
+            mesh_shape = (1, len(self.devices))
+            self.mesh = jax.make_mesh(mesh_shape, axis_names, devices=self.devices)
+            logger.info(f"Init mesh | mesh={self.mesh}")
 
     def _init_model(self) -> None:
         self.model_fn = get_model(
