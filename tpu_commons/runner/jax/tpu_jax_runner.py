@@ -338,6 +338,7 @@ class TPUModelRunner():
             logprobs=None,
             spec_token_ids=None,
             sampled_token_ids=sampled_token_ids,
+            pooler_output=[],
         )
 
     def _init_mesh(self) -> None:
