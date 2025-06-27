@@ -83,31 +83,45 @@ def get_nnx_model(
 ):
     model_class = _get_model_architecture(vllm_config.model_config.hf_config)
 
-    # We first create an abstract model without allocating any weights,
-    # then fill in its weigths during load_weights from HF.
-    # This shows 3 advantages than the normal way:
-    # 1. The model weights will only be allocated once. Otherwise the normal way
-    #    will random-init the model weights first, then load the real weights.
-    #    The two pass weights allocation causes model loading slow.
-    # 2. The model loading won't be OOM. Otherwise the normal way will hold
-    #    a full model weights after random-init, then duplicate a layer during
-    #    the load_weights. This would be easy to OOM if the layer is super large.
-    # 3. The model architecture definition won't need to worry about the sharding.
-    #    The sharding definition is taken over by the load_weights instead.
-    model = nnx.eval_shape(lambda: model_class(vllm_config, rng, mesh))
-    model.load_weights(rng)
+    if os.getenv("JAX_RANDOM_WEIGHTS", False):
+        # Create a sharded model with random inited weights.
+        @nnx.jit
+        def create_sharded_model():
+            model = model_class(vllm_config, rng, mesh)
+            state = nnx.state(model)
+            pspecs = nnx.get_partition_spec(state)
+            sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
+            nnx.update(model, sharded_state)
+            return model
 
-    # Although the created model can already work, we still need to jit
-    # the model creation again, otherwise the model forward will have
-    # non-trivial overhead in PjitFunction.
-    @nnx.jit(donate_argnums=(0, ))
-    def create_sharded_model(model):
-        state = nnx.state(model)
-        nnx.update(model, state)
-        return model
+        with mesh:
+            jit_model = create_sharded_model()
+    else:
+        # We first create an abstract model without allocating any weights,
+        # then fill in its weigths during load_weights from HF.
+        # This shows 3 advantages than the normal way:
+        # 1. The model weights will only be allocated once. Otherwise the normal way
+        #    will random-init the model weights first, then load the real weights.
+        #    The two pass weights allocation causes model loading slow.
+        # 2. The model loading won't be OOM. Otherwise the normal way will hold
+        #    a full model weights after random-init, then duplicate a layer during
+        #    the load_weights. This would be easy to OOM if the layer is super large.
+        # 3. The model architecture definition won't need to worry about the sharding.
+        #    The sharding definition is taken over by the load_weights instead.
+        model = nnx.eval_shape(lambda: model_class(vllm_config, rng, mesh))
+        model.load_weights(rng)
 
-    with mesh:
-        jit_model = create_sharded_model(model)
+        # Although the created model can already work, we still need to jit
+        # the model creation again, otherwise the model forward will have
+        # non-trivial overhead in PjitFunction.
+        @nnx.jit(donate_argnums=(0, ))
+        def create_jit_model(model):
+            state = nnx.state(model)
+            nnx.update(model, state)
+            return model
+
+        with mesh:
+            jit_model = create_jit_model(model)
 
     kv_cache_sharding = NamedSharding(mesh, PartitionSpec("model"))
     outputs_sharding = NamedSharding(mesh, PartitionSpec(None))
