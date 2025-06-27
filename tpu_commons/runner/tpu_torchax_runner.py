@@ -698,6 +698,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # Calculate the slot mapping.
         slot_mapping_metadata = self._get_slot_mapping_metadata(
             num_reqs, num_scheduled_tokens_per_req)
+        num_slices = slot_mapping_metadata.shape[0]
         padded_num_slices = _get_padded_num_kv_cache_update_slices(
             padded_total_num_scheduled_tokens, self.max_num_reqs,
             self.block_size)
@@ -735,12 +736,15 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
         num_seqs = self._create_torchax_array(
             torch.tensor([num_reqs], dtype=torch.int32))
+        num_slices = self._create_torchax_array(
+            torch.tensor([num_slices], dtype=torch.int32))
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
             block_tables=block_tables,
             context_lens=seq_lens,
             query_start_loc=query_start_loc,
             num_seqs=num_seqs,
+            num_slices=num_slices,
         )
         # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
         # request in the batch. While we should not sample any token from this
@@ -1211,12 +1215,15 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             torch.ones((self.max_num_reqs, ), dtype=torch.int32))
         num_seqs = self._create_torchax_array(
             torch.tensor([actual_num_reqs], dtype=torch.int32))
+        num_slices = self._create_torchax_array(
+            torch.tensor([padded_num_slices], dtype=torch.int32))
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
             block_tables=block_tables,
             context_lens=context_lens,
             query_start_loc=query_start_loc,
             num_seqs=num_seqs,
+            num_slices=num_slices,
         )
 
         if self.is_multimodal_model:
