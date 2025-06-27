@@ -257,7 +257,10 @@ class TPUModelRunner():
         return output_cache
 
     def capture_model(self) -> None:
-        pass
+        # TODO
+        logger.warning(
+            "Model warm-up is not implemented for the JAX backend. "
+            "The first few requests will be slow due to JIT compilation.")
 
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
         # We don't want to use ragged attention kernel all the time as paged attention is faster for decoding only.

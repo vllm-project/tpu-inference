@@ -119,7 +119,7 @@ class TPUWorker(WorkerBase):
         self.model_runner.load_model()
 
     def compile_or_warm_up_model(self) -> None:
-        return
+        self.model_runner.capture_model()
 
     def get_model(self):
         return self.model_runner.get_model()
