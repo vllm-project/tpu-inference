@@ -1,6 +1,7 @@
 # Here we try to bring as much code as possible from Hex-LLM, instead of `tpu_torch_xla_runner.py` -> jax conversion.
 # This runner is a port of https://source.corp.google.com/h/vertex-model-garden/hex-llm/+/main:hex_llm/worker/runner_jax.py
 import math
+import time
 from typing import Any, List, Optional, Tuple
 
 import jax
@@ -56,6 +57,8 @@ class TPUModelRunner():
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
         self.max_num_reqs = max(self.scheduler_config.max_num_seqs,
                                 MIN_NUM_SEQS)
+        self.num_reqs_paddings = _get_req_paddings(
+            min_req_size=MIN_NUM_SEQS, max_req_size=self.max_num_reqs)
         self.num_tokens_paddings = _get_token_paddings(
             min_token_size=16,
             max_token_size=self.scheduler_config.max_num_batched_tokens,
@@ -257,10 +260,115 @@ class TPUModelRunner():
         return output_cache
 
     def capture_model(self) -> None:
-        # TODO
-        logger.warning(
-            "Model warm-up is not implemented for the JAX backend. "
-            "The first few requests will be slow due to JIT compilation.")
+        logger.info("Warming up model for JIT compilation...")
+        start_time = time.perf_counter()
+
+        # Warm up decode path
+        for batch_size in self.num_reqs_paddings:
+            for do_sampling in [True, False]:
+                logger.info(
+                    "Compiling decode path for batch_size=%d, do_sampling=%s",
+                    batch_size, do_sampling)
+                self._dummy_run_decode(batch_size, do_sampling)
+
+        # Warm up prefill path
+        for batch_size in self.num_reqs_paddings:
+            for prompt_len in self.num_tokens_paddings:
+                if batch_size * prompt_len > self.max_num_tokens:
+                    continue
+                for do_sampling in [True, False]:
+                    logger.info(("Compiling prefill path for batch_size=%d, "
+                                 "prompt_len=%d, do_sampling=%s"), batch_size,
+                                prompt_len, do_sampling)
+                    self._dummy_run_prefill(batch_size, prompt_len,
+                                            do_sampling)
+
+        jax.block_until_ready(self.kv_caches)
+        end_time = time.perf_counter()
+        logger.info("Model warm-up finished in %.2fs", end_time - start_time)
+
+    def _dummy_run_decode(self, batch_size: int, do_sampling: bool):
+        block_size = self.cache_config.block_size
+        max_model_len = self.model_config.max_model_len
+        max_num_blocks = math.ceil(max_model_len / block_size)
+
+        input_ids = jnp.zeros((batch_size, ), dtype=jnp.int32)
+        input_positions = jnp.zeros((batch_size, 1), dtype=jnp.int32)
+        seq_lens = jnp.zeros((batch_size, ), dtype=jnp.int32)
+        block_indices = jnp.zeros((batch_size, max_num_blocks),
+                                  dtype=jnp.int32)
+        kv_cache_write_indices = jnp.zeros((batch_size, ), dtype=jnp.int32)
+
+        temperatures = jnp.ones((batch_size, ), dtype=jnp.bfloat16)
+        top_ps = jnp.ones((batch_size, ), dtype=jnp.bfloat16)
+        top_ks = jnp.full((batch_size, ), self.vocab_size, dtype=jnp.int32)
+
+        attn_metadata = AttentionMetadata(input_positions, seq_lens,
+                                          block_indices,
+                                          kv_cache_write_indices)
+
+        model_inputs = (
+            False,  # is_prefill
+            do_sampling,
+            self.kv_caches,
+            input_ids,
+            attn_metadata,
+            temperatures,
+            top_ps,
+            top_ks,
+            None,  # kv_cache_position_indices
+            None,  # evict_write_indices
+            None,  # replacement_write_indices
+            None,  # eviction_score_mask
+        )
+
+        self.model_fn(*model_inputs)
+
+    def _dummy_run_prefill(self, batch_size: int, prompt_len: int,
+                           do_sampling: bool):
+        block_size = self.vllm_config.cache_config.block_size
+        padded_prompt_len = pad_to_multiple(
+            prompt_len,
+            self.scheduler_config.prefill_len_padding,
+            self.model_config.max_model_len,
+        )
+        padded_num_blocks = math.ceil(padded_prompt_len / block_size)
+
+        input_ids = jnp.zeros((batch_size, padded_prompt_len), dtype=jnp.int32)
+        input_positions = jnp.zeros((batch_size, padded_prompt_len),
+                                    dtype=jnp.int32)
+        seq_lens = jnp.full((batch_size, ), padded_prompt_len, dtype=jnp.int32)
+        block_indices = jnp.zeros((batch_size, padded_num_blocks),
+                                  dtype=jnp.int32)
+        kv_cache_write_indices = jnp.zeros((batch_size, padded_num_blocks),
+                                           dtype=jnp.int32)
+
+        temperatures = jnp.ones((batch_size, ), dtype=jnp.bfloat16)
+        top_ps = jnp.ones((batch_size, ), dtype=jnp.bfloat16)
+        top_ks = jnp.full((batch_size, ), self.vocab_size, dtype=jnp.int32)
+
+        attn_metadata = AttentionMetadata(input_positions, seq_lens,
+                                          block_indices,
+                                          kv_cache_write_indices)
+
+        model_inputs = (
+            True,  # is_prefill
+            do_sampling,
+            self.kv_caches,
+            input_ids,
+            attn_metadata,
+            temperatures,
+            top_ps,
+            top_ks,
+            None,  # kv_cache_position_indices
+            None,  # evict_write_indices
+            None,  # replacement_write_indices
+            None,  # eviction_score_mask
+            None,  # images_flattened
+            None,  # image_lens
+        )
+
+        self.model_fn(*model_inputs)
 
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
         # We don't want to use ragged attention kernel all the time as paged attention is faster for decoding only.
@@ -1295,3 +1403,21 @@ def read_outputs(
     outputs = output_cache.at[running_indices, token_indices].get()
     outputs = jnp.expand_dims(outputs, 1)
     return outputs
+
+
+def _get_padded_num_reqs_with_upper_limit(x: int, upper_limit: int) -> int:
+    res = MIN_NUM_SEQS if x <= MIN_NUM_SEQS else 1 << (x - 1).bit_length()
+    return min(res, upper_limit)
+
+
+def _get_req_paddings(min_req_size: int, max_req_size: int) -> list[int]:
+    logger.info("Preparing request paddings:")
+    # assert min_req_size is power of 2
+    assert (min_req_size & (min_req_size - 1) == 0) and min_req_size > 0
+    paddings: list = []
+    num = max(MIN_NUM_SEQS, min_req_size)
+    while num <= max_req_size and (len(paddings) == 0 or paddings[-1] != num):
+        paddings.append(num)
+        logger.info("    %d", num)
+        num = _get_padded_num_reqs_with_upper_limit(num + 1, max_req_size)
+    return paddings
