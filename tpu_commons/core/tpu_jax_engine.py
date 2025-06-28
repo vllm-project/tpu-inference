@@ -164,6 +164,7 @@ class JaxEngine(engine_api.Engine):
             logprobs=None,
             spec_token_ids=None,
             sampled_token_ids=sampled_token_ids,
+            pooler_output=[],
         )
 
         prefix = {
@@ -308,6 +309,7 @@ class JaxEngine(engine_api.Engine):
                 logprobs=None,
                 spec_token_ids=None,
                 sampled_token_ids=sampled_token_ids,
+                pooler_output=[],
             )
 
             return all_requests, model_output_to_return, reqs_to_remove
