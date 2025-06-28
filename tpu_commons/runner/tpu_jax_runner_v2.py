@@ -259,17 +259,19 @@ class TPUModelRunner():
 
     def _dummy_run_prefill(self, prompt_len: int, do_sampling: bool):
         """Runs a dummy prefill step to compile the model."""
+        prompt_len = pad_to_multiple(prompt_len, self.block_size,
+                                     self.max_model_len)
         batch_size = 1
         input_ids = jnp.zeros((batch_size, prompt_len), dtype=jnp.int32)
         input_positions = jnp.arange(prompt_len,
                                      dtype=jnp.int32)[jnp.newaxis, :]
         input_positions = jnp.repeat(input_positions, batch_size, axis=0)
         seq_lens = jnp.full((batch_size, ), prompt_len, dtype=jnp.int32)
-
         max_num_blocks = math.ceil(self.max_model_len / self.block_size)
         block_indices = jnp.zeros((batch_size, max_num_blocks),
                                   dtype=jnp.int32)
-        kv_cache_write_indices = jnp.zeros((batch_size, prompt_len),
+        num_blocks = prompt_len // self.block_size
+        kv_cache_write_indices = jnp.zeros((batch_size, num_blocks),
                                            dtype=jnp.int32)
 
         temperatures = jnp.ones((batch_size, ), dtype=jnp.bfloat16)
