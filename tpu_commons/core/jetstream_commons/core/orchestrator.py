@@ -400,8 +400,9 @@ class Driver:
             my_transfer_backlog = self._transfer_backlogs[idx]
             # The prefill thread can just sleep until it has work to do.
             vllm_request = self._prefill_backlog.get(block=True)
-            logging.info("get request %s from prefill backlog",
-                         vllm_request.request_id)
+            logging.info(
+                "get request %s from prefill backlog", vllm_request.request_id
+                if vllm_request is not None else "None")
             my_detokenize_backlog = self._detokenize_backlogs[idx]
 
             if vllm_request is None:
