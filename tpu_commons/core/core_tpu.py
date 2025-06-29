@@ -9,6 +9,7 @@ from contextlib import ExitStack
 from inspect import isclass, signature
 from typing import Any, Callable, Optional, TypeVar, Union
 
+import jax
 import msgspec
 import zmq
 from vllm.config import ParallelConfig, VllmConfig
@@ -33,6 +34,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import EngineHandshakeMetadata, EngineZmqAddresses
 from vllm.version import __version__ as VLLM_VERSION
 
+from tpu_commons.core import disagg_executor
 from tpu_commons.core.jetstream_commons.core import orchestrator
 from tpu_commons.core.tpu_jax_engine import JaxEngine
 
@@ -65,15 +67,31 @@ class EngineCore:
         self.log_stats = log_stats
 
         # Setup Model.
-        self.model_executor = executor_class(vllm_config)
+        # TODO(fhzhang): create config to setup disagg executors.
+        devices = jax.devices()
+        self.prefill_executor = disagg_executor.DisaggExecutor(vllm_config)
+        self.prefill_executor.init_with_devices(devices[:2])
+
+        self.decode_executor = None
+        if len(devices) == 8:
+            self.decode_executor = disagg_executor.DisaggExecutor(vllm_config)
+            self.decode_executor.init_with_devices(devices[2:4])
+            self.decode_executor.driver_worker.model_runner.input_batch = (
+                self.prefill_executor.driver_worker.model_runner.input_batch)
+            self.decode_executor.driver_worker.model_runner.requests = (
+                self.prefill_executor.driver_worker.model_runner.requests)
+            logger.info("Disaggregated decode executor created.")
+
         if executor_fail_callback is not None:
-            self.model_executor.register_failure_callback(
+            self.prefill_executor.register_failure_callback(
                 executor_fail_callback)
 
         logger.info("executor created.")
         # Setup KV Caches and update CacheConfig after profiling.
         num_gpu_blocks, num_cpu_blocks, kv_cache_config = \
-            self._initialize_kv_caches(vllm_config)
+            self._initialize_kv_caches(vllm_config, self.prefill_executor)
+        if len(devices) == 8:
+            self._initialize_kv_caches(vllm_config, self.decode_executor)
 
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
@@ -122,7 +140,7 @@ class EngineCore:
         # Batch queue for scheduled batches. This enables us to asynchronously
         # schedule and execute batches, and is required by pipeline parallelism
         # to eliminate pipeline bubbles.
-        self.batch_queue_size = self.model_executor.max_concurrent_batches
+        self.batch_queue_size = self.prefill_executor.max_concurrent_batches
         self.batch_queue: Optional[queue.Queue[tuple[Future[ModelRunnerOutput],
                                                      SchedulerOutput]]] = None
         if self.batch_queue_size > 1:
@@ -131,19 +149,20 @@ class EngineCore:
             self.batch_queue = queue.Queue(self.batch_queue_size)
         logger.warning("set up jetstream driver")
         self.orchestrator = self._setup_driver(vllm_config,
-                                               self.kv_cache_manager, True)
+                                               self.kv_cache_manager,
+                                               interleaved_mode=False)
         logger.warning("starting jetstream orchestrator")
 
-    def _initialize_kv_caches(
-            self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
+    def _initialize_kv_caches(self, vllm_config: VllmConfig,
+                              executor) -> tuple[int, int, KVCacheConfig]:
         start = time.time()
 
         # Get all kv cache needed by the model
-        kv_cache_specs = self.model_executor.get_kv_cache_specs()
+        kv_cache_specs = executor.get_kv_cache_specs()
 
         # Profiles the peak memory usage of the model to determine how much
         # memory can be allocated for kv cache.
-        available_gpu_memory = self.model_executor.determine_available_memory()
+        available_gpu_memory = executor.determine_available_memory()
 
         assert len(kv_cache_specs) == len(available_gpu_memory)
         # Get the kv cache tensor size
@@ -170,7 +189,7 @@ class EngineCore:
         scheduler_kv_cache_config = kv_cache_configs[0]
 
         # Initialize kv cache and warmup the execution
-        self.model_executor.initialize_from_config(kv_cache_configs)
+        executor.initialize_from_config(kv_cache_configs)
 
         elapsed = time.time() - start
         logger.info(("init engine (profile, create kv cache, "
@@ -182,11 +201,12 @@ class EngineCore:
                       kv_cache_manager,
                       interleaved_mode=True):
         prefill_engine = JaxEngine(vllm_config, kv_cache_manager,
-                                   self.model_executor)
+                                   self.prefill_executor)
         # Create a generate engine with a different set of weights
         # so that we can test that the right one is in use at a given time.
-        generate_engine = JaxEngine(vllm_config, kv_cache_manager,
-                                    self.model_executor)
+        generate_engine = JaxEngine(
+            vllm_config, kv_cache_manager, self.decode_executor
+            if self.decode_executor else self.prefill_executor)
         driver = orchestrator.Driver(
             vllm_config=vllm_config,
             prefill_engines=[prefill_engine],
@@ -284,8 +304,10 @@ class EngineCore:
     def shutdown(self):
         self.orchestrator.stop()
         # self.structured_output_manager.clear_backend()
-        if self.model_executor:
-            self.model_executor.shutdown()
+        if self.prefill_executor:
+            self.prefill_executor.shutdown()
+        if self.decode_executor:
+            self.decode_executor.shutdown()
         # if self.scheduler:
         #     self.scheduler.shutdown()
 
@@ -299,34 +321,34 @@ class EngineCore:
         self.mm_input_cache_server.reset()
 
     def profile(self, is_start: bool = True):
-        self.model_executor.profile(is_start)
+        self.prefill_executor.profile(is_start)
 
     def reset_prefix_cache(self):
         self.scheduler.reset_prefix_cache()
 
     def sleep(self, level: int = 1):
-        self.model_executor.sleep(level)
+        self.prefill_executor.sleep(level)
 
     def wake_up(self, tags: Optional[list[str]] = None):
-        self.model_executor.wake_up(tags)
+        self.prefill_executor.wake_up(tags)
 
     def is_sleeping(self) -> bool:
-        return self.model_executor.is_sleeping
+        return self.prefill_executor.is_sleeping
 
     def execute_dummy_batch(self):
-        self.model_executor.collective_rpc("execute_dummy_batch")
+        self.prefill_executor.collective_rpc("execute_dummy_batch")
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
-        return self.model_executor.add_lora(lora_request)
+        return self.prefill_executor.add_lora(lora_request)
 
     def remove_lora(self, lora_id: int) -> bool:
-        return self.model_executor.remove_lora(lora_id)
+        return self.prefill_executor.remove_lora(lora_id)
 
     def list_loras(self) -> set[int]:
-        return self.model_executor.list_loras()
+        return self.prefill_executor.list_loras()
 
     def pin_lora(self, lora_id: int) -> bool:
-        return self.model_executor.pin_lora(lora_id)
+        return self.prefill_executor.pin_lora(lora_id)
 
     def save_sharded_state(
         self,
@@ -334,23 +356,23 @@ class EngineCore:
         pattern: Optional[str] = None,
         max_size: Optional[int] = None,
     ) -> None:
-        self.model_executor.save_sharded_state(path=path,
-                                               pattern=pattern,
-                                               max_size=max_size)
+        self.prefill_executor.save_sharded_state(path=path,
+                                                 pattern=pattern,
+                                                 max_size=max_size)
 
     def collective_rpc(self,
                        method: Union[str, Callable[..., _R]],
                        timeout: Optional[float] = None,
                        args: tuple = (),
                        kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
-        return self.model_executor.collective_rpc(method, timeout, args,
-                                                  kwargs)
+        return self.prefill_executor.collective_rpc(method, timeout, args,
+                                                    kwargs)
 
     def save_tensorized_model(
         self,
         tensorizer_config,
     ) -> None:
-        self.model_executor.save_tensorized_model(
+        self.prefill_executor.save_tensorized_model(
             tensorizer_config=tensorizer_config, )
 
 

@@ -16,7 +16,9 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import ModelRunnerOutput
 
+from tpu_commons.core.jetstream_commons.engine import PATHWAYS_ENABLED
 from tpu_commons.logger import init_logger
+from tpu_commons.models.jax.common.sharding import Sharding
 from tpu_commons.models.jax.model_loader import get_model
 from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
                                                     InputBatch)
@@ -200,12 +202,21 @@ class TPUModelRunner():
             kv_cache_spec.block_size,
             kv_cache_spec.head_size,
         )
+        if PATHWAYS_ENABLED:
+            cache_shape = (
+                kv_cache_spec.num_kv_heads,  # 8
+                #kv_cache_config.num_blocks,  # 7199
+                1024,
+                kv_cache_spec.block_size,  # 32
+                kv_cache_spec.head_size,  # 128
+            )
         logger.info(
             f"Init kv-cache | shape={len(layer_names)} * {cache_shape}")
         logger.info(jax.lib.xla_bridge.get_backend().platform_version)
 
         # Shard the num_kv_heads dim along the 'model' axis.
-        sharding = NamedSharding(self.mesh, PartitionSpec("model"))
+        self.kv_cache_sharding = NamedSharding(self.mesh,
+                                               PartitionSpec("model"))
 
         def _allocate() -> Any:
             return jnp.empty(
@@ -214,15 +225,16 @@ class TPUModelRunner():
             )
 
         logger.info("Trace allocate fn.")
-        sharded_allocate = jax.jit(_allocate, out_shardings=sharding)
-        logger.info(f"allocate kv cache: {sharding}")
+        sharded_allocate = jax.jit(_allocate,
+                                   out_shardings=self.kv_cache_sharding)
+        logger.info(f"allocate kv cache: {self.kv_cache_sharding}")
         for name in layer_names:
             logger.info(f"allocate for {name}")
             k_cache = sharded_allocate()
             v_cache = sharded_allocate()
             self.kv_caches.append((k_cache, v_cache))
 
-        logger.info(f"allocate kv cache: {sharding}, done")
+        logger.info(f"allocate kv cache: {self.kv_cache_sharding}, done")
         self.output_cache = self.init_output_cache()
         logger.info(
             f"Init kv-cache | shape={len(layer_names)} * {cache_shape}, Done!")
@@ -337,20 +349,48 @@ class TPUModelRunner():
             logprobs=None,
             spec_token_ids=None,
             sampled_token_ids=sampled_token_ids,
+            pooler_output=[],
         )
 
     def _init_mesh(self) -> None:
-        axis_names = ("data", "model")
-        # In case we are in disagg mode, the number of devices can exceed 8.
-        # TODO(fhzhang): fix this properly as we implement disagg serving.
-        if len(self.devices) > 8:
-            self.devices = self.devices[:8]
-        mesh_shape = (1, len(self.devices))
-        self.mesh = jax.make_mesh(mesh_shape, axis_names, devices=self.devices)
+        hf_config = self.model_config.hf_config
+        architectures = getattr(hf_config, "architectures", [])
+        #TODO merge the if-else branches when new design is ready
+        # Llama4Scout is only used for new model design,
+        # so that we use it as a flag for testing the new model design
+        if architectures == ["Llama4Scout"]:
+            try:
+                sharding_strategy = \
+                    self.vllm_config.additional_config["overrides"]["sharding"]["sharding_strategy"]
+            except KeyError:
+                logger.warning(
+                    f"No sharding strategy passed! Using default of full model parallelism={len(self.devices)}"
+                )
+                sharding_strategy = {"tensor_parallelism": len(self.devices)}
+            sharding = Sharding(strategy_dict=sharding_strategy)
+            self.mesh = sharding.mesh
+            logger.info(f"Init mesh | mesh={self.mesh}")
+        else:
+            # Support for legacy tpu_commons.
+            axis_names = ("data", "model")
+            mesh_shape = (1, len(self.devices))
+            self.mesh = jax.make_mesh(mesh_shape,
+                                      axis_names,
+                                      devices=self.devices)
 
-        logger.info(f"Init mesh | mesh={self.mesh}")
+            logger.info(f"Init mesh | mesh={self.mesh} done")
+            # In case we are in disagg mode, the number of devices can exceed 8.
+            # TODO(fhzhang): fix this properly as we implement disagg serving.
+            if len(self.devices) > 8:
+                self.devices = self.devices[:8]
+            mesh_shape = (1, len(self.devices))
+            self.mesh = jax.make_mesh(mesh_shape,
+                                      axis_names,
+                                      devices=self.devices)
+            logger.info(f"Init mesh | mesh={self.mesh}")
 
     def _init_model(self) -> None:
+        logger.info("Init model start...")
         self.model_fn, self.total_model_params_num = get_model(
             self.vllm_config,
             self.rng_key,

@@ -9,8 +9,11 @@ from vllm.config import VllmConfig
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
 
+from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.runner.utils import determine_do_sampling, pad_to_multiple
+
+logger = init_logger(__name__)
 
 # When chunked prefill is enabled, this is the max number of prefill segments that
 # could scheduled in one token batch.
@@ -80,11 +83,13 @@ class InputPrep:
 
         if not (has_new_full or has_new_partial or has_subsequent_partial
                 or has_decoding):
+            self.inference_phase = ""
             return None
 
         if not new_full_prefill_seqs and not new_partial_prefill_seqs and not subsequent_partial_prefill_seqs:
             self.inference_phase = "decode"
-            return self._prepare_decode(decoding_seqs, scheduler_output,
+            return self._prepare_decode(decoding_seqs,
+                                        scheduler_output.num_scheduled_tokens,
                                         kv_caches, output_cache)
 
         def _tokens_after_padding_in_prefill_mode(scheduler_output, reqs):
@@ -113,7 +118,8 @@ class InputPrep:
                 self.inference_phase = "prefill"
                 return self._prepare_prefill(
                     new_full_prefill_seqs + new_partial_prefill_seqs,
-                    scheduler_output, kv_caches, output_cache)
+                    scheduler_output.num_scheduled_tokens, kv_caches,
+                    output_cache)
             else:
                 self.inference_phase = "chunked_prefill"
                 return self._prepare_chunked_prefill(scheduler_output,
@@ -126,11 +132,10 @@ class InputPrep:
 
     # Modified from https://source.corp.google.com/h/vertex-model-garden/hex-llm/+/main:hex_llm/worker/runner_jax.py;drc=3ed287d21d5f95a053cb5fe3b249373064ac2f23;l=803.
     def _prepare_decode(self, reqs: List[NewRequestData | CachedRequestData],
-                        scheduler_output: SchedulerOutput, kv_caches: KVCaches,
+                        num_scheduled_tokens: Any, kv_caches: KVCaches,
                         output_cache: jax.Array) -> Any:
         if not len(reqs):
             return None
-
         num_seqs = len(reqs)
         block_size = self.cache_config.block_size
         sliding_window = self.model_config.get_sliding_window()
@@ -301,8 +306,8 @@ class InputPrep:
         )
 
     def _prepare_prefill(self, reqs: List[NewRequestData | CachedRequestData],
-                         scheduler_output: SchedulerOutput,
-                         kv_caches: KVCaches, output_cache: jax.Array) -> Any:
+                         num_scheduled_tokens: Any, kv_caches: KVCaches,
+                         output_cache: jax.Array) -> Any:
         if not len(reqs):
             return None
 
@@ -318,9 +323,8 @@ class InputPrep:
         )
 
         # Full prompt length.
-        max_prompt_len = max([
-            scheduler_output.num_scheduled_tokens[req.req_id] for req in reqs
-        ])
+        max_prompt_len = max(
+            [num_scheduled_tokens[req.req_id] for req in reqs])
 
         # Unfilled prompt length.
         # TODO: Fix this for prefix caching.
@@ -376,8 +380,7 @@ class InputPrep:
             num_effective_cached_blocks = 0
             prompt_token_ids = seq.prompt_token_ids[
                 effective_cached_prompt_len:]
-            scheduled_tokens = scheduler_output.num_scheduled_tokens[
-                seq.req_id]
+            scheduled_tokens = num_scheduled_tokens[seq.req_id]
             assert scheduled_tokens <= len(prompt_token_ids)
             prompt_len = scheduled_tokens
             input_ids[i][:prompt_len] = prompt_token_ids[:prompt_len]
