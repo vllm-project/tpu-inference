@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -7,6 +8,7 @@ import torch
 # Required to register custom ops.
 import torch_xla.experimental.custom_kernel  # noqa: F401
 from jax.tree_util import register_pytree_node_class
+from torchax.interop import call_jax
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
@@ -15,14 +17,24 @@ from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.utils import cdiv, next_power_of_2
 
+from tpu_commons.kernels.ragged_kv_cache_update import kv_cache_update
+
 VLLM_TORCHAX_ENABLED = os.environ.get('VLLM_TORCHAX_ENABLED', '0') == '1'
 
 if VLLM_TORCHAX_ENABLED:
     # Register custom op dispatcher.
-    from tpu_commons.models.torchax.torchax_wrapper import \
-        ragged_paged_attention
+    try:
+        from tpu_commons.models.torchax.torchax_wrapper import \
+            ragged_paged_attention
+    except ImportError:
+        from vllm.compilation.torchax_wrapper import ragged_paged_attention
 
 logger = init_logger(__name__)
+
+# TPU requires the head size to be a multiple of 128.
+TPU_HEAD_SIZE_ALIGNMENT = 128
+# Block size used for kv cache updating kernel
+NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK = 8
 
 
 class PallasAttentionBackend(AttentionBackend):
@@ -50,7 +62,9 @@ class PallasAttentionBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> tuple[int, ...]:
-        return (num_blocks, block_size, num_kv_heads * 2, head_size)
+        padded_head_size = cdiv(
+            head_size, TPU_HEAD_SIZE_ALIGNMENT) * TPU_HEAD_SIZE_ALIGNMENT
+        return (num_blocks, block_size, num_kv_heads * 2, padded_head_size)
 
     @staticmethod
     def swap_blocks(
@@ -131,6 +145,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
+        kv_sharing_target_layer_name: Optional[int] = None,
         use_irope: bool = False,
     ) -> None:
         if use_irope:
@@ -146,11 +161,9 @@ class PallasAttentionBackendImpl(AttentionImpl):
         self.num_kv_heads = num_kv_heads
         self.sliding_window = sliding_window
         self.logits_soft_cap = logits_soft_cap
+        self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
-        assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-        if head_size % 128 != 0:
-            raise NotImplementedError("Head size must be a multiple of 128.")
         if alibi_slopes is not None:
             raise NotImplementedError("Alibi slopes is not supported.")
         if kv_cache_dtype != "auto":
@@ -177,6 +190,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: PallasMetadata,
         output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with Pallas attention.
 
@@ -189,6 +203,11 @@ class PallasAttentionBackendImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+        if output_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported"
+                " for PallasAttentionBackendImpl")
+
         # For determine_available_memory case.
         if kv_cache.numel() == 0:
             if output is None:
@@ -198,8 +217,22 @@ class PallasAttentionBackendImpl(AttentionImpl):
         assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
         num_tokens, hidden_size = query.shape
         query = query.view(num_tokens, self.num_heads, self.head_size)
+        key = key.view(-1, self.num_kv_heads, self.head_size)
+        value = value.view(-1, self.num_kv_heads, self.head_size)
+        if self.head_size % TPU_HEAD_SIZE_ALIGNMENT != 0:
+            padded_head_size = cdiv(
+                self.head_size,
+                TPU_HEAD_SIZE_ALIGNMENT) * TPU_HEAD_SIZE_ALIGNMENT
+            query = torch.nn.functional.pad(
+                query, (0, padded_head_size - self.head_size), value=0.0)
+            key = torch.nn.functional.pad(
+                key, (0, padded_head_size - self.head_size), value=0.0)
+            value = torch.nn.functional.pad(
+                value, (0, padded_head_size - self.head_size), value=0.0)
 
-        if kv_cache.numel() > 0:
+        if self.kv_sharing_target_layer_name is None and kv_cache.numel() > 0:
+            # Write input keys and values to the KV cache.
+            # Skip this if sharing KV cache with an earlier attention layer.
             slot_mapping = attn_metadata.slot_mapping
             kv_cache = write_to_kv_cache(key, value, kv_cache, slot_mapping)
             if VLLM_TORCHAX_ENABLED:
@@ -230,29 +263,31 @@ class PallasAttentionBackendImpl(AttentionImpl):
             soft_cap=self.logits_soft_cap,
         )
 
+        if self.head_size % TPU_HEAD_SIZE_ALIGNMENT != 0:
+            output = output[:, :, :self.head_size]
+
         return output.reshape(num_tokens, hidden_size)
 
 
-def write_to_kv_cache(
-    key: torch.Tensor,
-    value: torch.Tensor,
-    kv_cache: torch.Tensor,
-    slot_mapping: torch.Tensor,
-) -> torch.Tensor:
+def write_to_kv_cache(key: torch.Tensor, value: torch.Tensor,
+                      kv_cache: torch.Tensor,
+                      slot_mapping: torch.Tensor) -> torch.Tensor:
     """ Write the key and values to the KV cache.
 
     Args:
         key: shape = [num_tokens, num_kv_heads * head_size]
         value: shape = [num_tokens, num_kv_heads *  head_size]
         kv_cache = [num_blocks, block_size, num_kv_heads * 2, head_size]
+        slot_mapping = [3, padded_num_slices]
 
     """
     num_blocks, block_size, num_combined_kv_heads, head_size = kv_cache.shape
+    head_size = cdiv(head_size,
+                     TPU_HEAD_SIZE_ALIGNMENT) * TPU_HEAD_SIZE_ALIGNMENT
     num_kv_heads = num_combined_kv_heads // 2
 
     key = key.view(-1, num_kv_heads, head_size)
     value = value.view(-1, num_kv_heads, head_size)
-
     kv = torch.cat([key, value], axis=-1).reshape(-1, num_combined_kv_heads,
                                                   head_size)
 
@@ -260,7 +295,13 @@ def write_to_kv_cache(
         torch.ops.xla.dynamo_set_buffer_donor_(kv_cache, True)
 
     kv_cache = kv_cache.reshape(-1, num_combined_kv_heads, head_size)
-    kv_cache = kv_cache.index_copy(0, slot_mapping, kv)
+    kv_cache = call_jax(
+        kv_cache_update,
+        kv,
+        slot_mapping,
+        kv_cache,
+        page_size=block_size,
+        num_slices_per_block=NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK)
     kv_cache = kv_cache.reshape(num_blocks, block_size, num_combined_kv_heads,
                                 head_size)
     return kv_cache

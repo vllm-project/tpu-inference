@@ -7,6 +7,10 @@ import jax.numpy as jnp
 from jax.experimental import shard_map
 from jax.experimental.pallas.ops.tpu.flash_attention import flash_attention
 from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention
+from jax.experimental.pallas.ops.tpu.splash_attention import \
+    splash_attention_kernel as splash
+from jax.experimental.pallas.ops.tpu.splash_attention import \
+    splash_attention_mask as mask_lib
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
@@ -182,3 +186,63 @@ def update_cache(
         cache = cache.at[jnp.arange(K)[..., None], indices, :].set(operand)
         cache = cache.reshape(K, L, S, H)
     return cache
+
+
+@functools.partial(
+    jax.jit, static_argnames=["window_size", "attn_logits_soft_cap", "is_mqa"])
+def apply_splash(q, k, v, window_size, attn_logits_soft_cap,
+                 is_mqa) -> jax.Array:
+    # q: (batch_size, num_heads, seq_len, head_dim)
+    num_heads = q.shape[1]
+    q_seq_len = q.shape[2]
+    kv_seq_len = k.shape[2]
+    assert kv_seq_len >= q_seq_len
+
+    masks = [
+        mask_lib.LocalMask((q_seq_len, kv_seq_len), (window_size, 0),
+                           kv_seq_len - q_seq_len) for _ in range(num_heads)
+    ]
+    mask = mask_lib.MultiHeadMask(tuple((m for m in masks)))
+    block_sizes = splash.BlockSizes.get_default()
+
+    if is_mqa:
+        attn = splash.make_splash_mqa_single_device(
+            mask,
+            block_sizes=block_sizes,
+            attn_logits_soft_cap=attn_logits_soft_cap)
+    else:
+        attn = splash.make_splash_mha_single_device(
+            mask,
+            block_sizes=block_sizes,
+            attn_logits_soft_cap=attn_logits_soft_cap)
+    attn = jax.vmap(attn)
+    outputs = attn(q, k, v, None)
+
+    return outputs
+
+
+def sharded_splash_attention(
+    mesh: Mesh,
+    window_size: Optional[int] = None,
+    attn_logits_soft_cap: Optional[float] = None,
+    is_mqa: bool = False,
+) -> Callable[..., Any]:
+    in_specs = (
+        P("data", "model", None, None),  # q
+        P("data", "model", None, None),  # k
+        P("data", "model", None, None),  # vx
+    )
+    out_specs = P("data", "model", None, None)
+    return jax.jit(
+        shard_map.shard_map(
+            functools.partial(
+                apply_splash,
+                window_size=window_size,
+                attn_logits_soft_cap=attn_logits_soft_cap,
+                is_mqa=is_mqa,
+            ),
+            mesh=mesh,
+            in_specs=in_specs,
+            out_specs=out_specs,
+            check_rep=False,
+        ))

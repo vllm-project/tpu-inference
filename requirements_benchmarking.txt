@@ -3,3 +3,5 @@
 nltk
 evaluate
 datasets
+rouge-score
+scikit-learn

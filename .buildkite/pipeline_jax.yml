@@ -11,8 +11,9 @@ steps:
        queue: tpu_v6e_queue
      commands:
        - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_commons/tests/ragged_paged_attention_test.py
+       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_commons/tests/ragged_kv_cache_update_test.py
 
-   - label: "benchmarking/llama3.1_8b_mmlu.sh"
+   - label: "benchmarking/mmlu.sh"
      key: tpu_test_1
      soft_fail: true
      env:
@@ -20,7 +21,7 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/llama3.1_8b_mmlu.sh
+       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mmlu.sh
 
   # -----------------------------------------------------------------
   # NOTIFICATION STEP

@@ -20,7 +20,7 @@ import jax
         "prefill_query_start_offsets",
         "num_prefill_seqs",
     ],
-    meta_fields=["chunked_prefill_enabled"],
+    meta_fields=["chunked_prefill_enabled", "page_aligned_update"],
 )
 @dataclass
 class AttentionMetadata(object):
@@ -41,3 +41,5 @@ class AttentionMetadata(object):
     prefill_page_indices: jax.Array = None  # [max_num_prefill_seqs, pages_per_sequence]
     prefill_query_start_offsets: jax.Array = None  # [max_num_prefill_seqs + 1]
     num_prefill_seqs: jax.Array = None  # [1]
+
+    page_aligned_update: bool = False

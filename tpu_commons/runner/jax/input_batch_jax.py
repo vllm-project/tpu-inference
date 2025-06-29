@@ -15,7 +15,7 @@ from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
 
-from tpu_commons.runner.block_table_jax import MultiGroupBlockTable
+from tpu_commons.runner.jax.block_table_jax import MultiGroupBlockTable
 
 _SAMPLING_EPS = 1e-5
 

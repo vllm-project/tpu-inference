@@ -7,36 +7,36 @@ from collections import deque
 from concurrent.futures import Future
 from contextlib import ExitStack
 from inspect import isclass, signature
-from logging import DEBUG
 from typing import Any, Callable, Optional, TypeVar, Union
 
+import jax
 import msgspec
 import zmq
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.logger import init_logger
-from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.config import \
     maybe_register_config_serialize_by_value
-from vllm.utils import make_zmq_socket, resolve_obj_by_qualname
+from vllm.utils import make_zmq_socket
+from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (get_kv_cache_config,
                                          unify_kv_cache_configs)
-from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.request import Request, RequestStatus
+from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import EngineHandshakeMetadata, EngineZmqAddresses
 from vllm.version import __version__ as VLLM_VERSION
 
-from tpu_commons.core.jetstream_commons.core.proto import jetstream_pb2
+from tpu_commons.core import disagg_executor
+from tpu_commons.core.jetstream_commons.core import orchestrator
+from tpu_commons.core.tpu_jax_engine import JaxEngine
 
 logger = init_logger(__name__)
 
@@ -67,72 +67,102 @@ class EngineCore:
         self.log_stats = log_stats
 
         # Setup Model.
-        self.model_executor = executor_class(vllm_config)
+        # TODO(fhzhang): create config to setup disagg executors.
+        devices = jax.devices()
+        self.prefill_executor = disagg_executor.DisaggExecutor(vllm_config)
+        self.prefill_executor.init_with_devices(devices[:2])
+
+        self.decode_executor = None
+        if len(devices) == 8:
+            self.decode_executor = disagg_executor.DisaggExecutor(vllm_config)
+            self.decode_executor.init_with_devices(devices[2:4])
+            self.decode_executor.driver_worker.model_runner.input_batch = (
+                self.prefill_executor.driver_worker.model_runner.input_batch)
+            self.decode_executor.driver_worker.model_runner.requests = (
+                self.prefill_executor.driver_worker.model_runner.requests)
+            logger.info("Disaggregated decode executor created.")
+
         if executor_fail_callback is not None:
-            self.model_executor.register_failure_callback(
+            self.prefill_executor.register_failure_callback(
                 executor_fail_callback)
 
+        logger.info("executor created.")
         # Setup KV Caches and update CacheConfig after profiling.
         num_gpu_blocks, num_cpu_blocks, kv_cache_config = \
-            self._initialize_kv_caches(vllm_config)
+            self._initialize_kv_caches(vllm_config, self.prefill_executor)
+        if len(devices) == 8:
+            self._initialize_kv_caches(vllm_config, self.decode_executor)
 
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
 
+        logger.info("KV cache initialized.")
         self.structured_output_manager = StructuredOutputManager(vllm_config)
+        logger.info("structure output manager created.")
 
         # Setup scheduler.
-        if isinstance(vllm_config.scheduler_config.scheduler_cls, str):
-            Scheduler = resolve_obj_by_qualname(
-                vllm_config.scheduler_config.scheduler_cls)
-        else:
-            Scheduler = vllm_config.scheduler_config.scheduler_cls
+        # if isinstance(vllm_config.scheduler_config.scheduler_cls, str):
+        #     Scheduler = resolve_obj_by_qualname(
+        #         vllm_config.scheduler_config.scheduler_cls)
+        # else:
+        #     Scheduler = vllm_config.scheduler_config.scheduler_cls
 
-        # This warning can be removed once the V1 Scheduler interface is
-        # finalized and we can maintain support for scheduler classes that
-        # implement it
-        if Scheduler is not V1Scheduler:
-            logger.warning(
-                "Using configured V1 scheduler class %s. "
-                "This scheduler interface is not public and "
-                "compatibility may not be maintained.",
-                vllm_config.scheduler_config.scheduler_cls)
+        # # This warning can be removed once the V1 Scheduler interface is
+        # # finalized and we can maintain support for scheduler classes that
+        # # implement it
+        # if Scheduler is not V1Scheduler:
+        #     logger.warning(
+        #         "Using configured V1 scheduler class %s. "
+        #         "This scheduler interface is not public and "
+        #         "compatibility may not be maintained.",
+        #         vllm_config.scheduler_config.scheduler_cls)
 
-        self.scheduler: SchedulerInterface = Scheduler(
-            vllm_config=vllm_config,
+        # self.scheduler: SchedulerInterface = Scheduler(
+        #     vllm_config=vllm_config,
+        #     kv_cache_config=kv_cache_config,
+        #     structured_output_manager=self.structured_output_manager,
+        #     include_finished_set=vllm_config.parallel_config.data_parallel_size
+        #     > 1,
+        #     log_stats=self.log_stats,
+        # )
+        self.kv_cache_manager = KVCacheManager(
             kv_cache_config=kv_cache_config,
-            structured_output_manager=self.structured_output_manager,
-            include_finished_set=vllm_config.parallel_config.data_parallel_size
-            > 1,
-            log_stats=self.log_stats,
+            max_model_len=vllm_config.scheduler_config.max_model_len,
+            enable_caching=False,
         )
-
+        logger.info("kv cache manager created.")
         # Setup MM Input Mapper.
         self.mm_input_cache_server = MirroredProcessingCache(
             vllm_config.model_config)
+        logger.info("mirrored processing cache created.")
 
         # Setup batch queue for pipeline parallelism.
         # Batch queue for scheduled batches. This enables us to asynchronously
         # schedule and execute batches, and is required by pipeline parallelism
         # to eliminate pipeline bubbles.
-        self.batch_queue_size = self.model_executor.max_concurrent_batches
+        self.batch_queue_size = self.prefill_executor.max_concurrent_batches
         self.batch_queue: Optional[queue.Queue[tuple[Future[ModelRunnerOutput],
                                                      SchedulerOutput]]] = None
         if self.batch_queue_size > 1:
             logger.info("Batch queue is enabled with size %d",
                         self.batch_queue_size)
             self.batch_queue = queue.Queue(self.batch_queue_size)
+        logger.warning("set up jetstream driver")
+        self.orchestrator = self._setup_driver(vllm_config,
+                                               self.kv_cache_manager,
+                                               interleaved_mode=False)
+        logger.warning("starting jetstream orchestrator")
 
-    def _initialize_kv_caches(
-            self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
+    def _initialize_kv_caches(self, vllm_config: VllmConfig,
+                              executor) -> tuple[int, int, KVCacheConfig]:
         start = time.time()
 
         # Get all kv cache needed by the model
-        kv_cache_specs = self.model_executor.get_kv_cache_specs()
+        kv_cache_specs = executor.get_kv_cache_specs()
 
         # Profiles the peak memory usage of the model to determine how much
         # memory can be allocated for kv cache.
-        available_gpu_memory = self.model_executor.determine_available_memory()
+        available_gpu_memory = executor.determine_available_memory()
 
         assert len(kv_cache_specs) == len(available_gpu_memory)
         # Get the kv cache tensor size
@@ -159,145 +189,166 @@ class EngineCore:
         scheduler_kv_cache_config = kv_cache_configs[0]
 
         # Initialize kv cache and warmup the execution
-        self.model_executor.initialize_from_config(kv_cache_configs)
+        executor.initialize_from_config(kv_cache_configs)
 
         elapsed = time.time() - start
         logger.info(("init engine (profile, create kv cache, "
                      "warmup model) took %.2f seconds"), elapsed)
         return num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config
 
+    def _setup_driver(self,
+                      vllm_config,
+                      kv_cache_manager,
+                      interleaved_mode=True):
+        prefill_engine = JaxEngine(vllm_config, kv_cache_manager,
+                                   self.prefill_executor)
+        # Create a generate engine with a different set of weights
+        # so that we can test that the right one is in use at a given time.
+        generate_engine = JaxEngine(
+            vllm_config, kv_cache_manager, self.decode_executor
+            if self.decode_executor else self.prefill_executor)
+        driver = orchestrator.Driver(
+            vllm_config=vllm_config,
+            prefill_engines=[prefill_engine],
+            generate_engines=[generate_engine],
+            interleaved_mode=interleaved_mode,
+        )
+        return driver
+
     def add_request(self, request: EngineCoreRequest):
         """Add request to the scheduler."""
-        logger.info("Request %s", request)
-        if request.mm_hashes is not None:
-            # Here, if hash exists for a multimodal input, then it will be
-            # fetched from the cache, else it will be added to the cache.
-            # Note that the cache here is mirrored with the client cache, so
-            # anything that has a hash must have a HIT cache entry here
-            # as well.
-            assert request.mm_inputs is not None
-            request.mm_inputs = self.mm_input_cache_server.get_and_update_p1(
-                request.mm_inputs, request.mm_hashes)
 
         req = Request.from_engine_core_request(request)
         if req.use_structured_output:
             # Start grammar compilation asynchronously
             self.structured_output_manager.grammar_init(req)
 
-        if req.kv_transfer_params is not None and (
-                not self.scheduler.get_kv_connector()):
-            logger.warning("Got kv_transfer_params, but no KVConnector found. "
-                           "Disabling KVTransfer for this request.")
-        self.scheduler.add_request(req)
+        # if req.kv_transfer_params is not None and (
+        #         not self.scheduler.get_kv_connector()):
+        #     logger.warning("Got kv_transfer_params, but no KVConnector found. "
+        #                    "Disabling KVTransfer for this request.")
+        # self.scheduler.add_request(req)
+        # self.model_executor.driver_worker.model_runner
+        # jetstream_request = jetstream_pb2.DecodeRequest(
+        #     token_content=jetstream_pb2.DecodeRequest.TokenContent(
+        #         token_ids=req.prompt_token_ids),
+        #     max_tokens=self.vllm_config.model_config.max_model_len,
+        # )
+        self.orchestrator.place_request_on_prefill_queue(req)
+        logger.warning("added req %s to jetstream orchestrator.",
+                       req.request_id)
 
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
-
+        pass
         # TODO: The scheduler doesn't really need to know the
         # specific finish reason, TBD whether we propagate that
         # (i.e. client-aborted vs stop criteria met).
-        self.scheduler.finish_requests(request_ids,
-                                       RequestStatus.FINISHED_ABORTED)
+        # self.scheduler.finish_requests(request_ids,
+        #                                RequestStatus.FINISHED_ABORTED)
 
-    def execute_model(self, scheduler_output: SchedulerOutput):
-        try:
-            return self.model_executor.execute_model(scheduler_output)
-        except BaseException as err:
-            # NOTE: This method is exception-free
-            dump_engine_exception(self.vllm_config, scheduler_output,
-                                  self.scheduler.make_stats())
-            # Re-raise exception
-            raise err
+    # def execute_model(self, scheduler_output: SchedulerOutput):
+    #     try:
+    #         return self.model_executor.execute_model(scheduler_output)
+    #     except BaseException as err:
+    #         # NOTE: This method is exception-free
+    #         dump_engine_exception(self.vllm_config, scheduler_output,
+    #                               self.scheduler.make_stats())
+    #         # Re-raise exception
+    #         raise err
 
-    def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
-        """Schedule, execute, and make output.
+    # def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
+    #     """Schedule, execute, and make output.
 
-        Returns tuple of outputs and a flag indicating whether the model
-        was executed.
-        """
+    #     Returns tuple of outputs and a flag indicating whether the model
+    #     was executed.
+    #     """
 
-        # Check for any requests remaining in the scheduler - unfinished,
-        # or finished and not yet removed from the batch.
-        if not self.scheduler.has_requests():
-            return {}, False
-        scheduler_output = self.scheduler.schedule()
-        scheduler_dict = scheduler_output.__dict__
-        for k in scheduler_dict:
-            logger.warning("Scheduler %s: %s", k, scheduler_dict[k])
-        model_output = self.execute_model(scheduler_output)
+    #     # Check for any requests remaining in the scheduler - unfinished,
+    #     # or finished and not yet removed from the batch.
+    #     if not self.scheduler.has_requests():
+    #         return {}, False
+    #     scheduler_output = self.scheduler.schedule()
+    #     scheduler_dict = scheduler_output.__dict__
+    #     for k in scheduler_dict:
+    #         logger.warning("Scheduler %s: %s", k, scheduler_dict[k])
+    #     model_output = self.execute_model(scheduler_output)
 
-        def is_pure_decode(s):
-            return s.total_num_scheduled_tokens == len(s.num_scheduled_tokens)
+    # def is_pure_decode(s):
+    #     return s.total_num_scheduled_tokens == len(s.num_scheduled_tokens)
 
-        logger.warning("is_pure_decode %s", is_pure_decode(scheduler_output))
-        # prefill request, possibly multiple prompts
-        if not is_pure_decode(scheduler_output):
-            for request_id in scheduler_output.num_scheduled_tokens:
-                req = self.scheduler.requests[request_id]
-                jetstream_request = jetstream_pb2.DecodeRequest(
-                    token_content=jetstream_pb2.DecodeRequest.TokenContent(
-                        token_ids=req.prompt_token_ids),
-                    max_tokens=1024,
-                )
-                logger.warning("Converted request %s to jetstream request",
-                               request_id)
-                self.orchestrator._prefill_mode = True
-                self.orchestrator.Decode(jetstream_request)
-        # decode
-        else:
-            self.orchestrator._prefill_mode = False
+    # logger.warning("is_pure_decode %s", is_pure_decode(scheduler_output))
+    # # prefill request, possibly multiple prompts
+    # if not is_pure_decode(scheduler_output):
+    #     for request_id in scheduler_output.num_scheduled_tokens:
+    #         req = self.scheduler.requests[request_id]
+    #         jetstream_request = jetstream_pb2.DecodeRequest(
+    #             token_content=jetstream_pb2.DecodeRequest.TokenContent(
+    #                 token_ids=req.prompt_token_ids),
+    #             max_tokens=1024,
+    #         )
+    #         logger.warning("Converted request %s to jetstream request",
+    #                        request_id)
+    #         self.orchestrator._prefill_mode = True
+    #         self.orchestrator.Decode(jetstream_request)
+    # # decode
+    # else:
+    #     self.orchestrator._prefill_mode = False
 
-        engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, model_output)  # type: ignore
+    # engine_core_outputs = self.scheduler.update_from_output(
+    #     scheduler_output, model_output)  # type: ignore
 
-        return (engine_core_outputs,
-                scheduler_output.total_num_scheduled_tokens > 0)
+    # return (engine_core_outputs,
+    #         scheduler_output.total_num_scheduled_tokens > 0)
 
     def shutdown(self):
-        self.structured_output_manager.clear_backend()
-        if self.model_executor:
-            self.model_executor.shutdown()
-        if self.scheduler:
-            self.scheduler.shutdown()
-
-    def profile(self, is_start: bool = True):
-        self.model_executor.profile(is_start)
+        self.orchestrator.stop()
+        # self.structured_output_manager.clear_backend()
+        if self.prefill_executor:
+            self.prefill_executor.shutdown()
+        if self.decode_executor:
+            self.decode_executor.shutdown()
+        # if self.scheduler:
+        #     self.scheduler.shutdown()
 
     def reset_mm_cache(self):
         # NOTE: Since this is mainly for debugging, we don't attempt to
         # re-sync the internal caches (P0 processor, P0 mirror, P1 mirror)
-        if self.scheduler.has_unfinished_requests():
-            logger.warning("Resetting the multi-modal cache when requests are "
-                           "in progress may lead to desynced internal caches.")
+        # if self.scheduler.has_unfinished_requests():
+        #     logger.warning("Resetting the multi-modal cache when requests are "
+        #                    "in progress may lead to desynced internal caches.")
 
         self.mm_input_cache_server.reset()
+
+    def profile(self, is_start: bool = True):
+        self.prefill_executor.profile(is_start)
 
     def reset_prefix_cache(self):
         self.scheduler.reset_prefix_cache()
 
     def sleep(self, level: int = 1):
-        self.model_executor.sleep(level)
+        self.prefill_executor.sleep(level)
 
     def wake_up(self, tags: Optional[list[str]] = None):
-        self.model_executor.wake_up(tags)
+        self.prefill_executor.wake_up(tags)
 
     def is_sleeping(self) -> bool:
-        return self.model_executor.is_sleeping
+        return self.prefill_executor.is_sleeping
 
     def execute_dummy_batch(self):
-        self.model_executor.collective_rpc("execute_dummy_batch")
+        self.prefill_executor.collective_rpc("execute_dummy_batch")
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
-        return self.model_executor.add_lora(lora_request)
+        return self.prefill_executor.add_lora(lora_request)
 
     def remove_lora(self, lora_id: int) -> bool:
-        return self.model_executor.remove_lora(lora_id)
+        return self.prefill_executor.remove_lora(lora_id)
 
     def list_loras(self) -> set[int]:
-        return self.model_executor.list_loras()
+        return self.prefill_executor.list_loras()
 
     def pin_lora(self, lora_id: int) -> bool:
-        return self.model_executor.pin_lora(lora_id)
+        return self.prefill_executor.pin_lora(lora_id)
 
     def save_sharded_state(
         self,
@@ -305,23 +356,23 @@ class EngineCore:
         pattern: Optional[str] = None,
         max_size: Optional[int] = None,
     ) -> None:
-        self.model_executor.save_sharded_state(path=path,
-                                               pattern=pattern,
-                                               max_size=max_size)
+        self.prefill_executor.save_sharded_state(path=path,
+                                                 pattern=pattern,
+                                                 max_size=max_size)
 
     def collective_rpc(self,
                        method: Union[str, Callable[..., _R]],
                        timeout: Optional[float] = None,
                        args: tuple = (),
                        kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
-        return self.model_executor.collective_rpc(method, timeout, args,
-                                                  kwargs)
+        return self.prefill_executor.collective_rpc(method, timeout, args,
+                                                    kwargs)
 
     def save_tensorized_model(
         self,
         tensorizer_config,
     ) -> None:
-        self.model_executor.save_tensorized_model(
+        self.prefill_executor.save_tensorized_model(
             tensorizer_config=tensorizer_config, )
 
 
@@ -372,8 +423,8 @@ class EngineCoreProc(EngineCore):
                              executor_fail_callback)
 
             self.engine_index = engine_index
-            self.step_fn = (self.step if self.batch_queue is None else
-                            self.step_with_batch_queue)
+            # self.step_fn = (self.step if self.batch_queue is None else
+            #                 self.step_with_batch_queue)
             self.engines_running = False
             self.last_counts = (0, 0)
 
@@ -462,7 +513,6 @@ class EngineCoreProc(EngineCore):
         engine_core: Optional[EngineCoreProc] = None
         try:
             engine_core = EngineCoreProc(*args, **kwargs)
-
             engine_core.run_busy_loop()
 
         except SystemExit:
@@ -484,51 +534,23 @@ class EngineCoreProc(EngineCore):
 
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
-        from tpu_commons.core.jetstream_commons.core import orchestrator
-        from tpu_commons.core.jetstream_commons.engine import mock_engine
-
-        def _setup_driver(self,
-                          interleaved_mode: bool = True,
-                          multi_sampling: bool = False):
-            prefill_engine = mock_engine.TestEngine(batch_size=32,
-                                                    cache_length=1024,
-                                                    weight=2.0)
-            # Create a generate engine with a different set of weights
-            # so that we can test that the right one is in use at a given time.
-            generate_engine = mock_engine.TestEngine(batch_size=4,
-                                                     cache_length=1024,
-                                                     weight=4.0)
-            driver = orchestrator.Driver(
-                prefill_engines=[prefill_engine],
-                generate_engines=[generate_engine],
-                prefill_params=[prefill_engine.load_params()],
-                generate_params=[generate_engine.load_params()],
-                interleaved_mode=interleaved_mode,
-                multi_sampling=multi_sampling,
-            )
-            return driver
-
-        driver = _setup_driver(True)
-        client = orchestrator.LLMOrchestrator(driver=driver)
-        self.orchestrator = client
-        logger.info("starting jetstream orchestrator")
         # Loop until process is sent a SIGINT or SIGTERM
         while True:
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
-            # 2) Step the engine core and return the outputs.
-            self._process_engine_step()
+            # 2) return the outputs.
+            self._process_output_queue()
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
 
         waited = False
-        while not self.engines_running and not self.scheduler.has_requests():
-            if logger.isEnabledFor(DEBUG) and self.input_queue.empty():
-                logger.debug("EngineCore waiting for work.")
-                waited = True
-            req = self.input_queue.get()
-            self._handle_client_request(*req)
+        # while True:
+        #     if logger.isEnabledFor(DEBUG) and self.input_queue.empty():
+        #         logger.debug("EngineCore waiting for work.")
+        #         waited = True
+        #     req = self.input_queue.get()
+        #     self._handle_client_request(*req)
 
         if waited:
             logger.debug("EngineCore loop active.")
@@ -538,16 +560,19 @@ class EngineCoreProc(EngineCore):
             req = self.input_queue.get_nowait()
             self._handle_client_request(*req)
 
-    def _process_engine_step(self) -> bool:
+    def _process_output_queue(self):
         """Called only when there are unfinished local requests."""
-
         # Step the engine core.
-        outputs, model_executed = self.step_fn()
+        for my_vllm_output_backlog in self.orchestrator._vllm_output_backlogs:
+            while my_vllm_output_backlog.qsize() > 0:
+                outputs = my_vllm_output_backlog.get(block=False)
+                # logger.info("Got output %s from orchestrator vllm output queue", output)
+                for output in (outputs.items() if outputs else ()):
+                    self.output_queue.put_nowait(output)
         # Put EngineCoreOutputs into the output queue.
-        for output in (outputs.items() if outputs else ()):
-            self.output_queue.put_nowait(output)
-
-        return model_executed
+        # for output in (outputs.items() if outputs else ()):
+        #     self.output_queue.put_nowait(output)
+        # return model_executed
 
     def _handle_client_request(self, request_type: EngineCoreRequestType,
                                request: Any) -> None:
@@ -698,6 +723,7 @@ class EngineCoreProc(EngineCore):
                 assert not isinstance(output, bytes)
                 client_index, outputs = output
                 outputs.engine_index = engine_index
+                outputs.scheduler_stats = {}
 
                 if client_index == -1:
                     # Don't reuse buffer for coordinator message

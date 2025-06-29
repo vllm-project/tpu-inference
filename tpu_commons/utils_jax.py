@@ -4,6 +4,8 @@ from typing import Any, List, Tuple
 import jax
 from ray._private.accelerators import TPUAcceleratorManager
 
+from tpu_commons.core.jetstream_commons.engine import PATHWAYS_ENABLED
+
 GBYTES = 1024 * 1024 * 1024
 
 _megacore = False
@@ -43,9 +45,16 @@ def get_num_kv_heads_by_tp(num_kv_heads: int, tp_size: int) -> int:
 def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
     usage = []
     for device in devices:
-        hbm_used = device.memory_stats()["bytes_in_use"]
-        hbm_limit = device.memory_stats()["bytes_limit"]
-        usage.append((hbm_used, hbm_limit))
+        if PATHWAYS_ENABLED:
+            # The Pathways backend doesn't support memory_stats().
+            # TODO(fhzhang): find the proper way to support this.
+            usage.append((32384, 33550237184))
+        else:
+            hbm_used = device.memory_stats()["bytes_in_use"]
+            hbm_limit = device.memory_stats()["bytes_limit"]
+            print(hbm_used, hbm_limit)
+            usage.append((hbm_used, hbm_limit))
+
     return usage
 
 

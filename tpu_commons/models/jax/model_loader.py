@@ -15,18 +15,22 @@ def _get_model_architecture(config: PretrainedConfig) -> nn.Module:
     # NOTE: Use inline imports here, otherwise the normal imports
     # would cause JAX init failure when using multi hosts with Ray.
 
+    _MODEL_REGISTRY = {}
     impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
+
     if impl == "flax_nn":
         from tpu_commons.models.jax.llama_nn import LlamaForCausalLM
+        _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
     elif impl == "flax_nnx":
         from tpu_commons.models.jax.llama import LlamaForCausalLM
+        _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
+        from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
+        _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
+        if os.getenv("NEW_MODEL_DESIGN", False):
+            from tpu_commons.models.jax.recipes.llama4 import Llama4Scout
+            _MODEL_REGISTRY["Llama4Scout"] = Llama4Scout
     else:
         raise NotImplementedError("Unsupported MODEL_IMPL_TYPE")
-
-    _MODEL_REGISTRY = {
-        "LlamaForCausalLM": LlamaForCausalLM,
-        # "Qwen2ForCausalLM": Qwen2ForCausalLM,
-    }
 
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
@@ -79,22 +83,45 @@ def get_nnx_model(
 ):
     model_class = _get_model_architecture(vllm_config.model_config.hf_config)
 
-    @nnx.jit
-    def create_sharded_model():
-        model = model_class(vllm_config, rng, mesh)
-        state = nnx.state(model)
-        pspecs = nnx.get_partition_spec(state)
-        sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
-        nnx.update(model, sharded_state)
-        return model
+    if os.getenv("JAX_RANDOM_WEIGHTS", False):
+        # Create a sharded model with random inited weights.
+        @nnx.jit
+        def create_sharded_model():
+            model = model_class(vllm_config, rng, mesh)
+            state = nnx.state(model)
+            pspecs = nnx.get_partition_spec(state)
+            sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
+            nnx.update(model, sharded_state)
+            return model
 
-    # Create the model instance with inited sharded weights
-    # TODO(xiang): create abstract model without weights allocated
-    # https://flax.readthedocs.io/en/latest/guides/surgery.html#creating-an-abstract-model-or-state-without-memory-allocation
-    with mesh:
-        jit_model = create_sharded_model()
+        with mesh:
+            jit_model = create_sharded_model()
+    else:
+        # We first create an abstract model without allocating any weights,
+        # then fill in its weigths during load_weights from HF.
+        # This shows 3 advantages than the normal way:
+        # 1. The model weights will only be allocated once. Otherwise the normal way
+        #    will random-init the model weights first, then load the real weights.
+        #    The two pass weights allocation causes model loading slow.
+        # 2. The model loading won't be OOM. Otherwise the normal way will hold
+        #    a full model weights after random-init, then duplicate a layer during
+        #    the load_weights. This would be easy to OOM if the layer is super large.
+        # 3. The model architecture definition won't need to worry about the sharding.
+        #    The sharding definition is taken over by the load_weights instead.
+        model = nnx.eval_shape(lambda: model_class(vllm_config, rng, mesh))
+        model.load_weights(rng)
 
-    jit_model.load_weights()
+        # Although the created model can already work, we still need to jit
+        # the model creation again, otherwise the model forward will have
+        # non-trivial overhead in PjitFunction.
+        @nnx.jit(donate_argnums=(0, ))
+        def create_jit_model(model):
+            state = nnx.state(model)
+            nnx.update(model, state)
+            return model
+
+        with mesh:
+            jit_model = create_jit_model(model)
 
     kv_cache_sharding = NamedSharding(mesh, PartitionSpec("model"))
     outputs_sharding = NamedSharding(mesh, PartitionSpec(None))
@@ -118,11 +145,7 @@ def get_nnx_model(
         model = nnx.merge(graphdef, state)
         return model(*args)
 
-    def model_fn(graphdef, state, *args):
-        with mesh:
-            return run_model(graphdef, state, *args)
-
-    model_fn = functools.partial(model_fn, graphdef, state)
+    model_fn = functools.partial(run_model, graphdef, state)
     return model_fn
 
 

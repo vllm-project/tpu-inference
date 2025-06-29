@@ -31,7 +31,6 @@ class Qwen2MLP(nnx.Module):
             intermediate_size,
             use_bias=False,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
             rngs=rng,
         )
         self.up_proj = nnx.Linear(
@@ -39,7 +38,6 @@ class Qwen2MLP(nnx.Module):
             intermediate_size,
             use_bias=False,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
             rngs=rng,
         )
         self.down_proj = nnx.Linear(
@@ -47,7 +45,6 @@ class Qwen2MLP(nnx.Module):
             hidden_size,
             use_bias=False,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
         )
         self.act_fn = modeling_flax_utils.ACT2FN[act]
@@ -78,8 +75,6 @@ class Qwen2Attention(nnx.Module):
             (self.num_heads, self.hidden_size, self.head_dim),
             (self.num_heads, self.head_dim),  # bias shape [N, H]
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
-            bias_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
         )
         self.k_proj = nnx.Einsum(
@@ -87,8 +82,6 @@ class Qwen2Attention(nnx.Module):
             (self.num_kv_heads, self.hidden_size, self.head_dim),
             (self.num_kv_heads, self.head_dim),  # bias shape [K, H])
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
-            bias_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
         )
         self.v_proj = nnx.Einsum(
@@ -96,15 +89,12 @@ class Qwen2Attention(nnx.Module):
             (self.num_kv_heads, self.hidden_size, self.head_dim),
             (self.num_kv_heads, self.head_dim),  # bias shape [K, H])
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
-            bias_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
         )
         self.o_proj = nnx.Einsum(
             "BNTH,NHD->BTD",
             (self.num_heads, self.head_dim, self.hidden_size),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
             rngs=rng,
         )
 
@@ -160,7 +150,6 @@ class Qwen2DecoderLayer(nnx.Module):
             hidden_size,
             epsilon=rms_norm_eps,
             param_dtype=dtype,
-            scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
         )
         self.self_attn = Qwen2Attention(config=config,
@@ -171,7 +160,6 @@ class Qwen2DecoderLayer(nnx.Module):
             hidden_size,
             epsilon=rms_norm_eps,
             param_dtype=dtype,
-            scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
         )
         self.mlp = Qwen2MLP(
@@ -229,7 +217,6 @@ class Qwen2Model(nnx.Module):
             hidden_size,
             epsilon=rms_norm_eps,
             param_dtype=dtype,
-            scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
         )
 
@@ -255,7 +242,7 @@ class Qwen2Model(nnx.Module):
 
 class Qwen2ForCausalLM(nnx.Module):
 
-    def __init__(self, vllm_config: VllmConfig, rng: jax.Array,
+    def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,
                  mesh: Mesh) -> None:
         model_config = vllm_config.model_config
         vocab_size = model_config.get_vocab_size()
@@ -263,14 +250,13 @@ class Qwen2ForCausalLM(nnx.Module):
         dtype = model_config.dtype
 
         self.vllm_config = vllm_config
-        self.rng = nnx.Rngs(rng)
+        self.rng = nnx.Rngs(rng_key)
         self.mesh = mesh
 
         self.embed = nnx.Embed(
             num_embeddings=vocab_size,
             features=hidden_size,
             param_dtype=dtype,
-            embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=self.rng,
         )
         self.model = Qwen2Model(
@@ -284,9 +270,7 @@ class Qwen2ForCausalLM(nnx.Module):
             self.lm_head = self.embed.embedding
         else:
             self.lm_head = nnx.Param(
-                init_fn(self.rng.params(), (hidden_size, vocab_size), dtype),
-                sharding=(None, "model"),
-            )
+                init_fn(self.rng.params(), (hidden_size, vocab_size), dtype), )
 
     def __call__(
         self,
@@ -330,41 +314,48 @@ class Qwen2ForCausalLM(nnx.Module):
             top_ks,
             attention_metadata.chunked_prefill_enabled,
         )
-        return kv_caches, next_tokens, logits
+        return kv_caches, next_tokens, None
 
-    def load_weights(self):
+    def load_weights(self, rng_key: jax.Array):
+        # NOTE: Since we are using nnx.eval_shape to init the model,
+        # we have to pass dynamic arrays here for __call__'s usage.
+        self.rng = nnx.Rngs(rng_key)
+
         mappings = {
-            "model.embed_tokens": "embed.embedding",
+            "model.embed_tokens": ("embed.embedding", ("model", None)),
             "model.layers.*.input_layernorm":
-            "model.layers.*.input_layernorm.scale",
+            ("model.layers.*.input_layernorm.scale", (None, )),
             "model.layers.*.mlp.down_proj":
-            "model.layers.*.mlp.down_proj.kernel",
+            ("model.layers.*.mlp.down_proj.kernel", ("model", None)),
             "model.layers.*.mlp.gate_proj":
-            "model.layers.*.mlp.gate_proj.kernel",
-            "model.layers.*.mlp.up_proj": "model.layers.*.mlp.up_proj.kernel",
+            ("model.layers.*.mlp.gate_proj.kernel", (None, "model")),
+            "model.layers.*.mlp.up_proj": ("model.layers.*.mlp.up_proj.kernel",
+                                           (None, "model")),
             "model.layers.*.post_attention_layernorm":
-            "model.layers.*.post_attention_layernorm.scale",
+            ("model.layers.*.post_attention_layernorm.scale", (None, )),
             "model.layers.*.self_attn.k_proj":
-            "model.layers.*.self_attn.k_proj.kernel",
+            ("model.layers.*.self_attn.k_proj.kernel", ("model", None, None)),
             "model.layers.*.self_attn.o_proj":
-            "model.layers.*.self_attn.o_proj.kernel",
+            ("model.layers.*.self_attn.o_proj.kernel", ("model", None, None)),
             "model.layers.*.self_attn.q_proj":
-            "model.layers.*.self_attn.q_proj.kernel",
+            ("model.layers.*.self_attn.q_proj.kernel", ("model", None, None)),
             "model.layers.*.self_attn.v_proj":
-            "model.layers.*.self_attn.v_proj.kernel",
+            ("model.layers.*.self_attn.v_proj.kernel", ("model", None, None)),
             "model.layers.*.self_attn.q_proj.bias":
-            "model.layers.*.self_attn.q_proj.bias",
+            ("model.layers.*.self_attn.q_proj.bias", ("model", None)),
             "model.layers.*.self_attn.k_proj.bias":
-            "model.layers.*.self_attn.k_proj.bias",
+            ("model.layers.*.self_attn.k_proj.bias", ("model", None)),
             "model.layers.*.self_attn.v_proj.bias":
-            "model.layers.*.self_attn.v_proj.bias",
-            "model.norm": "model.norm.scale",
+            ("model.layers.*.self_attn.v_proj.bias", ("model", None)),
+            "model.norm": ("model.norm.scale", (None, )),
         }
 
         # Add lm_head mapping only if it's not tied to embeddings
         hf_config = self.vllm_config.model_config.hf_config
         if not hf_config.tie_word_embeddings:
-            mappings["lm_head"] = "lm_head"
+            mappings.update({
+                "lm_head": ("lm_head", (None, "model")),
+            })
 
         load_hf_weights(vllm_config=self.vllm_config,
                         model=self,

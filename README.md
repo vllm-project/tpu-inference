@@ -7,7 +7,7 @@ Follow this [guide](https://docs.vllm.ai/en/latest/getting_started/installation/
 **NOTE**: Right after `git clone` vLLM repo and before running any `pip install` commands, run the following command to pin the version:
 
 ```
-git checkout 12575cfa7aa176e017735dd2883513b12be54c32
+git checkout 3c545c0c3b98ee642373a308197d750d0e449403
 ```
 
 ### Install `tpu_commons`:
@@ -41,8 +41,7 @@ python tpu_commons/examples/offline_inference.py \
     --model=meta-llama/Llama-3.1-8B \
     --tensor_parallel_size=4 \
     --task=generate \
-    --max_model_len=1024 \
-    --max_num_seqs=1
+    --max_model_len=1024
 ```
 
 ### Run vLLM Pytorch models on the JAX path
@@ -56,8 +55,7 @@ python tpu_commons/examples/offline_inference.py \
     --model=meta-llama/Llama-3.1-8B \
     --tensor_parallel_size=4 \
     --task=generate \
-    --max_model_len=1024 \
-    --max_num_seqs=1
+    --max_model_len=1024
 ```
 
 Run the vLLM Pytorch `Qwen3-30B-A3B` MoE model, use `--enable-expert-parallel` for expert parallelism, otherwise it defaults to tensor parallelism:
@@ -70,7 +68,6 @@ python vllm/examples/offline_inference/basic/generate.py \
     --tensor_parallel_size=4 \
     --task=generate \
     --max_model_len=1024 \
-    --max_num_seqs=1 \
     --enable-expert-parallel
 ```
 
@@ -96,6 +93,12 @@ To enable profiling:
 
 ```
 VLLM_TORCH_PROFILER_DIR=$PWD
+```
+
+To run JAX path without loading real model weights:
+
+```
+JAX_RANDOM_WEIGHTS=1
 ```
 
 To enable experimental scheduler:
@@ -139,7 +142,6 @@ docker run \
   --tensor_parallel_size=4 \
   --task=generate \
   --max_model_len=1024 \
-  --max_num_seqs=1
 ```
 
 ## Torchax Guide

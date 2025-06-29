@@ -9,10 +9,10 @@ from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.layers.attention import (sharded_flash_attention,
                                                      sharded_paged_attention,
                                                      update_cache)
-from tpu_commons.models.jax.layers.chunked_prefill_attention import \
-    sharded_chunked_prefill_attention
+from tpu_commons.models.jax.layers.chunked_prefill_attention import (
+    sharded_chunked_prefill_attention, sharded_chunked_prefill_update_cache)
 from tpu_commons.models.jax.layers.quantized_kvcache import (
-    chunked_prefill_update_cache_quantized, update_cache_quantized)
+    chunked_prefill_update_cache_quantized, dequantize, update_cache_quantized)
 
 KVCache = Tuple[jax.Array, jax.Array]
 QuantizedKVCache = Tuple[Tuple[jax.Array, jax.Array], Tuple[jax.Array,
@@ -47,34 +47,83 @@ def attention(
     md = attention_metadata
     new_kv_cache = None
     if md.chunked_prefill_enabled:
-        # (K, L, S, H)
-        # k_cache, v_cache = kv_cache
-        # k_cache = sharded_chunked_prefill_update_cache(mesh)(
-        #     k_cache, md.kv_cache_write_indices, k, md.num_decode_seqs)
-        # v_cache = sharded_chunked_prefill_update_cache(mesh)(
-        #     v_cache, md.kv_cache_write_indices, v, md.num_decode_seqs)
+        if attention_metadata.page_aligned_update:
+            # The e2e performance improvement of this was ~5% back in 2024/03 per gxd@. This might have changed now.
+            # k_cache = sharded_chunked_prefill_update_cache(mesh)(
+            #     k_cache, md.kv_cache_write_indices, k, md.num_decode_seqs)
+            # v_cache = sharded_chunked_prefill_update_cache(mesh)(
+            #     v_cache, md.kv_cache_write_indices, v, md.num_decode_seqs)
+            if is_quantized:
+                (k_quant_data, k_scales), (v_quant_data, v_scales) = kv_cache
+                quant_dtype = k_quant_data.dtype
+                k_quant_data, k_scales = chunked_prefill_update_cache_quantized(
+                    k_quant_data, k_scales, quant_dtype,
+                    md.kv_cache_write_indices, k, md.num_decode_seqs)
+                v_quant_data, v_scales = chunked_prefill_update_cache_quantized(
+                    v_quant_data, v_scales, quant_dtype,
+                    md.kv_cache_write_indices, v, md.num_decode_seqs)
+                # TODO
+                # k_cache = quantization_utils.QuantizedTensor(
+                #     k_quant_data, k_scales)
+                # v_cache = quantization_utils.QuantizedTensor(
+                #     v_quant_data, v_scales)
+                new_kv_cache = ((k_quant_data, k_scales), (v_quant_data,
+                                                           v_scales))
+                k_cache = dequantize(k_quant_data, quant_dtype, k_scales,
+                                     jnp.bfloat16)
+                v_cache = dequantize(v_quant_data, quant_dtype, v_scales,
+                                     jnp.bfloat16)
+            else:
+                k_cache = sharded_chunked_prefill_update_cache(mesh)(
+                    k_cache, md.kv_cache_write_indices, k, md.num_decode_seqs)
+                v_cache = sharded_chunked_prefill_update_cache(mesh)(
+                    v_cache, md.kv_cache_write_indices, v, md.num_decode_seqs)
+        else:
+            # TODO(pooyam): Try the following ideas to optimize this.
+            # Idea 1: use lax loop similar to to chunked_prefill_update_cache above.
+            # Idea 2: Convert a prefill of size m*PAGE_SIZE + n, to a prefill of size m*PAGE_SIZE AND n decodes (But in fact they are all the same seq.)
+            # This will however make the code much more complicated.
+            k = k.swapaxes(0, 2)
+            v = v.swapaxes(0, 2)
+            if is_quantized:
+                (k_quant_data, k_scales), (v_quant_data, v_scales) = kv_cache
+                quant_dtype = k_quant_data.dtype
+                k_quant_data, k_scales = update_cache_quantized(
+                    False,
+                    k_quant_data,
+                    k_scales,
+                    quant_dtype,
+                    md.kv_cache_write_indices,
+                    k,
+                )
+                v_quant_data, v_scales = update_cache_quantized(
+                    False,
+                    v_quant_data,
+                    v_scales,
+                    quant_dtype,
+                    md.kv_cache_write_indices,
+                    v,
+                )
+                # k_cache = quantization_utils.QuantizedTensor(
+                #     k_quant_data, k_scales)
+                # v_cache = quantization_utils.QuantizedTensor(
+                #     v_quant_data, v_scales)
+                k_cache = dequantize(k_quant_data, quant_dtype, k_scales,
+                                     jnp.bfloat16)
+                v_cache = dequantize(v_quant_data, quant_dtype, v_scales,
+                                     jnp.bfloat16)
+                new_kv_cache = ((k_quant_data, k_scales),
+                                (v_quant_data,
+                                 v_scales)) if is_quantized else (k_cache,
+                                                                  v_cache)
+            else:
+                k_cache, v_cache = kv_cache
+                k_cache = update_cache(False, k_cache,
+                                       md.kv_cache_write_indices, k)
+                v_cache = update_cache(False, v_cache,
+                                       md.kv_cache_write_indices, v)
+            new_kv_cache = (k_cache, v_cache)
 
-        (k_quant_data, k_scales), (v_quant_data, v_scales) = kv_cache
-        quant_dtype = k_quant_data.dtype
-        k_quant_data, k_scales = chunked_prefill_update_cache_quantized(
-            k_quant_data, k_scales, quant_dtype, md.kv_cache_write_indices, k,
-            md.num_decode_seqs)
-        v_quant_data, v_scales = chunked_prefill_update_cache_quantized(
-            v_quant_data, v_scales, quant_dtype, md.kv_cache_write_indices, v,
-            md.num_decode_seqs)
-        # TODO
-        # k_cache = quantization_utils.QuantizedTensor(
-        #     k_quant_data, k_scales)
-        # v_cache = quantization_utils.QuantizedTensor(
-        #     v_quant_data, v_scales)
-        new_kv_cache = ((k_quant_data, k_scales),
-                        (v_quant_data,
-                         v_scales)) if is_quantized else (k_cache, v_cache)
-
-        from tpu_commons.models.jax.layers.quantized_kvcache import dequantize
-
-        k_cache = dequantize(k_quant_data, quant_dtype, k_scales, jnp.bfloat16)
-        v_cache = dequantize(v_quant_data, quant_dtype, v_scales, jnp.bfloat16)
         outputs = sharded_chunked_prefill_attention(mesh)(
             q,
             k_cache,
@@ -125,7 +174,8 @@ def attention(
 
         if is_prefill:
             # (B, N, T, H)
-            # TODO(xiang): support MQA and GQA
+            # NOTE(pooyam): Based on my benchmarks, We should not use splash kernel for normal settings (e.g., 32 heads, 8 kv heads) as flash attention is faster.
+            # I think splash kernel is faster only in presence of sparsity otherwise flash attention is faster.
             if num_kv_heads != num_heads:
                 k = jnp.repeat(k, num_heads // num_kv_heads, axis=1)
                 v = jnp.repeat(v, num_heads // num_kv_heads, axis=1)
