@@ -11,12 +11,12 @@ from torchax.interop import extract_all_buffers, torch_view
 from torchax.tensor import t2j
 from vllm.attention import Attention as VllmAttention
 from vllm.config import ParallelConfig
-from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 
+from tpu_commons.logger import init_logger
 from tpu_commons.models.vllm.jax_attention import JaxAttention
 from tpu_commons.models.vllm.jax_fused_moe import JaxFusedMoE
 from tpu_commons.models.vllm.jax_qkv_parallel_linear import \

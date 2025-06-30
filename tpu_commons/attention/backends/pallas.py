@@ -9,11 +9,11 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
 from vllm.utils import cdiv, next_power_of_2
 
 # Required to register the custom op "torch.ops.xla.ragged_paged_attention"
 import tpu_commons.attention.backends.torch_xla_custom_op  # noqa: F401
+from tpu_commons.logger import init_logger
 
 logger = init_logger(__name__)
 

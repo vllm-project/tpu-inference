@@ -13,11 +13,13 @@ import torchax
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from torch.nn import Parameter
-from vllm.logger import init_logger
+from torchax import jax_device
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
+
+from tpu_commons.logger import init_logger
 
 logger = init_logger(__name__)
 
@@ -37,7 +39,8 @@ def create_torchax_tensor_with_partition_spec(
 
     if mesh is None:
         # Single chip case.
-        return weight_t.to('jax')
+        with jax_device('tpu'):
+            return weight_t.to('jax')
 
     # Create CPU tensor first then move to jax device.
     cpu_device = jax.devices("cpu")[0]

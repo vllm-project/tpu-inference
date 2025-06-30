@@ -29,7 +29,7 @@ except ImportError:
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
-from vllm.logger import init_logger
+from tpu_commons.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv

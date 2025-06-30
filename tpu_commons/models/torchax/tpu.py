@@ -8,11 +8,13 @@ import torch.nn as nn
 import torch_xla.core.xla_model as xm
 import torch_xla.distributed.spmd as xs
 import torchax
+from torchax import jax_device
 from vllm.config import ModelConfig, VllmConfig
-from vllm.logger import init_logger
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.utils import (
     initialize_model, process_weights_after_loading, set_default_torch_dtype)
+
+from tpu_commons.logger import init_logger
 
 VLLM_TORCHAX_ENABLED = os.environ.get('VLLM_TORCHAX_ENABLED', '0') == '1'
 if VLLM_TORCHAX_ENABLED:
@@ -85,7 +87,8 @@ class TPUModelLoader(DefaultModelLoader):
                 shard_model(model, mesh)
             else:
                 with torchax.default_env():
-                    model = model.to('jax')
+                    with jax_device('tpu'):
+                        model = model.to('jax')
         counter_after_partition = time.perf_counter()
         logger.info("Partition model took %.2f seconds",
                     counter_after_partition - counter_before_partition)
