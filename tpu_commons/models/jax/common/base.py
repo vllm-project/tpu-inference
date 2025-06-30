@@ -87,7 +87,7 @@ class ParamFactory:
         )
         key = rngs.params()
         param_data = sharded_initializer(key, shape, dtype)
-        return nnx.Param(param_data)
+        return nnx.Param(param_data, sharding=sharding)
 
     def create_kernel_param(self, *args, **kwargs) -> nnx.Param:
         """Creates a kernel/weight parameter using the kernel_initializer."""
