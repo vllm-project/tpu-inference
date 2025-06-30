@@ -259,7 +259,8 @@ class TPUModelRunner():
 
     def _dummy_run_prefill(self, prompt_len: int, do_sampling: bool):
         """Runs a dummy prefill step to compile the model."""
-        prompt_len = pad_to_multiple(prompt_len, self.block_size,
+        prompt_len = pad_to_multiple(prompt_len,
+                                     self.scheduler_config.prefill_len_padding,
                                      self.max_model_len)
         batch_size = 1
         input_ids = jnp.zeros((batch_size, prompt_len), dtype=jnp.int32)
