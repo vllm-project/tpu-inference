@@ -50,28 +50,38 @@ logger = init_logger(__name__)
 
 @dataclass
 class Llama8BModelConfig(ModelConfig):
-    emb: EmbedderConfig = field(default_factory=lambda: EmbedderConfig(
-        vocab_size=128256,
-        d_model=4096,
-        dtype=jnp.bfloat16,
-        normalize_embeddings=False  # TODO: Confirm
-    ))
-    layers: TransformerBlockConfig = field(
-        default_factory=lambda: TransformerBlockConfig(
-            attention=AttentionConfig(d_model=4096,
-                                      num_q_heads=32,
-                                      num_kv_heads=8,
-                                      head_dim=128,
-                                      rope_theta=500000.0,
-                                      rope_scaling={},
-                                      dtype=jnp.bfloat16),
+    hidden_size: int = 4096
+    dtype: jnp.dtype = jnp.bfloat16
+    num_layers: int = 32
+    emb: EmbedderConfig = field(default_factory=EmbedderConfig)
+    layers: TransformerBlockConfig = field(default_factory=TransformerBlockConfig)
+
+    def __post_init__(self):
+
+        # Initialize defaults:
+        if not self.emb:
+            self.emb = EmbedderConfig(
+                vocab_size=128256,
+                hidden_size=self.hidden_size,
+                dtype=self.dtype,
+                normalize_embeddings=False  # TODO: Confirm
+            )
+        if not self.layers:
+            self.layers = TransformerBlockConfig(
+                attention=AttentionConfig(
+                hidden_size=self.hidden_size, 
+                num_attention_heads=32,
+                num_key_value_heads=8,
+                head_dim=128,
+                rope_theta=500000.0,
+                rope_scaling={},
+                dtype=jnp.bfloat16),
             ffw=FFWConfig(d_model=4096,
                           hidden_size=14336,
                           act="silu",
                           dtype=jnp.bfloat16),
             rmsnorm_epsilon=1e-5,
-            block_type="dense"))
-    num_layers: int = 32
+            block_type="dense")
 
 
 class Llama8BOpShardingConfig(OpShardingConfig):
@@ -266,22 +276,22 @@ class Llama3WeightLoader(WeightLoader):
         })
         # Set weights reshape map
         hidden_size = self.model_config.layers.attention.d_model
-        attn_heads = self.model_config.layers.attention.num_q_heads
-        num_kv_heads = self.model_config.layers.attention.num_kv_heads
+        attn_heads = self.model_config.layers.attention.num_attention_heads
+        num_key_value_heads = self.model_config.layers.attention.num_key_value_heads
         attn_head_dim = self.model_config.layers.attention.head_dim
         self.set_reshape_param_map(
             {
                 "q_proj": (attn_heads, -1, hidden_size),
-                "k_proj": (num_kv_heads, -1, hidden_size),
-                "v_proj": (num_kv_heads, -1, hidden_size),
+                "k_proj": (num_key_value_heads, -1, hidden_size),
+                "v_proj": (num_key_value_heads, -1, hidden_size),
                 "o_proj": (hidden_size, attn_heads, -1),
             },
             param_type=ParameterType.weight)
         # Set bias reshape map
         self.set_reshape_param_map(param_reshape_dict={
             "q_proj.bias": (attn_heads, attn_head_dim),
-            "k_proj.bias": (num_kv_heads, attn_head_dim),
-            "v_proj.bias": (num_kv_heads, attn_head_dim)
+            "k_proj.bias": (num_key_value_heads, attn_head_dim),
+            "v_proj.bias": (num_key_value_heads, attn_head_dim)
         },
                                    param_type=ParameterType.bias)
         # Set the mappings from loaded parameter keys to standardized names.

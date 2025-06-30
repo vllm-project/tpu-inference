@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, make_dataclass
 from typing import Any, List, Mapping, Tuple, Type
 
 # Flax and JAX sharding imports
@@ -8,37 +8,38 @@ from jax.sharding import Mesh
 from tpu_commons.models.jax.common.attention.attention import (
     Attention, AttentionConfig, AttentionMetadata, KVCache)
 from tpu_commons.models.jax.common.base import Config, ParamFactory
+from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
 from tpu_commons.models.jax.common.layers import FFW, FFWConfig, RMSNorm
 from tpu_commons.models.jax.common.moe.moe import MoE, Router, RoutingConfig
 from tpu_commons.models.jax.common.sharding import *
 
 
-@dataclass
-class TransformerBlockConfig(Config):
-    """
-    light weighted transformer config, which includes config for all sub-modules
+################
+# TransformerBlockConfig definition
+# def _post_init_transformer_block_config(self):
+#      if self.block_type.lower() == "moe":
+#         return MoE
+#     elif self.block_type.lower() == "dense":
+#         return FFW
+#     else:
+#         raise ValueError(f"Invalid block type: {self.block_type}")
+
+TransformerBlockConfig = make_dataclass("TransformerBlockConfig", [
+        ("attention", AttentionConfig),
+        ("ffw", FFWConfig),
+        ("block_type", str),
+        (HuggingFaceArgNames.RMS_NORM_EPS, float)
+    ],
+    doc=f"""light weighted transformer config, which includes config for all sub-modules
     it uses make() to create the live module from this config
-    """
-    attention: AttentionConfig
-    ffw: FFWConfig = None
-    router: RoutingConfig = None
-    block_type: str = None
-    rmsnorm_epsilon: float = None
-    overrides: Mapping[str, Any] = None
-
-    def _block_type_cls(self) -> FFW:
-        if self.block_type.lower() == "moe":
-            return MoE
-        elif self.block_type.lower() == "dense":
-            return FFW
-        else:
-            raise ValueError(f"Invalid block type: {self.block_type}")
-
-    def from_cfg(self, flags_cfg):
-        self.attention = AttentionConfig.from_cfg(flags_cfg)
-        block_class = self._block_type_cls()
-        self.ffw = block_class.from_cfg(flags_cfg)
-        self.cfg = flags_cfg
+    Args:
+        attention: AttentionConfig config used to specify attention layer parameters.
+        ffw: FFWConfig config used to specify feed-forward layer parameters.
+        block_type: str The type of transformer block (currently support ["moe", "dense"]).
+        {HuggingFaceArgNames.RMS_NORM_EPS}: float The epsilon value for RMSNorm.
+        """
+)
+################
 
 
 @dataclass
@@ -70,10 +71,10 @@ class TransformerBlock(nnx.Module):
         self.attn = self._create_module(Attention, cfg=self.cfg.attention)
 
         if self.block_type == "moe":
-            self.router = self._create_module(Router, cfg=self.cfg.router)
+            router = self._create_module(Router, cfg=self.cfg.ffw.router)
             self.moe = self._create_module(MoE,
                                            cfg=self.cfg.ffw,
-                                           router=self.router)
+                                           router=router)
         else:
             self.mlp = self._create_module(FFW, cfg=self.cfg.ffw)
 

@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, make_dataclass
 from typing import Any
 
 import jax
@@ -6,11 +6,13 @@ import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from jaxtyping import Float
+from jaxtyping import Float, DTypeLike
+
 
 from tpu_commons.models.jax.common.base import (Config,
                                                 ParamFactory)
-from tpu_commons.models.jax.common.constants import RouterType
+from tpu_commons.models.jax.common.constants import (RouterType,
+                                                     HuggingFaceArgNames)
 from tpu_commons.models.jax.common.sharding import ShardingConfig
 from tpu_commons.models.jax.common.layers import (FFWConfig,
                                                   FlaxUtils)
@@ -18,32 +20,34 @@ from tpu_commons.models.jax.common.layers import (FFWConfig,
 modeling_flax_utils = FlaxUtils()
 
 
-@dataclass
-class RoutingConfig(Config):
-    """Configuration for the Router module.
+RoutingConfig = make_dataclass("RoutingConfig", [
++    (HuggingFaceArgNames.HIDDEN_SIZE, int),
+    (HuggingFaceArgNames.INTERMEDIATE_SIZE, int),
+    (HuggingFaceArgNames.INTERMEDIATE_SIZE_MLP, int)
+    (HuggingFaceArgNames.NUM_LOCAL_EXPERTS, int),
+    (HuggingFaceArgNames.NUM_EXPERTS_PER_TOKEN, int),
+    ("router_type", RouterType),
+    (HuggingFaceArgNames.HIDDEN_ACT, str),
+    ("expert_capacity", int),
+    ("routed_bias", bool),
+    ("routed_scaling_factor", float),
+    ("dtype", DTypeLike),
+    ],
+    doc=f"""Configuration for the Router module.
 
-    Attributes:
-        d_model: The dimension of the model.
-        hidden_size: The hidden size of the expert.
-        num_experts: The total number of experts.
-        num_experts_per_tok: The number of experts each token is routed to.
-        router_type: The type of router to use (e.g., 'top_k').
-        act: The activation function to use.
-        expert_capacity: The maximum number of tokens an expert can process. Defaults to -1 (no capacity limit).
-        routed_bias: Whether to use a bias in the router. Defaults to False. # DeepSeek related. Could be removed
-        routed_scaling_factor: Scaling factor for routed weights. Defaults to 1.0.
-        dtype: The data type to use for computations. Defaults to jnp.float32.
-    """
-    d_model: int
-    hidden_size: int
-    num_experts: int
-    num_experts_per_tok: int
-    router_type: RouterType
-    act: str
-    expert_capacity: int = -1
-    routed_bias: bool = False
-    routed_scaling_factor: float = 1.0
-    dtype: Any = jnp.float32
+     Attributes:
+        {HuggingFaceArgNames.HIDDEN_SIZE}: The dimension of the model.
+        {HuggingFaceArgNames.INTERMEDIATE_SIZE}: The hidden size of the expert.
+        {HuggingFaceArgNames.INTERMEDIATE_SIZE_MLP}: The hidden size of MLP layers.
+        {HuggingFaceArgNames.NUM_LOCAL_EXPERTS}: The total number of experts.
+        {HuggingFaceArgNames.NUM_EXPERTS_PER_TOKEN}: The number of experts each token is routed to.
+         router_type: The type of router to use (e.g., 'top_k').
+        {HuggingFaceArgNames.HIDDEN_ACT}: The activation function to use.
+         expert_capacity: The maximum number of tokens an expert can process. Defaults to -1 (no capacity limit).
+         routed_bias: Whether to use a bias in the router. Defaults to False. # DeepSeek related. Could be removed
+         routed_scaling_factor: Scaling factor for routed weights. Defaults to 1.0.
+        dtype: The data type to use for computations. Defaults to jnp.float32."""
+)
 
 
 @dataclass
@@ -128,25 +132,22 @@ class Router(nnx.Module):
         return
 
 
-@dataclass(kw_only=True)
-class MoEConfig(FFWConfig):
-    """Configuration for the Mixture-of-Experts (MoE) layer.
+MoeConfig = make_dataclass("MoEConfig", [
+    (HuggingFaceArgNames.HIDDEN_SIZE, int),
+    (HuggingFaceArgNames.INTERMEDIATE_SIZE, int),
+    (HuggingFaceArgNames.NUM_LOCAL_EXPERTS, int),
+    (HuggingFaceArgNames.HIDDEN_ACT, int),
+    ("apply_expert_weight_before_computation", bool),
+    ],
+    doc=f"""Configuration for the Mixture-of-Experts (MoE) layer.
 
-    Attributes:
-        d_model: The dimension of the model.
-        expert_hidden_size: The hidden size of each expert's MLP.
-        num_experts: The total number of experts.
-        sequence_len: The maximum sequence length.
-        act: The activation function to use within the experts.
-        dtype: The data type to use for computations. Defaults to jnp.float32.
-        apply_expert_weight_before_computation: Whether to apply expert weights before computation. Defaults to False.
-    """
-    d_model: int
-    expert_hidden_size: int
-    num_experts: int
-    expert_act: str
-    apply_expert_weight_before_computation: bool = False
-
+     Attributes:
+        {HuggingFaceArgNames.HIDDEN_SIZE}: The dimension of the model.
+        {HuggingFaceArgNames.INTERMEDIATE_SIZE}: The hidden size of each expert's MLP.
+        {HuggingFaceArgNames.NUM_LOCAL_EXPERTS}: The total number of experts.
+        {HuggingFaceArgNames.HIDDEN_ACT}: The activation function to use within the experts.
+        apply_expert_weight_before_computation: Whether to apply expert weights before computation. Defaults to False."""
+)
 
 @dataclass
 class MoE(nnx.Module):
