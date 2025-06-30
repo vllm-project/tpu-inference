@@ -379,6 +379,8 @@ class TPUModelRunner():
         start = time.perf_counter()
 
         for num_tokens in self.num_tokens_paddings:
+            if num_tokens > 4096:
+                break
             logger.info("  -- num_tokens: %d", num_tokens)
             # dummy_ids = jnp.zeros((num_tokens), dtype=jnp.int32)
             # _ = self.model_fn(dummy_ids)
