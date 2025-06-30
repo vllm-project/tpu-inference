@@ -296,6 +296,82 @@ class TPUModelRunner():
 
         self.kv_caches, _, _ = self.model_fn(*model_inputs)
 
+    def _dummy_run_chunked_prefill(self, prompt_len: int, do_sampling: bool):
+        """Runs a dummy chunked prefill step to compile the model."""
+        # Pad to the chunked prefill padding size
+        padded_prompt_len = pad_to_multiple(
+            prompt_len, self.scheduler_config.chunked_prefill_tokens_padding)
+
+        # Simulate a single prefill request, no decode requests
+        num_decode_seqs = 0
+        num_prefill_seqs = 1
+
+        # --- Construct AttentionMetadata ---
+        input_positions = jnp.arange(padded_prompt_len,
+                                     dtype=jnp.int32)[jnp.newaxis, :]
+
+        # Prefill-specific metadata
+        prefill_seq_lens = jnp.array([padded_prompt_len], dtype=jnp.int32)
+        max_num_blocks = math.ceil(self.max_model_len / self.block_size)
+        # Dummy block indices for one sequence
+        prefill_block_indices = jnp.zeros(
+            (MAX_PREFILL_SEQS_PER_TOKEN_BATCH, max_num_blocks),
+            dtype=jnp.int32)
+        # For a single prefill sequence, offsets are [0, length]
+        prefill_query_start_offsets = jnp.array([0, padded_prompt_len],
+                                                dtype=jnp.int32)
+        num_prefill_seqs_arr = jnp.array([num_prefill_seqs], dtype=jnp.int32)
+
+        # Decode-specific metadata (empty/zeroed out)
+        decode_seq_lens = jnp.zeros((self.scheduler_config.max_num_seqs, ),
+                                    dtype=jnp.int32)
+        decode_block_indices = jnp.zeros(
+            (self.scheduler_config.max_num_seqs, max_num_blocks),
+            dtype=jnp.int32)
+        num_decode_seqs_arr = jnp.array([num_decode_seqs], dtype=jnp.int32)
+
+        # KV cache write indices
+        kv_cache_write_indices = jnp.zeros((padded_prompt_len, ),
+                                           dtype=jnp.int32)
+
+        attn_metadata = AttentionMetadata(
+            input_positions=input_positions,
+            seq_lens=None,
+            block_indices=None,
+            kv_cache_write_indices=kv_cache_write_indices,
+            chunked_prefill_enabled=True,
+            decode_lengths=decode_seq_lens,
+            decode_page_indices=decode_block_indices,
+            num_decode_seqs=num_decode_seqs_arr,
+            prefill_lengths=prefill_seq_lens,
+            prefill_page_indices=prefill_block_indices,
+            prefill_query_start_offsets=prefill_query_start_offsets,
+            num_prefill_seqs=num_prefill_seqs_arr,
+            page_aligned_update=self.scheduler_config.page_aligned_scheduling,
+        )
+
+        # --- Construct other model inputs ---
+        input_ids = jnp.zeros((1, padded_prompt_len), dtype=jnp.int32)
+        temperatures = jnp.ones((padded_prompt_len, ), dtype=jnp.bfloat16)
+        top_ps = jnp.ones((padded_prompt_len, ), dtype=jnp.bfloat16)
+        top_ks = jnp.full((padded_prompt_len, ),
+                          self.vocab_size,
+                          dtype=jnp.int32)
+
+        model_inputs = (
+            False,  # is_prefill is False for the chunked prefill path
+            do_sampling,
+            self.kv_caches,
+            input_ids,
+            attn_metadata,
+            temperatures,
+            top_ps,
+            top_ks,
+        )
+
+        # Execute the model to trigger JIT compilation
+        self.kv_caches, _, _ = self.model_fn(*model_inputs)
+
     # TODO: rewrite this
     def _precompile_backbone(self) -> None:
         # pass
@@ -307,6 +383,7 @@ class TPUModelRunner():
             # dummy_ids = jnp.zeros((num_tokens), dtype=jnp.int32)
             # _ = self.model_fn(dummy_ids)
             self._dummy_run_prefill(num_tokens, do_sampling=False)
+            self._dummy_run_chunked_prefill(num_tokens, do_sampling=False)
         jax.block_until_ready(jnp.array([1.0]))
         end = time.perf_counter()
         logger.info("Compilation finished in %.2f [secs].", end - start)
