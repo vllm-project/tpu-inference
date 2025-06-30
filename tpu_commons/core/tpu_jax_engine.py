@@ -16,6 +16,7 @@
 import warnings
 from typing import Any, Optional, Tuple
 
+from dataclasses import asdict
 import jax
 import jax.numpy as jnp
 from vllm.logger import init_logger
@@ -67,21 +68,14 @@ class JaxEngine(engine_api.Engine):
         new_block_ids = self.kv_cache_manager.get_block_ids(
             vllm_request.request_id)
         request = NewRequestData.from_request(vllm_request, new_block_ids)
-        #assume all tokens will get prefilled.
+        # assume all tokens will get prefilled.
         request.num_computed_tokens = vllm_request.num_tokens
         input_batch = self.model_runner.input_batch
-        request_to_add = CachedRequestState(
-            req_id=request.req_id,
-            prompt_token_ids=request.prompt_token_ids,
-            mm_inputs=request.mm_inputs,
-            mm_positions=request.mm_positions,
-            sampling_params=request.sampling_params,
-            generator=None,
-            block_ids=request.block_ids,
-            num_computed_tokens=vllm_request.num_tokens,
-            output_token_ids=[],
-            lora_request=request.lora_request,
-        )
+
+        data_items = asdict(request)
+        data_items["mm_hashes"] = []
+        request_to_add = CachedRequestState(**data_items, output_token_ids=[])
+
         input_batch.add_request(request_to_add, None)
         # logger.info("added request %s to input batch!!", request.req_id)
         self.model_runner.requests[request.req_id] = request_to_add

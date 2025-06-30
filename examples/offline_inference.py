@@ -74,8 +74,7 @@ if __name__ == "__main__":
     parser = create_parser()
     args: dict = vars(parser.parse_args())
 
-    if (disagg_utils.PREFILL_SLICES not in os.environ
-            or disagg_utils.DECODE_SLICES not in os.environ):
+    if not disagg_utils.is_disagg_enabled():
         main(args)
     else:
         from unittest.mock import patch

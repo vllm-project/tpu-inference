@@ -7,10 +7,11 @@ from typing import Any, Optional, cast
 import jax
 import jax.numpy as jnp
 import numpy as np
+
 from vllm.lora.request import LoRARequest
-from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
-from vllm.sampling_params import SamplingParams, SamplingType
+from vllm.sampling_params import SamplingType
 from vllm.utils import swap_dict_values
+from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
@@ -23,23 +24,12 @@ _SAMPLING_EPS = 1e-5
 
 
 @dataclass
-class CachedRequestState:
+class CachedRequestState(NewRequestData):
 
-    req_id: str
-    prompt_token_ids: list[int]
-    mm_inputs: list[MultiModalKwargs]
-    mm_positions: list[PlaceholderRange]
-    sampling_params: SamplingParams
-    generator: Optional[Any]
-
-    block_ids: list[list[int]]
-    num_computed_tokens: int
     output_token_ids: list[int]
-
+    generator: Optional[Any] = None
     mrope_positions: Optional[jax.Array] = None
     mrope_position_delta: Optional[int] = None
-
-    lora_request: Optional[LoRARequest] = None
 
     def __post_init__(self):
         self.num_prompt_tokens = len(self.prompt_token_ids)

@@ -2,6 +2,7 @@
 # This runner is a port of https://source.corp.google.com/h/vertex-model-garden/hex-llm/+/main:hex_llm/worker/runner_jax.py
 from typing import Any, List, Optional, Tuple
 
+from dataclasses import asdict
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -467,20 +468,11 @@ class TPUModelRunner():
         # Add new requests to the cached states.
         for new_req_data in scheduler_output.scheduled_new_reqs:
             req_id = new_req_data.req_id
-            sampling_params = new_req_data.sampling_params
 
-            self.requests[req_id] = CachedRequestState(
-                req_id=req_id,
-                prompt_token_ids=new_req_data.prompt_token_ids,
-                mm_inputs=new_req_data.mm_inputs,
-                mm_positions=new_req_data.mm_positions,
-                sampling_params=sampling_params,
-                generator=None,
-                block_ids=new_req_data.block_ids,
-                num_computed_tokens=new_req_data.num_computed_tokens,
-                output_token_ids=[],
-                lora_request=new_req_data.lora_request,
-            )
+            data_items = asdict(new_req_data)
+            data_items["mm_hashes"] = []
+
+            self.requests[req_id] = CachedRequestState(**data_items, output_token_ids=[])
 
             req_ids_to_add.append(req_id)
 
