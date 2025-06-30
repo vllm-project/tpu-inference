@@ -42,7 +42,7 @@ from vllm.attention.layer import Attention
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import ParallelConfig, VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import set_forward_context
-from vllm.logger import init_logger
+from tpu_commons.logger import init_logger
 from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.model_executor.model_loader import get_model_loader
 
@@ -1504,11 +1504,17 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         for layer_name, layer_spec in kv_cache_spec.items():
             if isinstance(layer_spec, AttentionSpec):
                 dtype = layer_spec.dtype
-                # Use an empty tensor instead of `None`` to force Dynamo to pass
-                # it by reference, rather by specializing on the value ``None``.
-                tpu_kv_cache = torch.tensor([],
-                                            dtype=dtype,
-                                            device=self.device)
+                # This is a workaround for torchax to create tensor on TPU
+                # instead of CPU. Within torchax.enable_globally(), it will
+                # create on CPU if we set device to be 'jax'.
+                # Also torch.tensor(..., device='jax') will create tensor on CPU
+                # instaled of TPU, need to call .to('jax')
+                with torchax.default_env():
+                    # Use an empty tensor instead of `None`` to force Dynamo to pass
+                    # it by reference, rather by specializing on the value ``None``.
+                    tpu_kv_cache = torch.tensor([], dtype=dtype)
+                    tpu_kv_cache = create_torchax_tensor_with_partition_spec(
+                        tpu_kv_cache, self.mesh, ())
                 kv_caches[layer_name] = tpu_kv_cache
             else:
                 raise NotImplementedError(
@@ -1649,13 +1655,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                     kv_caches[layer_name] = tpu_kv_cache
                 else:
                     raise NotImplementedError
-
-        # kv_caches_cpu = {}
-        # for k, v in kv_caches.items():
-        #     kv_caches_cpu[k] = torch.zeros(v.shape, dtype=v.dtype)
-        #     print(kv_caches_cpu[k])
-        # torch.save(kv_caches_cpu,
-        #            '/home/lsiyuan/torchax_dump/kv_caches.pt')
 
         # Setup `kv_cache_config` and `kv_caches` for models
         # with cross-layer KV sharing

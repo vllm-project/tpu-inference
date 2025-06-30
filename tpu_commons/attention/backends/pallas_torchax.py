@@ -14,10 +14,10 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.logger import init_logger
 from vllm.utils import cdiv, next_power_of_2
 
 from tpu_commons.kernels.ragged_kv_cache_update import kv_cache_update
+from tpu_commons.logger import init_logger
 
 VLLM_TORCHAX_ENABLED = os.environ.get('VLLM_TORCHAX_ENABLED', '0') == '1'
 
