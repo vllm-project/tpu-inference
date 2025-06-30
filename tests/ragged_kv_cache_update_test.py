@@ -38,6 +38,7 @@ class KVCacheUpdateTest(jtu.JaxTestCase):
             dtype=jnp.bfloat16)
         slice_lens = np.array([7, page_size, page_size, 1, 1, 1, 9],
                               dtype=np.int32)
+        num_slices = jnp.array([len(slice_lens)], dtype=np.int32)
         kv_cache_start_indices = np.array([
             page_size * 2 - 7, page_size * 2, page_size * 3, page_size * 4 + 6,
             page_size * 5 + 7, page_size * 6 + 8, page_size * 15 + 3
@@ -62,6 +63,7 @@ class KVCacheUpdateTest(jtu.JaxTestCase):
             new_kv,
             slot_mapping,
             kv_cache,
+            num_slices,
             page_size=page_size,
             num_slices_per_block=num_slices_per_block)
         updated_kv_cache_ref = kv_cache_update_ref(new_kv, slot_mapping_np,
