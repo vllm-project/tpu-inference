@@ -1,7 +1,6 @@
 # Here we try to bring as much code as possible from Hex-LLM, instead of `tpu_torch_xla_runner.py` -> jax conversion.
 # This runner is a port of https://source.corp.google.com/h/vertex-model-garden/hex-llm/+/main:hex_llm/worker/runner_jax.py
 import math
-import time
 from typing import Any, List, Optional, Tuple
 
 import jax
@@ -257,73 +256,73 @@ class TPUModelRunner():
         output_cache = sharded_allocate()
         return output_cache
 
-    def _dummy_run_prefill(self, prompt_len: int, do_sampling: bool):
-        """Runs a dummy prefill step to compile the model."""
-        prompt_len = pad_to_multiple(prompt_len,
-                                     self.scheduler_config.prefill_len_padding,
-                                     self.max_model_len)
-        batch_size = 1
-        input_ids = jnp.zeros((batch_size, prompt_len), dtype=jnp.int32)
-        input_positions = jnp.arange(prompt_len,
-                                     dtype=jnp.int32)[jnp.newaxis, :]
-        input_positions = jnp.repeat(input_positions, batch_size, axis=0)
-        seq_lens = jnp.full((batch_size, ), prompt_len, dtype=jnp.int32)
-        max_num_blocks = math.ceil(self.max_model_len / self.block_size)
-        block_indices = jnp.zeros((batch_size, max_num_blocks),
-                                  dtype=jnp.int32)
-        num_blocks = prompt_len // self.block_size
-        kv_cache_write_indices = jnp.zeros((batch_size, num_blocks),
-                                           dtype=jnp.int32)
+    # def _dummy_run_prefill(self, prompt_len: int, do_sampling: bool):
+    #     """Runs a dummy prefill step to compile the model."""
+    #     prompt_len = pad_to_multiple(prompt_len,
+    #                                  self.scheduler_config.prefill_len_padding,
+    #                                  self.max_model_len)
+    #     batch_size = 1
+    #     input_ids = jnp.zeros((batch_size, prompt_len), dtype=jnp.int32)
+    #     input_positions = jnp.arange(prompt_len,
+    #                                  dtype=jnp.int32)[jnp.newaxis, :]
+    #     input_positions = jnp.repeat(input_positions, batch_size, axis=0)
+    #     seq_lens = jnp.full((batch_size, ), prompt_len, dtype=jnp.int32)
+    #     max_num_blocks = math.ceil(self.max_model_len / self.block_size)
+    #     block_indices = jnp.zeros((batch_size, max_num_blocks),
+    #                               dtype=jnp.int32)
+    #     num_blocks = prompt_len // self.block_size
+    #     kv_cache_write_indices = jnp.zeros((batch_size, num_blocks),
+    #                                        dtype=jnp.int32)
 
-        temperatures = jnp.ones((batch_size, ), dtype=jnp.bfloat16)
-        top_ps = jnp.ones((batch_size, ), dtype=jnp.bfloat16)
-        top_ks = jnp.full((batch_size, ), self.vocab_size, dtype=jnp.int32)
+    #     temperatures = jnp.ones((batch_size, ), dtype=jnp.bfloat16)
+    #     top_ps = jnp.ones((batch_size, ), dtype=jnp.bfloat16)
+    #     top_ks = jnp.full((batch_size, ), self.vocab_size, dtype=jnp.int32)
 
-        attn_metadata = AttentionMetadata(input_positions, seq_lens,
-                                          block_indices,
-                                          kv_cache_write_indices)
+    #     attn_metadata = AttentionMetadata(input_positions, seq_lens,
+    #                                       block_indices,
+    #                                       kv_cache_write_indices)
 
-        model_inputs = (
-            True,  # is_prefill
-            do_sampling,
-            self.kv_caches,
-            input_ids,
-            attn_metadata,
-            temperatures,
-            top_ps,
-            top_ks,
-        )
+    #     model_inputs = (
+    #         True,  # is_prefill
+    #         do_sampling,
+    #         self.kv_caches,
+    #         input_ids,
+    #         attn_metadata,
+    #         temperatures,
+    #         top_ps,
+    #         top_ks,
+    #     )
 
-        self.kv_caches, _, _ = self.model_fn(*model_inputs)
+    #     self.kv_caches, _, _ = self.model_fn(*model_inputs)
 
-    # TODO: rewrite this
-    def _precompile_backbone(self) -> None:
-        # pass
-        logger.info("Compiling the model with different input shapes.")
-        start = time.perf_counter()
+    # # TODO: rewrite this
+    # def _precompile_backbone(self) -> None:
+    #     # pass
+    #     logger.info("Compiling the model with different input shapes.")
+    #     start = time.perf_counter()
 
-        # NOTE(Wenlong): We create a copy of the kv_caches to avoid polluting the
-        # real kv_caches with dummy data from the precompilation runs.
-        original_kv_caches = self.kv_caches
-        self.kv_caches = jax.tree_util.tree_map(lambda x: x.copy(),
-                                                self.kv_caches)
+    #     # NOTE(Wenlong): We create a copy of the kv_caches to avoid polluting the
+    #     # real kv_caches with dummy data from the precompilation runs.
+    #     original_kv_caches = self.kv_caches
+    #     self.kv_caches = jax.tree_util.tree_map(lambda x: x.copy(),
+    #                                             self.kv_caches)
 
-        for num_tokens in self.num_tokens_paddings:
-            logger.info("  -- num_tokens: %d", num_tokens)
-            # dummy_ids = jnp.zeros((num_tokens), dtype=jnp.int32)
-            # _ = self.model_fn(dummy_ids)
-            self._dummy_run_prefill(num_tokens, do_sampling=False)
-        jax.block_until_ready(self.kv_caches)
-        self.kv_caches = original_kv_caches
-        end = time.perf_counter()
-        logger.info("Compilation finished in %.2f [secs].", end - start)
+    #     for num_tokens in self.num_tokens_paddings:
+    #         logger.info("  -- num_tokens: %d", num_tokens)
+    #         # dummy_ids = jnp.zeros((num_tokens), dtype=jnp.int32)
+    #         # _ = self.model_fn(dummy_ids)
+    #         self._dummy_run_prefill(num_tokens, do_sampling=False)
+    #     jax.block_until_ready(self.kv_caches)
+    #     self.kv_caches = original_kv_caches
+    #     end = time.perf_counter()
+    #     logger.info("Compilation finished in %.2f [secs].", end - start)
 
     def capture_model(self) -> None:
         # TODO
         logger.warning(
             "Model warm-up is not implemented for the JAX backend. "
             "The first few requests will be slow due to JIT compilation.")
-        self._precompile_backbone()
+        # self._precompile_backbone()
 
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
         # We don't want to use ragged attention kernel all the time as paged attention is faster for decoding only.
