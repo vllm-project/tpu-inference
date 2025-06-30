@@ -8,9 +8,14 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
 
+def _ceil_div(a, b):
+    assert b != 0
+    return (a + b - 1) // b
+
+
 def _kv_cache_update_kernel(
     # Prefetch
-    slices_ref,  # [3, num_slices], list of (kv_cache_start, new_kv_start,
+    slices_ref,  # [3, padded_num_slices], list of (kv_cache_start, new_kv_start,
     # slice_len)
     # Input
     new_kv_hbm_ref,  # [num_tokens, num_combined_kv_heads, head_dim]
@@ -71,6 +76,7 @@ def kv_cache_update(
     Array,  # [3, slices], list of (kv_cache_start, new_kv_start, slice_len)
     kv_cache: jax.
     Array,  # [total_num_pages * page_size, num_combined_kv_heads, head_dim]
+    num_slices: jax.Array,  # [1]
     *,
     page_size: int = 32,
     num_slices_per_block: int = 8,
@@ -108,7 +114,7 @@ def kv_cache_update(
             num_scalar_prefetch=len(scalar_prefetches),
             in_specs=in_specs,
             out_specs=out_specs,
-            grid=(slices.shape[1] // num_slices_per_block, ),
+            grid=(_ceil_div(num_slices[0], num_slices_per_block), ),
             scratch_shapes=scratch_shapes,
         ),
         out_shape=out_shape,
