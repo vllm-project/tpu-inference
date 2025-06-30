@@ -302,19 +302,12 @@ class TPUModelRunner():
         logger.info("Compiling the model with different input shapes.")
         start = time.perf_counter()
 
-        # NOTE(Wenlong): We create a copy of the kv_caches to avoid polluting the
-        # real kv_caches with dummy data from the precompilation runs.
-        original_kv_caches = self.kv_caches
-        self.kv_caches = jax.tree_util.tree_map(lambda x: x.copy(),
-                                                self.kv_caches)
-
         for num_tokens in self.num_tokens_paddings:
             logger.info("  -- num_tokens: %d", num_tokens)
             # dummy_ids = jnp.zeros((num_tokens), dtype=jnp.int32)
             # _ = self.model_fn(dummy_ids)
             self._dummy_run_prefill(num_tokens, do_sampling=False)
         jax.block_until_ready(jnp.array([1.0]))
-        self.kv_caches = original_kv_caches
         end = time.perf_counter()
         logger.info("Compilation finished in %.2f [secs].", end - start)
 
