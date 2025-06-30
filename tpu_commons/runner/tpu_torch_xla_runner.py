@@ -18,7 +18,6 @@ from vllm.attention.layer import Attention
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import set_forward_context
-from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargs,
@@ -39,6 +38,7 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.utils import sanity_check_mm_encoder_outputs
 
+from tpu_commons.logger import init_logger
 from tpu_commons.sample.metadata import TPUSupportedSamplingMetadata
 from tpu_commons.sample.sampler import Sampler as TPUSampler
 

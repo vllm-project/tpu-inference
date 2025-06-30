@@ -8,8 +8,9 @@ from torch.distributed import ProcessGroup
 from vllm.config import get_current_vllm_config
 from vllm.distributed.device_communicators.base_device_communicator import \
     DeviceCommunicatorBase
-from vllm.logger import init_logger
 from vllm.platforms import current_platform
+
+from tpu_commons.logger import init_logger
 
 USE_RAY = parallel_config = get_current_vllm_config(
 ).parallel_config.distributed_executor_backend == "ray"
