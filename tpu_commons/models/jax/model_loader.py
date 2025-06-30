@@ -8,7 +8,10 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 
+from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.utils.param_overview import get_parameter_overview
+
+logger = init_logger(__name__)
 
 
 def _get_model_architecture(config: PretrainedConfig) -> nn.Module:
@@ -174,6 +177,7 @@ def get_model(
     mesh: Mesh,
 ) -> nn.Module:
     impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
+    logger.info(f"Loading model, implementation type={impl}")
     if impl == "flax_nn":
         return get_nn_model(vllm_config, rng, mesh)
     elif impl == "flax_nnx":
