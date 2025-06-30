@@ -9,6 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
@@ -30,6 +31,7 @@ class CachedRequestState:
     mm_inputs: list[MultiModalKwargs]
     mm_positions: list[PlaceholderRange]
     sampling_params: SamplingParams
+    pooling_params: Optional[PoolingParams]
     generator: Optional[Any]
 
     block_ids: list[list[int]]
