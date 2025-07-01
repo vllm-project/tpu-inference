@@ -357,11 +357,14 @@ class TPUModelRunner():
 
     def _init_mesh(self) -> None:
         hf_config = self.model_config.hf_config
-        model_class = _get_model_architecture(hf_config)
+        try:
+            model_class = _get_model_architecture(hf_config)
+        except NotImplementedError:
+            model_class = None
         #TODO merge the if-else branches when new design is ready
         # Llama4Scout is only used for new model design,
         # so that we use it as a flag for testing the new model design
-        if issubclass(model_class, Model):
+        if model_class is not None and issubclass(model_class, Model):
             try:
                 # TODO: Update override steps.
                 sharding_strategy = \
