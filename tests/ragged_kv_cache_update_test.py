@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import numpy as np
 from absl.testing import parameterized
 from jax._src import test_util as jtu
-from jax.sharding import NamedSharding
+from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 from tpu_commons.kernels.ragged_kv_cache_update import kv_cache_update
@@ -21,8 +21,8 @@ def kv_cache_update_ref(new_kv, slot_mapping, kv_cache):
 @jtu.with_config(jax_numpy_dtype_promotion="standard")
 class KVCacheUpdateTest(jtu.JaxTestCase):
 
-    def _generate_input_data(self, page_size, combined_kv_head_num, head_dim,
-                             num_slices_per_block):
+    def _generate_data(self, page_size, combined_kv_head_num, head_dim,
+                       num_slices_per_block):
         page_num = 20
         padded_num_tokens = 128
         prng_key = jax.random.key(1234)
@@ -94,7 +94,7 @@ class KVCacheUpdateTest(jtu.JaxTestCase):
             page_size, combined_kv_head_num, head_dim, num_slices_per_block)
         old_kv_cache_copy = kv_cache.copy()
 
-        mesh = jax.sharding.Mesh(jax.devices(), 'x')
+        mesh = Mesh(jax.devices(), 'x')
         kv_cache_pspec = P(None, 'x', None)
 
         new_kv = jax.device_put(new_kv, NamedSharding(mesh, kv_cache_pspec))
