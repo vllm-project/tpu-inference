@@ -99,7 +99,6 @@ TPU_BACKEND_TYPE=pytorch_xla
 To switch different model implementations:
 
 ```
-MODEL_IMPL_TYPE=flax_nn
 MODEL_IMPL_TYPE=flax_nnx
 MODEL_IMPL_TYPE=vllm
 ```

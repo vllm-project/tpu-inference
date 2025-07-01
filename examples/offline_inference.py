@@ -49,7 +49,7 @@ def main(args: dict):
     prompts = [
         "Hello, my name is",
         "The capital of France is",
-        "The colors of the rainbow are"
+        "The colors of the rainbow are",
         "The future of AI is",
         "The president of the United States is",
     ]
