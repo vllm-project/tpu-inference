@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -19,13 +18,11 @@ class BlockTable:
         max_num_blocks_per_req: int,
         max_num_batched_tokens: int,
         pin_memory: bool,
-        device: Any,
     ):
         self.max_num_reqs = max_num_reqs
         self.max_num_blocks_per_req = max_num_blocks_per_req
         self.max_num_batched_tokens = max_num_batched_tokens
         self.pin_memory = pin_memory
-        self.device = device
 
         self.block_table = jnp.zeros(
             (max_num_reqs, max_num_blocks_per_req),
@@ -93,11 +90,11 @@ class MultiGroupBlockTable:
     """The BlockTables for each KV cache group."""
 
     def __init__(self, max_num_reqs: int, max_model_len: int,
-                 max_num_batched_tokens: int, pin_memory: bool, device: Any,
+                 max_num_batched_tokens: int, pin_memory: bool,
                  block_sizes: list[int]) -> None:
         self.block_tables = [
             BlockTable(max_num_reqs, cdiv(max_model_len, block_size),
-                       max_num_batched_tokens, pin_memory, device)
+                       max_num_batched_tokens, pin_memory)
             for block_size in block_sizes
         ]
 
