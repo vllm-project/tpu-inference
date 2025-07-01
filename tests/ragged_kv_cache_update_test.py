@@ -63,7 +63,7 @@ class KVCacheUpdateTest(jtu.JaxTestCase):
     )
     def test_basic(self, page_size: int, combined_kv_head_num: int,
                    head_dim: int, num_slices_per_block: int):
-        new_kv, slot_mapping, kv_cache, num_slices = self._generate_input_data(
+        new_kv, slot_mapping, kv_cache, num_slices = self._generate_data(
             page_size, combined_kv_head_num, head_dim, num_slices_per_block)
         old_kv_cache_copy = kv_cache.copy()
 
@@ -90,7 +90,7 @@ class KVCacheUpdateTest(jtu.JaxTestCase):
     )
     def test_torchax_shard_map(self, page_size: int, combined_kv_head_num: int,
                                head_dim: int, num_slices_per_block: int):
-        new_kv, slot_mapping, kv_cache, num_slices = self._generate_input_data(
+        new_kv, slot_mapping, kv_cache, num_slices = self._generate_data(
             page_size, combined_kv_head_num, head_dim, num_slices_per_block)
         old_kv_cache_copy = kv_cache.copy()
 
