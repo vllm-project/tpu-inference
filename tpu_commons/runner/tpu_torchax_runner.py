@@ -30,12 +30,12 @@ if VLLM_TORCHAX_ENABLED:
         from tpu_commons.models.torchax.torchax_wrapper import (
             get_cpu_tensor_from_torchax_tensor, wrap_model, wrap_model_func)
         from tpu_commons.distributed.tpu_distributed_utils import (
-            create_torchax_tensor_with_partition_spec)
+            create_torchax_kv_cache, create_torchax_tensor_with_partition_spec)
     except ImportError:
         from vllm.compilation.torchax_wrapper import (
             get_cpu_tensor_from_torchax_tensor, wrap_model, wrap_model_func)
         from vllm.distributed.tpu_distributed_utils import (
-            create_torchax_tensor_with_partition_spec)
+            create_torchax_kv_cache, create_torchax_tensor_with_partition_spec)
 
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
@@ -1661,13 +1661,15 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                     tpu_kv_cache = torch.zeros(kv_cache_shape, dtype=dtype)
 
                     if VLLM_TORCHAX_ENABLED:
-                        partition_spec = None
+                        partition_spec = ()
                         if self.use_spmd:
                             partition_spec = (None, None, 'x', None)
                             # Use torchax tensor to support SPMD sharding.
-                        tpu_kv_cache = create_torchax_tensor_with_partition_spec(
-                            tpu_kv_cache, self.mesh, partition_spec)
-
+                        tpu_kv_cache = create_torchax_kv_cache(
+                            kv_cache_shape, dtype, self.mesh, partition_spec)
+                    else:
+                        assert False, \
+                            "VLLM_TORCHAX_ENABLED must be enabled now."
                     kv_caches[layer_name] = tpu_kv_cache
                 else:
                     raise NotImplementedError

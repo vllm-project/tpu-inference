@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A TPU worker class."""
+import copy
 import os
 from typing import Optional
 
@@ -69,7 +70,7 @@ class TPUWorker:
         if self.use_spmd:
             # Under SPMD mode, distributed env is initialized as if there is
             # only one worker/device.
-            self.original_parallel_config = self.parallel_config
+            self.original_parallel_config = copy.deepcopy(self.parallel_config)
             self.parallel_config.tensor_parallel_size = 1
             self.parallel_config.pipeline_parallel_size = 1
             self.parallel_config.world_size = 1
@@ -247,6 +248,9 @@ class TPUWorker:
             # errors, even after padding the head_size.
             tpu_kv_cache_bytes = (tpu_kv_cache_bytes * head_size //
                                   padded_head_size)
+        if self.original_parallel_config is not None:
+            tpu_kv_cache_bytes *= self.original_parallel_config.world_size
+
         return int(tpu_kv_cache_bytes)
 
     def execute_model(
