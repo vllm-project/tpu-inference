@@ -16,7 +16,6 @@ from vllm.config import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils import cdiv, next_power_of_2
 
-from tpu_commons.kernels.ragged_kv_cache_update import kv_cache_update
 from tpu_commons.logger import init_logger
 
 VLLM_TORCHAX_ENABLED = os.environ.get('VLLM_TORCHAX_ENABLED', '0') == '1'
@@ -24,10 +23,11 @@ VLLM_TORCHAX_ENABLED = os.environ.get('VLLM_TORCHAX_ENABLED', '0') == '1'
 if VLLM_TORCHAX_ENABLED:
     # Register custom op dispatcher.
     try:
-        from tpu_commons.models.torchax.torchax_wrapper import \
-            ragged_paged_attention
+        from tpu_commons.models.torchax.torchax_wrapper import (
+            kv_cache_update, ragged_paged_attention)
     except ImportError:
-        from vllm.compilation.torchax_wrapper import ragged_paged_attention
+        from vllm.compilation.torchax_wrapper import (kv_cache_update,
+                                                      ragged_paged_attention)
 
 logger = init_logger(__name__)
 
