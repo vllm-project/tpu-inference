@@ -6,6 +6,8 @@ import functools
 import jax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
+from jax.sharding import Mesh
+from jax.sharding import PartitionSpec as P
 
 
 def _ceil_div(a, b):
@@ -65,21 +67,16 @@ def _kv_cache_update_kernel(
         async_copy.wait()
 
 
-@functools.partial(
-    jax.jit,
-    static_argnames=["page_size", "num_slices_per_block"],
-    donate_argnames="kv_cache",
-)
-def kv_cache_update(
+def _kv_cache_update(
     new_kv: jax.Array,  # [total_num_token, num_combined_kv_heads, head_dim]
-    slices: jax.
-    Array,  # [3, slices], list of (kv_cache_start, new_kv_start, slice_len)
+    slices: jax.Array,  # [3, slices], list of (kv_cache_start, new_kv_start,
+    # slice_len)
     kv_cache: jax.
-    Array,  # [total_num_pages * page_size, num_combined_kv_heads, head_dim]
+    Array,  # [total_num_pages * page_size, num_combined_kv_heads,
+    # head_dim]
     num_slices: jax.Array,  # [1]
-    *,
-    page_size: int = 32,
-    num_slices_per_block: int = 8,
+    page_size: int,
+    num_slices_per_block: int,
 ):
     assert slices.shape[1] % num_slices_per_block == 0
     _, num_combined_kv_heads, head_dim = new_kv.shape
@@ -122,3 +119,46 @@ def kv_cache_update(
     )
 
     return kernel(*scalar_prefetches, new_kv, kv_cache)[0]
+
+
+@functools.partial(
+    jax.jit,
+    static_argnames=[
+        "page_size", "num_slices_per_block", "mesh", "kv_cache_pspec"
+    ],
+    donate_argnames="kv_cache",
+)
+def kv_cache_update(
+    new_kv: jax.Array,  # [total_num_token, num_combined_kv_heads, head_dim]
+    slices: jax.
+    Array,  # [3, slices], list of (kv_cache_start, new_kv_start, slice_len)
+    kv_cache: jax.
+    Array,  # [total_num_pages * page_size, num_combined_kv_heads, head_dim]
+    num_slices: jax.Array,  # [1]
+    *,
+    page_size: int = 32,
+    num_slices_per_block: int = 8,
+    mesh: Mesh | None = None,
+    kv_cache_pspec: P | None = None,
+):
+    if mesh is None:
+        return _kv_cache_update(new_kv, slices, kv_cache, num_slices,
+                                page_size, num_slices_per_block)
+
+    assert kv_cache_pspec is not None, \
+        "kv_cache_pspec must be provided when mesh is specified"
+
+    in_specs = (kv_cache_pspec, P(), kv_cache_pspec, P())
+    out_specs = kv_cache_pspec
+    shard_map_wrapped = jax.shard_map(
+        functools.partial(
+            _kv_cache_update,
+            page_size=page_size,
+            num_slices_per_block=num_slices_per_block,
+        ),
+        mesh=mesh,
+        in_specs=in_specs,
+        out_specs=out_specs,
+        check_vma=False,
+    )
+    return shard_map_wrapped(new_kv, slices, kv_cache, num_slices)
