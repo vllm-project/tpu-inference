@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from tpu_commons.models.jax.common.base import Config
 
 import jax
 import numpy as np
@@ -107,7 +108,7 @@ class OpShardingConfig:
     vocab_dv: tuple = (None, None)
 
 
-class ShardingConfig:
+class ShardingConfig(Config):
     """Container for operation-specific sharding configurations.
 
     This class holds two separate `OpShardingConfig` objects, one for the
@@ -140,7 +141,8 @@ class ShardingConfig:
     def __init__(self,
                  prefill_sharding_cfg=None,
                  generate_sharding_cfg=None,
-                 default_ops_cls=OpShardingConfig):
+                 default_ops_cls=OpShardingConfig,
+                 vllm_config=None):
         """Initializes the ShardingConfig.
 
         Args:
@@ -157,7 +159,7 @@ class ShardingConfig:
         )
 
 
-@dataclass
+
 class Sharding:
     """Generates and manages sharding configurations based on a high-level strategy.
 

@@ -11,6 +11,7 @@ from jax.typing import DTypeLike
 from jax.experimental.pallas.ops.tpu.flash_attention import flash_attention
 from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention
 
+from vllm.config import VllmConfig
 from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.sharding import ShardingConfig
 from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
@@ -112,25 +113,28 @@ class AttentionMetadata(object):
 
 
 AttentionConfig = make_dataclass("AttentionConfig", [
-    (HuggingFaceArgNames.HIDDEN_SIZE, int),
-    (HuggingFaceArgNames.NUM_ATTENTION_HEADS, int),
-    (HuggingFaceArgNames.NUM_KEY_VALUE_HEADS, int),
-    (HuggingFaceArgNames.HEAD_DIM, int),
-    (HuggingFaceArgNames.ROPE_THETA, float),
-    (HuggingFaceArgNames.ROPE_SCALING, Dict[str, Any]),
+    (HuggingFaceArgNames.HIDDEN_SIZE.value, int),
+    (HuggingFaceArgNames.NUM_ATTENTION_HEADS.value, int),
+    (HuggingFaceArgNames.NUM_KEY_VALUE_HEADS.value, int),
+    (HuggingFaceArgNames.HEAD_DIM.value, int),
+    (HuggingFaceArgNames.ROPE_THETA.value, float),
+    (HuggingFaceArgNames.ROPE_SCALING.value, Dict[str, Any]),
     ("dtype", DTypeLike),
+    ("vllm_config", VllmConfig)
     ],
-    doc=f"""Configuration for the Attention module.
-         Attributes:
-        {HuggingFaceArgNames.HIDDEN_SIZE}: The dimension of the model.
-        {HuggingFaceArgNames.NUM_ATTENTION_HEADS}: The number of query heads.
-        {HuggingFaceArgNames.NUM_KEY_VALUE_HEADS}: The number of key/value heads.
-        {HuggingFaceArgNames.HEAD_DIM}: The dimension of each attention head.
-        {HuggingFaceArgNames.ROPE_THETA}: The base period for Rotary Position Embeddings.
-        {HuggingFaceArgNames.ROPE_SCALING}: Optional dictionary of scaling factors for RoPE.
-         dtype: The data type for computations (default: jnp.float32).
-    """
+    bases=(Config,)
 )
+AttentionConfig.__doc__ = f"""Configuration for the Attention module.
+         Attributes:
+        {HuggingFaceArgNames.HIDDEN_SIZE.value}: The dimension of the model.
+        {HuggingFaceArgNames.NUM_ATTENTION_HEADS.value}: The number of query heads.
+        {HuggingFaceArgNames.NUM_KEY_VALUE_HEADS.value}: The number of key/value heads.
+        {HuggingFaceArgNames.HEAD_DIM.value}: The dimension of each attention head.
+        {HuggingFaceArgNames.ROPE_THETA.value}: The base period for Rotary Position Embeddings.
+        {HuggingFaceArgNames.ROPE_SCALING.value}: Optional dictionary of scaling factors for RoPE.
+         dtype: The data type for computations (default: jnp.float32).
+         vllm_config: The VLLM config containing any overrides to apply.
+    """
 
 @dataclass
 class Attention(nnx.Module):
@@ -161,10 +165,10 @@ class Attention(nnx.Module):
 
     def generate_kernel(self, rngs: nnx.Rngs):
         """Initializes the weight kernels for Q, K, V, and O projections."""
-        N = getattr(self.cfg, HuggingFaceArgNames.NUM_ATTENTION_HEADS)
-        K = getattr(self.cfg, HuggingFaceArgNames.NUM_KEY_VALUE_HEADS)
-        D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE)
-        H = getattr(self.cfg, HuggingFaceArgNames.HEAD_DIM)
+        N = getattr(self.cfg, HuggingFaceArgNames.NUM_ATTENTION_HEADS.value)
+        K = getattr(self.cfg, HuggingFaceArgNames.NUM_KEY_VALUE_HEADS.value)
+        D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
+        H = getattr(self.cfg, HuggingFaceArgNames.HEAD_DIM.value)
 
         self.kernel_q_proj_NDH = self.param_factory.create_kernel_param(
             rngs, (N, D, H), self.ndh_sharding, self.cfg.dtype)
@@ -255,11 +259,11 @@ class Attention(nnx.Module):
             x, self.activation_attention_btd[op_mode])
         x_q_BTD = nnx.with_sharding_constraint(x,
                                                self.activation_q_btd[op_mode])
-        N = getattr(self.cfg, HuggingFaceArgNames.NUM_ATTENTION_HEADS)
-        K = getattr(self.cfg, HuggingFaceArgNames.NUM_KEY_VALUE_HEADS)
-        rope_scaling = getattr(self.cfg, HuggingFaceArgNames.ROPE_SCALING)
-        rope_theta = getattr(self.cfg, HuggingFaceArgNames.ROPE_THETA)
-        H = getattr(self.cfg, HuggingFaceArgNames.HEAD_DIM)
+        N = getattr(self.cfg, HuggingFaceArgNames.NUM_ATTENTION_HEADS.value)
+        K = getattr(self.cfg, HuggingFaceArgNames.NUM_KEY_VALUE_HEADS.value)
+        rope_scaling = getattr(self.cfg, HuggingFaceArgNames.ROPE_SCALING.value)
+        rope_theta = getattr(self.cfg, HuggingFaceArgNames.ROPE_THETA.value)
+        H = getattr(self.cfg, HuggingFaceArgNames.HEAD_DIM.value)
         with jax.named_scope("q_proj"):
             q_BTNH = jnp.einsum('BTD,NDH -> BTNH', x_q_BTD,
                                 self.kernel_q_proj_NDH.value)

@@ -9,6 +9,7 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from jaxtyping import Float, Int, DTypeLike
 
+from vllm.config import VllmConfig
 from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
 from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.sharding import ShardingConfig
@@ -95,20 +96,24 @@ class RMSNorm(nnx.Module):
             rngs, shape=(self.dims, ), sharding=self.scale_sharding, dtype=self.dtype)
 
 FFWConfig = make_dataclass("FFWConfig", [
-    (HuggingFaceArgNames.HIDDEN_SIZE, int),
-    (HuggingFaceArgNames.INTERMEDIATE_SIZE, int),
-    (HuggingFaceArgNames.HIDDEN_ACT, str),
+    (HuggingFaceArgNames.HIDDEN_SIZE.value, int),
+    (HuggingFaceArgNames.INTERMEDIATE_SIZE.value, int),
+    (HuggingFaceArgNames.HIDDEN_ACT.value, str),
     ("dtype", DTypeLike),
-    ], 
-    doc=f"""Configuration for the Feed-Forward (FFW) layer.
+    ("vllm_config", VllmConfig)
+    ],
+    bases=(Config,)
+)
+    
+FFWConfig.__doc__ =f"""Configuration for the Feed-Forward (FFW) layer.
 
      Attributes:
-+        {HuggingFaceArgNames.HIDDEN_SIZE}: The dimension of the model.
-+        {HuggingFaceArgNames.INTERMEDIATE_SIZE}: The size of the intermediate hidden layer.
-+        {HuggingFaceArgNames.HIDDEN_ACT}: The name of the activation function to use (e.g., 'silu').
++        {HuggingFaceArgNames.HIDDEN_SIZE.value}: The dimension of the model.
++        {HuggingFaceArgNames.INTERMEDIATE_SIZE.value}: The size of the intermediate hidden layer.
++        {HuggingFaceArgNames.HIDDEN_ACT.value}: The name of the activation function to use (e.g., 'silu').
          dtype: The data type for computations.
+         vllm_config: The VLLM config containing any overrides to apply.
      """
-)
 
 
 @dataclass
@@ -150,11 +155,11 @@ class FFW(nnx.Module):
         # TODO consider to create factories for einsum(?)
         x = jnp.asarray(x, jnp.float32)
         x = nnx.with_sharding_constraint(x, self.activation_ffw_btd[op_mode])
-
+        act = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_ACT.value)
         with jax.named_scope("wi_0"):
             gating_BTF = jnp.einsum('BTD,DF -> BTF', x,
                                     self.kernel_gating_DF.value)
-            activated_gating_BTF = modeling_flax_utils.ACT2FN[self.cfg.act](
+            activated_gating_BTF = modeling_flax_utils.ACT2FN[act](
                 gating_BTF)
         with jax.named_scope("wi_1"):
             up_proj_BTF = jnp.einsum('BTD,DF -> BTF', x,
@@ -167,8 +172,8 @@ class FFW(nnx.Module):
         return output_BTD
 
     def generate_kernel(self, rngs: nnx.Rngs):
-        D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE)
-        F = getattr(self.cfg, HuggingFaceArgNames.INTERMEDIATE_SIZE)
+        D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
+        F = getattr(self.cfg, HuggingFaceArgNames.INTERMEDIATE_SIZE.value)
         self.kernel_gating_DF = self.param_factory.create_kernel_param(
             rngs,
             shape=(D, F),
@@ -216,20 +221,23 @@ class FFW(nnx.Module):
 
 
 EmbedderConfig = make_dataclass("EmbedderConfig", [
-    (HuggingFaceArgNames.VOCAB_SIZE, int),
-    (HuggingFaceArgNames.D_MODEL, int),
+    (HuggingFaceArgNames.VOCAB_SIZE.value, int),
+    (HuggingFaceArgNames.HIDDEN_SIZE.value, int),
     ("dtype", DTypeLike),
     ("normalize_embeddings", bool),
+    ("vllm_config", VllmConfig)
     ],
-    doc="""Configuration for the Embedder module.
+    bases=(Config,)
+)
+EmbedderConfig.__doc__ =f"""Configuration for the Embedder module.
 
      Attributes:
-         vocab_size: The size of the vocabulary.
-@@ -221,10 +231,7 @@ class EmbedderConfig(Config):
+         {HuggingFaceArgNames.VOCAB_SIZE.value}: The size of the vocabulary.
+         {HuggingFaceArgNames.HIDDEN_SIZE.value}: The hidden dimension of the model.
          dtype: The data type for the embedding table.
          normalize_embeddings: If True, scale embeddings by `sqrt(d_model)`.
+         vllm_config: The VLLM config containing any overrides to apply.
      """
-)
 
 
 @dataclass
@@ -276,8 +284,8 @@ class Embedder(nnx.Module):
 
     def generate_kernel(self, rngs: nnx.Rngs):
         
-        V = getattr(self.cfg, HuggingFaceArgNames.VOCAB_SIZE)
-        D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE)
+        V = getattr(self.cfg, HuggingFaceArgNames.VOCAB_SIZE.value)
+        D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
         self.input_embedding_table_VD = self.param_factory.create_kernel_param(
             rngs,
             shape=(V, D),
@@ -311,7 +319,7 @@ class Embedder(nnx.Module):
             `(batch, sequence, d_model)`.
         """
         embedding_BTD = self.input_embedding_table_VD.value[x]
-        D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE)
+        D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
         if self.cfg.normalize_embeddings:
             embedding_BTD *= jnp.sqrt(D).astype(self.cfg.dtype)
         return embedding_BTD

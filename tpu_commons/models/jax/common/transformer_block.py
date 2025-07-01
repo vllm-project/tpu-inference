@@ -5,6 +5,7 @@ from typing import Any, List, Mapping, Tuple, Type
 from flax import nnx
 from jax.sharding import Mesh
 
+from vllm.config import VllmConfig
 from tpu_commons.models.jax.common.attention.attention import (
     Attention, AttentionConfig, AttentionMetadata, KVCache)
 from tpu_commons.models.jax.common.base import Config, ParamFactory
@@ -28,17 +29,20 @@ TransformerBlockConfig = make_dataclass("TransformerBlockConfig", [
         ("attention", AttentionConfig),
         ("ffw", FFWConfig),
         ("block_type", str),
-        (HuggingFaceArgNames.RMS_NORM_EPS, float)
+        (HuggingFaceArgNames.RMS_NORM_EPS.value, float),
+        ("vllm_config", VllmConfig)
     ],
-    doc=f"""light weighted transformer config, which includes config for all sub-modules
+    bases=(Config,)
+)
+TransformerBlockConfig.__doc__ = f"""light weighted transformer config, which includes config for all sub-modules
     it uses make() to create the live module from this config
     Args:
         attention: AttentionConfig config used to specify attention layer parameters.
         ffw: FFWConfig config used to specify feed-forward layer parameters.
         block_type: str The type of transformer block (currently support ["moe", "dense"]).
-        {HuggingFaceArgNames.RMS_NORM_EPS}: float The epsilon value for RMSNorm.
+        {HuggingFaceArgNames.RMS_NORM_EPS.value}: float The epsilon value for RMSNorm.
+        vllm_config: VllmConfig The VLLM config containing any overrides to apply.
         """
-)
 ################
 
 
@@ -66,8 +70,8 @@ class TransformerBlock(nnx.Module):
         return module_cls(cfg=cfg, **args)
 
     def __post_init__(self):
-
-        self.d_model = self.cfg.attention.d_model
+        hidden_size = getattr(self.cfg.attention, HuggingFaceArgNames.HIDDEN_SIZE.value)
+        rmsnorm_epsilon = getattr(self.cfg, HuggingFaceArgNames.RMS_NORM_EPS.value)
         self.attn = self._create_module(Attention, cfg=self.cfg.attention)
 
         if self.block_type == "moe":
@@ -79,20 +83,20 @@ class TransformerBlock(nnx.Module):
             self.mlp = self._create_module(FFW, cfg=self.cfg.ffw)
 
         self.post_attention_norm = RMSNorm(
-            dims=self.cfg.ffw.d_model,
+            dims=hidden_size,
             mesh=self.mesh,
             param_factory=self.param_factory,
             sharding_cfg=self.sharding_cfg,
-            epsilon=self.cfg.rmsnorm_epsilon,
+            epsilon=rmsnorm_epsilon,
             with_scale=True,
             dtype=self.cfg.ffw.dtype,
         )
         self.post_mlp_norm = RMSNorm(
-            dims=self.cfg.ffw.d_model,
+            dims=hidden_size,
             mesh=self.mesh,
             param_factory=self.param_factory,
             sharding_cfg=self.sharding_cfg,
-            epsilon=self.cfg.rmsnorm_epsilon,
+            epsilon=rmsnorm_epsilon,
             with_scale=True,
             dtype=self.cfg.ffw.dtype,
         )
