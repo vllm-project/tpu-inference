@@ -55,7 +55,7 @@ class TPUModelRunner():
         self.device_config = vllm_config.device_config
         self._verify_chunked_prefill_config()
         # TODO(xiang): make this configurable after merging v0 and v1
-        # self.cache_config.block_size = 256
+        self.cache_config.block_size = 256
 
         self.devices = devices
         self.dtype = self.model_config.dtype
