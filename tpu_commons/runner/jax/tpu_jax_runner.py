@@ -1,8 +1,8 @@
 # Here we try to bring as much code as possible from Hex-LLM, instead of `tpu_torch_xla_runner.py` -> jax conversion.
 # This runner is a port of https://source.corp.google.com/h/vertex-model-garden/hex-llm/+/main:hex_llm/worker/runner_jax.py
+from dataclasses import asdict
 from typing import Any, List, Optional, Tuple
 
-from dataclasses import asdict
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -85,7 +85,6 @@ class TPUModelRunner():
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
             max_num_batched_tokens=self.max_num_tokens,
-            device=None,
             pin_memory=False,
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[self.block_size],
@@ -472,7 +471,8 @@ class TPUModelRunner():
             data_items = asdict(new_req_data)
             data_items["mm_hashes"] = []
 
-            self.requests[req_id] = CachedRequestState(**data_items, output_token_ids=[])
+            self.requests[req_id] = CachedRequestState(**data_items,
+                                                       output_token_ids=[])
 
             req_ids_to_add.append(req_id)
 
