@@ -211,6 +211,8 @@ def _kv_cache_update(
     page_size: int = 32,
     num_slices_per_block: int = 8,
 ) -> Array:
+    # TODO: Get rid of this wrapper and call from pallas.py directly. Need to
+    #       find a better way to get mesh in pallas.py.
 
     from tpu_commons.kernels.ragged_kv_cache_update import kv_cache_update
 
