@@ -129,24 +129,27 @@ def _kv_cache_update(
     donate_argnames="kv_cache",
 )
 def kv_cache_update(
-    new_kv: jax.Array,  # [total_num_token, num_combined_kv_heads, head_dim]
-    slices: jax.
+        new_kv: jax.
+    Array,  # [total_num_token, num_combined_kv_heads, head_dim]
+        slices: jax.
     Array,  # [3, slices], list of (kv_cache_start, new_kv_start, slice_len)
-    kv_cache: jax.
+        kv_cache: jax.
     Array,  # [total_num_pages * page_size, num_combined_kv_heads, head_dim]
-    num_slices: jax.Array,  # [1]
-    *,
-    page_size: int = 32,
-    num_slices_per_block: int = 8,
-    mesh: Mesh | None = None,
-    kv_cache_pspec: P | None = None,
+        num_slices: jax.Array,  # [1]
+        *,
+        page_size: int = 32,
+        num_slices_per_block: int = 8,
+        mesh: Mesh | None = None,
+        kv_cache_pspec: P
+    | None = None,  # Only sharding along head_dim is supported
 ):
     if mesh is None:
         return _kv_cache_update(new_kv, slices, kv_cache, num_slices,
                                 page_size, num_slices_per_block)
 
-    assert kv_cache_pspec is not None, \
-        "kv_cache_pspec must be provided when mesh is specified"
+    if kv_cache_pspec is None:
+        raise ValueError(
+            "kv_cache_pspec must be provided when mesh is specified")
 
     in_specs = (kv_cache_pspec, P(), kv_cache_pspec, P())
     out_specs = kv_cache_pspec
