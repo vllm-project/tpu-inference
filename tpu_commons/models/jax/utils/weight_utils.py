@@ -318,13 +318,15 @@ def load_hf_weights_v1(vllm_config, model: nnx.Module,
     head_dim = model_config.get_head_size()
 
     reshape_keys = {
-        "q_proj": (num_heads, -1, hidden_size),
-        "k_proj": (num_kv_heads, -1, hidden_size),
-        "v_proj": (num_kv_heads, -1, hidden_size),
-        "o_proj": (hidden_size, num_heads, -1),
+        "q_proj": (num_heads, head_dim, hidden_size),
+        "k_proj": (num_kv_heads, head_dim, hidden_size),
+        "v_proj": (num_kv_heads, head_dim, hidden_size),
+        "o_proj": (hidden_size, num_heads, head_dim),
+    }
+    bias_reshape_keys = {
         "q_proj.bias": (num_heads, head_dim),
         "k_proj.bias": (num_kv_heads, head_dim),
-        "v_proj.bias": (num_kv_heads, head_dim),
+        "v_proj.bias": (num_kv_heads, head_dim)
     }
     transpose_keys = {
         "lm_head": (1, 0),
@@ -358,17 +360,21 @@ def load_hf_weights_v1(vllm_config, model: nnx.Module,
             f"{hf_key}: {hf_weight.shape}  -->  {model_key}: {model_weight.value.shape} {model_sharding}"
         )
 
-        # Reshape HF weight if needed
-        for key in reshape_keys:
-            if key in hf_key:
-                hf_weight = jnp.reshape(hf_weight, reshape_keys[key])
-                break
-        # Transpose HF weight if needed
-        for key in transpose_keys:
-            if key in hf_key:
-                hf_weight = jnp.transpose(hf_weight, transpose_keys[key])
-                break
-        assert model_weight.value.shape == hf_weight.shape
+        if hf_key.endswith(".bias"):
+            for key in bias_reshape_keys:
+                if key in hf_key:
+                    hf_weight = jnp.reshape(hf_weight, bias_reshape_keys[key])
+                    break
+        else:
+            for key in reshape_keys:
+                if key in hf_key:
+                    hf_weight = jnp.reshape(hf_weight, reshape_keys[key])
+                    break
+            for key in transpose_keys:
+                if key in hf_key:
+                    hf_weight = jnp.transpose(hf_weight, transpose_keys[key])
+                    break
+            assert model_weight.value.shape == hf_weight.shape
 
         # Update the model weight
         model_weight.value = shard(hf_weight, model_sharding)
