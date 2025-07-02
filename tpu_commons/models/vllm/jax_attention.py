@@ -9,7 +9,7 @@ from torchax.interop import jax_view, torch_view
 from vllm.attention import Attention as VllmAttention
 from vllm.model_executor.models.utils import extract_layer_index
 
-from tpu_commons.models.jax.attention_interface import KVCache, attention
+from tpu_commons.models.jax.attention_interface_v1 import attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context
@@ -24,7 +24,7 @@ from tpu_commons.models.vllm.vllm_model_wrapper_context import \
 )
 def _jax_attn_func(
     is_prefill: bool,
-    kv_cache: KVCache,
+    kv_cache: jax.Array,
     q: jax.Array,
     k: jax.Array,
     v: jax.Array,
@@ -34,45 +34,36 @@ def _jax_attn_func(
     head_dim: int,
     num_heads: int,
     num_kv_heads: int,
-) -> Tuple[KVCache, jax.Array]:
+) -> Tuple[jax.Array, jax.Array]:
 
     # Get shapes from vllm
-    bs, q_len, q_compute_dim = q.shape
-    _, k_len, k_compute_dim = k.shape
+    q_len, q_compute_dim = q.shape
+    k_len, k_compute_dim = k.shape
     assert k.shape == v.shape
-    assert k.shape[0] == bs
     assert q_compute_dim == head_dim * num_heads
     assert k_compute_dim == head_dim * num_kv_heads
 
     # Convert the shapes from vLLM's convetion to what the attention function expects
     # bs, num_heads, q_len, head_dim
-    q = q.reshape(bs, q_len, num_heads, head_dim).swapaxes(1, 2)
+    q = q.reshape(q_len, num_heads, head_dim)
     # bs, num_kv_heads, k_len, head_dim
-    k = k.reshape(bs, k_len, num_kv_heads, head_dim).swapaxes(1, 2)
-    v = v.reshape(bs, k_len, num_kv_heads, head_dim).swapaxes(1, 2)
-
-    # vLLM scales q in the common Attention class, but jax models scale it in each of the model code.
-    q = (q * scale).astype(q.dtype)
+    k = k.reshape(k_len, num_kv_heads, head_dim)
+    v = v.reshape(k_len, num_kv_heads, head_dim)
 
     new_kv_cache, outputs = attention(
-        is_prefill,
         kv_cache,
         q,
         k,
         v,
         attention_metadata,
         mesh,
-        num_heads,
-        num_kv_heads,
     )
 
     # Convert the shape back to vLLM's convention
-    assert outputs.shape[0] == bs
+    assert outputs.shape[0] == q_len
     assert outputs.shape[1] == num_heads
-    assert outputs.shape[2] == q_len
-    assert outputs.shape[3] == head_dim
-    outputs = outputs.swapaxes(1, 2)  # bs, q_len, num_heads, head_dim
-    outputs = outputs.reshape(bs, q_len, q_compute_dim)
+    assert outputs.shape[2] == head_dim
+    outputs = outputs.reshape(q_len, q_compute_dim)
 
     return new_kv_cache, outputs
 

@@ -68,7 +68,7 @@ def attention(
     # S: block_size
 
     # q: (T, N, H)
-    # kv: (T, K, H)
+    # k,v: (T, K, H)
     # kv_cache: (L, S, 2 * K, H)
 
     md = attention_metadata
