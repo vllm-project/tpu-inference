@@ -22,10 +22,11 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     # TODO(xiang): unify the model interface
     if os.getenv("USE_JAX_V1", False):
         from tpu_commons.models.jax.llama_v1 import LlamaForCausalLM
+        from tpu_commons.models.jax.qwen2_v1 import Qwen2ForCausalLM
     else:
         from tpu_commons.models.jax.llama import LlamaForCausalLM
+        from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
     _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
-    from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
     _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
 
     if os.getenv("NEW_MODEL_DESIGN", False):
