@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import torch_view
-from torchax.tensor import t2j
+from torchax.ops.mappings import t2j
 from vllm.model_executor.layers.linear import QKVParallelLinear
 
 P = PartitionSpec

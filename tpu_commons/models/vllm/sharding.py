@@ -8,7 +8,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torch.nn.parameter import Parameter
 from torch.utils import _pytree as pytree
 from torchax.interop import extract_all_buffers, torch_view
-from torchax.tensor import t2j
+from torchax.ops.mappings import t2j
 from vllm.attention import Attention as VllmAttention
 from vllm.config import ParallelConfig
 from vllm.model_executor.layers.fused_moe import FusedMoE
