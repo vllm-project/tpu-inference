@@ -26,9 +26,11 @@ def sample(
             logits, NamedSharding(mesh, P(None, None)))
 
     if chunked_prefill_enabled:
-        batch_size = logits.shape[0]
-        assert batch_size == 1
-        logits = jnp.squeeze(logits, 0)
+        # TODO(xiang): remove this after forcing logits.ndim=2
+        if logits.ndim == 3:
+            batch_size = logits.shape[0]
+            assert batch_size == 1
+            logits = jnp.squeeze(logits, 0)
     elif is_prefill:
         batch_size = logits.shape[0]
         batch_indices = jnp.arange(batch_size)

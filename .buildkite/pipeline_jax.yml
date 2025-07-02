@@ -15,7 +15,7 @@ steps:
        - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_commons/tests/ragged_kv_cache_update_test.py
 
    - label: "benchmarking/mmlu.sh for JAX + FlaxNNX models"
-     key: tpu_test_1
+     key: tpu_test_1_model_impl_flax_nnx
      soft_fail: true
      env:
        TPU_BACKEND_TYPE: "jax"
@@ -42,7 +42,8 @@ steps:
    - label: "TPU Test Notification"
      depends_on:
        - tpu_test_0
-       - tpu_test_1
+       - tpu_test_1_model_impl_flax_nnx
+       - tpu_test_1_model_impl_vllm
      agents:
        queue: tpu_v6e_queue
      commands: "bash .buildkite/scripts/check_results.sh"

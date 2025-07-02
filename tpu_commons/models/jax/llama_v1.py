@@ -281,6 +281,7 @@ class LlamaForCausalLM(nnx.Module):
 
         # (T, V)
         logits = jnp.dot(x, self.lm_head.value)
+        # TODO(xiang): remove this expand_dims
         # (1, T, V)
         logits = jnp.expand_dims(logits, 0)
 
