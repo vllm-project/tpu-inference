@@ -1,9 +1,25 @@
+import logging
 import unittest
 from dataclasses import dataclass, field, fields
-from vllm.config import ModelConfig
 from typing import Any, List, Mapping
 
 from tpu_commons.models.jax.common.base import Config
+# Use the 'warnings' module to globally ignore warnings within this block
+vllm_logger = logging.getLogger("vllm")
+original_level = vllm_logger.level
+import warnings
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    
+    # Set the vLLM logger to ERROR to suppress its messages
+    vllm_logger.setLevel(logging.ERROR)
+    
+    # Import the class; all warnings will be suppressed
+    from vllm.config import ModelConfig
+vllm_logger.setLevel(logging.WARNING)
+
+
+
 
 def setup_vllm_config(subconfig_types: List[str], overrides: List[Mapping[str, Any]]):
     vllm_config = SimpleVllmConfig()
@@ -19,7 +35,9 @@ def setup_vllm_config(subconfig_types: List[str], overrides: List[Mapping[str, A
 @dataclass
 class SimpleVllmConfig():
     additional_config: Mapping[str, Any] = field(default_factory=dict)
-    model_config: ModelConfig = field(default_factory=ModelConfig)
+    # Set default max_model_len to turn off warnings.
+    model_config: ModelConfig = field(default_factory=lambda: ModelConfig(max_model_len=1024))
+    
 
 @dataclass
 class SimpleConfig(Config):

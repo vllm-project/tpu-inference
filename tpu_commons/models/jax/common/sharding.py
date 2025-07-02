@@ -1,13 +1,10 @@
-from dataclasses import dataclass, fields
 import json
-from tpu_commons.models.jax.common.base import Config
-from vllm.config import VllmConfig
+from dataclasses import dataclass
 
 import jax
 import numpy as np
 from jax.sharding import Mesh
-from typing import Type
-
+from vllm.config import VllmConfig
 
 BATCH_AXIS_NAME = 'data'
 SEQUENCE_AXIS_NAME = 'data'
@@ -111,7 +108,7 @@ class ShardingRulesConfig:
     vocab_dv: tuple = (None, None)
 
 
-class ShardingConfig():
+class ShardingConfig:
     """Container for operation-specific sharding configurations.
 
     This class holds two separate `ShardingRulesConfig` objects, one for the
@@ -134,33 +131,32 @@ class ShardingConfig():
 
     - Prefill (long sequences, small batch):
     Sharding sequence dim on the 'sp' axis is often efficient.
-    `prefill_rules_cls.activation_attention_btd = (None, 'seq', 'tensor')`
+    `prefill_rules.activation_attention_btd = (None, 'seq', 'tensor')`
 
     - Generate (short sequences, large batch):
     Sharding batch dim on the 'dp' axis is often efficient.
-    `generate_rules_cls.activation_attention_btd = ('data', None, 'tensor')`
+    `generate_rules.activation_attention_btd = ('data', None, 'tensor')`
     """
 
     def __init__(self,
-                 prefill_rules_cls=None,
-                 generate_rules_cls=None,
+                 prefill_rules=None,
+                 generate_rules=None,
                  default_rules_cls=ShardingRulesConfig):
         """Initializes the ShardingConfig.
 
         Args:
-            prefill_rules_cls: An `ShardingRulesConfig` for the prefill phase.
+            prefill_rules: An `ShardingRulesConfig` for the prefill phase.
                 If None, a default config is created.
-            generate_rules_cls: An `ShardingRulesConfig` for the generate phase.
+            generate_rules: An `ShardingRulesConfig` for the generate phase.
                 If None, a default config is created.
             default_rules_cls: The default sharding rules (class) to use.
         """
         # Use a factory pattern to avoid mutable default arguments
         self.default_rules_cls = default_rules_cls
-        self.prefill_rules_cls = prefill_rules_cls if prefill_rules_cls is not None else default_rules_cls(
+        self.prefill_rules = prefill_rules if prefill_rules is not None else default_rules_cls(
         )
-        self.generate_rules_cls = generate_rules_cls if generate_rules_cls is not None else default_rules_cls(
+        self.generate_rules = generate_rules if generate_rules is not None else default_rules_cls(
         )
-
 
 
 class Sharding:
@@ -176,10 +172,11 @@ class Sharding:
         sharding_cfg: The generated `ShardingConfig` with detailed rules.
         mesh: The JAX `Mesh` object representing the device grid.
     """
+
     def __init__(self,
                  strategy_dict: dict,
-                 prefill_rules_cls: dict | None = None,
-                 generate_rules_cls: dict | None = None,
+                 prefill_rules: dict | None = None,
+                 generate_rules: dict | None = None,
                  mesh: Mesh = None,
                  default_rules_cls=ShardingRulesConfig,
                  vllm_config: VllmConfig = None):
@@ -188,10 +185,10 @@ class Sharding:
         Args:
             strategy_dict: A dictionary mapping parallelism types (e.g.,
                 'tensor_parallelism') to their degrees.
-            prefill_rules_cls: A dictionary of overrides for the prefill
+            prefill_rules: A dictionary of overrides for the prefill
                 sharding config. Keys are attribute names in `ShardingRulesConfig`,
                 and values are the new sharding tuples.
-            generate_rules_cls: A dictionary of overrides for the generate
+            generate_rules: A dictionary of overrides for the generate
                 sharding config.
             mesh: A jax mesh to use for the sharding.
         """
@@ -204,35 +201,33 @@ class Sharding:
         self.default_rules_cls = default_rules_cls
         self.sharding_cfg = self.make_sharding_config(
             default_rules_cls=default_rules_cls,
-            prefill_overrides=prefill_rules_cls,
-            generate_overrides=generate_rules_cls)
+            prefill_overrides=prefill_rules,
+            generate_overrides=generate_rules)
 
     def _get_overrides(self, sharding_phase: str):
-        # from tpu_commons.logger import init_logger
-        # logger = init_logger(__name__)
+        """Return the overrides from the vLLM config for the given sharding phase."""
         overrides = {}
         try:
-            overrides = self.vllm_config.additional_config["sharding"]["logical_rules"]["all"]
+            overrides = self.vllm_config.additional_config["sharding"][
+                "logical_rules"]["all"]
         except KeyError:
-            # logger.info(f"There is a KeyError!")
             pass
-        
+
         try:
-            additional_overrides = self.vllm_config.additional_config["sharding"]["logical_rules"][f"{sharding_phase}"]
+            additional_overrides = self.vllm_config.additional_config[
+                "sharding"]["logical_rules"][f"{sharding_phase}"]
             overrides.update(additional_overrides)
         except KeyError:
-            # logger.info(f"There is a KeyError!")
             pass
         return overrides
-    
+
     def __str__(self):
+        """Succinct representation of relevant Sharding settings and overrides."""
         output_str = f"  Using {self.default_rules_cls.__name__} logical rules.\n"
         output_str += f"  {self.__class__.__name__:} overrides:\n"
         output_str += f"    prefill logical_rule overrides:\n    {json.dumps(self._get_overrides('prefill'), indent=4, default=str)}\n\n"
         output_str += f"    generate logical_rule overrides:\n    {json.dumps(self._get_overrides('generate'), indent=4, default=str)}\n\n"
         return output_str
-
-
 
     def validate_sharding_strategy(self, ):
         """Validates if the sharding strategy is compatible with the environment.
@@ -289,7 +284,7 @@ class Sharding:
         """Applies runtime overrides to a sharding configuration object.
 
         Args:
-            config_obj: The sharding configuration object (e.g., prefill_rules_cls)
+            config_obj: The sharding configuration object (e.g., prefill_rules)
                 to be updated.
             overrides: A dictionary where keys are attribute names of the config
                 object and values are the new sharding tuples.
@@ -306,99 +301,78 @@ class Sharding:
                 raise AttributeError(
                     f"'{key}' is not a valid attribute of {type(config_obj).__name__}"
                 )
-    def _make_default_sharding_config(
-        self,
-        prefill_rules_cls,
-        generate_rules_cls):
+
+    def _make_default_sharding_config(self, prefill_rules, generate_rules):
 
         # Populate Prefill Config
         # During prefill, sequence length is long, so we shard along the sequence axis.
-        prefill_rules_cls.activation_attention_btd = (None,
-                                                         SEQUENCE_AXIS_NAME,
-                                                         ATTN_TENSOR_AXIS_NAME)
-        prefill_rules_cls.activation_attention_out_btd = (
-            None, SEQUENCE_AXIS_NAME,
-            ATTN_TENSOR_AXIS_NAME)
-        prefill_rules_cls.activation_q_btd = (
-            BATCH_AXIS_NAME, None, ATTN_TENSOR_AXIS_NAME)
+        prefill_rules.activation_attention_btd = (None, SEQUENCE_AXIS_NAME,
+                                                  ATTN_TENSOR_AXIS_NAME)
+        prefill_rules.activation_attention_out_btd = (None, SEQUENCE_AXIS_NAME,
+                                                      ATTN_TENSOR_AXIS_NAME)
+        prefill_rules.activation_q_btd = (BATCH_AXIS_NAME, None,
+                                          ATTN_TENSOR_AXIS_NAME)
         #TODO: the default qkv and kvcache is sharded on head dim
         # We may change it after we finalize the KVCache design
-        prefill_rules_cls.attn_o_btnh = (
-            None, SEQUENCE_AXIS_NAME, ATTN_TENSOR_AXIS_NAME,
-            None)
-        prefill_rules_cls.query_btnh = (
-            None, SEQUENCE_AXIS_NAME, ATTN_TENSOR_AXIS_NAME,
-            None)
-        prefill_rules_cls.keyvalue_bskh = (
-            None, SEQUENCE_AXIS_NAME, ATTN_TENSOR_AXIS_NAME,
-            None)
-        prefill_rules_cls.keyvalue_cache_kbsh = (
-            ATTN_TENSOR_AXIS_NAME, None, None, None)
+        prefill_rules.attn_o_btnh = (None, SEQUENCE_AXIS_NAME,
+                                     ATTN_TENSOR_AXIS_NAME, None)
+        prefill_rules.query_btnh = (None, SEQUENCE_AXIS_NAME,
+                                    ATTN_TENSOR_AXIS_NAME, None)
+        prefill_rules.keyvalue_bskh = (None, SEQUENCE_AXIS_NAME,
+                                       ATTN_TENSOR_AXIS_NAME, None)
+        prefill_rules.keyvalue_cache_kbsh = (ATTN_TENSOR_AXIS_NAME, None, None,
+                                             None)
 
         # Populate Generate (Decode) Config
         # During decode, batch size is the large dimension, so we shard along the batch axis.
-        generate_rules_cls.activation_attention_btd = (
-            BATCH_AXIS_NAME, None, ATTN_TENSOR_AXIS_NAME)
-        generate_rules_cls.activation_attention_out_btd = (
-            BATCH_AXIS_NAME, None, ATTN_TENSOR_AXIS_NAME)
-        generate_rules_cls.activation_q_btd = (
-            BATCH_AXIS_NAME, None, ATTN_TENSOR_AXIS_NAME)
+        generate_rules.activation_attention_btd = (BATCH_AXIS_NAME, None,
+                                                   ATTN_TENSOR_AXIS_NAME)
+        generate_rules.activation_attention_out_btd = (BATCH_AXIS_NAME, None,
+                                                       ATTN_TENSOR_AXIS_NAME)
+        generate_rules.activation_q_btd = (BATCH_AXIS_NAME, None,
+                                           ATTN_TENSOR_AXIS_NAME)
         #TODO: the default qkv and kvcache is sharded on head dim
         # We may change it after we finalize the KVCache design
-        generate_rules_cls.attn_o_btnh = (
-            BATCH_AXIS_NAME, None, ATTN_TENSOR_AXIS_NAME,
-            None)
-        generate_rules_cls.query_btnh = (
-            BATCH_AXIS_NAME, None, ATTN_TENSOR_AXIS_NAME,
-            None)
-        generate_rules_cls.keyvalue_bskh = (
-            BATCH_AXIS_NAME, None, ATTN_TENSOR_AXIS_NAME,
-            None)
-        generate_rules_cls.keyvalue_cache_kbsh = (
-            ATTN_TENSOR_AXIS_NAME, None, None, None)
-        generate_rules_cls.attn_q_weight_ndh = (
-            None, ATTN_HEAD_AXIS_NAME,
-            ATTN_TENSOR_AXIS_NAME)
-        generate_rules_cls.attn_k_weight_kdh = (
-            None, ATTN_HEAD_AXIS_NAME,
-            ATTN_TENSOR_AXIS_NAME)
-        generate_rules_cls.attn_v_weight_kdh = (
-            None, ATTN_HEAD_AXIS_NAME,
-            ATTN_TENSOR_AXIS_NAME)
-        generate_rules_cls.attn_o_weight_nhd = (
-            None, ATTN_HEAD_AXIS_NAME,
-            ATTN_TENSOR_AXIS_NAME)
+        generate_rules.attn_o_btnh = (BATCH_AXIS_NAME, None,
+                                      ATTN_TENSOR_AXIS_NAME, None)
+        generate_rules.query_btnh = (BATCH_AXIS_NAME, None,
+                                     ATTN_TENSOR_AXIS_NAME, None)
+        generate_rules.keyvalue_bskh = (BATCH_AXIS_NAME, None,
+                                        ATTN_TENSOR_AXIS_NAME, None)
+        generate_rules.keyvalue_cache_kbsh = (ATTN_TENSOR_AXIS_NAME, None,
+                                              None, None)
+        generate_rules.attn_q_weight_ndh = (None, ATTN_HEAD_AXIS_NAME,
+                                            ATTN_TENSOR_AXIS_NAME)
+        generate_rules.attn_k_weight_kdh = (None, ATTN_HEAD_AXIS_NAME,
+                                            ATTN_TENSOR_AXIS_NAME)
+        generate_rules.attn_v_weight_kdh = (None, ATTN_HEAD_AXIS_NAME,
+                                            ATTN_TENSOR_AXIS_NAME)
+        generate_rules.attn_o_weight_nhd = (None, ATTN_HEAD_AXIS_NAME,
+                                            ATTN_TENSOR_AXIS_NAME)
 
-        generate_rules_cls.activation_ffw_btd = (BATCH_AXIS_NAME, None,
-                                                    MLP_TENSOR_AXIS_NAME)
-        generate_rules_cls.ffw_hidden_btf = (BATCH_AXIS_NAME, None,
-                                                MLP_TENSOR_AXIS_NAME)
+        generate_rules.activation_ffw_btd = (BATCH_AXIS_NAME, None,
+                                             MLP_TENSOR_AXIS_NAME)
+        generate_rules.ffw_hidden_btf = (BATCH_AXIS_NAME, None,
+                                         MLP_TENSOR_AXIS_NAME)
         # FFW weights are typically sharded along the hidden dimension (F).
-        generate_rules_cls.ffw_weight_df = (None, MLP_TENSOR_AXIS_NAME)
-        generate_rules_cls.ffw_weight_fd = (MLP_TENSOR_AXIS_NAME, None)
+        generate_rules.ffw_weight_df = (None, MLP_TENSOR_AXIS_NAME)
+        generate_rules.ffw_weight_fd = (MLP_TENSOR_AXIS_NAME, None)
         # MoE weights are sharded along the expert axis and the hidden dimension.
-        generate_rules_cls.moe_weights_edf = (EXPERT_AXIS_NAME, None,
-                                                 MOE_TENSOR_AXIS_NAME)
-        generate_rules_cls.moe_weights_efd = (EXPERT_AXIS_NAME,
-                                                 MOE_TENSOR_AXIS_NAME, None)
-        generate_rules_cls.moe_router_de = (None, EXPERT_AXIS_NAME)
+        generate_rules.moe_weights_edf = (EXPERT_AXIS_NAME, None,
+                                          MOE_TENSOR_AXIS_NAME)
+        generate_rules.moe_weights_efd = (EXPERT_AXIS_NAME,
+                                          MOE_TENSOR_AXIS_NAME, None)
+        generate_rules.moe_router_de = (None, EXPERT_AXIS_NAME)
 
         # Embedding weight: (VocabSize, Dim)
-        generate_rules_cls.emb_weight_vd = (
-            MLP_TENSOR_AXIS_NAME,
-            None)
-        generate_rules_cls.activation_btd = (
-            BATCH_AXIS_NAME, None,
-            ATTN_TENSOR_AXIS_NAME)
-        generate_rules_cls.prelogit_btd = (
-            BATCH_AXIS_NAME, None,
-            ATTN_TENSOR_AXIS_NAME)
-        generate_rules_cls.logits_btv = (
-            BATCH_AXIS_NAME, None,
-            MLP_TENSOR_AXIS_NAME)
-        generate_rules_cls.vocab_dv = (
-            None,
-            MLP_TENSOR_AXIS_NAME)
+        generate_rules.emb_weight_vd = (MLP_TENSOR_AXIS_NAME, None)
+        generate_rules.activation_btd = (BATCH_AXIS_NAME, None,
+                                         ATTN_TENSOR_AXIS_NAME)
+        generate_rules.prelogit_btd = (BATCH_AXIS_NAME, None,
+                                       ATTN_TENSOR_AXIS_NAME)
+        generate_rules.logits_btv = (BATCH_AXIS_NAME, None,
+                                     MLP_TENSOR_AXIS_NAME)
+        generate_rules.vocab_dv = (None, MLP_TENSOR_AXIS_NAME)
 
     def make_sharding_config(
             self,
@@ -408,8 +382,8 @@ class Sharding:
         """Creates the detailed `ShardingConfig` with specific partitioning rules
         and applies any runtime overrides.
 
-        This method populates the `prefill_rules_cls` and
-        `generate_rules_cls` with hardcoded sharding rules that are generally
+        This method populates the `prefill_rules` and
+        `generate_rules` with hardcoded sharding rules that are generally
         effective for transformer models, and then updates them with any provided
         overrides.
 
@@ -425,8 +399,8 @@ class Sharding:
         #TODO: organize into update_prefill() and update_decode for each axis
         #TODO: verify the sharding axes
         sharding_cfg = ShardingConfig(default_rules_cls=default_rules_cls)
-        prefill_rules_cls = sharding_cfg.prefill_rules_cls
-        generate_rules_cls = sharding_cfg.generate_rules_cls
+        prefill_rules = sharding_cfg.prefill_rules
+        generate_rules = sharding_cfg.generate_rules
 
         # Extract the overrides from the vllm_config if they are not provided programatically.
         if prefill_overrides is None:
@@ -435,14 +409,14 @@ class Sharding:
             generate_overrides = self._get_overrides("generate")
 
         # Apply default sharding configs
-        self._make_default_sharding_config(prefill_rules_cls, generate_rules_cls)
+        self._make_default_sharding_config(prefill_rules, generate_rules)
 
         # Apply overriding the runtime sharding rules
-        self._apply_overrides(prefill_rules_cls, prefill_overrides)
-        self._apply_overrides(generate_rules_cls, generate_overrides)
+        self._apply_overrides(prefill_rules, prefill_overrides)
+        self._apply_overrides(generate_rules, generate_overrides)
 
         return sharding_cfg
-    
+
     #TODO: Add __repr__
 
 

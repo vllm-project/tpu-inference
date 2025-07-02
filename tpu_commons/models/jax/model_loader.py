@@ -31,6 +31,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
 
     if os.getenv("NEW_MODEL_DESIGN", False):
         from tpu_commons.models.jax.recipes.llama3 import Llama3_8B
+
         # from tpu_commons.models.jax.recipes.llama4 import Llama4Scout
         _MODEL_REGISTRY["Llama3_8B"] = Llama3_8B
         # _MODEL_REGISTRY["Llama4Scout"] = Llama4Scout
@@ -72,16 +73,8 @@ def _get_nnx_model(
             nnx.update(model, sharded_state)
             return model
 
-<<<<<<< HEAD
         with mesh:
             jit_model = create_sharded_model()
-=======
-    logger.info(f"Loaded model class: {model_class}")
-    if issubclass(model_class, Model): # TODO: Get this to wrok for nnx.eval_shape.
-        model = model_class(vllm_config, rng, mesh)
-        model.load_weights(model)
-        jit_model = model
->>>>>>> dd67ec2 (Updated sharding override logic to allow overriding specific rules in)
     else:
         # We first create an abstract model without allocating any weights,
         # then fill in its weigths during load_weights from HF.

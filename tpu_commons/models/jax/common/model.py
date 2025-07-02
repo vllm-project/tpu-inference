@@ -1,6 +1,6 @@
 import abc
 from dataclasses import dataclass
-from typing import Any, List, Mapping, Tuple
+from typing import List, Tuple
 
 import jax
 from flax import nnx
@@ -8,8 +8,8 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh
 from vllm.config import VllmConfig
 
-from tpu_commons.models.jax.common.base import Config
 from tpu_commons.models.jax.common.attention.attention import AttentionMetadata
+from tpu_commons.models.jax.common.base import Config
 from tpu_commons.models.jax.common.kv_cache import KVCacheType
 from tpu_commons.models.jax.common.layers import EmbedderConfig
 from tpu_commons.models.jax.common.transformer_block import \
@@ -42,5 +42,3 @@ class Model(nnx.Module, abc.ABC):
                  *args,
                  **kwargs) -> Tuple[List[KVCacheType], jax.Array, jax.Array]:
         raise NotImplementedError
-
-

@@ -18,12 +18,11 @@
 
 import pprint
 import re
-from dataclasses import asdict, dataclass, field, fields
-from typing import List, Mapping, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
-import json
 from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
@@ -38,18 +37,19 @@ from tpu_commons.models.jax.common.kv_cache import KVCacheType
 from tpu_commons.models.jax.common.layers import (Embedder, EmbedderConfig,
                                                   FFWConfig, RMSNorm)
 from tpu_commons.models.jax.common.model import Model, ModelConfig
-from tpu_commons.models.jax.recipes.recipe import RecipeConfig
-from tpu_commons.models.jax.common.sharding import (ShardingRulesConfig, Sharding,
-                                                    ShardingConfig)
+from tpu_commons.models.jax.common.sharding import (Sharding, ShardingConfig,
+                                                    ShardingRulesConfig)
 from tpu_commons.models.jax.common.transformer_block import (
     TransformerBlock, TransformerBlockConfig)
 from tpu_commons.models.jax.layers.misc import shard_put
 from tpu_commons.models.jax.layers.sampling import sample
+from tpu_commons.models.jax.recipes.recipe import RecipeConfig
 from tpu_commons.models.jax.utils.weight_utils import (ParameterType,
                                                        WeightLoader, get_param)
 
 logger = init_logger(__name__)
 pp = pprint.PrettyPrinter(depth=6)
+
 
 @dataclass
 class Llama8BModelConfig(ModelConfig):
@@ -72,41 +72,28 @@ class Llama8BModelConfig(ModelConfig):
                 vllm_config=self.vllm_config)
         if not self.layers:
             self.layers = TransformerBlockConfig(
-                attention=AttentionConfig(
-                hidden_size=self.hidden_size, 
-                num_attention_heads=32,
-                num_key_value_heads=8,
-                head_dim=128,
-                rope_theta=500000.0,
-                rope_scaling={},
-                dtype=self.dtype,
-                vllm_config=self.vllm_config),
-            ffw=FFWConfig(hidden_size=self.hidden_size,
-                          intermediate_size=14336,
-                          hidden_act="silu",
-                          dtype=self.dtype,
-                          vllm_config=self.vllm_config),
-            rms_norm_eps=1e-5,
-            block_type="dense",
-            vllm_config=self.vllm_config
-            )
+                attention=AttentionConfig(hidden_size=self.hidden_size,
+                                          num_attention_heads=32,
+                                          num_key_value_heads=8,
+                                          head_dim=128,
+                                          rope_theta=500000.0,
+                                          rope_scaling={},
+                                          dtype=self.dtype,
+                                          vllm_config=self.vllm_config),
+                ffw=FFWConfig(hidden_size=self.hidden_size,
+                              intermediate_size=14336,
+                              hidden_act="silu",
+                              dtype=self.dtype,
+                              vllm_config=self.vllm_config),
+                rms_norm_eps=1e-5,
+                block_type="dense",
+                vllm_config=self.vllm_config)
+
 
 @dataclass
 class Llama8BShardingRulesConfig(ShardingRulesConfig):
     lm_head_dv: tuple = (None, sharding.MLP_TENSOR_AXIS_NAME)
 
-# class Llama8BSharding(Sharding):
-
-#     def make_sharding_config(self,
-#                              prefill_overrides=None,
-#                              generate_overrides=None) -> ShardingConfig:
-#         sharding_config = super().make_sharding_config(prefill_overrides,
-#                                                        generate_overrides)
-#         sharding_config.prefill_rules_cls.lm_head_dv = (
-#             None, sharding.MLP_TENSOR_AXIS_NAME)
-#         sharding_config.generate_rules_cls.lm_head_dv = (
-#             None, sharding.MLP_TENSOR_AXIS_NAME)
-#         return sharding_config
 
 @dataclass
 class Llama8BServingConfig(Config):
@@ -116,7 +103,10 @@ class Llama8BServingConfig(Config):
 @dataclass(frozen=True)
 class Llama8BConfig(RecipeConfig):
     model: Llama8BModelConfig = field(default_factory=Llama8BModelConfig)
-    sharding: ShardingConfig = field(default_factory=ShardingConfig, repr=False, )
+    sharding: ShardingConfig = field(
+        default_factory=ShardingConfig,
+        repr=False,
+    )
     serving: Llama8BServingConfig = field(default_factory=Llama8BServingConfig)
 
 
@@ -131,18 +121,15 @@ class Llama3_8B(Model):
                 "sharding_strategy"]
         except (KeyError, TypeError):
             strategy_dict = {"tensor_parallelism": 4, "expert_parallelism": 2}
-        self.sharding = Sharding(
-            strategy_dict=strategy_dict,
-            mesh=self.mesh,
-            default_rules_cls=Llama8BShardingRulesConfig,
-            vllm_config=self.vllm_config
-        )
-    
+        self.sharding = Sharding(strategy_dict=strategy_dict,
+                                 mesh=self.mesh,
+                                 default_rules_cls=Llama8BShardingRulesConfig,
+                                 vllm_config=self.vllm_config)
+
         self.cfg = Llama8BConfig(
             model=Llama8BModelConfig(vllm_config=self.vllm_config),
             sharding=self.sharding.sharding_cfg,
-            serving=Llama8BServingConfig(vllm_config=self.vllm_config)
-            )
+            serving=Llama8BServingConfig(vllm_config=self.vllm_config))
         logger.info(f"Using the following config:\n{self.cfg}")
         logger.info(f"Using the following shardings:\n{self.sharding}")
         self.mesh = self.sharding.mesh
@@ -157,7 +144,7 @@ class Llama3_8B(Model):
                                  param_factory=param_factory,
                                  sharding_cfg=self.cfg.sharding)
         self.embedder.generate_kernel(self.rng)
-        
+
         self.layers = [
             TransformerBlock(cfg=self.cfg.model.layers,
                              block_type="dense",

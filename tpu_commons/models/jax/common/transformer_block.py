@@ -1,39 +1,25 @@
 from dataclasses import dataclass, field, make_dataclass
-from typing import Any, List, Mapping, Tuple, Type
+from typing import Any, Tuple, Type
 
 # Flax and JAX sharding imports
 from flax import nnx
 from jax.sharding import Mesh
-
 from vllm.config import VllmConfig
+
 from tpu_commons.models.jax.common.attention.attention import (
     Attention, AttentionConfig, AttentionMetadata, KVCache)
 from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
 from tpu_commons.models.jax.common.layers import FFW, FFWConfig, RMSNorm
-from tpu_commons.models.jax.common.moe.moe import MoE, Router, RoutingConfig
+from tpu_commons.models.jax.common.moe.moe import MoE, Router
 from tpu_commons.models.jax.common.sharding import *
 
-
-################
-# TransformerBlockConfig definition
-# def _post_init_transformer_block_config(self):
-#      if self.block_type.lower() == "moe":
-#         return MoE
-#     elif self.block_type.lower() == "dense":
-#         return FFW
-#     else:
-#         raise ValueError(f"Invalid block type: {self.block_type}")
-
-TransformerBlockConfig = make_dataclass("TransformerBlockConfig", [
-        ("attention", AttentionConfig),
-        ("ffw", FFWConfig),
-        ("block_type", str),
-        (HuggingFaceArgNames.RMS_NORM_EPS.value, float),
-        ("vllm_config", VllmConfig, field(repr=False, default=None))
-    ],
-    bases=(Config,)
-)
+TransformerBlockConfig = make_dataclass(
+    "TransformerBlockConfig",
+    [("attention", AttentionConfig), ("ffw", FFWConfig), ("block_type", str),
+     (HuggingFaceArgNames.RMS_NORM_EPS.value, float),
+     ("vllm_config", VllmConfig, field(repr=False, default=None))],
+    bases=(Config, ))
 TransformerBlockConfig.__doc__ = f"""light weighted transformer config, which includes config for all sub-modules
     it uses make() to create the live module from this config
     Args:
@@ -43,7 +29,6 @@ TransformerBlockConfig.__doc__ = f"""light weighted transformer config, which in
         {HuggingFaceArgNames.RMS_NORM_EPS.value}: float The epsilon value for RMSNorm.
         vllm_config: VllmConfig The VLLM config containing any overrides to apply.
         """
-################
 
 
 @dataclass
@@ -70,8 +55,10 @@ class TransformerBlock(nnx.Module):
         return module_cls(cfg=cfg, **args)
 
     def __post_init__(self):
-        hidden_size = getattr(self.cfg.attention, HuggingFaceArgNames.HIDDEN_SIZE.value)
-        rmsnorm_epsilon = getattr(self.cfg, HuggingFaceArgNames.RMS_NORM_EPS.value)
+        hidden_size = getattr(self.cfg.attention,
+                              HuggingFaceArgNames.HIDDEN_SIZE.value)
+        rmsnorm_epsilon = getattr(self.cfg,
+                                  HuggingFaceArgNames.RMS_NORM_EPS.value)
         self.attn = self._create_module(Attention, cfg=self.cfg.attention)
 
         if self.block_type == "moe":
@@ -101,14 +88,13 @@ class TransformerBlock(nnx.Module):
             dtype=self.cfg.ffw.dtype,
         )
 
-    def __call__(self,
-                 x: jax.Array,
-                 is_prefill: bool,
-                 kv_cache: KVCache,
-                 attention_metadata: AttentionMetadata) -> Tuple[KVCache, jax.Array]:
+    def __call__(
+            self, x: jax.Array, is_prefill: bool, kv_cache: KVCache,
+            attention_metadata: AttentionMetadata
+    ) -> Tuple[KVCache, jax.Array]:
         op_mode = "prefill" if is_prefill else "generate"
         new_cache, score = self.attn(x, is_prefill, kv_cache,
-                                          attention_metadata)
+                                     attention_metadata)
         x = self.post_attention_norm(x + score)
         if self.block_type == "moe":
             y = self.moe(x, op_mode)
