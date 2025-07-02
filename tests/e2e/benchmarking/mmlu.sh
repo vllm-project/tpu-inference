@@ -205,7 +205,7 @@ for model_name in $model_list; do
     echo "--------------------------------------------------"
     # Spin up the vLLM server
     echo "Spinning up the vLLM server..."
-    (TPU_BACKEND_TYPE=jax vllm serve "$model_name" --max-model-len=1024 --disable-log-requests --max-num-batched-tokens 8192 2>&1 | tee -a "$LOG_FILE") &
+    (vllm serve "$model_name" --max-model-len=1024 --disable-log-requests --max-num-batched-tokens 8192 2>&1 | tee -a "$LOG_FILE") &
 
 
 

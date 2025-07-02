@@ -44,6 +44,21 @@ python tpu_commons/examples/offline_inference.py \
     --max_model_len=1024
 ```
 
+### Run JAX path examples with disaggregated serving
+
+Run `Llama 3.1 8B Instruct` offline inference on 4 TPU chips in disaggregated mode:
+
+```
+PREFILL_SLICES=2 \
+DECODE_SLICES=2 \
+TPU_BACKEND_TYPE=jax \
+python tpu_commons/examples/offline_inference.py \
+    --task=generate \
+    --model=meta-llama/Meta-Llama-3-8B-Instruct \
+    --max_model_len=1024 \
+    --max_num_seqs=8
+```
+
 ### Run vLLM Pytorch models on the JAX path
 
 Run the vLLM's implementation of `Llama 3.1 8B`, which is in Pytorch. It is the same command as above with the extra env var `MODEL_IMPL_TYPE=vllm`:
@@ -84,7 +99,6 @@ TPU_BACKEND_TYPE=pytorch_xla
 To switch different model implementations:
 
 ```
-MODEL_IMPL_TYPE=flax_nn
 MODEL_IMPL_TYPE=flax_nnx
 MODEL_IMPL_TYPE=vllm
 ```

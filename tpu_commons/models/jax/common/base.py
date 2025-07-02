@@ -1,13 +1,18 @@
 import dataclasses
 from dataclasses import dataclass, fields
-from flax import nnx
+from typing import Any, Callable, Mapping
+
 import jax
 import jax.numpy as jnp
+from flax import nnx
 from jax.sharding import NamedSharding
-from typing import Any, Callable
+
+from tpu_commons.logger import init_logger
 
 # Type alias for Initializer for cleaner type hints
 Initializer = Callable[..., jax.Array]
+logger = init_logger(__name__)
+
 
 @dataclass
 class Config:
@@ -56,7 +61,70 @@ class Config:
         filtered_cfg = {k: v for k, v in cfg.items() if k in known_params}
 
         return cls(**filtered_cfg)
-    
+
+    # TODO: check logic with some unit tests.
+    def maybe_apply_overrides(self):
+        """Update the args with additional_configs, hf_overrides, and override_generation_config settings.
+        If there is overlap in overrides between the configs, then print a warning declaring which
+        overrides will take precedent."""
+
+        if not getattr(self, "vllm_config"):
+            return
+
+        def _overrides_str(original: str, original_val: Any,
+                           new_val: Any) -> str:
+            return f"{original}: {original_val} ---> {new_val}"
+
+        def _get_overrides_dict(self) -> Mapping[str, Any]:
+            """Return the overrides from all of the possible vllm sections."""
+            overrides_dict = {}
+            vllm_model_config = self.vllm_config.model_config
+
+            for override_type in ordered_override_types:
+                if override_type == "additional_config":
+                    overrides_dict[
+                        override_type] = self.vllm_config.additional_config
+                else:
+                    overrides_dict[override_type] = getattr(
+                        vllm_model_config, override_type)
+            return overrides_dict
+
+        ordered_override_types = [
+            "additional_config", "hf_overrides", "override_generation_config"
+        ]
+
+        overrides_dict = _get_overrides_dict(self)
+
+        # Override the config values using the vLLM sections with highest
+        # precedence first.
+        for field in fields(self):
+            selected_type = None
+            for override_type in reversed(ordered_override_types):
+                if field.name in overrides_dict[override_type]:
+                    setattr(self, field.name,
+                            overrides_dict[override_type][field.name])
+                    selected_type = override_type
+                    break
+            if selected_type is None:
+                continue
+
+            # If multiple vLLM sections contain overrides, print a warning.
+            for override_type in ordered_override_types:
+                if override_type == selected_type:
+                    break
+                else:
+                    if field.name in overrides_dict[override_type]:
+                        overriden_keys_str = _overrides_str(
+                            field.name,
+                            overrides_dict[override_type][field.name],
+                            overrides_dict[selected_type][field.name])
+                        logger.warning(
+                            f"Overriding {override_type} arguments with the following {selected_type} args: {overriden_keys_str}"
+                        )
+
+    def __post_init__(self):
+        self.maybe_apply_overrides()
+
 
 @dataclasses.dataclass
 class ParamFactory:
@@ -80,14 +148,12 @@ class ParamFactory:
                       sharding: NamedSharding,
                       dtype: Any = jnp.float32) -> nnx.Param:
         """Private helper to create a sharded parameter with a given initializer."""
-        sharded_initializer = jax.jit(
-            initializer,
-            static_argnames=('shape', 'dtype'), 
-            out_shardings=sharding
-        )
+        sharded_initializer = jax.jit(initializer,
+                                      static_argnames=('shape', 'dtype'),
+                                      out_shardings=sharding)
         key = rngs.params()
         param_data = sharded_initializer(key, shape, dtype)
-        return nnx.Param(param_data)
+        return nnx.Param(param_data, sharding=sharding)
 
     def create_kernel_param(self, *args, **kwargs) -> nnx.Param:
         """Creates a kernel/weight parameter using the kernel_initializer."""

@@ -1,3 +1,4 @@
+# TODO: Update documentation
 # Input flags are stored in below configs
 # model_flag_config: Config
 #   d_model: 2048
@@ -15,15 +16,16 @@
 
 # The foundation Model/ModelConfig class is to-be-implemented
 
+import pprint
 import re
 from dataclasses import dataclass, field
-from typing import List, Mapping, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
 from flax.typing import PRNGKey
-from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from jax.sharding import Mesh
 from vllm.config import VllmConfig
 
 import tpu_commons.models.jax.common.sharding as sharding
@@ -31,154 +33,118 @@ from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.common.attention.attention import (
     AttentionConfig, AttentionMetadata)
 from tpu_commons.models.jax.common.base import Config, ParamFactory
-from tpu_commons.models.jax.common.kv_cache import KVCacheConfig, KVCacheType
+from tpu_commons.models.jax.common.kv_cache import KVCacheType
 from tpu_commons.models.jax.common.layers import (Embedder, EmbedderConfig,
                                                   FFWConfig, RMSNorm)
 from tpu_commons.models.jax.common.model import Model, ModelConfig
-from tpu_commons.models.jax.common.sharding import (OpShardingConfig, Sharding,
-                                                    ShardingConfig)
+from tpu_commons.models.jax.common.sharding import (Sharding, ShardingConfig,
+                                                    ShardingRulesConfig)
 from tpu_commons.models.jax.common.transformer_block import (
     TransformerBlock, TransformerBlockConfig)
 from tpu_commons.models.jax.layers.misc import shard_put
-from tpu_commons.models.jax.utils.weight_utils import (
-    ParameterType, WeightLoader, get_param)
+from tpu_commons.models.jax.layers.sampling import sample
+from tpu_commons.models.jax.recipes.recipe import RecipeConfig
+from tpu_commons.models.jax.utils.weight_utils import (ParameterType,
+                                                       WeightLoader, get_param)
 
 logger = init_logger(__name__)
+pp = pprint.PrettyPrinter(depth=6)
 
 
 @dataclass
 class Llama8BModelConfig(ModelConfig):
-    emb: EmbedderConfig = field(default_factory=lambda: EmbedderConfig(
-        vocab_size=128256,
-        d_model=4096,  ## TODO: Is this correct?
-        dtype=jnp.bfloat16,
-        normalize_embeddings=False  # TODO: Confirm
-    ))
-    layers: TransformerBlockConfig = field(
-        default_factory=lambda: TransformerBlockConfig(
-            attention=AttentionConfig(
-                d_model=4096,  ## TODO: Is this correct?
-                num_q_heads=32,
-                num_kv_heads=8,
-                head_dim=128,
-                rope_theta=500000.0,
-                rope_scaling={},
-                dtype=jnp.bfloat16),
-            ffw=FFWConfig(
-                d_model=4096,  ## TODO: Is this correct?
-                hidden_size=14336,
-                act="silu",
-                dtype=jnp.bfloat16),
-            kv_cache=KVCacheConfig(batch_size=1,
-                                   cache_len=1024,
-                                   num_kv_heads=8,
-                                   head_dim=128,
-                                   dtype=jnp.float16),
-            rmsnorm_epsilon=1e-5,
-            block_type="dense"))
+    hidden_size: int = 4096
+    dtype: jnp.dtype = jnp.bfloat16
     num_layers: int = 32
-    # num_layers: int = 24 ## TODO REVERT
-    # num_moe_layers: int = 24 ## TODO REVERT
+    emb: EmbedderConfig = None
+    layers: TransformerBlockConfig = None
+    vllm_config: VllmConfig = field(repr=False, default=None)
 
+    def __post_init__(self):
 
-class Llama8BOpShardingConfig(OpShardingConfig):
-    lm_head_dv: tuple = (None, None)
-
-
-class Llama8BSharding(Sharding):
-
-    def make_sharding_config(self,
-                             prefill_overrides=None,
-                             generate_overrides=None) -> ShardingConfig:
-        sharding_config = super().make_sharding_config(
-            prefill_overrides, generate_overrides, Llama8BOpShardingConfig)
-        sharding_config.prefill_sharding_cfg.lm_head_dv = (
-            None, sharding.MLP_TENSOR_AXIS_NAME)
-        sharding_config.generate_sharding_cfg.lm_head_dv = (
-            None, sharding.MLP_TENSOR_AXIS_NAME)
-        return sharding_config
-
-
-# class Llama4ScoutQuantizationConfig(QuantizationConfig):
-#     pass
-
-
-class Llama8BServingConfig(Config):
-    pass
+        # Initialize defaults:
+        if not self.emb:
+            self.emb = EmbedderConfig(
+                vocab_size=128256,
+                hidden_size=self.hidden_size,
+                dtype=self.dtype,
+                normalize_embeddings=False,  # TODO: Confirm
+                vllm_config=self.vllm_config)
+        if not self.layers:
+            self.layers = TransformerBlockConfig(
+                attention=AttentionConfig(hidden_size=self.hidden_size,
+                                          num_attention_heads=32,
+                                          num_key_value_heads=8,
+                                          head_dim=128,
+                                          rope_theta=500000.0,
+                                          rope_scaling={},
+                                          dtype=self.dtype,
+                                          vllm_config=self.vllm_config),
+                ffw=FFWConfig(hidden_size=self.hidden_size,
+                              intermediate_size=14336,
+                              hidden_act="silu",
+                              dtype=self.dtype,
+                              vllm_config=self.vllm_config),
+                rms_norm_eps=1e-5,
+                block_type="dense",
+                vllm_config=self.vllm_config)
 
 
 @dataclass
-class Llama8BConfig():
+class Llama8BShardingRulesConfig(ShardingRulesConfig):
+    lm_head_dv: tuple = (None, sharding.MLP_TENSOR_AXIS_NAME)
+
+
+@dataclass
+class Llama8BServingConfig(Config):
+    vllm_config: VllmConfig = field(repr=False, default=None)
+
+
+@dataclass(frozen=True)
+class Llama8BConfig(RecipeConfig):
     model: Llama8BModelConfig = field(default_factory=Llama8BModelConfig)
-    sharding: ShardingConfig = field(default_factory=ShardingConfig)
-    # quant: Llama4ScoutQuantizationConfig = None
-    serving: Llama8BServingConfig = None
-    overrides: Mapping[str, any] = None
-
-    def __post_init__(self):
-        # TODO: Allow for command-line overrides. Maybe inherit from recipe.py.
-        if self.overrides:
-            if self.overrides.get("model", None):
-                pass
-            if self.overrides.get("sharding", None):
-                pass
-            if self.overrides.get("quant", None):
-                pass
-            if self.overrides.get("serving", None):
-                pass
+    sharding: ShardingConfig = field(
+        default_factory=ShardingConfig,
+        repr=False,
+    )
+    serving: Llama8BServingConfig = field(default_factory=Llama8BServingConfig)
 
 
-# Class Model(nnx.module) will be added
 class Llama3_8B(Model):
 
     def __init__(self, vllm_config: VllmConfig, rng: PRNGKey, mesh: Mesh):
         self.vllm_config = vllm_config
         self.rng = nnx.Rngs(rng)
         self.mesh = mesh
-        # jax.debug.breakpoint()
-        self.cfg = Llama8BConfig(
-            model=Llama8BModelConfig(),
-            sharding=ShardingConfig(default_ops_cls=Llama8BOpShardingConfig),
-            # quant=Llama4ScoutQuantizationConfig(),
-            serving=Llama8BServingConfig(),
-            overrides=self.vllm_config.additional_config.get(
-                "overrides", None))
-        self.runtime_params = self.vllm_config.additional_config.get(
-            "overrides", None)
-        self.setup()
-
-    def setup(self) -> None:
-        param_factory = ParamFactory(
-            kernel_initializer=nnx.initializers.xavier_normal(),
-            scale_initializer=nnx.initializers.ones
-        )
         try:
-            strategy_dict = self.runtime_params["sharding"][
+            strategy_dict = self.vllm_config.additional_config["sharding"][
                 "sharding_strategy"]
         except (KeyError, TypeError):
             strategy_dict = {"tensor_parallelism": 4, "expert_parallelism": 2}
-        self.sharding = Llama8BSharding(
-            # cfg=self.cfg.sharding,
-            strategy_dict=strategy_dict,
-            mesh=self.mesh)
-        self.cfg.sharding = self.sharding.sharding_cfg
+        self.sharding = Sharding(strategy_dict=strategy_dict,
+                                 mesh=self.mesh,
+                                 default_rules_cls=Llama8BShardingRulesConfig,
+                                 vllm_config=self.vllm_config)
+
+        self.cfg = Llama8BConfig(
+            model=Llama8BModelConfig(vllm_config=self.vllm_config),
+            sharding=self.sharding.sharding_cfg,
+            serving=Llama8BServingConfig(vllm_config=self.vllm_config))
+        logger.info(f"Using the following config:\n{self.cfg}")
+        logger.info(f"Using the following shardings:\n{self.sharding}")
         self.mesh = self.sharding.mesh
+        self._init_layers()
+
+    def _init_layers(self):
+        param_factory = ParamFactory(
+            kernel_initializer=nnx.initializers.xavier_normal(),
+            scale_initializer=nnx.initializers.ones)
         self.embedder = Embedder(cfg=self.cfg.model.emb,
                                  mesh=self.mesh,
                                  param_factory=param_factory,
                                  sharding_cfg=self.cfg.sharding)
-        # a better way to guarantee the order of initialization
-        # i.e. sharding_cfg, quantization should be ready before global_KV_cache etc
-        # self.global_KV_cache = self.create_KV_cache()
+        self.embedder.generate_kernel(self.rng)
 
-        # TODO: Confirm against MaxText
-        # dense_blocks = [
-        #     self.cfg.transformer_moe_blocks_config.make(
-        #         name=f'dense_layer_{i}',
-        #         runtime_param=self.global_runtime_params[i])
-        #     for i in self.cfg.dense_layers
-        # ]
-        # TODO: What is ParamFactory?
         self.layers = [
             TransformerBlock(cfg=self.cfg.model.layers,
                              block_type="dense",
@@ -187,42 +153,37 @@ class Llama3_8B(Model):
                              sharding_cfg=self.cfg.sharding)
             for i in range(self.cfg.model.num_layers)
         ]
+        for i in range(len(self.layers)):
+            self.layers[i].generate_kernel(self.rng)
+
         self.final_norm = RMSNorm(
-            dims=self.cfg.model.layers.ffw.d_model,
+            dims=self.cfg.model.hidden_size,
             mesh=self.mesh,
-            param_factory=param_factory,  # TODO: what to set this to?
-            sharding_cfg=self.cfg.sharding,  # Kept for API consistency
-            epsilon=self.cfg.model.layers.rmsnorm_epsilon,
-            with_scale=True,  # TODO: What is this?
-            dtype=self.cfg.model.layers.ffw.dtype,
+            param_factory=param_factory,
+            sharding_cfg=self.cfg.sharding,
+            epsilon=self.cfg.model.layers.rms_norm_eps,
+            with_scale=True,
+            dtype=self.cfg.model.dtype,
         )
-        lm_head_sharding = \
-            NamedSharding(self.mesh,
-                          PartitionSpec(*self.cfg.sharding.generate_sharding_cfg.lm_head_dv))
+        self.final_norm.generate_kernel(self.rng)
 
-        self.lm_head = param_factory.create_kernel_init(
-            shape=(self.cfg.model.emb.d_model, self.cfg.model.emb.vocab_size),
-            dtype=self.cfg.model.emb.dtype,
-            sharding=lm_head_sharding)
-
-        logger.info("Initalized the following model architeture:\n")
-        # nnx.display(self)
+        self.lm_head = Embedder(cfg=self.cfg.model.emb,
+                                mesh=self.mesh,
+                                param_factory=param_factory,
+                                sharding_cfg=self.cfg.sharding)
+        self.lm_head.generate_kernel(self.rng)
 
     # For compatibility with flax.
     def apply(self, variables, *args, **kwargs):
         return self.__call__(*args, **kwargs)
 
-    def load_weights(self, cache_dir: Optional[str] = None):
+    def load_weights(self, rng: PRNGKey, cache_dir: Optional[str] = None):
         # TODO: support gcs paths as well.
         model_name_or_path = self.vllm_config.model_config.model
         if not model_name_or_path:  # TODO
             logger.warning(
                 "Model name or path not provided - randomly randomly initializing the weights."
             )
-            # params = nnx.state(self).filter(nnx.Param)
-            #jax.debug.print("Randomly initializing the following weight shapes:\n{params_repr}",
-            #                params_repr=pretty_repr(params))
-            # return params
         else:
             weight_loader = Llama3WeightLoader(vllm_config=self.vllm_config,
                                                model_config=self.cfg.model,
@@ -245,20 +206,29 @@ class Llama3_8B(Model):
             *args,
             **kwargs) -> Tuple[List[KVCacheType], jax.Array, jax.Array]:
         x = self.embedder.encode(input_ids)
-        # for i, block in self.dense_blocks + self.moe_blocks:
-        for block in self.layers:
-            kv_cache = block.kv_cache
-            x, kv_cache = block(is_prefill, do_sampling, kv_caches, x,
-                                attention_metadata, temperatures)
-            # TODO: need to confirm functionality.
-            # self.global_KV_cache.append(new_cache)
-            block.kv_cache = kv_cache
+        for (i, block) in enumerate(self.layers):
+            kv_cache = kv_caches[i]
+            new_kv_cache, x = block(x, is_prefill, kv_cache,
+                                    attention_metadata)
+            kv_caches[i] = new_kv_cache
 
         final_activation = self.final_norm(x)
-        logits = self.lm_head(final_activation)
-        # decoder_output = self.embedder.decode(final_activation)
-        return logits
-        # return decoder_output
+        decoder_output = self.embedder.decode(final_activation)
+
+        next_tokens = sample(
+            is_prefill,
+            do_sampling,
+            self.rng.params(),
+            self.mesh,
+            decoder_output,
+            attention_metadata.seq_lens,
+            temperatures,
+            top_ps,
+            top_ks,
+            attention_metadata.chunked_prefill_enabled,
+        )
+
+        return kv_caches, next_tokens, decoder_output
 
 
 class Llama3WeightLoader(WeightLoader):
@@ -278,7 +248,6 @@ class Llama3WeightLoader(WeightLoader):
     def setup(self):
         super().setup()
         self.set_transpose_param_map({
-            "lm_head": (1, 0),
             "gate_proj": (1, 0),
             "up_proj": (1, 0),
             "down_proj": (1, 0),
@@ -288,23 +257,23 @@ class Llama3WeightLoader(WeightLoader):
             "o_proj": (1, 2, 0),
         })
         # Set weights reshape map
-        hidden_size = self.model_config.layers.attention.d_model
-        attn_heads = self.model_config.layers.attention.num_q_heads
-        num_kv_heads = self.model_config.layers.attention.num_kv_heads
+        hidden_size = self.model_config.hidden_size
+        attn_heads = self.model_config.layers.attention.num_attention_heads
+        num_key_value_heads = self.model_config.layers.attention.num_key_value_heads
         attn_head_dim = self.model_config.layers.attention.head_dim
         self.set_reshape_param_map(
             {
                 "q_proj": (attn_heads, -1, hidden_size),
-                "k_proj": (num_kv_heads, -1, hidden_size),
-                "v_proj": (num_kv_heads, -1, hidden_size),
+                "k_proj": (num_key_value_heads, -1, hidden_size),
+                "v_proj": (num_key_value_heads, -1, hidden_size),
                 "o_proj": (hidden_size, attn_heads, -1),
             },
             param_type=ParameterType.weight)
         # Set bias reshape map
         self.set_reshape_param_map(param_reshape_dict={
             "q_proj.bias": (attn_heads, attn_head_dim),
-            "k_proj.bias": (num_kv_heads, attn_head_dim),
-            "v_proj.bias": (num_kv_heads, attn_head_dim)
+            "k_proj.bias": (num_key_value_heads, attn_head_dim),
+            "v_proj.bias": (num_key_value_heads, attn_head_dim)
         },
                                    param_type=ParameterType.bias)
         # Set the mappings from loaded parameter keys to standardized names.
@@ -332,6 +301,8 @@ class Llama3WeightLoader(WeightLoader):
             "layers.*.attn.kernel_v_proj_KDH",
             "model.norm":
             "final_norm.scale",  # TODO: is this correct??
+            "lm_head":
+            "lm_head.input_embedding_table_VD"
         })
 
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
@@ -348,7 +319,6 @@ class Llama3WeightLoader(WeightLoader):
         return mapped_key
 
     def load_weights(self, model_for_loading: nnx.Module):
-        # model_params = nnx.state(model_for_loading, nnx.Param)
         model_params = nnx.state(model_for_loading)
         for loaded_name, loaded_weight in self.names_and_weights_generator:
             old_param_name = loaded_name
@@ -375,4 +345,5 @@ class Llama3WeightLoader(WeightLoader):
             model_weight.value = shard_put(loaded_weight,
                                            model_weight.sharding.spec,
                                            mesh=model_for_loading.mesh)
+        # TODO: validate that all of the model_params were accounted for as well.
         nnx.update(model_for_loading, model_params)

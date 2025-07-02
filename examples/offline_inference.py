@@ -5,6 +5,8 @@ import vllm.envs as envs
 from vllm import LLM, EngineArgs
 from vllm.utils import FlexibleArgumentParser
 
+from tpu_commons.core import disagg_utils
+
 
 def create_parser():
     parser = FlexibleArgumentParser()
@@ -45,8 +47,11 @@ def main(args: dict):
     # Generate texts from the prompts. The output is a list of RequestOutput
     # objects that contain the prompt, generated text, and other information.
     prompts = [
-        "The president of the United States is", "The capital of France is",
-        "The future of AI is", "The colors of the rainbow are"
+        "Hello, my name is",
+        "The capital of France is",
+        "The colors of the rainbow are",
+        "The future of AI is",
+        "The president of the United States is",
     ]
     if envs.VLLM_TORCH_PROFILER_DIR is not None:
         llm.start_profile()
@@ -66,4 +71,16 @@ def main(args: dict):
 if __name__ == "__main__":
     parser = create_parser()
     args: dict = vars(parser.parse_args())
-    main(args)
+
+    if not disagg_utils.is_disagg_enabled():
+        main(args)
+    else:
+        from unittest.mock import patch
+
+        from tpu_commons.core.core_tpu import EngineCore as TPUEngineCore
+        from tpu_commons.core.core_tpu import \
+            EngineCoreProc as TPUEngineCoreProc
+        with patch('vllm.v1.engine.core.EngineCore', TPUEngineCore):
+            with patch('vllm.v1.engine.core.EngineCoreProc',
+                       TPUEngineCoreProc):
+                main(args)

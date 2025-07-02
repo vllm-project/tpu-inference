@@ -193,3 +193,43 @@ def _ragged_paged_attention(
 
 
 ragged_paged_attention = functools.partial(call_jax, _ragged_paged_attention)
+
+
+@functools.partial(
+    jax.jit,
+    static_argnames=["page_size", "num_slices_per_block"],
+    donate_argnames="kv_cache",
+)
+def _kv_cache_update(
+    new_kv: jax.Array,  # [total_num_token, num_combined_kv_heads, head_dim]
+    slices: jax.
+    Array,  # [3, slices], list of (kv_cache_start, new_kv_start, slice_len)
+    kv_cache: jax.
+    Array,  # [total_num_pages * page_size, num_combined_kv_heads, head_dim]
+    num_slices: jax.Array,  # [1]
+    *,
+    page_size: int = 32,
+    num_slices_per_block: int = 8,
+) -> Array:
+    # TODO: Get rid of this wrapper and call from pallas.py directly. Need to
+    #       find a better way to get mesh in pallas.py.
+
+    from tpu_commons.kernels.ragged_kv_cache_update import kv_cache_update
+
+    mesh = None
+    kv_cache_pspec = None
+    if envs.VLLM_XLA_USE_SPMD:
+        mesh = get_mesh()
+        kv_cache_pspec = P(None, 'x', None)
+
+    return kv_cache_update(new_kv,
+                           slices,
+                           kv_cache,
+                           num_slices,
+                           page_size=page_size,
+                           num_slices_per_block=num_slices_per_block,
+                           mesh=mesh,
+                           kv_cache_pspec=kv_cache_pspec)
+
+
+kv_cache_update = functools.partial(call_jax, _kv_cache_update)

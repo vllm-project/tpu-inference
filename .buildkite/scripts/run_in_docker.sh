@@ -28,6 +28,10 @@ if [ -z "${TPU_BACKEND_TYPE:-}" ]; then
   TPU_BACKEND_TYPE=pytorch_xla
 fi
 
+if [ -z "${MODEL_IMPL_TYPE:-}" ]; then
+  MODEL_IMPL_TYPE=flax_nn
+fi
+
 # Prune older images on the host to save space.
 docker system prune -a -f --filter "until=3h"
 
@@ -41,6 +45,7 @@ exec docker run \
   --shm-size=16G \
   --rm \
   -e TPU_BACKEND_TYPE="$TPU_BACKEND_TYPE" \
+  -e MODEL_IMPL_TYPE="$MODEL_IMPL_TYPE" \
   -e HF_TOKEN="$HF_TOKEN" \
   -e VLLM_XLA_CACHE_PATH= \
   -e VLLM_USE_V1=1 \

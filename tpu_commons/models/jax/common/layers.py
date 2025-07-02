@@ -1,15 +1,16 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field, make_dataclass
 from typing import Any
 
 import jax
 import jax.numpy as jnp
-
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from jaxtyping import Float, Int
+from jaxtyping import DTypeLike, Float, Int
+from vllm.config import VllmConfig
 
 from tpu_commons.models.jax.common.base import Config, ParamFactory
+from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
 from tpu_commons.models.jax.common.sharding import ShardingConfig
 
 
@@ -24,6 +25,7 @@ class FlaxUtils:
 
 
 modeling_flax_utils = FlaxUtils()
+
 
 @dataclass
 class RuntimeParams:
@@ -91,22 +93,29 @@ class RMSNorm(nnx.Module):
 
     def generate_kernel(self, rngs: nnx.Rngs):
         self.scale = self.param_factory.create_scale_param(
-            rngs, shape=(self.dims, ), sharding=self.scale_sharding, dtype=self.dtype)
+            rngs,
+            shape=(self.dims, ),
+            sharding=self.scale_sharding,
+            dtype=self.dtype)
 
-@dataclass
-class FFWConfig(Config):
-    """Configuration for the Feed-Forward (FFW) layer.
 
-    Attributes:
-        d_model: The dimension of the model.
-        hidden_size: The size of the intermediate hidden layer.
-        act: The name of the activation function to use (e.g., 'silu').
-        dtype: The data type for computations.
-    """
-    d_model: int
-    hidden_size: int
-    act: str
-    dtype: Any = jnp.float32
+FFWConfig = make_dataclass(
+    "FFWConfig",
+    [(HuggingFaceArgNames.HIDDEN_SIZE.value, int),
+     (HuggingFaceArgNames.INTERMEDIATE_SIZE.value, int),
+     (HuggingFaceArgNames.HIDDEN_ACT.value, str), ("dtype", DTypeLike),
+     ("vllm_config", VllmConfig, field(repr=False, default=None))],
+    bases=(Config, ))
+
+FFWConfig.__doc__ = f"""Configuration for the Feed-Forward (FFW) layer.
+
+     Attributes:
+        {HuggingFaceArgNames.HIDDEN_SIZE.value}: The dimension of the model.
+        {HuggingFaceArgNames.INTERMEDIATE_SIZE.value}: The size of the intermediate hidden layer.
+        {HuggingFaceArgNames.HIDDEN_ACT.value}: The name of the activation function to use (e.g., 'silu').
+         dtype: The data type for computations.
+         vllm_config: The VLLM config containing any overrides to apply.
+     """
 
 
 @dataclass
@@ -148,12 +157,11 @@ class FFW(nnx.Module):
         # TODO consider to create factories for einsum(?)
         x = jnp.asarray(x, jnp.float32)
         x = nnx.with_sharding_constraint(x, self.activation_ffw_btd[op_mode])
-
+        act = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_ACT.value)
         with jax.named_scope("wi_0"):
             gating_BTF = jnp.einsum('BTD,DF -> BTF', x,
                                     self.kernel_gating_DF.value)
-            activated_gating_BTF = modeling_flax_utils.ACT2FN[self.cfg.act](
-                gating_BTF)
+            activated_gating_BTF = modeling_flax_utils.ACT2FN[act](gating_BTF)
         with jax.named_scope("wi_1"):
             up_proj_BTF = jnp.einsum('BTD,DF -> BTF', x,
                                      self.kernel_up_proj_DF.value)
@@ -165,19 +173,21 @@ class FFW(nnx.Module):
         return output_BTD
 
     def generate_kernel(self, rngs: nnx.Rngs):
+        D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
+        F = getattr(self.cfg, HuggingFaceArgNames.INTERMEDIATE_SIZE.value)
         self.kernel_gating_DF = self.param_factory.create_kernel_param(
             rngs,
-            shape=(self.cfg.d_model, self.cfg.hidden_size),
+            shape=(D, F),
             dtype=self.cfg.dtype,
             sharding=self.df_sharding)
         self.kernel_up_proj_DF = self.param_factory.create_kernel_param(
             rngs,
-            shape=(self.cfg.d_model, self.cfg.hidden_size),
+            shape=(D, F),
             dtype=self.cfg.dtype,
             sharding=self.df_sharding)
         self.kernel_down_proj_FD = self.param_factory.create_kernel_param(
             rngs,
-            shape=(self.cfg.hidden_size, self.cfg.d_model),
+            shape=(F, D),
             dtype=self.cfg.dtype,
             sharding=self.fd_sharding)
 
@@ -187,10 +197,10 @@ class FFW(nnx.Module):
             "activation_ffw_btd",
         ]
         for attr_name in mode_dependent_attrs:
-            prefill_sharding_config = getattr(
-                self.sharding_cfg.prefill_sharding_cfg, attr_name)
+            prefill_sharding_config = getattr(self.sharding_cfg.prefill_rules,
+                                              attr_name)
             generate_sharding_config = getattr(
-                self.sharding_cfg.generate_sharding_cfg, attr_name)
+                self.sharding_cfg.generate_rules, attr_name)
 
             sharding_dict = {
                 'prefill': NamedSharding(self.mesh,
@@ -202,29 +212,29 @@ class FFW(nnx.Module):
 
         # static sharding for kernel/weights
         self.df_sharding = NamedSharding(
-            self.mesh,
-            P(*self.sharding_cfg.generate_sharding_cfg.ffw_weight_df))
+            self.mesh, P(*self.sharding_cfg.generate_rules.ffw_weight_df))
         self.fd_sharding = NamedSharding(
-            self.mesh,
-            P(*self.sharding_cfg.generate_sharding_cfg.ffw_weight_fd))
+            self.mesh, P(*self.sharding_cfg.generate_rules.ffw_weight_fd))
 
         return
 
 
-@dataclass
-class EmbedderConfig(Config):
-    """Configuration for the Embedder module.
+EmbedderConfig = make_dataclass(
+    "EmbedderConfig",
+    [(HuggingFaceArgNames.VOCAB_SIZE.value, int),
+     (HuggingFaceArgNames.HIDDEN_SIZE.value, int), ("dtype", DTypeLike),
+     ("normalize_embeddings", bool),
+     ("vllm_config", VllmConfig, field(repr=False, default=None))],
+    bases=(Config, ))
+EmbedderConfig.__doc__ = f"""Configuration for the Embedder module.
 
-    Attributes:
-        vocab_size: The size of the vocabulary.
-        d_model: The dimension of the embeddings/the model.
-        dtype: The data type for the embedding table.
-        normalize_embeddings: If True, scale embeddings by `sqrt(d_model)`.
-    """
-    vocab_size: int
-    d_model: int
-    dtype: Any = jnp.float32
-    normalize_embeddings: bool = False
+     Attributes:
+         {HuggingFaceArgNames.VOCAB_SIZE.value}: The size of the vocabulary.
+         {HuggingFaceArgNames.HIDDEN_SIZE.value}: The hidden dimension of the model.
+         dtype: The data type for the embedding table.
+         normalize_embeddings: If True, scale embeddings by `sqrt(d_model)`.
+         vllm_config: The VLLM config containing any overrides to apply.
+     """
 
 
 @dataclass
@@ -270,9 +280,12 @@ class Embedder(nnx.Module):
             return self.encode(x)
 
     def generate_kernel(self, rngs: nnx.Rngs):
+
+        V = getattr(self.cfg, HuggingFaceArgNames.VOCAB_SIZE.value)
+        D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
         self.input_embedding_table_VD = self.param_factory.create_kernel_param(
             rngs,
-            shape=(self.cfg.vocab_size, self.cfg.d_model),
+            shape=(V, D),
             sharding=self.dv_sharding,
             dtype=self.cfg.dtype)
 
@@ -303,16 +316,17 @@ class Embedder(nnx.Module):
             `(batch, sequence, d_model)`.
         """
         embedding_BTD = self.input_embedding_table_VD.value[x]
+        D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
         if self.cfg.normalize_embeddings:
-            embedding_BTD *= jnp.sqrt(self.cfg.d_model).astype(self.cfg.dtype)
+            embedding_BTD *= jnp.sqrt(D).astype(self.cfg.dtype)
         return embedding_BTD
 
     def create_sharding(self):
         """Creates and sets sharding attributes for weights and activations."""
         self.prelogit_btd = NamedSharding(
-            self.mesh, P(*self.sharding_cfg.generate_sharding_cfg.prelogit_btd))
+            self.mesh, P(*self.sharding_cfg.generate_rules.prelogit_btd))
         self.dv_sharding = NamedSharding(
-            self.mesh, P(*self.sharding_cfg.generate_sharding_cfg.vocab_dv))
+            self.mesh, P(*self.sharding_cfg.generate_rules.vocab_dv))
 
     def __post_init__(self):
         self.create_sharding()

@@ -1,36 +1,40 @@
 import functools
 import os
+from typing import Any
 
-import flax.linen as nn
 import jax
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 
-from tpu_commons.models.jax.utils.param_overview import get_parameter_overview
+from tpu_commons.logger import init_logger
+from tpu_commons.models.jax.common.model import Model
+
+logger = init_logger(__name__)
 
 
-def _get_model_architecture(config: PretrainedConfig) -> nn.Module:
+def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     # NOTE: Use inline imports here, otherwise the normal imports
     # would cause JAX init failure when using multi hosts with Ray.
-
     _MODEL_REGISTRY = {}
-    impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
 
-    if impl == "flax_nn":
-        from tpu_commons.models.jax.llama_nn import LlamaForCausalLM
-        _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
-    elif impl == "flax_nnx":
-        from tpu_commons.models.jax.llama import LlamaForCausalLM
-        _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
-        from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
-        _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
-        if os.getenv("NEW_MODEL_DESIGN", False):
-            from tpu_commons.models.jax.recipes.llama4 import Llama4Scout
-            _MODEL_REGISTRY["Llama4Scout"] = Llama4Scout
+    # TODO(xiang): unify the model interface
+    if os.getenv("USE_JAX_V1", False):
+        from tpu_commons.models.jax.llama_v1 import LlamaForCausalLM
+        from tpu_commons.models.jax.qwen2_v1 import Qwen2ForCausalLM
     else:
-        raise NotImplementedError("Unsupported MODEL_IMPL_TYPE")
+        from tpu_commons.models.jax.llama import LlamaForCausalLM
+        from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
+    _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
+    _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
+
+    if os.getenv("NEW_MODEL_DESIGN", False):
+        from tpu_commons.models.jax.recipes.llama3 import Llama3_8B
+
+        # from tpu_commons.models.jax.recipes.llama4 import Llama4Scout
+        _MODEL_REGISTRY["Llama3_8B"] = Llama3_8B
+        # _MODEL_REGISTRY["Llama4Scout"] = Llama4Scout
 
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
@@ -41,48 +45,23 @@ def _get_model_architecture(config: PretrainedConfig) -> nn.Module:
         f"Supported architectures: {list(_MODEL_REGISTRY.keys())}")
 
 
-def get_nn_model(
+def _get_common_model(
+    model_class: Any,
     vllm_config: VllmConfig,
     rng: jax.Array,
     mesh: Mesh,
-):
-    model_class = _get_model_architecture(vllm_config.model_config.hf_config)
-    model = model_class(
-        vllm_config=vllm_config,
-        rng=rng,
-        mesh=mesh,
-    )
-    params = model.load_weights(vllm_config.model_config.model)
-    if os.getenv("INSPECT_MODEL", False):
-        print(
-            "Model params:\n%s",
-            get_parameter_overview(params, include_stats="sharding"),
-        )
-
-    kv_cache_sharding = NamedSharding(mesh, PartitionSpec("model"))
-    outputs_sharding = NamedSharding(mesh, PartitionSpec(None))
-    logits_cache_sharding = NamedSharding(mesh, PartitionSpec(None))
-    jit_model = jax.jit(
-        model.apply,
-        out_shardings=(
-            kv_cache_sharding,
-            outputs_sharding,
-            logits_cache_sharding,
-        ),
-        static_argnums=(1, 2),
-        donate_argnums=3,
-    )
-    model_fn = functools.partial(jit_model, params)
-    return model_fn
+) -> nnx.Module:
+    model = model_class(vllm_config, rng, mesh)
+    model.load_weights(model)
+    return model
 
 
-def get_nnx_model(
+def _get_nnx_model(
+    model_class: Any,
     vllm_config: VllmConfig,
     rng: jax.Array,
     mesh: Mesh,
-):
-    model_class = _get_model_architecture(vllm_config.model_config.hf_config)
-
+) -> nnx.Module:
     if os.getenv("JAX_RANDOM_WEIGHTS", False):
         # Create a sharded model with random inited weights.
         @nnx.jit
@@ -110,7 +89,6 @@ def get_nnx_model(
         #    The sharding definition is taken over by the load_weights instead.
         model = nnx.eval_shape(lambda: model_class(vllm_config, rng, mesh))
         model.load_weights(rng)
-
         # Although the created model can already work, we still need to jit
         # the model creation again, otherwise the model forward will have
         # non-trivial overhead in PjitFunction.
@@ -122,8 +100,22 @@ def get_nnx_model(
 
         with mesh:
             jit_model = create_jit_model(model)
+    return jit_model
 
-    kv_cache_sharding = NamedSharding(mesh, PartitionSpec("model"))
+
+def get_flax_model(
+    vllm_config: VllmConfig,
+    rng: jax.Array,
+    mesh: Mesh,
+) -> nnx.Module:
+    model_class = _get_model_architecture(vllm_config.model_config.hf_config)
+    if issubclass(model_class,
+                  Model):  # TODO: Get this to work for nnx.eval_shape.
+        jit_model = _get_common_model(model_class, vllm_config, rng, mesh)
+    else:
+        jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh)
+
+    kv_cache_sharding = NamedSharding(mesh, PartitionSpec(None, None, "model"))
     outputs_sharding = NamedSharding(mesh, PartitionSpec(None))
     logits_cache_sharding = NamedSharding(mesh, PartitionSpec(None))
 
@@ -172,12 +164,11 @@ def get_model(
     vllm_config: VllmConfig,
     rng: jax.Array,
     mesh: Mesh,
-) -> nn.Module:
+) -> Any:
     impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
-    if impl == "flax_nn":
-        return get_nn_model(vllm_config, rng, mesh)
-    elif impl == "flax_nnx":
-        return get_nnx_model(vllm_config, rng, mesh)
+    logger.info(f"Loading model, implementation type={impl}")
+    if impl == "flax_nnx":
+        return get_flax_model(vllm_config, rng, mesh)
     elif impl == "vllm":
         return get_vllm_model(vllm_config, rng, mesh)
     else:

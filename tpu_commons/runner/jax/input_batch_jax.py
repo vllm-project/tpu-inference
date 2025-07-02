@@ -8,9 +8,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from vllm.lora.request import LoRARequest
-from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
-from vllm.sampling_params import SamplingParams, SamplingType
+from vllm.sampling_params import SamplingType
 from vllm.utils import swap_dict_values
+from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
@@ -23,23 +23,12 @@ _SAMPLING_EPS = 1e-5
 
 
 @dataclass
-class CachedRequestState:
+class CachedRequestState(NewRequestData):
 
-    req_id: str
-    prompt_token_ids: list[int]
-    mm_inputs: list[MultiModalKwargs]
-    mm_positions: list[PlaceholderRange]
-    sampling_params: SamplingParams
-    generator: Optional[Any]
-
-    block_ids: list[list[int]]
-    num_computed_tokens: int
     output_token_ids: list[int]
-
+    generator: Optional[Any] = None
     mrope_positions: Optional[jax.Array] = None
     mrope_position_delta: Optional[int] = None
-
-    lora_request: Optional[LoRARequest] = None
 
     def __post_init__(self):
         self.num_prompt_tokens = len(self.prompt_token_ids)
@@ -62,7 +51,6 @@ class InputBatch:
         max_num_reqs: int,
         max_model_len: int,
         max_num_batched_tokens: int,
-        device: Any,
         pin_memory: bool,
         vocab_size: int,
         block_sizes: list[int],
@@ -70,7 +58,6 @@ class InputBatch:
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
         self.max_num_batched_tokens = max_num_batched_tokens
-        self.device = device
         self.pin_memory = pin_memory
         self.vocab_size = vocab_size
 
@@ -99,40 +86,24 @@ class InputBatch:
             max_model_len=max_model_len,
             max_num_batched_tokens=max_num_batched_tokens,
             pin_memory=pin_memory,
-            device=device,
             block_sizes=block_sizes,
         )
 
         # Sampling-related.
-        self.temperature = jnp.empty((max_num_reqs, ),
-                                     dtype=jnp.float32,
-                                     device=device)
         self.temperature_cpu = np.empty((max_num_reqs, ), dtype=np.float32)
         self.greedy_reqs: set[str] = set()
         self.random_reqs: set[str] = set()
 
-        self.top_p = jnp.empty((max_num_reqs, ),
-                               dtype=jnp.float32,
-                               device=device)
         self.top_p_cpu = np.empty((max_num_reqs, ), dtype=np.float32)
         self.top_p_reqs: set[str] = set()
 
-        self.top_k = jnp.empty((max_num_reqs, ),
-                               dtype=jnp.int32,
-                               device=device)
         self.top_k_cpu = np.empty((max_num_reqs, ), dtype=np.int32)
         self.top_k_reqs: set[str] = set()
 
-        self.min_p = jnp.empty((max_num_reqs, ),
-                               dtype=jnp.float32,
-                               device=device)
         self.min_p_cpu = np.empty((max_num_reqs, ), dtype=np.float32)
         self.min_p_reqs: set[str] = set()
 
         # Frequency penalty related data structures
-        self.frequency_penalties = jnp.empty((max_num_reqs, ),
-                                             dtype=jnp.float32,
-                                             device=device)
         self.frequency_penalties_cpu = \
             np.empty(
             (max_num_reqs, ),
@@ -140,17 +111,11 @@ class InputBatch:
         self.frequency_penalties_reqs: set[str] = set()
 
         # Presence penalty related data structures
-        self.presence_penalties = jnp.empty((max_num_reqs, ),
-                                            dtype=jnp.float32,
-                                            device=device)
         self.presence_penalties_cpu = np.empty((max_num_reqs, ),
                                                dtype=np.float32)
         self.presence_penalties_reqs: set[str] = set()
 
         # Repetition penalty related data structures
-        self.repetition_penalties = jnp.empty((max_num_reqs, ),
-                                              dtype=jnp.float32,
-                                              device=device)
         self.repetition_penalties_cpu = \
             np.empty(
             (max_num_reqs, ),
@@ -505,29 +470,9 @@ class InputBatch:
 
     def _make_sampling_metadata(self) -> SamplingMetadata:
         num_reqs = self.num_reqs
-        if not self.all_greedy:
-            temperature = copy_slice(self.temperature_cpu, self.temperature,
-                                     num_reqs)
-        else:
-            temperature = None
-        if not self.no_top_p:
-            copy_slice(self.top_p_cpu, self.top_p, num_reqs)
-        if not self.no_top_k:
-            copy_slice(self.top_k_cpu, self.top_k, num_reqs)
-        if not self.no_min_p:
-            copy_slice(self.min_p_cpu, self.min_p, num_reqs)
+        temperature = None
 
         if not self.no_penalties:
-            # Since syncing these tensors is expensive only copy them
-            # if necessary i.e. if there are requests which require
-            # penalties to be applied during sampling.
-            copy_slice(self.frequency_penalties_cpu, self.frequency_penalties,
-                       num_reqs)
-            copy_slice(self.presence_penalties_cpu, self.presence_penalties,
-                       num_reqs)
-            copy_slice(self.repetition_penalties_cpu,
-                       self.repetition_penalties, num_reqs)
-
             # The prompt tokens are used only for applying penalties during
             # the sampling process. Hence copy these tensors only when
             # there are requests which need penalties to be applied.
@@ -546,15 +491,15 @@ class InputBatch:
             temperature=temperature,
             all_greedy=self.all_greedy,
             all_random=self.all_random,
-            top_p=None if self.no_top_p else self.top_p[:num_reqs],
-            top_k=None if self.no_top_k else self.top_k[:num_reqs],
-            min_p=None if self.no_min_p else self.min_p[:num_reqs],
+            top_p=None,
+            top_k=None,
+            min_p=None,
             generators=self.generators,
             max_num_logprobs=self.max_num_logprobs,
             prompt_token_ids=prompt_token_ids,
-            frequency_penalties=self.frequency_penalties[:num_reqs],
-            presence_penalties=self.presence_penalties[:num_reqs],
-            repetition_penalties=self.repetition_penalties[:num_reqs],
+            frequency_penalties=None,
+            presence_penalties=None,
+            repetition_penalties=None,
             output_token_ids=cast(list[list[int]], self.req_output_token_ids),
             min_tokens=self.min_tokens,
             no_penalties=self.no_penalties,
