@@ -590,43 +590,50 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                     cache for the corresponding slice.
                 - slice_len (int): The length of the slice.
         """
-        slices_start = self.input_batch.num_computed_tokens_cpu[:num_reqs]
-        slices_end = self.input_batch.num_computed_tokens_cpu[:num_reqs] + \
+        slices_start_np = self.input_batch.num_computed_tokens_cpu[:num_reqs]
+        slices_end_np = self.input_batch.num_computed_tokens_cpu[:num_reqs] + \
             num_scheduled_tokens_per_req
-        local_block_start_idx = slices_start // self.block_size
-        local_block_end_idx = (slices_end - 1) // self.block_size
-        no_repeat_req_indices = self.arange_np[:num_reqs]
-        global_block_start_idx = (
-            no_repeat_req_indices * self.max_num_blocks_per_req +
-            local_block_start_idx)
-        block_lens = local_block_end_idx - local_block_start_idx + 1
-        global_block_start_idx = np.repeat(global_block_start_idx, block_lens)
-        slice_arange = np.concatenate([self.arange_np[:n] for n in block_lens])
-        global_block_indices = global_block_start_idx + slice_arange
+        local_block_start_idx_np = slices_start_np // self.block_size
+        local_block_end_idx_np = (slices_end_np - 1) // self.block_size
+        no_repeat_req_indices_np = self.arange_np[:num_reqs]
+        global_block_start_idx_np = (
+            no_repeat_req_indices_np * self.max_num_blocks_per_req +
+            local_block_start_idx_np)
+        block_lens_np = local_block_end_idx_np - local_block_start_idx_np + 1
+        global_block_start_idx_np = np.repeat(global_block_start_idx_np,
+                                              block_lens_np)
+        slice_arange_np = np.concatenate(
+            [self.arange_np[:n] for n in block_lens_np])
+        global_block_indices_np = global_block_start_idx_np + slice_arange_np
         block_table_cpu = self.input_batch.block_table[0].get_cpu_tensor()
-        block_numbers = block_table_cpu.flatten()[global_block_indices].numpy()
-        total_block_len = np.sum(block_lens)
-        slot_mapping_slices = np.repeat(np.array([[0, self.block_size]],
-                                                 dtype=np.int32),
-                                        total_block_len,
-                                        axis=0)
-        cu_block_lens = np.zeros(len(block_lens) + 1, dtype=np.int32)
-        np.cumsum(block_lens, out=cu_block_lens[1:])
+        block_numbers_np = block_table_cpu.flatten(
+        )[global_block_indices_np].numpy()
+        total_block_len = np.sum(block_lens_np)
+        slot_mapping_slices_np = np.repeat(np.array([[0, self.block_size]],
+                                                    dtype=np.int32),
+                                           total_block_len,
+                                           axis=0)
+        cu_block_lens_np = np.zeros(len(block_lens_np) + 1, dtype=np.int32)
+        np.cumsum(block_lens_np, out=cu_block_lens_np[1:])
         for req_idx in range(num_reqs):
-            slot_mapping_slices[cu_block_lens[req_idx]][
-                0] = slices_start[req_idx] % self.block_size
-            slot_mapping_slices[
-                cu_block_lens[req_idx + 1] -
-                1][1] = (slices_end[req_idx] - 1) % self.block_size + 1
-        slice_lens = slot_mapping_slices[:, 1] - slot_mapping_slices[:, 0]
-        cu_slices_lens = np.zeros(len(slice_lens) + 1, dtype=np.int32)
-        np.cumsum(slice_lens, out=cu_slices_lens[1:])
-        kv_cache_start_indices = slot_mapping_slices[:, 0] + \
-            (block_numbers * self.block_size)
-        new_kv_start_indices = cu_slices_lens[:-1]
-        slot_mapping_metadata = np.stack(
-            [kv_cache_start_indices, new_kv_start_indices, slice_lens], axis=1)
-        return slot_mapping_metadata
+            slot_mapping_slices_np[cu_block_lens_np[req_idx]][
+                0] = slices_start_np[req_idx] % self.block_size
+            slot_mapping_slices_np[
+                cu_block_lens_np[req_idx + 1] -
+                1][1] = (slices_end_np[req_idx] - 1) % self.block_size + 1
+        slice_lens_np = slot_mapping_slices_np[:,
+                                               1] - slot_mapping_slices_np[:,
+                                                                           0]
+        cu_slices_lens_np = np.zeros(len(slice_lens_np) + 1, dtype=np.int32)
+        np.cumsum(slice_lens_np, out=cu_slices_lens_np[1:])
+        kv_cache_start_indices_np = slot_mapping_slices_np[:, 0] + \
+            (block_numbers_np * self.block_size)
+        new_kv_start_indices_np = cu_slices_lens_np[:-1]
+        slot_mapping_metadata_np = np.stack([
+            kv_cache_start_indices_np, new_kv_start_indices_np, slice_lens_np
+        ],
+                                            axis=1)
+        return slot_mapping_metadata_np
 
     def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -698,24 +705,24 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             total_num_scheduled_tokens:padded_total_num_scheduled_tokens] = 0
 
         # Calculate the slot mapping.
-        slot_mapping_metadata = self._get_slot_mapping_metadata(
+        slot_mapping_metadata_np = self._get_slot_mapping_metadata(
             num_reqs, num_scheduled_tokens_per_req)
-        num_slices = slot_mapping_metadata.shape[0]
+        num_slices = slot_mapping_metadata_np.shape[0]
         padded_num_slices = _get_padded_num_kv_cache_update_slices(
             padded_total_num_scheduled_tokens, self.max_num_reqs,
             self.block_size)
-        slot_mapping_metadata = np.pad(
-            slot_mapping_metadata,
-            [[0, padded_num_slices - len(slot_mapping_metadata)], [0, 0]],
+        slot_mapping_metadata_np = np.pad(
+            slot_mapping_metadata_np,
+            [[0, padded_num_slices - len(slot_mapping_metadata_np)], [0, 0]],
             constant_values=0)
-        slot_mapping_metadata = np.transpose(slot_mapping_metadata)
+        slot_mapping_metadata_np = np.transpose(slot_mapping_metadata_np)
 
         self.input_ids = self._create_torchax_array(
             self.input_ids_cpu[:padded_total_num_scheduled_tokens])
         self.position_ids = self._create_torchax_array(
             self.positions_cpu[:padded_total_num_scheduled_tokens])
-        slot_mapping = torchax.tensor.Tensor(
-            jnp.asarray(slot_mapping_metadata), self.torchax_env)
+        slot_mapping = self._create_torchax_array(
+            torch.from_numpy(slot_mapping_metadata_np))
         block_tables = self.block_table_cpu[:self.max_num_reqs]
         block_tables[:num_reqs, :self.max_num_blocks_per_req] = (
             self.input_batch.block_table[0].get_cpu_tensor()[:num_reqs])
