@@ -14,6 +14,7 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from torch.nn import Parameter
 from torchax import jax_device
+from torchax.ops.mappings import t2j_dtype
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
@@ -24,6 +25,25 @@ from tpu_commons.logger import init_logger
 logger = init_logger(__name__)
 
 VLLM_TORCHAX_ENABLED = os.environ.get('VLLM_TORCHAX_ENABLED', '0') == '1'
+
+
+def create_torchax_kv_cache(shape, dtype, mesh,
+                            partition_spec) -> torch.Tensor:
+    # This works better than device_put for large tensor allocation.
+    assert VLLM_TORCHAX_ENABLED, \
+        "It's expected that VLLM_TORCHAX_ENABLED is True."
+
+    jax_dtype = t2j_dtype(dtype)
+    if mesh is None:
+        device = jax.devices()[0]
+    else:
+        sharding = NamedSharding(mesh, P(*partition_spec))
+        device = sharding
+
+    jax_t = jnp.zeros(shape, dtype=jax_dtype,
+                      device=device).block_until_ready()
+    torchax_t = torchax.tensor.Tensor(jax_t, torchax.default_env())
+    return torchax_t
 
 
 def create_torchax_tensor_with_partition_spec(
