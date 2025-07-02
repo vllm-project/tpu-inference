@@ -87,10 +87,10 @@ class TPUWorker(WorkerBase):
             self.devices = jax.local_devices()
             self.global_devices = jax.devices()
 
-        logger.info(f"Init devices | "
-                    f"devices={self.devices} | "
-                    f"local_devices={len(self.devices)} | "
-                    f"hbm={utils.hbm_usage_gb(self.devices)}Gb")
+        logger.warning(f"Init devices | "
+                       f"devices={self.devices} | "
+                       f"local_devices={len(self.devices)} | "
+                       f"hbm={utils.hbm_usage_gb(self.devices)}Gb")
 
         self.model_runner = TPUModelRunner(self.vllm_config, self.devices)
 

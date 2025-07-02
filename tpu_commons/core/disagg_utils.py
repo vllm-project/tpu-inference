@@ -40,8 +40,12 @@ def _parse_slices(slices_str: str) -> Tuple[int, ...]:
 
 
 def get_prefill_slices() -> Tuple[int, ...]:
+    if PREFILL_SLICES not in os.environ:
+        return ()
     return _parse_slices(os.environ[PREFILL_SLICES])
 
 
 def get_decode_slices() -> Tuple[int, ...]:
+    if DECODE_SLICES not in os.environ:
+        return ()
     return _parse_slices(os.environ[DECODE_SLICES])

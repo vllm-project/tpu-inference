@@ -395,6 +395,7 @@ class TPUModelRunner():
                                       axis_names,
                                       devices=self.devices)
             logger.info(f"Init mesh | mesh={self.mesh}")
+        logger.warning(f"Init mesh | mesh={self.mesh} devices={self.devices}")
 
     def _init_model(self) -> None:
         logger.info("Init model start...")
