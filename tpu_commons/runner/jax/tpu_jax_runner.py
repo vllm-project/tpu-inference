@@ -367,13 +367,14 @@ class TPUModelRunner():
             try:
                 # TODO: Update override steps.
                 sharding_strategy = \
-                    self.vllm_config.additional_config["overrides"]["sharding"]["sharding_strategy"]
+                    self.vllm_config.additional_config["sharding"]["sharding_strategy"]
             except KeyError:
                 logger.warning(
                     f"No sharding strategy passed! Using default of full model parallelism={len(self.devices)}"
                 )
                 sharding_strategy = {"tensor_parallelism": len(self.devices)}
-            sharding = Sharding(strategy_dict=sharding_strategy)
+            sharding = Sharding(strategy_dict=sharding_strategy,
+                                vllm_config=self.vllm_config)
             self.mesh = sharding.mesh
             logger.info(f"Init mesh | mesh={self.mesh}")
         else:

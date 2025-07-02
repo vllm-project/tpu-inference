@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field, make_dataclass
 from typing import Any, Dict, List, Tuple, Union
 
 import jax
@@ -6,12 +6,15 @@ import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
+from jax.typing import DTypeLike
 
 from jax.experimental.pallas.ops.tpu.flash_attention import flash_attention
 from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention
 
+from vllm.config import VllmConfig
 from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.sharding import ShardingConfig
+from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
 from tpu_commons.models.jax.layers.rope import apply_rope_scaling
 from tpu_commons.models.jax.layers.attention import update_cache
 from tpu_commons.utils_jax import get_megacore
@@ -109,27 +112,29 @@ class AttentionMetadata(object):
     num_prefill_seqs: jax.Array = None  # [1]
 
 
-@dataclass
-class AttentionConfig(Config):
-    """Configuration for the Attention module.
-
-    Attributes:
-        d_model: The dimension of the model.
-        num_q_heads: The number of query heads.
-        num_kv_heads: The number of key/value heads.
-        head_dim: The dimension of each attention head.
-        rope_theta: The base period for Rotary Position Embeddings.
-        rope_scaling: Optional dictionary of scaling factors for RoPE.
-        dtype: The data type for computations (default: jnp.float32).
+AttentionConfig = make_dataclass("AttentionConfig", [
+    (HuggingFaceArgNames.HIDDEN_SIZE.value, int),
+    (HuggingFaceArgNames.NUM_ATTENTION_HEADS.value, int),
+    (HuggingFaceArgNames.NUM_KEY_VALUE_HEADS.value, int),
+    (HuggingFaceArgNames.HEAD_DIM.value, int),
+    (HuggingFaceArgNames.ROPE_THETA.value, float),
+    (HuggingFaceArgNames.ROPE_SCALING.value, Dict[str, Any]),
+    ("dtype", DTypeLike),
+    ("vllm_config", VllmConfig, field(repr=False, default=None))
+    ],
+    bases=(Config,)
+)
+AttentionConfig.__doc__ = f"""Configuration for the Attention module.
+         Attributes:
+        {HuggingFaceArgNames.HIDDEN_SIZE.value}: The dimension of the model.
+        {HuggingFaceArgNames.NUM_ATTENTION_HEADS.value}: The number of query heads.
+        {HuggingFaceArgNames.NUM_KEY_VALUE_HEADS.value}: The number of key/value heads.
+        {HuggingFaceArgNames.HEAD_DIM.value}: The dimension of each attention head.
+        {HuggingFaceArgNames.ROPE_THETA.value}: The base period for Rotary Position Embeddings.
+        {HuggingFaceArgNames.ROPE_SCALING.value}: Optional dictionary of scaling factors for RoPE.
+         dtype: The data type for computations (default: jnp.float32).
+         vllm_config: The VLLM config containing any overrides to apply.
     """
-    d_model: int
-    num_q_heads: int
-    num_kv_heads: int
-    head_dim: int
-    rope_theta: float = 10000.0
-    rope_scaling: Dict[str, Any] = None
-    dtype: Any = jnp.float32
-
 
 @dataclass
 class Attention(nnx.Module):
@@ -160,10 +165,10 @@ class Attention(nnx.Module):
 
     def generate_kernel(self, rngs: nnx.Rngs):
         """Initializes the weight kernels for Q, K, V, and O projections."""
-        N = self.cfg.num_q_heads
-        K = self.cfg.num_kv_heads
-        D = self.cfg.d_model
-        H = self.cfg.head_dim
+        N = getattr(self.cfg, HuggingFaceArgNames.NUM_ATTENTION_HEADS.value)
+        K = getattr(self.cfg, HuggingFaceArgNames.NUM_KEY_VALUE_HEADS.value)
+        D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
+        H = getattr(self.cfg, HuggingFaceArgNames.HEAD_DIM.value)
 
         self.kernel_q_proj_NDH = self.param_factory.create_kernel_param(
             rngs, (N, D, H), self.ndh_sharding, self.cfg.dtype)
@@ -182,9 +187,9 @@ class Attention(nnx.Module):
         ]
         for attr_name in mode_dependent_attrs:
             prefill_sharding_config = getattr(
-                self.sharding_cfg.prefill_sharding_cfg, attr_name)
+                self.sharding_cfg.prefill_rules, attr_name)
             generate_sharding_config = getattr(
-                self.sharding_cfg.generate_sharding_cfg, attr_name)
+                self.sharding_cfg.generate_rules, attr_name)
 
             sharding_dict = {
                 'prefill': NamedSharding(self.mesh,
@@ -197,28 +202,28 @@ class Attention(nnx.Module):
         # static sharding for kernel/weights
         self.ndh_sharding = NamedSharding(
             self.mesh,
-            P(*self.sharding_cfg.generate_sharding_cfg.attn_q_weight_ndh))
+            P(*self.sharding_cfg.generate_rules.attn_q_weight_ndh))
         self.kdh_sharding = NamedSharding(
             self.mesh,
-            P(*self.sharding_cfg.generate_sharding_cfg.attn_k_weight_kdh))
+            P(*self.sharding_cfg.generate_rules.attn_k_weight_kdh))
         self.nhd_sharding = NamedSharding(
             self.mesh,
-            P(*self.sharding_cfg.generate_sharding_cfg.attn_o_weight_nhd))
+            P(*self.sharding_cfg.generate_rules.attn_o_weight_nhd))
         
         # TODO: the pallas kernels of flash_attention/paged_attention need to be called 
         # via shard_map with sharding specs, However, the q/k/v have been sharded outside of attention()
         # So we replicate the sharding below but it should be better organized if we use pallas kernels
         self.pallas_q_spec = {
-            'prefill': P(*self.sharding_cfg.prefill_sharding_cfg.query_btnh),
-            'generate': P(*self.sharding_cfg.generate_sharding_cfg.query_btnh)
+            'prefill': P(*self.sharding_cfg.prefill_rules.query_btnh),
+            'generate': P(*self.sharding_cfg.generate_rules.query_btnh)
         }
         self.pallas_kv_spec = {
-            'prefill': P(*self.sharding_cfg.prefill_sharding_cfg.keyvalue_bskh),
-            'generate': P(*self.sharding_cfg.generate_sharding_cfg.keyvalue_bskh)
+            'prefill': P(*self.sharding_cfg.prefill_rules.keyvalue_bskh),
+            'generate': P(*self.sharding_cfg.generate_rules.keyvalue_bskh)
         }
         self.pallas_cache_page_spec = {
-            'prefill': P(*self.sharding_cfg.prefill_sharding_cfg.keyvalue_cache_kbsh),
-            'generate': P(*self.sharding_cfg.generate_sharding_cfg.keyvalue_cache_kbsh)
+            'prefill': P(*self.sharding_cfg.prefill_rules.keyvalue_cache_kbsh),
+            'generate': P(*self.sharding_cfg.generate_rules.keyvalue_cache_kbsh)
         }        
 
     def __call__(
@@ -254,19 +259,23 @@ class Attention(nnx.Module):
             x, self.activation_attention_btd[op_mode])
         x_q_BTD = nnx.with_sharding_constraint(x,
                                                self.activation_q_btd[op_mode])
-
+        N = getattr(self.cfg, HuggingFaceArgNames.NUM_ATTENTION_HEADS.value)
+        K = getattr(self.cfg, HuggingFaceArgNames.NUM_KEY_VALUE_HEADS.value)
+        rope_scaling = getattr(self.cfg, HuggingFaceArgNames.ROPE_SCALING.value)
+        rope_theta = getattr(self.cfg, HuggingFaceArgNames.ROPE_THETA.value)
+        H = getattr(self.cfg, HuggingFaceArgNames.HEAD_DIM.value)
         with jax.named_scope("q_proj"):
             q_BTNH = jnp.einsum('BTD,NDH -> BTNH', x_q_BTD,
                                 self.kernel_q_proj_NDH.value)
-            q_BTNH = self.apply_rope(q_BTNH, md.input_positions, self.cfg.head_dim,
-                                self.cfg.rope_theta, self.cfg.rope_scaling)
+            q_BTNH = self.apply_rope(q_BTNH, md.input_positions, H,
+                                rope_theta, rope_scaling)
             q_BTNH = nnx.with_sharding_constraint(q_BTNH,
                                                   self.query_btnh[op_mode])
         with jax.named_scope("k_proj"):
             k_BSKH = jnp.einsum('BSD,KDH -> BSKH', x_BSD,
                                 self.kernel_k_proj_KDH.value)
-            k_BSKH = self.apply_rope(k_BSKH, md.input_positions, self.cfg.head_dim,
-                                self.cfg.rope_theta, self.cfg.rope_scaling)
+            k_BSKH = self.apply_rope(k_BSKH, md.input_positions, H,
+                                rope_theta, rope_scaling)
             k_BSKH = nnx.with_sharding_constraint(k_BSKH,
                                                   self.keyvalue_bskh[op_mode])
 
@@ -285,8 +294,8 @@ class Attention(nnx.Module):
                 v_BSKH,
                 attention_metadata,
                 self.mesh,
-                self.cfg.num_q_heads,
-                self.cfg.num_kv_heads,
+                N,
+                K,
             )
 
         with jax.named_scope("o_proj"):
@@ -346,7 +355,7 @@ class Attention(nnx.Module):
         attention_metadata: AttentionMetadata,
         mesh: Mesh,
         num_heads: int,
-        num_kv_heads: int,
+        num_key_value_heads: int,
     ) -> Tuple[KVCache, jax.Array]:
         """Performs scaled dot-product attention and updates the KV cache.
 
@@ -358,14 +367,14 @@ class Attention(nnx.Module):
         Args:
             is_prefill: A boolean indicating if the mode is 'prefill'.
             kv_cache: The key-value cache to be updated and used.
-            q_BTNH: Query tensor of shape `(batch, query_seq, num_q_heads, head_dim)`.
-            k_BSKH: Key tensor of shape `(batch, kv_seq, num_kv_heads, head_dim)`.
-            v_BSKH: Value tensor of shape `(batch, kv_seq, num_kv_heads, head_dim)`.
+            q_BTNH: Query tensor of shape `(batch, query_seq, num_attention_heads, head_dim)`.
+            k_BSKH: Key tensor of shape `(batch, kv_seq, num_key_value_heads, head_dim)`.
+            v_BSKH: Value tensor of shape `(batch, kv_seq, num_key_value_heads, head_dim)`.
             attention_metadata: Metadata containing sequence lengths.
             mesh: The JAX device mesh (unused in this specific function but
                 kept for potential future use or API consistency).
             num_heads: The number of query heads.
-            num_kv_heads: The number of key/value heads.
+            num_key_value_heads: The number of key/value heads.
 
         Returns:
             A tuple containing:
@@ -374,7 +383,7 @@ class Attention(nnx.Module):
                   `(batch, seq, num_q_heads, head_dim)`.
         """
         def _attention_kernel(q_BTNH, k_BSKH, v_BSKH, key_cache, value_cache, seq_lens, block_indices):
-            head_repeats = num_heads // num_kv_heads
+            head_repeats = num_heads // num_key_value_heads
 
             if is_prefill:
                 # Transpose K/V for attention calculation

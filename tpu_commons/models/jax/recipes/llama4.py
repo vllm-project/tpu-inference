@@ -35,8 +35,8 @@ class Llama4ScoutModelConfig(ModelConfig):
         default_factory=lambda: TransformerBlockConfig(
             attention=AttentionConfig(
                 d_model=5120,  ## TODO: Is this correct?
-                num_q_heads=40,
-                num_kv_heads=8,
+                num_attention_heads=40,
+                num_key_value_heads=8,
                 head_dim=128,
                 rope_theta=500000.0,
                 rope_scaling={
