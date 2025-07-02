@@ -17,7 +17,6 @@ from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.sequence import IntermediateTensors
 
-from tpu_commons.models.jax.attention_interface import KVCache
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.layers.sampling import sample
 from tpu_commons.models.vllm.sharding import shard_model_to_tpu
@@ -103,14 +102,14 @@ class VllmModelWrapper:
             params_and_buffers,  # this has been wrapped into a torchax TorchValue
             is_prefill: bool,
             do_sampling: bool,
-            kv_caches: List[KVCache],
+            kv_caches: List[jax.Array],
             input_ids: jax.Array,
             attention_metadata: AttentionMetadata,
             temperatures: jax.Array,
             top_ps: jax.Array,
             top_ks: jax.Array,
             *args,
-        ) -> Tuple[List[KVCache], jax.Array, jax.Array]:
+        ) -> Tuple[List[jax.Array], jax.Array, jax.Array]:
 
             with torchax.default_env(), set_vllm_model_wrapper_context(
                     is_prefill=is_prefill,

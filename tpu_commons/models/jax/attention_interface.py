@@ -2,30 +2,63 @@ from typing import Tuple
 
 import jax
 import jax.numpy as jnp
+from jax.experimental import shard_map
 from jax.sharding import Mesh
+from jax.sharding import PartitionSpec as P
 
+from tpu_commons.kernels.ragged_kv_cache_update import kv_cache_update
+from tpu_commons.kernels.ragged_paged_attention.kernel import \
+    ragged_paged_attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.models.jax.layers.attention import (sharded_flash_attention,
-                                                     sharded_paged_attention,
-                                                     update_cache)
-from tpu_commons.models.jax.layers.chunked_prefill_attention import (
-    sharded_chunked_prefill_attention, sharded_chunked_prefill_update_cache)
 
-KVCache = Tuple[jax.Array, jax.Array]
+# TODO(xiang): put this in attention metadata
+# Block size used for kv cache updating kernel
+NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK = 8
+
+
+def sharded_ragged_paged_attention(sm_scale: float, mesh: Mesh):
+    """Shards along KV heads."""
+    in_specs = (
+        P(None, "model", None),  # q
+        P(None, None, "model", None),  # kv cache
+        P(),  # kv_lens
+        P(),  # page_indices
+        P(),  # cu_q_lens
+        P(),  # num_seqs
+    )
+    out_specs = P(None, "model", None)
+
+    def _ragged_paged_attention(*args):
+        return ragged_paged_attention(
+            *args,
+            sm_scale=sm_scale,
+            sliding_window=None,
+            soft_cap=None,
+            mask_value=None,
+            # NOTE(xiang): v6e chip has 128M VMEM capacity,
+            # set this to 64M to avoid VMEM OOM,
+            # otherwise the default value is 16M.
+            vmem_limit_bytes=64 * 1024 * 1024,
+        )
+
+    return jax.jit(
+        shard_map.shard_map(
+            _ragged_paged_attention,
+            mesh=mesh,
+            in_specs=in_specs,
+            out_specs=out_specs,
+            check_rep=False,
+        ))
 
 
 def attention(
-    is_prefill: bool,
-    kv_cache: KVCache,
+    kv_cache: jax.Array,
     q: jax.Array,
     k: jax.Array,
     v: jax.Array,
     attention_metadata: AttentionMetadata,
     mesh: Mesh,
-    num_heads: int,
-    num_kv_heads: int,
-) -> Tuple[KVCache, jax.Array]:
-    # B: batch_size
+) -> Tuple[jax.Array, jax.Array]:
     # T: seq_len
     # N: num_heads
     # K: num_kv_heads
@@ -34,63 +67,54 @@ def attention(
     # L: num_blocks
     # S: block_size
 
-    # (K, L, S, H)
-    k_cache, v_cache = kv_cache
+    # q: (T, N, H)
+    # k,v: (T, K, H)
+    # kv_cache: (L, S, 2 * K, H)
+
     md = attention_metadata
-    if md.chunked_prefill_enabled:
-        if attention_metadata.page_aligned_update:
-            # The e2e performance improvement of this was ~5% back in 2024/03 per gxd@. This might have changed now.
-            k_cache = sharded_chunked_prefill_update_cache(mesh)(
-                k_cache, md.kv_cache_write_indices, k, md.num_decode_seqs)
-            v_cache = sharded_chunked_prefill_update_cache(mesh)(
-                v_cache, md.kv_cache_write_indices, v, md.num_decode_seqs)
-        else:
-            # TODO(pooyam): Try the following ideas to optimize this.
-            # Idea 1: use lax loop similar to to chunked_prefill_update_cache above.
-            # Idea 2: Convert a prefill of size m*PAGE_SIZE + n, to a prefill of size m*PAGE_SIZE AND n decodes (But in fact they are all the same seq.)
-            # This will however make the code much more complicated.
-            k = k.swapaxes(0, 2)
-            v = v.swapaxes(0, 2)
-            k_cache = update_cache(False, k_cache, md.kv_cache_write_indices,
-                                   k)
-            v_cache = update_cache(False, v_cache, md.kv_cache_write_indices,
-                                   v)
+    kv_cache = update_kv_cache(k, v, kv_cache, md.kv_cache_write_indices,
+                               md.num_prefill_seqs, mesh)
 
-        outputs = sharded_chunked_prefill_attention(mesh)(
-            q,
-            k_cache,
-            v_cache,
-            attention_metadata.decode_lengths,
-            attention_metadata.decode_page_indices,
-            attention_metadata.num_decode_seqs,
-            attention_metadata.prefill_lengths,
-            attention_metadata.prefill_page_indices,
-            attention_metadata.prefill_query_start_offsets,
-            attention_metadata.num_prefill_seqs,
-        )
-    else:
-        k_cache = update_cache(is_prefill, k_cache, md.kv_cache_write_indices,
-                               k)
-        v_cache = update_cache(is_prefill, v_cache, md.kv_cache_write_indices,
-                               v)
+    head_dim = q.shape[-1]
+    # (T, N, H)
+    output = sharded_ragged_paged_attention(head_dim**-0.5, mesh)(
+        q,
+        kv_cache,
+        md.seq_lens,
+        md.block_indices,
+        md.prefill_query_start_offsets,
+        md.num_decode_seqs,
+    )
 
-        if is_prefill:
-            # (B, N, T, H)
-            # NOTE(pooyam): Based on my benchmarks, We should not use splash kernel for normal settings (e.g., 32 heads, 8 kv heads) as flash attention is faster.
-            # I think splash kernel is faster only in presence of sparsity otherwise flash attention is faster.
-            if num_kv_heads != num_heads:
-                k = jnp.repeat(k, num_heads // num_kv_heads, axis=1)
-                v = jnp.repeat(v, num_heads // num_kv_heads, axis=1)
-            outputs = sharded_flash_attention(mesh)(q, k, v)
-        else:
-            # (B, N, H)
-            q = jnp.squeeze(q, 2)
-            outputs = sharded_paged_attention(mesh)(q, k_cache, v_cache,
-                                                    md.seq_lens,
-                                                    md.block_indices)
-            # (B, N, 1, H)
-            outputs = jnp.expand_dims(outputs, 2)
+    return kv_cache, output
 
-    new_kv_cache = (k_cache, v_cache)
 
-    return new_kv_cache, outputs
+def update_kv_cache(k: jax.Array, v: jax.Array, kv_cache: jax.Array,
+                    slices: jax.Array, num_slices: jax.Array,
+                    mesh: Mesh) -> jax.Array:
+    """ Write K and V into KV cache.
+
+    Args:
+        k: (T, K, H)
+        v: (T, K, H)
+        kv_cache: (L, S, K*2, H)
+    """
+    L, S, K_2, H = kv_cache.shape
+    T, K, H = k.shape
+
+    # (T, K*2, H)
+    # NOTE(xiang): KV needs to be interleaved as required by kernel
+    kv = jnp.concat([k, v], axis=-1).reshape(T, K_2, H)
+
+    kv_cache = kv_cache.reshape(-1, K_2, H)
+    kv_cache = kv_cache_update(
+        kv,
+        slices,
+        kv_cache,
+        num_slices,
+        page_size=S,
+        num_slices_per_block=NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK,
+        mesh=mesh,
+        kv_cache_pspec=P(None, "model", None))
+    kv_cache = kv_cache.reshape(L, S, K_2, H)
+    return kv_cache

@@ -8,7 +8,7 @@ from transformers import Qwen2Config, modeling_flax_utils
 from vllm.config import VllmConfig
 
 from tpu_commons.logger import init_logger
-from tpu_commons.models.jax.attention_interface import KVCache, attention
+from tpu_commons.models.jax.attention_interface import attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.layers.rope import apply_rope
 from tpu_commons.models.jax.layers.sampling import sample
@@ -71,28 +71,28 @@ class Qwen2Attention(nnx.Module):
         self.mesh = mesh
 
         self.q_proj = nnx.Einsum(
-            "BTD,NDH->BNTH",
-            (self.num_heads, self.hidden_size, self.head_dim),
-            (self.num_heads, self.head_dim),  # bias shape [N, H]
+            "TD,DNH->TNH",
+            (self.hidden_size, self.num_heads, self.head_dim),
+            (self.num_heads, self.head_dim),
             param_dtype=dtype,
             rngs=rng,
         )
         self.k_proj = nnx.Einsum(
-            "BTD,KDH->BKTH",
-            (self.num_kv_heads, self.hidden_size, self.head_dim),
-            (self.num_kv_heads, self.head_dim),  # bias shape [K, H])
+            "TD,DKH->TKH",
+            (self.hidden_size, self.num_kv_heads, self.head_dim),
+            (self.num_kv_heads, self.head_dim),
             param_dtype=dtype,
             rngs=rng,
         )
         self.v_proj = nnx.Einsum(
-            "BTD,KDH->BKTH",
-            (self.num_kv_heads, self.hidden_size, self.head_dim),
-            (self.num_kv_heads, self.head_dim),  # bias shape [K, H])
+            "TD,DKH->TKH",
+            (self.hidden_size, self.num_kv_heads, self.head_dim),
+            (self.num_kv_heads, self.head_dim),
             param_dtype=dtype,
             rngs=rng,
         )
         self.o_proj = nnx.Einsum(
-            "BNTH,NHD->BTD",
+            "TNH,NHD->TD",
             (self.num_heads, self.head_dim, self.hidden_size),
             param_dtype=dtype,
             rngs=rng,
@@ -100,41 +100,36 @@ class Qwen2Attention(nnx.Module):
 
     def __call__(
         self,
-        is_prefill: bool,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[jax.Array],
         x: jax.Array,
         attention_metadata: AttentionMetadata,
-    ) -> Tuple[KVCache, jax.Array]:
+    ) -> Tuple[jax.Array, jax.Array]:
         md = attention_metadata
 
-        # q: (B, N, T, H)
+        # q: (T, N, H)
         q = self.q_proj(x)
         q = apply_rope(q, md.input_positions, self.head_dim, self.rope_theta,
                        self.rope_scaling)
-        q = q * self.head_dim**-0.5
 
-        # k: (B, K, T, H)
+        # k: (T, K, H)
         k = self.k_proj(x)
         k = apply_rope(k, md.input_positions, self.head_dim, self.rope_theta,
                        self.rope_scaling)
 
-        # v: (B, K, T, H)
+        # k: (T, K, H)
         v = self.v_proj(x)
 
-        # o: (B, N, T, H)
+        # o: (T, N, H)
         new_kv_cache, outputs = attention(
-            is_prefill,
             kv_cache,
             q,
             k,
             v,
             attention_metadata,
             self.mesh,
-            self.num_heads,
-            self.num_kv_heads,
         )
 
-        # (B, T, D)
+        # (T, D)
         o = self.o_proj(outputs)
         return new_kv_cache, o
 
@@ -170,21 +165,17 @@ class Qwen2DecoderLayer(nnx.Module):
 
     def __call__(
         self,
-        is_prefill: bool,
-        kv_cache: KVCache,
+        kv_cache: jax.Array,
         x: jax.Array,
         attention_metadata: AttentionMetadata,
-    ) -> Tuple[KVCache, jax.Array]:
+    ) -> Tuple[jax.Array, jax.Array]:
         # Self attention.
         hidden_states = self.input_layernorm(x)
-
         kv_cache, attn_output = self.self_attn(
-            is_prefill,
             kv_cache,
             hidden_states,
             attention_metadata,
         )
-
         attn_output += x
 
         # MLP.
@@ -222,15 +213,13 @@ class Qwen2Model(nnx.Module):
 
     def __call__(
         self,
-        is_prefill: bool,
-        kv_caches: List[KVCache],
+        kv_caches: List[jax.Array],
         x: jax.Array,
         attention_metadata: AttentionMetadata,
-    ) -> Tuple[List[KVCache], jax.Array]:
+    ) -> Tuple[List[jax.Array], jax.Array]:
         for i, layer in enumerate(self.layers):
             kv_cache = kv_caches[i]
             kv_cache, x = layer(
-                is_prefill,
                 kv_cache,
                 x,
                 attention_metadata,
@@ -276,19 +265,21 @@ class Qwen2ForCausalLM(nnx.Module):
         self,
         is_prefill: bool,
         do_sampling: bool,
-        kv_caches: List[KVCache],
+        kv_caches: List[jax.Array],
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
         temperatures: jax.Array = None,
         top_ps: jax.Array = None,
         top_ks: jax.Array = None,
         *args,
-    ) -> Tuple[List[KVCache], jax.Array, jax.Array]:
+    ) -> Tuple[List[jax.Array], jax.Array, jax.Array]:
+        # input_ids: (T,)
 
+        # x: (T, D)
         x = self.embed(input_ids)
 
+        # (T, D)
         kv_caches, x = self.model(
-            is_prefill,
             kv_caches,
             x,
             attention_metadata,
@@ -301,9 +292,11 @@ class Qwen2ForCausalLM(nnx.Module):
         else:
             # self.lm_head.value is (hidden_size, vocab_size)
             logits = jnp.dot(x, self.lm_head.value)
+        # (1, T, V)
+        logits = jnp.expand_dims(logits, 0)
 
         next_tokens = sample(
-            is_prefill,
+            False,
             do_sampling,
             self.rng.params(),
             self.mesh,
@@ -321,6 +314,8 @@ class Qwen2ForCausalLM(nnx.Module):
         # we have to pass dynamic arrays here for __call__'s usage.
         self.rng = nnx.Rngs(rng_key)
 
+        # Key: path to a HF layer weight
+        # Value: a tuple of (path to a nnx layer weight, nnx weight sharding)
         mappings = {
             "model.embed_tokens": ("embed.embedding", ("model", None)),
             "model.layers.*.input_layernorm":
@@ -334,13 +329,13 @@ class Qwen2ForCausalLM(nnx.Module):
             "model.layers.*.post_attention_layernorm":
             ("model.layers.*.post_attention_layernorm.scale", (None, )),
             "model.layers.*.self_attn.k_proj":
-            ("model.layers.*.self_attn.k_proj.kernel", ("model", None, None)),
+            ("model.layers.*.self_attn.k_proj.kernel", (None, "model", None)),
             "model.layers.*.self_attn.o_proj":
             ("model.layers.*.self_attn.o_proj.kernel", ("model", None, None)),
             "model.layers.*.self_attn.q_proj":
-            ("model.layers.*.self_attn.q_proj.kernel", ("model", None, None)),
+            ("model.layers.*.self_attn.q_proj.kernel", (None, "model", None)),
             "model.layers.*.self_attn.v_proj":
-            ("model.layers.*.self_attn.v_proj.kernel", ("model", None, None)),
+            ("model.layers.*.self_attn.v_proj.kernel", (None, "model", None)),
             "model.layers.*.self_attn.q_proj.bias":
             ("model.layers.*.self_attn.q_proj.bias", ("model", None)),
             "model.layers.*.self_attn.k_proj.bias":
