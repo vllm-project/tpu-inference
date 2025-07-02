@@ -118,7 +118,7 @@ class EngineCore:
         # Setup KV Caches and update CacheConfig after profiling.
         num_gpu_blocks, num_cpu_blocks, kv_cache_config = \
             self._initialize_kv_caches(vllm_config, self.prefill_executor)
-        if len(devices) == 8:
+        if self.decode_executor:
             self._initialize_kv_caches(vllm_config, self.decode_executor)
 
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
@@ -193,10 +193,15 @@ class EngineCore:
         available_gpu_memory = executor.determine_available_memory()
 
         assert len(kv_cache_specs) == len(available_gpu_memory)
+
         # Get the kv cache tensor size
+        # We leave 50% memory for processing and incoming batches. This is due to the
+        # donation issues we are seeing:
+        #   /mlir.py:1184: UserWarning: Some donated buffers were not usable: bfloat16[4,2737,32,128]...
+        # TODO(fhzhang): fix the donation issues!
         kv_cache_configs = [
             get_kv_cache_config(vllm_config, kv_cache_spec_one_worker,
-                                available_gpu_memory_one_worker)
+                                available_gpu_memory_one_worker * 0.5)
             for kv_cache_spec_one_worker, available_gpu_memory_one_worker in
             zip(kv_cache_specs, available_gpu_memory)
         ]
