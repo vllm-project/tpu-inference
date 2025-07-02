@@ -30,19 +30,19 @@ if VLLM_TORCHAX_ENABLED:
         from tpu_commons.models.torchax.torchax_wrapper import (
             get_cpu_tensor_from_torchax_tensor, wrap_model, wrap_model_func)
         from tpu_commons.distributed.tpu_distributed_utils import (
-            create_torchax_tensor_with_partition_spec)
+            create_torchax_kv_cache, create_torchax_tensor_with_partition_spec)
     except ImportError:
         from vllm.compilation.torchax_wrapper import (
             get_cpu_tensor_from_torchax_tensor, wrap_model, wrap_model_func)
         from vllm.distributed.tpu_distributed_utils import (
-            create_torchax_tensor_with_partition_spec)
+            create_torchax_kv_cache, create_torchax_tensor_with_partition_spec)
 
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import ParallelConfig, VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import set_forward_context
-from vllm.logger import init_logger
+from tpu_commons.logger import init_logger
 from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.model_executor.model_loader import get_model_loader
 
@@ -447,21 +447,24 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             req_ids_to_add.append(req_id)
 
         # Update the states of the running/resumed requests.
-        for req_data in scheduler_output.scheduled_cached_reqs:
-            req_id = req_data.req_id
+        req_data = scheduler_output.scheduled_cached_reqs
+        for i, req_id in enumerate(req_data.req_ids):
             req_state = self.requests[req_id]
+            num_computed_tokens = req_data.num_computed_tokens[i]
+            new_block_ids = req_data.new_block_ids[i]
+            resumed_from_preemption = req_data.resumed_from_preemption[i]
 
             # Update the cached states.
-            req_state.num_computed_tokens = req_data.num_computed_tokens
-            if not req_data.resumed_from_preemption:
+            req_state.num_computed_tokens = num_computed_tokens
+            if not resumed_from_preemption:
                 # Append the new blocks to the existing block IDs.
-                for block_ids, new_block_ids in zip(req_state.block_ids,
-                                                    req_data.new_block_ids):
-                    block_ids.extend(new_block_ids)
+                for block_ids, new_ids in zip(req_state.block_ids,
+                                              new_block_ids):
+                    block_ids.extend(new_ids)
             else:
                 # The request is resumed from preemption.
                 # Replace the existing block IDs with the new ones.
-                req_state.block_ids = req_data.new_block_ids
+                req_state.block_ids = new_block_ids
 
             req_index = self.input_batch.req_id_to_index.get(req_id)
             if req_index is None:
@@ -473,9 +476,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
             # Update the persistent batch.
             self.input_batch.num_computed_tokens_cpu[req_index] = (
-                req_data.num_computed_tokens)
-            self.input_batch.block_table.append_row(req_data.new_block_ids,
-                                                    req_index)
+                num_computed_tokens)
+            self.input_batch.block_table.append_row(new_block_ids, req_index)
 
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
@@ -588,43 +590,50 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                     cache for the corresponding slice.
                 - slice_len (int): The length of the slice.
         """
-        slices_start = self.input_batch.num_computed_tokens_cpu[:num_reqs]
-        slices_end = self.input_batch.num_computed_tokens_cpu[:num_reqs] + \
+        slices_start_np = self.input_batch.num_computed_tokens_cpu[:num_reqs]
+        slices_end_np = self.input_batch.num_computed_tokens_cpu[:num_reqs] + \
             num_scheduled_tokens_per_req
-        local_block_start_idx = slices_start // self.block_size
-        local_block_end_idx = (slices_end - 1) // self.block_size
-        no_repeat_req_indices = self.arange_np[:num_reqs]
-        global_block_start_idx = (
-            no_repeat_req_indices * self.max_num_blocks_per_req +
-            local_block_start_idx)
-        block_lens = local_block_end_idx - local_block_start_idx + 1
-        global_block_start_idx = np.repeat(global_block_start_idx, block_lens)
-        slice_arange = np.concatenate([self.arange_np[:n] for n in block_lens])
-        global_block_indices = global_block_start_idx + slice_arange
+        local_block_start_idx_np = slices_start_np // self.block_size
+        local_block_end_idx_np = (slices_end_np - 1) // self.block_size
+        no_repeat_req_indices_np = self.arange_np[:num_reqs]
+        global_block_start_idx_np = (
+            no_repeat_req_indices_np * self.max_num_blocks_per_req +
+            local_block_start_idx_np)
+        block_lens_np = local_block_end_idx_np - local_block_start_idx_np + 1
+        global_block_start_idx_np = np.repeat(global_block_start_idx_np,
+                                              block_lens_np)
+        slice_arange_np = np.concatenate(
+            [self.arange_np[:n] for n in block_lens_np])
+        global_block_indices_np = global_block_start_idx_np + slice_arange_np
         block_table_cpu = self.input_batch.block_table[0].get_cpu_tensor()
-        block_numbers = block_table_cpu.flatten()[global_block_indices].numpy()
-        total_block_len = np.sum(block_lens)
-        slot_mapping_slices = np.repeat(np.array([[0, self.block_size]],
-                                                 dtype=np.int32),
-                                        total_block_len,
-                                        axis=0)
-        cu_block_lens = np.zeros(len(block_lens) + 1, dtype=np.int32)
-        np.cumsum(block_lens, out=cu_block_lens[1:])
+        block_numbers_np = block_table_cpu.flatten(
+        )[global_block_indices_np].numpy()
+        total_block_len = np.sum(block_lens_np)
+        slot_mapping_slices_np = np.repeat(np.array([[0, self.block_size]],
+                                                    dtype=np.int32),
+                                           total_block_len,
+                                           axis=0)
+        cu_block_lens_np = np.zeros(len(block_lens_np) + 1, dtype=np.int32)
+        np.cumsum(block_lens_np, out=cu_block_lens_np[1:])
         for req_idx in range(num_reqs):
-            slot_mapping_slices[cu_block_lens[req_idx]][
-                0] = slices_start[req_idx] % self.block_size
-            slot_mapping_slices[
-                cu_block_lens[req_idx + 1] -
-                1][1] = (slices_end[req_idx] - 1) % self.block_size + 1
-        slice_lens = slot_mapping_slices[:, 1] - slot_mapping_slices[:, 0]
-        cu_slices_lens = np.zeros(len(slice_lens) + 1, dtype=np.int32)
-        np.cumsum(slice_lens, out=cu_slices_lens[1:])
-        kv_cache_start_indices = slot_mapping_slices[:, 0] + \
-            (block_numbers * self.block_size)
-        new_kv_start_indices = cu_slices_lens[:-1]
-        slot_mapping_metadata = np.stack(
-            [kv_cache_start_indices, new_kv_start_indices, slice_lens], axis=1)
-        return slot_mapping_metadata
+            slot_mapping_slices_np[cu_block_lens_np[req_idx]][
+                0] = slices_start_np[req_idx] % self.block_size
+            slot_mapping_slices_np[
+                cu_block_lens_np[req_idx + 1] -
+                1][1] = (slices_end_np[req_idx] - 1) % self.block_size + 1
+        slice_lens_np = slot_mapping_slices_np[:,
+                                               1] - slot_mapping_slices_np[:,
+                                                                           0]
+        cu_slices_lens_np = np.zeros(len(slice_lens_np) + 1, dtype=np.int32)
+        np.cumsum(slice_lens_np, out=cu_slices_lens_np[1:])
+        kv_cache_start_indices_np = slot_mapping_slices_np[:, 0] + \
+            (block_numbers_np * self.block_size)
+        new_kv_start_indices_np = cu_slices_lens_np[:-1]
+        slot_mapping_metadata_np = np.stack([
+            kv_cache_start_indices_np, new_kv_start_indices_np, slice_lens_np
+        ],
+                                            axis=1)
+        return slot_mapping_metadata_np
 
     def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -696,23 +705,24 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             total_num_scheduled_tokens:padded_total_num_scheduled_tokens] = 0
 
         # Calculate the slot mapping.
-        slot_mapping_metadata = self._get_slot_mapping_metadata(
+        slot_mapping_metadata_np = self._get_slot_mapping_metadata(
             num_reqs, num_scheduled_tokens_per_req)
+        num_slices = slot_mapping_metadata_np.shape[0]
         padded_num_slices = _get_padded_num_kv_cache_update_slices(
             padded_total_num_scheduled_tokens, self.max_num_reqs,
             self.block_size)
-        slot_mapping_metadata = np.pad(
-            slot_mapping_metadata,
-            [[0, padded_num_slices - len(slot_mapping_metadata)], [0, 0]],
+        slot_mapping_metadata_np = np.pad(
+            slot_mapping_metadata_np,
+            [[0, padded_num_slices - len(slot_mapping_metadata_np)], [0, 0]],
             constant_values=0)
-        slot_mapping_metadata = np.transpose(slot_mapping_metadata)
+        slot_mapping_metadata_np = np.transpose(slot_mapping_metadata_np)
 
         self.input_ids = self._create_torchax_array(
             self.input_ids_cpu[:padded_total_num_scheduled_tokens])
         self.position_ids = self._create_torchax_array(
             self.positions_cpu[:padded_total_num_scheduled_tokens])
-        slot_mapping = torchax.tensor.Tensor(
-            jnp.asarray(slot_mapping_metadata), self.torchax_env)
+        slot_mapping = self._create_torchax_array(
+            torch.from_numpy(slot_mapping_metadata_np))
         block_tables = self.block_table_cpu[:self.max_num_reqs]
         block_tables[:num_reqs, :self.max_num_blocks_per_req] = (
             self.input_batch.block_table[0].get_cpu_tensor()[:num_reqs])
@@ -735,12 +745,15 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
         num_seqs = self._create_torchax_array(
             torch.tensor([num_reqs], dtype=torch.int32))
+        num_slices = self._create_torchax_array(
+            torch.tensor([num_slices], dtype=torch.int32))
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
             block_tables=block_tables,
             context_lens=seq_lens,
             query_start_loc=query_start_loc,
             num_seqs=num_seqs,
+            num_slices=num_slices,
         )
         # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
         # request in the batch. While we should not sample any token from this
@@ -1211,12 +1224,15 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             torch.ones((self.max_num_reqs, ), dtype=torch.int32))
         num_seqs = self._create_torchax_array(
             torch.tensor([actual_num_reqs], dtype=torch.int32))
+        num_slices = self._create_torchax_array(
+            torch.tensor([padded_num_slices], dtype=torch.int32))
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
             block_tables=block_tables,
             context_lens=context_lens,
             query_start_loc=query_start_loc,
             num_seqs=num_seqs,
+            num_slices=num_slices,
         )
 
         if self.is_multimodal_model:
@@ -1504,11 +1520,17 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         for layer_name, layer_spec in kv_cache_spec.items():
             if isinstance(layer_spec, AttentionSpec):
                 dtype = layer_spec.dtype
-                # Use an empty tensor instead of `None`` to force Dynamo to pass
-                # it by reference, rather by specializing on the value ``None``.
-                tpu_kv_cache = torch.tensor([],
-                                            dtype=dtype,
-                                            device=self.device)
+                # This is a workaround for torchax to create tensor on TPU
+                # instead of CPU. Within torchax.enable_globally(), it will
+                # create on CPU if we set device to be 'jax'.
+                # Also torch.tensor(..., device='jax') will create tensor on CPU
+                # instaled of TPU, need to call .to('jax')
+                with torchax.default_env():
+                    # Use an empty tensor instead of `None`` to force Dynamo to pass
+                    # it by reference, rather by specializing on the value ``None``.
+                    tpu_kv_cache = torch.tensor([], dtype=dtype)
+                    tpu_kv_cache = create_torchax_tensor_with_partition_spec(
+                        tpu_kv_cache, self.mesh, ())
                 kv_caches[layer_name] = tpu_kv_cache
             else:
                 raise NotImplementedError(
@@ -1639,23 +1661,18 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                     tpu_kv_cache = torch.zeros(kv_cache_shape, dtype=dtype)
 
                     if VLLM_TORCHAX_ENABLED:
-                        partition_spec = None
+                        partition_spec = ()
                         if self.use_spmd:
                             partition_spec = (None, None, 'x', None)
                             # Use torchax tensor to support SPMD sharding.
-                        tpu_kv_cache = create_torchax_tensor_with_partition_spec(
-                            tpu_kv_cache, self.mesh, partition_spec)
-
+                        tpu_kv_cache = create_torchax_kv_cache(
+                            kv_cache_shape, dtype, self.mesh, partition_spec)
+                    else:
+                        assert False, \
+                            "VLLM_TORCHAX_ENABLED must be enabled now."
                     kv_caches[layer_name] = tpu_kv_cache
                 else:
                     raise NotImplementedError
-
-        # kv_caches_cpu = {}
-        # for k, v in kv_caches.items():
-        #     kv_caches_cpu[k] = torch.zeros(v.shape, dtype=v.dtype)
-        #     print(kv_caches_cpu[k])
-        # torch.save(kv_caches_cpu,
-        #            '/home/lsiyuan/torchax_dump/kv_caches.pt')
 
         # Setup `kv_cache_config` and `kv_caches` for models
         # with cross-layer KV sharing

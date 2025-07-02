@@ -1,5 +1,6 @@
 # Here we try to bring as much code as possible from Hex-LLM, instead of `tpu_torch_xla_runner.py` -> jax conversion.
 # This runner is a port of https://source.corp.google.com/h/vertex-model-garden/hex-llm/+/main:hex_llm/worker/runner_jax.py
+from dataclasses import asdict
 from typing import Any, List, Optional, Tuple
 
 import jax
@@ -18,8 +19,10 @@ from vllm.v1.outputs import ModelRunnerOutput
 
 from tpu_commons.core.jetstream_commons.engine import PATHWAYS_ENABLED
 from tpu_commons.logger import init_logger
+from tpu_commons.models.jax.common.model import Model
 from tpu_commons.models.jax.common.sharding import Sharding
-from tpu_commons.models.jax.model_loader import get_model
+from tpu_commons.models.jax.model_loader import (_get_model_architecture,
+                                                 get_model)
 from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
                                                     InputBatch)
 from tpu_commons.runner.jax.input_prep import InputPrep
@@ -82,7 +85,6 @@ class TPUModelRunner():
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
             max_num_batched_tokens=self.max_num_tokens,
-            device=None,
             pin_memory=False,
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[self.block_size],
@@ -354,20 +356,25 @@ class TPUModelRunner():
 
     def _init_mesh(self) -> None:
         hf_config = self.model_config.hf_config
-        architectures = getattr(hf_config, "architectures", [])
+        try:
+            model_class = _get_model_architecture(hf_config)
+        except NotImplementedError:
+            model_class = None
         #TODO merge the if-else branches when new design is ready
         # Llama4Scout is only used for new model design,
         # so that we use it as a flag for testing the new model design
-        if architectures == ["Llama4Scout"]:
+        if model_class is not None and issubclass(model_class, Model):
             try:
+                # TODO: Update override steps.
                 sharding_strategy = \
-                    self.vllm_config.additional_config["overrides"]["sharding"]["sharding_strategy"]
+                    self.vllm_config.additional_config["sharding"]["sharding_strategy"]
             except KeyError:
                 logger.warning(
                     f"No sharding strategy passed! Using default of full model parallelism={len(self.devices)}"
                 )
                 sharding_strategy = {"tensor_parallelism": len(self.devices)}
-            sharding = Sharding(strategy_dict=sharding_strategy)
+            sharding = Sharding(strategy_dict=sharding_strategy,
+                                vllm_config=self.vllm_config)
             self.mesh = sharding.mesh
             logger.info(f"Init mesh | mesh={self.mesh}")
         else:
@@ -464,20 +471,12 @@ class TPUModelRunner():
         # Add new requests to the cached states.
         for new_req_data in scheduler_output.scheduled_new_reqs:
             req_id = new_req_data.req_id
-            sampling_params = new_req_data.sampling_params
 
-            self.requests[req_id] = CachedRequestState(
-                req_id=req_id,
-                prompt_token_ids=new_req_data.prompt_token_ids,
-                mm_inputs=new_req_data.mm_inputs,
-                mm_positions=new_req_data.mm_positions,
-                sampling_params=sampling_params,
-                generator=None,
-                block_ids=new_req_data.block_ids,
-                num_computed_tokens=new_req_data.num_computed_tokens,
-                output_token_ids=[],
-                lora_request=new_req_data.lora_request,
-            )
+            data_items = asdict(new_req_data)
+            data_items["mm_hashes"] = []
+
+            self.requests[req_id] = CachedRequestState(**data_items,
+                                                       output_token_ids=[])
 
             req_ids_to_add.append(req_id)
 

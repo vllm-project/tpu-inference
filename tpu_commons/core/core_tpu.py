@@ -34,7 +34,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import EngineHandshakeMetadata, EngineZmqAddresses
 from vllm.version import __version__ as VLLM_VERSION
 
-from tpu_commons.core import disagg_executor
+from tpu_commons.core import disagg_executor, disagg_utils
 from tpu_commons.core.jetstream_commons.core import orchestrator
 from tpu_commons.core.tpu_jax_engine import JaxEngine
 
@@ -69,13 +69,41 @@ class EngineCore:
         # Setup Model.
         # TODO(fhzhang): create config to setup disagg executors.
         devices = jax.devices()
+        prefill_slice_sizes = disagg_utils.get_prefill_slices()
+
+        assert len(prefill_slice_sizes) > 0
+
+        if len(prefill_slice_sizes) > 1:
+            logger.warning(
+                "We currently only support a single prefill slice, ignore others!"
+            )
+
+        assert prefill_slice_sizes[0] > 0 and prefill_slice_sizes[0] <= 8
+
+        logger.warning(
+            f"Customized prefill slice size: {prefill_slice_sizes[0]}")
+
         self.prefill_executor = disagg_executor.DisaggExecutor(vllm_config)
-        self.prefill_executor.init_with_devices(devices[:2])
+        self.prefill_executor.init_with_devices(
+            devices[:prefill_slice_sizes[0]])
+
+        decode_slice_sizes = disagg_utils.get_decode_slices()
 
         self.decode_executor = None
-        if len(devices) == 8:
+        if len(decode_slice_sizes) >= 1:
+            if len(decode_slice_sizes) > 1:
+                logger.warning(
+                    "We currently only support a single decode slice, ignore others!"
+                )
+            assert (decode_slice_sizes[0] > 0
+                    and decode_slice_sizes[0] + prefill_slice_sizes[0] <= 8)
+            logger.warning(
+                f"Disagg enabled with decode slice size: {decode_slice_sizes[0]}"
+            )
             self.decode_executor = disagg_executor.DisaggExecutor(vllm_config)
-            self.decode_executor.init_with_devices(devices[2:4])
+            self.decode_executor.init_with_devices(
+                devices[prefill_slice_sizes[0]:decode_slice_sizes[0] +
+                        prefill_slice_sizes[0]])
             self.decode_executor.driver_worker.model_runner.input_batch = (
                 self.prefill_executor.driver_worker.model_runner.input_batch)
             self.decode_executor.driver_worker.model_runner.requests = (
