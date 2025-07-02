@@ -6,7 +6,6 @@ from jax.experimental import shard_map
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
-# from torch_xla.experimental.pallas_kernels.ragged_paged_attention_v2 import ragged_paged_attention
 from tpu_commons.kernels.ragged_kv_cache_update import kv_cache_update
 from tpu_commons.kernels.ragged_paged_attention.kernel import \
     ragged_paged_attention
@@ -74,7 +73,7 @@ def attention(
 
     md = attention_metadata
     kv_cache = update_kv_cache(k, v, kv_cache, md.kv_cache_write_indices,
-                               md.num_prefill_seqs)
+                               md.num_prefill_seqs, mesh)
 
     head_dim = q.shape[-1]
     # (T, N, H)
@@ -91,7 +90,8 @@ def attention(
 
 
 def update_kv_cache(k: jax.Array, v: jax.Array, kv_cache: jax.Array,
-                    slices: jax.Array, num_slices: jax.Array) -> jax.Array:
+                    slices: jax.Array, num_slices: jax.Array,
+                    mesh: Mesh) -> jax.Array:
     """ Write K and V into KV cache.
 
     Args:
@@ -113,6 +113,8 @@ def update_kv_cache(k: jax.Array, v: jax.Array, kv_cache: jax.Array,
         kv_cache,
         num_slices,
         page_size=S,
-        num_slices_per_block=NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK)
+        num_slices_per_block=NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK,
+        mesh=mesh,
+        kv_cache_pspec=P(None, "model", None))
     kv_cache = kv_cache.reshape(L, S, K_2, H)
     return kv_cache
