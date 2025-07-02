@@ -249,7 +249,8 @@ class TPUWorker:
             tpu_kv_cache_bytes = (tpu_kv_cache_bytes * head_size //
                                   padded_head_size)
         if self.original_parallel_config is not None:
-            tpu_kv_cache_bytes *= self.original_parallel_config.world_size
+            tpu_kv_cache_bytes *= \
+                self.original_parallel_config.tensor_parallel_size
 
         return int(tpu_kv_cache_bytes)
 
