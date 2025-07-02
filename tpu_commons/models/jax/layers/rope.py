@@ -19,8 +19,7 @@ def apply_rope(
     if rope_scaling:
         timescale = apply_rope_scaling(timescale, rope_scaling)
 
-    sinusoid_inp = positions[..., jnp.newaxis] * timescale[jnp.newaxis,
-                                                           jnp.newaxis, :]
+    sinusoid_inp = positions[..., jnp.newaxis] * timescale[jnp.newaxis, :]
     sinusoid_inp = sinusoid_inp[:, jnp.newaxis, ...]
     sin = jnp.sin(sinusoid_inp)
     cos = jnp.cos(sinusoid_inp)

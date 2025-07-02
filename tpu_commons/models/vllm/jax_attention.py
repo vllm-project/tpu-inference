@@ -9,7 +9,7 @@ from torchax.interop import jax_view, torch_view
 from vllm.attention import Attention as VllmAttention
 from vllm.model_executor.models.utils import extract_layer_index
 
-from tpu_commons.models.jax.attention_interface_v1 import attention
+from tpu_commons.models.jax.attention_interface import attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context

@@ -13,11 +13,7 @@ from vllm.v1.worker.worker_base import WorkerBase
 
 from tpu_commons import utils_jax as utils
 from tpu_commons.logger import init_logger
-
-if os.getenv("USE_JAX_V1", True):
-    from tpu_commons.runner.jax.tpu_jax_runner_v1 import TPUModelRunner
-else:
-    from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
+from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
 
 logger = init_logger(__name__)
 

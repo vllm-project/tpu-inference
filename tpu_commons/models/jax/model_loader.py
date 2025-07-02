@@ -19,13 +19,8 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     # would cause JAX init failure when using multi hosts with Ray.
     _MODEL_REGISTRY = {}
 
-    # TODO(xiang): unify the model interface
-    if os.getenv("USE_JAX_V1", True):
-        from tpu_commons.models.jax.llama_v1 import LlamaForCausalLM
-        from tpu_commons.models.jax.qwen2_v1 import Qwen2ForCausalLM
-    else:
-        from tpu_commons.models.jax.llama import LlamaForCausalLM
-        from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
+    from tpu_commons.models.jax.llama import LlamaForCausalLM
+    from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
     _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
     _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
 
