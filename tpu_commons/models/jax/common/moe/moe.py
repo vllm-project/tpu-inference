@@ -1,4 +1,4 @@
-from dataclasses import dataclass, make_dataclass
+from dataclasses import dataclass, field, make_dataclass
 from typing import Any
 
 import jax
@@ -31,7 +31,7 @@ RoutingConfig = make_dataclass("RoutingConfig", [
     ("routed_bias", bool),
     ("routed_scaling_factor", float),
     ("dtype", DTypeLike),
-    ("vllm_config", VllmConfig)
+    ("vllm_config", VllmConfig, field(repr=False, default=None))
     ],
     bases=(Config,)
 )
@@ -118,9 +118,9 @@ class Router(nnx.Module):
         ]
         for attr_name in mode_dependent_attrs:
             prefill_sharding_config = getattr(
-                self.sharding_cfg.prefill_sharding_cfg, attr_name)
+                self.sharding_cfg.prefill_rules_cls, attr_name)
             generate_sharding_config = getattr(
-                self.sharding_cfg.generate_sharding_cfg, attr_name)
+                self.sharding_cfg.generate_rules_cls, attr_name)
 
             sharding_dict = {
                 'prefill': NamedSharding(self.mesh,
@@ -133,7 +133,7 @@ class Router(nnx.Module):
         # static sharding for kernel/weights
         self.ed_sharding = NamedSharding(
             self.mesh,
-            P(*self.sharding_cfg.generate_sharding_cfg.moe_router_de))
+            P(*self.sharding_cfg.generate_rules_cls.moe_router_de))
 
         return
 
@@ -144,7 +144,7 @@ MoEConfig = make_dataclass("MoEConfig", [
     (HuggingFaceArgNames.NUM_LOCAL_EXPERTS.value, int),
     (HuggingFaceArgNames.HIDDEN_ACT.value, int),
     ("apply_expert_weight_before_computation", bool),
-    ("vllm_config", VllmConfig)
+    ("vllm_config", VllmConfig, field(repr=False, default=None))
     ],
     bases=(Config,)
 )
@@ -273,9 +273,9 @@ class MoE(nnx.Module):
         ]
         for attr_name in mode_dependent_attrs:
             prefill_sharding_config = getattr(
-                self.sharding_cfg.prefill_sharding_cfg, attr_name)
+                self.sharding_cfg.prefill_rules_cls, attr_name)
             generate_sharding_config = getattr(
-                self.sharding_cfg.generate_sharding_cfg, attr_name)
+                self.sharding_cfg.generate_rules_cls, attr_name)
 
             sharding_dict = {
                 'prefill': NamedSharding(self.mesh,
@@ -288,9 +288,9 @@ class MoE(nnx.Module):
         # static sharding for kernel/weights
         self.edf_sharding = NamedSharding(
             self.mesh,
-            P(*self.sharding_cfg.generate_sharding_cfg.moe_weights_edf))
+            P(*self.sharding_cfg.generate_rules_cls.moe_weights_edf))
         self.efd_sharding = NamedSharding(
             self.mesh,
-            P(*self.sharding_cfg.generate_sharding_cfg.moe_weights_efd))
+            P(*self.sharding_cfg.generate_rules_cls.moe_weights_efd))
 
         return

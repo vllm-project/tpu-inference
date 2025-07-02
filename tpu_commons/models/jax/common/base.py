@@ -1,9 +1,11 @@
 import dataclasses
-from dataclasses import dataclass, fields
+from dataclasses import asdict, dataclass, fields
 from flax import nnx
 import jax
 import jax.numpy as jnp
 from jax.sharding import NamedSharding
+import json
+import pprint
 from typing import Any, Callable, Iterable, Mapping
 
 from tpu_commons.logger import init_logger

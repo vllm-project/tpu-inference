@@ -173,9 +173,9 @@ class KVCache(nnx.Module):
         ]
         for attr_name in mode_dependent_attrs:
             prefill_sharding_config = getattr(
-                self.sharding_cfg.prefill_sharding_cfg, attr_name)
+                self.sharding_cfg.prefill_rules_cls, attr_name)
             generate_sharding_config = getattr(
-                self.sharding_cfg.generate_sharding_cfg, attr_name)
+                self.sharding_cfg.generate_rules_cls, attr_name)
 
             sharding_dict = {
                 'prefill': NamedSharding(self.mesh,

@@ -1,4 +1,4 @@
-from dataclasses import dataclass, make_dataclass
+from dataclasses import dataclass, field, make_dataclass
 from typing import Any, Dict, List, Tuple, Union
 
 import jax
@@ -120,7 +120,7 @@ AttentionConfig = make_dataclass("AttentionConfig", [
     (HuggingFaceArgNames.ROPE_THETA.value, float),
     (HuggingFaceArgNames.ROPE_SCALING.value, Dict[str, Any]),
     ("dtype", DTypeLike),
-    ("vllm_config", VllmConfig)
+    ("vllm_config", VllmConfig, field(repr=False, default=None))
     ],
     bases=(Config,)
 )
@@ -187,9 +187,9 @@ class Attention(nnx.Module):
         ]
         for attr_name in mode_dependent_attrs:
             prefill_sharding_config = getattr(
-                self.sharding_cfg.prefill_sharding_cfg, attr_name)
+                self.sharding_cfg.prefill_rules_cls, attr_name)
             generate_sharding_config = getattr(
-                self.sharding_cfg.generate_sharding_cfg, attr_name)
+                self.sharding_cfg.generate_rules_cls, attr_name)
 
             sharding_dict = {
                 'prefill': NamedSharding(self.mesh,
@@ -202,28 +202,28 @@ class Attention(nnx.Module):
         # static sharding for kernel/weights
         self.ndh_sharding = NamedSharding(
             self.mesh,
-            P(*self.sharding_cfg.generate_sharding_cfg.attn_q_weight_ndh))
+            P(*self.sharding_cfg.generate_rules_cls.attn_q_weight_ndh))
         self.kdh_sharding = NamedSharding(
             self.mesh,
-            P(*self.sharding_cfg.generate_sharding_cfg.attn_k_weight_kdh))
+            P(*self.sharding_cfg.generate_rules_cls.attn_k_weight_kdh))
         self.nhd_sharding = NamedSharding(
             self.mesh,
-            P(*self.sharding_cfg.generate_sharding_cfg.attn_o_weight_nhd))
+            P(*self.sharding_cfg.generate_rules_cls.attn_o_weight_nhd))
         
         # TODO: the pallas kernels of flash_attention/paged_attention need to be called 
         # via shard_map with sharding specs, However, the q/k/v have been sharded outside of attention()
         # So we replicate the sharding below but it should be better organized if we use pallas kernels
         self.pallas_q_spec = {
-            'prefill': P(*self.sharding_cfg.prefill_sharding_cfg.query_btnh),
-            'generate': P(*self.sharding_cfg.generate_sharding_cfg.query_btnh)
+            'prefill': P(*self.sharding_cfg.prefill_rules_cls.query_btnh),
+            'generate': P(*self.sharding_cfg.generate_rules_cls.query_btnh)
         }
         self.pallas_kv_spec = {
-            'prefill': P(*self.sharding_cfg.prefill_sharding_cfg.keyvalue_bskh),
-            'generate': P(*self.sharding_cfg.generate_sharding_cfg.keyvalue_bskh)
+            'prefill': P(*self.sharding_cfg.prefill_rules_cls.keyvalue_bskh),
+            'generate': P(*self.sharding_cfg.generate_rules_cls.keyvalue_bskh)
         }
         self.pallas_cache_page_spec = {
-            'prefill': P(*self.sharding_cfg.prefill_sharding_cfg.keyvalue_cache_kbsh),
-            'generate': P(*self.sharding_cfg.generate_sharding_cfg.keyvalue_cache_kbsh)
+            'prefill': P(*self.sharding_cfg.prefill_rules_cls.keyvalue_cache_kbsh),
+            'generate': P(*self.sharding_cfg.generate_rules_cls.keyvalue_cache_kbsh)
         }        
 
     def __call__(

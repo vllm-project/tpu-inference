@@ -1,4 +1,4 @@
-from dataclasses import dataclass, make_dataclass
+from dataclasses import dataclass, field, make_dataclass
 from typing import Any, List, Mapping, Tuple, Type
 
 # Flax and JAX sharding imports
@@ -30,7 +30,7 @@ TransformerBlockConfig = make_dataclass("TransformerBlockConfig", [
         ("ffw", FFWConfig),
         ("block_type", str),
         (HuggingFaceArgNames.RMS_NORM_EPS.value, float),
-        ("vllm_config", VllmConfig)
+        ("vllm_config", VllmConfig, field(repr=False, default=None))
     ],
     bases=(Config,)
 )

@@ -1,4 +1,4 @@
-from dataclasses import dataclass, make_dataclass
+from dataclasses import dataclass, field, make_dataclass
 from typing import Any
 
 import jax
@@ -100,7 +100,7 @@ FFWConfig = make_dataclass("FFWConfig", [
     (HuggingFaceArgNames.INTERMEDIATE_SIZE.value, int),
     (HuggingFaceArgNames.HIDDEN_ACT.value, str),
     ("dtype", DTypeLike),
-    ("vllm_config", VllmConfig)
+    ("vllm_config", VllmConfig, field(repr=False, default=None))
     ],
     bases=(Config,)
 )
@@ -197,9 +197,9 @@ class FFW(nnx.Module):
         ]
         for attr_name in mode_dependent_attrs:
             prefill_sharding_config = getattr(
-                self.sharding_cfg.prefill_sharding_cfg, attr_name)
+                self.sharding_cfg.prefill_rules_cls, attr_name)
             generate_sharding_config = getattr(
-                self.sharding_cfg.generate_sharding_cfg, attr_name)
+                self.sharding_cfg.generate_rules_cls, attr_name)
 
             sharding_dict = {
                 'prefill': NamedSharding(self.mesh,
@@ -212,10 +212,10 @@ class FFW(nnx.Module):
         # static sharding for kernel/weights
         self.df_sharding = NamedSharding(
             self.mesh,
-            P(*self.sharding_cfg.generate_sharding_cfg.ffw_weight_df))
+            P(*self.sharding_cfg.generate_rules_cls.ffw_weight_df))
         self.fd_sharding = NamedSharding(
             self.mesh,
-            P(*self.sharding_cfg.generate_sharding_cfg.ffw_weight_fd))
+            P(*self.sharding_cfg.generate_rules_cls.ffw_weight_fd))
 
         return
 
@@ -225,7 +225,7 @@ EmbedderConfig = make_dataclass("EmbedderConfig", [
     (HuggingFaceArgNames.HIDDEN_SIZE.value, int),
     ("dtype", DTypeLike),
     ("normalize_embeddings", bool),
-    ("vllm_config", VllmConfig)
+    ("vllm_config", VllmConfig, field(repr=False, default=None))
     ],
     bases=(Config,)
 )
@@ -327,9 +327,9 @@ class Embedder(nnx.Module):
     def create_sharding(self):
         """Creates and sets sharding attributes for weights and activations."""
         self.prelogit_btd = NamedSharding(
-            self.mesh, P(*self.sharding_cfg.generate_sharding_cfg.prelogit_btd))
+            self.mesh, P(*self.sharding_cfg.generate_rules_cls.prelogit_btd))
         self.dv_sharding = NamedSharding(
-            self.mesh, P(*self.sharding_cfg.generate_sharding_cfg.vocab_dv))
+            self.mesh, P(*self.sharding_cfg.generate_rules_cls.vocab_dv))
 
     def __post_init__(self):
         self.create_sharding()

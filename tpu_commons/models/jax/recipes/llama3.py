@@ -16,12 +16,14 @@
 
 # The foundation Model/ModelConfig class is to-be-implemented
 
+import pprint
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from typing import List, Mapping, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
+import json
 from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
@@ -36,7 +38,8 @@ from tpu_commons.models.jax.common.kv_cache import KVCacheType
 from tpu_commons.models.jax.common.layers import (Embedder, EmbedderConfig,
                                                   FFWConfig, RMSNorm)
 from tpu_commons.models.jax.common.model import Model, ModelConfig
-from tpu_commons.models.jax.common.sharding import (OpShardingConfig, Sharding,
+from tpu_commons.models.jax.recipes.recipe import RecipeConfig
+from tpu_commons.models.jax.common.sharding import (ShardingRulesConfig, Sharding,
                                                     ShardingConfig)
 from tpu_commons.models.jax.common.transformer_block import (
     TransformerBlock, TransformerBlockConfig)
@@ -46,7 +49,7 @@ from tpu_commons.models.jax.utils.weight_utils import (ParameterType,
                                                        WeightLoader, get_param)
 
 logger = init_logger(__name__)
-
+pp = pprint.PrettyPrinter(depth=6)
 
 @dataclass
 class Llama8BModelConfig(ModelConfig):
@@ -55,7 +58,7 @@ class Llama8BModelConfig(ModelConfig):
     num_layers: int = 32
     emb: EmbedderConfig = None
     layers: TransformerBlockConfig = None
-    vllm_config: VllmConfig = None
+    vllm_config: VllmConfig = field(repr=False, default=None)
 
     def __post_init__(self):
 
@@ -89,33 +92,32 @@ class Llama8BModelConfig(ModelConfig):
             )
 
 @dataclass
-class Llama8BOpShardingConfig(OpShardingConfig):
-    lm_head_dv: tuple = (None, None)
+class Llama8BShardingRulesConfig(ShardingRulesConfig):
+    lm_head_dv: tuple = (None, sharding.MLP_TENSOR_AXIS_NAME)
 
-class Llama8BSharding(Sharding):
+# class Llama8BSharding(Sharding):
 
-    def make_sharding_config(self,
-                             prefill_overrides=None,
-                             generate_overrides=None) -> ShardingConfig:
-        sharding_config = super().make_sharding_config(prefill_overrides,
-                                                       generate_overrides)
-        sharding_config.prefill_sharding_cfg.lm_head_dv = (
-            None, sharding.MLP_TENSOR_AXIS_NAME)
-        sharding_config.generate_sharding_cfg.lm_head_dv = (
-            None, sharding.MLP_TENSOR_AXIS_NAME)
-        return sharding_config
+#     def make_sharding_config(self,
+#                              prefill_overrides=None,
+#                              generate_overrides=None) -> ShardingConfig:
+#         sharding_config = super().make_sharding_config(prefill_overrides,
+#                                                        generate_overrides)
+#         sharding_config.prefill_rules_cls.lm_head_dv = (
+#             None, sharding.MLP_TENSOR_AXIS_NAME)
+#         sharding_config.generate_rules_cls.lm_head_dv = (
+#             None, sharding.MLP_TENSOR_AXIS_NAME)
+#         return sharding_config
 
 @dataclass
 class Llama8BServingConfig(Config):
-    vllm_config: VllmConfig = None
+    vllm_config: VllmConfig = field(repr=False, default=None)
 
 
 @dataclass(frozen=True)
-class Llama8BConfig():
+class Llama8BConfig(RecipeConfig):
     model: Llama8BModelConfig = field(default_factory=Llama8BModelConfig)
-    sharding: ShardingConfig = field(default_factory=ShardingConfig)
-    serving: Llama8BServingConfig = None
-    overrides: Mapping[str, any] = None
+    sharding: ShardingConfig = field(default_factory=ShardingConfig, repr=False, )
+    serving: Llama8BServingConfig = field(default_factory=Llama8BServingConfig)
 
 
 class Llama3_8B(Model):
@@ -129,18 +131,20 @@ class Llama3_8B(Model):
                 "sharding_strategy"]
         except (KeyError, TypeError):
             strategy_dict = {"tensor_parallelism": 4, "expert_parallelism": 2}
-        self.sharding = Llama8BSharding(
+        self.sharding = Sharding(
             strategy_dict=strategy_dict,
             mesh=self.mesh,
+            default_rules_cls=Llama8BShardingRulesConfig,
+            vllm_config=self.vllm_config
         )
     
         self.cfg = Llama8BConfig(
             model=Llama8BModelConfig(vllm_config=self.vllm_config),
-            sharding=ShardingConfig(default_ops_cls=Llama8BOpShardingConfig,
-                                    vllm_config=self.vllm_config),
+            sharding=self.sharding.sharding_cfg,
             serving=Llama8BServingConfig(vllm_config=self.vllm_config)
             )
-        self.cfg.sharding = self.sharding.sharding_cfg
+        logger.info(f"Using the following config:\n{self.cfg}")
+        logger.info(f"Using the following shardings:\n{self.sharding}")
         self.mesh = self.sharding.mesh
         self._init_layers()
 
