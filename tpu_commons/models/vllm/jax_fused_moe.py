@@ -8,7 +8,7 @@ from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
-from torchax.tensor import t2j
+from torchax.ops.mappings import t2j
 from vllm.config import ParallelConfig
 from vllm.model_executor.layers.fused_moe import FusedMoE
 
