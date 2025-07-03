@@ -104,10 +104,6 @@ class EngineCore:
             self.decode_executor.init_with_devices(
                 devices[prefill_slice_sizes[0]:decode_slice_sizes[0] +
                         prefill_slice_sizes[0]])
-            self.decode_executor.driver_worker.model_runner.input_batch = (
-                self.prefill_executor.driver_worker.model_runner.input_batch)
-            self.decode_executor.driver_worker.model_runner.requests = (
-                self.prefill_executor.driver_worker.model_runner.requests)
             logger.info("Disaggregated decode executor created.")
 
         if executor_fail_callback is not None:
@@ -256,17 +252,6 @@ class EngineCore:
             # Start grammar compilation asynchronously
             self.structured_output_manager.grammar_init(req)
 
-        # if req.kv_transfer_params is not None and (
-        #         not self.scheduler.get_kv_connector()):
-        #     logger.warning("Got kv_transfer_params, but no KVConnector found. "
-        #                    "Disabling KVTransfer for this request.")
-        # self.scheduler.add_request(req)
-        # self.model_executor.driver_worker.model_runner
-        # jetstream_request = jetstream_pb2.DecodeRequest(
-        #     token_content=jetstream_pb2.DecodeRequest.TokenContent(
-        #         token_ids=req.prompt_token_ids),
-        #     max_tokens=self.vllm_config.model_config.max_model_len,
-        # )
         self.orchestrator.place_request_on_prefill_queue(req)
         logger.warning("added req %s to jetstream orchestrator.",
                        req.request_id)
@@ -274,65 +259,6 @@ class EngineCore:
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
         pass
-        # TODO: The scheduler doesn't really need to know the
-        # specific finish reason, TBD whether we propagate that
-        # (i.e. client-aborted vs stop criteria met).
-        # self.scheduler.finish_requests(request_ids,
-        #                                RequestStatus.FINISHED_ABORTED)
-
-    # def execute_model(self, scheduler_output: SchedulerOutput):
-    #     try:
-    #         return self.model_executor.execute_model(scheduler_output)
-    #     except BaseException as err:
-    #         # NOTE: This method is exception-free
-    #         dump_engine_exception(self.vllm_config, scheduler_output,
-    #                               self.scheduler.make_stats())
-    #         # Re-raise exception
-    #         raise err
-
-    # def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
-    #     """Schedule, execute, and make output.
-
-    #     Returns tuple of outputs and a flag indicating whether the model
-    #     was executed.
-    #     """
-
-    #     # Check for any requests remaining in the scheduler - unfinished,
-    #     # or finished and not yet removed from the batch.
-    #     if not self.scheduler.has_requests():
-    #         return {}, False
-    #     scheduler_output = self.scheduler.schedule()
-    #     scheduler_dict = scheduler_output.__dict__
-    #     for k in scheduler_dict:
-    #         logger.warning("Scheduler %s: %s", k, scheduler_dict[k])
-    #     model_output = self.execute_model(scheduler_output)
-
-    # def is_pure_decode(s):
-    #     return s.total_num_scheduled_tokens == len(s.num_scheduled_tokens)
-
-    # logger.warning("is_pure_decode %s", is_pure_decode(scheduler_output))
-    # # prefill request, possibly multiple prompts
-    # if not is_pure_decode(scheduler_output):
-    #     for request_id in scheduler_output.num_scheduled_tokens:
-    #         req = self.scheduler.requests[request_id]
-    #         jetstream_request = jetstream_pb2.DecodeRequest(
-    #             token_content=jetstream_pb2.DecodeRequest.TokenContent(
-    #                 token_ids=req.prompt_token_ids),
-    #             max_tokens=1024,
-    #         )
-    #         logger.warning("Converted request %s to jetstream request",
-    #                        request_id)
-    #         self.orchestrator._prefill_mode = True
-    #         self.orchestrator.Decode(jetstream_request)
-    # # decode
-    # else:
-    #     self.orchestrator._prefill_mode = False
-
-    # engine_core_outputs = self.scheduler.update_from_output(
-    #     scheduler_output, model_output)  # type: ignore
-
-    # return (engine_core_outputs,
-    #         scheduler_output.total_num_scheduled_tokens > 0)
 
     def shutdown(self):
         self.orchestrator.stop()

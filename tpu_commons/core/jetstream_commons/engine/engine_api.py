@@ -154,6 +154,10 @@ class Engine(abc.ABC):
   """
 
     @abc.abstractmethod
+    def get_new_block_ids(self, req: Request) -> Any:
+        """Allocate new block ids for a request."""
+
+    @abc.abstractmethod
     def prefill(
         self,  # pytype: disable=signature-mismatch
         *,
@@ -170,7 +174,7 @@ class Engine(abc.ABC):
     """
 
     @abc.abstractmethod
-    def generate(self, all_requests) -> Tuple[Any, ModelRunnerOutput]:
+    def generate(self, requests) -> Tuple[Any, ModelRunnerOutput]:
         """Generates tokens for each sequence being decoded in parallel.
 
     Generate takes a batch of pre-computed kv-caches, and computes:
@@ -186,7 +190,7 @@ class Engine(abc.ABC):
     """
 
     @abc.abstractmethod
-    def insert(self, prefix: Prefix) -> None:
+    def insert(self, kv_cache: list[jax.Array]) -> None:
         """Adds `new_request` into `caches` at 'slot'.
 
     When decoding multiple requests in parallel, when one request finishes, a
