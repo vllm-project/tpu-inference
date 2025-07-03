@@ -390,6 +390,11 @@ class Driver:
         # prefill_params = self._prefill_params[idx]
         logging.info("---------Prefill params %d loaded.---------", idx)
 
+        # TODO(fhzhang): add better dispatch algorithm.
+        target_idx = idx % len(self._generate_backlogs)
+        my_detokenize_backlog = self._detokenize_backlogs[target_idx]
+        my_transfer_backlog = self._transfer_backlogs[idx]
+
         while self.live:
             input_batch = prefill_engine.model_runner.input_batch
             if len(input_batch.req_id_to_index) == input_batch.max_num_reqs:
@@ -399,13 +404,11 @@ class Driver:
                     self.reqs_to_remove = []
                 else:
                     continue
-            my_transfer_backlog = self._transfer_backlogs[idx]
             # The prefill thread can just sleep until it has work to do.
             vllm_request = self._prefill_backlog.get(block=True)
             logging.info(
                 "get request %s from prefill backlog", vllm_request.request_id
                 if vllm_request is not None else "None")
-            my_detokenize_backlog = self._detokenize_backlogs[idx]
 
             if vllm_request is None:
                 break
@@ -428,9 +431,7 @@ class Driver:
             # full.
             my_transfer_backlog.put(prefill_output, block=True)
             logging.info(
-                "Finished prefill req %s, Placed request on transfer queue %s",
-                req_id,
-                idx,
+                f"Prefill worker {idx}: Finished prefill req {req_id}, Placed request on transfer queue {target_idx}"
             )
 
             vllm_model_runner_output.req_ids = copy.deepcopy(

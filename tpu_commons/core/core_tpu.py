@@ -66,89 +66,53 @@ class EngineCore:
 
         self.log_stats = log_stats
 
-        # Setup Model.
         # TODO(fhzhang): create config to setup disagg executors.
         devices = jax.devices()
         prefill_slice_sizes = disagg_utils.get_prefill_slices()
-
-        assert len(prefill_slice_sizes) > 0
-
-        if len(prefill_slice_sizes) > 1:
-            logger.warning(
-                "We currently only support a single prefill slice, ignore others!"
-            )
-
-        assert prefill_slice_sizes[0] > 0 and prefill_slice_sizes[0] <= 8
-
-        logger.warning(
-            f"Customized prefill slice size: {prefill_slice_sizes[0]}")
-
-        self.prefill_executor = disagg_executor.DisaggExecutor(vllm_config)
-        self.prefill_executor.init_with_devices(
-            devices[:prefill_slice_sizes[0]])
-
         decode_slice_sizes = disagg_utils.get_decode_slices()
+        assert sum(decode_slice_sizes) + sum(prefill_slice_sizes) <= len(devices)
+        assert sum(prefill_slice_sizes) > 0
 
-        self.decode_executor = None
-        if len(decode_slice_sizes) >= 1:
-            if len(decode_slice_sizes) > 1:
-                logger.warning(
-                    "We currently only support a single decode slice, ignore others!"
-                )
-            assert (decode_slice_sizes[0] > 0
-                    and decode_slice_sizes[0] + prefill_slice_sizes[0] <= 8)
-            logger.warning(
-                f"Disagg enabled with decode slice size: {decode_slice_sizes[0]}"
-            )
-            self.decode_executor = disagg_executor.DisaggExecutor(vllm_config)
-            self.decode_executor.init_with_devices(
-                devices[prefill_slice_sizes[0]:decode_slice_sizes[0] +
-                        prefill_slice_sizes[0]])
+        self.prefill_executors: list[Executor] = []
+        device_offset = 0
+        for i, slice_size in enumerate(prefill_slice_sizes):
+            logger.info(
+                f"Creating prefill executor {i} with slice size: {slice_size}")
+            executor = disagg_executor.DisaggExecutor(vllm_config)
+            executor.init_with_devices(
+                devices[device_offset:device_offset + slice_size])
+            self.prefill_executors.append(executor)
+            device_offset += slice_size
+            num_gpu_blocks, num_cpu_blocks, kv_cache_config = \
+                self._initialize_kv_caches(vllm_config, executor)
+            logger.info("Disaggregated prefill executor created.")
+
+        self.decode_executors: list[Executor] = []
+        for i, slice_size in enumerate(decode_slice_sizes):
+            logger.info(
+                f"Creating decode executor {i} with slice size: {slice_size}")
+            executor = disagg_executor.DisaggExecutor(vllm_config)
+            executor.init_with_devices(
+                devices[device_offset:device_offset + slice_size])
+            self.decode_executors.append(executor)
+            num_gpu_blocks, num_cpu_blocks, kv_cache_config = \
+                self._initialize_kv_caches(vllm_config, executor)
+            device_offset += slice_size
             logger.info("Disaggregated decode executor created.")
 
-        if executor_fail_callback is not None:
-            self.prefill_executor.register_failure_callback(
-                executor_fail_callback)
+        all_executors = self.prefill_executors + self.decode_executors
+        for executor in all_executors:
+            num_gpu_blocks, num_cpu_blocks, kv_cache_config = \
+                self._initialize_kv_caches(vllm_config, executor)
+            # TODO(fhzhang): we only need to set this once.
+            vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
+            vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
 
-        logger.info("executor created.")
-        # Setup KV Caches and update CacheConfig after profiling.
-        num_gpu_blocks, num_cpu_blocks, kv_cache_config = \
-            self._initialize_kv_caches(vllm_config, self.prefill_executor)
-        if self.decode_executor:
-            self._initialize_kv_caches(vllm_config, self.decode_executor)
-
-        vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
-        vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
-
-        logger.info("KV cache initialized.")
         self.structured_output_manager = StructuredOutputManager(vllm_config)
         logger.info("structure output manager created.")
 
         # Setup scheduler.
-        # if isinstance(vllm_config.scheduler_config.scheduler_cls, str):
-        #     Scheduler = resolve_obj_by_qualname(
-        #         vllm_config.scheduler_config.scheduler_cls)
-        # else:
-        #     Scheduler = vllm_config.scheduler_config.scheduler_cls
 
-        # # This warning can be removed once the V1 Scheduler interface is
-        # # finalized and we can maintain support for scheduler classes that
-        # # implement it
-        # if Scheduler is not V1Scheduler:
-        #     logger.warning(
-        #         "Using configured V1 scheduler class %s. "
-        #         "This scheduler interface is not public and "
-        #         "compatibility may not be maintained.",
-        #         vllm_config.scheduler_config.scheduler_cls)
-
-        # self.scheduler: SchedulerInterface = Scheduler(
-        #     vllm_config=vllm_config,
-        #     kv_cache_config=kv_cache_config,
-        #     structured_output_manager=self.structured_output_manager,
-        #     include_finished_set=vllm_config.parallel_config.data_parallel_size
-        #     > 1,
-        #     log_stats=self.log_stats,
-        # )
         self.kv_cache_manager = KVCacheManager(
             kv_cache_config=kv_cache_config,
             max_model_len=vllm_config.scheduler_config.max_model_len,
@@ -164,7 +128,7 @@ class EngineCore:
         # Batch queue for scheduled batches. This enables us to asynchronously
         # schedule and execute batches, and is required by pipeline parallelism
         # to eliminate pipeline bubbles.
-        self.batch_queue_size = self.prefill_executor.max_concurrent_batches
+        self.batch_queue_size = self.prefill_executors[0].max_concurrent_batches
         self.batch_queue: Optional[queue.Queue[tuple[Future[ModelRunnerOutput],
                                                      SchedulerOutput]]] = None
         if self.batch_queue_size > 1:
@@ -229,17 +193,30 @@ class EngineCore:
                       vllm_config,
                       kv_cache_manager,
                       interleaved_mode=True):
-        prefill_engine = JaxEngine(vllm_config, kv_cache_manager,
-                                   self.prefill_executor)
+        prefill_engines = [
+            JaxEngine(vllm_config, kv_cache_manager, executor)
+            for executor in self.prefill_executors
+        ]
         # Create a generate engine with a different set of weights
         # so that we can test that the right one is in use at a given time.
-        generate_engine = JaxEngine(
-            vllm_config, kv_cache_manager, self.decode_executor
-            if self.decode_executor else self.prefill_executor)
+        prefill_engines = [
+            JaxEngine(vllm_config, kv_cache_manager, executor)
+            for executor in self.prefill_executors
+        ]
+
+        generate_engines = [
+            JaxEngine(vllm_config, kv_cache_manager, executor)
+            for executor in self.decode_executors
+        ]
+        if len(generate_engines) == 0:
+            generate_engines = [
+                JaxEngine(vllm_config, kv_cache_manager, self.prefill_executors[0])
+            ]
+
         driver = orchestrator.Driver(
             vllm_config=vllm_config,
-            prefill_engines=[prefill_engine],
-            generate_engines=[generate_engine],
+            prefill_engines=prefill_engines,
+            generate_engines=generate_engines,
             interleaved_mode=interleaved_mode,
         )
         return driver
@@ -262,13 +239,10 @@ class EngineCore:
 
     def shutdown(self):
         self.orchestrator.stop()
-        # self.structured_output_manager.clear_backend()
-        if self.prefill_executor:
-            self.prefill_executor.shutdown()
-        if self.decode_executor:
-            self.decode_executor.shutdown()
-        # if self.scheduler:
-        #     self.scheduler.shutdown()
+        for executor in self.prefill_executors:
+            executor.shutdown()
+        for executor in self.decode_executors:
+            executor.shutdown()
 
     def reset_mm_cache(self):
         # NOTE: Since this is mainly for debugging, we don't attempt to
@@ -280,34 +254,34 @@ class EngineCore:
         self.mm_input_cache_server.reset()
 
     def profile(self, is_start: bool = True):
-        self.prefill_executor.profile(is_start)
+        self.prefill_executors[0].profile(is_start)
 
     def reset_prefix_cache(self):
         self.scheduler.reset_prefix_cache()
 
     def sleep(self, level: int = 1):
-        self.prefill_executor.sleep(level)
+        self.prefill_executors[0].sleep(level)
 
     def wake_up(self, tags: Optional[list[str]] = None):
-        self.prefill_executor.wake_up(tags)
+        self.prefill_executors[0].wake_up(tags)
 
     def is_sleeping(self) -> bool:
-        return self.prefill_executor.is_sleeping
+        return self.prefill_executors[0].is_sleeping
 
     def execute_dummy_batch(self):
-        self.prefill_executor.collective_rpc("execute_dummy_batch")
+        self.prefill_executors[0].collective_rpc("execute_dummy_batch")
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
-        return self.prefill_executor.add_lora(lora_request)
+        return self.prefill_executors[0].add_lora(lora_request)
 
     def remove_lora(self, lora_id: int) -> bool:
-        return self.prefill_executor.remove_lora(lora_id)
+        return self.prefill_executors[0].remove_lora(lora_id)
 
     def list_loras(self) -> set[int]:
-        return self.prefill_executor.list_loras()
+        return self.prefill_executors[0].list_loras()
 
     def pin_lora(self, lora_id: int) -> bool:
-        return self.prefill_executor.pin_lora(lora_id)
+        return self.prefill_executors[0].pin_lora(lora_id)
 
     def save_sharded_state(
         self,
@@ -315,7 +289,7 @@ class EngineCore:
         pattern: Optional[str] = None,
         max_size: Optional[int] = None,
     ) -> None:
-        self.prefill_executor.save_sharded_state(path=path,
+        self.prefill_executors[0].save_sharded_state(path=path,
                                                  pattern=pattern,
                                                  max_size=max_size)
 
@@ -324,14 +298,14 @@ class EngineCore:
                        timeout: Optional[float] = None,
                        args: tuple = (),
                        kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
-        return self.prefill_executor.collective_rpc(method, timeout, args,
+        return self.prefill_executors[0].collective_rpc(method, timeout, args,
                                                     kwargs)
 
     def save_tensorized_model(
         self,
         tensorizer_config,
     ) -> None:
-        self.prefill_executor.save_tensorized_model(
+        self.prefill_executors[0].save_tensorized_model(
             tensorizer_config=tensorizer_config, )
 
 
