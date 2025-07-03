@@ -73,6 +73,7 @@ Either use :orchestrator test, which tests the multi-threading components,
 to debug hangs due to bugs in threads (it is easier to debug with live logs).
 """
 
+import copy
 import functools
 import itertools
 import logging
@@ -87,6 +88,7 @@ from collections import defaultdict
 from typing import Any, Optional
 
 import jax
+
 from vllm.config import VllmConfig
 from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.outputs import ModelRunnerOutput
@@ -98,7 +100,7 @@ root = logging.getLogger()
 root.setLevel(logging.INFO)
 
 handler = logging.StreamHandler(sys.stdout)
-handler.setLevel(logging.WARNING)
+handler.setLevel(logging.INFO)
 formatter = logging.Formatter(
     "%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 handler.setFormatter(formatter)
@@ -409,55 +411,40 @@ class Driver:
                 break
 
             # Compute new kv cache for the prefill_content.
-            prefix, vllm_model_runner_output, request = prefill_engine.prefill(
-                vllm_request=vllm_request)
-            req_id = request.request_id
-            self.requests[req_id] = request
+            prefill_output, vllm_model_runner_output = prefill_engine.prefill(
+                vllm_request=vllm_request
+            )
+            vllm_model_runner_output.req_id_to_index = copy.deepcopy(
+                vllm_model_runner_output.req_id_to_index
+            )
+            req_id = vllm_request.request_id
+            self.requests[req_id] = vllm_request
             logging.info("Put request %s in req dict. request.num_tokens: %s",
-                         req_id, request.num_tokens)
+                         req_id, vllm_request.num_tokens)
             # logging.warning("finished prefill for request %s output %s \n", vllm_request.request_id, vllm_model_runner_output.__dict__)
             # logging.warning("added %s to requests dictionary \n", self.requests[req_id].__dict__)
             # request.prefill_result = prefill_result
             # Once prefill is complete, place it on the generation queue and block if
             # full.
-            my_transfer_backlog.put(prefix, block=True)
+            my_transfer_backlog.put(prefill_output, block=True)
             logging.info(
                 "Finished prefill req %s, Placed request on transfer queue %s",
                 req_id,
                 idx,
             )
-            # my_vllm_output_backlog = self._vllm_output_backlogs[idx]
+
+            vllm_model_runner_output.req_ids = copy.deepcopy(
+                vllm_model_runner_output.req_ids
+            )
+            vllm_model_runner_output.req_id_to_index = copy.deepcopy(
+                vllm_model_runner_output.req_id_to_index
+            )
+            logging.info(f"prefill -> detoken: {vllm_model_runner_output}")
             my_detokenize_backlog.put(vllm_model_runner_output, block=True)
-            # logging.info("Put vllm_model_runner_output %s to detokenize backlog, qsize %s \n", vllm_model_runner_output.__dict__, my_detokenize_backlog.qsize())
-            del prefix
+
+            del prefill_output
             del vllm_model_runner_output
             del vllm_request
-
-    def _jax_transfer_prefill_result(self, prefill_result: Any,
-                                     target_idx: int):
-        # logging.info(f"Sharding: {sharding['cache'].device_set}")
-        prefill_result = jax.device_put(
-            prefill_result,
-            self._generate_engines[target_idx].get_prefix_destination_sharding(
-            ),
-        )
-        # Block here so we don't block on the generate thread that steps.
-        jax.block_until_ready(prefill_result)
-        # logging.info(f"{prefill_result['cache'][0][0].sharding.device_set}")
-        return prefill_result
-
-    def _ray_transfer_prefill_result(self, prefill_result: Any,
-                                     target_idx: int):
-        return self._generate_engines[target_idx].transfer(prefill_result)
-
-    def _transfer_prefill_result(self, prefill_result: Any,
-                                 target_idx: int) -> Any:
-        if self._is_ray_backend:
-            return self._ray_transfer_prefill_result(prefill_result,
-                                                     target_idx)
-        else:
-            return self._jax_transfer_prefill_result(prefill_result,
-                                                     target_idx)
 
     def _transfer_thread(self, idx: int):
         """Transfers the kv cache on an active request to the least full
@@ -465,27 +452,25 @@ class Driver:
         transfer_backlog = self._transfer_backlogs[idx]
         while self.live:
             # The transfer thread can just sleep until it has work to do.
-            prefix = transfer_backlog.get(block=True)
-            if prefix is None:
+            prefill_output = transfer_backlog.get(block=True)
+            if prefill_output is None:
                 break
-            # logging.info(f"Before transfer: {prefix['cache'][0][0].sharding.device_set}")
+            kv_cache = prefill_output["cache"]
+            request = prefill_output["request"]
             target_idx = min(self._generate_backlogs.items(),
                              key=lambda q: q[1].qsize())[0]
             # Only transfer the KVCache for the disaggregated serving.
             # TODO: Remove the conditional after fixing the compatibility.
             if not self._interleaved_mode:
-                # Transfer the info to the relevant generate slice.
-                request_id = prefix["request_id"]
-                del prefix["request_id"]
-                prefix = self._transfer_prefill_result(prefix, target_idx)
-                prefix["request_id"] = request_id
+                kv_cache = self._generate_engines[target_idx].model_runner.transfer_kv_cache(kv_cache)
+                prefill_output["cache"] = kv_cache
+
             # Place the request on the correct generate backlog and block if full.
-            self._generate_backlogs[target_idx].put(prefix, block=True)
-            # logging.info(f"After transfer: {prefix['cache'][0][0].sharding.device_set}")
+            self._generate_backlogs[target_idx].put(prefill_output, block=True)
             logging.info(
                 "Successfully transferred prefill request %s"
                 "from prefill engine %d to generate engine %d. generate backlog len %d",
-                prefix["request_id"],
+                request.request_id,
                 idx,
                 target_idx,
                 self._generate_backlogs[target_idx].qsize(),
@@ -495,8 +480,6 @@ class Driver:
         """Step token generation and insert prefills from backlog."""
         logging.info("---------Spinning up generate thread %d.---------", idx)
         generate_engine = self._generate_engines[idx]
-        # TODO(fhzhang): fix this!!!
-        prefill_engine = self._prefill_engines[idx]
         my_generate_backlog = self._generate_backlogs[idx]
         my_detokenize_backlog = self._detokenize_backlogs[idx]
 
@@ -508,50 +491,21 @@ class Driver:
         # logging.info("---------Generate params %d loaded.---------", idx)
         # time_of_last_generate = time.time()
         # time_of_last_print = time.time() - 1
+        active_reqs: dict[str, Request] = {}
         while self.live:
             # Check if there are any free my_slots. We don't want to block here since
             # we can still generate if we can't insert. We do this in a while loop to
             # insert as many sequences as possible.
             while True:
                 logging.info(f"generate({idx}): looping on backlog...")
-                time.sleep(3)
-                input_batch = generate_engine.model_runner.input_batch
-                logging.info(
-                    f"input_batch @ generate: {input_batch.req_id_to_index}, finished_transfer: {input_batch.finished_transfer}"
-                )
                 if not self._prefill_backlog.empty() and len(
                         self.reqs_to_remove) != 0:
+                    time.sleep(1.0)
                     continue
-                if self._interleaved_mode:
-                    if len(input_batch.req_id_to_index
-                           ) == input_batch.max_num_reqs:
-                        if set(input_batch.req_id_to_index.keys()).issubset(
-                                set(self.requests.keys())):
-                            break
-                        else:
-                            continue
-                else:
-                    if len(input_batch.finished_transfer
-                           ) == input_batch.max_num_reqs:
-                        break
-                if not self._interleaved_mode:
-                    block = len(input_batch.finished_transfer) == 0
-                else:
-                    block = len(input_batch.req_id_to_index) == 0
 
-                # We block when the decode slots are all free since we need to get a
-                # prefilled request to insert. We add timeout for the block to handle
-                # the case when the prefill backlog is cancelled and we end up with no
-                # more useful prefill work to do.
-                if self._interleaved_mode:
-                    # For interleaved mode, we also blocks when prefill backlog
-                    # is not empty or there are transfer work to do.
-                    block |= not self._prefill_backlog.empty()
-                    # block |= (len(self.reqs_to_remove) != 0)
-                    block |= not self._transfer_backlogs[idx].empty()
-
+                block = len(active_reqs) == 0
                 try:
-                    prefix = my_generate_backlog.get(block=block, timeout=1.0)
+                    prefill_output = my_generate_backlog.get(block=block, timeout=1.0)
                     # Got free slot and new request, use them.
                 except queue.Empty:
                     # No new requests, we can't insert, so put back slot.
@@ -561,66 +515,57 @@ class Driver:
                         continue
                     else:
                         break
-                if prefix is None:
+                if prefill_output is None:
                     return
                 else:
                     pass
-                    # logging.info(
-                    #     "get prefix of request %s from generate backlog. input batch req ids : %s ",
-                    #     prefix["seq"].request_id, input_batch.req_id_to_index)
                 logging.info(
                     f"generate backlog len: {my_generate_backlog.qsize()}")
-                generate_engine.insert(prefix)
-                request_id = prefix["request_id"]
-                input_batch.finished_transfer.add(request_id)
-                generate_engine.model_runner.requests[
-                    request_id] = prefill_engine.model_runner.requests[
-                        request_id]
+                request = prefill_output["request"]
+                kv_cache = prefill_output["cache"]
+                new_block_ids = generate_engine.get_new_block_ids(request)
+                generate_engine.model_runner.insert_request_with_kv_cache(
+                    request, kv_cache, new_block_ids
+                )
+                active_reqs[request.request_id] = request
 
-            if len(self.requests) > 0:
-                logging.info("executing generation...")
-                # At this point, we know that we have at least some slots filled.
-                input_batch = generate_engine.model_runner.input_batch
-                assert (
-                    len(input_batch.req_id_to_index) != 0
-                ), "At this point we must have some requests inserted into the slots."
-                # Now we actually take a generate step on requests in the slots.
-                self.requests, vllm_model_runner_output, reqs_to_remove = generate_engine.generate(
-                    self.requests)
-                # change to reference by value to avoid deletion
-                vllm_model_runner_output.req_ids = [
-                    req_id for req_id in vllm_model_runner_output.req_ids
-                ]
-                vllm_model_runner_output.req_id_to_index = {
-                    k: v
-                    for (
-                        k,
-                        v) in vllm_model_runner_output.req_id_to_index.items()
-                }
-                if len(reqs_to_remove) != 0:
-                    self.reqs_to_remove = reqs_to_remove
-                # for request in self.requests:
-                #   logging.info("Request %s", request.__dict__)
-                my_detokenize_backlog.put(vllm_model_runner_output, block=True)
-                # logging.info("Put vllm_model_runner_output to detokenize backlog, qsize %s \n", my_detokenize_backlog.qsize())
+            logging.info(f"executing generation... #active_reqs={len(active_reqs)}")
+            # At this point, we know that we have at least some slots filled.
+            # Now we actually take a generate step on requests in the slots.
+            vllm_model_runner_output, reqs_to_remove = generate_engine.generate(
+                active_reqs)
+            for req_id in reqs_to_remove:
+                active_reqs.pop(req_id)
 
-                #   sampled_tokens.copy_to_host_async()
-                #   # Respond to detokenization backpressure.
-                #   my_detokenize_backlog.put((generate_timestep, sampled_tokens), block=True)
-                generate_timestep += 1
-                logging.info(
-                    "Finished generate step %s, req_ids %s, output tokens %s \n",
-                    generate_timestep, vllm_model_runner_output.req_ids,
-                    vllm_model_runner_output.sampled_token_ids)
-                # logging.info(
-                #     "Generate engine %d step %d - slots free : %d / %d, took %.2fms",
-                #     idx,
-                #     generate_timestep,
-                #     my_slots_size,
-                #     max_concurrent_decodes,
-                #     (time.time() - time_of_last_generate) * 10**3,
-                # )
-                # time_of_last_generate = time.time()
+            vllm_model_runner_output.req_ids = copy.deepcopy(
+                vllm_model_runner_output.req_ids
+            )
+            vllm_model_runner_output.req_id_to_index = copy.deepcopy(
+                vllm_model_runner_output.req_id_to_index
+            )
+            if len(reqs_to_remove) != 0:
+                self.reqs_to_remove = reqs_to_remove
+
+            logging.info(f"generate enqueue: {vllm_model_runner_output}")
+            my_detokenize_backlog.put(vllm_model_runner_output, block=True)
+
+            #   sampled_tokens.copy_to_host_async()
+            #   # Respond to detokenization backpressure.
+            #   my_detokenize_backlog.put((generate_timestep, sampled_tokens), block=True)
+            generate_timestep += 1
+            logging.info(
+                "Finished generate step %s, req_ids %s, output tokens %s \n",
+                generate_timestep, vllm_model_runner_output.req_ids,
+                vllm_model_runner_output.sampled_token_ids)
+            # logging.info(
+            #     "Generate engine %d step %d - slots free : %d / %d, took %.2fms",
+            #     idx,
+            #     generate_timestep,
+            #     my_slots_size,
+            #     max_concurrent_decodes,
+            #     (time.time() - time_of_last_generate) * 10**3,
+            # )
+            # time_of_last_generate = time.time()
 
     def _detokenize_thread(self, idx: int):
         """Detokenize sampled tokens and returns them to the user."""
@@ -639,13 +584,13 @@ class Driver:
             # for request in model_runner_output.req_id_to_index:
             if not self.live:
                 break
+            logging.info(f"detoken: {model_runner_output}")
             #   sampled_token_id = model_runner_output.sampled_token_ids[]
             # logging.info("Detokenize model runner output: %s", model_runner_output)
             req_ids = list(model_runner_output.prompt_logprobs_dict.keys())
             for req_id in req_ids:
                 request = self.requests[req_id]
-                sampled_token_index = model_runner_output.req_id_to_index[
-                    req_id]
+                sampled_token_index = model_runner_output.req_id_to_index[req_id]
                 sampled_token_id = model_runner_output.sampled_token_ids[
                     sampled_token_index]
                 outputs[request.client_index].append(

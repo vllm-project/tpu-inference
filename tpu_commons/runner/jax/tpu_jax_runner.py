@@ -7,6 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 import vllm.envs as envs
 from jax.sharding import NamedSharding, PartitionSpec
+from vllm.v1.request import Request
 from vllm.config import VllmConfig
 from vllm.sequence import IntermediateTensors
 from vllm.utils import cdiv
@@ -34,6 +35,12 @@ MIN_NUM_SEQS = 8
 # Block size used for kv cache updating kernel
 NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK = 8
 
+DUMMY_METADATA= AttentionMetadata(
+    input_positions=jnp.empty((0,)),
+    seq_lens=[],
+    block_indices=[],
+    kv_cache_write_indices=[],
+)
 
 class TPUModelRunner():
 
@@ -229,15 +236,207 @@ class TPUModelRunner():
     def capture_model(self) -> None:
         pass
 
+    def get_kv_cache_for_requests(
+        self,
+        request_ids: List[str],
+        kv_cache_write_indices: jax.Array,
+        num_scheduled_tokens_per_req: np.ndarray,
+    ) -> dict[str, list[jax.Array]]:
+        """
+        Extracts the KV cache slices for given request IDs based on the
+        provided slot mapping metadata. This extracts the cache for newly
+        scheduled tokens.
+
+        Args:
+            request_ids: A list of request IDs to extract KV cache for.
+            kv_cache_write_indices: The metadata for slot mapping, from
+                `AttentionMetadata.kv_cache_write_indices`.
+            num_scheduled_tokens_per_req: An array containing the number of
+                scheduled tokens for each request in the current batch, ordered
+                by their position in the batch.
+
+        Returns:
+            A dictionary where keys are request IDs and values are lists of
+            JAX arrays, with each array representing the KV cache slices for a
+            layer.
+        """
+        # kv_cache_write_indices is on device and transposed.
+        # Get it to CPU and transpose back for processing.
+        slot_mapping_metadata = np.asarray(
+            jax.device_get(kv_cache_write_indices)
+        ).T
+        num_reqs_in_batch = len(num_scheduled_tokens_per_req)
+        slices_start = self.input_batch.num_computed_tokens_cpu[:num_reqs_in_batch]
+        slices_end = slices_start + num_scheduled_tokens_per_req
+        local_block_start_idx = slices_start // self.block_size
+        local_block_end_idx = (slices_end - 1) // self.block_size
+        block_lens = local_block_end_idx - local_block_start_idx + 1
+
+        cu_block_lens = np.zeros(len(block_lens) + 1, dtype=np.int32)
+        np.cumsum(block_lens, out=cu_block_lens[1:])
+
+        output = {}
+        for req_id in request_ids:
+            if req_id not in self.input_batch.req_id_to_index:
+                logger.warning(f"Request ID {req_id} not found in input batch.")
+                continue
+
+            req_index = self.input_batch.req_id_to_index[req_id]
+            start_meta_idx = cu_block_lens[req_index]
+            end_meta_idx = cu_block_lens[req_index + 1]
+            metadata_for_req = slot_mapping_metadata[start_meta_idx:end_meta_idx]
+            indices_to_gather = [
+                i for start, _, length in metadata_for_req
+                for i in range(int(start), int(start + length))
+            ]
+
+            if not indices_to_gather:
+                output[req_id] = []
+                continue
+
+            indices_to_gather_jnp = jnp.array(indices_to_gather,
+                                              dtype=jnp.int32)
+            req_kv_cache_per_layer = []
+            for layer_kv_cache in self.kv_caches:
+                flat_layer_cache = layer_kv_cache.reshape(
+                    -1, *layer_kv_cache.shape[2:])
+                gathered_slices = flat_layer_cache.take(indices_to_gather_jnp,
+                                                        axis=0)
+                req_kv_cache_per_layer.append(gathered_slices)
+
+            output[req_id] = req_kv_cache_per_layer
+        return output
+
+    def transfer_kv_cache(
+        self, kv_cache_slices: List[jax.Array]
+    ) -> List[jax.Array]:
+        """
+        Transfers KV cache slices to the runner's mesh.
+
+        This is used when a KV cache generated on one runner (e.g., a prefill
+        runner) needs to be used on another runner (e.g., a decode runner)
+        with a different device mesh. The transfer is asynchronous.
+
+        Args:
+            kv_cache_slices: A list of JAX arrays, where each array contains
+                the KV cache slices for a specific layer. The shape of each
+                slice is expected to be (num_tokens, num_kv_heads * 2, head_size).
+
+        Returns:
+            A new list of JAX arrays representing the KV cache slices, sharded
+            across the runner's device mesh.
+        """
+        # The KV cache slices have a shape of (num_tokens, num_kv_heads * 2, head_size).
+        # We shard along the num_kv_heads dimension (axis=1), which corresponds
+        # to the "model" axis of the mesh for tensor parallelism.
+        sharding = NamedSharding(self.mesh, PartitionSpec(None, None, "model"))
+        transferred_kv_cache = jax.device_put(kv_cache_slices, sharding)
+        return transferred_kv_cache
+
+    def insert_request_with_kv_cache(
+        self,
+        request: "Request",
+        kv_cache_slices: List[jax.Array],
+        block_ids: List[List[int]],
+    ):
+        """
+        Inserts a request and its KV cache into the runner. This is used to
+        transfer a request from a prefill runner to a decode runner.
+
+        The provided KV cache slices are copied into the physical blocks
+        allocated for the request. The runner's internal state is then updated
+        to include the request.
+
+        Args:
+            request: The vLLM request object, containing the state after prefill.
+            kv_cache_slices: The KV cache for the request, already transferred
+                to this runner's mesh. This is a list of JAX arrays, one per layer.
+            block_ids: The physical block numbers allocated for this request on
+                this runner. This is a list of lists, for each KV cache group.
+        """
+        # Assume one KV cache group for now, which is consistent with current setup.
+        if len(block_ids) > 1:
+            raise NotImplementedError(
+                "Inserting KV cache for models with multiple KV cache groups "
+                "is not supported yet."
+            )
+        block_numbers = block_ids[0]
+
+        if kv_cache_slices:
+            num_tokens_in_cache = kv_cache_slices[0].shape[0]
+        else:
+            num_tokens_in_cache = 0
+
+        if num_tokens_in_cache > 0:
+            num_blocks_for_cache = cdiv(num_tokens_in_cache, self.block_size)
+
+            if len(block_numbers) < num_blocks_for_cache:
+                raise ValueError(
+                    f"Not enough blocks allocated for request {request.req_id}. "
+                    f"Need {num_blocks_for_cache}, got {len(block_numbers)}."
+                )
+
+            # For each layer, scatter the slices into the main KV cache.
+            for i, layer_kv_cache_slices in enumerate(kv_cache_slices):
+                # Pad the slices to be a multiple of block_size.
+                padded_len = num_blocks_for_cache * self.block_size
+                padding_size = padded_len - num_tokens_in_cache
+
+                padded_slices = jnp.pad(
+                    layer_kv_cache_slices,
+                    ((0, padding_size), (0, 0), (0, 0)),
+                    mode='constant')
+
+                # Reshape to (num_blocks_for_req, block_size, ...)
+                reshaped_slices = padded_slices.reshape(
+                    num_blocks_for_cache, self.block_size,
+                    *padded_slices.shape[1:])
+
+                # Scatter into the main KV cache for this layer.
+                self.kv_caches[i] = self.kv_caches[i].at[jnp.array(
+                    block_numbers[:num_blocks_for_cache])].set(reshaped_slices)
+            logger.warning(f"Updated kv cache entries cnt={len(self.kv_caches)}")
+
+        # Update runner's internal state to track the new request.
+        req_id = request.request_id
+        if req_id in self.requests:
+            logger.warning(f"Request {req_id} already exists in the runner. Overwriting.")
+
+        # Create a CachedRequestState object to add to the input batch.
+        req_state = CachedRequestState(
+            req_id=request.request_id,
+            prompt_token_ids=request.prompt_token_ids,
+            output_token_ids=[],
+            sampling_params=request.sampling_params,
+            block_ids=tuple(block_ids),
+            num_computed_tokens=request.num_tokens,
+            lora_request=request.lora_request,
+            mm_inputs=getattr(request, "mm_inputs", []),
+            mm_hashes=[],
+            mm_positions=getattr(request, "mm_positions", []),
+            pooling_params=getattr(request, "pooling_params", None),
+            generator=None,
+        )
+
+        self.requests[req_id] = req_state
+        self.input_batch.add_request(req_state)
+
     def execute_model(
         self,
         scheduler_output: "VllmSchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> ModelRunnerOutput:
-        self._update_states(scheduler_output)
+        return self._execute_model(scheduler_output)[1]
+
+    def _execute_model(
+        self,
+        scheduler_output: "VllmSchedulerOutput",
+    ) -> tuple[AttentionMetadata, ModelRunnerOutput]:
         if not scheduler_output.total_num_scheduled_tokens:
             # Return empty ModelRunnerOutput if there's no work to do.
-            return EMPTY_MODEL_RUNNER_OUTPUT
+            logger.warning(f"Nothing scheduled: {scheduler_output}!")
+            return DUMMY_METADATA, EMPTY_MODEL_RUNNER_OUTPUT,
+        self._update_states(scheduler_output)
 
         inputs = self._prepare_inputs(scheduler_output)
         self.kv_caches, next_tokens, _ = self.model_fn(*inputs)
@@ -299,7 +498,7 @@ class TPUModelRunner():
             prompt_logprobs_dict=prompt_logprobs_dict,
             pooler_output=[],
         )
-        return model_runner_output
+        return inputs[4], model_runner_output
 
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
