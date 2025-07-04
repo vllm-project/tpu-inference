@@ -195,12 +195,6 @@ class EngineCore:
             JaxEngine(vllm_config, kv_cache_manager, executor)
             for executor in self.prefill_executors
         ]
-        # Create a generate engine with a different set of weights
-        # so that we can test that the right one is in use at a given time.
-        prefill_engines = [
-            JaxEngine(vllm_config, kv_cache_manager, executor)
-            for executor in self.prefill_executors
-        ]
 
         generate_engines = [
             JaxEngine(vllm_config, kv_cache_manager, executor)
