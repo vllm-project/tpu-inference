@@ -18,7 +18,7 @@ could want to call, enabling interleaved (continuous batching) inference.
 """
 
 import abc
-from typing import Any, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 import jax
 import numpy as np
@@ -159,10 +159,10 @@ class Engine(abc.ABC):
 
     @abc.abstractmethod
     def prefill(
-        self,  # pytype: disable=signature-mismatch
+        self,
         *,
-        vllm_req_data: Optional[Request] = None,
-    ) -> Tuple[Prefix, ModelRunnerOutput, Request]:
+        vllm_request: Optional[Request] = None,
+    ) -> Tuple[Prefix, ModelRunnerOutput]:
         """Computes a kv-cache for a set of tokens conditional on existing cache.
 
     existing_prefix (if provided) represents a prefix that has already been
@@ -174,7 +174,9 @@ class Engine(abc.ABC):
     """
 
     @abc.abstractmethod
-    def generate(self, requests) -> Tuple[Any, ModelRunnerOutput]:
+    def generate(
+        self, requests: Dict[str, Request]
+    ) -> Tuple[ModelRunnerOutput, Any]:
         """Generates tokens for each sequence being decoded in parallel.
 
     Generate takes a batch of pre-computed kv-caches, and computes:
@@ -189,83 +191,7 @@ class Engine(abc.ABC):
     If sampler is passed, then the engine should use it do sample next token.
     """
 
-    @abc.abstractmethod
-    def insert(self, kv_cache: list[jax.Array]) -> None:
-        """Adds `new_request` into `caches` at 'slot'.
-
-    When decoding multiple requests in parallel, when one request finishes, a
-    new request must be slotted into the recently vacated spot: `insert`!
-
-    This can occur in between and async to generate calls, and takes a lock over
-    that row of the cache.
-
-    The slot may represent a tuple of positions (e.g. microbatch, pipeline stage
-    and batch), but at the engine interface level all of these are exposed as
-    a [0, n) range of slots and converted internally.
-    """
-
-    def free_resource(
-            self,
-            slot: int,  # pylint: disable=unused-argument
-    ) -> Any:
-        """Free cache and other decode resource for the slot.
-
-    This function is needed for advanced attetnion kenel like PageAttetion.
-    After finishing one request, the engine need to free all used page block
-    resource and reuse for coming requests.
-    """
-        return None
-
-    @abc.abstractmethod
-    def get_prefix_destination_sharding(self) -> Any:
-        """Returns the shardings necessary to transfer data between engines."""
-
-    # @abc.abstractmethod
-    # def get_tokenizer(self, ) -> tokenizer_pb2.TokenizerParameters:
-    #     """Returns the info to construct a tokenizer in py/c++."""
-
-    # def build_tokenizer(
-    #     self,
-    #     metadata: tokenizer_pb2.TokenizerParameters,
-    # ) -> Tokenizer:
-    #     """Builds a new tokenizer object and returns it."""
-    #     return token_utils.SentencePieceTokenizer(metadata)
-
-    # @abc.abstractmethod
-    # def init_decode_state(self, *args, **kwargs) -> DecodeState:
-    #     """Initialises any state which a generation step transforms."""
-
     @property
     @abc.abstractmethod
     def max_concurrent_decodes(self) -> int:
         """Total capacity."""
-
-    @property
-    @abc.abstractmethod
-    def samples_per_slot(self) -> int:
-        """Total samples per slot."""
-
-    @property
-    @abc.abstractmethod
-    def max_prefill_length(self) -> int:
-        """Maximum prefill length."""
-
-    @property
-    @abc.abstractmethod
-    def mesh(self) -> jax.sharding.Mesh:
-        """Mesh which the engine is running on."""
-
-    @property
-    @abc.abstractmethod
-    def colocated_cpus(self) -> Union[list[CpuDevices], None]:
-        """CPU devices colocated with the engine's accelerators."""
-
-    @property
-    @abc.abstractmethod
-    def use_chunked_prefill(self) -> bool:
-        """Whether to use chunked prefill."""
-
-    @property
-    @abc.abstractmethod
-    def prefill_chunk_size(self) -> int:
-        """Prefill chunk size."""
