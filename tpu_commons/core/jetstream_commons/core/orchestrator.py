@@ -1,76 +1,49 @@
-# Copyright 2024 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-"""Orchestrates the engines with performance optimization for inference.
+# SPDX-License-Identifier: Apache-2.0
+"""Orchestrates disaggregated prefill and decode engines for inference.
 
-1. A client sends a DecodeRequest via gRPC to the server, an 'LLMOrchestrator'.
-2. This gets wrapped as an 'ActiveRequest' inside the orchestrator, with a
-    'return_channel' queue as a place that output tokens can be placed.
-    - The ActiveRequest is placed on the 'prefill_queue'.
-    - A while loop runs continuously, yielding any tokens placed on the return
-      channel until an end condition is met (EOS token or max tokens).
-3. There is a prefill_thread per prefill_engine, each of which runs on a
-    distinct prefill_slice.
-4. There is a generate_thread per generate_engine, each of which runs on a
-    distinct generate_slice.
-5. Within a prefill thread:
-    - It attempts to pop ActiveRequests off the prefill_queue.
-    - It tokenizes the request.
-    - When successful, it performs a prefill operation, transfers the kv cache
-      to the generation slice and pops this information (still wrapped in the
-      same ActiveRequest) onto the generation queue.
-6. Within a generation thread:
-   - There is a queue of integers representing 'available slots'.
-   - It checks if there is something on both the slots_queue and generation_
-     queue.
-   - If so, the kv_cache associated with that request into the decoding state
-    of the generation loop at the relevant slot.
-   - Regardless, it performs a step.
-  - It takes the sampled tokens, and places them on a 'detokenizing_queue'.
-7. Within the detokenizing thread:
-  - Tokens are detokenized for every 'slot' in a given set of sampled tokens.
-  - When an end condition is met, the 'slot' integer is returned to the
-    respective generation queue.
-  - This does mean that a single generation step may run after detokenizing
-    indicates that row is no longer valid (if the detokenizing is running behind
-    generation steps), this is fine as it avoids detokenizing being blocking of
-    the generate thread.
+The Driver class manages the lifecycle of a request through a multi-stage
+pipeline, using dedicated threads and queues for each stage to maximize
+throughput and hardware utilization.
 
-If you haven't worked with concurrency in python before - queues are thread-safe
-by default, so we can happily use them to transfer pointers to data between
-different processes. The structure of this server is simple as a result - a
-thread for each thing we might want to do (prefill, transfer, generate,
-detokenize), and corresponding queues that an active request is passed between.
-The same goes for the 'return_channel' of the request itself, where we can just
-pop tokens once they are done and try to pop them back to transmit them over
-grpc.
-It is literally queues all the way down! :)
-The primary concern is GIL contention between threads, which is why we block
-on queues that don't have an ongoing activity (i.e. everything but the
-generation queue) because we don't control to go back to those queues until
-necessary. Blocking means that the GIL doesn't switch back to that thread,
-wheras continual queue get operations 'chop' control and mean that we do not
-achieve good throughput. This is okay on the prefill/transfer/detokenization
-threads because we don't need to do anything other than react to the presence
-of items on these queues, wheras the generation thread needs to also run a
-step - so it cannot block until it has new things to insert.
+Request Lifecycle:
+1.  A `vllm.v1.request.Request` object is submitted to the Driver and placed
+    on the `_prefill_backlog` queue.
+
+2.  A `_prefill_thread` picks up the request. It calls the `prefill()` method
+    on a prefill engine, which processes the prompt and generates the initial
+    Key-Value (KV) cache. The output, containing the KV cache and the updated
+    request state, is placed on a `_transfer_backlog` queue.
+
+3.  A `_transfer_thread` picks up the prefill output. It calls the decode
+    engine's `transfer_kv_cache()` method to re-shard the KV cache for the
+    decode engine's hardware topology. The request is then routed to the least
+    busy `_generate_backlog` queue.
+
+4.  A `_generate_thread` pulls the request from its backlog. It first calls
+    `insert_request_with_kv_cache()` to load the request's state and KV cache
+    into the decode engine. It then enters a loop, repeatedly calling the
+    `generate()` method to produce one token at a time. The raw output
+    (`ModelRunnerOutput`) is placed on an `_output_backlog`.
+
+5.  An `_output_thread` processes the `ModelRunnerOutput`. It packages the raw
+    token data into the final `EngineCoreOutput` format and places it on the
+    `_vllm_output_backlog`. This final queue is consumed by the main `EngineCore`
+    loop, which sends the results back to the client.
+
+This architecture uses non-blocking or timed-blocking queues to manage the
+flow of requests, preventing GIL contention and ensuring that compute resources
+remain highly utilized.
 
 ## Testing
-This server is intended to be easy to locally test.
+We currently mostly test this with manual test, namely on a v6e-8, you can run
 
-Either use :orchestrator test, which tests the multi-threading components,
-:server_test, which extends this to test grpc_components, or run it locally
-to debug hangs due to bugs in threads (it is easier to debug with live logs).
+  PREFILL_SLICES=2,2 DECODE_SLICES=2,2 \
+  TPU_BACKEND_TYPE=jax \
+  python tpu_commons/examples/offline_inference.py \
+    --task=generate \
+    --model=meta-llama/Meta-Llama-3-8B-Instruct \
+    --max_model_len=1024 \
+    --max_num_seqs=8
 """
 
 import copy
@@ -107,16 +80,6 @@ handler.setFormatter(formatter)
 root.addHandler(handler)
 
 
-def delete_pytree(p):
-
-    def delete_leaf(leaf):
-        if isinstance(leaf, jax.Array):
-            leaf.delete()
-        del leaf
-
-    jax.tree_map(delete_leaf, p)
-
-
 class JetThread(threading.Thread):
     """Thread that kills the program if it fails.
 
@@ -137,10 +100,6 @@ class Driver:
 
     _prefill_engines: list[engine_api.Engine]
     _generate_engines: list[engine_api.Engine]
-    # Allows us to pre-load the params, primarily so that we can iterate quickly
-    # on the driver in colab without reloading weights.
-    _prefill_params: list[Any]
-    _generate_params: list[Any]
     # Stage 1
     _prefill_backlog: queue.Queue[Request | None]
     # Stage 2
@@ -153,18 +112,14 @@ class Driver:
     _generate_backlogs: dict[int, queue.Queue[Any]] = {}
     # Stage 4
     # This can be a list because we can pass it as an arg to generate and
-    # detokenize threads. It is a list of tokens to be detokenized.
-    _detokenize_backlogs: list[queue.Queue[Any]] = []
+    # output threads. It is a list of tokens to be sent out.
+    _output_backlogs: list[queue.Queue[Any]] = []
     _vllm_output_backlogs: list[queue.Queue[ModelRunnerOutput]] = []
-    _generate_slots: list[queue.Queue[int]] = []
     #   _active_requests: list[queue.Queue[tuple[int, ActiveRequest]]] = []
 
     # For interleaved_mode, only generate if all slots are full
     # or corresponding prefill queue is empty.
     _interleaved_mode: bool = False
-
-    # todo: remove jax_padding after all then engine migrate to np padding
-    _jax_padding = True
 
     # All metrics we want to monitor should be collected with this
     #   _metrics_collector: JetstreamMetricsCollector | None = None
@@ -174,21 +129,12 @@ class Driver:
         vllm_config: VllmConfig,
         prefill_engines: Optional[list[engine_api.Engine]] = None,
         generate_engines: Optional[list[engine_api.Engine]] = None,
-        prefill_params: Optional[list[Any]] = None,
-        generate_params: Optional[list[Any]] = None,
         interleaved_mode: bool = False,
-        jax_padding: bool = True,
-        #   metrics_collector: JetstreamMetricsCollector | None = None,
-        is_ray_backend: bool = False,
     ):
         if prefill_engines is None:
             prefill_engines = []
         if generate_engines is None:
             generate_engines = []
-        if prefill_params is None:
-            prefill_params = []
-        if generate_params is None:
-            generate_params = []
 
         logging.info(
             "Initialising driver with %d prefill engines and %d generate engines.",
@@ -198,12 +144,9 @@ class Driver:
         self.vllm_config = vllm_config
         self._prefill_engines = prefill_engines
         self._generate_engines = generate_engines
-        self._prefill_params = prefill_params
-        self._generate_params = generate_params
         self._interleaved_mode = interleaved_mode
         self.requests = {}
         self.reqs_to_remove = []
-        # self._metrics_collector = metrics_collector
 
         # Stages 1-4 represent the life cycle of a request.
         # Stage 1
@@ -242,47 +185,20 @@ class Driver:
             for idx, engine in enumerate(self._generate_engines)
         }
         # Stage 4
-        # After generation, ActiveRequests are placed on the detokenization backlog
+        # After generation, ActiveRequests are placed on the output backlog
         # for tokens to be sent into each ActiveRequest's return channel.
         # We have one of these per generate engine to simplify the logic keeping
         # track of which generation engine to replace slots on.
         # This is a queue of either - tuple[int, ActiveRequest] which represents our
-        # active requests, or tuple[int, sample_tokens]. We combine these into one
-        # queue because it allows us to be somewhat clever with how we do
-        # detokenization.
-        # If the detokenization receives an (int, ActiveRequest) this signifies
-        # that slot int should from now be placing tokens in the return channel of
-        # the ActiveRequest.
-        # If it receives (int, sample_tokens) then it actually
-        # does a detokenization for any slots which have previously been set active
-        # via the previous kind of object, and the int is used to log which step
-        # the tokens were created at. By having them in one queue we prevent
-        # the possibility of race conditions where a slot is made live before the
-        # tokens are ready and it receives tokens from a different sequence,
-        # or tokens detokenized before the relevant slot is live.
-        self._detokenize_backlogs = [
-            # We don't let detokenization accumulate more than 8 steps to avoid
+        # active requests, or tuple[int, sample_tokens].
+        self._output_backlogs = [
+            # We don't let output accumulate more than 8 steps to avoid
             # synchronization issues.
             queue.Queue(8) for _ in self._generate_engines
         ]
         self._vllm_output_backlogs = [
             queue.Queue(8) for _ in self._generate_engines
         ]
-
-        # A queue of integers representing available 'slots' in the decode
-        # operation. I.e. potentially available rows in the batch and/or microbatch.
-        # When we want to insert a prefill result, we pop an integer to insert at.
-        # When this is empty, it means all slots are full.
-        self._generate_slots = [
-            queue.Queue(engine.max_concurrent_decodes)
-            for engine in self._generate_engines
-        ]
-        _ = [[
-            self._generate_slots[idx].put(i)
-            for i in range(engine.max_concurrent_decodes)
-        ] for idx, engine in enumerate(self._generate_engines)]
-
-        self._jax_padding = jax_padding
 
         # Create all threads
         self._prefill_threads = [
@@ -312,13 +228,13 @@ class Driver:
                 daemon=True,
             ) for idx in range(len(self._generate_engines))
         ]
-        self.detokenize_threads = [
+        self.output_threads = [
             JetThread(
                 target=functools.partial(
-                    self._detokenize_thread,
+                    self._output_thread,
                     idx,
                 ),
-                name=f"detokenize-{idx}",
+                name=f"output-{idx}",
             ) for idx in range(len(self._generate_engines))
         ]
         self._all_threads = list(
@@ -326,10 +242,9 @@ class Driver:
                 self._prefill_threads,
                 self._transfer_threads,
                 self._generate_threads,
-                self.detokenize_threads,
+                self.output_threads,
             ))
         self.live = True
-        self._is_ray_backend = is_ray_backend
         # Start all threads
         for t in self._all_threads:
             t.start()
@@ -344,7 +259,7 @@ class Driver:
                 [self._prefill_backlog],
                 self._transfer_backlogs,
                 self._generate_backlogs.values(),
-                self._detokenize_backlogs,
+                self._output_backlogs,
                 self._vllm_output_backlogs,
             ))
 
@@ -387,12 +302,11 @@ class Driver:
         """Thread which runs in the background performing prefills."""
         logging.info("---------Spinning up prefill thread %d.---------", idx)
         prefill_engine = self._prefill_engines[idx]
-        # prefill_params = self._prefill_params[idx]
         logging.info("---------Prefill params %d loaded.---------", idx)
 
         # TODO(fhzhang): add better dispatch algorithm.
         target_idx = idx % len(self._generate_backlogs)
-        my_detokenize_backlog = self._detokenize_backlogs[target_idx]
+        my_output_backlog = self._output_backlogs[target_idx]
         my_transfer_backlog = self._transfer_backlogs[idx]
 
         while self.live:
@@ -440,8 +354,8 @@ class Driver:
             vllm_model_runner_output.req_id_to_index = copy.deepcopy(
                 vllm_model_runner_output.req_id_to_index
             )
-            logging.info(f"prefill -> detoken: {vllm_model_runner_output}")
-            my_detokenize_backlog.put(vllm_model_runner_output, block=True)
+            logging.info(f"prefill -> output: {vllm_model_runner_output}")
+            my_output_backlog.put(vllm_model_runner_output, block=True)
 
             del prefill_output
             del vllm_model_runner_output
@@ -482,21 +396,13 @@ class Driver:
         logging.info("---------Spinning up generate thread %d.---------", idx)
         generate_engine = self._generate_engines[idx]
         my_generate_backlog = self._generate_backlogs[idx]
-        my_detokenize_backlog = self._detokenize_backlogs[idx]
+        my_output_backlog = self._output_backlogs[idx]
 
-        # Keep track of what step tokens were generated at.
-        generate_timestep = 0
-        # State to store things like running kv cache in.
-
-        # generate_params = self._generate_params[idx]
-        # logging.info("---------Generate params %d loaded.---------", idx)
-        # time_of_last_generate = time.time()
-        # time_of_last_print = time.time() - 1
         active_reqs: dict[str, Request] = {}
         while self.live:
-            # Check if there are any free my_slots. We don't want to block here since
-            # we can still generate if we can't insert. We do this in a while loop to
-            # insert as many sequences as possible.
+            # Try to fill the batch with new requests from the generate backlog
+            # before running a generation step. We don't want to block here
+            # since we can still generate tokens for existing requests.
             while True:
                 logging.info(f"generate({idx}): looping on backlog...")
                 if not self._prefill_backlog.empty() and len(
@@ -548,44 +454,26 @@ class Driver:
                 self.reqs_to_remove = reqs_to_remove
 
             logging.info(f"generate enqueue: {vllm_model_runner_output}")
-            my_detokenize_backlog.put(vllm_model_runner_output, block=True)
+            my_output_backlog.put(vllm_model_runner_output, block=True)
 
-            #   sampled_tokens.copy_to_host_async()
-            #   # Respond to detokenization backpressure.
-            #   my_detokenize_backlog.put((generate_timestep, sampled_tokens), block=True)
-            generate_timestep += 1
             logging.info(
-                "Finished generate step %s, req_ids %s, output tokens %s \n",
-                generate_timestep, vllm_model_runner_output.req_ids,
+                "Finished generate step, req_ids %s, output tokens %s \n",
+                vllm_model_runner_output.req_ids,
                 vllm_model_runner_output.sampled_token_ids)
-            # logging.info(
-            #     "Generate engine %d step %d - slots free : %d / %d, took %.2fms",
-            #     idx,
-            #     generate_timestep,
-            #     my_slots_size,
-            #     max_concurrent_decodes,
-            #     (time.time() - time_of_last_generate) * 10**3,
-            # )
-            # time_of_last_generate = time.time()
 
-    def _detokenize_thread(self, idx: int):
-        """Detokenize sampled tokens and returns them to the user."""
-        # One of these per generate engine.
-        # For all filled my_slots, pop the sampled token onto the relevant
-        # requests return channel. If it done, place it back onto free slots.
-        my_detokenize_backlog = self._detokenize_backlogs[idx]
-        # my_generate_engine = self._generate_engines[idx]
-        # my_slots = self._generate_slots[idx]
+    def _output_thread(self, idx: int):
+        """Processes raw model output and packages it for the client."""
+        my_output_backlog = self._output_backlogs[idx]
         my_vllm_output_backlog = self._vllm_output_backlogs[idx]
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
 
         while self.live:
             # pass
-            model_runner_output = my_detokenize_backlog.get(block=True)
+            model_runner_output = my_output_backlog.get(block=True)
             # for request in model_runner_output.req_id_to_index:
             if not self.live:
                 break
-            logging.info(f"detoken: {model_runner_output}")
+            logging.info(f"output: {model_runner_output}")
             #   sampled_token_id = model_runner_output.sampled_token_ids[]
             # logging.info("Detokenize model runner output: %s", model_runner_output)
             req_ids = list(model_runner_output.prompt_logprobs_dict.keys())
