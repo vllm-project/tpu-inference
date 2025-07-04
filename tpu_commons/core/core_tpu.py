@@ -136,9 +136,10 @@ class EngineCore:
                         self.batch_queue_size)
             self.batch_queue = queue.Queue(self.batch_queue_size)
         logger.warning("set up jetstream driver")
-        self.orchestrator = self._setup_driver(vllm_config,
-                                               self.kv_cache_manager,
-                                               interleaved_mode=False)
+        self.orchestrator = self._setup_driver(
+            vllm_config,
+            self.kv_cache_manager,
+        )
         logger.warning("starting jetstream orchestrator")
 
     def _initialize_kv_caches(self, vllm_config: VllmConfig,
@@ -189,16 +190,7 @@ class EngineCore:
                      "warmup model) took %.2f seconds"), elapsed)
         return num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config
 
-    def _setup_driver(self,
-                      vllm_config,
-                      kv_cache_manager,
-                      interleaved_mode=True):
-        prefill_engines = [
-            JaxEngine(vllm_config, kv_cache_manager, executor)
-            for executor in self.prefill_executors
-        ]
-        # Create a generate engine with a different set of weights
-        # so that we can test that the right one is in use at a given time.
+    def _setup_driver(self, vllm_config, kv_cache_manager):
         prefill_engines = [
             JaxEngine(vllm_config, kv_cache_manager, executor)
             for executor in self.prefill_executors
@@ -208,16 +200,11 @@ class EngineCore:
             JaxEngine(vllm_config, kv_cache_manager, executor)
             for executor in self.decode_executors
         ]
-        if len(generate_engines) == 0:
-            generate_engines = [
-                JaxEngine(vllm_config, kv_cache_manager, self.prefill_executors[0])
-            ]
 
         driver = orchestrator.Driver(
             vllm_config=vllm_config,
             prefill_engines=prefill_engines,
             generate_engines=generate_engines,
-            interleaved_mode=interleaved_mode,
         )
         return driver
 
@@ -489,11 +476,11 @@ class EngineCoreProc(EngineCore):
 
     def _process_output_queue(self):
         """Called only when there are unfinished local requests."""
-        for my_vllm_output_backlog in self.orchestrator._vllm_output_backlogs:
-            while my_vllm_output_backlog.qsize() > 0:
-                outputs = my_vllm_output_backlog.get(block=False)
-                for output in (outputs.items() if outputs else ()):
-                    self.output_queue.put_nowait(output)
+        my_vllm_output_backlog = self.orchestrator._vllm_output_backlogs
+        while my_vllm_output_backlog.qsize() > 0:
+            outputs = my_vllm_output_backlog.get(block=False)
+            for output in (outputs.items() if outputs else ()):
+                self.output_queue.put_nowait(output)
 
     def _handle_client_request(self, request_type: EngineCoreRequestType,
                                request: Any) -> None:

@@ -25,11 +25,6 @@ Request Lifecycle:
     `generate()` method to produce one token at a time. The raw output
     (`ModelRunnerOutput`) is placed on an `_output_backlog`.
 
-5.  An `_output_thread` processes the `ModelRunnerOutput`. It packages the raw
-    token data into the final `EngineCoreOutput` format and places it on the
-    `_vllm_output_backlog`. This final queue is consumed by the main `EngineCore`
-    loop, which sends the results back to the client.
-
 This architecture uses non-blocking or timed-blocking queues to manage the
 flow of requests, preventing GIL contention and ensuring that compute resources
 remain highly utilized.
@@ -110,12 +105,8 @@ class Driver:
     # to, it allows us to natively have the index from the min operation, rather
     # than have to call .index()
     _generate_backlogs: dict[int, queue.Queue[Any]] = {}
-    # Stage 4
-    # This can be a list because we can pass it as an arg to generate and
-    # output threads. It is a list of tokens to be sent out.
-    _output_backlogs: list[queue.Queue[Any]] = []
-    _vllm_output_backlogs: list[queue.Queue[ModelRunnerOutput]] = []
-    #   _active_requests: list[queue.Queue[tuple[int, ActiveRequest]]] = []
+    # In the prefill and generate threads, we dump output out directly.
+    _vllm_output_backlogs: queue.Queue[ModelRunnerOutput]
 
     # For interleaved_mode, only generate if all slots are full
     # or corresponding prefill queue is empty.
@@ -129,7 +120,6 @@ class Driver:
         vllm_config: VllmConfig,
         prefill_engines: Optional[list[engine_api.Engine]] = None,
         generate_engines: Optional[list[engine_api.Engine]] = None,
-        interleaved_mode: bool = False,
     ):
         if prefill_engines is None:
             prefill_engines = []
@@ -144,7 +134,13 @@ class Driver:
         self.vllm_config = vllm_config
         self._prefill_engines = prefill_engines
         self._generate_engines = generate_engines
-        self._interleaved_mode = interleaved_mode
+        if not generate_engines:
+            self._generate_engines = prefill_engines
+            self._interleaved_mode = True
+        else:
+            self._generate_engines = generate_engines
+            self._interleaved_mode = False
+
         self.requests = {}
         self.reqs_to_remove = []
 
@@ -184,21 +180,8 @@ class Driver:
                         3)
             for idx, engine in enumerate(self._generate_engines)
         }
-        # Stage 4
-        # After generation, ActiveRequests are placed on the output backlog
-        # for tokens to be sent into each ActiveRequest's return channel.
-        # We have one of these per generate engine to simplify the logic keeping
-        # track of which generation engine to replace slots on.
-        # This is a queue of either - tuple[int, ActiveRequest] which represents our
-        # active requests, or tuple[int, sample_tokens].
-        self._output_backlogs = [
-            # We don't let output accumulate more than 8 steps to avoid
-            # synchronization issues.
-            queue.Queue(8) for _ in self._generate_engines
-        ]
-        self._vllm_output_backlogs = [
-            queue.Queue(8) for _ in self._generate_engines
-        ]
+
+        self._vllm_output_backlogs = queue.Queue()
 
         # Create all threads
         self._prefill_threads = [
@@ -228,21 +211,11 @@ class Driver:
                 daemon=True,
             ) for idx in range(len(self._generate_engines))
         ]
-        self.output_threads = [
-            JetThread(
-                target=functools.partial(
-                    self._output_thread,
-                    idx,
-                ),
-                name=f"output-{idx}",
-            ) for idx in range(len(self._generate_engines))
-        ]
         self._all_threads = list(
             itertools.chain(
                 self._prefill_threads,
                 self._transfer_threads,
                 self._generate_threads,
-                self.output_threads,
             ))
         self.live = True
         # Start all threads
@@ -259,8 +232,7 @@ class Driver:
                 [self._prefill_backlog],
                 self._transfer_backlogs,
                 self._generate_backlogs.values(),
-                self._output_backlogs,
-                self._vllm_output_backlogs,
+                [self._vllm_output_backlogs],
             ))
 
         while any(t.is_alive() for t in self._all_threads):
@@ -306,7 +278,6 @@ class Driver:
 
         # TODO(fhzhang): add better dispatch algorithm.
         target_idx = idx % len(self._generate_backlogs)
-        my_output_backlog = self._output_backlogs[target_idx]
         my_transfer_backlog = self._transfer_backlogs[idx]
 
         while self.live:
@@ -354,8 +325,7 @@ class Driver:
             vllm_model_runner_output.req_id_to_index = copy.deepcopy(
                 vllm_model_runner_output.req_id_to_index
             )
-            logging.info(f"prefill -> output: {vllm_model_runner_output}")
-            my_output_backlog.put(vllm_model_runner_output, block=True)
+            self._output(vllm_model_runner_output)
 
             del prefill_output
             del vllm_model_runner_output
@@ -375,7 +345,6 @@ class Driver:
             target_idx = min(self._generate_backlogs.items(),
                              key=lambda q: q[1].qsize())[0]
             # Only transfer the KVCache for the disaggregated serving.
-            # TODO: Remove the conditional after fixing the compatibility.
             if not self._interleaved_mode:
                 kv_cache = self._generate_engines[target_idx].model_runner.transfer_kv_cache(kv_cache)
                 prefill_output["cache"] = kv_cache
@@ -396,7 +365,6 @@ class Driver:
         logging.info("---------Spinning up generate thread %d.---------", idx)
         generate_engine = self._generate_engines[idx]
         my_generate_backlog = self._generate_backlogs[idx]
-        my_output_backlog = self._output_backlogs[idx]
 
         active_reqs: dict[str, Request] = {}
         while self.live:
@@ -429,11 +397,12 @@ class Driver:
                 logging.info(
                     f"generate backlog len: {my_generate_backlog.qsize()}")
                 request = prefill_output["request"]
-                kv_cache = prefill_output["cache"]
-                new_block_ids = generate_engine.get_new_block_ids(request)
-                generate_engine.model_runner.insert_request_with_kv_cache(
-                    request, kv_cache, new_block_ids
-                )
+                if not self._interleaved_mode:
+                    kv_cache = prefill_output["cache"]
+                    new_block_ids = generate_engine.get_new_block_ids(request)
+                    generate_engine.model_runner.insert_request_with_kv_cache(
+                        request, kv_cache, new_block_ids
+                    )
                 active_reqs[request.request_id] = request
 
             logging.info(f"executing generation... #active_reqs={len(active_reqs)}")
@@ -453,53 +422,42 @@ class Driver:
             if len(reqs_to_remove) != 0:
                 self.reqs_to_remove = reqs_to_remove
 
-            logging.info(f"generate enqueue: {vllm_model_runner_output}")
-            my_output_backlog.put(vllm_model_runner_output, block=True)
+            self._output(vllm_model_runner_output)
 
             logging.info(
                 "Finished generate step, req_ids %s, output tokens %s \n",
                 vllm_model_runner_output.req_ids,
                 vllm_model_runner_output.sampled_token_ids)
 
-    def _output_thread(self, idx: int):
-        """Processes raw model output and packages it for the client."""
-        my_output_backlog = self._output_backlogs[idx]
-        my_vllm_output_backlog = self._vllm_output_backlogs[idx]
+    def _output(self, model_runner_output):
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
 
-        while self.live:
-            # pass
-            model_runner_output = my_output_backlog.get(block=True)
-            # for request in model_runner_output.req_id_to_index:
-            if not self.live:
-                break
-            logging.info(f"output: {model_runner_output}")
-            #   sampled_token_id = model_runner_output.sampled_token_ids[]
-            # logging.info("Detokenize model runner output: %s", model_runner_output)
-            req_ids = list(model_runner_output.prompt_logprobs_dict.keys())
-            for req_id in req_ids:
-                request = self.requests[req_id]
-                sampled_token_index = model_runner_output.req_id_to_index[req_id]
-                sampled_token_id = model_runner_output.sampled_token_ids[
-                    sampled_token_index]
-                outputs[request.client_index].append(
-                    EngineCoreOutput(
-                        request_id=req_id,
-                        new_token_ids=sampled_token_id,
-                        finish_reason=request.get_finished_reason(),
-                        new_logprobs=None,
-                        new_prompt_logprobs_tensors=None,
-                        stop_reason=request.stop_reason,
-                        events=request.take_events(),
-                        # kv_transfer_params=kv_transfer_params,
-                        num_cached_tokens=request.num_cached_tokens,
-                    ))
-            engine_core_outputs = {
-                client_index: EngineCoreOutputs(outputs=outs)
-                for client_index, outs in outputs.items()
-            }
-            outputs = defaultdict(list)
-            logging.info(
-                "Put engine core outputs %s to vllm output backlog, queue len %s",
-                req_ids, my_vllm_output_backlog.qsize())
-            my_vllm_output_backlog.put(engine_core_outputs, block=True)
+        logging.info(f"output: {model_runner_output}")
+        #   sampled_token_id = model_runner_output.sampled_token_ids[]
+        # logging.info("Detokenize model runner output: %s", model_runner_output)
+        req_ids = list(model_runner_output.prompt_logprobs_dict.keys())
+        for req_id in req_ids:
+            request = self.requests[req_id]
+            sampled_token_index = model_runner_output.req_id_to_index[req_id]
+            sampled_token_id = model_runner_output.sampled_token_ids[
+                sampled_token_index]
+            outputs[request.client_index].append(
+                EngineCoreOutput(
+                    request_id=req_id,
+                    new_token_ids=sampled_token_id,
+                    finish_reason=request.get_finished_reason(),
+                    new_logprobs=None,
+                    new_prompt_logprobs_tensors=None,
+                    stop_reason=request.stop_reason,
+                    events=request.take_events(),
+                    # kv_transfer_params=kv_transfer_params,
+                    num_cached_tokens=request.num_cached_tokens,
+                ))
+        engine_core_outputs = {
+            client_index: EngineCoreOutputs(outputs=outs)
+            for client_index, outs in outputs.items()
+        }
+        logging.info(
+            "Put engine core outputs %s to vllm output backlog, queue len %s",
+            req_ids, self._vllm_output_backlogs.qsize())
+        self._vllm_output_backlogs.put(engine_core_outputs, block=True)

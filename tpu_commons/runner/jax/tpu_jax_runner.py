@@ -329,7 +329,7 @@ class TPUModelRunner():
         # The KV cache slices have a shape of (num_tokens, num_kv_heads * 2, head_size).
         # We shard along the num_kv_heads dimension (axis=1), which corresponds
         # to the "model" axis of the mesh for tensor parallelism.
-        sharding = NamedSharding(self.mesh, PartitionSpec(None, None, "model"))
+        sharding = NamedSharding(self.mesh, PartitionSpec(None, "model", None))
         transferred_kv_cache = jax.device_put(kv_cache_slices, sharding)
         return transferred_kv_cache
 
@@ -391,6 +391,13 @@ class TPUModelRunner():
                 reshaped_slices = padded_slices.reshape(
                     num_blocks_for_cache, self.block_size,
                     *padded_slices.shape[1:])
+
+                # Enforce the sharding to match the destination KV cache to
+                # prevent donation errors. The main KV cache is sharded on the
+                # num_kv_heads dimension (axis=2).
+                reshaped_slices = jax.lax.with_sharding_constraint(
+                    reshaped_slices,
+                    self.kv_caches[i].sharding)
 
                 # Scatter into the main KV cache for this layer.
                 self.kv_caches[i] = self.kv_caches[i].at[jnp.array(
