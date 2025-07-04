@@ -111,6 +111,7 @@ class Driver:
     # For interleaved_mode, only generate if all slots are full
     # or corresponding prefill queue is empty.
     _interleaved_mode: bool = False
+    _interleaved_lock: threading.Lock = threading.Lock()
 
     # All metrics we want to monitor should be collected with this
     #   _metrics_collector: JetstreamMetricsCollector | None = None
@@ -137,6 +138,7 @@ class Driver:
         if not generate_engines:
             self._generate_engines = prefill_engines
             self._interleaved_mode = True
+            logging.warning("No generate engine provided, running in interleave mode...")
         else:
             self._generate_engines = generate_engines
             self._interleaved_mode = False
@@ -193,23 +195,18 @@ class Driver:
         ]
         self._transfer_threads = [
             JetThread(
-                target=functools.partial(
-                    self._transfer_thread,
-                    idx,
-                ),
+                target=functools.partial(self._transfer_thread, idx),
                 name=f"transfer-{idx}",
                 daemon=True,
             ) for idx in range(len(self._prefill_engines))
         ]
         self._generate_threads = [
             JetThread(
-                target=functools.partial(
-                    self._generate_thread,
-                    idx,
-                ),
+                target=functools.partial(self._generate_thread, idx),
                 name=f"generate-{idx}",
                 daemon=True,
-            ) for idx in range(len(self._generate_engines))
+            )
+            for idx in range(len(self._generate_engines))
         ]
         self._all_threads = list(
             itertools.chain(
@@ -299,12 +296,16 @@ class Driver:
                 break
 
             # Compute new kv cache for the prefill_content.
+            if self._interleaved_mode:
+                self._interleaved_lock.acquire()
             prefill_output, vllm_model_runner_output = prefill_engine.prefill(
                 vllm_request=vllm_request
             )
             vllm_model_runner_output.req_id_to_index = copy.deepcopy(
                 vllm_model_runner_output.req_id_to_index
             )
+            if self._interleaved_mode:
+                self._interleaved_lock.release()
             req_id = vllm_request.request_id
             self.requests[req_id] = vllm_request
             logging.info("Put request %s in req dict. request.num_tokens: %s",
@@ -408,6 +409,8 @@ class Driver:
             logging.info(f"executing generation... #active_reqs={len(active_reqs)}")
             # At this point, we know that we have at least some slots filled.
             # Now we actually take a generate step on requests in the slots.
+            if self._interleaved_mode:
+                self._interleaved_lock.acquire()
             vllm_model_runner_output, reqs_to_remove = generate_engine.generate(
                 active_reqs)
             for req_id in reqs_to_remove:
@@ -419,6 +422,8 @@ class Driver:
             vllm_model_runner_output.req_id_to_index = copy.deepcopy(
                 vllm_model_runner_output.req_id_to_index
             )
+            if self._interleaved_mode:
+                self._interleaved_lock.release()
             if len(reqs_to_remove) != 0:
                 self.reqs_to_remove = reqs_to_remove
 
