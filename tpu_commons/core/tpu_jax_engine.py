@@ -36,44 +36,89 @@ PRNGKeyType = Any
 logger = init_logger(__name__)
 
 
-class JaxEngine(engine_api.Engine):
-    """The computational core of the generative model server.
+class JaxEngine():
+    """The computational core of the disaggregated inference engine.
 
-  Engine defines an API that models must adhere to as they plug into the
-  JetStream efficient serving infrastructure.
-  """
+    The class is _not_ thread safe. The caller is responsible for sycnrhonization.
+    """
 
     def __init__(self, vllm_config, kv_cache_manager, vllm_executor):
         self.model_runner = vllm_executor.driver_worker.model_runner
         self.kv_cache_manager = kv_cache_manager
         self.vllm_config = vllm_config
+        self._max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
 
-    def get_new_block_ids(self, vllm_request: Request):
+        # Requests we are already processing.
+        self._requests: list[Request] = []
+        # Newly added requests.
+        self._new_requests: list[Request] = []
+        self._request_map: dict[str, Request] = {}
+        self._pending_num_prefill_tokens = 0
+
+    def get_new_block_ids(self, vllm_request: Request, num_tokens: int):
         computed_blocks, _ = self.kv_cache_manager.get_computed_blocks(
             vllm_request)
         _ = self.kv_cache_manager.allocate_slots(
             vllm_request,
-            vllm_request.num_tokens,
+            num_tokens,
             new_computed_blocks=computed_blocks)
         req_id = vllm_request.request_id
         return self.kv_cache_manager.get_block_ids(req_id)
 
-    # Public non-JIT prefill method that updates page state
-    def prefill(
-        self,  # pytype: disable=signature-mismatch
-        *,
-        vllm_request: Optional[Request] = None,
-    ) -> Tuple[Prefix, ModelRunnerOutput]:
-        req_id = vllm_request.request_id
-        new_block_ids = self.get_new_block_ids(vllm_request)
-        request = NewRequestData.from_request(vllm_request, new_block_ids)
+    def has_more_prefill_capacity(self):
+        """Returns True if we still have room for more prefill requests."""
+        return self._pending_num_prefill_tokens < self._max_num_tokens
 
-        num_scheduled_tokens = {req_id: vllm_request.num_tokens}
-        scheduler_output = SchedulerOutput(
-            scheduled_new_reqs=[request],
-            scheduled_cached_reqs=[],
+    def is_prefill_idle(self) -> bool:
+        return self._pending_num_prefill_tokens <= 0
+
+    def add_request(self, req: Request):
+        self._request_map[req.request_id] = req
+        self._new_requests.append(req)
+        self._pending_num_prefill_tokens += req.num_tokens - req.num_computed_tokens
+
+    def _schedule_prefill(self) -> SchedulerOutput:
+        """Schedule the next batch to be processed.
+        
+        We currently prioritize oldest requests in the queue.
+        """
+        capacity_left = self._max_num_tokens
+        cached_reqs = []
+        num_scheduled_tokens: dict[str, int] = {}
+        for req in self._requests:
+            assert capacity_left > 0
+
+            num_tokens_to_schedule = min(capacity_left, req.num_tokens - req.num_computed_tokens)
+            new_block_ids = self.get_new_block_ids(req, num_tokens_to_schedule)
+
+            new_token_ids = req.all_token_ids[
+                req.num_computed_tokens:req.num_computed_tokens + num_tokens_to_schedule]
+            req_data = CachedRequestData.from_request(req, False, new_token_ids, new_block_ids)
+            cached_reqs.append(req_data)
+            capacity_left -= num_tokens_to_schedule
+            num_scheduled_tokens[req.request_id] = num_tokens_to_schedule
+
+        new_reqs = []
+        scheduled_new_reqs_list: set[Request] = set()
+        for req in self._new_requests:
+            assert capacity_left > 0
+
+            num_tokens_to_schedule = min(capacity_left, req.num_tokens - req.num_computed_tokens)
+
+            new_block_ids = self.get_new_block_ids(req, num_tokens_to_schedule)
+            req_data = NewRequestData.from_request(req, new_block_ids)
+            new_reqs.append(req_data)
+            capacity_left -= num_tokens_to_schedule
+            num_scheduled_tokens[req.request_id] = num_tokens_to_schedule
+            scheduled_new_reqs_list.add(req)
+
+        self._move_newly_scheduled_to_running(scheduled_new_reqs_list)
+
+        return SchedulerOutput(
+            scheduled_new_reqs=new_reqs,
+            scheduled_cached_reqs=cached_reqs,
             num_scheduled_tokens=num_scheduled_tokens,
-            total_num_scheduled_tokens=vllm_request.num_tokens,
+            total_num_scheduled_tokens=(self._max_num_tokens - capacity_left),
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
             num_common_prefix_blocks=[0],
@@ -83,29 +128,55 @@ class JaxEngine(engine_api.Engine):
             grammar_bitmask=None,
         )
 
+    def _move_newly_scheduled_to_running(self, scheduled_reqs: set[Request]):
+        """Moves scheduled requests from _new_requests to _requests."""
+        if not scheduled_reqs:
+            return
+        self._requests.extend(scheduled_reqs)
+        self._new_requests = [r for r in self._new_requests if r not in scheduled_reqs]
+
+
+    # Public non-JIT prefill method that updates page state
+    def prefill(self) -> Tuple[Prefix, ModelRunnerOutput]:
+        scheduler_output = self._schedule_prefill()
+        self._pending_num_prefill_tokens -= scheduler_output.total_num_scheduled_tokens
+        
+        logger.info(f"Scheduled output: {scheduler_output}")
+            
         metadata, runner_output = self.model_runner._execute_model(scheduler_output)
-
-        num_scheduled_tokens_per_req = np.array([vllm_request.num_tokens], dtype=np.int32)
-        kv_cache_slices = self.model_runner.get_kv_cache_for_requests(
-            [req_id], metadata.kv_cache_write_indices, num_scheduled_tokens_per_req
-        )
-
-        kv_caches_slice = kv_cache_slices[req_id]
-
         logger.info(f"Prefill result: {runner_output}")
-        new_token_ids = runner_output.sampled_token_ids[
-            runner_output.req_id_to_index[req_id]]
-        vllm_request.append_output_token_ids(new_token_ids)
-        vllm_request.num_computed_tokens = vllm_request.num_prompt_tokens + 1
-        vllm_request.num_cached_tokens = vllm_request.num_prompt_tokens + 1
-        vllm_request.status = RequestStatus.RUNNING
 
-        prefix = {
-            "cache": kv_caches_slice,
-            "request": vllm_request,
-        }
-        logger.info(f"prefill done: {runner_output} \nfor {vllm_request} with {vllm_request.num_tokens} tokens")
-        return prefix, runner_output
+        completed_requests: list[str] = []
+        num_tokens_done: list[int] = []
+        for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
+            req = self._request_map[req_id]
+            req.num_computed_tokens += num_tokens
+            req.num_cached_tokens += num_tokens
+            req.status = RequestStatus.RUNNING
+            
+            prefill_done = req.num_computed_tokens == req.num_prompt_tokens
+            
+            if prefill_done:
+                num_tokens_done.append(num_tokens)
+
+                new_token_ids = runner_output.sampled_token_ids[
+                    runner_output.req_id_to_index[req_id]]
+                req.append_output_token_ids(new_token_ids)
+                req.num_computed_tokens += 1
+                req.num_cached_tokens += 1
+
+                logger.info(f"prefill done: for {req_id} with {num_tokens} tokens")
+                completed_requests.append(req_id)
+                self._request_map.pop(req_id)
+        
+        num_scheduled_tokens_per_req = np.array(num_tokens_done, dtype=np.int32)
+        kv_cache_slices = self.model_runner.get_kv_cache_for_requests(
+            completed_requests, metadata.kv_cache_write_indices, num_scheduled_tokens_per_req
+        )
+                
+        self._requests = [r for r in self._requests if r.request_id in self._request_map]
+
+        return kv_cache_slices, runner_output
 
     def generate(self, requests: dict[str, Request]) -> Tuple[ModelRunnerOutput, Any]:
         """Public API for generate that updates page state outside JIT."""
