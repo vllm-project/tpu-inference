@@ -43,6 +43,7 @@ from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import ParallelConfig, VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import set_forward_context
 from tpu_commons.logger import init_logger
+from tpu_commons.runner.utils import get_padded_num_reqs_with_upper_limit, MIN_NUM_SEQS
 from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.model_executor.model_loader import get_model_loader
 
@@ -87,8 +88,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 INVALID_TOKEN_ID = -1
-# Smallest output size
-MIN_NUM_SEQS = 8
 
 
 #########################################################
@@ -760,7 +759,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # partial request, we do so for simplicity. We will ignore the sampled
         # token from the partial request.
         # TODO: Support prompt logprobs.
-        padded_num_reqs = _get_padded_num_reqs_with_upper_limit(
+        padded_num_reqs = get_padded_num_reqs_with_upper_limit(
             num_reqs, self.max_num_reqs)
         # Indices at which we sample (positions of last token in the sequence).
         # Padded to avoid recompiling when `num_reqs` varies.
@@ -1862,13 +1861,8 @@ def _get_req_paddings(min_req_size: int, max_req_size: int) -> list[int]:
     while num <= max_req_size and (len(paddings) == 0 or paddings[-1] != num):
         paddings.append(num)
         logger.info("    %d", num)
-        num = _get_padded_num_reqs_with_upper_limit(num + 1, max_req_size)
+        num = get_padded_num_reqs_with_upper_limit(num + 1, max_req_size)
     return paddings
-
-
-def _get_padded_num_reqs_with_upper_limit(x: int, upper_limit: int) -> int:
-    res = MIN_NUM_SEQS if x <= MIN_NUM_SEQS else 1 << (x - 1).bit_length()
-    return min(res, upper_limit)
 
 
 def _get_token_paddings(min_token_size: int, max_token_size: int,

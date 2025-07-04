@@ -265,6 +265,7 @@ class LlamaForCausalLM(nnx.Module):
         temperatures: jax.Array = None,
         top_ps: jax.Array = None,
         top_ks: jax.Array = None,
+        logits_indices: jax.Array = None,
         *args,
     ) -> Tuple[List[jax.Array], jax.Array, jax.Array]:
         # input_ids: (T,)
@@ -279,14 +280,15 @@ class LlamaForCausalLM(nnx.Module):
             attention_metadata,
         )
 
-        # (T, V)
+        # Select tokens that we need to calculate logits for.
+        # This should be cheaper than computing for all tokens, moving to cpu and then selecting the needed token.
+        # (B, D)
+        x = x[logits_indices]
+
+        # (B, V)
         logits = jnp.dot(x, self.lm_head.value)
-        # TODO(xiang): remove this expand_dims
-        # (1, T, V)
-        logits = jnp.expand_dims(logits, 0)
 
         next_tokens = sample(
-            False,
             do_sampling,
             self.rng.params(),
             self.mesh,
@@ -295,7 +297,6 @@ class LlamaForCausalLM(nnx.Module):
             temperatures,
             top_ps,
             top_ks,
-            attention_metadata.chunked_prefill_enabled,
         )
         return kv_caches, next_tokens, None
 
