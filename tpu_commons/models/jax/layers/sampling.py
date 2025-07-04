@@ -7,7 +7,6 @@ from tpu_commons.models.jax.layers.binary_search import topk_mask, topp_mask
 
 
 def sample(
-    is_prefill: bool,
     do_sampling: bool,
     rng: jax.Array,
     mesh: Mesh,
@@ -16,27 +15,13 @@ def sample(
     temperatures: jax.Array,
     top_ps: jax.Array,
     top_ks: jax.Array,
-    chunked_prefill_enabled: bool = False,
 ) -> jax.Array:
-    # (batch_size, vocab_size)
+    # (B, vocab_size)
     if do_sampling:
         # Unshard the logits explicity to avoid latency increase.
         # TODO: shard the batch axis without affecting unembedding
         logits = jax.lax.with_sharding_constraint(
             logits, NamedSharding(mesh, P(None, None)))
-
-    if chunked_prefill_enabled:
-        # TODO(xiang): remove this after forcing logits.ndim=2
-        if logits.ndim == 3:
-            batch_size = logits.shape[0]
-            assert batch_size == 1
-            logits = jnp.squeeze(logits, 0)
-    elif is_prefill:
-        batch_size = logits.shape[0]
-        batch_indices = jnp.arange(batch_size)
-        logits = logits[batch_indices, seq_lens - 1, :]
-    else:
-        logits = jnp.squeeze(logits, 1)
 
     if not do_sampling:
         return jnp.argmax(logits, axis=-1)

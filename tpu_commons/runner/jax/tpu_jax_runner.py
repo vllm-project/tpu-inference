@@ -7,7 +7,6 @@ import jax.numpy as jnp
 import numpy as np
 import vllm.envs as envs
 from jax.sharding import NamedSharding, PartitionSpec
-from vllm.v1.request import Request
 from vllm.config import VllmConfig
 from vllm.sequence import IntermediateTensors
 from vllm.utils import cdiv
@@ -15,6 +14,7 @@ from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
+from vllm.v1.request import Request
 
 from tpu_commons import utils_jax as utils
 from tpu_commons.logger import init_logger
@@ -26,6 +26,7 @@ from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
 from tpu_commons.runner.tpu_torch_xla_runner import (_get_padded_token_len,
                                                      _get_req_paddings,
                                                      _get_token_paddings)
+from tpu_commons.runner.utils import get_padded_num_reqs_with_upper_limit
 
 logger = init_logger(__name__)
 
@@ -35,12 +36,13 @@ MIN_NUM_SEQS = 8
 # Block size used for kv cache updating kernel
 NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK = 8
 
-DUMMY_METADATA= AttentionMetadata(
-    input_positions=jnp.empty((0,)),
+DUMMY_METADATA = AttentionMetadata(
+    input_positions=jnp.empty((0, )),
     seq_lens=[],
     block_indices=[],
     kv_cache_write_indices=[],
 )
+
 
 class TPUModelRunner():
 
@@ -263,10 +265,10 @@ class TPUModelRunner():
         # kv_cache_write_indices is on device and transposed.
         # Get it to CPU and transpose back for processing.
         slot_mapping_metadata = np.asarray(
-            jax.device_get(kv_cache_write_indices)
-        ).T
+            jax.device_get(kv_cache_write_indices)).T
         num_reqs_in_batch = len(num_scheduled_tokens_per_req)
-        slices_start = self.input_batch.num_computed_tokens_cpu[:num_reqs_in_batch]
+        slices_start = self.input_batch.num_computed_tokens_cpu[:
+                                                                num_reqs_in_batch]
         slices_end = slices_start + num_scheduled_tokens_per_req
         local_block_start_idx = slices_start // self.block_size
         local_block_end_idx = (slices_end - 1) // self.block_size
@@ -278,13 +280,15 @@ class TPUModelRunner():
         output = {}
         for req_id in request_ids:
             if req_id not in self.input_batch.req_id_to_index:
-                logger.warning(f"Request ID {req_id} not found in input batch.")
+                logger.warning(
+                    f"Request ID {req_id} not found in input batch.")
                 continue
 
             req_index = self.input_batch.req_id_to_index[req_id]
             start_meta_idx = cu_block_lens[req_index]
             end_meta_idx = cu_block_lens[req_index + 1]
-            metadata_for_req = slot_mapping_metadata[start_meta_idx:end_meta_idx]
+            metadata_for_req = slot_mapping_metadata[
+                start_meta_idx:end_meta_idx]
             indices_to_gather = [
                 i for start, _, length in metadata_for_req
                 for i in range(int(start), int(start + length))
@@ -307,9 +311,8 @@ class TPUModelRunner():
             output[req_id] = req_kv_cache_per_layer
         return output
 
-    def transfer_kv_cache(
-        self, kv_cache_slices: List[jax.Array]
-    ) -> List[jax.Array]:
+    def transfer_kv_cache(self,
+                          kv_cache_slices: List[jax.Array]) -> List[jax.Array]:
         """
         Transfers KV cache slices to the runner's mesh.
 
@@ -358,8 +361,7 @@ class TPUModelRunner():
         if len(block_ids) > 1:
             raise NotImplementedError(
                 "Inserting KV cache for models with multiple KV cache groups "
-                "is not supported yet."
-            )
+                "is not supported yet.")
         block_numbers = block_ids[0]
 
         if kv_cache_slices:
@@ -373,8 +375,7 @@ class TPUModelRunner():
             if len(block_numbers) < num_blocks_for_cache:
                 raise ValueError(
                     f"Not enough blocks allocated for request {request.req_id}. "
-                    f"Need {num_blocks_for_cache}, got {len(block_numbers)}."
-                )
+                    f"Need {num_blocks_for_cache}, got {len(block_numbers)}.")
 
             # For each layer, scatter the slices into the main KV cache.
             for i, layer_kv_cache_slices in enumerate(kv_cache_slices):
@@ -382,10 +383,9 @@ class TPUModelRunner():
                 padded_len = num_blocks_for_cache * self.block_size
                 padding_size = padded_len - num_tokens_in_cache
 
-                padded_slices = jnp.pad(
-                    layer_kv_cache_slices,
-                    ((0, padding_size), (0, 0), (0, 0)),
-                    mode='constant')
+                padded_slices = jnp.pad(layer_kv_cache_slices,
+                                        ((0, padding_size), (0, 0), (0, 0)),
+                                        mode='constant')
 
                 # Reshape to (num_blocks_for_req, block_size, ...)
                 reshaped_slices = padded_slices.reshape(
@@ -396,18 +396,19 @@ class TPUModelRunner():
                 # prevent donation errors. The main KV cache is sharded on the
                 # num_kv_heads dimension (axis=2).
                 reshaped_slices = jax.lax.with_sharding_constraint(
-                    reshaped_slices,
-                    self.kv_caches[i].sharding)
+                    reshaped_slices, self.kv_caches[i].sharding)
 
                 # Scatter into the main KV cache for this layer.
                 self.kv_caches[i] = self.kv_caches[i].at[jnp.array(
                     block_numbers[:num_blocks_for_cache])].set(reshaped_slices)
-            logger.warning(f"Updated kv cache entries cnt={len(self.kv_caches)}")
+            logger.warning(
+                f"Updated kv cache entries cnt={len(self.kv_caches)}")
 
         # Update runner's internal state to track the new request.
         req_id = request.request_id
         if req_id in self.requests:
-            logger.warning(f"Request {req_id} already exists in the runner. Overwriting.")
+            logger.warning(
+                f"Request {req_id} already exists in the runner. Overwriting.")
 
         # Create a CachedRequestState object to add to the input batch.
         req_state = CachedRequestState(
@@ -485,7 +486,6 @@ class TPUModelRunner():
         next_tokens = np.asarray(jax.device_get(next_tokens))
         selected_token_ids = np.expand_dims(next_tokens[:num_reqs], 1)
         valid_sampled_token_ids = selected_token_ids.tolist()
-
         # Mask out the sampled tokens that should not be sampled.
         for i in discard_sampled_tokens_req_indices:
             valid_sampled_token_ids[i].clear()
@@ -619,12 +619,17 @@ class TPUModelRunner():
             self.input_batch.block_table[0].get_cpu_tensor()[:num_reqs])
         query_start_loc = self.query_start_loc_cpu[:self.max_num_reqs + 1]
         seq_lens = self.seq_lens_cpu[:self.max_num_reqs]
+        padded_num_reqs = get_padded_num_reqs_with_upper_limit(
+            num_reqs, self.max_num_reqs)
+        logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
         num_reqs = np.array([num_reqs])
 
         (input_ids, positions, slot_mapping_metadata, num_slices, block_tables,
-         query_start_loc, seq_lens, num_reqs) = self._device_array(
+         query_start_loc, seq_lens, num_reqs,
+         logits_indices) = self._device_array(
              (input_ids, positions, slot_mapping_metadata, num_slices,
-              block_tables, query_start_loc, seq_lens, num_reqs))
+              block_tables, query_start_loc, seq_lens, num_reqs,
+              logits_indices))
 
         return (
             False,
@@ -639,11 +644,11 @@ class TPUModelRunner():
                 num_prefill_seqs=num_slices,
                 prefill_query_start_offsets=query_start_loc,
                 num_decode_seqs=num_reqs,
-                chunked_prefill_enabled=True,
             ),
             temperatures,
             top_ps,
             top_ks,
+            logits_indices,
         )
 
     def _get_slot_mapping_metadata(self, num_reqs,
