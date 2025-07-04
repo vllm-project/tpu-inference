@@ -47,11 +47,7 @@ class JaxEngine(engine_api.Engine):
         self.model_runner = vllm_executor.driver_worker.model_runner
         self.kv_cache_manager = kv_cache_manager
         self.vllm_config = vllm_config
-        input_batch = self.model_runner.input_batch
-        input_batch.finished_transfer = set()
-        # self.config = config
-        # input_batch = self.model_runner.input_batch
-        
+
     def get_new_block_ids(self, vllm_request: Request):
         computed_blocks, _ = self.kv_cache_manager.get_computed_blocks(
             vllm_request)
@@ -189,7 +185,6 @@ class JaxEngine(engine_api.Engine):
     def get_prefix_destination_sharding(self) -> Any:
         return {
             "cache": self.model_runner.outputs_sharding,
-            # "cache": self.model_runner.kv_cache_sharding,
             "next_tokens": self.model_runner.outputs_sharding,
             "running_indices": self.model_runner.outputs_sharding,
             "output_token_indices": self.model_runner.outputs_sharding,
@@ -200,32 +195,3 @@ class JaxEngine(engine_api.Engine):
     def max_concurrent_decodes(self) -> int:
         """Free slots."""
         return self.model_runner.input_batch.max_num_reqs
-
-    @property
-    def max_prefill_length(self) -> int:
-        """Maximum prefill length."""
-        return int(self.config.max_prefill_predict_length)
-
-    @property
-    def use_chunked_prefill(self) -> bool:
-        """Whether to use chunked prefill."""
-        return self.config.use_chunked_prefill
-
-    @property
-    def prefill_chunk_size(self) -> int:
-        """Prefill chunk size."""
-        return int(self.config.prefill_chunk_size)
-
-    @property
-    def samples_per_slot(self) -> int:
-        """Number of samples per slot."""
-        return 1
-
-    @property
-    def mesh(self) -> jax.sharding.Mesh:
-        return self._mesh
-
-    @property
-    def colocated_cpus(self) -> None:
-        """CPU devices colocated with the engine's accelerators."""
-        raise NotImplementedError
