@@ -62,7 +62,7 @@ from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request
 
-from tpu_commons.core.jetstream_commons.engine import engine_api
+from tpu_commons.core.tpu_jax_engine import JaxEngine
 
 root = logging.getLogger()
 root.setLevel(logging.INFO)
@@ -93,8 +93,8 @@ class JetThread(threading.Thread):
 class Driver:
     """Drives the engines."""
 
-    _prefill_engines: list[engine_api.Engine]
-    _generate_engines: list[engine_api.Engine]
+    _prefill_engines: list[JaxEngine]
+    _generate_engines: list[JaxEngine]
     # Stage 1
     _prefill_backlog: queue.Queue[Request | None]
     # Stage 2
@@ -111,7 +111,6 @@ class Driver:
     # For interleaved_mode, only generate if all slots are full
     # or corresponding prefill queue is empty.
     _interleaved_mode: bool = False
-    _interleaved_lock: threading.Lock = threading.Lock()
 
     # All metrics we want to monitor should be collected with this
     #   _metrics_collector: JetstreamMetricsCollector | None = None
@@ -119,8 +118,8 @@ class Driver:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        prefill_engines: Optional[list[engine_api.Engine]] = None,
-        generate_engines: Optional[list[engine_api.Engine]] = None,
+        prefill_engines: Optional[list[JaxEngine]] = None,
+        generate_engines: Optional[list[JaxEngine]] = None,
     ):
         if prefill_engines is None:
             prefill_engines = []
@@ -138,12 +137,11 @@ class Driver:
         if not generate_engines:
             self._generate_engines = prefill_engines
             self._interleaved_mode = True
-            logging.warning("No generate engine provided, running in interleave mode...")
         else:
             self._generate_engines = generate_engines
             self._interleaved_mode = False
 
-        self.requests = {}
+        self.requests: dict[str, Request]= {}
         self.reqs_to_remove = []
 
         # Stages 1-4 represent the life cycle of a request.
@@ -195,18 +193,23 @@ class Driver:
         ]
         self._transfer_threads = [
             JetThread(
-                target=functools.partial(self._transfer_thread, idx),
+                target=functools.partial(
+                    self._transfer_thread,
+                    idx,
+                ),
                 name=f"transfer-{idx}",
                 daemon=True,
             ) for idx in range(len(self._prefill_engines))
         ]
         self._generate_threads = [
             JetThread(
-                target=functools.partial(self._generate_thread, idx),
+                target=functools.partial(
+                    self._generate_thread,
+                    idx,
+                ),
                 name=f"generate-{idx}",
                 daemon=True,
-            )
-            for idx in range(len(self._generate_engines))
+            ) for idx in range(len(self._generate_engines))
         ]
         self._all_threads = list(
             itertools.chain(
@@ -278,46 +281,39 @@ class Driver:
         my_transfer_backlog = self._transfer_backlogs[idx]
 
         while self.live:
-            input_batch = prefill_engine.model_runner.input_batch
-            if len(input_batch.req_id_to_index) == input_batch.max_num_reqs:
-                if self.reqs_to_remove != []:
-                    for req in self.reqs_to_remove:
-                        input_batch.remove_request(req)
-                    self.reqs_to_remove = []
-                else:
-                    continue
-            # The prefill thread can just sleep until it has work to do.
-            vllm_request = self._prefill_backlog.get(block=True)
-            logging.info(
-                "get request %s from prefill backlog", vllm_request.request_id
-                if vllm_request is not None else "None")
+            # Fetch more requests from the block if we have capacity.
+            # Don't block if the prefill engine has work to do.
+            block = prefill_engine.is_prefill_idle()
+            while prefill_engine.has_more_prefill_capacity():
+                try:
+                    vllm_request = self._prefill_backlog.get(block=block, timeout=1.0)
+                except queue.Empty:
+                    if block:
+                        continue
+                    else:
+                        break
 
-            if vllm_request is None:
+                logging.info(
+                    "get request %s from prefill backlog", vllm_request.request_id
+                    if vllm_request is not None else "None")
+
+                if vllm_request is None:
+                    break
+
+                block = False
+                prefill_engine.add_request(vllm_request)
+                req_id = vllm_request.request_id
+                self.requests[req_id] = vllm_request
+
+            if prefill_engine.is_prefill_idle():
+                logging.info("Nothing to process, we are done, exiting...")
                 break
 
-            # Compute new kv cache for the prefill_content.
-            if self._interleaved_mode:
-                self._interleaved_lock.acquire()
-            prefill_output, vllm_model_runner_output = prefill_engine.prefill(
-                vllm_request=vllm_request
-            )
-            vllm_model_runner_output.req_id_to_index = copy.deepcopy(
-                vllm_model_runner_output.req_id_to_index
-            )
-            if self._interleaved_mode:
-                self._interleaved_lock.release()
-            req_id = vllm_request.request_id
-            self.requests[req_id] = vllm_request
-            logging.info("Put request %s in req dict. request.num_tokens: %s",
-                         req_id, vllm_request.num_tokens)
-            # logging.warning("finished prefill for request %s output %s \n", vllm_request.request_id, vllm_model_runner_output.__dict__)
-            # logging.warning("added %s to requests dictionary \n", self.requests[req_id].__dict__)
-            # request.prefill_result = prefill_result
-            # Once prefill is complete, place it on the generation queue and block if
-            # full.
-            my_transfer_backlog.put(prefill_output, block=True)
+            kv_caches, vllm_model_runner_output = prefill_engine.prefill()
+
+            my_transfer_backlog.put(kv_caches, block=True)
             logging.info(
-                f"Prefill worker {idx}: Finished prefill req {req_id}, Placed request on transfer queue {target_idx}"
+                f"Prefill worker {idx}: Finished prefill batch, Placed request on transfer queue {target_idx}"
             )
 
             vllm_model_runner_output.req_ids = copy.deepcopy(
@@ -328,9 +324,7 @@ class Driver:
             )
             self._output(vllm_model_runner_output)
 
-            del prefill_output
-            del vllm_model_runner_output
-            del vllm_request
+            # TODO(fhzhang): remove transferred requests from the prefill engine once we are done.
 
     def _transfer_thread(self, idx: int):
         """Transfers the kv cache on an active request to the least full
@@ -338,28 +332,33 @@ class Driver:
         transfer_backlog = self._transfer_backlogs[idx]
         while self.live:
             # The transfer thread can just sleep until it has work to do.
-            prefill_output = transfer_backlog.get(block=True)
-            if prefill_output is None:
+            kv_caches = transfer_backlog.get(block=True)
+            if kv_caches is None:
                 break
-            kv_cache = prefill_output["cache"]
-            request = prefill_output["request"]
-            target_idx = min(self._generate_backlogs.items(),
-                             key=lambda q: q[1].qsize())[0]
-            # Only transfer the KVCache for the disaggregated serving.
-            if not self._interleaved_mode:
-                kv_cache = self._generate_engines[target_idx].model_runner.transfer_kv_cache(kv_cache)
-                prefill_output["cache"] = kv_cache
 
-            # Place the request on the correct generate backlog and block if full.
-            self._generate_backlogs[target_idx].put(prefill_output, block=True)
-            logging.info(
-                "Successfully transferred prefill request %s"
-                "from prefill engine %d to generate engine %d. generate backlog len %d",
-                request.request_id,
-                idx,
-                target_idx,
-                self._generate_backlogs[target_idx].qsize(),
-            )
+            for req_id, kv_cache in kv_caches.items():
+                request = self.requests[req_id]
+                target_idx = min(self._generate_backlogs.items(),
+                                 key=lambda q: q[1].qsize())[0]
+                prefill_output = {
+                    "cache": kv_cache,
+                    "request": request,
+                }
+                # Only transfer the KVCache for the disaggregated serving.
+                if not self._interleaved_mode:
+                    kv_cache = self._generate_engines[target_idx].model_runner.transfer_kv_cache(kv_cache)
+                    prefill_output["cache"] = kv_cache
+
+                # Place the request on the correct generate backlog and block if full.
+                self._generate_backlogs[target_idx].put(prefill_output, block=True)
+                logging.info(
+                    "Successfully transferred prefill request %s"
+                    "from prefill engine %d to generate engine %d. generate backlog len %d",
+                    request.request_id,
+                    idx,
+                    target_idx,
+                    self._generate_backlogs[target_idx].qsize(),
+                )
 
     def _generate_thread(self, idx: int):
         """Step token generation and insert prefills from backlog."""
@@ -400,7 +399,9 @@ class Driver:
                 request = prefill_output["request"]
                 if not self._interleaved_mode:
                     kv_cache = prefill_output["cache"]
-                    new_block_ids = generate_engine.get_new_block_ids(request)
+                    new_block_ids = generate_engine.get_new_block_ids(
+                        request, request.num_tokens
+                    )
                     generate_engine.model_runner.insert_request_with_kv_cache(
                         request, kv_cache, new_block_ids
                     )
@@ -409,8 +410,6 @@ class Driver:
             logging.info(f"executing generation... #active_reqs={len(active_reqs)}")
             # At this point, we know that we have at least some slots filled.
             # Now we actually take a generate step on requests in the slots.
-            if self._interleaved_mode:
-                self._interleaved_lock.acquire()
             vllm_model_runner_output, reqs_to_remove = generate_engine.generate(
                 active_reqs)
             for req_id in reqs_to_remove:
@@ -422,8 +421,6 @@ class Driver:
             vllm_model_runner_output.req_id_to_index = copy.deepcopy(
                 vllm_model_runner_output.req_id_to_index
             )
-            if self._interleaved_mode:
-                self._interleaved_lock.release()
             if len(reqs_to_remove) != 0:
                 self.reqs_to_remove = reqs_to_remove
 
