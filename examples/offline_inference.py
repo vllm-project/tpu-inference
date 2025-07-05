@@ -83,7 +83,7 @@ def main(args: dict):
         "Who wrote the American Declaration of Independence?",
         'Who wrote the novel "Pride and Prejudice"?',
     ]
-
+    
     if envs.VLLM_TORCH_PROFILER_DIR is not None:
         llm.start_profile()
     outputs = llm.generate(prompts, sampling_params)

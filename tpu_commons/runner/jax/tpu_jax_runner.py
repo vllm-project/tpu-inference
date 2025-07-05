@@ -26,7 +26,7 @@ from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
 from tpu_commons.runner.tpu_torch_xla_runner import (_get_padded_token_len,
                                                      _get_req_paddings,
                                                      _get_token_paddings)
-from tpu_commons.runner.utils import get_padded_num_reqs_with_upper_limit
+from tpu_commons.runner.utils import get_padded_num_reqs_with_upper_limit, LatencyTracker
 
 logger = init_logger(__name__)
 
@@ -106,14 +106,6 @@ class TPUModelRunner():
                                       axis_names,
                                       devices=self.devices)
 
-            # In case we are in disagg mode, the number of devices can exceed 8.
-            # TODO(fhzhang): fix this properly as we implement disagg serving.
-            if len(self.devices) > 8:
-                self.devices = self.devices[:8]
-            mesh_shape = (1, len(self.devices))
-            self.mesh = jax.make_mesh(mesh_shape,
-                                      axis_names,
-                                      devices=self.devices)
         logger.warning(f"Init mesh | mesh={self.mesh}")
 
     def _init_inputs(self) -> None:
@@ -333,7 +325,43 @@ class TPUModelRunner():
         # We shard along the num_kv_heads dimension (axis=1), which corresponds
         # to the "model" axis of the mesh for tensor parallelism.
         sharding = NamedSharding(self.mesh, PartitionSpec(None, "model", None))
-        transferred_kv_cache = jax.device_put(kv_cache_slices, sharding)
+        kv_cache_slices = jax.device_put(kv_cache_slices, sharding)
+
+        transferred_kv_cache = []
+        if kv_cache_slices:
+            num_tokens_in_cache = kv_cache_slices[0].shape[0]
+        else:
+            num_tokens_in_cache = 0
+
+        if num_tokens_in_cache > 0:
+            num_blocks_for_cache = cdiv(num_tokens_in_cache, self.block_size)
+
+            with LatencyTracker(f"reshape-{len(kv_cache_slices)}"):
+                # For each layer, scatter the slices into the main KV cache.
+                for i, layer_kv_cache_slices in enumerate(kv_cache_slices):
+                    # Pad the slices to be a multiple of block_size.
+                    padded_len = num_blocks_for_cache * self.block_size
+                    padding_size = padded_len - num_tokens_in_cache
+
+                    padded_slices = jnp.pad(layer_kv_cache_slices,
+                                            ((0, padding_size), (0, 0), (0, 0)),
+                                            mode='constant')
+
+                    # Reshape to (num_blocks_for_req, block_size, ...)
+                    reshaped_slices = padded_slices.reshape(
+                        num_blocks_for_cache, self.block_size,
+                        *padded_slices.shape[1:])
+
+                    # Enforce the sharding to match the destination KV cache to
+                    # prevent donation errors. The main KV cache is sharded on the
+                    # num_kv_heads dimension (axis=2).
+                    reshaped_slices = jax.lax.with_sharding_constraint(
+                        reshaped_slices, self.kv_caches[i].sharding)
+
+                    transferred_kv_cache.append(reshaped_slices)
+
+        for arr in transferred_kv_cache:
+            arr.block_until_ready()
         return transferred_kv_cache
 
     def insert_request_with_kv_cache(
@@ -377,30 +405,20 @@ class TPUModelRunner():
                     f"Not enough blocks allocated for request {request.req_id}. "
                     f"Need {num_blocks_for_cache}, got {len(block_numbers)}.")
 
-            # For each layer, scatter the slices into the main KV cache.
-            for i, layer_kv_cache_slices in enumerate(kv_cache_slices):
-                # Pad the slices to be a multiple of block_size.
-                padded_len = num_blocks_for_cache * self.block_size
-                padding_size = padded_len - num_tokens_in_cache
+            with LatencyTracker(f"SliceManipulate-{len(kv_cache_slices)}"):
+                @jax.jit
+                def update_array_func(arr, index, value):
+                    return arr.at[jnp.array(index)].set(value)
 
-                padded_slices = jnp.pad(layer_kv_cache_slices,
-                                        ((0, padding_size), (0, 0), (0, 0)),
-                                        mode='constant')
+                # For each layer, scatter the slices into the main KV cache.
+                for i, layer_kv_cache_slices in enumerate(kv_cache_slices):
 
-                # Reshape to (num_blocks_for_req, block_size, ...)
-                reshaped_slices = padded_slices.reshape(
-                    num_blocks_for_cache, self.block_size,
-                    *padded_slices.shape[1:])
-
-                # Enforce the sharding to match the destination KV cache to
-                # prevent donation errors. The main KV cache is sharded on the
-                # num_kv_heads dimension (axis=2).
-                reshaped_slices = jax.lax.with_sharding_constraint(
-                    reshaped_slices, self.kv_caches[i].sharding)
-
-                # Scatter into the main KV cache for this layer.
-                self.kv_caches[i] = self.kv_caches[i].at[jnp.array(
-                    block_numbers[:num_blocks_for_cache])].set(reshaped_slices)
+                    # Scatter into the main KV cache for this layer.
+                    self.kv_caches[i] = update_array_func(
+                        self.kv_caches[i],
+                        block_numbers[:num_blocks_for_cache],
+                        layer_kv_cache_slices,
+                    )
             logger.debug(
                 f"Updated kv cache entries cnt={len(self.kv_caches)}")
 

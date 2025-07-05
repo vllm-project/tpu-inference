@@ -156,10 +156,6 @@ class EngineCore:
         assert len(kv_cache_specs) == len(available_gpu_memory)
 
         # Get the kv cache tensor size
-        # We leave 50% memory for processing and incoming batches. This is due to the
-        # donation issues we are seeing:
-        #   /mlir.py:1184: UserWarning: Some donated buffers were not usable: bfloat16[4,2737,32,128]...
-        # TODO(fhzhang): fix the donation issues!
         kv_cache_configs = [
             get_kv_cache_config(vllm_config, kv_cache_spec_one_worker,
                                 available_gpu_memory_one_worker)
