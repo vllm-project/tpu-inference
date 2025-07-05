@@ -401,7 +401,7 @@ class TPUModelRunner():
                 # Scatter into the main KV cache for this layer.
                 self.kv_caches[i] = self.kv_caches[i].at[jnp.array(
                     block_numbers[:num_blocks_for_cache])].set(reshaped_slices)
-            logger.warning(
+            logger.debug(
                 f"Updated kv cache entries cnt={len(self.kv_caches)}")
 
         # Update runner's internal state to track the new request.
@@ -440,11 +440,13 @@ class TPUModelRunner():
         self,
         scheduler_output: "VllmSchedulerOutput",
     ) -> tuple[AttentionMetadata, ModelRunnerOutput]:
+        self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
             # Return empty ModelRunnerOutput if there's no work to do.
             logger.warning(f"Nothing scheduled: {scheduler_output}!")
+            if len(scheduler_output.finished_req_ids) == 0:
+                raise Exception("Should not schedule a request that does nothing!")
             return DUMMY_METADATA, EMPTY_MODEL_RUNNER_OUTPUT,
-        self._update_states(scheduler_output)
 
         inputs = self._prepare_inputs(scheduler_output)
         self.kv_caches, next_tokens, _ = self.model_fn(*inputs)

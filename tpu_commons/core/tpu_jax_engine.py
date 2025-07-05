@@ -16,7 +16,6 @@
 import warnings
 from typing import Any, Tuple
 
-import jax
 import numpy as np
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
@@ -46,6 +45,7 @@ class JaxEngine():
         self.kv_cache_manager = kv_cache_manager
         self.vllm_config = vllm_config
         self._max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        self._max_num_reqs = vllm_config.scheduler_config.max_num_seqs
 
         # Requests we are already processing.
         self._requests: list[Request] = []
@@ -63,17 +63,43 @@ class JaxEngine():
         req_id = vllm_request.request_id
         return self.kv_cache_manager.get_block_ids(req_id)
 
-    def has_more_prefill_capacity(self):
-        """Returns True if we still have room for more prefill requests."""
-        return self._pending_num_prefill_tokens < self._max_num_tokens
+    def has_more_capacity(self):
+        """Returns True if we still have room for more requests.
+        
+        Most likely prefill will be gated by the number of tokens; generate will
+        be gated by the number of requests.
+        """
+        return (
+            self._pending_num_prefill_tokens < self._max_num_tokens
+            and len(self._requests) + len(self._new_requests) < self._max_num_reqs
+            and self.model_runner.input_batch.num_reqs < self.model_runner.max_num_reqs
+        )
+
+    def dump_stats(self) -> str:
+        return (
+            f"#prefill_tokens={self._pending_num_prefill_tokens},"
+            f"#reqs={len(self._requests)}, #new_reqs={len(self._new_requests)},"
+            f"has_more_cacacity={self.has_more_capacity()},"
+            f"input_batch_size={self.model_runner.input_batch.num_reqs};"
+            f"input_batch={self.model_runner.input_batch.req_id_to_index}"
+        )
 
     def is_prefill_idle(self) -> bool:
-        return self._pending_num_prefill_tokens <= 0
+        return (
+            self._pending_num_prefill_tokens <= 0
+            and self.model_runner.input_batch.num_reqs <= 0
+        )
 
-    def add_request(self, req: Request):
+    def is_generate_idle(self) -> bool:
+        return (
+            len(self._requests) + len(self._new_requests) <= 0
+            and self.model_runner.input_batch.num_reqs <= 0
+        )
+
+    def add_request(self, req: Request, num_tokens: int):
         self._request_map[req.request_id] = req
         self._new_requests.append(req)
-        self._pending_num_prefill_tokens += req.num_tokens - req.num_computed_tokens
+        self._pending_num_prefill_tokens += num_tokens
 
     def _schedule_prefill(self) -> SchedulerOutput:
         """Schedule the next batch to be processed.
@@ -150,7 +176,12 @@ class JaxEngine():
 
         metadata, runner_output = self.model_runner._execute_model(
             scheduler_output)
-        logger.info(f"Prefill result: {runner_output}")
+
+        if scheduler_output.total_num_scheduled_tokens <= 0:
+            logger.warning("No active requests!")
+            return {}, EMPTY_MODEL_RUNNER_OUTPUT
+
+        logger.debug(f"Prefill result: {runner_output}")
 
         num_tokens_scheduled: list[int] = []
         for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items(
@@ -170,7 +201,7 @@ class JaxEngine():
                 req.num_computed_tokens += 1
                 req.num_cached_tokens += 1
 
-                logger.info(
+                logger.debug(
                     f"prefill done: for {req_id} with {num_tokens} tokens")
                 self._completed_requests.append(req_id)
                 self._request_map.pop(req_id)
@@ -187,21 +218,18 @@ class JaxEngine():
 
         return kv_cache_slices, runner_output
 
-    def generate(
-            self, requests: dict[str,
-                                 Request]) -> Tuple[ModelRunnerOutput, Any]:
-        """Public API for generate that updates page state outside JIT."""
+    def _schedule_generate(self) -> SchedulerOutput:
         # Filter out requests that are already finished to prevent
         # them from being scheduled again.
-        active_requests = {
-            req_id: req
-            for req_id, req in requests.items() if not req.is_finished()
-        }
+        self._requests.extend(self._new_requests)
+        self._new_requests.clear()
 
-        # If there are no active requests, return an empty output.
-        if not active_requests:
-            logger.warning("No active requests!")
-            return EMPTY_MODEL_RUNNER_OUTPUT, []
+        active_requests = {
+            req.request_id: req
+            for req in self._requests if not req.is_finished()
+        }
+        logger.debug(
+            f"scheduling generation... #active_reqs={len(active_requests)}")
 
         cached_reqs: list[CachedRequestData] = []
         num_scheduled_tokens: dict[str, int] = {}
@@ -215,12 +243,11 @@ class JaxEngine():
             req_data = CachedRequestData.from_request(
                 request, False, new_token_ids,
                 req_to_new_block_ids[request_id])
-            logger.info(f"Prepare generate: {req_data}")
 
             cached_reqs.append(req_data)
             num_scheduled_tokens[request_id] = 1
 
-        scheduler_output = SchedulerOutput(
+        return SchedulerOutput(
             scheduled_new_reqs=[],
             scheduled_cached_reqs=cached_reqs,
             num_scheduled_tokens=num_scheduled_tokens,
@@ -228,17 +255,26 @@ class JaxEngine():
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
             num_common_prefix_blocks=[0],
-            finished_req_ids=set(),
+            finished_req_ids=set(self._completed_requests),
             free_encoder_input_ids=[],
             structured_output_request_ids={},
             grammar_bitmask=None,
         )
 
+    def generate(self) -> ModelRunnerOutput:
+        """Public API for generate that updates page state outside JIT."""
+        scheduler_output = self._schedule_generate()
+        self._completed_requests.clear()
+
         _, runner_output = self.model_runner._execute_model(scheduler_output)
 
+        if scheduler_output.total_num_scheduled_tokens <= 0:
+            logger.warning("No active requests!")
+            return EMPTY_MODEL_RUNNER_OUTPUT
+
         sampled_token_ids = runner_output.sampled_token_ids
-        reqs_to_remove: list[str] = []
-        for req_id, request in active_requests.items():
+        for req_id in scheduler_output.num_scheduled_tokens.keys():
+            request = self._request_map[req_id]
             req_index = runner_output.req_id_to_index[req_id]
             new_token_ids = sampled_token_ids[
                 req_index] if sampled_token_ids else []
@@ -250,18 +286,18 @@ class JaxEngine():
                     request, self.vllm_config.scheduler_config.max_model_len)
                 if stopped:
                     # The request is now finished. Mark it for removal.
-                    reqs_to_remove.append(req_id)
+                    self._completed_requests.append(req_id)
+                    self._request_map.pop(req_id)
                     # Stop processing more tokens for this request in this step.
                     break
             request.num_computed_tokens += num_appended
             request.num_cached_tokens += num_appended
-        logger.info(
-            f"generate done: {runner_output}; req to remove: {reqs_to_remove}")
-        return runner_output, reqs_to_remove
-
-    def insert(self, kv_cache: list[jax.Array]) -> None:
-        """Non-JIT wrapper for inserting prefill cache."""
-        pass
+        self._requests = [
+            r for r in self._requests if r.request_id in self._request_map
+        ]
+        logger.debug(
+            f"generate done: {runner_output}; req to remove: {self._completed_requests}")
+        return runner_output
 
     def get_prefix_destination_sharding(self) -> Any:
         return {
