@@ -135,12 +135,12 @@ class EngineCore:
             logger.info("Batch queue is enabled with size %d",
                         self.batch_queue_size)
             self.batch_queue = queue.Queue(self.batch_queue_size)
-        logger.warning("set up jetstream driver")
+        logger.warning("set up disaggregated driver")
         self.orchestrator = self._setup_driver(
             vllm_config,
             self.kv_cache_manager,
         )
-        logger.warning("starting jetstream orchestrator")
+        logger.warning("starting disaggregated orchestrator")
 
     def _initialize_kv_caches(self, vllm_config: VllmConfig,
                               executor) -> tuple[int, int, KVCacheConfig]:
@@ -162,7 +162,7 @@ class EngineCore:
         # TODO(fhzhang): fix the donation issues!
         kv_cache_configs = [
             get_kv_cache_config(vllm_config, kv_cache_spec_one_worker,
-                                available_gpu_memory_one_worker * 0.5)
+                                available_gpu_memory_one_worker)
             for kv_cache_spec_one_worker, available_gpu_memory_one_worker in
             zip(kv_cache_specs, available_gpu_memory)
         ]
@@ -217,8 +217,7 @@ class EngineCore:
             self.structured_output_manager.grammar_init(req)
 
         self.orchestrator.place_request_on_prefill_queue(req)
-        logger.warning("added req %s to jetstream orchestrator.",
-                       req.request_id)
+        logger.debug("added req %s to disaggregated orchestrator.", req.request_id)
 
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
