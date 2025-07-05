@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for JaxEngine._schedule."""
+"""Tests for JaxEngine._schedule_prefill."""
+import unittest
 from unittest.mock import Mock
 
-import unittest
 import torch
-from vllm.config import (CacheConfig, ModelConfig, SchedulerConfig, VllmConfig)
+from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
@@ -17,6 +17,7 @@ EOS_TOKEN_ID = 50256
 
 
 class JaxEngineTest(unittest.TestCase):
+
     def create_test_jax_engine(
         self,
         max_num_seqs: int = 8,
@@ -56,8 +57,8 @@ class JaxEngineTest(unittest.TestCase):
             kv_cache_tensors=[],
             kv_cache_groups=[
                 KVCacheGroupSpec(['layer'],
-                                 FullAttentionSpec(block_size, 1, 1, torch.float32,
-                                                   False))
+                                 FullAttentionSpec(block_size, 1, 1,
+                                                   torch.float32, False))
             ],
         )
         cache_config.num_gpu_blocks = num_blocks
@@ -74,13 +75,13 @@ class JaxEngineTest(unittest.TestCase):
         engine = JaxEngine(vllm_config, kv_cache_manager, mock_executor)
         return engine
 
-
     def create_requests(self,
                         num_requests: int,
                         num_tokens: int = 10,
                         max_tokens: int = 16) -> list[Request]:
         """Creates a list of requests for testing."""
-        sampling_params = SamplingParams(ignore_eos=False, max_tokens=max_tokens)
+        sampling_params = SamplingParams(ignore_eos=False,
+                                         max_tokens=max_tokens)
         requests = []
         for i in range(num_requests):
             request = Request(
@@ -96,7 +97,6 @@ class JaxEngineTest(unittest.TestCase):
             requests.append(request)
         return requests
 
-
     def test_jax_engine_schedule_new_requests(self):
         """Tests scheduling of new requests that fit within the token limit."""
         engine = self.create_test_jax_engine(max_num_batched_tokens=100)
@@ -108,7 +108,7 @@ class JaxEngineTest(unittest.TestCase):
         assert len(engine._new_requests) == 2
         assert not engine._requests
 
-        output = engine._schedule()
+        output = engine._schedule_prefill()
 
         assert len(output.scheduled_new_reqs) == 2
         assert not output.scheduled_cached_reqs
@@ -122,7 +122,6 @@ class JaxEngineTest(unittest.TestCase):
         assert engine._requests[0].request_id == "0"
         assert engine._requests[1].request_id == "1"
 
-
     def test_jax_engine_schedule_new_requests_with_limit(self):
         """Tests scheduling new requests when they exceed the token limit."""
         engine = self.create_test_jax_engine(max_num_batched_tokens=50)
@@ -131,7 +130,7 @@ class JaxEngineTest(unittest.TestCase):
         for req in requests:
             engine.add_request(req)
 
-        output = engine._schedule()
+        output = engine._schedule_prefill()
 
         # The first request is fully scheduled, the second is partially scheduled.
         assert len(output.scheduled_new_reqs) == 2
@@ -144,7 +143,6 @@ class JaxEngineTest(unittest.TestCase):
         assert not engine._new_requests
         assert len(engine._requests) == 2
 
-
     def test_jax_engine_schedule_running_requests_chunked(self):
         """Tests scheduling of a running request (chunked prefill)."""
         engine = self.create_test_jax_engine(max_num_batched_tokens=50)
@@ -154,7 +152,7 @@ class JaxEngineTest(unittest.TestCase):
         engine.add_request(req)
 
         # First schedule call
-        output1 = engine._schedule()
+        output1 = engine._schedule_prefill()
 
         assert len(output1.scheduled_new_reqs) == 1
         assert not output1.scheduled_cached_reqs
@@ -167,7 +165,7 @@ class JaxEngineTest(unittest.TestCase):
         assert not engine._new_requests
 
         # Second schedule call
-        output2 = engine._schedule()
+        output2 = engine._schedule_prefill()
 
         assert not output2.scheduled_new_reqs
         assert len(output2.scheduled_cached_reqs) == 1
@@ -177,7 +175,6 @@ class JaxEngineTest(unittest.TestCase):
         cached_req_data = output2.scheduled_cached_reqs[0]
         assert cached_req_data.req_id == req.request_id
         assert len(cached_req_data.new_token_ids) == 30
-
 
     def test_jax_engine_schedule_mixed_requests(self):
         """Tests scheduling a mix of running and new requests."""
@@ -189,7 +186,7 @@ class JaxEngineTest(unittest.TestCase):
 
         # Temporarily reduce capacity to simulate chunking
         engine._max_num_tokens = 50
-        _ = engine._schedule()
+        _ = engine._schedule_prefill()
         running_req.num_computed_tokens += 50
         engine._max_num_tokens = 100  # Restore capacity
 
@@ -199,11 +196,12 @@ class JaxEngineTest(unittest.TestCase):
         engine.add_request(new_req)
 
         # Second schedule call
-        output2 = engine._schedule()
+        output2 = engine._schedule_prefill()
 
         # The running request's next chunk should be scheduled first
         assert len(output2.scheduled_cached_reqs) == 1
-        assert output2.scheduled_cached_reqs[0].req_id == running_req.request_id
+        assert output2.scheduled_cached_reqs[
+            0].req_id == running_req.request_id
         assert output2.num_scheduled_tokens[running_req.request_id] == 30
 
         # Then the new request should be scheduled
@@ -212,3 +210,7 @@ class JaxEngineTest(unittest.TestCase):
         assert output2.num_scheduled_tokens[new_req.request_id] == 40
 
         assert output2.total_num_scheduled_tokens == 70  # 30 + 40
+
+
+if __name__ == '__main__':
+    unittest.main()
