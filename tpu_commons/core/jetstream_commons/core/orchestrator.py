@@ -55,8 +55,6 @@ import traceback
 from collections import defaultdict
 from typing import Any, Optional
 
-import jax
-
 from vllm.config import VllmConfig
 from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.outputs import ModelRunnerOutput
@@ -141,7 +139,7 @@ class Driver:
             self._generate_engines = generate_engines
             self._interleaved_mode = False
 
-        self.requests: dict[str, Request]= {}
+        self.requests: dict[str, Request] = {}
         self.reqs_to_remove = []
 
         # Stages 1-4 represent the life cycle of a request.
@@ -286,7 +284,8 @@ class Driver:
             block = prefill_engine.is_prefill_idle()
             while prefill_engine.has_more_prefill_capacity():
                 try:
-                    vllm_request = self._prefill_backlog.get(block=block, timeout=1.0)
+                    vllm_request = self._prefill_backlog.get(block=block,
+                                                             timeout=1.0)
                 except queue.Empty:
                     if block:
                         continue
@@ -294,7 +293,8 @@ class Driver:
                         break
 
                 logging.info(
-                    "get request %s from prefill backlog", vllm_request.request_id
+                    "get request %s from prefill backlog",
+                    vllm_request.request_id
                     if vllm_request is not None else "None")
 
                 if vllm_request is None:
@@ -309,19 +309,22 @@ class Driver:
                 logging.info("Nothing to process, we are done, exiting...")
                 break
 
+            # Compute new kv cache for the prefill_content.
+            if self._interleaved_mode:
+                self._interleaved_lock.acquire()
             kv_caches, vllm_model_runner_output = prefill_engine.prefill()
-
             my_transfer_backlog.put(kv_caches, block=True)
+            if self._interleaved_mode:
+                self._interleaved_lock.release()
+
             logging.info(
                 f"Prefill worker {idx}: Finished prefill batch, Placed request on transfer queue {target_idx}"
             )
 
             vllm_model_runner_output.req_ids = copy.deepcopy(
-                vllm_model_runner_output.req_ids
-            )
+                vllm_model_runner_output.req_ids)
             vllm_model_runner_output.req_id_to_index = copy.deepcopy(
-                vllm_model_runner_output.req_id_to_index
-            )
+                vllm_model_runner_output.req_id_to_index)
             self._output(vllm_model_runner_output)
 
             # TODO(fhzhang): remove transferred requests from the prefill engine once we are done.
@@ -336,6 +339,8 @@ class Driver:
             if kv_caches is None:
                 break
 
+            logging.info(f"KV Cache items received: {kv_caches.keys()}")
+
             for req_id, kv_cache in kv_caches.items():
                 request = self.requests[req_id]
                 target_idx = min(self._generate_backlogs.items(),
@@ -346,13 +351,15 @@ class Driver:
                 }
                 # Only transfer the KVCache for the disaggregated serving.
                 if not self._interleaved_mode:
-                    kv_cache = self._generate_engines[target_idx].model_runner.transfer_kv_cache(kv_cache)
+                    kv_cache = self._generate_engines[
+                        target_idx].model_runner.transfer_kv_cache(kv_cache)
                     prefill_output["cache"] = kv_cache
 
                 # Place the request on the correct generate backlog and block if full.
-                self._generate_backlogs[target_idx].put(prefill_output, block=True)
+                self._generate_backlogs[target_idx].put(prefill_output,
+                                                        block=True)
                 logging.info(
-                    "Successfully transferred prefill request %s"
+                    "Successfully transferred prefill request %s "
                     "from prefill engine %d to generate engine %d. generate backlog len %d",
                     request.request_id,
                     idx,
@@ -380,7 +387,8 @@ class Driver:
 
                 block = len(active_reqs) == 0
                 try:
-                    prefill_output = my_generate_backlog.get(block=block, timeout=1.0)
+                    prefill_output = my_generate_backlog.get(block=block,
+                                                             timeout=1.0)
                     # Got free slot and new request, use them.
                 except queue.Empty:
                     # No new requests, we can't insert, so put back slot.
@@ -400,14 +408,13 @@ class Driver:
                 if not self._interleaved_mode:
                     kv_cache = prefill_output["cache"]
                     new_block_ids = generate_engine.get_new_block_ids(
-                        request, request.num_tokens
-                    )
+                        request, request.num_tokens)
                     generate_engine.model_runner.insert_request_with_kv_cache(
-                        request, kv_cache, new_block_ids
-                    )
+                        request, kv_cache, new_block_ids)
                 active_reqs[request.request_id] = request
 
-            logging.info(f"executing generation... #active_reqs={len(active_reqs)}")
+            logging.info(
+                f"executing generation... #active_reqs={len(active_reqs)}")
             # At this point, we know that we have at least some slots filled.
             # Now we actually take a generate step on requests in the slots.
             vllm_model_runner_output, reqs_to_remove = generate_engine.generate(
@@ -416,11 +423,9 @@ class Driver:
                 active_reqs.pop(req_id)
 
             vllm_model_runner_output.req_ids = copy.deepcopy(
-                vllm_model_runner_output.req_ids
-            )
+                vllm_model_runner_output.req_ids)
             vllm_model_runner_output.req_id_to_index = copy.deepcopy(
-                vllm_model_runner_output.req_id_to_index
-            )
+                vllm_model_runner_output.req_id_to_index)
             if len(reqs_to_remove) != 0:
                 self.reqs_to_remove = reqs_to_remove
 

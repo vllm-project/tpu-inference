@@ -18,13 +18,11 @@ could want to call, enabling interleaved (continuous batching) inference.
 """
 
 import abc
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Union
 
 import jax
 import numpy as np
 from flax import struct
-from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.request import Request
 
 # The model parameters - their partitioning will be unique for different prefill
 # and decode topoologies.

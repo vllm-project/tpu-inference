@@ -14,18 +14,17 @@
 """Implementation of Engine API for MaxText."""
 
 import warnings
-from typing import Any, Optional, Tuple
+from typing import Any, Tuple
 
-import numpy as np
 import jax
+import numpy as np
 from vllm.logger import init_logger
-from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput 
+from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
+                                       SchedulerOutput)
 from vllm.v1.core.sched.utils import check_stop
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 
-from tpu_commons.core.jetstream_commons.engine import engine_api
-from tpu_commons.runner.jax.input_batch_jax import CachedRequestState
 
 warnings.simplefilter("ignore", category=FutureWarning)
 DecodeState = Any
@@ -52,6 +51,7 @@ class JaxEngine():
         self._requests: list[Request] = []
         # Newly added requests.
         self._new_requests: list[Request] = []
+        self._completed_requests: list[str] = []
         self._request_map: dict[str, Request] = {}
         self._pending_num_prefill_tokens = 0
 
@@ -59,9 +59,7 @@ class JaxEngine():
         computed_blocks, _ = self.kv_cache_manager.get_computed_blocks(
             vllm_request)
         _ = self.kv_cache_manager.allocate_slots(
-            vllm_request,
-            num_tokens,
-            new_computed_blocks=computed_blocks)
+            vllm_request, num_tokens, new_computed_blocks=computed_blocks)
         req_id = vllm_request.request_id
         return self.kv_cache_manager.get_block_ids(req_id)
 
@@ -79,7 +77,7 @@ class JaxEngine():
 
     def _schedule_prefill(self) -> SchedulerOutput:
         """Schedule the next batch to be processed.
-        
+
         We currently prioritize oldest requests in the queue.
         """
         capacity_left = self._max_num_tokens
@@ -88,12 +86,16 @@ class JaxEngine():
         for req in self._requests:
             assert capacity_left > 0
 
-            num_tokens_to_schedule = min(capacity_left, req.num_tokens - req.num_computed_tokens)
+            num_tokens_to_schedule = min(
+                capacity_left, req.num_tokens - req.num_computed_tokens)
             new_block_ids = self.get_new_block_ids(req, num_tokens_to_schedule)
 
-            new_token_ids = req.all_token_ids[
-                req.num_computed_tokens:req.num_computed_tokens + num_tokens_to_schedule]
-            req_data = CachedRequestData.from_request(req, False, new_token_ids, new_block_ids)
+            new_token_ids = req.all_token_ids[req.num_computed_tokens:req.
+                                              num_computed_tokens +
+                                              num_tokens_to_schedule]
+            req_data = CachedRequestData.from_request(req, False,
+                                                      new_token_ids,
+                                                      new_block_ids)
             cached_reqs.append(req_data)
             capacity_left -= num_tokens_to_schedule
             num_scheduled_tokens[req.request_id] = num_tokens_to_schedule
@@ -103,7 +105,8 @@ class JaxEngine():
         for req in self._new_requests:
             assert capacity_left > 0
 
-            num_tokens_to_schedule = min(capacity_left, req.num_tokens - req.num_computed_tokens)
+            num_tokens_to_schedule = min(
+                capacity_left, req.num_tokens - req.num_computed_tokens)
 
             new_block_ids = self.get_new_block_ids(req, num_tokens_to_schedule)
             req_data = NewRequestData.from_request(req, new_block_ids)
@@ -122,7 +125,7 @@ class JaxEngine():
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
             num_common_prefix_blocks=[0],
-            finished_req_ids=set(),
+            finished_req_ids=set(self._completed_requests),
             free_encoder_input_ids=[],
             structured_output_request_ids={},
             grammar_bitmask=None,
@@ -133,59 +136,66 @@ class JaxEngine():
         if not scheduled_reqs:
             return
         self._requests.extend(scheduled_reqs)
-        self._new_requests = [r for r in self._new_requests if r not in scheduled_reqs]
-
+        self._new_requests = [
+            r for r in self._new_requests if r not in scheduled_reqs
+        ]
 
     # Public non-JIT prefill method that updates page state
     def prefill(self) -> Tuple[Prefix, ModelRunnerOutput]:
         scheduler_output = self._schedule_prefill()
         self._pending_num_prefill_tokens -= scheduler_output.total_num_scheduled_tokens
-        
+        self._completed_requests.clear()
+
         logger.info(f"Scheduled output: {scheduler_output}")
-            
-        metadata, runner_output = self.model_runner._execute_model(scheduler_output)
+
+        metadata, runner_output = self.model_runner._execute_model(
+            scheduler_output)
         logger.info(f"Prefill result: {runner_output}")
 
-        completed_requests: list[str] = []
-        num_tokens_done: list[int] = []
-        for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
+        num_tokens_scheduled: list[int] = []
+        for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items(
+        ):
             req = self._request_map[req_id]
             req.num_computed_tokens += num_tokens
             req.num_cached_tokens += num_tokens
             req.status = RequestStatus.RUNNING
-            
-            prefill_done = req.num_computed_tokens == req.num_prompt_tokens
-            
-            if prefill_done:
-                num_tokens_done.append(num_tokens)
 
+            prefill_done = req.num_computed_tokens == req.num_prompt_tokens
+            num_tokens_scheduled.append(num_tokens)
+
+            if prefill_done:
                 new_token_ids = runner_output.sampled_token_ids[
                     runner_output.req_id_to_index[req_id]]
                 req.append_output_token_ids(new_token_ids)
                 req.num_computed_tokens += 1
                 req.num_cached_tokens += 1
 
-                logger.info(f"prefill done: for {req_id} with {num_tokens} tokens")
-                completed_requests.append(req_id)
+                logger.info(
+                    f"prefill done: for {req_id} with {num_tokens} tokens")
+                self._completed_requests.append(req_id)
                 self._request_map.pop(req_id)
-        
-        num_scheduled_tokens_per_req = np.array(num_tokens_done, dtype=np.int32)
+
+        num_scheduled_tokens_per_req = np.array(num_tokens_scheduled,
+                                                dtype=np.int32)
         kv_cache_slices = self.model_runner.get_kv_cache_for_requests(
-            completed_requests, metadata.kv_cache_write_indices, num_scheduled_tokens_per_req
-        )
-                
-        self._requests = [r for r in self._requests if r.request_id in self._request_map]
+            self._completed_requests, metadata.kv_cache_write_indices,
+            num_scheduled_tokens_per_req)
+
+        self._requests = [
+            r for r in self._requests if r.request_id in self._request_map
+        ]
 
         return kv_cache_slices, runner_output
 
-    def generate(self, requests: dict[str, Request]) -> Tuple[ModelRunnerOutput, Any]:
+    def generate(
+            self, requests: dict[str,
+                                 Request]) -> Tuple[ModelRunnerOutput, Any]:
         """Public API for generate that updates page state outside JIT."""
         # Filter out requests that are already finished to prevent
         # them from being scheduled again.
         active_requests = {
             req_id: req
-            for req_id, req in requests.items()
-            if not req.is_finished()
+            for req_id, req in requests.items() if not req.is_finished()
         }
 
         # If there are no active requests, return an empty output.
@@ -198,8 +208,7 @@ class JaxEngine():
         req_to_new_block_ids = {}
         for request_id, request in active_requests.items():
             new_blocks = self.kv_cache_manager.allocate_slots(request, 1)
-            req_to_new_block_ids[
-                request_id] = new_blocks.get_block_ids()
+            req_to_new_block_ids[request_id] = new_blocks.get_block_ids()
             num_computed_tokens = request.num_computed_tokens
             new_token_ids = request.all_token_ids[
                 num_computed_tokens:num_computed_tokens + 1]
@@ -246,7 +255,8 @@ class JaxEngine():
                     break
             request.num_computed_tokens += num_appended
             request.num_cached_tokens += num_appended
-        logger.info(f"generate done: {runner_output}; req to remove: {reqs_to_remove}")
+        logger.info(
+            f"generate done: {runner_output}; req to remove: {reqs_to_remove}")
         return runner_output, reqs_to_remove
 
     def insert(self, kv_cache: list[jax.Array]) -> None:
