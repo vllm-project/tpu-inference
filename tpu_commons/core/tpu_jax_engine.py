@@ -24,6 +24,7 @@ from vllm.v1.core.sched.utils import check_stop
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 
+from tpu_commons.runner.utils import LatencyTracker
 
 warnings.simplefilter("ignore", category=FutureWarning)
 DecodeState = Any
@@ -208,9 +209,10 @@ class JaxEngine():
 
         num_scheduled_tokens_per_req = np.array(num_tokens_scheduled,
                                                 dtype=np.int32)
-        kv_cache_slices = self.model_runner.get_kv_cache_for_requests(
-            self._completed_requests, metadata.kv_cache_write_indices,
-            num_scheduled_tokens_per_req)
+        with LatencyTracker("ExtractKVCache"):
+            kv_cache_slices = self.model_runner.get_kv_cache_for_requests(
+                self._completed_requests, metadata.kv_cache_write_indices,
+                num_scheduled_tokens_per_req)
 
         self._requests = [
             r for r in self._requests if r.request_id in self._request_map

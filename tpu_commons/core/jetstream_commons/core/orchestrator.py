@@ -61,6 +61,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request
 
 from tpu_commons.core.tpu_jax_engine import JaxEngine
+from tpu_commons.runner.utils import LatencyTracker 
 
 root = logging.getLogger()
 root.setLevel(logging.INFO)
@@ -365,8 +366,9 @@ class Driver:
                 }
                 # Only transfer the KVCache for the disaggregated serving.
                 if not self._interleaved_mode:
-                    kv_cache = self._generate_engines[
-                        target_idx].model_runner.transfer_kv_cache(kv_cache)
+                    with LatencyTracker("KVCacheTransfer"):
+                        kv_cache = self._generate_engines[
+                            target_idx].model_runner.transfer_kv_cache(kv_cache)
                     prefill_output["cache"] = kv_cache
 
                 # Place the request on the correct generate backlog and block if full.
@@ -426,8 +428,9 @@ class Driver:
                         f"insert request for generation: {request.request_id}, "
                         f"{generate_engine.dump_stats()}"
                     )
-                    generate_engine.model_runner.insert_request_with_kv_cache(
-                        request, kv_cache, new_block_ids)
+                    with LatencyTracker("KVCacheInsert"):
+                        generate_engine.model_runner.insert_request_with_kv_cache(
+                            request, kv_cache, new_block_ids)
                 generate_engine.add_request(request, 1)
 
             model_output = generate_engine.generate()
