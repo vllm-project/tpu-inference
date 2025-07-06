@@ -289,6 +289,7 @@ class Driver:
                         continue
                     break
 
+                logging.debug(f"prefill-{idx}: looping on backlog... block={block}, {prefill_engine.dump_stats()}")
                 try:
                     vllm_request = self._prefill_backlog.get(block=block,
                                                              timeout=1.0)
@@ -298,7 +299,7 @@ class Driver:
                     break
 
                 logging.info(
-                    "prefill-{idx}: get request %s from prefill backlog",
+                    f"prefill-{idx}: get request %s from prefill backlog",
                     vllm_request.request_id
                     if vllm_request is not None else "None")
 
@@ -320,7 +321,8 @@ class Driver:
             # Compute new kv cache for the prefill_content.
             if self._interleaved_mode:
                 self._interleaved_lock.acquire()
-            kv_caches, vllm_model_runner_output = prefill_engine.prefill()
+            with LatencyTracker("prefill"):
+                kv_caches, vllm_model_runner_output = prefill_engine.prefill()
             my_transfer_backlog.put(kv_caches, block=True)
             if self._interleaved_mode:
                 self._interleaved_lock.release()
@@ -354,8 +356,9 @@ class Driver:
             if kv_caches is None:
                 break
 
-            logging.debug(f"KV Cache items received: {kv_caches.keys()}")
+            logging.info(f"KV Cache items received: {kv_caches.keys()}")
 
+            push_targets = []
             for req_id, kv_cache in kv_caches.items():
                 request = self.requests[req_id]
                 target_idx = min(self._generate_backlogs.items(),
@@ -370,11 +373,12 @@ class Driver:
                         kv_cache = self._generate_engines[
                             target_idx].model_runner.transfer_kv_cache(kv_cache)
                     prefill_output["cache"] = kv_cache
+                push_targets.append((target_idx, prefill_output))
 
-                # Place the request on the correct generate backlog and block if full.
-                self._generate_backlogs[target_idx].put(prefill_output,
-                                                        block=True)
-                logging.debug(
+            for target_idx, prefill_output in push_targets:
+                self._generate_backlogs[target_idx].put(prefill_output, block=True)
+                request = prefill_output["request"]
+                logging.info(
                     "Successfully transferred prefill request %s "
                     "from prefill engine %d to generate engine %d. generate backlog len %d",
                     request.request_id,
@@ -433,7 +437,8 @@ class Driver:
                             request, kv_cache, new_block_ids)
                 generate_engine.add_request(request, 1)
 
-            model_output = generate_engine.generate()
+            with LatencyTracker("generate"):
+                model_output = generate_engine.generate()
 
             logging.debug(f"generate output: {model_output}")
             model_output.req_ids = copy.deepcopy(model_output.req_ids)
