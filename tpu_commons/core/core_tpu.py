@@ -18,7 +18,6 @@ from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.config import \
     maybe_register_config_serialize_by_value
 from vllm.utils import make_zmq_socket
-from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (get_kv_cache_config,
                                          unify_kv_cache_configs)
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -113,11 +112,6 @@ class EngineCore:
 
         # Setup scheduler.
 
-        self.kv_cache_manager = KVCacheManager(
-            kv_cache_config=kv_cache_config,
-            max_model_len=vllm_config.scheduler_config.max_model_len,
-            enable_caching=False,
-        )
         logger.info("kv cache manager created.")
         # Setup MM Input Mapper.
         self.mm_input_cache_server = MirroredProcessingCache(
@@ -138,7 +132,7 @@ class EngineCore:
         logger.warning("set up disaggregated driver")
         self.orchestrator = self._setup_driver(
             vllm_config,
-            self.kv_cache_manager,
+            kv_cache_config,
         )
         logger.warning("starting disaggregated orchestrator")
 
@@ -190,14 +184,14 @@ class EngineCore:
                      "warmup model) took %.2f seconds"), elapsed)
         return num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config
 
-    def _setup_driver(self, vllm_config, kv_cache_manager):
+    def _setup_driver(self, vllm_config, kv_cache_config):
         prefill_engines = [
-            JaxEngine(vllm_config, kv_cache_manager, executor)
+            JaxEngine(vllm_config, kv_cache_config, executor)
             for executor in self.prefill_executors
         ]
 
         generate_engines = [
-            JaxEngine(vllm_config, kv_cache_manager, executor)
+            JaxEngine(vllm_config, kv_cache_config, executor)
             for executor in self.decode_executors
         ]
 

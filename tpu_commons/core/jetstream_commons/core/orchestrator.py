@@ -350,6 +350,7 @@ class Driver:
         """Transfers the kv cache on an active request to the least full
     generate backlog."""
         transfer_backlog = self._transfer_backlogs[idx]
+        prefill_engine = self._prefill_engines[idx]
         while self.live:
             # The transfer thread can just sleep until it has work to do.
             kv_caches = transfer_backlog.get(block=True)
@@ -373,6 +374,8 @@ class Driver:
                         kv_cache = self._generate_engines[
                             target_idx].model_runner.transfer_kv_cache(kv_cache)
                     prefill_output["cache"] = kv_cache
+                if request.is_finished():
+                    prefill_engine.free_request(request)
                 push_targets.append((target_idx, prefill_output))
 
             for target_idx, prefill_output in push_targets:
@@ -445,6 +448,14 @@ class Driver:
             model_output.req_id_to_index = copy.deepcopy(model_output.req_id_to_index)
 
             self._output(model_output)
+
+            # TODO(fhzhang): consider moving this out of the generate thread.
+            for req_id in model_output.req_ids:
+                request = self.requests[req_id]
+                if request.is_finished():
+                    generate_engine.free_request(request)
+                    self.requests.pop(request.request_id, None)
+                    logging.info("Freed request %s.", request.request_id)
 
             logging.debug(
                 "Finished generate step, req_ids %s, output tokens %s \n",
