@@ -162,10 +162,6 @@ class InputCreator:
         return jnp.arange(self.num_blocks,
                           dtype=jnp.int32)\
                              .reshape(self.input_args.batch_size, -1)
-        # return jnp.tile(
-        #    jnp.arange(self.input_args.max_seq_len, dtype=jnp.int32),
-        #    (self.input_args.batch_size, 1)
-        # )
 
     def _mock_kv_write_indices(self, seq_lens: List[int],
                                phase_types: List[str]):
@@ -224,13 +220,6 @@ class InputCreator:
             # TODO: Perform padding from jax/tpu_jax_runner.py:403
             return slot_mapping_metadata
 
-    # def _get_block_indices(self, seq_lens: List[int], layer_idx: int) -> jnp.array:
-    #    """For the purpose of simple benchmarking, just using some simple heuristics to select block indices."""
-    #    cumsum = 0
-    #    block_table = jnp
-    #    for (i, seq_len) in enumerate(seq_lens):
-    #       kv_start_idx = self.num_blocks // cumsum
-    #       num_blocks = seq_lenrow =
 
     def create_prefill_input(self,
                              previous_input: AttentionMetadata = None
@@ -351,44 +340,6 @@ class Benchmarker:
             model_input = input_creator.create_prefill_input()
             # TODO: add tracing
             self.model(model_input)
-
-    # def benchmark_prefill(self, input_args: InputArgs):
-    #    additional_cfg = self.vllm_config.additional_config
-
-    #    max_blocks_per_req = int(np.ceil(input_args.max_seq_len / input_args.block_size))
-
-    #    num_prefill_steps =_get_config_arg_or_default(additional_cfg, query_keys="max_blocks_per_req", default=1)
-    #    block_table = jnp.empty(shape=(), dtype=jnp.int32)
-    #    for (arg, default) in zip(
-    #     ["num_prefill_steps", "prefill_batch_size", "block_size", "max_seq_len"],
-    #     [5, 1, 16, 1024]
-    #     ):
-    #     config_setting = _get_config_arg_or_default(additional_cfg, query_keys=arg, default=default)
-    #     setattr(self, config_setting)
-
-    #    max_blocks_per_req = int(np.ceil(input_args.max_prefill_seq_len / input_args.block_size))
-
-    # def benchmark_decode(self):
-    #    pass
-
-
-# def run_benchmark(args: Namespace):
-#     devices = jax.local_devices()
-#     try:
-#         sharding_strategy = args.additional_config["sharding"]["sharding_strategy"]
-#     except KeyError:
-#         logger.warning(
-#             f"No sharding strategy passed! Using default of full model parallelism={len(devices)}"
-#         )
-#         sharding_strategy = {"tensor_parallelism": len(devices)}
-#     vllm_config = VllmConfig(**args)
-#     sharding = Sharding(strategy_dict=sharding_strategy,
-#                         vllm_config=vllm_config)
-#     mesh = sharding.mesh
-#     model_type = getattr(vllm_config.hf_config, "architectures", [])
-#     benchmarker = Benchmarker(vllm_config=vllm_config, model_type=model_type, mesh=mesh, args=args)
-#     benchmarker.benchmark_prefill()
-#     benchmarker.benchmark_decode()
 
 
 def main():
