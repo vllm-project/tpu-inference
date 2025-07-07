@@ -217,7 +217,6 @@ class Llama4Scout(Model):
             temperatures,
             top_ps,
             top_ks,
-            attention_metadata.chunked_prefill_enabled,
         )
         jax.debug.print("DEBUG: Sampled next_token ID: {token}",
                         token=next_tokens)

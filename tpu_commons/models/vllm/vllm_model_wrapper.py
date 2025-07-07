@@ -146,7 +146,6 @@ class VllmModelWrapper:
                 temperatures,
                 top_ps,
                 top_ks,
-                attention_metadata.chunked_prefill_enabled,
             )
 
             return new_kv_caches, next_tokens, logits

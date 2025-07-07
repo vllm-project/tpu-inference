@@ -225,7 +225,6 @@ class Llama3_8B(Model):
             temperatures,
             top_ps,
             top_ks,
-            attention_metadata.chunked_prefill_enabled,
         )
 
         return kv_caches, next_tokens, decoder_output

@@ -305,7 +305,6 @@ class Qwen2ForCausalLM(nnx.Module):
             temperatures,
             top_ps,
             top_ks,
-            attention_metadata.chunked_prefill_enabled,
         )
         return kv_caches, next_tokens, None
 
