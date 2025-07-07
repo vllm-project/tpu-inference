@@ -20,14 +20,15 @@ TIMEOUT_SECONDS=300
 
 # The minimum ROUGE1 and throughput scores we expect
 # TODO (jacobplatin): these are very low, so we'll want to boost them eventually
-TARGET_ROUGE1="30"
-TARGET_THROUGHPUT="50"
+# We need to support different targets for different models.
+TARGET_ROUGE1="40"
+TARGET_THROUGHPUT="1500"
 
 model_list="Qwen/Qwen2.5-1.5B-Instruct meta-llama/Llama-3.1-8B-Instruct"
 root_dir=/workspace
 dataset_name=mlperf
 dataset_path=""
-num_prompts=10
+num_prompts=1000
 exit_code=0
 
 helpFunction()
