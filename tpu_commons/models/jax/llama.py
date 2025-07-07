@@ -293,7 +293,6 @@ class LlamaForCausalLM(nnx.Module):
             self.rng.params(),
             self.mesh,
             logits,
-            attention_metadata.seq_lens,
             temperatures,
             top_ps,
             top_ks,

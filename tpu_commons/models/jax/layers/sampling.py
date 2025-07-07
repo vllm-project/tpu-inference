@@ -11,7 +11,6 @@ def sample(
     rng: jax.Array,
     mesh: Mesh,
     logits: jax.Array,
-    seq_lens: jax.Array,
     temperatures: jax.Array,
     top_ps: jax.Array,
     top_ks: jax.Array,
@@ -19,7 +18,6 @@ def sample(
     # (B, vocab_size)
     if do_sampling:
         # Unshard the logits explicity to avoid latency increase.
-        # TODO: shard the batch axis without affecting unembedding
         logits = jax.lax.with_sharding_constraint(
             logits, NamedSharding(mesh, P(None, None)))
 
