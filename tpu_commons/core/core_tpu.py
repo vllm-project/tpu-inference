@@ -69,43 +69,19 @@ class EngineCore:
         devices = jax.devices()
         prefill_slice_sizes = disagg_utils.get_prefill_slices()
         decode_slice_sizes = disagg_utils.get_decode_slices()
-        assert sum(decode_slice_sizes) + sum(prefill_slice_sizes) <= len(devices)
-        assert sum(prefill_slice_sizes) > 0
+        prefill_chip_cnt = sum(prefill_slice_sizes)
+        assert sum(decode_slice_sizes) + prefill_chip_cnt <= len(devices)
+        assert prefill_chip_cnt > 0
 
-        self.prefill_executors: list[Executor] = []
-        device_offset = 0
-        for i, slice_size in enumerate(prefill_slice_sizes):
-            logger.info(
-                f"Creating prefill executor {i} with slice size: {slice_size}")
-            executor = disagg_executor.DisaggExecutor(vllm_config)
-            executor.init_with_devices(
-                devices[device_offset:device_offset + slice_size])
-            self.prefill_executors.append(executor)
-            device_offset += slice_size
-            num_gpu_blocks, num_cpu_blocks, kv_cache_config = \
-                self._initialize_kv_caches(vllm_config, executor)
-            logger.info("Disaggregated prefill executor created.")
+        self.prefill_executors, self.prefill_engines = self._create_and_initialize_executors(
+            decode_slice_sizes, devices, vllm_config
+        )
+        logger.info(f"{len(self.prefill_executors)} Disaggregated prefill executor created.")
 
-        self.decode_executors: list[Executor] = []
-        for i, slice_size in enumerate(decode_slice_sizes):
-            logger.info(
-                f"Creating decode executor {i} with slice size: {slice_size}")
-            executor = disagg_executor.DisaggExecutor(vllm_config)
-            executor.init_with_devices(
-                devices[device_offset:device_offset + slice_size])
-            self.decode_executors.append(executor)
-            num_gpu_blocks, num_cpu_blocks, kv_cache_config = \
-                self._initialize_kv_caches(vllm_config, executor)
-            device_offset += slice_size
-            logger.info("Disaggregated decode executor created.")
-
-        all_executors = self.prefill_executors + self.decode_executors
-        for executor in all_executors:
-            num_gpu_blocks, num_cpu_blocks, kv_cache_config = \
-                self._initialize_kv_caches(vllm_config, executor)
-            # TODO(fhzhang): we only need to set this once.
-            vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
-            vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
+        self.decode_executors, self.decode_engines = self._create_and_initialize_executors(
+            decode_slice_sizes, devices[prefill_chip_cnt:], vllm_config
+        )
+        logger.info(f"{len(self.decode_executors)} Disaggregated decode executor created.")
 
         self.structured_output_manager = StructuredOutputManager(vllm_config)
         logger.info("structure output manager created.")
@@ -130,11 +106,37 @@ class EngineCore:
                         self.batch_queue_size)
             self.batch_queue = queue.Queue(self.batch_queue_size)
         logger.warning("set up disaggregated driver")
-        self.orchestrator = self._setup_driver(
-            vllm_config,
-            kv_cache_config,
-        )
+        self.orchestrator = self._setup_driver(vllm_config)
         logger.warning("starting disaggregated orchestrator")
+
+    def _create_and_initialize_executors(
+        self,
+        slice_sizes: tuple[int, ...],
+        devices: list[Any],
+        vllm_config: VllmConfig,
+    ) -> tuple[list[disagg_executor.DisaggExecutor], list[JaxEngine]]:
+        executors = []
+        engines = []
+        device_offset = 0
+        for i, slice_size in enumerate(slice_sizes):
+            logger.info(
+                f"Creating executor {i} with slice size: {slice_size}")
+            subslice = devices[device_offset:device_offset + slice_size]
+            executor = disagg_executor.DisaggExecutor(vllm_config)
+            executor.init_with_devices(subslice)
+            num_gpu_blocks, num_cpu_blocks, kv_cache_config = \
+                self._initialize_kv_caches(vllm_config, executor)
+            # TODO(fhzhang): we only need to set this once.
+            vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
+            vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
+
+            engine = JaxEngine(vllm_config, kv_cache_config, executor)
+            engines.append(engine)
+            executors.append(executor)
+            device_offset += slice_size
+            logger.info("Disaggregated executor created.")
+            
+        return executors, engines
 
     def _initialize_kv_caches(self, vllm_config: VllmConfig,
                               executor) -> tuple[int, int, KVCacheConfig]:
@@ -184,21 +186,11 @@ class EngineCore:
                      "warmup model) took %.2f seconds"), elapsed)
         return num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config
 
-    def _setup_driver(self, vllm_config, kv_cache_config):
-        prefill_engines = [
-            JaxEngine(vllm_config, kv_cache_config, executor)
-            for executor in self.prefill_executors
-        ]
-
-        generate_engines = [
-            JaxEngine(vllm_config, kv_cache_config, executor)
-            for executor in self.decode_executors
-        ]
-
+    def _setup_driver(self, vllm_config):
         driver = orchestrator.Driver(
             vllm_config=vllm_config,
-            prefill_engines=prefill_engines,
-            generate_engines=generate_engines,
+            prefill_engines=self.prefill_engines,
+            generate_engines=self.decode_engines,
         )
         return driver
 
