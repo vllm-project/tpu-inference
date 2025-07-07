@@ -57,21 +57,6 @@ class TPUWorker(WorkerBase):
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         self.profile_dir)
         self.devices = devices
-        self._set_visible_devices()
-
-    def _set_visible_devices(self):
-        num_request_devices = self.parallel_config.tensor_parallel_size
-        num_available_devices = utils.get_local_available_devices()
-        if num_request_devices > num_available_devices:
-            raise ValueError(
-                f"Request {num_request_devices} TPU devices but only {num_available_devices} available"
-            )
-        device_ids = list(
-            range(
-                self.local_rank * num_request_devices,
-                (self.local_rank + 1) * num_request_devices,
-            ))
-        utils.set_visible_device_ids(device_ids)
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
@@ -88,7 +73,9 @@ class TPUWorker(WorkerBase):
                        f"local_devices={len(self.devices)} | "
                        f"hbm={utils.hbm_usage_gb(self.devices)}Gb")
 
-        self.model_runner = TPUModelRunner(self.vllm_config, self.devices)
+        # TODO(xiang): support advanced sharding
+        tp = self.parallel_config.tensor_parallel_size
+        self.model_runner = TPUModelRunner(self.vllm_config, self.devices[:tp])
 
     def determine_available_memory(self) -> int:
         # We don't trigger a dummy batch run to calculate the usage,
