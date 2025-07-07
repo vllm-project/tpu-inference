@@ -145,7 +145,6 @@ class VllmModelWrapper:
                 self.rng,
                 self.mesh,
                 logits,
-                attention_metadata.seq_lens,
                 temperatures,
                 top_ps,
                 top_ks,

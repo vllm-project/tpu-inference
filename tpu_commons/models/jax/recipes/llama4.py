@@ -208,16 +208,13 @@ class Llama4Scout(Model):
             "DEBUG: Logits for last token (first 10 values): {logits}",
             logits=decoder_output[:, -1, :10])
         next_tokens = sample(
-            is_prefill,
             do_sampling,
             self.rng,
             self.mesh,
             decoder_output,
-            attention_metadata.seq_lens,
             temperatures,
             top_ps,
             top_ks,
-            attention_metadata.chunked_prefill_enabled,
         )
         jax.debug.print("DEBUG: Sampled next_token ID: {token}",
                         token=next_tokens)
