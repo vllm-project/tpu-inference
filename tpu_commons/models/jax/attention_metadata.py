@@ -1,6 +1,5 @@
 import functools
 from dataclasses import dataclass
-from typing import List, Union
 
 import jax
 
@@ -9,26 +8,28 @@ import jax
     jax.tree_util.register_dataclass,
     data_fields=[
         "input_positions",
+        "slot_mapping",
+        "block_tables",
         "seq_lens",
-        "block_indices",
-        "kv_cache_write_indices",
-        "num_decode_seqs",
-        "prefill_query_start_offsets",
-        "num_prefill_seqs",
+        "query_start_loc",
+        "num_seqs",
+        "num_slices",
     ],
     meta_fields=[],
 )
 @dataclass
 class AttentionMetadata(object):
+    # (padded_total_num_scheduled_tokens,)
     input_positions: jax.Array
-    # If mix attention, this is a list of len 2
-    seq_lens: Union[jax.Array, List[jax.Array]]
-    # If mix attention, this is a list of len 2
-    block_indices: Union[jax.Array, List[jax.Array]]
-    # If mix attention, this is a list of len 2
-    kv_cache_write_indices: Union[jax.Array, List[jax.Array]]
-
-    # The following fields are set only when chunked prefill is enabled
-    num_decode_seqs: jax.Array = None  # [1]
-    prefill_query_start_offsets: jax.Array = None  # [max_num_prefill_seqs + 1]
-    num_prefill_seqs: jax.Array = None  # [1]
+    # (3, num_slices)
+    slot_mapping: jax.Array
+    # (max_num_seqs, max_num_blocks_per_req)
+    block_tables: jax.Array
+    # (max_num_seqs,)
+    seq_lens: jax.Array
+    # (max_num_seqs + 1,)
+    query_start_loc: jax.Array = None
+    # (1,)
+    num_seqs: jax.Array = None
+    # (1,)
+    num_slices: jax.Array = None

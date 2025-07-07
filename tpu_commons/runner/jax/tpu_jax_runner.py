@@ -27,7 +27,8 @@ from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
 from tpu_commons.runner.tpu_torch_xla_runner import (_get_padded_token_len,
                                                      _get_req_paddings,
                                                      _get_token_paddings)
-from tpu_commons.runner.utils import LatencyTracker, get_padded_num_reqs_with_upper_limit
+from tpu_commons.runner.utils import (LatencyTracker,
+                                      get_padded_num_reqs_with_upper_limit)
 
 logger = init_logger(__name__)
 
@@ -40,8 +41,8 @@ NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK = 8
 DUMMY_METADATA = AttentionMetadata(
     input_positions=jnp.empty((0, )),
     seq_lens=[],
-    block_indices=[],
-    kv_cache_write_indices=[],
+    block_tables=[],
+    slot_mapping=[],
 )
 
 
@@ -242,8 +243,8 @@ class TPUModelRunner():
     @staticmethod
     @functools.partial(jax.jit)
     def _jitted_gather_kv_cache(
-        kv_caches: List[jax.Array], indices_to_gather: jax.Array
-    ) -> List[jax.Array]:
+            kv_caches: List[jax.Array],
+            indices_to_gather: jax.Array) -> List[jax.Array]:
         """
         JIT-compiled function to gather KV cache slices for all layers at once.
         This fuses the reshape and take operations across all layers into a
@@ -251,13 +252,16 @@ class TPUModelRunner():
         """
         batched_kv_cache_per_layer = []
         for layer_kv_cache in kv_caches:
-            flat_layer_cache = layer_kv_cache.reshape(-1, *layer_kv_cache.shape[2:])
-            all_gathered_slices = flat_layer_cache.take(indices_to_gather, axis=0)
+            flat_layer_cache = layer_kv_cache.reshape(
+                -1, *layer_kv_cache.shape[2:])
+            all_gathered_slices = flat_layer_cache.take(indices_to_gather,
+                                                        axis=0)
             batched_kv_cache_per_layer.append(all_gathered_slices)
         return batched_kv_cache_per_layer
-    
+
     @staticmethod
-    @functools.partial(jax.jit, static_argnames=("block_size", "kv_cache_sharding"))
+    @functools.partial(jax.jit,
+                       static_argnames=("block_size", "kv_cache_sharding"))
     def _jitted_insert_kv_cache(
         kv_caches: List[jax.Array],
         kv_cache_slices: List[jax.Array],
@@ -281,8 +285,9 @@ class TPUModelRunner():
                                     ((0, padding_size), (0, 0), (0, 0)),
                                     mode='constant')
 
-            reshaped_slices = padded_slices.reshape(
-                num_blocks_for_cache, block_size, *padded_slices.shape[1:])
+            reshaped_slices = padded_slices.reshape(num_blocks_for_cache,
+                                                    block_size,
+                                                    *padded_slices.shape[1:])
 
             reshaped_slices = jax.lax.with_sharding_constraint(
                 reshaped_slices, kv_cache_sharding)
@@ -358,8 +363,8 @@ class TPUModelRunner():
 
                 start_meta_idx = cu_block_lens[req_index]
                 end_meta_idx = cu_block_lens[req_index + 1]
-                metadata_for_req = slot_mapping_metadata[start_meta_idx:
-                                                         end_meta_idx]
+                metadata_for_req = slot_mapping_metadata[
+                    start_meta_idx:end_meta_idx]
 
                 indices_for_req = [
                     i for start, _, length in metadata_for_req
@@ -384,8 +389,7 @@ class TPUModelRunner():
         # 3. Batch the `take` operation for all layers using a JIT-compiled function.
         with LatencyTracker(f"BatchedGatherKVSlices-{len(req_ids_with_work)}"):
             batched_kv_cache_per_layer = self._jitted_gather_kv_cache(
-                self.kv_caches, indices_to_gather_jnp
-            )
+                self.kv_caches, indices_to_gather_jnp)
 
         # 4. Split the results on-device and populate the output dictionary.
         split_indices = np.cumsum(indices_lengths[:-1])
@@ -484,8 +488,7 @@ class TPUModelRunner():
                     self.kv_caches[0].sharding,
                 )
 
-            logger.debug(
-                f"Updated kv cache entries cnt={len(self.kv_caches)}")
+            logger.debug(f"Updated kv cache entries cnt={len(self.kv_caches)}")
 
         # Update runner's internal state to track the new request.
         req_id = request.request_id
@@ -528,7 +531,8 @@ class TPUModelRunner():
             # Return empty ModelRunnerOutput if there's no work to do.
             logger.warning(f"Nothing scheduled: {scheduler_output}!")
             if len(scheduler_output.finished_req_ids) == 0:
-                raise Exception("Should not schedule a request that does nothing!")
+                raise Exception(
+                    "Should not schedule a request that does nothing!")
             return DUMMY_METADATA, EMPTY_MODEL_RUNNER_OUTPUT,
 
         inputs = self._prepare_inputs(scheduler_output)
@@ -723,12 +727,12 @@ class TPUModelRunner():
             input_ids,
             AttentionMetadata(
                 input_positions=positions,
+                slot_mapping=slot_mapping_metadata,
+                block_tables=block_tables,
                 seq_lens=seq_lens,
-                block_indices=block_tables,
-                kv_cache_write_indices=slot_mapping_metadata,
-                num_prefill_seqs=num_slices,
-                prefill_query_start_offsets=query_start_loc,
-                num_decode_seqs=num_reqs,
+                query_start_loc=query_start_loc,
+                num_seqs=num_reqs,
+                num_slices=num_slices,
             ),
             temperatures,
             top_ps,
