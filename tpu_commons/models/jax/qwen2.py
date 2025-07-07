@@ -271,6 +271,7 @@ class Qwen2ForCausalLM(nnx.Module):
         temperatures: jax.Array = None,
         top_ps: jax.Array = None,
         top_ks: jax.Array = None,
+        logits_indices: jax.Array = None,
         *args,
     ) -> Tuple[List[jax.Array], jax.Array, jax.Array]:
         # input_ids: (T,)
@@ -285,6 +286,11 @@ class Qwen2ForCausalLM(nnx.Module):
             attention_metadata,
         )
 
+        # Select tokens that we need to calculate logits for.
+        # This should be cheaper than computing for all tokens, moving to cpu and then selecting the needed token.
+        # (B, D)
+        x = x[logits_indices]
+
         hf_config = self.vllm_config.model_config.hf_config
         if hf_config.tie_word_embeddings:
             # self.lm_head.value is (vocab_size, hidden_size)
@@ -292,16 +298,12 @@ class Qwen2ForCausalLM(nnx.Module):
         else:
             # self.lm_head.value is (hidden_size, vocab_size)
             logits = jnp.dot(x, self.lm_head.value)
-        # (1, T, V)
-        logits = jnp.expand_dims(logits, 0)
 
         next_tokens = sample(
-            False,
             do_sampling,
             self.rng.params(),
             self.mesh,
             logits,
-            attention_metadata.seq_lens,
             temperatures,
             top_ps,
             top_ks,

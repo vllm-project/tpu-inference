@@ -61,7 +61,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request
 
 from tpu_commons.core.tpu_jax_engine import JaxEngine
-from tpu_commons.runner.utils import LatencyTracker 
+from tpu_commons.runner.utils import LatencyTracker
 
 root = logging.getLogger()
 root.setLevel(logging.INFO)
@@ -289,7 +289,9 @@ class Driver:
                         continue
                     break
 
-                logging.debug(f"prefill-{idx}: looping on backlog... block={block}, {prefill_engine.dump_stats()}")
+                logging.debug(
+                    f"prefill-{idx}: looping on backlog... block={block}, {prefill_engine.dump_stats()}"
+                )
                 try:
                     vllm_request = self._prefill_backlog.get(block=block,
                                                              timeout=1.0)
@@ -331,7 +333,9 @@ class Driver:
             # delayed to next batch.
             # TODO(fhzhang): fix this!
             if len(vllm_model_runner_output.req_ids) == 0:
-                logging.info(f"prefill-{idx} Empty output: {prefill_engine.dump_stats()}")
+                logging.info(
+                    f"prefill-{idx} Empty output: {prefill_engine.dump_stats()}"
+                )
                 continue
 
             logging.debug(
@@ -350,6 +354,7 @@ class Driver:
         """Transfers the kv cache on an active request to the least full
     generate backlog."""
         transfer_backlog = self._transfer_backlogs[idx]
+        prefill_engine = self._prefill_engines[idx]
         while self.live:
             # The transfer thread can just sleep until it has work to do.
             kv_caches = transfer_backlog.get(block=True)
@@ -371,12 +376,18 @@ class Driver:
                 if not self._interleaved_mode:
                     with LatencyTracker("KVCacheTransfer"):
                         kv_cache = self._generate_engines[
-                            target_idx].model_runner.transfer_kv_cache(kv_cache)
+                            target_idx].model_runner.transfer_kv_cache(
+                                kv_cache)
                     prefill_output["cache"] = kv_cache
+
+                if request.is_finished():
+                    prefill_engine.free_request(request)
+
                 push_targets.append((target_idx, prefill_output))
 
             for target_idx, prefill_output in push_targets:
-                self._generate_backlogs[target_idx].put(prefill_output, block=True)
+                self._generate_backlogs[target_idx].put(prefill_output,
+                                                        block=True)
                 request = prefill_output["request"]
                 logging.info(
                     "Successfully transferred prefill request %s "
@@ -400,13 +411,17 @@ class Driver:
             block = generate_engine.is_generate_idle()
             while True:
                 if not generate_engine.has_more_capacity():
-                    logging.debug(f"generate-{idx}: busy, {generate_engine.dump_stats()}")
+                    logging.debug(
+                        f"generate-{idx}: busy, {generate_engine.dump_stats()}"
+                    )
                     time.sleep(1.0)
                     if block:
                         continue
                     break
 
-                logging.debug(f"generate-{idx}: looping on backlog... block={block}, {generate_engine.dump_stats()}")
+                logging.debug(
+                    f"generate-{idx}: looping on backlog... block={block}, {generate_engine.dump_stats()}"
+                )
                 try:
                     prefill_output = my_generate_backlog.get(block=block,
                                                              timeout=1.0)
@@ -430,8 +445,7 @@ class Driver:
                         request, request.num_tokens)
                     logging.info(
                         f"insert request for generation: {request.request_id}, "
-                        f"{generate_engine.dump_stats()}"
-                    )
+                        f"{generate_engine.dump_stats()}")
                     with LatencyTracker("KVCacheInsert"):
                         generate_engine.model_runner.insert_request_with_kv_cache(
                             request, kv_cache, new_block_ids)
@@ -442,9 +456,18 @@ class Driver:
 
             logging.debug(f"generate output: {model_output}")
             model_output.req_ids = copy.deepcopy(model_output.req_ids)
-            model_output.req_id_to_index = copy.deepcopy(model_output.req_id_to_index)
+            model_output.req_id_to_index = copy.deepcopy(
+                model_output.req_id_to_index)
 
             self._output(model_output)
+
+            # TODO(fhzhang): consider moving this out of the generate thread.
+            for req_id in model_output.req_ids:
+                request = self.requests[req_id]
+                if request.is_finished():
+                    generate_engine.free_request(request)
+                    self.requests.pop(request.request_id, None)
+                    logging.info("Freed request %s.", request.request_id)
 
             logging.debug(
                 "Finished generate step, req_ids %s, output tokens %s \n",

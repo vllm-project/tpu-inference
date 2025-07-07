@@ -15,9 +15,11 @@
 
 import warnings
 from typing import Any, Tuple
+import threading
 
 import numpy as np
 from vllm.logger import init_logger
+from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
 from vllm.v1.core.sched.utils import check_stop
@@ -41,9 +43,13 @@ class JaxEngine():
     The class is _not_ thread safe. The caller is responsible for sycnrhonization.
     """
 
-    def __init__(self, vllm_config, kv_cache_manager, vllm_executor):
+    def __init__(self, vllm_config, kv_cache_config, vllm_executor):
         self.model_runner = vllm_executor.driver_worker.model_runner
-        self.kv_cache_manager = kv_cache_manager
+        self.kv_cache_manager = KVCacheManager(
+            kv_cache_config=kv_cache_config,
+            max_model_len=vllm_config.scheduler_config.max_model_len,
+            enable_caching=False,
+        )
         self.vllm_config = vllm_config
         self._max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self._max_num_reqs = vllm_config.scheduler_config.max_num_seqs
@@ -55,14 +61,16 @@ class JaxEngine():
         self._completed_requests: list[str] = []
         self._request_map: dict[str, Request] = {}
         self._pending_num_prefill_tokens = 0
+        self._kv_cache_manager_lock = threading.Lock()
 
     def get_new_block_ids(self, vllm_request: Request, num_tokens: int):
-        computed_blocks, _ = self.kv_cache_manager.get_computed_blocks(
-            vllm_request)
-        _ = self.kv_cache_manager.allocate_slots(
-            vllm_request, num_tokens, new_computed_blocks=computed_blocks)
-        req_id = vllm_request.request_id
-        return self.kv_cache_manager.get_block_ids(req_id)
+        with self._kv_cache_manager_lock:
+            computed_blocks, _ = self.kv_cache_manager.get_computed_blocks(
+                vllm_request)
+            _ = self.kv_cache_manager.allocate_slots(
+                vllm_request, num_tokens, new_computed_blocks=computed_blocks)
+            req_id = vllm_request.request_id
+            return self.kv_cache_manager.get_block_ids(req_id)
 
     def has_more_capacity(self):
         """Returns True if we still have room for more requests.
@@ -237,7 +245,8 @@ class JaxEngine():
         num_scheduled_tokens: dict[str, int] = {}
         req_to_new_block_ids = {}
         for request_id, request in active_requests.items():
-            new_blocks = self.kv_cache_manager.allocate_slots(request, 1)
+            with self._kv_cache_manager_lock:
+                new_blocks = self.kv_cache_manager.allocate_slots(request, 1)
             req_to_new_block_ids[request_id] = new_blocks.get_block_ids()
             num_computed_tokens = request.num_computed_tokens
             new_token_ids = request.all_token_ids[
@@ -300,6 +309,11 @@ class JaxEngine():
         logger.debug(
             f"generate done: {runner_output}; req to remove: {self._completed_requests}")
         return runner_output
+
+    def free_request(self, request: Request):
+        """Frees the KV-cache blocks allocated for a request."""
+        with self._kv_cache_manager_lock:
+            self.kv_cache_manager.free(request)
 
     def get_prefix_destination_sharding(self) -> Any:
         return {

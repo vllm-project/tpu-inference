@@ -189,7 +189,6 @@ checkThroughputAndRouge() {
 
     if [ "$rouge1_pass" -eq 1 ] && [ "$throughput_pass" -eq 1 ]; then
         echo "Overall: PASSED"
-        exit_code=0
     else
         echo "Overall: FAILED"
         [ "$rouge1_pass" -eq 0 ] && echo "Reason: Rouge1 check failed or value not found."

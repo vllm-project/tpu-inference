@@ -35,11 +35,13 @@ class ModelForLogits(torch.nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        logits_indices: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor],
     ) -> torch.Tensor:
         hidden_state = self.vllm_model(input_ids, positions,
                                        intermediate_tensors, inputs_embeds)
+        hidden_state = hidden_state[logits_indices]
         return self.vllm_model.compute_logits(hidden_state,
                                               sampling_metadata=None)
 
@@ -108,6 +110,7 @@ class VllmModelWrapper:
             temperatures: jax.Array,
             top_ps: jax.Array,
             top_ks: jax.Array,
+            logits_indices: jax.Array,
             *args,
         ) -> Tuple[List[jax.Array], jax.Array, jax.Array]:
 
@@ -127,6 +130,7 @@ class VllmModelWrapper:
                         torch_view(attention_metadata.input_positions),
                         "intermediate_tensors": None,
                         "inputs_embeds": None,
+                        "logits_indices": torch_view(logits_indices),
                     },
                     tie_weights=False,
                     strict=True)
@@ -137,7 +141,6 @@ class VllmModelWrapper:
             logits = jax_view(logits)
 
             next_tokens = sample(
-                is_prefill,
                 do_sampling,
                 self.rng,
                 self.mesh,
