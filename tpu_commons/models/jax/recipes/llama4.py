@@ -208,12 +208,10 @@ class Llama4Scout(Model):
             "DEBUG: Logits for last token (first 10 values): {logits}",
             logits=decoder_output[:, -1, :10])
         next_tokens = sample(
-            is_prefill,
             do_sampling,
             self.rng,
             self.mesh,
             decoder_output,
-            attention_metadata.seq_lens,
             temperatures,
             top_ps,
             top_ks,

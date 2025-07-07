@@ -216,12 +216,10 @@ class Llama3_8B(Model):
         decoder_output = self.embedder.decode(final_activation)
 
         next_tokens = sample(
-            is_prefill,
             do_sampling,
             self.rng.params(),
             self.mesh,
             decoder_output,
-            attention_metadata.seq_lens,
             temperatures,
             top_ps,
             top_ks,
