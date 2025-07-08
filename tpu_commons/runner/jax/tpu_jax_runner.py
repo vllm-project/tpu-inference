@@ -263,8 +263,11 @@ class TPUModelRunner():
         return batched_kv_cache_per_layer
 
     @staticmethod
-    @functools.partial(jax.jit,
-                       static_argnames=("block_size", "kv_cache_sharding"))
+    @functools.partial(
+        jax.jit,
+        static_argnames=("block_size", "kv_cache_sharding"),
+        donate_argnames=("kv_caches"),
+    )
     def _jitted_insert_kv_cache(
         kv_caches: List[jax.Array],
         kv_cache_slices: List[jax.Array],
@@ -313,7 +316,7 @@ class TPUModelRunner():
         Args:
             request_ids: A list of request IDs to extract KV cache for.
             kv_cache_write_indices: The metadata for slot mapping, from
-                `AttentionMetadata.kv_cache_write_indices`.
+                `AttentionMetadata.slot_mapping`.
             num_scheduled_tokens_per_req: An array containing the number of
                 scheduled tokens for each request in the current batch, ordered
                 by their position in the batch.
