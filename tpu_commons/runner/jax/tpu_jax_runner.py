@@ -1,5 +1,6 @@
 import functools
 import os
+import random
 from dataclasses import asdict
 from typing import Any, List, Optional, cast
 
@@ -84,6 +85,7 @@ class TPUModelRunner():
     def _init_random(self):
         if self.model_config.seed is None:
             self.model_config.seed = 0
+        random.seed(self.model_config.seed)
         np.random.seed(self.model_config.seed)
         self.rng_key = jax.random.key(self.model_config.seed)
 
@@ -238,7 +240,8 @@ class TPUModelRunner():
                     f"hbm={utils.hbm_usage_gb(self.devices)}Gb")
 
     def capture_model(self) -> None:
-        pass
+        # TODO(xiang): add warm up
+        return
 
     @staticmethod
     @functools.partial(jax.jit)

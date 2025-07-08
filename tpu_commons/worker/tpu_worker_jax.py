@@ -65,25 +65,19 @@ class TPUWorker(WorkerBase):
 
     def init_device(self):
         if not self.devices:
-            self.devices = jax.local_devices()
-            self.global_devices = jax.devices()
-
+            tp = self.parallel_config.tensor_parallel_size
+            self.devices = jax.devices()[:tp]
         logger.warning(f"Init devices | "
                        f"devices={self.devices} | "
-                       f"local_devices={len(self.devices)} | "
                        f"hbm={utils.hbm_usage_gb(self.devices)}Gb")
 
-        # TODO(xiang): support advanced sharding
-        tp = self.parallel_config.tensor_parallel_size
-        self.model_runner = TPUModelRunner(self.vllm_config, self.devices[:tp])
+        self.model_runner = TPUModelRunner(self.vllm_config, self.devices)
 
     def determine_available_memory(self) -> int:
-        # We don't trigger a dummy batch run to calculate the usage,
-        # we get the available size after loading the model directly.
         hbm_usage = utils.hbm_usage_bytes(self.devices)
         hbm_free = [limit - used for used, limit in hbm_usage]
-        min_hbm_free = min(hbm_free)
-        taxed_hbm = min_hbm_free * self.cache_config.gpu_memory_utilization
+        total_hbm_free = sum(hbm_free)
+        taxed_hbm = total_hbm_free * self.cache_config.gpu_memory_utilization
         return taxed_hbm
 
     def execute_model(
@@ -106,7 +100,10 @@ class TPUWorker(WorkerBase):
         self.model_runner.load_model()
 
     def compile_or_warm_up_model(self) -> None:
-        return
+        self.model_runner.capture_model()
+        # Reset the seed to ensure that the random state is not affected by
+        # the model initialization and profiling.
+        self.model_runner._init_random()
 
     def get_model(self):
         return self.model_runner.get_model()
