@@ -33,8 +33,7 @@ def apply_rope(
     second_part = second_half * cos + first_half * sin
     out = jnp.concatenate([first_part, second_part], axis=-1)
     if padded_head_dim > head_dim:
-        out = jnp.pad(out, ((0, 0), (0, 0), (0, 0),
-                            (0, padded_head_dim - head_dim)))
+        out = jnp.pad(out, ((0, 0), (0, 0), (0, padded_head_dim - head_dim)))
     return out.astype(inputs.dtype)
 
 

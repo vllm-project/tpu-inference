@@ -302,9 +302,13 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
                 if key in hf_key:
                     hf_weight = jnp.reshape(hf_weight, reshape_keys[key])
                     if head_dim_pad:
-                        hf_weight = jnp.pad(hf_weight,
-                                            ((0, 0), (0, head_dim_pad),
-                                             (0, 0)))
+                        if "o_proj" in key:
+                            hf_weight = jnp.pad(hf_weight, ((0, 0), (0, 0),
+                                                            (0, head_dim_pad)))
+                        else:
+                            hf_weight = jnp.pad(hf_weight,
+                                                ((0, 0), (0, head_dim_pad),
+                                                 (0, 0)))
                     break
             for key in transpose_keys:
                 if key in hf_key:
