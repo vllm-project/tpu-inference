@@ -9,11 +9,14 @@ from jax.sharding import PartitionSpec as P
 from tpu_commons.kernels.ragged_kv_cache_update import kv_cache_update
 from tpu_commons.kernels.ragged_paged_attention.kernel import \
     ragged_paged_attention
+from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 
 # TODO(xiang): put this in attention metadata
 # Block size used for kv cache updating kernel
 NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK = 8
+
+logger = init_logger(__name__)
 
 
 def sharded_ragged_paged_attention(sm_scale: float, mesh: Mesh):
@@ -52,13 +55,13 @@ def sharded_ragged_paged_attention(sm_scale: float, mesh: Mesh):
 
 
 def attention(
-    kv_cache: jax.Array,
-    q: jax.Array,
-    k: jax.Array,
-    v: jax.Array,
-    attention_metadata: AttentionMetadata,
-    mesh: Mesh,
-    head_dim: int,
+        kv_cache: jax.Array,
+        q: jax.Array,
+        k: jax.Array,
+        v: jax.Array,
+        attention_metadata: AttentionMetadata,
+        mesh: Mesh,
+        head_dim: int,  # before padding
 ) -> Tuple[jax.Array, jax.Array]:
     # T: seq_len
     # N: num_heads
@@ -98,11 +101,13 @@ def update_kv_cache(k: jax.Array, v: jax.Array, kv_cache: jax.Array,
 
     Args:
         k: (T, K, H)
-        v: (T, K, H)
-        kv_cache: (L, S, K*2, H)
+        v: (T, K, H) # padded
+        kv_cache: (L, S, K*2, H) # non-padded
     """
     L, S, K_2, H = kv_cache.shape
     T, K, H = k.shape
+    logger.info(f"kv_cache shape: {kv_cache.shape}")
+    logger.info(f"k shape: {k.shape}")
 
     # (T, K*2, H)
     # NOTE(xiang): KV needs to be interleaved as required by kernel

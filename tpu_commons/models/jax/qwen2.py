@@ -68,6 +68,8 @@ class Qwen2Attention(nnx.Module):
         self.rope_scaling = getattr(config, "rope_scaling", None)
         self.head_dim_original = config.hidden_size // config.num_attention_heads
         self.head_dim = 128
+        if self.head_dim_original % 128 == 0:
+            self.head_dim = self.head_dim_original
 
         self.mesh = mesh
 
