@@ -13,9 +13,9 @@
 # limitations under the License.
 """Implementation of Engine API for MaxText."""
 
+import threading
 import warnings
 from typing import Any, Tuple
-import threading
 
 import numpy as np
 from vllm.logger import init_logger
@@ -74,15 +74,14 @@ class JaxEngine():
 
     def has_more_capacity(self):
         """Returns True if we still have room for more requests.
-        
+
         Most likely prefill will be gated by the number of tokens; generate will
         be gated by the number of requests.
         """
-        return (
-            self._pending_num_prefill_tokens < self._max_num_tokens
-            and len(self._requests) + len(self._new_requests) < self._max_num_reqs
-            and self.model_runner.input_batch.num_reqs < self.model_runner.max_num_reqs
-        )
+        return (self._pending_num_prefill_tokens < self._max_num_tokens
+                and len(self._requests) + len(self._new_requests)
+                < self._max_num_reqs and self.model_runner.input_batch.num_reqs
+                < self.model_runner.max_num_reqs)
 
     def dump_stats(self) -> str:
         return (
@@ -90,20 +89,15 @@ class JaxEngine():
             f"#reqs={len(self._requests)}, #new_reqs={len(self._new_requests)},"
             f"has_more_cacacity={self.has_more_capacity()},"
             f"input_batch_size={self.model_runner.input_batch.num_reqs};"
-            f"input_batch={self.model_runner.input_batch.req_id_to_index}"
-        )
+            f"input_batch={self.model_runner.input_batch.req_id_to_index}")
 
     def is_prefill_idle(self) -> bool:
-        return (
-            self._pending_num_prefill_tokens <= 0
-            and self.model_runner.input_batch.num_reqs <= 0
-        )
+        return (self._pending_num_prefill_tokens <= 0
+                and self.model_runner.input_batch.num_reqs <= 0)
 
     def is_generate_idle(self) -> bool:
-        return (
-            len(self._requests) + len(self._new_requests) <= 0
-            and self.model_runner.input_batch.num_reqs <= 0
-        )
+        return (len(self._requests) + len(self._new_requests) <= 0
+                and self.model_runner.input_batch.num_reqs <= 0)
 
     def add_request(self, req: Request, num_tokens: int):
         self._request_map[req.request_id] = req
@@ -219,7 +213,7 @@ class JaxEngine():
                                                 dtype=np.int32)
         with LatencyTracker("ExtractKVCache"):
             kv_cache_slices = self.model_runner.get_kv_cache_for_requests(
-                self._completed_requests, metadata.kv_cache_write_indices,
+                self._completed_requests, metadata.slot_mapping,
                 num_scheduled_tokens_per_req)
 
         self._requests = [
@@ -307,7 +301,8 @@ class JaxEngine():
             r for r in self._requests if r.request_id in self._request_map
         ]
         logger.debug(
-            f"generate done: {runner_output}; req to remove: {self._completed_requests}")
+            f"generate done: {runner_output}; req to remove: {self._completed_requests}"
+        )
         return runner_output
 
     def free_request(self, request: Request):
