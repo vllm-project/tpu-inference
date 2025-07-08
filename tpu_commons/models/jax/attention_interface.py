@@ -58,6 +58,7 @@ def attention(
     v: jax.Array,
     attention_metadata: AttentionMetadata,
     mesh: Mesh,
+    head_dim: int,
 ) -> Tuple[jax.Array, jax.Array]:
     # T: seq_len
     # N: num_heads
@@ -75,7 +76,8 @@ def attention(
     kv_cache = update_kv_cache(k, v, kv_cache, md.slot_mapping, md.num_slices,
                                mesh)
 
-    head_dim = q.shape[-1]
+    # head_dim = q.shape[-1]
+
     # (T, N, H)
     output = sharded_ragged_paged_attention(head_dim**-0.5, mesh)(
         q,

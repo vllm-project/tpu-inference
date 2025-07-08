@@ -234,18 +234,28 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
     num_heads = hf_config.num_attention_heads
     num_kv_heads = hf_config.num_key_value_heads
     hidden_size = model_config.get_hidden_size()
-    head_dim = model_config.get_head_size()
+
+    # NOTE(wenlong): we may need to pad head_dim to a multiple of 128 as required of kernels
+    # Details can be seen at: tpu_commons/kernels/ragged_kv_cache_update.py::_kv_cache_update()
+
+    head_dim_original = model_config.get_head_size()
+    head_dim = head_dim_original
+    head_dim_pad = 0
+    if head_dim % 128 != 0:
+        head_dim = 128
+        head_dim_pad = head_dim - head_dim_original
+        logger.info(f"Change head_dim from {head_dim_original} to {head_dim}")
 
     reshape_keys = {
-        "q_proj": (num_heads, head_dim, hidden_size),
-        "k_proj": (num_kv_heads, head_dim, hidden_size),
-        "v_proj": (num_kv_heads, head_dim, hidden_size),
-        "o_proj": (hidden_size, num_heads, head_dim),
+        "q_proj": (num_heads, head_dim_original, hidden_size),
+        "k_proj": (num_kv_heads, head_dim_original, hidden_size),
+        "v_proj": (num_kv_heads, head_dim_original, hidden_size),
+        "o_proj": (hidden_size, num_heads, head_dim_original),
     }
     bias_reshape_keys = {
-        "q_proj.bias": (num_heads, head_dim),
-        "k_proj.bias": (num_kv_heads, head_dim),
-        "v_proj.bias": (num_kv_heads, head_dim)
+        "q_proj.bias": (num_heads, head_dim_original),
+        "k_proj.bias": (num_kv_heads, head_dim_original),
+        "v_proj.bias": (num_kv_heads, head_dim_original)
     }
     transpose_keys = {
         "lm_head": (1, 0),
@@ -283,11 +293,18 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
             for key in bias_reshape_keys:
                 if key in hf_key:
                     hf_weight = jnp.reshape(hf_weight, bias_reshape_keys[key])
+                    if head_dim_pad:
+                        hf_weight = jnp.pad(hf_weight,
+                                            ((0, 0), (0, head_dim_pad)))
                     break
         else:
             for key in reshape_keys:
                 if key in hf_key:
                     hf_weight = jnp.reshape(hf_weight, reshape_keys[key])
+                    if head_dim_pad:
+                        hf_weight = jnp.pad(hf_weight,
+                                            ((0, 0), (0, head_dim_pad),
+                                             (0, 0)))
                     break
             for key in transpose_keys:
                 if key in hf_key:

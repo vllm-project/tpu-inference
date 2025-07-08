@@ -124,6 +124,7 @@ class LlamaAttention(nnx.Module):
             v,
             attention_metadata,
             self.mesh,
+            self.head_dim,
         )
 
         # (T, D)

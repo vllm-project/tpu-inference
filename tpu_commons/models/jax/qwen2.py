@@ -66,7 +66,8 @@ class Qwen2Attention(nnx.Module):
         self.num_kv_heads = config.num_key_value_heads
         self.rope_theta = config.rope_theta
         self.rope_scaling = getattr(config, "rope_scaling", None)
-        self.head_dim = config.hidden_size // config.num_attention_heads
+        self.head_dim_original = config.hidden_size // config.num_attention_heads
+        self.head_dim = 128
 
         self.mesh = mesh
 
@@ -108,13 +109,13 @@ class Qwen2Attention(nnx.Module):
 
         # q: (T, N, H)
         q = self.q_proj(x)
-        q = apply_rope(q, md.input_positions, self.head_dim, self.rope_theta,
-                       self.rope_scaling)
+        q = apply_rope(q, md.input_positions, self.head_dim_original,
+                       self.rope_theta, self.rope_scaling)
 
         # k: (T, K, H)
         k = self.k_proj(x)
-        k = apply_rope(k, md.input_positions, self.head_dim, self.rope_theta,
-                       self.rope_scaling)
+        k = apply_rope(k, md.input_positions, self.head_dim_original,
+                       self.rope_theta, self.rope_scaling)
 
         # k: (T, K, H)
         v = self.v_proj(x)
@@ -127,6 +128,7 @@ class Qwen2Attention(nnx.Module):
             v,
             attention_metadata,
             self.mesh,
+            self.head_dim_original,
         )
 
         # (T, D)
