@@ -72,8 +72,8 @@ def attention(
     # kv_cache: (L, S, 2 * K, H)
 
     md = attention_metadata
-    kv_cache = update_kv_cache(k, v, kv_cache, md.kv_cache_write_indices,
-                               md.num_prefill_seqs, mesh)
+    kv_cache = update_kv_cache(k, v, kv_cache, md.slot_mapping, md.num_slices,
+                               mesh)
 
     head_dim = q.shape[-1]
     # (T, N, H)
@@ -81,9 +81,9 @@ def attention(
         q,
         kv_cache,
         md.seq_lens,
-        md.block_indices,
-        md.prefill_query_start_offsets,
-        md.num_decode_seqs,
+        md.block_tables,
+        md.query_start_loc,
+        md.num_seqs,
     )
 
     return kv_cache, output
