@@ -21,7 +21,7 @@ import jax
 class AttentionMetadata(object):
     # (padded_total_num_scheduled_tokens,)
     input_positions: jax.Array
-    # (3, num_slices)
+    # (3, padded_num_slices)
     slot_mapping: jax.Array
     # (max_num_seqs, max_num_blocks_per_req)
     block_tables: jax.Array
