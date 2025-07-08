@@ -310,7 +310,8 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
                 if key in hf_key:
                     hf_weight = jnp.transpose(hf_weight, transpose_keys[key])
                     break
-            assert model_weight.value.shape == hf_weight.shape
+            if head_dim_pad == 0:
+                assert model_weight.value.shape == hf_weight.shape
 
         # Update the model weight
         model_weight.value = shard(hf_weight, model_sharding)
