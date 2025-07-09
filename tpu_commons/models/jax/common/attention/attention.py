@@ -4,92 +4,24 @@ from typing import Any, Dict, List, Tuple, Union
 import jax
 import jax.numpy as jnp
 from flax import nnx
+from jax.experimental.pallas.ops.tpu.flash_attention import flash_attention
+from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from jax.typing import DTypeLike
-
-from jax.experimental.pallas.ops.tpu.flash_attention import flash_attention
-from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention
-
 from vllm.config import VllmConfig
+
 from tpu_commons.models.jax.common.base import Config, ParamFactory
-from tpu_commons.models.jax.common.sharding import ShardingConfig
 from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
-from tpu_commons.models.jax.layers.rope import apply_rope_scaling
-from tpu_commons.models.jax.layers.attention import update_cache
-from tpu_commons.utils_jax import get_megacore
-
-KVCache = Tuple[jax.Array, jax.Array]
-
-@dataclass
-class AttentionMetadata(object):
-    input_positions: jax.Array
-    # If mix attention, this is a list of len 2
-    seq_lens: Union[jax.Array, List[jax.Array]]
-    # If mix attention, this is a list of len 2
-    block_indices: Union[jax.Array, List[jax.Array]]
-    # If mix attention, this is a list of len 2
-    kv_cache_write_indices: Union[jax.Array, List[jax.Array]]
-
-    # The following fields are set only when chunked prefill is enabled
-    chunked_prefill_enabled: bool = False
-    decode_lengths: jax.Array = None  # [max_num_decode_seqs]
-    decode_page_indices: jax.Array = None  # [max_num_decode_seqs, pages_per_sequence]
-    num_decode_seqs: jax.Array = None  # [1]
-    prefill_lengths: jax.Array = None  # [max_num_prefill_seqs]
-    prefill_page_indices: jax.Array = None  # [max_num_prefill_seqs, pages_per_sequence]
-    prefill_query_start_offsets: jax.Array = None  # [max_num_prefill_seqs + 1]
-    num_prefill_seqs: jax.Array = None  # [1]
-
-
-@dataclass
-class AttentionMetadata(object):
-    input_positions: jax.Array
-    # If mix attention, this is a list of len 2
-    seq_lens: Union[jax.Array, List[jax.Array]]
-    # If mix attention, this is a list of len 2
-    block_indices: Union[jax.Array, List[jax.Array]]
-    # If mix attention, this is a list of len 2
-    kv_cache_write_indices: Union[jax.Array, List[jax.Array]]
-
-    # The following fields are set only when chunked prefill is enabled
-    chunked_prefill_enabled: bool = False
-    decode_lengths: jax.Array = None  # [max_num_decode_seqs]
-    decode_page_indices: jax.Array = None  # [max_num_decode_seqs, pages_per_sequence]
-    num_decode_seqs: jax.Array = None  # [1]
-    prefill_lengths: jax.Array = None  # [max_num_prefill_seqs]
-    prefill_page_indices: jax.Array = None  # [max_num_prefill_seqs, pages_per_sequence]
-    prefill_query_start_offsets: jax.Array = None  # [max_num_prefill_seqs + 1]
-    num_prefill_seqs: jax.Array = None  # [1]
-
-
-@dataclass
-class AttentionMetadata(object):
-    input_positions: jax.Array
-    # If mix attention, this is a list of len 2
-    seq_lens: Union[jax.Array, List[jax.Array]]
-    # If mix attention, this is a list of len 2
-    block_indices: Union[jax.Array, List[jax.Array]]
-    # If mix attention, this is a list of len 2
-    kv_cache_write_indices: Union[jax.Array, List[jax.Array]]
-
-    # The following fields are set only when chunked prefill is enabled
-    chunked_prefill_enabled: bool = False
-    decode_lengths: jax.Array = None  # [max_num_decode_seqs]
-    decode_page_indices: jax.Array = None  # [max_num_decode_seqs, pages_per_sequence]
-    num_decode_seqs: jax.Array = None  # [1]
-    prefill_lengths: jax.Array = None  # [max_num_prefill_seqs]
-    prefill_page_indices: jax.Array = None  # [max_num_prefill_seqs, pages_per_sequence]
-    prefill_query_start_offsets: jax.Array = None  # [max_num_prefill_seqs + 1]
-    num_prefill_seqs: jax.Array = None  # [1]
-
-from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.sharding import ShardingConfig
-from tpu_commons.models.jax.layers.rope import apply_rope_scaling
 from tpu_commons.models.jax.layers.attention import update_cache
+from tpu_commons.models.jax.layers.chunked_prefill_attention import (
+    sharded_chunked_prefill_attention, sharded_chunked_prefill_update_cache)
+from tpu_commons.models.jax.layers.rope import apply_rope_scaling
 from tpu_commons.utils_jax import get_megacore
 
 KVCache = Tuple[jax.Array, jax.Array]
+
 
 @dataclass
 class AttentionMetadata(object):
@@ -112,18 +44,17 @@ class AttentionMetadata(object):
     num_prefill_seqs: jax.Array = None  # [1]
 
 
-AttentionConfig = make_dataclass("AttentionConfig", [
-    (HuggingFaceArgNames.HIDDEN_SIZE.value, int),
-    (HuggingFaceArgNames.NUM_ATTENTION_HEADS.value, int),
-    (HuggingFaceArgNames.NUM_KEY_VALUE_HEADS.value, int),
-    (HuggingFaceArgNames.HEAD_DIM.value, int),
-    (HuggingFaceArgNames.ROPE_THETA.value, float),
-    (HuggingFaceArgNames.ROPE_SCALING.value, Dict[str, Any]),
-    ("dtype", DTypeLike),
-    ("vllm_config", VllmConfig, field(repr=False, default=None))
-    ],
-    bases=(Config,)
-)
+AttentionConfig = make_dataclass(
+    "AttentionConfig",
+    [(HuggingFaceArgNames.HIDDEN_SIZE.value, int),
+     (HuggingFaceArgNames.NUM_ATTENTION_HEADS.value, int),
+     (HuggingFaceArgNames.NUM_KEY_VALUE_HEADS.value, int),
+     (HuggingFaceArgNames.HEAD_DIM.value, int),
+     (HuggingFaceArgNames.ROPE_THETA.value, float),
+     (HuggingFaceArgNames.ROPE_SCALING.value, Dict[str, Any]),
+     ("dtype", DTypeLike),
+     ("vllm_config", VllmConfig, field(repr=False, default=None))],
+    bases=(Config, ))
 AttentionConfig.__doc__ = f"""Configuration for the Attention module.
          Attributes:
         {HuggingFaceArgNames.HIDDEN_SIZE.value}: The dimension of the model.
@@ -135,6 +66,7 @@ AttentionConfig.__doc__ = f"""Configuration for the Attention module.
          dtype: The data type for computations (default: jnp.float32).
          vllm_config: The VLLM config containing any overrides to apply.
     """
+
 
 @dataclass
 class Attention(nnx.Module):
@@ -186,8 +118,8 @@ class Attention(nnx.Module):
             "keyvalue_bskh", "activation_attention_out_btd"
         ]
         for attr_name in mode_dependent_attrs:
-            prefill_sharding_config = getattr(
-                self.sharding_cfg.prefill_rules, attr_name)
+            prefill_sharding_config = getattr(self.sharding_cfg.prefill_rules,
+                                              attr_name)
             generate_sharding_config = getattr(
                 self.sharding_cfg.generate_rules, attr_name)
 
@@ -201,16 +133,13 @@ class Attention(nnx.Module):
 
         # static sharding for kernel/weights
         self.ndh_sharding = NamedSharding(
-            self.mesh,
-            P(*self.sharding_cfg.generate_rules.attn_q_weight_ndh))
+            self.mesh, P(*self.sharding_cfg.generate_rules.attn_q_weight_ndh))
         self.kdh_sharding = NamedSharding(
-            self.mesh,
-            P(*self.sharding_cfg.generate_rules.attn_k_weight_kdh))
+            self.mesh, P(*self.sharding_cfg.generate_rules.attn_k_weight_kdh))
         self.nhd_sharding = NamedSharding(
-            self.mesh,
-            P(*self.sharding_cfg.generate_rules.attn_o_weight_nhd))
-        
-        # TODO: the pallas kernels of flash_attention/paged_attention need to be called 
+            self.mesh, P(*self.sharding_cfg.generate_rules.attn_o_weight_nhd))
+
+        # TODO: the pallas kernels of flash_attention/paged_attention need to be called
         # via shard_map with sharding specs, However, the q/k/v have been sharded outside of attention()
         # So we replicate the sharding below but it should be better organized if we use pallas kernels
         self.pallas_q_spec = {
@@ -223,8 +152,9 @@ class Attention(nnx.Module):
         }
         self.pallas_cache_page_spec = {
             'prefill': P(*self.sharding_cfg.prefill_rules.keyvalue_cache_kbsh),
-            'generate': P(*self.sharding_cfg.generate_rules.keyvalue_cache_kbsh)
-        }        
+            'generate':
+            P(*self.sharding_cfg.generate_rules.keyvalue_cache_kbsh)
+        }
 
     def __call__(
         self,
@@ -261,21 +191,23 @@ class Attention(nnx.Module):
                                                self.activation_q_btd[op_mode])
         N = getattr(self.cfg, HuggingFaceArgNames.NUM_ATTENTION_HEADS.value)
         K = getattr(self.cfg, HuggingFaceArgNames.NUM_KEY_VALUE_HEADS.value)
-        rope_scaling = getattr(self.cfg, HuggingFaceArgNames.ROPE_SCALING.value)
+        rope_scaling = getattr(self.cfg,
+                               HuggingFaceArgNames.ROPE_SCALING.value)
         rope_theta = getattr(self.cfg, HuggingFaceArgNames.ROPE_THETA.value)
         H = getattr(self.cfg, HuggingFaceArgNames.HEAD_DIM.value)
         with jax.named_scope("q_proj"):
             q_BTNH = jnp.einsum('BTD,NDH -> BTNH', x_q_BTD,
                                 self.kernel_q_proj_NDH.value)
-            q_BTNH = self.apply_rope(q_BTNH, md.input_positions, H,
-                                rope_theta, rope_scaling)
+            q_BTNH = self.apply_rope(q_BTNH, md.input_positions, H, rope_theta,
+                                     rope_scaling)
+            q_BTNH = q_BTNH * H**-0.5
             q_BTNH = nnx.with_sharding_constraint(q_BTNH,
                                                   self.query_btnh[op_mode])
         with jax.named_scope("k_proj"):
             k_BSKH = jnp.einsum('BSD,KDH -> BSKH', x_BSD,
                                 self.kernel_k_proj_KDH.value)
-            k_BSKH = self.apply_rope(k_BSKH, md.input_positions, H,
-                                rope_theta, rope_scaling)
+            k_BSKH = self.apply_rope(k_BSKH, md.input_positions, H, rope_theta,
+                                     rope_scaling)
             k_BSKH = nnx.with_sharding_constraint(k_BSKH,
                                                   self.keyvalue_bskh[op_mode])
 
@@ -309,7 +241,7 @@ class Attention(nnx.Module):
         return self.cfg
 
     # TODO: As there's a shape mismatch when using the rope lib,
-    # for function verification purpose, we add a local apply_rope function, 
+    # for function verification purpose, we add a local apply_rope function,
     # which is mainly inherited from the tpu_commons.models.jax.layers.rope,
     def apply_rope(
         self,
@@ -326,8 +258,11 @@ class Attention(nnx.Module):
         if rope_scaling:
             timescale = apply_rope_scaling(timescale, rope_scaling)
 
+        # Shape: (B, seq_len, head_dim // 2)
         sinusoid_inp = positions[..., jnp.newaxis] * timescale[jnp.newaxis,
-                                                            jnp.newaxis, :]
+                                                               jnp.newaxis, :]
+
+        # Shape: (B, seq_len, 1, head_dim // 2)
         sinusoid_inp = sinusoid_inp[:, :, jnp.newaxis, :]
         sin = jnp.sin(sinusoid_inp)
         cos = jnp.cos(sinusoid_inp)
@@ -382,7 +317,9 @@ class Attention(nnx.Module):
                 - The attention output tensor of shape
                   `(batch, seq, num_q_heads, head_dim)`.
         """
-        def _attention_kernel(q_BTNH, k_BSKH, v_BSKH, key_cache, value_cache, seq_lens, block_indices):
+
+        def _attention_kernel(q_BTNH, k_BSKH, v_BSKH, key_cache, value_cache,
+                              seq_lens, block_indices):
             head_repeats = num_heads // num_key_value_heads
 
             if is_prefill:
@@ -390,8 +327,12 @@ class Attention(nnx.Module):
                 k_BKSH = k_BSKH.swapaxes(1, 2)
                 v_BKSH = v_BSKH.swapaxes(1, 2)
 
-                k_attn_BNSH = jnp.repeat(k_BKSH, head_repeats, axis=1) if head_repeats > 1 else k_BKSH
-                v_attn_BNSH = jnp.repeat(v_BKSH, head_repeats, axis=1) if head_repeats > 1 else v_BKSH
+                k_attn_BNSH = jnp.repeat(
+                    k_BKSH, head_repeats,
+                    axis=1) if head_repeats > 1 else k_BKSH
+                v_attn_BNSH = jnp.repeat(
+                    v_BKSH, head_repeats,
+                    axis=1) if head_repeats > 1 else v_BKSH
 
                 # Transpose Q for flash_attention
                 q_BNTH = q_BTNH.swapaxes(1, 2)
@@ -418,37 +359,82 @@ class Attention(nnx.Module):
                 attn_output_BTNH = jnp.expand_dims(attn_output_BNH, 1)
 
             return attn_output_BTNH
-        
-        op_mode = "prefill" if is_prefill else "generate"
-        key_cache, value_cache = kv_cache
 
-        with jax.named_scope("kv_cache_update"):
-            k_BKSH = k_BSKH.swapaxes(1, 2)
-            v_BKSH = v_BSKH.swapaxes(1, 2)
-            key_cache = update_cache(is_prefill, key_cache, attention_metadata.kv_cache_write_indices, k_BKSH)
-            value_cache = update_cache(is_prefill, value_cache, attention_metadata.kv_cache_write_indices, v_BKSH)
-             
-        seq_lens_spec = P()
-        block_indices_spec = P()
+        if attention_metadata.chunked_prefill_enabled:
+            key_cache, value_cache = kv_cache
+            if attention_metadata.page_aligned_update:
+                # The e2e performance improvement of this was ~5% back in 2024/03 per gxd@. This might have changed now.
+                k_BKSH = k_BSKH.swapaxes(1, 2)
+                v_BKSH = v_BSKH.swapaxes(1, 2)
+                key_cache = sharded_chunked_prefill_update_cache(mesh)(
+                    key_cache, attention_metadata.kv_cache_write_indices,
+                    k_BKSH, attention_metadata.num_decode_seqs)
+                value_cache = sharded_chunked_prefill_update_cache(mesh)(
+                    value_cache, attention_metadata.kv_cache_write_indices,
+                    v_BKSH, attention_metadata.num_decode_seqs)
+            else:
+                # TODO(pooyam): Try the following ideas to optimize this.
+                # Idea 1: use lax loop similar to to chunked_prefill_update_cache above.
+                # Idea 2: Convert a prefill of size m*PAGE_SIZE + n, to a prefill of size m*PAGE_SIZE AND n decodes (But in fact they are all the same seq.)
+                # This will however make the code much more complicated.
+                k_BKSH = k_BSKH.swapaxes(1, 2)
+                v_BKSH = v_BSKH.swapaxes(1, 2)
+                k_SKBH = k_BKSH.swapaxes(0, 2)
+                v_SKBH = v_BKSH.swapaxes(0, 2)
+                key_cache = update_cache(
+                    False, key_cache,
+                    attention_metadata.kv_cache_write_indices, k_SKBH)
+                value_cache = update_cache(
+                    False, value_cache,
+                    attention_metadata.kv_cache_write_indices, v_SKBH)
 
-        in_specs = (
-            self.pallas_q_spec[op_mode],
-            self.pallas_kv_spec[op_mode],
-            self.pallas_kv_spec[op_mode],
-            self.pallas_cache_page_spec[op_mode],
-            self.pallas_cache_page_spec[op_mode],
-            seq_lens_spec,
-            block_indices_spec
-        )
+            q_BNTH = q_BTNH.swapaxes(1, 2)
+            outputs_BNTH = sharded_chunked_prefill_attention(mesh)(
+                q_BNTH,
+                key_cache,
+                value_cache,
+                attention_metadata.decode_lengths,
+                attention_metadata.decode_page_indices,
+                attention_metadata.num_decode_seqs,
+                attention_metadata.prefill_lengths,
+                attention_metadata.prefill_page_indices,
+                attention_metadata.prefill_query_start_offsets,
+                attention_metadata.num_prefill_seqs,
+            )
+            outputs_BTNH = outputs_BNTH.swapaxes(1, 2)
+        else:
+            op_mode = "prefill" if is_prefill else "generate"
+            key_cache, value_cache = kv_cache
 
-        out_specs = self.pallas_q_spec[op_mode]
+            with jax.named_scope("kv_cache_update"):
+                k_BKSH = k_BSKH.swapaxes(1, 2)
+                v_BKSH = v_BSKH.swapaxes(1, 2)
+                key_cache = update_cache(
+                    is_prefill, key_cache,
+                    attention_metadata.kv_cache_write_indices, k_BKSH)
+                value_cache = update_cache(
+                    is_prefill, value_cache,
+                    attention_metadata.kv_cache_write_indices, v_BKSH)
 
-        outputs_BTNH = jax.experimental.shard_map.shard_map(
-            _attention_kernel,
-            mesh=self.mesh,
-            in_specs=in_specs,
-            out_specs=out_specs,
-            check_rep=False
-        )(q_BTNH, k_BSKH, v_BSKH, key_cache, value_cache, attention_metadata.seq_lens, attention_metadata.block_indices)
-        
+            seq_lens_spec = P()
+            block_indices_spec = P()
+
+            in_specs = (self.pallas_q_spec[op_mode],
+                        self.pallas_kv_spec[op_mode],
+                        self.pallas_kv_spec[op_mode],
+                        self.pallas_cache_page_spec[op_mode],
+                        self.pallas_cache_page_spec[op_mode], seq_lens_spec,
+                        block_indices_spec)
+
+            out_specs = self.pallas_q_spec[op_mode]
+
+            outputs_BTNH = jax.experimental.shard_map.shard_map(
+                _attention_kernel,
+                mesh=self.mesh,
+                in_specs=in_specs,
+                out_specs=out_specs,
+                check_rep=False)(q_BTNH, k_BSKH, v_BSKH, key_cache,
+                                 value_cache, attention_metadata.seq_lens,
+                                 attention_metadata.block_indices)
+
         return (key_cache, value_cache), outputs_BTNH

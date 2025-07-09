@@ -2,6 +2,7 @@ from dataclasses import dataclass, field, make_dataclass
 from typing import Any, Tuple, Type
 
 # Flax and JAX sharding imports
+import jax
 from flax import nnx
 from jax.sharding import Mesh
 from vllm.config import VllmConfig
@@ -12,7 +13,7 @@ from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
 from tpu_commons.models.jax.common.layers import FFW, FFWConfig, RMSNorm
 from tpu_commons.models.jax.common.moe.moe import MoE, Router
-from tpu_commons.models.jax.common.sharding import *
+from tpu_commons.models.jax.common.sharding import ShardingConfig
 
 TransformerBlockConfig = make_dataclass(
     "TransformerBlockConfig",
@@ -69,7 +70,7 @@ class TransformerBlock(nnx.Module):
         else:
             self.mlp = self._create_module(FFW, cfg=self.cfg.ffw)
 
-        self.post_attention_norm = RMSNorm(
+        self.pre_attention_norm = RMSNorm(
             dims=hidden_size,
             mesh=self.mesh,
             param_factory=self.param_factory,
@@ -78,7 +79,7 @@ class TransformerBlock(nnx.Module):
             with_scale=True,
             dtype=self.cfg.ffw.dtype,
         )
-        self.post_mlp_norm = RMSNorm(
+        self.pre_mlp_norm = RMSNorm(
             dims=hidden_size,
             mesh=self.mesh,
             param_factory=self.param_factory,
@@ -93,18 +94,23 @@ class TransformerBlock(nnx.Module):
             attention_metadata: AttentionMetadata
     ) -> Tuple[KVCache, jax.Array]:
         op_mode = "prefill" if is_prefill else "generate"
-        new_cache, score = self.attn(x, is_prefill, kv_cache,
-                                     attention_metadata)
-        x = self.post_attention_norm(x + score)
+        # Attn Block
+        attn_residual = x
+        x = self.pre_attention_norm(x)
+        new_cache, attn_output = self.attn(x, is_prefill, kv_cache,
+                                           attention_metadata)
+        attn_output += attn_residual
+
+        # FFW Block
+        ffw_residual = attn_output
+        normed_ffw_input = self.pre_mlp_norm(attn_output)
         if self.block_type == "moe":
-            y = self.moe(x, op_mode)
+            logits = self.moe(normed_ffw_input, op_mode)
         elif self.block_type == "dense":
-            y = self.mlp(x, op_mode)
+            logits = self.mlp(normed_ffw_input, op_mode)
         else:
             raise ValueError(f"Invalid block type: {self.block_type}")
-
-        logits = self.post_mlp_norm(x + y)
-
+        logits += ffw_residual
         return new_cache, logits
 
     def generate_kernel(self, rngs: nnx.Rngs):
@@ -114,5 +120,5 @@ class TransformerBlock(nnx.Module):
             self.moe.generate_kernel(rngs)
         else:
             self.mlp.generate_kernel(rngs)
-        self.post_attention_norm.generate_kernel(rngs)
-        self.post_mlp_norm.generate_kernel(rngs)
+        self.pre_attention_norm.generate_kernel(rngs)
+        self.pre_mlp_norm.generate_kernel(rngs)

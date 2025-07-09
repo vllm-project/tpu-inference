@@ -213,7 +213,7 @@ class Llama3_8B(Model):
             kv_caches[i] = new_kv_cache
 
         final_activation = self.final_norm(x)
-        decoder_output = self.embedder.decode(final_activation)
+        decoder_output = self.lm_head.decode(final_activation)
 
         next_tokens = sample(
             do_sampling,
@@ -279,7 +279,7 @@ class Llama3WeightLoader(WeightLoader):
             "model.embed_tokens":
             "embedder.input_embedding_table_VD",
             "model.layers.*.input_layernorm":
-            "layers.*.post_mlp_norm.scale",
+            "layers.*.pre_attention_norm.scale",
             "model.layers.*.mlp.down_proj":
             "layers.*.mlp.kernel_down_proj_FD",
             "model.layers.*.mlp.gate_proj":
@@ -287,7 +287,7 @@ class Llama3WeightLoader(WeightLoader):
             "model.layers.*.mlp.up_proj":
             "layers.*.mlp.kernel_up_proj_DF",
             "model.layers.*.post_attention_layernorm":
-            "layers.*.post_attention_norm.scale",
+            "layers.*.pre_mlp_norm.scale",
             "model.layers.*.self_attn.k_proj":
             "layers.*.attn.kernel_k_proj_KDH",
             "model.layers.*.self_attn.o_proj":
