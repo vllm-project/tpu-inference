@@ -16,6 +16,7 @@ import torch.nn as nn
 # TPU XLA related
 import torch_xla.distributed.spmd as xs
 import torch_xla.runtime as xr
+from torch.utils import _pytree as pytree
 
 # TPU XLA related
 import vllm.envs as envs
@@ -88,6 +89,8 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 INVALID_TOKEN_ID = -1
+
+jax.config.update("jax_explain_cache_misses", True)
 
 
 #########################################################
@@ -747,12 +750,12 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         num_slices = self._create_torchax_array(
             torch.tensor([num_slices], dtype=torch.int32))
         attn_metadata = PallasMetadata(
-            slot_mapping=slot_mapping,
-            block_tables=block_tables,
-            context_lens=seq_lens,
-            query_start_loc=query_start_loc,
-            num_seqs=num_seqs,
-            num_slices=num_slices,
+            slot_mapping=slot_mapping.jax(),
+            block_tables=block_tables.jax(),
+            context_lens=seq_lens.jax(),
+            query_start_loc=query_start_loc.jax(),
+            num_seqs=num_seqs.jax(),
+            num_slices=num_slices.jax(),
         )
         # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
         # request in the batch. While we should not sample any token from this
@@ -965,11 +968,20 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         num_reqs = self.input_batch.num_reqs
         # Run the decoder
         if not VLLM_TORCHAX_EAGER:
-            input_args = (input_ids, self.position_ids)
+            input_args = (input_ids.jax(), self.position_ids.jax())
             num_scheduled_tokens_padded = input_ids.shape[0]
             hidden_states, new_kv_caches = self.model_func(
-                self.params_and_buffers, input_args, self.kv_caches_dict,
+                self.params_and_buffers_jax, input_args, self.kv_caches_dict,
                 attn_metadata, num_scheduled_tokens_padded)
+            # We can keep JAX array once we make the rest of the graphs to take
+            # JAX array directly.
+            hidden_states = torchax.tensor.Tensor(hidden_states,
+                                                  self.torchax_env)
+            new_kv_caches = {
+                layer_name:
+                [torchax.tensor.Tensor(kv_cache[0], self.torchax_env)]
+                for layer_name, kv_cache in new_kv_caches.items()
+            }
             # Set the new KV caches to the static forward context.
             static_forward_context = self.vllm_config.compilation_config.\
                                             static_forward_context
@@ -1139,6 +1151,9 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                         create_torchax_tensor_with_partition_spec(tensor,
                                                                     self.mesh,
                                                                     ())
+            self.params_and_buffers_jax = \
+                pytree.tree_map_only(torch.Tensor, lambda x : x.jax(),
+                                    self.params_and_buffers)
 
             # Create a function for model.forward
             static_forward_context = \
@@ -1226,12 +1241,12 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         num_slices = self._create_torchax_array(
             torch.tensor([padded_num_slices], dtype=torch.int32))
         attn_metadata = PallasMetadata(
-            slot_mapping=slot_mapping,
-            block_tables=block_tables,
-            context_lens=context_lens,
-            query_start_loc=query_start_loc,
-            num_seqs=num_seqs,
-            num_slices=num_slices,
+            slot_mapping=slot_mapping.jax(),
+            block_tables=block_tables.jax(),
+            context_lens=context_lens.jax(),
+            query_start_loc=query_start_loc.jax(),
+            num_seqs=num_seqs.jax(),
+            num_slices=num_slices.jax(),
         )
 
         if self.is_multimodal_model:
@@ -1249,14 +1264,14 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         }
 
         if VLLM_TORCHAX_ENABLED:
-            input_args = (input_ids, position_ids)
+            input_args = (input_ids.jax(), position_ids.jax())
             for k, v in self.params_and_buffers.items():
                 if not isinstance(v, torchax.tensor.Tensor):
                     logger.info("key %s is not torchax tensor, ", k)
             for name, kv_cache in self.kv_caches_dict.items():
                 if not isinstance(kv_cache, torchax.tensor.Tensor):
-                    logger.info("key %s is torchax tensor, ", name)
-            out, new_kv_caches = self.model_func(self.params_and_buffers,
+                    logger.info("key %s is not torchax tensor, ", name)
+            out, new_kv_caches = self.model_func(self.params_and_buffers_jax,
                                                  input_args,
                                                  self.kv_caches_dict,
                                                  per_layer_attn_metadata,
@@ -1278,7 +1293,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 out = self.model(input_ids=input_ids,
                                  positions=position_ids,
                                  inputs_embeds=inputs_embeds)
-        self._hidden_states_dtype = out.dtype
+        self._hidden_states_dtype = torchax.ops.mappings.j2t_dtype(out.dtype)
 
     def _set_active_loras(self, prompt_lora_mapping, token_lora_mapping,
                           lora_requests) -> None:
@@ -1542,6 +1557,9 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             runner_kv_caches)
         if VLLM_TORCHAX_ENABLED:
             self.kv_caches_dict = kv_caches
+            self.kv_caches_dict = pytree.tree_map_only(torch.Tensor,
+                                                       lambda x: x.jax(),
+                                                       self.kv_caches_dict)
 
         # Profile with multimodal encoder & encoder cache.
         # TODO: handle encoder-decoder models once we support them.
