@@ -70,18 +70,23 @@ class EngineCore:
         prefill_slice_sizes = disagg_utils.get_prefill_slices()
         decode_slice_sizes = disagg_utils.get_decode_slices()
         prefill_chip_cnt = sum(prefill_slice_sizes)
-        assert sum(decode_slice_sizes) + prefill_chip_cnt <= len(devices)
-        assert prefill_chip_cnt > 0
+        decode_chip_cnt = sum(decode_slice_sizes)
+        assert decode_chip_cnt + prefill_chip_cnt <= len(devices)
+        assert prefill_chip_cnt > 0 and decode_chip_cnt > 0
 
         self.prefill_executors, self.prefill_engines = self._create_and_initialize_executors(
-            decode_slice_sizes, devices, vllm_config
+            prefill_slice_sizes, devices[:prefill_chip_cnt], vllm_config)
+        logger.info(
+            f"{len(self.prefill_executors)} Disaggregated prefill executor created."
         )
-        logger.info(f"{len(self.prefill_executors)} Disaggregated prefill executor created.")
 
         self.decode_executors, self.decode_engines = self._create_and_initialize_executors(
-            decode_slice_sizes, devices[prefill_chip_cnt:], vllm_config
+            decode_slice_sizes,
+            devices[prefill_chip_cnt:prefill_chip_cnt + decode_chip_cnt],
+            vllm_config)
+        logger.info(
+            f"{len(self.decode_executors)} Disaggregated decode executor created."
         )
-        logger.info(f"{len(self.decode_executors)} Disaggregated decode executor created.")
 
         self.structured_output_manager = StructuredOutputManager(vllm_config)
         logger.info("structure output manager created.")
@@ -98,7 +103,8 @@ class EngineCore:
         # Batch queue for scheduled batches. This enables us to asynchronously
         # schedule and execute batches, and is required by pipeline parallelism
         # to eliminate pipeline bubbles.
-        self.batch_queue_size = self.prefill_executors[0].max_concurrent_batches
+        self.batch_queue_size = self.prefill_executors[
+            0].max_concurrent_batches
         self.batch_queue: Optional[queue.Queue[tuple[Future[ModelRunnerOutput],
                                                      SchedulerOutput]]] = None
         if self.batch_queue_size > 1:
@@ -119,8 +125,7 @@ class EngineCore:
         engines = []
         device_offset = 0
         for i, slice_size in enumerate(slice_sizes):
-            logger.info(
-                f"Creating executor {i} with slice size: {slice_size}")
+            logger.info(f"Creating executor {i} with slice size: {slice_size}")
             subslice = devices[device_offset:device_offset + slice_size]
             executor = disagg_executor.DisaggExecutor(vllm_config)
             executor.init_with_devices(subslice)
@@ -135,7 +140,7 @@ class EngineCore:
             executors.append(executor)
             device_offset += slice_size
             logger.info("Disaggregated executor created.")
-            
+
         return executors, engines
 
     def _initialize_kv_caches(self, vllm_config: VllmConfig,
@@ -203,7 +208,8 @@ class EngineCore:
             self.structured_output_manager.grammar_init(req)
 
         self.orchestrator.place_request_on_prefill_queue(req)
-        logger.debug("added req %s to disaggregated orchestrator.", req.request_id)
+        logger.debug("added req %s to disaggregated orchestrator.",
+                     req.request_id)
 
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
@@ -262,16 +268,16 @@ class EngineCore:
         max_size: Optional[int] = None,
     ) -> None:
         self.prefill_executors[0].save_sharded_state(path=path,
-                                                 pattern=pattern,
-                                                 max_size=max_size)
+                                                     pattern=pattern,
+                                                     max_size=max_size)
 
     def collective_rpc(self,
                        method: Union[str, Callable[..., _R]],
                        timeout: Optional[float] = None,
                        args: tuple = (),
                        kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
-        return self.prefill_executors[0].collective_rpc(method, timeout, args,
-                                                    kwargs)
+        return self.prefill_executors[0].collective_rpc(
+            method, timeout, args, kwargs)
 
     def save_tensorized_model(
         self,
