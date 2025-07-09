@@ -324,8 +324,8 @@ class Driver:
             if self._interleaved_mode:
                 self._interleaved_lock.acquire()
             with LatencyTracker("prefill"):
-                kv_cach_map, vllm_model_runner_output = prefill_engine.prefill()
-            my_transfer_backlog.put(kv_cach_map, block=True)
+                kv_cache_map, vllm_model_runner_output = prefill_engine.prefill()
+            my_transfer_backlog.put(kv_cache_map, block=True)
             if self._interleaved_mode:
                 self._interleaved_lock.release()
 
