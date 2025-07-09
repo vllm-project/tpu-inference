@@ -105,9 +105,10 @@ def update_kv_cache(k: jax.Array, v: jax.Array, kv_cache: jax.Array,
         kv_cache: (L, S, K*2, H) # non-padded
     """
     L, S, K_2, H = kv_cache.shape
-    T, K, H = k.shape
-    logger.info(f"kv_cache shape: {kv_cache.shape}")
-    logger.info(f"k shape: {k.shape}")
+    T, K, _ = k.shape
+    logger.info(f"kv_cache shape: {kv_cache.shape}"
+                )  # kv_cache shape: (18118, 64, 4, 64)
+    logger.info(f"k shape: {k.shape}")  # k shape: (16, 2, 128)
 
     # (T, K*2, H)
     # NOTE(xiang): KV needs to be interleaved as required by kernel
