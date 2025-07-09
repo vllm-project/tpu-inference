@@ -26,7 +26,7 @@ DeepSeekV3RoutingConfig = make_dataclass(
         ("dtype", DTypeLike),
         ("vllm_config", VllmConfig, field(repr=False, default=None)),
     ],
-    bases=(Config,),
+    bases=(Config, ),
 )
 
 DeepSeekV3RoutingConfig.__doc__ = f"""Configuration for the Router module.
@@ -69,21 +69,19 @@ class DeepSeekV3Router(nnx.Module):
         self.quant = quant
         self.dtype = self.cfg.dtype
 
-        self.hidden_size = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
+        self.hidden_size = getattr(self.cfg,
+                                   HuggingFaceArgNames.HIDDEN_SIZE.value)
         self.num_experts = getattr(
-            self.cfg, HuggingFaceArgNames.NUM_ROUTED_EXPERTS.value
-        )
+            self.cfg, HuggingFaceArgNames.NUM_ROUTED_EXPERTS.value)
         self.num_experts_per_tok = getattr(
-            self.cfg, HuggingFaceArgNames.NUM_EXPERTS_PER_TOKEN.value
-        )
+            self.cfg, HuggingFaceArgNames.NUM_EXPERTS_PER_TOKEN.value)
         self.n_groups = getattr(self.cfg, HuggingFaceArgNames.NUM_GROUPS.value)
-        self.topk_groups = getattr(self.cfg, HuggingFaceArgNames.TOPK_GROUP.value)
-        self.norm_topk_prob = getattr(
-            self.cfg, HuggingFaceArgNames.NORM_TOPK_PROB.value
-        )
+        self.topk_groups = getattr(self.cfg,
+                                   HuggingFaceArgNames.TOPK_GROUP.value)
+        self.norm_topk_prob = getattr(self.cfg,
+                                      HuggingFaceArgNames.NORM_TOPK_PROB.value)
         self.routed_scaling_factor = getattr(
-            self.cfg, HuggingFaceArgNames.ROUTED_SCALING_FACTOR.value
-        )
+            self.cfg, HuggingFaceArgNames.ROUTED_SCALING_FACTOR.value)
 
         self.__post_init__()
 
@@ -97,14 +95,16 @@ class DeepSeekV3Router(nnx.Module):
         scores = scores + self.bias_E
         if self.n_groups > 1:
             experts_per_group = self.num_experts // self.n_groups
-            group_scores = jnp.reshape(scores, (-1, self.n_groups, experts_per_group))
+            group_scores = jnp.reshape(scores,
+                                       (-1, self.n_groups, experts_per_group))
             group_scores = jax.lax.top_k(group_scores, k=2)[0]
             group_scores = jnp.sum(group_scores, axis=-1)
             indices = jax.lax.top_k(group_scores, k=self.topk_groups)[1]
 
-            mask = jnp.any(
-                jnp.arange(self.n_groups)[:, None] == indices[..., None, :], axis=-1
-            )
+            mask = jnp.any(jnp.arange(self.n_groups)[:,
+                                                     None] == indices[...,
+                                                                      None, :],
+                           axis=-1)
             mask = jnp.repeat(mask, scores.shape[-1] // mask.shape[-1], -1)
             scores = jnp.where(mask, scores, 0.0)
 
@@ -146,11 +146,13 @@ class DeepSeekV3Router(nnx.Module):
         D = self.hidden_size
         E = self.num_experts
         self.kernel_DE = self.param_factory.create_kernel_param(
-            rngs, shape=(D, E), dtype=self.cfg.dtype, sharding=self.ed_sharding
-        )
+            rngs,
+            shape=(D, E),
+            dtype=self.cfg.dtype,
+            sharding=self.ed_sharding)
         self.bias_E = self.param_factory.create_scale_param(
             rngs,
-            shape=(E,),
+            shape=(E, ),
             dtype=self.cfg.dtype,
             sharding=None,  # TODO: check if this is correct
         )
@@ -161,22 +163,21 @@ class DeepSeekV3Router(nnx.Module):
             "activation_ffw_btd",
         ]
         for attr_name in mode_dependent_attrs:
-            prefill_sharding_config = getattr(
-                self.sharding_cfg.prefill_rules, attr_name
-            )
+            prefill_sharding_config = getattr(self.sharding_cfg.prefill_rules,
+                                              attr_name)
             generate_sharding_config = getattr(
-                self.sharding_cfg.generate_rules, attr_name
-            )
+                self.sharding_cfg.generate_rules, attr_name)
 
             sharding_dict = {
-                "prefill": NamedSharding(self.mesh, P(*prefill_sharding_config)),
-                "generate": NamedSharding(self.mesh, P(*generate_sharding_config)),
+                "prefill": NamedSharding(self.mesh,
+                                         P(*prefill_sharding_config)),
+                "generate": NamedSharding(self.mesh,
+                                          P(*generate_sharding_config)),
             }
             setattr(self, attr_name, sharding_dict)
 
         # static sharding for kernel/weights
         self.ed_sharding = NamedSharding(
-            self.mesh, P(*self.sharding_cfg.generate_rules.moe_router_de)
-        )
+            self.mesh, P(*self.sharding_cfg.generate_rules.moe_router_de))
 
         return
