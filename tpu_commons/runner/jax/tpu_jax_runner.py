@@ -335,11 +335,13 @@ class TPUModelRunner():
         """
         num_tokens_in_cache = kv_cache_slices[0].shape[0]
         num_blocks_for_cache = cdiv(num_tokens_in_cache, block_size)
+        # Fix the padding size here.
         padded_len = num_blocks_for_cache * block_size
         padding_size = padded_len - num_tokens_in_cache
 
         new_kv_caches = []
         for i, layer_kv_cache_slices in enumerate(kv_cache_slices):
+            # This padding is useless, as JAX/XLA would do it.
             padded_slices = jnp.pad(layer_kv_cache_slices,
                                     ((0, padding_size), (0, 0), (0, 0)),
                                     mode='constant')
@@ -355,114 +357,35 @@ class TPUModelRunner():
             new_kv_caches.append(updated_cache)
         return new_kv_caches
 
-    def get_kv_cache_for_requests(
+    def get_kv_cache_for_block_ids(
         self,
-        request_ids: List[str],
-        kv_cache_write_indices: jax.Array,
-        num_scheduled_tokens_per_req: np.ndarray,
-    ) -> dict[str, list[jax.Array]]:
+        block_ids: List[int],
+    ) -> List[jax.Array]:
         """
-        Extracts the KV cache slices for given request IDs based on the
-        provided slot mapping metadata. This extracts the cache for newly
-        scheduled tokens.
+        Extracts the KV cache slices for a given list of block IDs.
+        This assumes all provided blocks are full.
 
         Args:
-            request_ids: A list of request IDs to extract KV cache for.
-            kv_cache_write_indices: The metadata for slot mapping, from
-                `AttentionMetadata.slot_mapping`.
-            num_scheduled_tokens_per_req: An array containing the number of
-                scheduled tokens for each request in the current batch, ordered
-                by their position in the batch.
+            block_ids: A list of block IDs to extract KV cache for.
 
         Returns:
-            A dictionary where keys are request IDs and values are lists of
-            JAX arrays, with each array representing the KV cache slices for a
-            layer.
+            A list of JAX arrays, with each array representing the KV cache
+            slices for a layer, concatenated for all blocks.
         """
-        # kv_cache_write_indices is on device and transposed.
-        # Get it to CPU and transpose back for processing.
-        with LatencyTracker("get_kv_cache_for_requests:device_get"):
-            slot_mapping_metadata = np.asarray(
-                jax.device_get(kv_cache_write_indices)).T
-
-        # --- Start of new, optimized logic ---
-
-        # 1. On CPU, compute all indices for all requests that need work.
         all_indices_to_gather = []
-        indices_lengths = []
-        req_ids_with_work = []
-        output = {}
+        for block_id in block_ids:
+            start_index = block_id * self.block_size
+            all_indices_to_gather.extend(
+                range(start_index, start_index + self.block_size))
 
-        # Pre-calculate block boundaries for all requests in the batch
-
-        num_reqs_in_batch = len(num_scheduled_tokens_per_req)
-        slices_start = self.input_batch.num_computed_tokens_cpu[:
-                                                                num_reqs_in_batch]
-        slices_end = slices_start + num_scheduled_tokens_per_req
-        local_block_start_idx = slices_start // self.block_size
-        local_block_end_idx = (slices_end - 1) // self.block_size
-        block_lens = local_block_end_idx - local_block_start_idx + 1
-
-        cu_block_lens = np.zeros(len(block_lens) + 1, dtype=np.int32)
-        np.cumsum(block_lens, out=cu_block_lens[1:])
-
-        with LatencyTracker("get_kv_cache_for_requests:cpu_index_generation"):
-            for req_id in request_ids:
-                if req_id not in self.input_batch.req_id_to_index:
-                    logger.warning(
-                        f"Request ID {req_id} not found in input batch.")
-                    output[req_id] = []
-                    continue
-
-                req_index = self.input_batch.req_id_to_index[req_id]
-
-                if num_scheduled_tokens_per_req[req_index] == 0:
-                    output[req_id] = []
-                    continue
-
-                start_meta_idx = cu_block_lens[req_index]
-                end_meta_idx = cu_block_lens[req_index + 1]
-                metadata_for_req = slot_mapping_metadata[
-                    start_meta_idx:end_meta_idx]
-
-                indices_for_req = [
-                    i for start, _, length in metadata_for_req
-                    for i in range(int(start), int(start + length))
-                ]
-
-                if not indices_for_req:
-                    output[req_id] = []
-                    continue
-
-                req_ids_with_work.append(req_id)
-                all_indices_to_gather.extend(indices_for_req)
-                indices_lengths.append(len(indices_for_req))
-
-        if not req_ids_with_work:
-            return output
-
-        # 2. Concatenate all indices and move to device once.
         indices_to_gather_jnp = jnp.array(all_indices_to_gather,
                                           dtype=jnp.int32)
 
-        # 3. Batch the `take` operation for all layers using a JIT-compiled function.
-        with LatencyTracker(f"BatchedGatherKVSlices-{len(req_ids_with_work)}"):
+        with LatencyTracker("BatchedGatherKVSlices-for-blocks"):
             batched_kv_cache_per_layer = self._jitted_gather_kv_cache(
                 self.kv_caches, indices_to_gather_jnp)
 
-        # 4. Split the results on-device and populate the output dictionary.
-        split_indices = np.cumsum(indices_lengths[:-1])
-
-        per_req_slices_by_layer = []
-        for all_gathered_slices in batched_kv_cache_per_layer:
-            per_req_slices_by_layer.append(
-                jnp.split(all_gathered_slices, split_indices))
-
-        for i, req_id in enumerate(req_ids_with_work):
-            output[req_id] = [
-                layer_slices[i] for layer_slices in per_req_slices_by_layer
-            ]
-        return output
+        return batched_kv_cache_per_layer
 
     def transfer_kv_cache(self,
                           kv_cache_slices: List[jax.Array]) -> List[jax.Array]:
@@ -533,6 +456,7 @@ class TPUModelRunner():
                     f"Need {num_blocks_for_cache}, got {len(block_numbers)}.")
 
             # Prepare inputs for the JIT-compiled function.
+            # TODO: adding padding here.
             target_block_numbers = jnp.array(
                 block_numbers[:num_blocks_for_cache], dtype=jnp.int32)
 

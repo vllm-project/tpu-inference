@@ -16,8 +16,9 @@
 import threading
 import warnings
 from typing import Any, Tuple
-
 import numpy as np
+import jax
+
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
@@ -70,6 +71,10 @@ class JaxEngine():
             _ = self.kv_cache_manager.allocate_slots(
                 vllm_request, num_tokens, new_computed_blocks=computed_blocks)
             req_id = vllm_request.request_id
+            return self.kv_cache_manager.get_block_ids(req_id)
+
+    def get_block_ids(self, req_id: str) -> tuple[list[int], ...]:
+        with self._kv_cache_manager_lock:
             return self.kv_cache_manager.get_block_ids(req_id)
 
     def has_more_capacity(self):
@@ -170,7 +175,7 @@ class JaxEngine():
         ]
 
     # Public non-JIT prefill method that updates page state
-    def prefill(self) -> Tuple[Prefix, ModelRunnerOutput]:
+    def prefill(self) -> Tuple[dict[str, list[jax.Array]], ModelRunnerOutput]:
         scheduler_output = self._schedule_prefill()
         self._pending_num_prefill_tokens -= scheduler_output.total_num_scheduled_tokens
         self._completed_requests.clear()
@@ -187,6 +192,7 @@ class JaxEngine():
         logger.debug(f"Prefill result: {runner_output}")
 
         num_tokens_scheduled: list[int] = []
+        kv_cache_map: dict[str, list[jax.Array]] = {}
         for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items(
         ):
             req = self._request_map[req_id]
@@ -204,23 +210,20 @@ class JaxEngine():
                 req.num_computed_tokens += 1
                 req.num_cached_tokens += 1
 
+                block_ids = self.get_block_ids(req_id)
+                with LatencyTracker("ExtractKVCache"):
+                    # Assume one KV cache group for now.
+                    kv_cache_map[req_id] = self.model_runner.get_kv_cache_for_block_ids(block_ids[0])
                 logger.debug(
                     f"prefill done: for {req_id} with {num_tokens} tokens")
                 self._completed_requests.append(req_id)
                 self._request_map.pop(req_id)
 
-        num_scheduled_tokens_per_req = np.array(num_tokens_scheduled,
-                                                dtype=np.int32)
-        with LatencyTracker("ExtractKVCache"):
-            kv_cache_slices = self.model_runner.get_kv_cache_for_requests(
-                self._completed_requests, metadata.slot_mapping,
-                num_scheduled_tokens_per_req)
-
         self._requests = [
             r for r in self._requests if r.request_id in self._request_map
         ]
 
-        return kv_cache_slices, runner_output
+        return kv_cache_map, runner_output
 
     def _schedule_generate(self) -> SchedulerOutput:
         # Filter out requests that are already finished to prevent
