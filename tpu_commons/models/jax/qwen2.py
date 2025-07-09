@@ -67,11 +67,11 @@ class Qwen2Attention(nnx.Module):
         self.rope_theta = config.rope_theta
         self.rope_scaling = getattr(config, "rope_scaling", None)
 
-        # TODO (wenlong): more robust way
         self.head_dim_original = config.hidden_size // config.num_attention_heads
-        self.head_dim = 128
-        if self.head_dim_original % 128 == 0:
-            self.head_dim = self.head_dim_original
+
+        # Pad head_dim up to the nearest multiple of 128 for kernel performance.
+        # Details can be seen at: tpu_commons/kernels/ragged_kv_cache_update.py::_kv_cache_update()
+        self.head_dim = (self.head_dim_original + 127) // 128 * 128
 
         self.mesh = mesh
 

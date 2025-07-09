@@ -235,17 +235,11 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
     num_kv_heads = hf_config.num_key_value_heads
     hidden_size = model_config.get_hidden_size()
 
-    # NOTE(wenlong): we may need to pad head_dim to a multiple of 128 as required of kernels
+    # NOTE(wenlong): we need to pad head_dim to a multiple of 128 as required of kernels
     # Details can be seen at: tpu_commons/kernels/ragged_kv_cache_update.py::_kv_cache_update()
-
-    # TODO (wenlong): more robust way
     head_dim_original = model_config.get_head_size()
-    head_dim = head_dim_original
-    head_dim_pad = 0
-    if head_dim % 128 != 0:
-        head_dim = 128
-        head_dim_pad = head_dim - head_dim_original
-        logger.info(f"Change head_dim from {head_dim_original} to {head_dim}")
+    head_dim = (head_dim_original + 127) // 128 * 128
+    head_dim_pad = head_dim - head_dim_original
 
     reshape_keys = {
         "q_proj": (num_heads, head_dim_original, hidden_size),
@@ -294,7 +288,7 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
             for key in bias_reshape_keys:
                 if key in hf_key:
                     hf_weight = jnp.reshape(hf_weight, bias_reshape_keys[key])
-                    if head_dim_pad:
+                    if head_dim_pad > 0:
                         hf_weight = jnp.pad(hf_weight,
                                             ((0, 0), (0, head_dim_pad)))
                     break
@@ -302,7 +296,7 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
             for key in reshape_keys:
                 if key in hf_key:
                     hf_weight = jnp.reshape(hf_weight, reshape_keys[key])
-                    if head_dim_pad:
+                    if head_dim_pad > 0:
                         if "o_proj" in key:
                             hf_weight = jnp.pad(hf_weight, ((0, 0), (0, 0),
                                                             (0, head_dim_pad)))

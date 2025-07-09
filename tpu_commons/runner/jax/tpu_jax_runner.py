@@ -188,11 +188,11 @@ class TPUModelRunner():
         model_config = self.vllm_config.model_config
         parallel_config = self.vllm_config.parallel_config
 
-        # TODO (wenlong): more robust way
-        # NOTE: sometimes the head_size needs to be padded due to kernel restriction
+        # NOTE: sometimes the head_size needs to be padded to a multiple of 128 due to kernel restriction
+        # Details can be seen at: tpu_commons/kernels/ragged_kv_cache_update.py::_kv_cache_update()
         head_size = model_config.get_head_size()
-        if head_size % 128 != 0:
-            head_size = 128
+        head_size = (head_size + 127) // 128 * 128
+
         for i in range(model_config.get_num_layers(parallel_config)):
             kv_cache_spec[f"layers.{i}"] = FullAttentionSpec(
                 block_size=block_size,
