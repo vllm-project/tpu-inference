@@ -187,13 +187,17 @@ class TPUModelRunner():
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         model_config = self.vllm_config.model_config
         parallel_config = self.vllm_config.parallel_config
+
+        # TODO (wenlong): more robust way
+        # NOTE: sometimes the head_size needs to be padded due to kernel restriction
+        head_size = model_config.get_head_size()
+        if head_size % 128 != 0:
+            head_size = 128
         for i in range(model_config.get_num_layers(parallel_config)):
             kv_cache_spec[f"layers.{i}"] = FullAttentionSpec(
                 block_size=block_size,
                 num_kv_heads=model_config.get_total_num_kv_heads(),
-                # TODO (wenlong): more robust way
-                # NOTE: sometimes the head_size needs to be padded due to kernel restriction
-                head_size=model_config.get_head_size() * 2,
+                head_size=head_size,
                 dtype=torch.bfloat16,
                 use_mla=False,
             )
