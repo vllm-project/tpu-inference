@@ -1,5 +1,4 @@
 import enum
-
 """
 Current Used Abbreviation for Tensor Dimensions:
 B: Batch size
@@ -17,6 +16,8 @@ X: Number of activated experts per token in MoE
 G: Number of groups in Grouped-Query Attention
 E: Total number of experts in MoE
 """
+
+
 class RouterType(enum.Enum):
     """Enum for router types."""
     TOP_K = 'top_k'
@@ -35,22 +36,29 @@ class HuggingFaceArgNames(enum.Enum):
     RMS_NORM_EPS: str = "rms_norm_eps"
     ROPE_SCALING: str = "rope_scaling"
     ROPE_THETA: str = "rope_theta"
-    VOCAB_SIZE="vocab_size"
-    
+    VOCAB_SIZE = "vocab_size"
+
     # FFW params
     INTERMEDIATE_SIZE: str = "intermediate_size"
-    
+
     # Attention params
     HEAD_DIM: str = "head_dim"
     NUM_ATTENTION_HEADS: str = "num_attention_heads"
     NUM_KEY_VALUE_HEADS: str = "num_key_value_heads"
     ATTENION_DROPOUT: str = "attention_dropout"
     ATTENTION_BIAS: str = "attention_bias"
-    
+
     # MoE
     INTERMEDIATE_SIZE_MOE: str = "intermediate_size_moe"
-    NUM_LOCAL_EXPERTS: str = "num_local_experts"
+    NUM_LOCAL_EXPERTS: str = "num_local_experts"  # Llama moe
     NUM_EXPERTS_PER_TOKEN: str = "num_experts_per_token"
+    NUM_ROUTED_EXPERTS: str = "n_routed_experts"  # Deepseek moe
+    NUM_SHARED_ROUTED_EXPERTS: str = "n_shared_experts"
+    NUM_GROUPS: str = "n_group"
+    ROUTED_SCALING_FACTOR: str = "routed_scaling_factor"
+    TOPK_GROUP: str = "topk_group"
+    NORM_TOPK_PROB: str = "norm_topk_prob"
+    SCORING_FUNCTION: str = "scoring_func"
 
     ## Sampling params
     BOS_TOKEN_ID: str = "bos_token_id"
