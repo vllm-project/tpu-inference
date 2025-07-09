@@ -213,11 +213,16 @@ class TPUModelRunner():
         # TODO(xiang): fix this together with get_kv_cache_spec
         # cache_dtype = kv_cache_spec.dtype
 
+        # NOTE: sometimes the head_size needs to be padded due to kernel restriction
+        head_size = kv_cache_spec.head_size
+        if head_size % 128 != 0:
+            head_size = 128
+
         cache_shape = (
             kv_cache_config.num_blocks,
             kv_cache_spec.block_size,
             kv_cache_spec.num_kv_heads * 2,
-            kv_cache_spec.head_size,
+            head_size,
         )
 
         # Shard the num_kv_heads dim along the 'model' axis.
