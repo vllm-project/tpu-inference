@@ -975,11 +975,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             # JAX array directly.
             hidden_states = torchax.tensor.Tensor(hidden_states,
                                                   self.torchax_env)
-            # new_kv_caches = {
-            #     layer_name:
-            #     [torchax.tensor.Tensor(kv_cache[0], self.torchax_env)]
-            #     for layer_name, kv_cache in new_kv_caches.items()
-            # }
             # Set the new KV caches to the static forward context.
             static_forward_context = self.vllm_config.compilation_config.\
                                             static_forward_context
