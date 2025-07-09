@@ -22,6 +22,7 @@ from tpu_commons.models.jax.layers.sampling import sample
 from tpu_commons.models.vllm.sharding import shard_model_to_tpu
 from tpu_commons.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
+from tpu_commons.sample.metadata_jax import TPUSupportedSamplingMetadata
 
 
 class ModelForLogits(torch.nn.Module):
@@ -107,9 +108,7 @@ class VllmModelWrapper:
             kv_caches: List[jax.Array],
             input_ids: jax.Array,
             attention_metadata: AttentionMetadata,
-            temperatures: jax.Array,
-            top_ps: jax.Array,
-            top_ks: jax.Array,
+            tpu_sampling_metadata: TPUSupportedSamplingMetadata,
             logits_indices: jax.Array,
             *args,
         ) -> Tuple[List[jax.Array], jax.Array, jax.Array]:
@@ -145,9 +144,7 @@ class VllmModelWrapper:
                 self.rng,
                 self.mesh,
                 logits,
-                temperatures,
-                top_ps,
-                top_ks,
+                tpu_sampling_metadata,
             )
 
             return new_kv_caches, next_tokens, logits
