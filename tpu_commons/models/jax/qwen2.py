@@ -13,6 +13,7 @@ from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.layers.rope import apply_rope
 from tpu_commons.models.jax.layers.sampling import sample
 from tpu_commons.models.jax.utils.weight_utils import load_hf_weights
+from tpu_commons.sample.metadata_jax import TPUSupportedSamplingMetadata
 
 logger = init_logger(__name__)
 
@@ -268,9 +269,7 @@ class Qwen2ForCausalLM(nnx.Module):
         kv_caches: List[jax.Array],
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
-        temperatures: jax.Array = None,
-        top_ps: jax.Array = None,
-        top_ks: jax.Array = None,
+        tpu_sampling_metadata: TPUSupportedSamplingMetadata,
         logits_indices: jax.Array = None,
         *args,
     ) -> Tuple[List[jax.Array], jax.Array, jax.Array]:
@@ -304,9 +303,7 @@ class Qwen2ForCausalLM(nnx.Module):
             self.rng.params(),
             self.mesh,
             logits,
-            temperatures,
-            top_ps,
-            top_ks,
+            tpu_sampling_metadata,
         )
         return kv_caches, next_tokens, None
 

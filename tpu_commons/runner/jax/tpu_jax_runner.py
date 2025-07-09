@@ -30,6 +30,7 @@ from tpu_commons.runner.tpu_torch_xla_runner import (_get_padded_token_len,
                                                      _get_token_paddings)
 from tpu_commons.runner.utils import (LatencyTracker,
                                       get_padded_num_reqs_with_upper_limit)
+from tpu_commons.sample.metadata_jax import TPUSupportedSamplingMetadata
 
 logger = init_logger(__name__)
 
@@ -639,16 +640,8 @@ class TPUModelRunner():
         req_ids = self.arange_cpu[:num_reqs]
         do_sampling = _do_sampling(self.input_batch.top_k_cpu[req_ids],
                                    self.input_batch.temperature_cpu[req_ids])
-        if do_sampling:
-            temperatures = self.input_batch.temperature_cpu[:padded_num_reqs]
-            top_ps = self.input_batch.top_p_cpu[:padded_num_reqs]
-            top_ks = self.input_batch.top_k_cpu[:padded_num_reqs]
-            (temperatures, top_ps, top_ks) = self._device_array(
-                (temperatures, top_ps, top_ks))
-        else:
-            temperatures = None
-            top_ps = None
-            top_ks = None
+        tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
+            from_input_batch(self.mesh, self.input_batch, padded_num_reqs, not do_sampling)
 
         (input_ids, positions, slot_mapping_metadata, num_slices, block_tables,
          query_start_loc, seq_lens, num_seqs,
@@ -671,9 +664,7 @@ class TPUModelRunner():
                 num_seqs=num_seqs,
                 num_slices=num_slices,
             ),
-            temperatures,
-            top_ps,
-            top_ks,
+            tpu_sampling_metadata,
             logits_indices,
         )
 
