@@ -445,6 +445,7 @@ class EngineCoreProc(EngineCore):
             self._process_input_queue()
             # 2) return the outputs.
             self._process_output_queue()
+            time.sleep(0.05)
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
