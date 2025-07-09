@@ -58,7 +58,7 @@ def attention(
         v: jax.Array,
         attention_metadata: AttentionMetadata,
         mesh: Mesh,
-        head_dim_original: int,  # before padding
+        head_dim_original: int | None = None,  # before padding
 ) -> Tuple[jax.Array, jax.Array]:
     # T: seq_len
     # N: num_heads
@@ -71,6 +71,9 @@ def attention(
     # q: (T, N, H)
     # k,v: (T, K, H)
     # kv_cache: (L, S, 2 * K, H)
+
+    if head_dim_original is None:
+        head_dim_original = q.shape[-1]
 
     md = attention_metadata
     kv_cache = update_kv_cache(k, v, kv_cache, md.slot_mapping, md.num_slices,
