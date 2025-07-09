@@ -146,7 +146,7 @@ class TPUModelRunner():
             (self.max_num_reqs, self.max_num_blocks_per_req), dtype=np.int32)
         self.query_start_loc_cpu = np.zeros(self.max_num_tokens + 1,
                                             dtype=np.int32)
-        self.seq_lens_cpu = np.zeros(self.max_num_tokens, dtype=np.int32)
+        self.seq_lens_cpu = np.zeros(self.max_num_reqs, dtype=np.int32)
         # Range tensor with values [0 .. self.max_num_tokens - 1].
         # Used to initialize positions / context_lens / seq_lens
         # Keep in int64 to avoid overflow with long context

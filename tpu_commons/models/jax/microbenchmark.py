@@ -11,10 +11,13 @@ import numpy as np
 from flax import nnx
 from jax.sharding import NamedSharding, PartitionSpec
 
+from tpu_commons.kernels.ragged_paged_attention.kernel import cdiv
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.common.sharding import Sharding
 from tpu_commons.models.jax.recipes.llama3 import Llama3_8B
+from tpu_commons.runner.jax.tpu_jax_runner import \
+    NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK
 
 vllm_logger = logging.getLogger("vllm")
 original_level = vllm_logger.level
@@ -49,16 +52,11 @@ class Sampler:
     type: str
     std: float = None
 
-    def generate_samples(self,
-                         shape: Tuple[int],
-                         fill_val: Any,
-                         rng: nnx.Rngs = None) -> jnp.array:
+    def generate_samples(self, shape: Tuple[int], fill_val: Any) -> np.array:
         if self.type.lower() == "fixed":
-            return jnp.full(shape, fill_val)
+            return np.full(shape, fill_val)
         elif self.type.lower() == "normal":
-            return jax.random.normal(rng.params(),
-                                     shape=shape,
-                                     stddev=self.std)
+            return np.random.normal(loc=0.0, scale=self.std, size=shape)
 
 
 @dataclass
@@ -91,6 +89,19 @@ def _nearest_power_of_two(val: int) -> int:
     index = bisect.bisect_left(power_of_two, val)
     assert index < len(power_of_two)
     return power_of_two[index]
+
+
+def _get_padded_num_kv_cache_update_slices(num_tokens: int, max_num_reqs: int,
+                                           page_size: int) -> int:
+    """Calculates the padded number of KV cache update slices to avoid
+    recompilation."""
+    padded_num_slices = 2 * max_num_reqs + num_tokens // page_size
+    padded_num_slices = min(padded_num_slices, num_tokens)
+    padded_num_slices = (
+        padded_num_slices + NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK - 1
+    ) // NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK * \
+        NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK
+    return padded_num_slices
 
 
 def _get_config_arg_or_default(config, query_keys: List[str] | str,
@@ -131,38 +142,67 @@ def device_array(*args, mesh, sharding=None, **kwargs) -> jax.Array:
 
 class InputCreator:
 
-    def __init__(self, input_args: InputArgs, sharding: NamedSharding | None,
-                 rng: nnx.Rngs):
+    def __init__(self,
+                 input_args: InputArgs,
+                 sharding: NamedSharding | None,
+                 rng: nnx.Rngs,
+                 mesh: jax.sharding.Mesh,
+                 permute_block_table: bool = False,
+                 kv_cache_dtype: jnp.dtype = jnp.bfloat16):
         self.rng = rng
         self.input_args = input_args
         self.sharding = sharding
+        self.mesh = mesh
+        self.permute_block_table = permute_block_table
+        self.kv_cache_dtype = kv_cache_dtype
         self.setup()
 
     def setup(self):
-        self.max_blocks_per_req = int(
-            np.ceil(self.input_args.max_seq_len / self.input_args.block_size))
+        self.max_blocks_per_req = cdiv(self.input_args.max_seq_len,
+                                       self.input_args.block_size)
         padded_max_seq_len = self.max_blocks_per_req * self.input_args.block_size
-        self.num_blocks = int(
-            np.ceil(self.input_args.batch_size * padded_max_seq_len //
-                    self.input_args.block_size))
-        self.block_table = self._create_mock_block_table()
+        if padded_max_seq_len != self.input_args.max_seq_len:
+            logger.warning(
+                f"Padding max_seq_len from {self.input_args.max_seq_len} to {padded_max_seq_len}."
+            )
+        self.num_blocks = cdiv(self.input_args.batch_size * padded_max_seq_len,
+                               self.input_args.block_size)
+        self.block_table = self._create_mock_block_table(
+            self.permute_block_table)
+        self.kv_caches = self._init_sharded_kv_cache()
 
+    def _init_sharded_kv_cache(self):
         kv_cache_shape = (self.num_blocks, self.input_args.block_size,
                           2 * self.input_args.num_kv_heads,
                           self.input_args.head_dim)
         self.kv_caches = []
+        # TODO: use constants instead of hardcoding axis names.
+        sharding = NamedSharding(self.mesh, PartitionSpec(None, None, "model"))
         key = self.rng.params()
-        normal_keys = jax.random.split(key, num=self.input_args.num_layers)
-        self.kv_caches = [
-            jax.random.normal(normal_key, shape=kv_cache_shape)
-            for normal_key in normal_keys
-        ]
+        rng_keys = jax.random.split(key, num=self.input_args.num_layers)
 
-    def _create_mock_block_table(self):
-        return jnp.arange(self.num_blocks,
+        @nnx.jit(out_shardings=sharding)
+        def _allocate(rng: jax.Array):
+            return jax.random.normal(rng,
+                                     shape=kv_cache_shape,
+                                     dtype=self.kv_cache_dtype)
+
+        kv_caches = []
+        print("rng type = ", type(self.rng))
+        for i in range(self.input_args.num_layers):
+            kv_caches.append(_allocate(rng_keys[i]))
+        return kv_caches
+
+    def _create_mock_block_table(self, random_permute: bool = False):
+        block_table = np.arange(self.num_blocks,
                           dtype=jnp.int32)\
                              .reshape(self.input_args.batch_size, -1)
+        if random_permute:
+            block_table = np.random.permutation(block_table)
+        return block_table
 
+    # TODO: lets try to split this logic out in TPURUnner or add CI/CD so that if any
+    # changes are made to tpu_comons, it doesn't break our code.
     def _mock_kv_write_indices(self, seq_lens: List[int],
                                phase_types: List[str]):
 
@@ -170,7 +210,10 @@ class InputCreator:
         block_lens = []
         slice_starts = []
         slice_ends = []
+        batch_size = self.input_args.batch_size
         for (seq_len, phase_type) in zip(seq_lens, phase_types):
+            # slice_start is the start index of the current request
+            # slice_end is the last index of the currnet request
             if phase_type == "prefill":
                 slice_start = 0
                 slice_end = seq_len
@@ -198,7 +241,7 @@ class InputCreator:
 
         # Slots correspond to amount of blocks being reserved for the requests.
         # We assume requests occupy k-2 full blocks + 1 possibly partially full, starting block + 1 partiall full, ending block
-        for req_idx in range(len(seq_lens)):
+        for req_idx in range(batch_size):
             # Update the start and end of the slices if they are not evenly divisible by block size.
             # Start block sizes only need to be updated at the start of each request.
             slot_mapping_slices[block_lens_cumsum[req_idx]][0] = \
@@ -206,12 +249,18 @@ class InputCreator:
             # End block sizes only need to be updated at the end of each request.
             slot_mapping_slices[
                block_lens_cumsum[req_idx + 1] - 1][1] = \
-                  (slice_ends[req_idx] - 1) % self.block_size + 1
+                  (slice_ends[req_idx] - 1) % self.input_args.block_size + 1
+            # Number of tokens corresponding to write for the request.
             slice_lens = slot_mapping_slices[:, 1] - slot_mapping_slices[:, 0]
             slices_lens_cumsum = np.zeros(len(slice_lens) + 1, dtype=np.int32)
             np.cumsum(slice_lens, out=slices_lens_cumsum[1:])
+
+            # Map the block indices back to KV cache token indices
             kv_cache_start_indices = slot_mapping_slices[:, 0] + \
-               (flattened_block_indices * self.block_size)
+               (flattened_block_indices * self.input_args.block_size)
+
+            # The new KV cache indices to write to.
+            # (essentially the indices corresponding to request_size + previously_computed)
             new_kv_start_indices = slices_lens_cumsum[:-1]
             slot_mapping_metadata = np.stack(
                 [kv_cache_start_indices, new_kv_start_indices, slice_lens],
@@ -220,47 +269,52 @@ class InputCreator:
             # TODO: Perform padding from jax/tpu_jax_runner.py:403
             return slot_mapping_metadata
 
-
     def create_prefill_input(self,
                              previous_input: AttentionMetadata = None
                              ) -> ModelInputs:
-        breakpoint()
+        # NOTE(gpolovets) seq_lens is padded shape (max_seq_len) in tpu_jax_runner: https://github.com/vllm-project/tpu_commons/blob/38df9a7cbdc490bae5a8f63938b518e0e636d829/tpu_commons/runner/jax/tpu_jax_runner.py#L713
+        # But I don't think this should affect things much.
+        batch_size = self.input_args.batch_size
         seq_lens = self.input_args.sampler.generate_samples(
-            shape=(self.input_args.batch_size, ),
-            fill_val=self.input_args.max_prefill_len)
+            shape=(batch_size, ), fill_val=self.input_args.max_prefill_len)
         if not self.input_args.sampler:
-            seq_lens = self.input_args.batch_size * [
-                self.input_args.max_prefill_len
-            ]
+            seq_lens = batch_size * [self.input_args.max_prefill_len]
         total_tokens = sum(seq_lens)
         padded_total_tokens = _nearest_power_of_two(total_tokens)
-        input_ids = jax.random.randint(
-            self.rng.params(),
-            shape=(padded_total_tokens),  # Pad to nearest power of two
-            minval=0,
-            maxval=self.input_args.vocab_size - 1)
-        num_prefill_seqs = len(self.input_args.batch_size)
-        num_decode_seqs = 0
+
+        ## Generate random input_ids
+        input_ids = np.random.randint(
+            low=0,
+            high=self.input_args.vocab_size - 1,
+            size=(padded_total_tokens, ),  # Pad to nearest power of two
+            dtype=np.int32)
+        num_decode_seqs = batch_size
         chunked_prefill_enabled = False
-        padded_input_positions = jnp.zeros(padded_total_tokens,
-                                           dtype=jnp.int32)
-        input_positions = jnp.concatenate(
-            [jnp.arange(seq_len, dtype=jnp.int32) for seq_len in seq_lens],
+        padded_input_positions = np.zeros(padded_total_tokens, dtype=np.int32)
+
+        # Calculate token positions within each sequence
+        input_positions = np.concatenate(
+            [np.arange(seq_len, dtype=np.int32) for seq_len in seq_lens],
             out=padded_input_positions)  # Pad to nearest power of 2
+        breakpoint()
         kv_cache_write_indices = self._mock_kv_write_indices(
             seq_lens, ["prefill"] * len(seq_lens))
-        self.query_start_loc_cpu = np.zeros(self.max_num_tokens + 1,
-                                            dtype=np.int32)
-        max_tokens = self.max_blocks_per_req * self.input_args.block_size
-        prefill_query_start_offsets = np.zeros(max_tokens + 1, dtype=np.int32)
+        # Padd the kv_cache_write_indices (used to avoid recompilation)
+        padded_num_slices = _get_padded_num_kv_cache_update_slices(
+            padded_total_tokens, batch_size, self.input_args.block_size)
+        kv_cache_write_indices = np.pad(
+            kv_cache_write_indices,
+            [[0, padded_num_slices - len(kv_cache_write_indices)], [0, 0]],
+            constant_values=0)
+        kv_cache_write_indices = np.transpose(kv_cache_write_indices)
+        num_prefill_seqs = np.array([kv_cache_write_indices.shape[0]])
+        prefill_query_start_offsets = np.zeros(batch_size + 1, dtype=np.int32)
         prefill_query_start_offsets[0] = 0
-        np.cumsum(seq_lens,
-                  out=prefill_query_start_offsets[1:len(seq_lens) + 1])
-        prefill_query_start_offsets[len(seq_lens) + 1:] = 1
-
+        np.cumsum(seq_lens, out=prefill_query_start_offsets[1:batch_size + 1])
+        prefill_query_start_offsets[batch_size + 1:] = 1  # no-op?
         sharding = NamedSharding(
             self.mesh,
-            PartitionSpec(None))  ## TODO: Should this actually be using DP??
+            PartitionSpec())  ## TODO: Should this actually be using DP??
 
         (input_ids, input_positions, kv_cache_write_indices, num_prefill_seqs,
          self.block_table, prefill_query_start_offsets, seq_lens,
@@ -268,10 +322,11 @@ class InputCreator:
              (input_ids, input_positions, kv_cache_write_indices,
               num_prefill_seqs, self.block_table, prefill_query_start_offsets,
               seq_lens, num_decode_seqs),
-             self.mesh,
+             mesh=self.mesh,
              sharding=sharding)
+        breakpoint()
 
-        ########### TODO: Add the rest of tpu_jax_runner logic to make this work ################
+        ########### TODO: May need to add sampling component (which would incur extra latency)
 
         return ModelInputs(
             is_prefill=True,
@@ -326,16 +381,19 @@ class Benchmarker:
             # TODO: Should you update the sharding to use DP?
             additional_config = self.vllm_config.additional_config
             input_args = InputArgs(
-                additional_config["block_size"],
-                additional_config["prefill_batch_size"],
-                additional_config["max_prefill_len"],
-                additional_config["max_seq_len"], self.sampler,
-                self.model.cfg.model.layers.attention.num_key_value_heads,
-                self.model.cfg.model.layers.attention.head_dim,
-                self.model.cfg.model.num_layers,
-                self.model.cfg.model.emb.vocab_size)
+                block_size=additional_config["block_size"],
+                batch_size=additional_config["prefill_batch_size"],
+                max_prefill_len=additional_config["max_prefill_len"],
+                max_seq_len=additional_config["max_seq_len"],
+                sampler=self.sampler,
+                num_kv_heads=self.model.cfg.model.layers.attention.
+                num_key_value_heads,
+                head_dim=self.model.cfg.model.layers.attention.head_dim,
+                num_layers=self.model.cfg.model.num_layers,
+                vocab_size=self.model.cfg.model.emb.vocab_size)
             input_creator = InputCreator(input_args=input_args,
                                          sharding=None,
+                                         mesh=self.mesh,
                                          rng=self.rng)
             model_input = input_creator.create_prefill_input()
             # TODO: add tracing

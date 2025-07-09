@@ -198,7 +198,7 @@ class Llama3_8B(Model):
             kv_caches:
         List[
             KVCacheType],  # TODO: Make sure to use this instead of creating in model.
-            input_ids: jax.Array,
+            input_ids: jax.Array,  # shape=(T,) <-- flattened batch
             attention_metadata: AttentionMetadata,
             temperatures: jax.Array = None,
             top_ps: jax.Array = None,
