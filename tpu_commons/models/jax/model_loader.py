@@ -9,7 +9,6 @@ from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 
 from tpu_commons.logger import init_logger
-from tpu_commons.models.jax.common.model import Model
 
 logger = init_logger(__name__)
 
@@ -104,8 +103,7 @@ def get_flax_model(
     mesh: Mesh,
 ) -> nnx.Module:
     model_class = _get_model_architecture(vllm_config.model_config.hf_config)
-    if issubclass(model_class,
-                  Model):  # TODO: Get this to work for nnx.eval_shape.
+    if os.getenv("NEW_MODEL_DESIGN", False):
         jit_model = _get_common_model(model_class, vllm_config, rng, mesh)
     else:
         jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh)

@@ -17,8 +17,6 @@ from safetensors import safe_open
 from vllm.config import VllmConfig
 
 from tpu_commons.logger import init_logger
-from tpu_commons.models.jax.common.model import ModelConfig
-from tpu_commons.models.jax.common.sharding import ShardingConfig
 from tpu_commons.models.jax.layers.misc import shard_put
 from tpu_commons.models.jax.utils import file_utils
 
@@ -60,10 +58,10 @@ class WeightLoader(abc.ABC):
 
     def __init__(self,
                  vllm_config: VllmConfig,
-                 model_config: ModelConfig,
+                 model_config,
                  framework: str = "flax",
                  cache_dir: Optional[str] = None,
-                 sharding_cfg: Optional[ShardingConfig] = None):
+                 sharding_cfg=None):
         self.vllm_config = vllm_config
         self.model_config = model_config
         self.sharding_cfg = sharding_cfg
