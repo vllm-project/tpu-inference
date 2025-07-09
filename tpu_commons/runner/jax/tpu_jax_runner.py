@@ -318,42 +318,21 @@ class TPUModelRunner():
     @staticmethod
     @functools.partial(
         jax.jit,
-        static_argnames=("block_size", "kv_cache_sharding"),
         donate_argnames=("kv_caches"),
     )
     def _jitted_insert_kv_cache(
         kv_caches: List[jax.Array],
         kv_cache_slices: List[jax.Array],
         block_numbers: jax.Array,
-        block_size: int,
-        kv_cache_sharding: NamedSharding,
     ) -> List[jax.Array]:
         """
         JIT-compiled function to insert KV cache slices into the physical
         cache for all layers at once. This fuses the pad, reshape, and scatter
         operations into a single efficient kernel.
         """
-        num_tokens_in_cache = kv_cache_slices[0].shape[0]
-        num_blocks_for_cache = cdiv(num_tokens_in_cache, block_size)
-        # Fix the padding size here.
-        padded_len = num_blocks_for_cache * block_size
-        padding_size = padded_len - num_tokens_in_cache
-
         new_kv_caches = []
         for i, layer_kv_cache_slices in enumerate(kv_cache_slices):
-            # This padding is useless, as JAX/XLA would do it.
-            padded_slices = jnp.pad(layer_kv_cache_slices,
-                                    ((0, padding_size), (0, 0), (0, 0)),
-                                    mode='constant')
-
-            reshaped_slices = padded_slices.reshape(num_blocks_for_cache,
-                                                    block_size,
-                                                    *padded_slices.shape[1:])
-
-            reshaped_slices = jax.lax.with_sharding_constraint(
-                reshaped_slices, kv_cache_sharding)
-
-            updated_cache = kv_caches[i].at[block_numbers].set(reshaped_slices)
+            updated_cache = kv_caches[i].at[block_numbers].set(layer_kv_cache_slices)
             new_kv_caches.append(updated_cache)
         return new_kv_caches
 
@@ -442,36 +421,20 @@ class TPUModelRunner():
                 "is not supported yet.")
         block_numbers = block_ids[0]
 
-        if kv_cache_slices:
-            num_tokens_in_cache = kv_cache_slices[0].shape[0]
-        else:
-            num_tokens_in_cache = 0
+        # Prepare inputs for the JIT-compiled function.
+        # TODO: adding padding here.
+        target_block_numbers = jnp.array(block_numbers, dtype=jnp.int32)
 
-        if num_tokens_in_cache > 0:
-            num_blocks_for_cache = cdiv(num_tokens_in_cache, self.block_size)
+        # Call the JIT-compiled function to perform the scatter operation
+        # for all layers in a single, fused kernel.
+        with LatencyTracker("JittedInsertKVCache"):
+            self.kv_caches = self._jitted_insert_kv_cache(
+                self.kv_caches,
+                kv_cache_slices,
+                target_block_numbers,
+            )
 
-            if len(block_numbers) < num_blocks_for_cache:
-                raise ValueError(
-                    f"Not enough blocks allocated for request {request.req_id}. "
-                    f"Need {num_blocks_for_cache}, got {len(block_numbers)}.")
-
-            # Prepare inputs for the JIT-compiled function.
-            # TODO: adding padding here.
-            target_block_numbers = jnp.array(
-                block_numbers[:num_blocks_for_cache], dtype=jnp.int32)
-
-            # Call the JIT-compiled function to perform the scatter operation
-            # for all layers in a single, fused kernel.
-            with LatencyTracker("JittedInsertKVCache"):
-                self.kv_caches = self._jitted_insert_kv_cache(
-                    self.kv_caches,
-                    kv_cache_slices,
-                    target_block_numbers,
-                    self.block_size,
-                    self.kv_caches[0].sharding,
-                )
-
-            logger.debug(f"Updated kv cache entries cnt={len(self.kv_caches)}")
+        logger.debug(f"Updated kv cache entries cnt={len(self.kv_caches)}")
 
         # Update runner's internal state to track the new request.
         req_id = request.request_id
