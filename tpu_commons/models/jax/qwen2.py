@@ -7,6 +7,7 @@ from jax.sharding import Mesh
 from transformers import Qwen2Config, modeling_flax_utils
 from vllm.config import VllmConfig
 
+from tpu_commons import utils_jax as utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_interface import attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
@@ -69,9 +70,8 @@ class Qwen2Attention(nnx.Module):
 
         self.head_dim_original = config.hidden_size // config.num_attention_heads
 
-        # Pad head_dim up to the nearest multiple of 128 for kernel performance.
-        # Details can be seen at: tpu_commons/kernels/ragged_kv_cache_update.py::_kv_cache_update()
-        self.head_dim = (self.head_dim_original + 127) // 128 * 128
+        # Pad head_dim for kernel performance.
+        self.head_dim = utils.get_padded_head_dim(self.head_dim_original)
 
         self.mesh = mesh
 

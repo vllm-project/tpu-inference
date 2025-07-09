@@ -16,6 +16,7 @@ from jax.sharding import Mesh
 from safetensors import safe_open
 from vllm.config import VllmConfig
 
+from tpu_commons import utils_jax as utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.common.model import ModelConfig
 from tpu_commons.models.jax.common.sharding import ShardingConfig
@@ -235,10 +236,9 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
     num_kv_heads = hf_config.num_key_value_heads
     hidden_size = model_config.get_hidden_size()
 
-    # NOTE(wenlong): we need to pad head_dim to a multiple of 128 as required of kernels
-    # Details can be seen at: tpu_commons/kernels/ragged_kv_cache_update.py::_kv_cache_update()
+    # Pad head_dim for kernel performance.
     head_dim_original = model_config.get_head_size()
-    head_dim = (head_dim_original + 127) // 128 * 128
+    head_dim = utils.get_padded_head_dim(head_dim_original)
     head_dim_pad = head_dim - head_dim_original
 
     reshape_keys = {
