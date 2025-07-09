@@ -105,11 +105,6 @@ class TPUModelRunner():
             self.mesh = sharding.mesh
         else:
             axis_names = ("data", "model")
-            mesh_shape = (1, len(self.devices))
-            self.mesh = jax.make_mesh(mesh_shape,
-                                      axis_names,
-                                      devices=self.devices)
-
             # In case we are in disagg mode, the number of devices can exceed 8.
             # TODO(fhzhang): fix this properly as we implement disagg serving.
             if len(self.devices) > 8:
