@@ -8,19 +8,18 @@ from tpu_commons.sample.metadata_jax import TPUSupportedSamplingMetadata
 
 
 def sample(
-    do_sampling: bool,
     rng: jax.Array,
     mesh: Mesh,
     logits: jax.Array,
     tpu_sampling_metadata: TPUSupportedSamplingMetadata,
 ) -> jax.Array:
     # (B, vocab_size)
-    if do_sampling:
+    if tpu_sampling_metadata.do_sampling:
         # Unshard the logits explicity to avoid latency increase.
         logits = jax.lax.with_sharding_constraint(
             logits, NamedSharding(mesh, P(None, None)))
 
-    if not do_sampling:
+    if not tpu_sampling_metadata.do_sampling:
         return jnp.argmax(logits, axis=-1)
 
     logits = logits.astype(jnp.float32)

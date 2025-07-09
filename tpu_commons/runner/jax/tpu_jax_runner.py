@@ -333,7 +333,8 @@ class TPUModelRunner():
         """
         new_kv_caches = []
         for i, layer_kv_cache_slices in enumerate(kv_cache_slices):
-            updated_cache = kv_caches[i].at[block_numbers].set(layer_kv_cache_slices)
+            updated_cache = kv_caches[i].at[block_numbers].set(
+                layer_kv_cache_slices)
             new_kv_caches.append(updated_cache)
         return new_kv_caches
 
@@ -641,7 +642,7 @@ class TPUModelRunner():
         do_sampling = _do_sampling(self.input_batch.top_k_cpu[req_ids],
                                    self.input_batch.temperature_cpu[req_ids])
         tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
-            from_input_batch(self.mesh, self.input_batch, padded_num_reqs, not do_sampling)
+            from_input_batch(self.mesh, self.input_batch, padded_num_reqs, do_sampling)
 
         (input_ids, positions, slot_mapping_metadata, num_slices, block_tables,
          query_start_loc, seq_lens, num_seqs,
@@ -651,8 +652,6 @@ class TPUModelRunner():
               logits_indices))
 
         return (
-            False,
-            do_sampling,
             self.kv_caches,
             input_ids,
             AttentionMetadata(

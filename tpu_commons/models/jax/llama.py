@@ -258,8 +258,6 @@ class LlamaForCausalLM(nnx.Module):
 
     def __call__(
         self,
-        is_prefill: bool,
-        do_sampling: bool,
         kv_caches: List[jax.Array],
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
@@ -288,7 +286,6 @@ class LlamaForCausalLM(nnx.Module):
         logits = jnp.dot(x, self.lm_head.value)
 
         next_tokens = sample(
-            do_sampling,
             self.rng.params(),
             self.mesh,
             logits,

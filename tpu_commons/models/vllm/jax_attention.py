@@ -17,13 +17,11 @@ from tpu_commons.models.vllm.vllm_model_wrapper_context import \
 
 @functools.partial(
     jax.jit,
-    static_argnums=(
-        0, 6, 7, 8, 9,
-        10),  # is_prefill, mesh, scale, head_dim, num_heads, num_kv_heads
-    donate_argnums=(1, ),  # donate kv_cache
+    static_argnums=(5, 6, 7, 8,
+                    9),  # mesh, scale, head_dim, num_heads, num_kv_heads
+    donate_argnums=(0, ),  # donate kv_cache
 )
 def _jax_attn_func(
-    is_prefill: bool,
     kv_cache: jax.Array,
     q: jax.Array,
     k: jax.Array,
@@ -96,7 +94,6 @@ class JaxAttention(torch.nn.Module):
     ) -> torch.Tensor:
         vllm_model_wrapper_context = get_vllm_model_wrapper_context()
         new_kv_cache, outputs = _jax_attn_func(
-            vllm_model_wrapper_context.is_prefill,
             vllm_model_wrapper_context.kv_caches[self.layer_idx], jax_view(q),
             jax_view(k), jax_view(v),
             vllm_model_wrapper_context.attention_metadata, self.mesh,

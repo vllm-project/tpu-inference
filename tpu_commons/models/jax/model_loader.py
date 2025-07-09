@@ -123,8 +123,7 @@ def get_flax_model(
             outputs_sharding,
             logits_cache_sharding,
         ),
-        static_argnums=(2, 3),
-        donate_argnums=4,
+        donate_argnums=2,  # 0 is graphdef, 1 is state, 2 is kv_cache
     )
     def run_model(graphdef, state, *args):
         model = nnx.merge(graphdef, state)

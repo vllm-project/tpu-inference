@@ -1,4 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
 import functools
 from dataclasses import dataclass
 from typing import Optional
@@ -24,14 +23,14 @@ DEFAULT_SAMPLING_PARAMS = dict(
         "top_k",
         "top_p",
     ],
-    meta_fields=["all_greedy"],
+    meta_fields=["do_sampling"],
 )
 @dataclass
 class TPUSupportedSamplingMetadata:
     temperature: Optional[jnp.ndarray] = None
     top_k: Optional[jnp.ndarray] = None
     top_p: Optional[jnp.ndarray] = None
-    all_greedy: bool = True
+    do_sampling: bool = False
 
     @classmethod
     def from_input_batch(
@@ -39,10 +38,10 @@ class TPUSupportedSamplingMetadata:
         mesh: Mesh,
         input_batch: InputBatch,
         padded_num_reqs: int,
-        all_greedy: bool,
+        do_sampling: bool,
     ) -> "TPUSupportedSamplingMetadata":
-        if all_greedy:
-            return cls(all_greedy=True)
+        if do_sampling is False:
+            return cls(do_sampling=False)
 
         num_reqs = input_batch.num_reqs
 
