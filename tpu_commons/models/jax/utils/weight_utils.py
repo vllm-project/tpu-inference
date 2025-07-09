@@ -238,6 +238,7 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
     # NOTE(wenlong): we may need to pad head_dim to a multiple of 128 as required of kernels
     # Details can be seen at: tpu_commons/kernels/ragged_kv_cache_update.py::_kv_cache_update()
 
+    # TODO (wenlong): more robust way
     head_dim_original = model_config.get_head_size()
     head_dim = head_dim_original
     head_dim_pad = 0

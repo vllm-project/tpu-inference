@@ -66,6 +66,8 @@ class Qwen2Attention(nnx.Module):
         self.num_kv_heads = config.num_key_value_heads
         self.rope_theta = config.rope_theta
         self.rope_scaling = getattr(config, "rope_scaling", None)
+
+        # TODO (wenlong): more robust way
         self.head_dim_original = config.hidden_size // config.num_attention_heads
         self.head_dim = 128
         if self.head_dim_original % 128 == 0:
