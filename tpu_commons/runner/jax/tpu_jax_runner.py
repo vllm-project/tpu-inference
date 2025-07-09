@@ -191,7 +191,7 @@ class TPUModelRunner():
             kv_cache_spec[f"layers.{i}"] = FullAttentionSpec(
                 block_size=block_size,
                 num_kv_heads=model_config.get_total_num_kv_heads(),
-                head_size=model_config.get_head_size(),
+                head_size=model_config.get_head_size() // 2,
                 dtype=torch.bfloat16,
                 use_mla=False,
             )
@@ -215,8 +215,8 @@ class TPUModelRunner():
 
         # NOTE: sometimes the head_size needs to be padded due to kernel restriction
         head_size = kv_cache_spec.head_size
-        if head_size % 128 != 0:
-            head_size = head_size * 2
+        # if head_size % 128 != 0:
+        #     head_size = 128
 
         cache_shape = (
             kv_cache_config.num_blocks,
