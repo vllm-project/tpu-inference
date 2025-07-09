@@ -216,7 +216,7 @@ class TPUModelRunner():
         # NOTE: sometimes the head_size needs to be padded due to kernel restriction
         head_size = kv_cache_spec.head_size
         if head_size % 128 != 0:
-            head_size = 128
+            head_size = head_size * 2
 
         cache_shape = (
             kv_cache_config.num_blocks,
