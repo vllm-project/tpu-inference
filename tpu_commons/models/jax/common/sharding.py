@@ -266,12 +266,14 @@ class Sharding:
             A JAX `Mesh` object.
         """
 
+        # TODO: use constants instead of hardcodings.
         axis_order = {
             "data": strategy.data_parallelism,
             "expert": strategy.expert_parallelism,
             "seq": strategy.sequence_parallelism,
             "model": strategy.tensor_parallelism,
         }
+
         # TODO: add logic to infer axis when the degree is -1
         mesh_axis_names = []
         mesh_shape = []
