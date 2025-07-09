@@ -98,13 +98,10 @@ class VllmModelWrapper:
 
         @functools.partial(
             jax.jit,
-            static_argnums=(1, 2),  # is_prefill, do_sampling
-            donate_argnums=(3, ),  # donate kv_cache
+            donate_argnums=(1, ),  # donate kv_cache
         )
         def step_fun(
             params_and_buffers,  # this has been wrapped into a torchax TorchValue
-            is_prefill: bool,
-            do_sampling: bool,
             kv_caches: List[jax.Array],
             input_ids: jax.Array,
             attention_metadata: AttentionMetadata,
@@ -114,7 +111,6 @@ class VllmModelWrapper:
         ) -> Tuple[List[jax.Array], jax.Array, jax.Array]:
 
             with torchax.default_env(), set_vllm_model_wrapper_context(
-                    is_prefill=is_prefill,
                     kv_caches=kv_caches,
                     attention_metadata=attention_metadata,
             ):
@@ -140,7 +136,6 @@ class VllmModelWrapper:
             logits = jax_view(logits)
 
             next_tokens = sample(
-                do_sampling,
                 self.rng,
                 self.mesh,
                 logits,
