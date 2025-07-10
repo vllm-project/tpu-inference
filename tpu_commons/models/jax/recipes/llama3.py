@@ -30,6 +30,7 @@ from tpu_commons.models.jax.layers.sampling import sample
 from tpu_commons.models.jax.recipes.recipe import RecipeConfig
 from tpu_commons.models.jax.utils.weight_utils import (ParameterType,
                                                        WeightLoader, get_param)
+from tpu_commons.sample.metadata_jax import TPUSupportedSamplingMetadata
 
 logger = init_logger(__name__)
 pp = pprint.PrettyPrinter(depth=6)
@@ -176,20 +177,15 @@ class Llama3_8B(Model):
             weight_loader.load_weights(self)
 
     def __call__(
-            self,
-            is_prefill: bool,
-            do_sampling: bool,
-            kv_caches:
-        List[
-            KVCacheType],  # TODO: Make sure to use this instead of creating in model.
-            input_ids: jax.Array,
-            attention_metadata: AttentionMetadata,
-            temperatures: jax.Array = None,
-            top_ps: jax.Array = None,
-            top_ks: jax.Array = None,
-            logits_indices: jax.Array = None,
-            *args,
-            **kwargs) -> Tuple[List[KVCacheType], jax.Array, jax.Array]:
+        self,
+        kv_caches: List[jax.Array],
+        input_ids: jax.Array,
+        attention_metadata: AttentionMetadata,
+        tpu_sampling_metadata: TPUSupportedSamplingMetadata,
+        logits_indices: jax.Array = None,
+        *args,
+    ) -> Tuple[List[KVCacheType], jax.Array, jax.Array]:
+        is_prefill = False
         x = self.embedder.encode(input_ids)
         for (i, block) in enumerate(self.layers):
             kv_cache = kv_caches[i]
@@ -202,13 +198,10 @@ class Llama3_8B(Model):
         decoder_output = self.lm_head.decode(final_activation)
 
         next_tokens = sample(
-            do_sampling,
             self.rng.params(),
             self.mesh,
             decoder_output,
-            temperatures,
-            top_ps,
-            top_ks,
+            tpu_sampling_metadata,
         )
 
         return kv_caches, next_tokens, decoder_output
