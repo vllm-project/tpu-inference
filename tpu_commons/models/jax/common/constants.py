@@ -1,4 +1,3 @@
-import enum
 """
 Current Used Abbreviation for Tensor Dimensions:
 B: Batch size
@@ -16,6 +15,7 @@ X: Number of activated experts per token in MoE
 G: Number of groups in Grouped-Query Attention
 E: Total number of experts in MoE
 """
+import enum
 
 
 class RouterType(enum.Enum):

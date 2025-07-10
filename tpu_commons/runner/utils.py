@@ -2,15 +2,15 @@
 """
 Implements a few utility functions for the various runners.
 """
-from typing import Optional
-
 import time
+from typing import Optional
 
 from vllm.logger import init_logger
 
 MIN_NUM_SEQS = 8
 
 logger = init_logger(__name__)
+
 
 def determine_do_sampling(top_k: int, temperature: float) -> bool:
     """
@@ -43,7 +43,9 @@ def get_padded_num_reqs_with_upper_limit(x: int, upper_limit: int) -> int:
     res = MIN_NUM_SEQS if x <= MIN_NUM_SEQS else 1 << (x - 1).bit_length()
     return min(res, upper_limit)
 
+
 class LatencyTracker:
+
     def __init__(self, name="Operation"):
         self.name = name
 
