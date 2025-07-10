@@ -367,6 +367,10 @@ class Sharding:
                                             ATTN_TENSOR_AXIS_NAME)
         generate_rules.attn_o_weight_nhd = (None, ATTN_HEAD_AXIS_NAME,
                                             ATTN_TENSOR_AXIS_NAME)
+        # MLA Query up projection weight: (QueryLoraRank, NumHeads, HeadDim)
+        generate_rules.attn_mla_qb_weight_anh: tuple = (None, ATTN_HEAD_AXIS_NAME, ATTN_TENSOR_AXIS_NAME)
+        # MLA KV up projection weight: (KVLoRA, NumHeads, QKNopeHeadDim + VHeadDim)
+        generate_rules.attn_mla_kvb_weight_ank: tuple = (None, ATTN_HEAD_AXIS_NAME, ATTN_TENSOR_AXIS_NAME)
 
         generate_rules.activation_ffw_td = (DATA_AXIS_NAME,
                                             MLP_TENSOR_AXIS_NAME)
