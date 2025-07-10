@@ -1,3 +1,10 @@
+# 🔬 **IMPORTANT: EXPERIMENTAL AND NOT SUPPORTED** 🔬
+
+This is an exploratory repository provided for informational and learning purposes only.
+The code is **not feature-complete** and **may not be stable**.
+
+> ⚠️ **DO NOT USE IN A PRODUCTION ENVIRONMENT.**
+
 ## Develop on a TPU VM
 
 ### Install `vLLM-TPU`:
