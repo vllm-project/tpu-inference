@@ -1,6 +1,7 @@
 import functools
 import os
 import random
+import time
 from dataclasses import asdict
 from typing import Any, List, Optional, cast
 
@@ -246,7 +247,10 @@ class TPUModelRunner():
         logger.info("Precompile all the subgraphs with possible input shapes.")
 
         for inputs in self._generate_dummy_inputs():
+            start = time.perf_counter()
             self.kv_caches, next_tokens, _ = self.model_fn(*inputs)
+            end = time.perf_counter()
+            logger.info("Compilation finished in %.2f [secs].", end - start)
             next_tokens = jax.device_get(next_tokens)
 
     def _generate_dummy_inputs(self):
@@ -263,6 +267,8 @@ class TPUModelRunner():
                                       dtype=np.int32)
 
             for num_reqs in self.num_reqs_paddings:
+                if num_reqs > num_tokens:
+                    continue
                 num_seqs = np.array([num_reqs], dtype=np.int32)
                 num_slices = np.array([1], dtype=np.int32)
                 logits_indices = np.ones((num_reqs, ), dtype=np.int32)
