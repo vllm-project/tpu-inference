@@ -89,7 +89,7 @@ class DeepSeekV3Router(nnx.Module):
         """Initializes the Router module by creating sharding configurations and generating the router kernel."""
         self.create_sharding()
 
-    def get_topk_indices(self, scores):
+    def get_topk_indices(self, scores: Float[jnp, "B T E"]) -> Float[jnp, "B T K"]:
         """Get the topk indices of the scores."""
 
         scores = scores + self.bias_E
@@ -112,8 +112,8 @@ class DeepSeekV3Router(nnx.Module):
 
         return indices
 
-    def __call__(self, x: Float, op_mode):
-        """Routes tokens to experts.
+    def __call__(self, x: Float[jnp, "B T D"], op_mode: str) -> Tuple[Float[jnp, "B T K"], Float[jnp, "B T K"]]:
+        """Routes tokens to top k experts.
 
         Args:
             x: Input array of shape (batch_size, sequence_length, d_model).

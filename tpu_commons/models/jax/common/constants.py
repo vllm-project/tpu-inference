@@ -36,7 +36,7 @@ class HuggingFaceArgNames(enum.Enum):
     RMS_NORM_EPS: str = "rms_norm_eps"
     ROPE_SCALING: str = "rope_scaling"
     ROPE_THETA: str = "rope_theta"
-    VOCAB_SIZE = "vocab_size"
+    VOCAB_SIZE: str = "vocab_size"
 
     # FFW params
     INTERMEDIATE_SIZE: str = "intermediate_size"
