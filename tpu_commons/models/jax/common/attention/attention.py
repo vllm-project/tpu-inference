@@ -33,7 +33,7 @@ AttentionConfig = make_dataclass(
         ("dtype", DTypeLike),
         ("vllm_config", VllmConfig, field(repr=False, default=None)),
     ],
-    bases=(Config, ),
+    bases=(Config,),
 )
 AttentionConfig.__doc__ = f"""Configuration for the Attention module.
          Attributes:
@@ -57,7 +57,7 @@ MLAConfig = make_dataclass(
         (HuggingFaceArgNames.V_HEAD_DIM.value, int),
         (HuggingFaceArgNames.RMS_NORM_EPS.value, float),
     ],
-    bases=(AttentionConfig, ),
+    bases=(AttentionConfig,),
 )
 
 MLAConfig.__doc__ = f"""Configuration for the MLA module.
@@ -107,13 +107,17 @@ class Attention(nnx.Module):
         H = getattr(self.cfg, HuggingFaceArgNames.HEAD_DIM.value)
 
         self.kernel_q_proj_NDH = self.param_factory.create_kernel_param(
-            rngs, (N, D, H), self.ndh_sharding, self.cfg.dtype)
+            rngs, (N, D, H), self.ndh_sharding, self.cfg.dtype
+        )
         self.kernel_k_proj_KDH = self.param_factory.create_kernel_param(
-            rngs, (K, D, H), self.kdh_sharding, self.cfg.dtype)
+            rngs, (K, D, H), self.kdh_sharding, self.cfg.dtype
+        )
         self.kernel_v_proj_KDH = self.param_factory.create_kernel_param(
-            rngs, (K, D, H), self.kdh_sharding, self.cfg.dtype)
+            rngs, (K, D, H), self.kdh_sharding, self.cfg.dtype
+        )
         self.kernel_o_proj_NHD = self.param_factory.create_kernel_param(
-            rngs, (N, H, D), self.nhd_sharding, self.cfg.dtype)
+            rngs, (N, H, D), self.nhd_sharding, self.cfg.dtype
+        )
 
     def create_sharding(self):
         """Creates sharding rules for activations and weights."""
@@ -122,26 +126,29 @@ class Attention(nnx.Module):
             "keyvalue_skh", "activation_attention_out_td"
         ]
         for attr_name in mode_dependent_attrs:
-            prefill_sharding_config = getattr(self.sharding_cfg.prefill_rules,
-                                              attr_name)
+            prefill_sharding_config = getattr(
+                self.sharding_cfg.prefill_rules, attr_name
+            )
             generate_sharding_config = getattr(
-                self.sharding_cfg.generate_rules, attr_name)
+                self.sharding_cfg.generate_rules, attr_name
+            )
 
             sharding_dict = {
-                "prefill": NamedSharding(self.mesh,
-                                         P(*prefill_sharding_config)),
-                "generate": NamedSharding(self.mesh,
-                                          P(*generate_sharding_config)),
+                "prefill": NamedSharding(self.mesh, P(*prefill_sharding_config)),
+                "generate": NamedSharding(self.mesh, P(*generate_sharding_config)),
             }
             setattr(self, attr_name, sharding_dict)
 
         # static sharding for kernel/weights
         self.ndh_sharding = NamedSharding(
-            self.mesh, P(*self.sharding_cfg.generate_rules.attn_q_weight_ndh))
+            self.mesh, P(*self.sharding_cfg.generate_rules.attn_q_weight_ndh)
+        )
         self.kdh_sharding = NamedSharding(
-            self.mesh, P(*self.sharding_cfg.generate_rules.attn_k_weight_kdh))
+            self.mesh, P(*self.sharding_cfg.generate_rules.attn_k_weight_kdh)
+        )
         self.nhd_sharding = NamedSharding(
-            self.mesh, P(*self.sharding_cfg.generate_rules.attn_o_weight_nhd))
+            self.mesh, P(*self.sharding_cfg.generate_rules.attn_o_weight_nhd)
+        )
 
         # TODO: the pallas kernels of flash_attention/paged_attention need to be called
         # via shard_map with sharding specs, However, the q/k/v have been sharded outside of attention()
@@ -257,8 +264,9 @@ class Attention(nnx.Module):
             timescale = apply_rope_scaling(timescale, rope_scaling)
 
         # Shape: (B, seq_len, head_dim // 2)
-        sinusoid_inp = (positions[..., jnp.newaxis] *
-                        timescale[jnp.newaxis, jnp.newaxis, :])
+        sinusoid_inp = (
+            positions[..., jnp.newaxis] * timescale[jnp.newaxis, jnp.newaxis, :]
+        )
 
         # Shape: (B, seq_len, 1, head_dim // 2)
         sinusoid_inp = sinusoid_inp[:, :, jnp.newaxis, :]
@@ -268,14 +276,15 @@ class Attention(nnx.Module):
         # Some models pad the inputs head_dim with zeros,
         # so we need to split the inputs using the head_dim before padding.
         padded_head_dim = inputs.shape[-1]
-        first_half = inputs[..., :head_dim // 2]
-        second_half = inputs[..., head_dim // 2:head_dim]
+        first_half = inputs[..., : head_dim // 2]
+        second_half = inputs[..., head_dim // 2 : head_dim]
         first_part = first_half * cos - second_half * sin
         second_part = second_half * cos + first_half * sin
         out = jnp.concatenate([first_part, second_part], axis=-1)
         if padded_head_dim > head_dim:
-            out = jnp.pad(out, ((0, 0), (0, 0), (0, 0),
-                                (0, padded_head_dim - head_dim)))
+            out = jnp.pad(
+                out, ((0, 0), (0, 0), (0, 0), (0, padded_head_dim - head_dim))
+            )
         return out.astype(inputs.dtype)
 
     def attention(
