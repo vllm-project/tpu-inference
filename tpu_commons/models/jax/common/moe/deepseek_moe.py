@@ -1,4 +1,4 @@
-from dataclasses import field, make_dataclass
+from dataclasses import field, make_dataclass, dataclass
 from typing import Any, Tuple
 
 import jax
@@ -41,6 +41,7 @@ DeepSeekV3RoutingConfig.__doc__ = f"""Configuration for the Router module.
         {HuggingFaceArgNames.NORM_TOPK_PROB.value}: Whether to normalize the top k groups."""
 
 
+@dataclass
 class DeepSeekV3Router(nnx.Module):
     """Router module for Mixture-of-Experts (MoE) layers.
 
@@ -54,21 +55,16 @@ class DeepSeekV3Router(nnx.Module):
         quant: Optional configuration for quantization.
     """
 
-    def __init__(
-        self,
-        cfg: DeepSeekV3RoutingConfig,  # type: ignore
-        mesh: Mesh,
-        param_factory: ParamFactory,
-        sharding_cfg: ShardingConfig,
-        quant: Any | None = None,
-    ):
-        self.cfg = cfg
-        self.mesh = mesh
-        self.param_factory = param_factory
-        self.sharding_cfg = sharding_cfg
-        self.quant = quant
-        self.dtype = self.cfg.dtype
+    cfg: DeepSeekV3RoutingConfig
+    mesh: Mesh
+    param_factory: ParamFactory
+    sharding_cfg: ShardingConfig
+    quant: Any | None = None
 
+
+    def __post_init__(self):
+        """Initializes the Router module by creating sharding configurations and generating the router kernel."""
+        
         self.hidden_size = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
         self.num_experts = getattr(
             self.cfg, HuggingFaceArgNames.NUM_ROUTED_EXPERTS.value
@@ -84,11 +80,8 @@ class DeepSeekV3Router(nnx.Module):
         self.routed_scaling_factor = getattr(
             self.cfg, HuggingFaceArgNames.ROUTED_SCALING_FACTOR.value
         )
+        self.dtype = self.cfg.dtype
 
-        self.__post_init__()
-
-    def __post_init__(self):
-        """Initializes the Router module by creating sharding configurations and generating the router kernel."""
         self.create_sharding()
 
     def get_topk_indices(self, scores: Float) -> Float:
