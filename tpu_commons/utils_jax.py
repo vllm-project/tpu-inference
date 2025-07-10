@@ -67,3 +67,9 @@ def hbm_usage_gb(devices: Any) -> List[Tuple[float, float]]:
 def array_info(name: str, x: jax.Array) -> str:
     rep = f"{name} | shape={x.shape} | dtype={x.dtype} | sharding={x.sharding}"
     return rep
+
+
+def get_padded_head_dim(head_dim: int) -> int:
+    """Pads head_dim up to the nearest multiple of 128 for kernel performance."""
+    # Details can be seen at: tpu_commons/kernels/ragged_kv_cache_update.py::_kv_cache_update()
+    return (head_dim + 127) // 128 * 128

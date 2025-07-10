@@ -30,6 +30,7 @@ from tpu_commons.runner.tpu_torch_xla_runner import (_get_padded_token_len,
                                                      _get_token_paddings)
 from tpu_commons.runner.utils import (LatencyTracker,
                                       get_padded_num_reqs_with_upper_limit)
+from tpu_commons.sample.metadata_jax import TPUSupportedSamplingMetadata
 
 logger = init_logger(__name__)
 
@@ -182,11 +183,16 @@ class TPUModelRunner():
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         model_config = self.vllm_config.model_config
         parallel_config = self.vllm_config.parallel_config
+
+        # Pad head_dim for kernel performance.
+        head_size = model_config.get_head_size()
+        head_size = utils.get_padded_head_dim(head_size)
+
         for i in range(model_config.get_num_layers(parallel_config)):
             kv_cache_spec[f"layers.{i}"] = FullAttentionSpec(
                 block_size=block_size,
                 num_kv_heads=model_config.get_total_num_kv_heads(),
-                head_size=model_config.get_head_size(),
+                head_size=head_size,
                 dtype=torch.bfloat16,
                 use_mla=False,
             )
@@ -235,7 +241,7 @@ class TPUModelRunner():
                     f"hbm={utils.hbm_usage_gb(self.devices)}Gb")
 
     def capture_model(self) -> None:
-        if os.getenv("SKIP_JAX_PRECOMPILE", True):
+        if os.getenv("SKIP_JAX_PRECOMPILE", False):
             return
         logger.info("Precompile all the subgraphs with possible input shapes.")
 
@@ -245,56 +251,66 @@ class TPUModelRunner():
 
     def _generate_dummy_inputs(self):
         for num_tokens in self.num_tokens_paddings:
-            input_ids = np.zeros((num_tokens, ), dtype=np.int32)
-            positions = np.zeros((num_tokens, ), dtype=np.int32)
+            input_ids = np.ones((num_tokens, ), dtype=np.int32)
+            positions = np.ones((num_tokens, ), dtype=np.int32)
             padded_num_slices = _get_padded_num_kv_cache_update_slices(
                 num_tokens, self.max_num_reqs, self.block_size)
-            slot_mapping_metadata = np.zeros((3, padded_num_slices),
-                                             dtype=np.int32)
+            slot_mapping_metadata = np.ones((3, padded_num_slices),
+                                            dtype=np.int32)
             block_tables = self.block_table_cpu[:self.max_num_reqs]
             seq_lens = np.ones((self.max_num_reqs, ), dtype=np.int32)
             query_start_loc = np.ones((self.max_num_reqs + 1, ),
                                       dtype=np.int32)
 
             for num_reqs in self.num_reqs_paddings:
-                logger.info(
-                    f"Precompile subgraph --> num_tokens={num_tokens} | num_reqs={num_reqs}"
-                )
                 num_seqs = np.array([num_reqs], dtype=np.int32)
                 num_slices = np.array([1], dtype=np.int32)
-                logits_indices = np.zeros((num_reqs, ), dtype=np.int32)
-                temperatures = np.full((num_reqs, ), 0.7, np.float32)
-                top_ps = np.full((num_reqs, ), 0.8, np.float32)
-                top_ks = np.full((num_reqs, ), 20, np.int32)
+                logits_indices = np.ones((num_reqs, ), dtype=np.int32)
 
                 (input_ids, positions, slot_mapping_metadata, num_slices,
                  block_tables, query_start_loc, seq_lens, num_seqs,
-                 temperatures, top_ps, top_ks,
                  logits_indices) = self._device_array(
                      (input_ids, positions, slot_mapping_metadata, num_slices,
                       block_tables, query_start_loc, seq_lens, num_seqs,
-                      temperatures, top_ps, top_ks, logits_indices))
-                do_sampling = True
+                      logits_indices))
 
-                yield (
-                    do_sampling,
-                    False,
-                    self.kv_caches,
-                    input_ids,
-                    AttentionMetadata(
-                        input_positions=positions,
-                        slot_mapping=slot_mapping_metadata,
-                        block_tables=block_tables,
-                        seq_lens=seq_lens,
-                        query_start_loc=query_start_loc,
-                        num_seqs=num_seqs,
-                        num_slices=num_slices,
-                    ),
-                    temperatures,
-                    top_ps,
-                    top_ks,
-                    logits_indices,
-                )
+                for do_sampling in (True, False):
+                    logger.info(
+                        f"Precompile subgraph --> num_tokens={num_tokens} | "
+                        f"num_reqs={num_reqs} | do_sampling={do_sampling}")
+                    if do_sampling:
+                        temperature = np.full((num_reqs, ),
+                                              0.7,
+                                              dtype=np.float32)
+                        top_k = np.full((num_reqs, ), 20, dtype=np.int32)
+                        top_p = np.full((num_reqs, ), 0.8, dtype=np.float32)
+                        (temperature, top_k, top_p) = self._device_array(
+                            (temperature, top_k, top_p))
+                    else:
+                        temperature = None
+                        top_k = None
+                        top_p = None
+                    sampling_metadata = TPUSupportedSamplingMetadata(
+                        temperature=temperature,
+                        top_k=top_k,
+                        top_p=top_p,
+                        do_sampling=do_sampling,
+                    )
+                    yield (
+                        self.kv_caches,
+                        input_ids,
+                        AttentionMetadata(
+                            input_positions=positions,
+                            slot_mapping=slot_mapping_metadata,
+                            block_tables=block_tables,
+                            seq_lens=seq_lens,
+                            query_start_loc=query_start_loc,
+                            num_seqs=num_seqs,
+                            num_slices=num_slices,
+                        ),
+                        sampling_metadata,
+                        logits_indices,
+                    )
 
     @staticmethod
     @functools.partial(jax.jit)
@@ -318,151 +334,55 @@ class TPUModelRunner():
     @staticmethod
     @functools.partial(
         jax.jit,
-        static_argnames=("block_size", "kv_cache_sharding"),
         donate_argnames=("kv_caches"),
     )
     def _jitted_insert_kv_cache(
         kv_caches: List[jax.Array],
         kv_cache_slices: List[jax.Array],
         block_numbers: jax.Array,
-        block_size: int,
-        kv_cache_sharding: NamedSharding,
     ) -> List[jax.Array]:
         """
         JIT-compiled function to insert KV cache slices into the physical
         cache for all layers at once. This fuses the pad, reshape, and scatter
         operations into a single efficient kernel.
         """
-        num_tokens_in_cache = kv_cache_slices[0].shape[0]
-        num_blocks_for_cache = cdiv(num_tokens_in_cache, block_size)
-        padded_len = num_blocks_for_cache * block_size
-        padding_size = padded_len - num_tokens_in_cache
-
         new_kv_caches = []
+        # Assuming block numbers are non-negative and sorted.
         for i, layer_kv_cache_slices in enumerate(kv_cache_slices):
-            padded_slices = jnp.pad(layer_kv_cache_slices,
-                                    ((0, padding_size), (0, 0), (0, 0)),
-                                    mode='constant')
-
-            reshaped_slices = padded_slices.reshape(num_blocks_for_cache,
-                                                    block_size,
-                                                    *padded_slices.shape[1:])
-
-            reshaped_slices = jax.lax.with_sharding_constraint(
-                reshaped_slices, kv_cache_sharding)
-
-            updated_cache = kv_caches[i].at[block_numbers].set(reshaped_slices)
+            updated_cache = kv_caches[i].at[block_numbers].set(
+                layer_kv_cache_slices)
             new_kv_caches.append(updated_cache)
         return new_kv_caches
 
-    def get_kv_cache_for_requests(
+    def get_kv_cache_for_block_ids(
         self,
-        request_ids: List[str],
-        kv_cache_write_indices: jax.Array,
-        num_scheduled_tokens_per_req: np.ndarray,
-    ) -> dict[str, list[jax.Array]]:
+        block_ids: List[int],
+    ) -> List[jax.Array]:
         """
-        Extracts the KV cache slices for given request IDs based on the
-        provided slot mapping metadata. This extracts the cache for newly
-        scheduled tokens.
+        Extracts the KV cache slices for a given list of block IDs.
+        This assumes all provided blocks are full.
 
         Args:
-            request_ids: A list of request IDs to extract KV cache for.
-            kv_cache_write_indices: The metadata for slot mapping, from
-                `AttentionMetadata.slot_mapping`.
-            num_scheduled_tokens_per_req: An array containing the number of
-                scheduled tokens for each request in the current batch, ordered
-                by their position in the batch.
+            block_ids: A list of block IDs to extract KV cache for.
 
         Returns:
-            A dictionary where keys are request IDs and values are lists of
-            JAX arrays, with each array representing the KV cache slices for a
-            layer.
+            A list of JAX arrays, with each array representing the KV cache
+            slices for a layer, concatenated for all blocks.
         """
-        # kv_cache_write_indices is on device and transposed.
-        # Get it to CPU and transpose back for processing.
-        with LatencyTracker("get_kv_cache_for_requests:device_get"):
-            slot_mapping_metadata = np.asarray(
-                jax.device_get(kv_cache_write_indices)).T
-
-        # --- Start of new, optimized logic ---
-
-        # 1. On CPU, compute all indices for all requests that need work.
         all_indices_to_gather = []
-        indices_lengths = []
-        req_ids_with_work = []
-        output = {}
+        for block_id in block_ids:
+            start_index = block_id * self.block_size
+            all_indices_to_gather.extend(
+                range(start_index, start_index + self.block_size))
 
-        # Pre-calculate block boundaries for all requests in the batch
-
-        num_reqs_in_batch = len(num_scheduled_tokens_per_req)
-        slices_start = self.input_batch.num_computed_tokens_cpu[:
-                                                                num_reqs_in_batch]
-        slices_end = slices_start + num_scheduled_tokens_per_req
-        local_block_start_idx = slices_start // self.block_size
-        local_block_end_idx = (slices_end - 1) // self.block_size
-        block_lens = local_block_end_idx - local_block_start_idx + 1
-
-        cu_block_lens = np.zeros(len(block_lens) + 1, dtype=np.int32)
-        np.cumsum(block_lens, out=cu_block_lens[1:])
-
-        with LatencyTracker("get_kv_cache_for_requests:cpu_index_generation"):
-            for req_id in request_ids:
-                if req_id not in self.input_batch.req_id_to_index:
-                    logger.warning(
-                        f"Request ID {req_id} not found in input batch.")
-                    output[req_id] = []
-                    continue
-
-                req_index = self.input_batch.req_id_to_index[req_id]
-
-                if num_scheduled_tokens_per_req[req_index] == 0:
-                    output[req_id] = []
-                    continue
-
-                start_meta_idx = cu_block_lens[req_index]
-                end_meta_idx = cu_block_lens[req_index + 1]
-                metadata_for_req = slot_mapping_metadata[
-                    start_meta_idx:end_meta_idx]
-
-                indices_for_req = [
-                    i for start, _, length in metadata_for_req
-                    for i in range(int(start), int(start + length))
-                ]
-
-                if not indices_for_req:
-                    output[req_id] = []
-                    continue
-
-                req_ids_with_work.append(req_id)
-                all_indices_to_gather.extend(indices_for_req)
-                indices_lengths.append(len(indices_for_req))
-
-        if not req_ids_with_work:
-            return output
-
-        # 2. Concatenate all indices and move to device once.
         indices_to_gather_jnp = jnp.array(all_indices_to_gather,
                                           dtype=jnp.int32)
 
-        # 3. Batch the `take` operation for all layers using a JIT-compiled function.
-        with LatencyTracker(f"BatchedGatherKVSlices-{len(req_ids_with_work)}"):
+        with LatencyTracker("BatchedGatherKVSlices-for-blocks"):
             batched_kv_cache_per_layer = self._jitted_gather_kv_cache(
                 self.kv_caches, indices_to_gather_jnp)
 
-        # 4. Split the results on-device and populate the output dictionary.
-        split_indices = np.cumsum(indices_lengths[:-1])
-
-        per_req_slices_by_layer = []
-        for all_gathered_slices in batched_kv_cache_per_layer:
-            per_req_slices_by_layer.append(
-                jnp.split(all_gathered_slices, split_indices))
-
-        for i, req_id in enumerate(req_ids_with_work):
-            output[req_id] = [
-                layer_slices[i] for layer_slices in per_req_slices_by_layer
-            ]
-        return output
+        return batched_kv_cache_per_layer
 
     def transfer_kv_cache(self,
                           kv_cache_slices: List[jax.Array]) -> List[jax.Array]:
@@ -518,36 +438,46 @@ class TPUModelRunner():
                 "Inserting KV cache for models with multiple KV cache groups "
                 "is not supported yet.")
         block_numbers = block_ids[0]
+        num_blocks = len(block_numbers)
 
-        if kv_cache_slices:
-            num_tokens_in_cache = kv_cache_slices[0].shape[0]
-        else:
-            num_tokens_in_cache = 0
+        # Pad the number of blocks to static bucket sizes to avoid recompilation.
+        block_buckets = [1, 2, 4, 8, 16, 32, 64, self.max_num_blocks_per_req]
+        import bisect
+        bucket_index = bisect.bisect_left(block_buckets, num_blocks)
+        padded_num_blocks = block_buckets[bucket_index]
+        padding_size = padded_num_blocks - num_blocks
 
-        if num_tokens_in_cache > 0:
-            num_blocks_for_cache = cdiv(num_tokens_in_cache, self.block_size)
+        # Pad target_block_numbers. Pad with the max_num_blocks + 1 to avoid writing
+        # to unintended blocks. JAX would ignore as it's beyond the number of blocks
+        # in the cache.
+        max_num_blocks = self.vllm_config.cache_config.num_cpu_blocks
+        assert max_num_blocks is not None
+        block_numbers.extend([max_num_blocks + 1] * padding_size)
 
-            if len(block_numbers) < num_blocks_for_cache:
-                raise ValueError(
-                    f"Not enough blocks allocated for request {request.req_id}. "
-                    f"Need {num_blocks_for_cache}, got {len(block_numbers)}.")
+        padded_block_numbers = jnp.array(block_numbers, dtype=jnp.int32)
 
-            # Prepare inputs for the JIT-compiled function.
-            target_block_numbers = jnp.array(
-                block_numbers[:num_blocks_for_cache], dtype=jnp.int32)
+        # Pad kv_cache_slices.
+        padded_kv_cache_slices = []
+        for layer_slice in kv_cache_slices:
+            # The shape of layer_slice is (num_blocks, block_size, ...).
+            # We need to pad the first dimension.
+            pad_width = [(0, padding_size)] + [(0, 0)] * (layer_slice.ndim - 1)
+            padded_slice = jnp.pad(layer_slice,
+                                   pad_width,
+                                   mode='constant',
+                                   constant_values=0)
+            padded_kv_cache_slices.append(padded_slice)
 
-            # Call the JIT-compiled function to perform the scatter operation
-            # for all layers in a single, fused kernel.
-            with LatencyTracker("JittedInsertKVCache"):
-                self.kv_caches = self._jitted_insert_kv_cache(
-                    self.kv_caches,
-                    kv_cache_slices,
-                    target_block_numbers,
-                    self.block_size,
-                    self.kv_caches[0].sharding,
-                )
+        # Call the JIT-compiled function to perform the scatter operation
+        # for all layers in a single, fused kernel.
+        with LatencyTracker(f"JittedInsertKVCache-b{padded_num_blocks}"):
+            self.kv_caches = self._jitted_insert_kv_cache(
+                self.kv_caches,
+                padded_kv_cache_slices,
+                padded_block_numbers,
+            )
 
-            logger.debug(f"Updated kv cache entries cnt={len(self.kv_caches)}")
+        logger.debug(f"Updated kv cache entries cnt={len(self.kv_caches)}")
 
         # Update runner's internal state to track the new request.
         req_id = request.request_id
@@ -654,7 +584,7 @@ class TPUModelRunner():
             prompt_logprobs_dict=prompt_logprobs_dict,
             pooler_output=[],
         )
-        return inputs[4], model_runner_output
+        return inputs[2], model_runner_output
 
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -748,21 +678,9 @@ class TPUModelRunner():
         logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
         num_seqs = np.array([num_reqs])
 
-        # Sampling
-        req_ids = self.arange_cpu[:num_reqs]
-        do_sampling = _do_sampling(self.input_batch.top_k_cpu[req_ids],
-                                   self.input_batch.temperature_cpu[req_ids])
-        if do_sampling:
-            temperatures = self.input_batch.temperature_cpu[:padded_num_reqs]
-            top_ps = self.input_batch.top_p_cpu[:padded_num_reqs]
-            top_ks = self.input_batch.top_k_cpu[:padded_num_reqs]
-            (temperatures, top_ps, top_ks) = self._device_array(
-                (temperatures, top_ps, top_ks))
-        else:
-            temperatures = None
-            top_ps = None
-            top_ks = None
-
+        # Put to device
+        sampling_metadata = TPUSupportedSamplingMetadata.\
+            from_input_batch(self.mesh, self.input_batch, padded_num_reqs)
         (input_ids, positions, slot_mapping_metadata, num_slices, block_tables,
          query_start_loc, seq_lens, num_seqs,
          logits_indices) = self._device_array(
@@ -771,8 +689,6 @@ class TPUModelRunner():
               logits_indices))
 
         return (
-            False,
-            do_sampling,
             self.kv_caches,
             input_ids,
             AttentionMetadata(
@@ -784,9 +700,7 @@ class TPUModelRunner():
                 num_seqs=num_seqs,
                 num_slices=num_slices,
             ),
-            temperatures,
-            top_ps,
-            top_ks,
+            sampling_metadata,
             logits_indices,
         )
 
@@ -987,7 +901,3 @@ def _get_padded_num_kv_cache_update_slices(num_tokens: int, max_num_reqs: int,
     ) // NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK * \
         NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK
     return padded_num_slices
-
-
-def _do_sampling(top_ks: np.ndarray, temperatures: np.ndarray) -> bool:
-    return np.any(top_ks != 1) and np.any(temperatures != 0.0)

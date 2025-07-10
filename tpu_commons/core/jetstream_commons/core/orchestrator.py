@@ -324,8 +324,8 @@ class Driver:
             if self._interleaved_mode:
                 self._interleaved_lock.acquire()
             with LatencyTracker("prefill"):
-                kv_caches, vllm_model_runner_output = prefill_engine.prefill()
-            my_transfer_backlog.put(kv_caches, block=True)
+                kv_cache_map, vllm_model_runner_output = prefill_engine.prefill()
+            my_transfer_backlog.put(kv_cache_map, block=True)
             if self._interleaved_mode:
                 self._interleaved_lock.release()
 
@@ -357,14 +357,14 @@ class Driver:
         prefill_engine = self._prefill_engines[idx]
         while self.live:
             # The transfer thread can just sleep until it has work to do.
-            kv_caches = transfer_backlog.get(block=True)
-            if kv_caches is None:
+            kv_cachce_map = transfer_backlog.get(block=True)
+            if kv_cachce_map is None:
                 break
 
-            logging.info(f"KV Cache items received: {kv_caches.keys()}")
+            logging.info(f"KV Cache items received: {kv_cachce_map.keys()}")
 
             push_targets = []
-            for req_id, kv_cache in kv_caches.items():
+            for req_id, kv_cache in kv_cachce_map.items():
                 request = self.requests[req_id]
                 target_idx = min(self._generate_backlogs.items(),
                                  key=lambda q: q[1].qsize())[0]
@@ -446,7 +446,7 @@ class Driver:
                     logging.info(
                         f"insert request for generation: {request.request_id}, "
                         f"{generate_engine.dump_stats()}")
-                    with LatencyTracker("KVCacheInsert"):
+                    with LatencyTracker(f"KVCacheInsert-{len(new_block_ids[0])}"):
                         generate_engine.model_runner.insert_request_with_kv_cache(
                             request, kv_cache, new_block_ids)
                 generate_engine.add_request(request, 1)

@@ -7,12 +7,14 @@ from jax.sharding import Mesh
 from transformers import Qwen2Config, modeling_flax_utils
 from vllm.config import VllmConfig
 
+from tpu_commons import utils_jax as utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_interface import attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.layers.rope import apply_rope
 from tpu_commons.models.jax.layers.sampling import sample
 from tpu_commons.models.jax.utils.weight_utils import load_hf_weights
+from tpu_commons.sample.metadata_jax import TPUSupportedSamplingMetadata
 
 logger = init_logger(__name__)
 
@@ -66,7 +68,11 @@ class Qwen2Attention(nnx.Module):
         self.num_kv_heads = config.num_key_value_heads
         self.rope_theta = config.rope_theta
         self.rope_scaling = getattr(config, "rope_scaling", None)
-        self.head_dim = config.hidden_size // config.num_attention_heads
+
+        self.head_dim_original = config.hidden_size // config.num_attention_heads
+
+        # Pad head_dim for kernel performance.
+        self.head_dim = utils.get_padded_head_dim(self.head_dim_original)
 
         self.mesh = mesh
 
@@ -108,13 +114,13 @@ class Qwen2Attention(nnx.Module):
 
         # q: (T, N, H)
         q = self.q_proj(x)
-        q = apply_rope(q, md.input_positions, self.head_dim, self.rope_theta,
-                       self.rope_scaling)
+        q = apply_rope(q, md.input_positions, self.head_dim_original,
+                       self.rope_theta, self.rope_scaling)
 
         # k: (T, K, H)
         k = self.k_proj(x)
-        k = apply_rope(k, md.input_positions, self.head_dim, self.rope_theta,
-                       self.rope_scaling)
+        k = apply_rope(k, md.input_positions, self.head_dim_original,
+                       self.rope_theta, self.rope_scaling)
 
         # k: (T, K, H)
         v = self.v_proj(x)
@@ -127,6 +133,7 @@ class Qwen2Attention(nnx.Module):
             v,
             attention_metadata,
             self.mesh,
+            self.head_dim_original,
         )
 
         # (T, D)
@@ -263,14 +270,10 @@ class Qwen2ForCausalLM(nnx.Module):
 
     def __call__(
         self,
-        is_prefill: bool,
-        do_sampling: bool,
         kv_caches: List[jax.Array],
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
-        temperatures: jax.Array = None,
-        top_ps: jax.Array = None,
-        top_ks: jax.Array = None,
+        tpu_sampling_metadata: TPUSupportedSamplingMetadata,
         logits_indices: jax.Array = None,
         *args,
     ) -> Tuple[List[jax.Array], jax.Array, jax.Array]:
@@ -300,13 +303,10 @@ class Qwen2ForCausalLM(nnx.Module):
             logits = jnp.dot(x, self.lm_head.value)
 
         next_tokens = sample(
-            do_sampling,
             self.rng.params(),
             self.mesh,
             logits,
-            temperatures,
-            top_ps,
-            top_ks,
+            tpu_sampling_metadata,
         )
         return kv_caches, next_tokens, None
 

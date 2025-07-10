@@ -11,7 +11,6 @@ KVCache = Tuple[jax.Array, jax.Array]
 
 @dataclass
 class VllmModelWrapperContext:
-    is_prefill: bool
     kv_caches: List[KVCache]
     attention_metadata: AttentionMetadata
 
@@ -30,14 +29,12 @@ def get_vllm_model_wrapper_context() -> VllmModelWrapperContext:
 @contextmanager
 def set_vllm_model_wrapper_context(
     *,
-    is_prefill: bool,
     kv_caches: List[KVCache],
     attention_metadata: AttentionMetadata,
 ):
     global _vllm_model_wrapper_context
     prev_context = _vllm_model_wrapper_context
     _vllm_model_wrapper_context = VllmModelWrapperContext(
-        is_prefill=is_prefill,
         kv_caches=kv_caches,
         attention_metadata=attention_metadata,
     )

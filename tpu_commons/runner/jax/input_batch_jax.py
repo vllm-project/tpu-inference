@@ -87,6 +87,8 @@ class InputBatch:
 
         # Sampling-related.
         self.temperature_cpu = np.empty((max_num_reqs, ), dtype=np.float32)
+        self.greedy_reqs: set[str] = set()
+        self.random_reqs: set[str] = set()
 
         self.top_p_cpu = np.empty((max_num_reqs, ), dtype=np.float32)
 
@@ -166,8 +168,10 @@ class InputBatch:
         if sampling_params.sampling_type == SamplingType.GREEDY:
             # Avoid later division by zero.
             self.temperature_cpu[req_index] = -1.0
+            self.greedy_reqs.add(req_id)
         else:
             self.temperature_cpu[req_index] = sampling_params.temperature
+            self.random_reqs.add(req_id)
 
         self.top_p_cpu[req_index] = sampling_params.top_p
         top_k = sampling_params.top_k
@@ -230,6 +234,8 @@ class InputBatch:
         self._req_ids[req_index] = None
         self.req_output_token_ids[req_index] = None
 
+        self.greedy_reqs.discard(req_id)
+        self.random_reqs.discard(req_id)
         self.min_tokens.pop(req_index, None)
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
@@ -375,3 +381,7 @@ class InputBatch:
     @property
     def num_reqs(self) -> int:
         return len(self.req_id_to_index)
+
+    @property
+    def all_greedy(self) -> bool:
+        return len(self.random_reqs) == 0

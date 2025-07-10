@@ -22,6 +22,7 @@ from tpu_commons.models.jax.layers.sampling import sample
 from tpu_commons.models.vllm.sharding import shard_model_to_tpu
 from tpu_commons.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
+from tpu_commons.sample.metadata_jax import TPUSupportedSamplingMetadata
 
 
 class ModelForLogits(torch.nn.Module):
@@ -97,25 +98,19 @@ class VllmModelWrapper:
 
         @functools.partial(
             jax.jit,
-            static_argnums=(1, 2),  # is_prefill, do_sampling
-            donate_argnums=(3, ),  # donate kv_cache
+            donate_argnums=(1, ),  # donate kv_cache
         )
         def step_fun(
             params_and_buffers,  # this has been wrapped into a torchax TorchValue
-            is_prefill: bool,
-            do_sampling: bool,
             kv_caches: List[jax.Array],
             input_ids: jax.Array,
             attention_metadata: AttentionMetadata,
-            temperatures: jax.Array,
-            top_ps: jax.Array,
-            top_ks: jax.Array,
+            tpu_sampling_metadata: TPUSupportedSamplingMetadata,
             logits_indices: jax.Array,
             *args,
         ) -> Tuple[List[jax.Array], jax.Array, jax.Array]:
 
             with torchax.default_env(), set_vllm_model_wrapper_context(
-                    is_prefill=is_prefill,
                     kv_caches=kv_caches,
                     attention_metadata=attention_metadata,
             ):
@@ -141,13 +136,10 @@ class VllmModelWrapper:
             logits = jax_view(logits)
 
             next_tokens = sample(
-                do_sampling,
                 self.rng,
                 self.mesh,
                 logits,
-                temperatures,
-                top_ps,
-                top_ks,
+                tpu_sampling_metadata,
             )
 
             return new_kv_caches, next_tokens, logits

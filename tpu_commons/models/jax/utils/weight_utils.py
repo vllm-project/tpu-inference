@@ -16,6 +16,7 @@ from jax.sharding import Mesh
 from safetensors import safe_open
 from vllm.config import VllmConfig
 
+from tpu_commons import utils_jax as utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.layers.misc import shard_put
 from tpu_commons.models.jax.utils import file_utils
@@ -232,18 +233,22 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
     num_heads = hf_config.num_attention_heads
     num_kv_heads = hf_config.num_key_value_heads
     hidden_size = model_config.get_hidden_size()
-    head_dim = model_config.get_head_size()
+
+    # Pad head_dim for kernel performance.
+    head_dim_original = model_config.get_head_size()
+    head_dim = utils.get_padded_head_dim(head_dim_original)
+    head_dim_pad = head_dim - head_dim_original
 
     reshape_keys = {
-        "q_proj": (num_heads, head_dim, hidden_size),
-        "k_proj": (num_kv_heads, head_dim, hidden_size),
-        "v_proj": (num_kv_heads, head_dim, hidden_size),
-        "o_proj": (hidden_size, num_heads, head_dim),
+        "q_proj": (num_heads, head_dim_original, hidden_size),
+        "k_proj": (num_kv_heads, head_dim_original, hidden_size),
+        "v_proj": (num_kv_heads, head_dim_original, hidden_size),
+        "o_proj": (hidden_size, num_heads, head_dim_original),
     }
     bias_reshape_keys = {
-        "q_proj.bias": (num_heads, head_dim),
-        "k_proj.bias": (num_kv_heads, head_dim),
-        "v_proj.bias": (num_kv_heads, head_dim)
+        "q_proj.bias": (num_heads, head_dim_original),
+        "k_proj.bias": (num_kv_heads, head_dim_original),
+        "v_proj.bias": (num_kv_heads, head_dim_original)
     }
     transpose_keys = {
         "lm_head": (1, 0),
@@ -281,17 +286,29 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
             for key in bias_reshape_keys:
                 if key in hf_key:
                     hf_weight = jnp.reshape(hf_weight, bias_reshape_keys[key])
+                    if head_dim_pad > 0:
+                        hf_weight = jnp.pad(hf_weight,
+                                            ((0, 0), (0, head_dim_pad)))
                     break
         else:
             for key in reshape_keys:
                 if key in hf_key:
                     hf_weight = jnp.reshape(hf_weight, reshape_keys[key])
+                    if head_dim_pad > 0:
+                        if "o_proj" in key:
+                            hf_weight = jnp.pad(hf_weight, ((0, 0), (0, 0),
+                                                            (0, head_dim_pad)))
+                        else:
+                            hf_weight = jnp.pad(hf_weight,
+                                                ((0, 0), (0, head_dim_pad),
+                                                 (0, 0)))
                     break
             for key in transpose_keys:
                 if key in hf_key:
                     hf_weight = jnp.transpose(hf_weight, transpose_keys[key])
                     break
-            assert model_weight.value.shape == hf_weight.shape
+            if head_dim_pad == 0:
+                assert model_weight.value.shape == hf_weight.shape
 
         # Update the model weight
         model_weight.value = shard(hf_weight, model_sharding)

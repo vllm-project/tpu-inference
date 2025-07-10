@@ -52,12 +52,13 @@ def sharded_ragged_paged_attention(sm_scale: float, mesh: Mesh):
 
 
 def attention(
-    kv_cache: jax.Array,
-    q: jax.Array,
-    k: jax.Array,
-    v: jax.Array,
-    attention_metadata: AttentionMetadata,
-    mesh: Mesh,
+        kv_cache: jax.Array,
+        q: jax.Array,
+        k: jax.Array,
+        v: jax.Array,
+        attention_metadata: AttentionMetadata,
+        mesh: Mesh,
+        head_dim_original: int | None = None,  # before padding
 ) -> Tuple[jax.Array, jax.Array]:
     # T: seq_len
     # N: num_heads
@@ -71,13 +72,15 @@ def attention(
     # k,v: (T, K, H)
     # kv_cache: (L, S, 2 * K, H)
 
+    if head_dim_original is None:
+        head_dim_original = q.shape[-1]
+
     md = attention_metadata
     kv_cache = update_kv_cache(k, v, kv_cache, md.slot_mapping, md.num_slices,
                                mesh)
 
-    head_dim = q.shape[-1]
     # (T, N, H)
-    output = sharded_ragged_paged_attention(head_dim**-0.5, mesh)(
+    output = sharded_ragged_paged_attention(head_dim_original**-0.5, mesh)(
         q,
         kv_cache,
         md.seq_lens,
