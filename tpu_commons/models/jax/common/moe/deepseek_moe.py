@@ -1,5 +1,5 @@
 from dataclasses import field, make_dataclass
-from typing import Any
+from typing import Any, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -91,8 +91,15 @@ class DeepSeekV3Router(nnx.Module):
         """Initializes the Router module by creating sharding configurations and generating the router kernel."""
         self.create_sharding()
 
-    def get_topk_indices(self, scores: Float[jnp, "B T E"]) -> Float[jnp, "B T K"]:
-        """Get the topk indices of the scores."""
+    def get_topk_indices(self, scores: Float) -> Float:
+        """Get the topk indices of the scores.
+
+        Args:
+            scores: The scores to get the topk indices of. Shape (batch_size, sequence_length, num_experts).
+
+        Returns:
+            The topk indices of the scores. Shape (batch_size, sequence_length, num_experts_per_tok).
+        """
 
         scores = scores + self.bias_E
         if self.n_groups > 1:
@@ -112,9 +119,7 @@ class DeepSeekV3Router(nnx.Module):
 
         return indices
 
-    def __call__(
-        self, x: Float[jnp, "B T D"], op_mode: str
-    ) -> Tuple[Float[jnp, "B T K"], Float[jnp, "B T K"]]:
+    def __call__(self, x: Float, op_mode: str) -> Tuple[Float, Float]:
         """Routes tokens to top k experts.
 
         Args:

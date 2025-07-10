@@ -7,7 +7,7 @@ from jax.sharding import Mesh
 
 from tpu_commons.models.jax.common.base import ParamFactory
 from tpu_commons.models.jax.common.sharding import ShardingConfig
-from tpu_commons.models.jax.deepseek import (DeepSeekV3Router,
+from tpu_commons.models.jax.common.moe.deepseek_moe import (DeepSeekV3Router,
                                              DeepSeekV3RoutingConfig)
 
 
