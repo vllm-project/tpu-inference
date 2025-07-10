@@ -146,6 +146,9 @@ class TestTPUJaxRunner(unittest.TestCase):
         num_kv_heads = 16
         head_size = 128
         num_blocks = 50
+        # This is needed for the padding logic in insert_request_with_kv_cache
+        self.runner.vllm_config.cache_config.num_cpu_blocks = num_blocks
+
         prompt_len = 63
 
         # Populate a source KV cache with data. This represents the state
