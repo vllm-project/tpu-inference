@@ -38,9 +38,8 @@ class TPUSupportedSamplingMetadata:
         mesh: Mesh,
         input_batch: InputBatch,
         padded_num_reqs: int,
-        do_sampling: bool,
     ) -> "TPUSupportedSamplingMetadata":
-        if do_sampling is False:
+        if input_batch.all_greedy:
             return cls(do_sampling=False)
 
         num_reqs = input_batch.num_reqs
@@ -63,6 +62,9 @@ class TPUSupportedSamplingMetadata:
             return jax.device_put(cpu_tensor, device=sharding)
 
         # Slice persistent device tensors to a fixed pre-compiled padded shape.
-        return cls(temperature=_device_array(temp_tensor),
-                   top_p=_device_array(top_p_tensor),
-                   top_k=_device_array(top_k_tensor))
+        return cls(
+            temperature=_device_array(temp_tensor[:padded_num_reqs]),
+            top_p=_device_array(top_p_tensor[:padded_num_reqs]),
+            top_k=_device_array(top_k_tensor[:padded_num_reqs]),
+            do_sampling=not input_batch.all_greedy,
+        )
