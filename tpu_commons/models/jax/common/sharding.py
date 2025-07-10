@@ -8,6 +8,7 @@ from vllm.config import VllmConfig
 
 BATCH_AXIS_NAME = 'data'
 SEQUENCE_AXIS_NAME = 'data'
+DATA_AXIS_NAME = 'data'
 ATTN_HEAD_AXIS_NAME = 'expert'
 ATTN_TENSOR_AXIS_NAME = 'model'
 MLP_TENSOR_AXIS_NAME = ('model', 'expert')
@@ -53,18 +54,18 @@ class ShardingRulesConfig:
     TODO: update the mesh axis names to be clear and reduce confusion between prefill & generate
     """
 
-    # Activation for attn input: (Batch, Sequence, Dim)
-    activation_attention_btd: tuple = (None, None, None)
+    # Activation for attn input: (Sequence, Dim)
+    activation_attention_td: tuple = (None, None)
     # Activation for attn out: (Batch, Sequence, Dim)
-    activation_attention_out_btd: tuple = (None, None, None)
+    activation_attention_out_td: tuple = (None, None)
     # Activation for q projection input: (Batch, Sequence, Dim)
-    activation_q_btd: tuple = (None, None, None)
+    activation_q_td: tuple = (None, None)
     # Attention Out activation after projection: (Batch, Sequence, NumHeads, HeadDim)
-    attn_o_btnh: tuple = (None, None, None, None)
+    attn_o_tnh: tuple = (None, None, None)
     # Q vector: (Batch, Sequence, NumHeads, HeadDim)
-    query_btnh: tuple = (None, None, None, None)
+    query_tnh: tuple = (None, None, None)
     # K/V vector: (Batch, Sequence, NumKVHeads, HeadDim)
-    keyvalue_bskh: tuple = (None, None, None, None)
+    keyvalue_skh: tuple = (None, None, None)
 
     # Attention Q weight: (NumHeads, Dim, HeadDim)
     attn_q_weight_ndh: tuple = (None, None, None)
@@ -76,12 +77,12 @@ class ShardingRulesConfig:
     attn_o_weight_nhd: tuple = (None, None, None)
 
     # K/V cache for generation: (NumKVHeads, Batch, Sequence, HeadDim)
-    keyvalue_cache_kbsh: tuple = (None, None, None, None)
+    keyvalue_cache_lskh: tuple = (None, None, None)
 
     # Activation for ffw input: (Batch, Sequence, Dim)
-    activation_ffw_btd: tuple = (None, None, None)
+    activation_ffw_td: tuple = (None, None)
     # FFW hidden activation: (Batch, Sequence, FfwDim)
-    ffw_hidden_btf: tuple = (None, None, None)
+    ffw_hidden_tf: tuple = (None, None)
 
     # FFW up/gate weight: (Dim, FfwDim)
     ffw_weight_df: tuple = (None, None)
@@ -97,11 +98,11 @@ class ShardingRulesConfig:
     # Embedding weight: (VocabSize, Dim)
     emb_weight_vd: tuple = (None, None)
     # Activation between layers: (Batch, Sequence, Dim)
-    activation_btd: tuple = (None, None, None)
+    activation_td: tuple = (None, None)
     # Final activation before logits: (Batch, Sequence, Dim)
-    prelogit_btd: tuple = (None, None, None)
+    prelogit_td: tuple = (None, None)
     # Logit activation: (Batch, Sequence, VocabSize)
-    logits_btv: tuple = (None, None, None)
+    logits_tv: tuple = (None, None)
     # RMS norm scale weight: (Dim,)
     norm_scale: tuple = (None)
     # Vocab projection weight (tied embeddings): (Dim, VocabSize)
@@ -306,41 +307,40 @@ class Sharding:
 
         # Populate Prefill Config
         # During prefill, sequence length is long, so we shard along the sequence axis.
-        prefill_rules.activation_attention_btd = (None, SEQUENCE_AXIS_NAME,
-                                                  ATTN_TENSOR_AXIS_NAME)
-        prefill_rules.activation_attention_out_btd = (None, SEQUENCE_AXIS_NAME,
-                                                      ATTN_TENSOR_AXIS_NAME)
-        prefill_rules.activation_q_btd = (BATCH_AXIS_NAME, None,
-                                          ATTN_TENSOR_AXIS_NAME)
+        prefill_rules.activation_attention_td = (DATA_AXIS_NAME,
+                                                 ATTN_TENSOR_AXIS_NAME)
+        prefill_rules.activation_attention_out_td = (DATA_AXIS_NAME,
+                                                     ATTN_TENSOR_AXIS_NAME)
+        prefill_rules.activation_q_td = (DATA_AXIS_NAME, ATTN_TENSOR_AXIS_NAME)
         #TODO: the default qkv and kvcache is sharded on head dim
         # We may change it after we finalize the KVCache design
-        prefill_rules.attn_o_btnh = (None, SEQUENCE_AXIS_NAME,
-                                     ATTN_TENSOR_AXIS_NAME, None)
-        prefill_rules.query_btnh = (None, SEQUENCE_AXIS_NAME,
-                                    ATTN_TENSOR_AXIS_NAME, None)
-        prefill_rules.keyvalue_bskh = (None, SEQUENCE_AXIS_NAME,
-                                       ATTN_TENSOR_AXIS_NAME, None)
-        prefill_rules.keyvalue_cache_kbsh = (ATTN_TENSOR_AXIS_NAME, None, None,
+        prefill_rules.attn_o_tnh = (DATA_AXIS_NAME, ATTN_TENSOR_AXIS_NAME,
+                                    None)
+        prefill_rules.query_tnh = (DATA_AXIS_NAME, ATTN_TENSOR_AXIS_NAME, None)
+        prefill_rules.keyvalue_skh = (DATA_AXIS_NAME, ATTN_TENSOR_AXIS_NAME,
+                                      None)
+        prefill_rules.keyvalue_cache_lskh = (None, None, ATTN_TENSOR_AXIS_NAME,
                                              None)
 
         # Populate Generate (Decode) Config
         # During decode, batch size is the large dimension, so we shard along the batch axis.
-        generate_rules.activation_attention_btd = (BATCH_AXIS_NAME, None,
-                                                   ATTN_TENSOR_AXIS_NAME)
-        generate_rules.activation_attention_out_btd = (BATCH_AXIS_NAME, None,
-                                                       ATTN_TENSOR_AXIS_NAME)
-        generate_rules.activation_q_btd = (BATCH_AXIS_NAME, None,
-                                           ATTN_TENSOR_AXIS_NAME)
+        generate_rules.activation_attention_td = (DATA_AXIS_NAME,
+                                                  ATTN_TENSOR_AXIS_NAME)
+        generate_rules.activation_attention_out_td = (DATA_AXIS_NAME,
+                                                      ATTN_TENSOR_AXIS_NAME)
+        generate_rules.activation_q_td = (DATA_AXIS_NAME,
+                                          ATTN_TENSOR_AXIS_NAME)
         #TODO: the default qkv and kvcache is sharded on head dim
         # We may change it after we finalize the KVCache design
-        generate_rules.attn_o_btnh = (BATCH_AXIS_NAME, None,
-                                      ATTN_TENSOR_AXIS_NAME, None)
-        generate_rules.query_btnh = (BATCH_AXIS_NAME, None,
-                                     ATTN_TENSOR_AXIS_NAME, None)
-        generate_rules.keyvalue_bskh = (BATCH_AXIS_NAME, None,
-                                        ATTN_TENSOR_AXIS_NAME, None)
-        generate_rules.keyvalue_cache_kbsh = (ATTN_TENSOR_AXIS_NAME, None,
-                                              None, None)
+        generate_rules.attn_o_tnh = (DATA_AXIS_NAME, ATTN_TENSOR_AXIS_NAME,
+                                     None)
+        generate_rules.query_tnh = (DATA_AXIS_NAME, ATTN_TENSOR_AXIS_NAME,
+                                    None)
+        generate_rules.keyvalue_skh = (DATA_AXIS_NAME, ATTN_TENSOR_AXIS_NAME,
+                                       None)
+        # The KV Cache is of shape (L, S, 2 * K, H), we shard on the head dim, but need to optimize on 2*K dim
+        generate_rules.keyvalue_cache_lskh = (None, None,
+                                              ATTN_TENSOR_AXIS_NAME, None)
         generate_rules.attn_q_weight_ndh = (None, ATTN_HEAD_AXIS_NAME,
                                             ATTN_TENSOR_AXIS_NAME)
         generate_rules.attn_k_weight_kdh = (None, ATTN_HEAD_AXIS_NAME,
@@ -350,10 +350,9 @@ class Sharding:
         generate_rules.attn_o_weight_nhd = (None, ATTN_HEAD_AXIS_NAME,
                                             ATTN_TENSOR_AXIS_NAME)
 
-        generate_rules.activation_ffw_btd = (BATCH_AXIS_NAME, None,
-                                             MLP_TENSOR_AXIS_NAME)
-        generate_rules.ffw_hidden_btf = (BATCH_AXIS_NAME, None,
-                                         MLP_TENSOR_AXIS_NAME)
+        generate_rules.activation_ffw_td = (DATA_AXIS_NAME,
+                                            MLP_TENSOR_AXIS_NAME)
+        generate_rules.ffw_hidden_tf = (DATA_AXIS_NAME, MLP_TENSOR_AXIS_NAME)
         # FFW weights are typically sharded along the hidden dimension (F).
         generate_rules.ffw_weight_df = (None, MLP_TENSOR_AXIS_NAME)
         generate_rules.ffw_weight_fd = (MLP_TENSOR_AXIS_NAME, None)
@@ -366,12 +365,9 @@ class Sharding:
 
         # Embedding weight: (VocabSize, Dim)
         generate_rules.emb_weight_vd = (MLP_TENSOR_AXIS_NAME, None)
-        generate_rules.activation_btd = (BATCH_AXIS_NAME, None,
-                                         ATTN_TENSOR_AXIS_NAME)
-        generate_rules.prelogit_btd = (BATCH_AXIS_NAME, None,
-                                       ATTN_TENSOR_AXIS_NAME)
-        generate_rules.logits_btv = (BATCH_AXIS_NAME, None,
-                                     MLP_TENSOR_AXIS_NAME)
+        generate_rules.activation_td = (DATA_AXIS_NAME, ATTN_TENSOR_AXIS_NAME)
+        generate_rules.prelogit_td = (DATA_AXIS_NAME, ATTN_TENSOR_AXIS_NAME)
+        generate_rules.logits_tv = (DATA_AXIS_NAME, MLP_TENSOR_AXIS_NAME)
         generate_rules.vocab_dv = (None, MLP_TENSOR_AXIS_NAME)
 
     def make_sharding_config(
