@@ -1,20 +1,4 @@
 # TODO: Update documentation
-# Input flags are stored in below configs
-# model_flag_config: Config
-#   d_model: 2048
-#   n_layers: 61
-#   n_moe_layer: 58
-# parallelism_flag_config: Config
-#   tp: 2
-#   ep: 4
-# quant_flag_config: Config
-#
-# Each Block(attn, mlp etc) has Config Class and Live Class
-# There're 2 ways to initialize a Config:
-# 1. manual specify as Config(d_model=, num_layer=, ..)
-# 2. auto assignment from a config as Config.from_cfg(cfg)
-
-# The foundation Model/ModelConfig class is to-be-implemented
 
 import pprint
 import re
@@ -34,8 +18,8 @@ from tpu_commons.models.jax.common.attention.attention import (
     AttentionConfig, AttentionMetadata)
 from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.kv_cache import KVCacheType
-from tpu_commons.models.jax.common.layers import (Embedder, EmbedderConfig,
-                                                  FFWConfig, RMSNorm)
+from tpu_commons.models.jax.common.layers import (DenseFFWConfig, Embedder,
+                                                  EmbedderConfig, RMSNorm)
 from tpu_commons.models.jax.common.model import Model, ModelConfig
 from tpu_commons.models.jax.common.sharding import (Sharding, ShardingConfig,
                                                     ShardingRulesConfig)
@@ -46,6 +30,7 @@ from tpu_commons.models.jax.layers.sampling import sample
 from tpu_commons.models.jax.recipes.recipe import RecipeConfig
 from tpu_commons.models.jax.utils.weight_utils import (ParameterType,
                                                        WeightLoader, get_param)
+from tpu_commons.sample.metadata_jax import TPUSupportedSamplingMetadata
 
 logger = init_logger(__name__)
 pp = pprint.PrettyPrinter(depth=6)
@@ -80,11 +65,11 @@ class Llama8BModelConfig(ModelConfig):
                                           rope_scaling={},
                                           dtype=self.dtype,
                                           vllm_config=self.vllm_config),
-                ffw=FFWConfig(hidden_size=self.hidden_size,
-                              intermediate_size=14336,
-                              hidden_act="silu",
-                              dtype=self.dtype,
-                              vllm_config=self.vllm_config),
+                dense_ffw=DenseFFWConfig(hidden_size=self.hidden_size,
+                                         intermediate_size=14336,
+                                         hidden_act="silu",
+                                         dtype=self.dtype,
+                                         vllm_config=self.vllm_config),
                 rms_norm_eps=1e-5,
                 block_type="dense",
                 vllm_config=self.vllm_config)
@@ -192,19 +177,15 @@ class Llama3_8B(Model):
             weight_loader.load_weights(self)
 
     def __call__(
-            self,
-            is_prefill: bool,
-            do_sampling: bool,
-            kv_caches:
-        List[
-            KVCacheType],  # TODO: Make sure to use this instead of creating in model.
-            input_ids: jax.Array,
-            attention_metadata: AttentionMetadata,
-            temperatures: jax.Array = None,
-            top_ps: jax.Array = None,
-            top_ks: jax.Array = None,
-            *args,
-            **kwargs) -> Tuple[List[KVCacheType], jax.Array, jax.Array]:
+        self,
+        kv_caches: List[jax.Array],
+        input_ids: jax.Array,
+        attention_metadata: AttentionMetadata,
+        tpu_sampling_metadata: TPUSupportedSamplingMetadata,
+        logits_indices: jax.Array = None,
+        *args,
+    ) -> Tuple[List[KVCacheType], jax.Array, jax.Array]:
+        is_prefill = False
         x = self.embedder.encode(input_ids)
         for (i, block) in enumerate(self.layers):
             kv_cache = kv_caches[i]
@@ -213,16 +194,14 @@ class Llama3_8B(Model):
             kv_caches[i] = new_kv_cache
 
         final_activation = self.final_norm(x)
+        final_activation = final_activation[logits_indices]
         decoder_output = self.lm_head.decode(final_activation)
 
         next_tokens = sample(
-            do_sampling,
             self.rng.params(),
             self.mesh,
             decoder_output,
-            temperatures,
-            top_ps,
-            top_ks,
+            tpu_sampling_metadata,
         )
 
         return kv_caches, next_tokens, decoder_output
@@ -297,7 +276,7 @@ class Llama3WeightLoader(WeightLoader):
             "model.layers.*.self_attn.v_proj":
             "layers.*.attn.kernel_v_proj_KDH",
             "model.norm":
-            "final_norm.scale",  # TODO: is this correct??
+            "final_norm.scale",
             "lm_head":
             "lm_head.input_embedding_table_VD"
         })

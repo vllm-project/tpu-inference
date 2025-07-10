@@ -99,7 +99,7 @@ class RMSNorm(nnx.Module):
             dtype=self.dtype)
 
 
-FFWConfig = make_dataclass(
+DenseFFWConfig = make_dataclass(
     "FFWConfig",
     [(HuggingFaceArgNames.HIDDEN_SIZE.value, int),
      (HuggingFaceArgNames.INTERMEDIATE_SIZE.value, int),
@@ -107,7 +107,7 @@ FFWConfig = make_dataclass(
      ("vllm_config", VllmConfig, field(repr=False, default=None))],
     bases=(Config, ))
 
-FFWConfig.__doc__ = f"""Configuration for the Feed-Forward (FFW) layer.
+DenseFFWConfig.__doc__ = f"""Configuration for the Dense Feed-Forward (FFW) layer.
 
      Attributes:
         {HuggingFaceArgNames.HIDDEN_SIZE.value}: The dimension of the model.
@@ -119,7 +119,7 @@ FFWConfig.__doc__ = f"""Configuration for the Feed-Forward (FFW) layer.
 
 
 @dataclass
-class FFW(nnx.Module):
+class DenseFFW(nnx.Module):
     """A Gated Feed-Forward Network (FFN) layer.
 
     This module consists of two linear projections (gating and up-projection),
@@ -127,13 +127,13 @@ class FFW(nnx.Module):
     up-projection, followed by a final downward projection.
 
     Attributes:
-        cfg: The `FFWConfig` configuration object.
+        cfg: The `DenseFFWConfig` configuration object.
         mesh: The JAX device mesh.
         param_factory: The factory for creating parameters.
         sharding_cfg: The configuration for tensor sharding.
         quant: Optional configuration for quantization.
     """
-    cfg: FFWConfig
+    cfg: DenseFFWConfig
     mesh: Mesh
     param_factory: ParamFactory
     sharding_cfg: ShardingConfig
@@ -147,7 +147,7 @@ class FFW(nnx.Module):
         """Performs the forward pass of the FFW layer.
 
         Args:
-            x: The input tensor of shape `(batch, sequence, d_model)`.
+            x: The input tensor of shape either `(sequence, d_model)`
             op_mode: The operational mode ('prefill' or 'generate'), used for
                 selecting sharding annotations.
 
@@ -156,21 +156,21 @@ class FFW(nnx.Module):
         """
         # TODO consider to create factories for einsum(?)
         x = jnp.asarray(x, jnp.float32)
-        x = nnx.with_sharding_constraint(x, self.activation_ffw_btd[op_mode])
+        x_TD = nnx.with_sharding_constraint(x, self.activation_ffw_td[op_mode])
         act = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_ACT.value)
         with jax.named_scope("wi_0"):
-            gating_BTF = jnp.einsum('BTD,DF -> BTF', x,
-                                    self.kernel_gating_DF.value)
-            activated_gating_BTF = modeling_flax_utils.ACT2FN[act](gating_BTF)
+            gating_TF = jnp.einsum('TD,DF -> TF', x_TD,
+                                   self.kernel_gating_DF.value)
+            activated_gating_TF = modeling_flax_utils.ACT2FN[act](gating_TF)
         with jax.named_scope("wi_1"):
-            up_proj_BTF = jnp.einsum('BTD,DF -> BTF', x,
-                                     self.kernel_up_proj_DF.value)
-        fuse_BTF = activated_gating_BTF * up_proj_BTF
+            up_proj_TF = jnp.einsum('TD,DF -> TF', x_TD,
+                                    self.kernel_up_proj_DF.value)
+        fuse_TF = activated_gating_TF * up_proj_TF
         with jax.named_scope("wo"):
-            output_BTD = jnp.einsum('BTF,FD -> BTD', fuse_BTF,
-                                    self.kernel_down_proj_FD.value)
+            output_TD = jnp.einsum('TF,FD -> TD', fuse_TF,
+                                   self.kernel_down_proj_FD.value)
 
-        return output_BTD
+        return output_TD
 
     def generate_kernel(self, rngs: nnx.Rngs):
         D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
@@ -194,7 +194,7 @@ class FFW(nnx.Module):
     def create_sharding(self):
         """Creates and sets sharding attributes for weights and activations."""
         mode_dependent_attrs = [
-            "activation_ffw_btd",
+            "activation_ffw_td",
         ]
         for attr_name in mode_dependent_attrs:
             prefill_sharding_config = getattr(self.sharding_cfg.prefill_rules,
@@ -294,39 +294,38 @@ class Embedder(nnx.Module):
 
         Args:
             x: The input tensor of hidden states from the model backbone, with
-                shape `(batch, sequence, d_model)`.
+                shape `(sequence, d_model)`.
 
         Returns:
             The output logits over the vocabulary, with shape
             `(batch, sequence, vocab_size)`.
         """
-        x_BTD = nnx.with_sharding_constraint(x, self.prelogit_btd)
-        logits_BTV = jnp.einsum('BTD,VD -> BTV', x_BTD,
-                                self.input_embedding_table_VD.value)
-        return logits_BTV
+        x = jnp.asarray(x, jnp.float32)
+        x_TD = nnx.with_sharding_constraint(x, self.prelogit_td)
+
+        logits_TV = jnp.einsum('TD,VD -> TV', x_TD,
+                               self.input_embedding_table_VD.value)
+        return logits_TV
 
     def encode(self, x: Int) -> Float:
         """Converts integer token IDs to dense embedding vectors.
 
         Args:
-            x: The input tensor of token IDs, with shape `(batch, sequence)`.
+            x: The input tensor of token IDs, with shape `(sequence, )`.
 
         Returns:
             The corresponding embedding vectors, with shape
             `(batch, sequence, d_model)`.
         """
-        embedding_BTD = self.input_embedding_table_VD.value[x]
+        embedding_TD = self.input_embedding_table_VD.value[x]
         D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
         if self.cfg.normalize_embeddings:
-            embedding_BTD *= jnp.sqrt(D).astype(self.cfg.dtype)
-        return embedding_BTD
+            embedding_TD *= jnp.sqrt(D).astype(self.cfg.dtype)
+        return embedding_TD
 
     def create_sharding(self):
         """Creates and sets sharding attributes for weights and activations."""
-        self.prelogit_btd = NamedSharding(
-            self.mesh, P(*self.sharding_cfg.generate_rules.prelogit_btd))
+        self.prelogit_td = NamedSharding(
+            self.mesh, P(*self.sharding_cfg.generate_rules.prelogit_td))
         self.dv_sharding = NamedSharding(
             self.mesh, P(*self.sharding_cfg.generate_rules.vocab_dv))
-
-    def __post_init__(self):
-        self.create_sharding()
