@@ -113,7 +113,6 @@ class TransformerBlock(nnx.Module):
         else:
             raise ValueError(f"Invalid block type: {self.block_type}")
         logits += ffw_residual
-
         return new_cache, logits
 
     def generate_kernel(self, rngs: nnx.Rngs):
