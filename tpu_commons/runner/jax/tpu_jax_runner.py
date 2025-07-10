@@ -236,7 +236,7 @@ class TPUModelRunner():
                     f"hbm={utils.hbm_usage_gb(self.devices)}Gb")
 
     def capture_model(self) -> None:
-        if os.getenv("SKIP_JAX_PRECOMPILE", True):
+        if os.getenv("SKIP_JAX_PRECOMPILE", False):
             return
         logger.info("Precompile all the subgraphs with possible input shapes.")
 
@@ -246,56 +246,66 @@ class TPUModelRunner():
 
     def _generate_dummy_inputs(self):
         for num_tokens in self.num_tokens_paddings:
-            input_ids = np.zeros((num_tokens, ), dtype=np.int32)
-            positions = np.zeros((num_tokens, ), dtype=np.int32)
+            input_ids = np.ones((num_tokens, ), dtype=np.int32)
+            positions = np.ones((num_tokens, ), dtype=np.int32)
             padded_num_slices = _get_padded_num_kv_cache_update_slices(
                 num_tokens, self.max_num_reqs, self.block_size)
-            slot_mapping_metadata = np.zeros((3, padded_num_slices),
-                                             dtype=np.int32)
+            slot_mapping_metadata = np.ones((3, padded_num_slices),
+                                            dtype=np.int32)
             block_tables = self.block_table_cpu[:self.max_num_reqs]
             seq_lens = np.ones((self.max_num_reqs, ), dtype=np.int32)
             query_start_loc = np.ones((self.max_num_reqs + 1, ),
                                       dtype=np.int32)
 
             for num_reqs in self.num_reqs_paddings:
-                logger.info(
-                    f"Precompile subgraph --> num_tokens={num_tokens} | num_reqs={num_reqs}"
-                )
                 num_seqs = np.array([num_reqs], dtype=np.int32)
                 num_slices = np.array([1], dtype=np.int32)
-                logits_indices = np.zeros((num_reqs, ), dtype=np.int32)
-                temperatures = np.full((num_reqs, ), 0.7, np.float32)
-                top_ps = np.full((num_reqs, ), 0.8, np.float32)
-                top_ks = np.full((num_reqs, ), 20, np.int32)
+                logits_indices = np.ones((num_reqs, ), dtype=np.int32)
 
                 (input_ids, positions, slot_mapping_metadata, num_slices,
                  block_tables, query_start_loc, seq_lens, num_seqs,
-                 temperatures, top_ps, top_ks,
                  logits_indices) = self._device_array(
                      (input_ids, positions, slot_mapping_metadata, num_slices,
                       block_tables, query_start_loc, seq_lens, num_seqs,
-                      temperatures, top_ps, top_ks, logits_indices))
-                do_sampling = True
+                      logits_indices))
 
-                yield (
-                    do_sampling,
-                    False,
-                    self.kv_caches,
-                    input_ids,
-                    AttentionMetadata(
-                        input_positions=positions,
-                        slot_mapping=slot_mapping_metadata,
-                        block_tables=block_tables,
-                        seq_lens=seq_lens,
-                        query_start_loc=query_start_loc,
-                        num_seqs=num_seqs,
-                        num_slices=num_slices,
-                    ),
-                    temperatures,
-                    top_ps,
-                    top_ks,
-                    logits_indices,
-                )
+                for do_sampling in (True, False):
+                    logger.info(
+                        f"Precompile subgraph --> num_tokens={num_tokens} | "
+                        f"num_reqs={num_reqs} | do_sampling={do_sampling}")
+                    if do_sampling:
+                        temperature = np.full((num_reqs, ),
+                                              0.7,
+                                              dtype=np.float32)
+                        top_k = np.full((num_reqs, ), 20, dtype=np.int32)
+                        top_p = np.full((num_reqs, ), 0.8, dtype=np.float32)
+                        (temperature, top_k, top_p) = self._device_array(
+                            (temperature, top_k, top_p))
+                    else:
+                        temperature = None
+                        top_k = None
+                        top_p = None
+                    sampling_metadata = TPUSupportedSamplingMetadata(
+                        temperature=temperature,
+                        top_k=top_k,
+                        top_p=top_p,
+                        do_sampling=do_sampling,
+                    )
+                    yield (
+                        self.kv_caches,
+                        input_ids,
+                        AttentionMetadata(
+                            input_positions=positions,
+                            slot_mapping=slot_mapping_metadata,
+                            block_tables=block_tables,
+                            seq_lens=seq_lens,
+                            query_start_loc=query_start_loc,
+                            num_seqs=num_seqs,
+                            num_slices=num_slices,
+                        ),
+                        sampling_metadata,
+                        logits_indices,
+                    )
 
     @staticmethod
     @functools.partial(jax.jit)
@@ -569,7 +579,7 @@ class TPUModelRunner():
             prompt_logprobs_dict=prompt_logprobs_dict,
             pooler_output=[],
         )
-        return inputs[4], model_runner_output
+        return inputs[2], model_runner_output
 
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -663,8 +673,8 @@ class TPUModelRunner():
         logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
         num_seqs = np.array([num_reqs])
 
-        # Sampling
-        tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
+        # Put to device
+        sampling_metadata = TPUSupportedSamplingMetadata.\
             from_input_batch(self.mesh, self.input_batch, padded_num_reqs)
         (input_ids, positions, slot_mapping_metadata, num_slices, block_tables,
          query_start_loc, seq_lens, num_seqs,
@@ -685,7 +695,7 @@ class TPUModelRunner():
                 num_seqs=num_seqs,
                 num_slices=num_slices,
             ),
-            tpu_sampling_metadata,
+            sampling_metadata,
             logits_indices,
         )
 
