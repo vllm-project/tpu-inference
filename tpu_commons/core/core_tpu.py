@@ -33,8 +33,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import EngineHandshakeMetadata, EngineZmqAddresses
 from vllm.version import __version__ as VLLM_VERSION
 
-from tpu_commons.core import disagg_executor, disagg_utils
-from tpu_commons.core.jetstream_commons.core import orchestrator
+from tpu_commons.core import disagg_executor, disagg_utils, orchestrator
 from tpu_commons.core.tpu_jax_engine import JaxEngine
 
 logger = init_logger(__name__)
