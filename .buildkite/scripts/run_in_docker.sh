@@ -44,7 +44,6 @@ exec docker run \
   --net host \
   --shm-size=16G \
   --rm \
-  -e SKIP_JAX_PRECOMPILE=1 \
   -e TPU_BACKEND_TYPE="$TPU_BACKEND_TYPE" \
   -e MODEL_IMPL_TYPE="$MODEL_IMPL_TYPE" \
   -e HF_TOKEN="$HF_TOKEN" \
