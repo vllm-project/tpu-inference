@@ -54,13 +54,6 @@ def get_cpu_tensor_from_torchax_tensor(tensor) -> torch.Tensor:
 
 def wrap_model(m, vllm_config, static_forward_context):
 
-    @functools.partial(
-        jax_jit,
-        kwargs_for_jax_jit={
-            "static_argnums": (4, ),
-            "donate_argnums": (2, )  # KV cache buffer donation.
-        },
-    )
     def func(weights, inputs, kv_caches, attn_metadata, num_tokens):
         with set_forward_context(attn_metadata,
                                  vllm_config,
@@ -80,7 +73,11 @@ def wrap_model(m, vllm_config, static_forward_context):
                 new_kv_cache[layer_name] = attn.kv_cache
             return res, new_kv_cache
 
-    return func
+    func_wrapped = jax.jit(torchax.interop.jax_view(func),
+                           static_argnums=(4, ),
+                           donate_argnums=(2, ))
+
+    return func_wrapped
 
 
 def wrap_model_func(model, method_name):
