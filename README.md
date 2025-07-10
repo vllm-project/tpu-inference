@@ -9,7 +9,7 @@ The code is **not feature-complete** and **may not be stable**.
 
 ### Install `vLLM-TPU`:
 
-Follow this [guide](https://docs.vllm.ai/en/latest/getting_started/installation/ai_accelerator.html#set-up-using-python) to install vLLM from source.
+Follow this [guide](https://docs.vllm.ai/en/latest/getting_started/installation/google_tpu.html#set-up-using-python) to install vLLM from source.
 
 **NOTE**: Right after `git clone` vLLM repo and before running any `pip install` commands, run the following command to pin the version:
 
