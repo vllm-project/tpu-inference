@@ -64,7 +64,9 @@ class JaxEngine():
         self._pending_num_prefill_tokens = 0
         self._kv_cache_manager_lock = threading.Lock()
 
-    def get_new_block_ids(self, vllm_request: Request, num_tokens: int):
+    def get_new_block_ids(
+        self, vllm_request: Request, num_tokens: int
+    ) -> tuple[list[int], ...]:
         with self._kv_cache_manager_lock:
             computed_blocks, _ = self.kv_cache_manager.get_computed_blocks(
                 vllm_request)
@@ -182,7 +184,7 @@ class JaxEngine():
 
         logger.info(f"Scheduled output: {scheduler_output}")
 
-        metadata, runner_output = self.model_runner._execute_model(
+        _, runner_output = self.model_runner._execute_model(
             scheduler_output)
 
         if scheduler_output.total_num_scheduled_tokens <= 0:
@@ -211,7 +213,7 @@ class JaxEngine():
                 req.num_cached_tokens += 1
 
                 block_ids = self.get_block_ids(req_id)
-                with LatencyTracker("ExtractKVCache"):
+                with LatencyTracker(f"ExtractKVCache-{len(block_ids[0])}"):
                     # Assume one KV cache group for now.
                     kv_cache_map[req_id] = self.model_runner.get_kv_cache_for_block_ids(block_ids[0])
                 logger.debug(

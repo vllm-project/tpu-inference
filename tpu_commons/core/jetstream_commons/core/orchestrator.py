@@ -446,7 +446,7 @@ class Driver:
                     logging.info(
                         f"insert request for generation: {request.request_id}, "
                         f"{generate_engine.dump_stats()}")
-                    with LatencyTracker("KVCacheInsert"):
+                    with LatencyTracker(f"KVCacheInsert-{len(new_block_ids[0])}"):
                         generate_engine.model_runner.insert_request_with_kv_cache(
                             request, kv_cache, new_block_ids)
                 generate_engine.add_request(request, 1)
