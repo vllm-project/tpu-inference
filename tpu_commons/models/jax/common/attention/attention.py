@@ -23,15 +23,18 @@ KVCache = Tuple[jax.Array, jax.Array]
 
 AttentionConfig = make_dataclass(
     "AttentionConfig",
-    [(HuggingFaceArgNames.HIDDEN_SIZE.value, int),
-     (HuggingFaceArgNames.NUM_ATTENTION_HEADS.value, int),
-     (HuggingFaceArgNames.NUM_KEY_VALUE_HEADS.value, int),
-     (HuggingFaceArgNames.HEAD_DIM.value, int),
-     (HuggingFaceArgNames.ROPE_THETA.value, float),
-     (HuggingFaceArgNames.ROPE_SCALING.value, Dict[str, Any]),
-     ("dtype", DTypeLike),
-     ("vllm_config", VllmConfig, field(repr=False, default=None))],
-    bases=(Config, ))
+    [
+        (HuggingFaceArgNames.HIDDEN_SIZE.value, int),
+        (HuggingFaceArgNames.NUM_ATTENTION_HEADS.value, int),
+        (HuggingFaceArgNames.NUM_KEY_VALUE_HEADS.value, int),
+        (HuggingFaceArgNames.HEAD_DIM.value, int),
+        (HuggingFaceArgNames.ROPE_THETA.value, float),
+        (HuggingFaceArgNames.ROPE_SCALING.value, Dict[str, Any]),
+        ("dtype", DTypeLike),
+        ("vllm_config", VllmConfig, field(repr=False, default=None)),
+    ],
+    bases=(Config, ),
+)
 AttentionConfig.__doc__ = f"""Configuration for the Attention module.
          Attributes:
         {HuggingFaceArgNames.HIDDEN_SIZE.value}: The dimension of the model.
@@ -42,6 +45,29 @@ AttentionConfig.__doc__ = f"""Configuration for the Attention module.
         {HuggingFaceArgNames.ROPE_SCALING.value}: Optional dictionary of scaling factors for RoPE.
          dtype: The data type for computations (default: jnp.float32).
          vllm_config: The VLLM config containing any overrides to apply.
+    """
+
+MLAConfig = make_dataclass(
+    "MLAConfig",
+    [
+        (HuggingFaceArgNames.Q_LORA_RANK.value, int),
+        (HuggingFaceArgNames.KV_LORA_RANK.value, int),
+        (HuggingFaceArgNames.QK_NOPE_HEAD_DIM.value, int),
+        (HuggingFaceArgNames.QK_ROPE_HEAD_DIM.value, int),
+        (HuggingFaceArgNames.V_HEAD_DIM.value, int),
+        (HuggingFaceArgNames.RMS_NORM_EPS.value, float),
+    ],
+    bases=(AttentionConfig, ),
+)
+
+MLAConfig.__doc__ = f"""Configuration for the MLA module.
+         Attributes:
+        {HuggingFaceArgNames.Q_LORA_RANK.value}: The dimension for the latent query vector.
+        {HuggingFaceArgNames.KV_LORA_RANK.value}: The dimension for the latent key/value vector.
+        {HuggingFaceArgNames.QK_NOPE_HEAD_DIM.value}: The dimension of the no rope portion of the qv tensor.
+        {HuggingFaceArgNames.QK_ROPE_HEAD_DIM.value}: The dimension of the rope portion of the qv tensor.
+        {HuggingFaceArgNames.V_HEAD_DIM.value}: The dimension of the value vector.
+        {HuggingFaceArgNames.RMS_NORM_EPS.value}: The epsilon for the RMS normalization.
     """
 
 
@@ -62,6 +88,7 @@ class Attention(nnx.Module):
         sharding_cfg: Configuration for tensor sharding strategies.
         quant: Optional configuration for quantization.
     """
+
     cfg: AttentionConfig
     mesh: Mesh
     param_factory: ParamFactory
@@ -70,7 +97,7 @@ class Attention(nnx.Module):
 
     def __post_init__(self):
         self.create_sharding()
-        #self._generate_kernel()
+        # self._generate_kernel()
 
     def generate_kernel(self, rngs: nnx.Rngs):
         """Initializes the weight kernels for Q, K, V, and O projections."""
@@ -101,10 +128,10 @@ class Attention(nnx.Module):
                 self.sharding_cfg.generate_rules, attr_name)
 
             sharding_dict = {
-                'prefill': NamedSharding(self.mesh,
+                "prefill": NamedSharding(self.mesh,
                                          P(*prefill_sharding_config)),
-                'generate': NamedSharding(self.mesh,
-                                          P(*generate_sharding_config))
+                "generate": NamedSharding(self.mesh,
+                                          P(*generate_sharding_config)),
             }
             setattr(self, attr_name, sharding_dict)
 
@@ -210,6 +237,46 @@ class Attention(nnx.Module):
 
     def get_cfg(self) -> AttentionConfig:
         return self.cfg
+
+    # TODO: As there's a shape mismatch when using the rope lib,
+    # for function verification purpose, we add a local apply_rope function,
+    # which is mainly inherited from the tpu_commons.models.jax.layers.rope,
+    def apply_rope(
+        self,
+        inputs: jax.Array,
+        positions: jax.Array,
+        head_dim: int,
+        rope_theta: float = 10000,
+        rope_scaling: Dict[str, Any] = None,
+    ) -> jax.Array:
+        fraction = 2 * jnp.arange(0, head_dim // 2) / head_dim
+        timescale = rope_theta**fraction
+        timescale = 1.0 / timescale
+
+        if rope_scaling:
+            timescale = apply_rope_scaling(timescale, rope_scaling)
+
+        # Shape: (B, seq_len, head_dim // 2)
+        sinusoid_inp = (positions[..., jnp.newaxis] *
+                        timescale[jnp.newaxis, jnp.newaxis, :])
+
+        # Shape: (B, seq_len, 1, head_dim // 2)
+        sinusoid_inp = sinusoid_inp[:, :, jnp.newaxis, :]
+        sin = jnp.sin(sinusoid_inp)
+        cos = jnp.cos(sinusoid_inp)
+
+        # Some models pad the inputs head_dim with zeros,
+        # so we need to split the inputs using the head_dim before padding.
+        padded_head_dim = inputs.shape[-1]
+        first_half = inputs[..., :head_dim // 2]
+        second_half = inputs[..., head_dim // 2:head_dim]
+        first_part = first_half * cos - second_half * sin
+        second_part = second_half * cos + first_half * sin
+        out = jnp.concatenate([first_part, second_part], axis=-1)
+        if padded_head_dim > head_dim:
+            out = jnp.pad(out, ((0, 0), (0, 0), (0, 0),
+                                (0, padded_head_dim - head_dim)))
+        return out.astype(inputs.dtype)
 
     def attention(
         self,
