@@ -638,12 +638,8 @@ class TPUModelRunner():
         num_seqs = np.array([num_reqs])
 
         # Sampling
-        req_ids = self.arange_cpu[:num_reqs]
-        do_sampling = _do_sampling(self.input_batch.top_k_cpu[req_ids],
-                                   self.input_batch.temperature_cpu[req_ids])
         tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
-            from_input_batch(self.mesh, self.input_batch, padded_num_reqs, do_sampling)
-
+            from_input_batch(self.mesh, self.input_batch, padded_num_reqs)
         (input_ids, positions, slot_mapping_metadata, num_slices, block_tables,
          query_start_loc, seq_lens, num_seqs,
          logits_indices) = self._device_array(
@@ -864,7 +860,3 @@ def _get_padded_num_kv_cache_update_slices(num_tokens: int, max_num_reqs: int,
     ) // NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK * \
         NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK
     return padded_num_slices
-
-
-def _do_sampling(top_ks: np.ndarray, temperatures: np.ndarray) -> bool:
-    return np.any(top_ks != 1) and np.any(temperatures != 0.0)
