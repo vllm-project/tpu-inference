@@ -94,6 +94,8 @@ class ShardingRulesConfig:
     moe_weights_efd: tuple = (None, None, None)
     # MoE router weights: (Dim, NumExperts)
     moe_router_de: tuple = (None, None)
+    # MoE router bias weights: (NumExperts,)
+    moe_router_bias_e: tuple = (None, )
 
     # Embedding weight: (VocabSize, Dim)
     emb_weight_vd: tuple = (None, None)
