@@ -13,7 +13,6 @@ import torchax
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from torch.nn import Parameter
-from torchax import jax_device
 from torchax.ops.mappings import t2j_dtype
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
@@ -40,8 +39,13 @@ def create_torchax_kv_cache(shape, dtype, mesh,
         sharding = NamedSharding(mesh, P(*partition_spec))
         device = sharding
 
-    jax_t = jnp.zeros(shape, dtype=jax_dtype,
-                      device=device).block_until_ready()
+    if mesh is None:
+        # We have to call device_put again for single chip to generate
+        # replicated sharding for kv cache
+        jax_t = jax.device_put(jnp.zeros(shape, dtype=jax_dtype), device)
+    else:
+        jax_t = jnp.zeros(shape, dtype=jax_dtype,
+                          device=device).block_until_ready()
     torchax_t = torchax.tensor.Tensor(jax_t, torchax.default_env())
     return torchax_t
 
@@ -57,11 +61,6 @@ def create_torchax_tensor_with_partition_spec(
         raise ValueError(
             "If mesh is None, partition_spec must also be None or empty")
 
-    if mesh is None:
-        # Single chip case.
-        with jax_device('tpu'):
-            return weight_t.to('jax')
-
     # Create CPU tensor first then move to jax device.
     cpu_device = jax.devices("cpu")[0]
     with jax.default_device(cpu_device):
@@ -71,10 +70,13 @@ def create_torchax_tensor_with_partition_spec(
         else:
             jax_t = jnp.array(weight_t.numpy())
 
-    partition_spec = partition_spec or ()
-    sharding = NamedSharding(mesh, P(*partition_spec))
+    if mesh is None:
+        device = jax.devices()[0]
+    else:
+        partition_spec = partition_spec or ()
+        device = NamedSharding(mesh, P(*partition_spec))
 
-    jax_t = jax.device_put(jax_t, sharding)
+    jax_t = jax.device_put(jax_t, device)
 
     torchax_t = torchax.tensor.Tensor(jax_t, torchax.default_env())
     return torchax_t

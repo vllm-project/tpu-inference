@@ -4,18 +4,12 @@ import functools
 import jax
 import numpy as np
 import torch
+import torchax
 from jax import Array
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from torch.nn.utils import stateless as torch_stateless
-
-try:
-    import torchax
-    from torchax.interop import call_jax, jax_jit
-    TORCHAX_AVAILABLE = True
-except ImportError:
-    TORCHAX_AVAILABLE = False
-
+from torchax.interop import call_jax
 from vllm import envs
 from vllm.forward_context import set_forward_context
 
@@ -23,8 +17,6 @@ from vllm.forward_context import set_forward_context
 def with_torchax_global(func):
     """Decorator that enables torchax globally before function call and
     disables after. Does nothing if torchax is not installed."""
-    if not TORCHAX_AVAILABLE:
-        return func
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
@@ -82,13 +74,14 @@ def wrap_model(m, vllm_config, static_forward_context):
 
 def wrap_model_func(model, method_name):
 
-    @jax_jit
     def func(params_and_buffers, *args, **kwargs):
         with torch_stateless._reparametrize_module(model, params_and_buffers):
             res = getattr(model, method_name)(*args, **kwargs)
         return res
 
-    return func
+    func_wrapped = jax.jit(torchax.interop.jax_view(func))
+
+    return func_wrapped
 
 
 def get_mesh():
