@@ -327,7 +327,7 @@ class TPUModelRunner():
 
     def _precompile_sampling(self) -> None:
         logger.info("Compiling sampling with different input shapes.")
-        hsize = self.model_config.get_hidden_size()
+        hsize = self.model_config.get_vocab_size()
         for num_reqs in self.num_reqs_paddings:
             logits = jnp.ones((num_reqs, hsize), dtype=jnp.bfloat16)
             logits = self._device_array(logits)
