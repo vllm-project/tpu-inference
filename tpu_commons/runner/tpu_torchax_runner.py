@@ -547,10 +547,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
         return kv_cache_spec
 
-    def _create_torchax_array(self, torch_tensor, partition_spec=()):
-        return create_torchax_tensor_with_partition_spec(
-            torch_tensor, self.mesh, partition_spec)
-
     def _get_slot_mapping_metadata(self, num_reqs,
                                    num_scheduled_tokens_per_req):
         """
@@ -703,20 +699,21 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             constant_values=0)
         slot_mapping_metadata_np = np.transpose(slot_mapping_metadata_np)
 
-        self.input_ids = self._create_torchax_array(
-            self.input_ids_cpu[:padded_total_num_scheduled_tokens])
-        self.position_ids = self._create_torchax_array(
-            self.positions_cpu[:padded_total_num_scheduled_tokens])
-        slot_mapping = self._create_torchax_array(
-            torch.from_numpy(slot_mapping_metadata_np))
+        self.input_ids = create_torchax_tensor_with_partition_spec(
+            self.input_ids_cpu[:padded_total_num_scheduled_tokens], self.mesh)
+        self.position_ids = create_torchax_tensor_with_partition_spec(
+            self.positions_cpu[:padded_total_num_scheduled_tokens], self.mesh)
+        slot_mapping = create_torchax_tensor_with_partition_spec(
+            torch.from_numpy(slot_mapping_metadata_np), self.mesh)
         block_tables = self.block_table_cpu[:self.max_num_reqs]
         block_tables[:num_reqs, :self.max_num_blocks_per_req] = (
             self.input_batch.block_table[0].get_cpu_tensor()[:num_reqs])
-        block_tables = self._create_torchax_array(block_tables)
-        query_start_loc = self._create_torchax_array(
-            self.query_start_loc_cpu[:self.max_num_reqs + 1])
-        seq_lens = self._create_torchax_array(
-            self.seq_lens_cpu[:self.max_num_reqs])
+        block_tables = create_torchax_tensor_with_partition_spec(
+            block_tables, self.mesh)
+        query_start_loc = create_torchax_tensor_with_partition_spec(
+            self.query_start_loc_cpu[:self.max_num_reqs + 1], self.mesh)
+        seq_lens = create_torchax_tensor_with_partition_spec(
+            self.seq_lens_cpu[:self.max_num_reqs], self.mesh)
 
         if self.lora_config is not None:
             # We need to respect padding when activating LoRA adapters
@@ -729,10 +726,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             self.set_active_loras(self.input_batch,
                                   padded_num_scheduled_tokens_per_req)
 
-        num_seqs = self._create_torchax_array(
-            torch.tensor([num_reqs], dtype=torch.int32))
-        num_slices = self._create_torchax_array(
-            torch.tensor([num_slices], dtype=torch.int32))
+        num_seqs = create_torchax_tensor_with_partition_spec(
+            torch.tensor([num_reqs], dtype=torch.int32), self.mesh)
+        num_slices = create_torchax_tensor_with_partition_spec(
+            torch.tensor([num_slices], dtype=torch.int32), self.mesh)
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping.jax(),
             block_tables=block_tables.jax(),
@@ -751,7 +748,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # Indices at which we sample (positions of last token in the sequence).
         # Padded to avoid recompiling when `num_reqs` varies.
         logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
-        logits_indices = self._create_torchax_array(logits_indices).jax()
+        logits_indices = create_torchax_tensor_with_partition_spec(
+            logits_indices, self.mesh).jax()
 
         if self.lora_config is not None:
             # We need to respect padding when activating LoRA adapters
@@ -1192,30 +1190,30 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                                         dtype=self.dtype,
                                         device=self.device)
         else:
-            input_ids = self._create_torchax_array(
-                torch.zeros((num_tokens), dtype=torch.int32))
+            input_ids = create_torchax_tensor_with_partition_spec(
+                torch.zeros((num_tokens), dtype=torch.int32), self.mesh)
             inputs_embeds = None
         actual_num_reqs = min(num_tokens, self.max_num_reqs)
-        position_ids = self._create_torchax_array(
-            torch.zeros(num_tokens, dtype=torch.int32))
+        position_ids = create_torchax_tensor_with_partition_spec(
+            torch.zeros(num_tokens, dtype=torch.int32), self.mesh)
         padded_num_slices = _get_padded_num_kv_cache_update_slices(
             num_tokens, self.max_num_reqs, self.block_size)
-        slot_mapping = self._create_torchax_array(
-            torch.zeros((3, padded_num_slices), dtype=torch.int64))
-        block_tables = self._create_torchax_array(
+        slot_mapping = create_torchax_tensor_with_partition_spec(
+            torch.zeros((3, padded_num_slices), dtype=torch.int64), self.mesh)
+        block_tables = create_torchax_tensor_with_partition_spec(
             torch.zeros((self.max_num_reqs, self.block_table_cpu.shape[1]),
-                        dtype=torch.int32))
+                        dtype=torch.int32), self.mesh)
         query_lens = [1] * self.max_num_reqs
-        query_start_loc = self._create_torchax_array(
+        query_start_loc = create_torchax_tensor_with_partition_spec(
             torch.cumsum(torch.tensor([0] + query_lens, dtype=torch.int32),
                          dim=0,
-                         dtype=torch.int32))
-        context_lens = self._create_torchax_array(
-            torch.ones((self.max_num_reqs, ), dtype=torch.int32))
-        num_seqs = self._create_torchax_array(
-            torch.tensor([actual_num_reqs], dtype=torch.int32))
-        num_slices = self._create_torchax_array(
-            torch.tensor([padded_num_slices], dtype=torch.int32))
+                         dtype=torch.int32), self.mesh)
+        context_lens = create_torchax_tensor_with_partition_spec(
+            torch.ones((self.max_num_reqs, ), dtype=torch.int32), self.mesh)
+        num_seqs = create_torchax_tensor_with_partition_spec(
+            torch.tensor([actual_num_reqs], dtype=torch.int32), self.mesh)
+        num_slices = create_torchax_tensor_with_partition_spec(
+            torch.tensor([padded_num_slices], dtype=torch.int32), self.mesh)
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping.jax(),
             block_tables=block_tables.jax(),
@@ -1367,13 +1365,13 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         start = time.perf_counter()
         hsize = self.model_config.get_hidden_size()
         for num_tokens in self.num_tokens_paddings:
-            dummy_hidden = self._create_torchax_array(
+            dummy_hidden = create_torchax_tensor_with_partition_spec(
                 torch.zeros((num_tokens, hsize),
-                            dtype=self._hidden_states_dtype)).jax()
+                            dtype=self._hidden_states_dtype), self.mesh).jax()
             torch._dynamo.mark_dynamic(dummy_hidden, 0)
             for num_reqs in self.num_reqs_paddings:
-                indices = self._create_torchax_array(
-                    torch.zeros(num_reqs, dtype=torch.int32)).jax()
+                indices = create_torchax_tensor_with_partition_spec(
+                    torch.zeros(num_reqs, dtype=torch.int32), self.mesh).jax()
                 torch._dynamo.mark_dynamic(indices, 0)
                 self.select_hidden_states(dummy_hidden, indices)
                 logger.info("  -- num_tokens: %d, num_seqs: %d", num_tokens,
@@ -1392,9 +1390,9 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         start = time.perf_counter()
         hsize = self.model_config.get_hidden_size()
         for num_reqs in self.num_reqs_paddings:
-            dummy_hidden = self._create_torchax_array(
+            dummy_hidden = create_torchax_tensor_with_partition_spec(
                 torch.zeros((num_reqs, hsize),
-                            dtype=self._hidden_states_dtype)).jax()
+                            dtype=self._hidden_states_dtype), self.mesh).jax()
             if VLLM_TORCHAX_ENABLED:
                 self.compute_logits_func(self.params_and_buffers_jax,
                                          dummy_hidden, None)
