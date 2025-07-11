@@ -359,8 +359,8 @@ class TPUModelRunner():
                             end - start)
 
     def capture_model(self) -> None:
-        # if os.getenv("SKIP_JAX_PRECOMPILE", False):
-        #     return
+        if os.getenv("SKIP_JAX_PRECOMPILE", False):
+            return
         logger.info("Precompile all the subgraphs with possible input shapes.")
 
         self._precompile_backbone()
