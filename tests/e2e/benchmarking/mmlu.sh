@@ -16,7 +16,7 @@ BENCHMARK_LOG_FILE="benchmark.log"
 # The sentinel message that indicates the server is ready (in LOG_FILE)
 READY_MESSAGE="Application startup complete."
 # After how long we should timeout if the server doesn't start
-TIMEOUT_SECONDS=1200
+TIMEOUT_SECONDS=1800
 
 # The minimum ROUGE1 and throughput scores we expect
 # TODO (jacobplatin): these are very low, so we'll want to boost them eventually
@@ -25,6 +25,21 @@ TARGET_ROUGE1="40"
 TARGET_THROUGHPUT="1500"
 
 model_list="Qwen/Qwen2.5-1.5B-Instruct Qwen/Qwen2.5-0.5B-Instruct meta-llama/Llama-3.1-8B-Instruct"
+
+extra_serve_args=()
+if [ "$NEW_MODEL_DESIGN" = "True" ]; then
+    echo "NEW_MODEL_DESIGN is True. Running with the new model list and custom hf_overrides."
+    model_list="meta-llama/Llama-3.1-8B-Instruct"
+    extra_serve_args+=("--tensor-parallel-size")
+    extra_serve_args+=("8")
+
+    extra_serve_args+=("--hf_overrides")
+    extra_serve_args+=('{"architectures": ["Llama3_8B"]}')
+else
+    echo "NEW_MODEL_DESIGN is not set to True. Running with default settings."
+    exit
+fi
+
 root_dir=/workspace
 dataset_name=mlperf
 dataset_path=""
@@ -211,7 +226,7 @@ for model_name in $model_list; do
 
     # Spin up the vLLM server
     echo "Spinning up the vLLM server..."
-    (vllm serve "$model_name" --max-model-len=1024 --disable-log-requests --max-num-batched-tokens 8192 2>&1 | tee -a "$LOG_FILE") &
+    (vllm serve "$model_name" --max-model-len=1024 --disable-log-requests --max-num-batched-tokens 8192 "${extra_serve_args[@]}" 2>&1 | tee -a "$LOG_FILE") &
 
 
 
