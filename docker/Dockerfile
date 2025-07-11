@@ -26,10 +26,13 @@ RUN python3 -m pip install --no-cache-dir git+https://github.com/thuml/depyf.git
 
 # Install tpu_commons
 WORKDIR /workspace/tpu_commons
-COPY . .
+# Install requirements first and cache so we don't need to re-install on code change.
+COPY requirements.txt .
 RUN pip install -r requirements.txt
+COPY requirements_benchmarking.txt .
 # These are needed for the E2E benchmarking tests (i.e. tests/e2e/benchmarking/llama3.1_8b_mmlu.sh)
 RUN pip install -r requirements_benchmarking.txt
+COPY . .
 RUN pip install -e .
 
 CMD ["/bin/bash"]
