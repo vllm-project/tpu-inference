@@ -163,18 +163,19 @@ class Llama3_8B(Model):
         return self.__call__(*args, **kwargs)
 
     def load_weights(self, rng: PRNGKey, cache_dir: Optional[str] = None):
-        # TODO: support gcs paths as well.
-        model_name_or_path = self.vllm_config.model_config.model
-        if not model_name_or_path:  # TODO
+        try:
+            use_random_weights = self.vllm_config.additional_config["random_weights"]
             logger.warning(
-                "Model name or path not provided - randomly randomly initializing the weights."
+                "Using randomly initialized weights instead of loading parameter weights."
             )
-        else:
-            weight_loader = Llama3WeightLoader(vllm_config=self.vllm_config,
-                                               model_config=self.cfg.model,
-                                               cache_dir=None,
-                                               sharding_cfg=self.cfg.sharding)
-            weight_loader.load_weights(self)
+            return
+        except KeyError:
+            use_random_weights = False
+        weight_loader = Llama3WeightLoader(vllm_config=self.vllm_config,
+                                            model_config=self.cfg.model,
+                                            cache_dir=None,
+                                            sharding_cfg=self.cfg.sharding)
+        weight_loader.load_weights(self)
 
     def __call__(
         self,
