@@ -334,11 +334,17 @@ class TPUModelRunner():
             logger.info(f"Precompile sampling --> num_reqs={num_reqs}")
             start = time.perf_counter()
             for do_sampling in (True, False):
-                temperature = np.full((num_reqs, ), 0.7, dtype=np.float32)
-                top_k = np.full((num_reqs, ), 20, dtype=np.int32)
-                top_p = np.full((num_reqs, ), 0.8, dtype=np.float32)
-                (temperature, top_k, top_p) = self._device_array(
-                    (temperature, top_k, top_p))
+                if do_sampling:
+                    temperature = np.full((num_reqs, ), 0.7, dtype=np.float32)
+                    top_k = np.full((num_reqs, ), 20, dtype=np.int32)
+                    top_p = np.full((num_reqs, ), 0.8, dtype=np.float32)
+                    (temperature, top_k, top_p) = self._device_array(
+                        (temperature, top_k, top_p))
+                else:
+                    temperature = None
+                    top_k = None
+                    top_p = None
+
                 sampling_metadata = TPUSupportedSamplingMetadata(
                     temperature=temperature,
                     top_k=top_k,
@@ -353,8 +359,8 @@ class TPUModelRunner():
                             end - start)
 
     def capture_model(self) -> None:
-        if os.getenv("SKIP_JAX_PRECOMPILE", False):
-            return
+        # if os.getenv("SKIP_JAX_PRECOMPILE", False):
+        #     return
         logger.info("Precompile all the subgraphs with possible input shapes.")
 
         self._precompile_backbone()
