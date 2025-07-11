@@ -1714,25 +1714,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
     def sample_from_logits(logits):
         return jnp.argmax(logits, axis=-1, keepdims=True)
 
-    # TODO: Under SPMD mode, sample_from_logits has correctness issue.
-    #       Re-enable the torch.compile once the issue is fixed in torchxla.
-    # @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
-    def sample_from_logit_tmp(
-            self, logits: torch.Tensor,
-            sampling_metadata: TPUSupportedSamplingMetadata) -> torch.Tensor:
-        """
-        Sample with xla-friendly function. This function is to be traced
-        separately from `forward` for lighter compilation overhead.
-        """
-        if sampling_metadata.all_greedy or VLLM_TORCHAX_ENABLED:
-            out_tokens = torch.argmax(logits, dim=-1, keepdim=True)
-        else:
-            # TODO: fix non-greedy sampler with torchax.
-            out_tokens = self.sampler(logits,
-                                      sampling_metadata).sampled_token_ids
-        return out_tokens
-
-    # @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def gather_logprobs(self, logits: torch.Tensor,
                         sampled_tokens: torch.Tensor) -> LogprobsTensors:
         """
@@ -1746,7 +1727,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             self.model_config.max_logprobs,
             token_ids=sampled_tokens.squeeze(-1))
 
-    # @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def structured_decode(self, require_struct_decoding: torch.Tensor,
                           grammar_bitmask: torch.Tensor, logits: torch.Tensor,
                           arange: torch.Tensor) -> torch.Tensor:
