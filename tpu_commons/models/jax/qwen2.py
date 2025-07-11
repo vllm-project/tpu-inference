@@ -12,9 +12,7 @@ from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_interface import attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.layers.rope import apply_rope
-from tpu_commons.models.jax.layers.sampling import sample
 from tpu_commons.models.jax.utils.weight_utils import load_hf_weights
-from tpu_commons.sample.metadata_jax import TPUSupportedSamplingMetadata
 
 logger = init_logger(__name__)
 
@@ -273,8 +271,6 @@ class Qwen2ForCausalLM(nnx.Module):
         kv_caches: List[jax.Array],
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
-        tpu_sampling_metadata: TPUSupportedSamplingMetadata,
-        logits_indices: jax.Array = None,
         *args,
     ) -> Tuple[List[jax.Array], jax.Array, jax.Array]:
         # input_ids: (T,)
@@ -289,26 +285,18 @@ class Qwen2ForCausalLM(nnx.Module):
             attention_metadata,
         )
 
-        # Select tokens that we need to calculate logits for.
-        # This should be cheaper than computing for all tokens, moving to cpu and then selecting the needed token.
-        # (B, D)
-        x = x[logits_indices]
+        return kv_caches, x
 
+    def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         hf_config = self.vllm_config.model_config.hf_config
         if hf_config.tie_word_embeddings:
             # self.lm_head.value is (vocab_size, hidden_size)
-            logits = jnp.dot(x, self.lm_head.value.T)
+            logits = jnp.dot(hidden_states, self.lm_head.value.T)
         else:
             # self.lm_head.value is (hidden_size, vocab_size)
-            logits = jnp.dot(x, self.lm_head.value)
+            logits = jnp.dot(hidden_states, self.lm_head.value)
 
-        next_tokens = sample(
-            self.rng.params(),
-            self.mesh,
-            logits,
-            tpu_sampling_metadata,
-        )
-        return kv_caches, next_tokens, None
+        return logits
 
     def load_weights(self, rng_key: jax.Array):
         # NOTE: Since we are using nnx.eval_shape to init the model,

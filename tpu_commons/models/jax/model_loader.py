@@ -109,8 +109,8 @@ def get_flax_model(
         jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh)
 
     kv_cache_sharding = NamedSharding(mesh, PartitionSpec(None, None, "model"))
-    outputs_sharding = NamedSharding(mesh, PartitionSpec(None))
-    logits_cache_sharding = NamedSharding(mesh, PartitionSpec(None))
+    hidden_states_sharding = NamedSharding(mesh, PartitionSpec(None,
+                                                               None))  # (T, D)
 
     # For performance consideration, refer to:
     # https://flax.readthedocs.io/en/latest/guides/performance.html
@@ -120,8 +120,7 @@ def get_flax_model(
         jax.jit,
         out_shardings=(
             kv_cache_sharding,
-            outputs_sharding,
-            logits_cache_sharding,
+            hidden_states_sharding,
         ),
         donate_argnums=2,  # 0 is graphdef, 1 is state, 2 is kv_cache
     )
@@ -129,8 +128,19 @@ def get_flax_model(
         model = nnx.merge(graphdef, state)
         return model(*args)
 
+    logits_sharding = NamedSharding(mesh, PartitionSpec(None, "model"))
+
+    @functools.partial(
+        jax.jit,
+        out_shardings=(logits_sharding),
+    )
+    def run_compute_logits(graphdef, state, *args):
+        model = nnx.merge(graphdef, state)
+        return model.compute_logits(*args)
+
     model_fn = functools.partial(run_model, graphdef, state)
-    return model_fn
+    compute_logits_fn = functools.partial(run_compute_logits, graphdef, state)
+    return model_fn, compute_logits_fn
 
 
 def get_vllm_model(
@@ -149,7 +159,9 @@ def get_vllm_model(
 
     jit_model = model.jit_step_func()
     model_fn = functools.partial(jit_model, params)
-    return model_fn
+    compute_logits_fn = functools.partial(model.jit_compute_logits_func(),
+                                          params)
+    return model_fn, compute_logits_fn
 
 
 def get_model(

@@ -1,3 +1,5 @@
+import functools
+
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
@@ -7,6 +9,10 @@ from tpu_commons.models.jax.layers.binary_search import topk_mask, topp_mask
 from tpu_commons.sample.metadata_jax import TPUSupportedSamplingMetadata
 
 
+@functools.partial(
+    jax.jit,
+    static_argnames=["mesh"],
+)
 def sample(
     rng: jax.Array,
     mesh: Mesh,

@@ -1,14 +1,14 @@
 import copy
 import functools
 import tempfile
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import jax
 import torch
 import torch.nn
 import torchax
 from flax.typing import PRNGKey
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import j2t_dtype
 from vllm.config import VllmConfig, set_current_vllm_config
@@ -18,31 +18,40 @@ from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.sequence import IntermediateTensors
 
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.models.jax.layers.sampling import sample
 from tpu_commons.models.vllm.sharding import shard_model_to_tpu
 from tpu_commons.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
-from tpu_commons.sample.metadata_jax import TPUSupportedSamplingMetadata
 
 
-class ModelForLogits(torch.nn.Module):
+class _VllmRunner(torch.nn.Module):
 
     def __init__(self, vllm_model: torch.nn.Module):
         super().__init__()
-
         self.vllm_model = vllm_model
 
-    def forward(
+    def forward(self, **kwargs) -> torch.Tensor:
+        if "hidden_state" in kwargs:
+            return self.compute_logits(kwargs["hidden_state"])
+        else:
+            return self.compute_hidden_state(
+                kwargs["input_ids"],
+                kwargs["positions"],
+                kwargs["intermediate_tensors"],
+                kwargs["inputs_embeds"],
+            )
+
+    def compute_hidden_state(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        logits_indices: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor],
     ) -> torch.Tensor:
         hidden_state = self.vllm_model(input_ids, positions,
                                        intermediate_tensors, inputs_embeds)
-        hidden_state = hidden_state[logits_indices]
+        return hidden_state
+
+    def compute_logits(self, hidden_state: torch.Tensor) -> torch.Tensor:
         return self.vllm_model.compute_logits(hidden_state,
                                               sampling_metadata=None)
 
@@ -52,6 +61,7 @@ class VllmModelWrapper:
 
     rng: PRNGKey
     mesh: Mesh
+    model: _VllmRunner
 
     def __init__(self, vllm_config: VllmConfig, rng: PRNGKey, mesh: Mesh):
         self.vllm_config = vllm_config
@@ -83,13 +93,13 @@ class VllmModelWrapper:
 
         # Load the vLLM model and wrap it into a new model whose forward
         # function calculates the hidden_state and logits in one go.
-        self.model_for_logits = ModelForLogits(
-            vllm_get_model(vllm_config=vllm_config_for_load))
+        vllm_model = vllm_get_model(vllm_config=vllm_config_for_load)
+        self.model = _VllmRunner(vllm_model)
 
         # jax.config.update("jax_explain_cache_misses", True)
 
         params_and_buffers = shard_model_to_tpu(
-            self.model_for_logits, self.mesh, self.vllm_config.parallel_config)
+            self.model, self.mesh, self.vllm_config.parallel_config)
 
         # Returning to the jax land, so we need to wrap it into a JaxValue.
         return jax_view(params_and_buffers)
@@ -105,10 +115,8 @@ class VllmModelWrapper:
             kv_caches: List[jax.Array],
             input_ids: jax.Array,
             attention_metadata: AttentionMetadata,
-            tpu_sampling_metadata: TPUSupportedSamplingMetadata,
-            logits_indices: jax.Array,
             *args,
-        ) -> Tuple[List[jax.Array], jax.Array, jax.Array]:
+        ) -> Tuple[List[jax.Array], jax.Array]:
 
             with torchax.default_env(), set_vllm_model_wrapper_context(
                     kv_caches=kv_caches,
@@ -116,8 +124,8 @@ class VllmModelWrapper:
             ):
                 # We need to wrap args from jax land into TorchValue with
                 # torch_view in order to call the Torch function.
-                logits = torch.func.functional_call(
-                    self.model_for_logits,
+                hidden_states = torch.func.functional_call(
+                    self.model,
                     torch_view(params_and_buffers),
                     kwargs={
                         "input_ids": torch_view(input_ids),
@@ -125,23 +133,40 @@ class VllmModelWrapper:
                         torch_view(attention_metadata.input_positions),
                         "intermediate_tensors": None,
                         "inputs_embeds": None,
-                        "logits_indices": torch_view(logits_indices),
                     },
                     tie_weights=False,
                     strict=True)
                 vllm_model_wrapper_context = get_vllm_model_wrapper_context()
                 new_kv_caches = vllm_model_wrapper_context.kv_caches
-            # Wrap the logits from torch land into a JaxValue for the jax code
-            # to consume.
-            logits = jax_view(logits)
+            # Wrap the hidden_states from torch land into a JaxValue for the jax
+            # code to consume.
+            hidden_states = jax_view(hidden_states)
 
-            next_tokens = sample(
-                self.rng,
-                self.mesh,
-                logits,
-                tpu_sampling_metadata,
-            )
-
-            return new_kv_caches, next_tokens, logits
+            return new_kv_caches, hidden_states
 
         return step_fun
+
+    def jit_compute_logits_func(self):
+
+        @functools.partial(
+            jax.jit,
+            out_shardings=(NamedSharding(self.mesh,
+                                         PartitionSpec(None, "model"))),
+        )
+        def compute_logits_func(
+            params_and_buffers: Any,
+            hidden_states: jax.Array,
+        ) -> jax.Array:
+            with torchax.default_env():
+                logits = torch.func.functional_call(
+                    self.model,
+                    torch_view(params_and_buffers),
+                    kwargs={
+                        "hidden_state": torch_view(hidden_states),
+                    },
+                    tie_weights=False,
+                    strict=True,
+                )
+            return jax_view(logits)
+
+        return compute_logits_func
