@@ -2,6 +2,7 @@ import functools
 import os
 import random
 import time
+from contextlib import nullcontext
 from dataclasses import asdict
 from typing import Any, List, Optional, cast
 
@@ -31,7 +32,7 @@ from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
 from tpu_commons.runner.tpu_torch_xla_runner import (_get_padded_token_len,
                                                      _get_req_paddings,
                                                      _get_token_paddings)
-from tpu_commons.runner.utils import (LatencyTracker,
+from tpu_commons.runner.utils import (ForbidCompile, LatencyTracker,
                                       get_padded_num_reqs_with_upper_limit)
 from tpu_commons.sample.metadata_jax import TPUSupportedSamplingMetadata
 
@@ -77,6 +78,9 @@ class TPUModelRunner():
         self._init_random()
         self._init_mesh()
         self._init_inputs()
+
+        self.maybe_forbid_compile = ForbidCompile(
+        ) if envs.VLLM_XLA_CHECK_RECOMPILATION else nullcontext()
         logger.info("TPUModelRunner created!")
 
     def _verify_chunked_prefill_config(self):
@@ -170,6 +174,10 @@ class TPUModelRunner():
         self.top_ps_cpu = np.zeros(self.max_num_tokens, dtype=np.float32)
         self.top_ks_cpu = np.zeros(self.max_num_tokens, dtype=np.float32)
 
+    @functools.partial(jax.jit, static_argnums=(0, ))
+    def select_hidden_states_fn(self, hidden_states, indices_do_sample):
+        return hidden_states[indices_do_sample]
+
     def load_model(self):
         self.model_fn, self.compute_logits_fn = get_model(
             self.vllm_config,
@@ -178,9 +186,6 @@ class TPUModelRunner():
         )
         self.rng_params_for_sampling = nnx.Rngs(
             jax.random.key(self.model_config.seed)).params()
-        self.select_hidden_states_fn = jax.jit(
-            lambda hidden_states, indices_do_sample: hidden_states[
-                indices_do_sample])
 
         logger.info(f"Init model | "
                     f"hbm={utils.hbm_usage_gb(self.devices)}Gb")
@@ -581,15 +586,17 @@ class TPUModelRunner():
             return DUMMY_METADATA, EMPTY_MODEL_RUNNER_OUTPUT,
 
         inputs = self._prepare_inputs(scheduler_output)
-        self.kv_caches, hidden_states = self.model_fn(*inputs[:3])
-        hidden_states = self.select_hidden_states_fn(hidden_states, inputs[4])
-        logits = self.compute_logits_fn(hidden_states)
-        next_tokens = sample(
-            self.rng_params_for_sampling,
-            self.mesh,
-            logits,
-            inputs[3],
-        )
+        with self.maybe_forbid_compile:
+            self.kv_caches, hidden_states = self.model_fn(*inputs[:3])
+            hidden_states = self.select_hidden_states_fn(
+                hidden_states, inputs[4])
+            logits = self.compute_logits_fn(hidden_states)
+            next_tokens = sample(
+                self.rng_params_for_sampling,
+                self.mesh,
+                logits,
+                inputs[3],
+            )
 
         num_reqs = self.input_batch.num_reqs
 
