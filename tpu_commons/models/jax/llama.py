@@ -11,9 +11,7 @@ from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_interface import attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.layers.rope import apply_rope
-from tpu_commons.models.jax.layers.sampling import sample
 from tpu_commons.models.jax.utils.weight_utils import load_hf_weights
-from tpu_commons.sample.metadata_jax import TPUSupportedSamplingMetadata
 
 logger = init_logger(__name__)
 
@@ -262,10 +260,8 @@ class LlamaForCausalLM(nnx.Module):
         kv_caches: List[jax.Array],
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
-        tpu_sampling_metadata: TPUSupportedSamplingMetadata,
-        logits_indices: jax.Array = None,
         *args,
-    ) -> Tuple[List[jax.Array], jax.Array, jax.Array]:
+    ) -> Tuple[List[jax.Array], jax.Array]:
         # input_ids: (T,)
 
         # x: (T, D)
@@ -278,21 +274,10 @@ class LlamaForCausalLM(nnx.Module):
             attention_metadata,
         )
 
-        # Select tokens that we need to calculate logits for.
-        # This should be cheaper than computing for all tokens, moving to cpu and then selecting the needed token.
-        # (B, D)
-        x = x[logits_indices]
+        return kv_caches, x
 
-        # (B, V)
-        logits = jnp.dot(x, self.lm_head.value)
-
-        next_tokens = sample(
-            self.rng.params(),
-            self.mesh,
-            logits,
-            tpu_sampling_metadata,
-        )
-        return kv_caches, next_tokens, None
+    def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
+        return jnp.dot(hidden_states, self.lm_head.value)
 
     def load_weights(self, rng_key: jax.Array):
         # NOTE: Since we are using nnx.eval_shape to init the model,

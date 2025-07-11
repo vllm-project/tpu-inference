@@ -9,6 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import vllm.envs as envs
+from flax import nnx
 from jax.sharding import NamedSharding, PartitionSpec
 from vllm.config import VllmConfig
 from vllm.sequence import IntermediateTensors
@@ -23,6 +24,7 @@ from tpu_commons import utils_jax as utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.common.sharding import Sharding
+from tpu_commons.models.jax.layers.sampling import sample
 from tpu_commons.models.jax.model_loader import get_model
 from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
                                                     InputBatch)
@@ -169,11 +171,17 @@ class TPUModelRunner():
         self.top_ks_cpu = np.zeros(self.max_num_tokens, dtype=np.float32)
 
     def load_model(self):
-        self.model_fn = get_model(
+        self.model_fn, self.compute_logits_fn = get_model(
             self.vllm_config,
             self.rng_key,
             self.mesh,
         )
+        self.rng_params_for_sampling = nnx.Rngs(
+            jax.random.key(self.model_config.seed)).params()
+        self.select_hidden_states_fn = jax.jit(
+            lambda hidden_states, indices_do_sample: hidden_states[
+                indices_do_sample])
+
         logger.info(f"Init model | "
                     f"hbm={utils.hbm_usage_gb(self.devices)}Gb")
 
@@ -241,19 +249,7 @@ class TPUModelRunner():
                     f"sharding={sharding} | "
                     f"hbm={utils.hbm_usage_gb(self.devices)}Gb")
 
-    def capture_model(self) -> None:
-        if os.getenv("SKIP_JAX_PRECOMPILE", False):
-            return
-        logger.info("Precompile all the subgraphs with possible input shapes.")
-
-        for inputs in self._generate_dummy_inputs():
-            start = time.perf_counter()
-            self.kv_caches, next_tokens, _ = self.model_fn(*inputs)
-            end = time.perf_counter()
-            logger.info("Compilation finished in %.2f [secs].", end - start)
-            next_tokens = jax.device_get(next_tokens)
-
-    def _generate_dummy_inputs(self):
+    def _precompile_backbone(self) -> None:
         for num_tokens in self.num_tokens_paddings:
             input_ids = np.ones((num_tokens, ), dtype=np.int32)
             positions = np.ones((num_tokens, ), dtype=np.int32)
@@ -265,58 +261,106 @@ class TPUModelRunner():
             seq_lens = np.ones((self.max_num_reqs, ), dtype=np.int32)
             query_start_loc = np.ones((self.max_num_reqs + 1, ),
                                       dtype=np.int32)
+            num_seqs = np.array([self.max_num_reqs], dtype=np.int32)
+            num_slices = np.array([1], dtype=np.int32)
 
+            (input_ids, positions, slot_mapping_metadata, num_slices,
+             block_tables, query_start_loc, seq_lens,
+             num_seqs) = self._device_array(
+                 (input_ids, positions, slot_mapping_metadata, num_slices,
+                  block_tables, query_start_loc, seq_lens, num_seqs))
+            logger.info(f"Precompile backbone --> num_tokens={num_tokens}")
+            inputs = (
+                self.kv_caches,
+                input_ids,
+                AttentionMetadata(
+                    input_positions=positions,
+                    slot_mapping=slot_mapping_metadata,
+                    block_tables=block_tables,
+                    seq_lens=seq_lens,
+                    query_start_loc=query_start_loc,
+                    num_seqs=num_seqs,
+                    num_slices=num_slices,
+                ),
+            )
+            start = time.perf_counter()
+            self.kv_caches, hidden_states = self.model_fn(*inputs[:3])
+            end = time.perf_counter()
+            logger.info("Compilation finished in %.2f [secs].", end - start)
+            hidden_states.block_until_ready()
+
+    def _precompile_select_hidden_states(self) -> None:
+        logger.info(
+            "Compiling select_hidden_states with different input shapes.")
+        hsize = self.model_config.get_hidden_size()
+        for num_tokens in self.num_tokens_paddings:
             for num_reqs in self.num_reqs_paddings:
                 if num_reqs > num_tokens:
                     continue
-                num_seqs = np.array([num_reqs], dtype=np.int32)
-                num_slices = np.array([1], dtype=np.int32)
-                logits_indices = np.ones((num_reqs, ), dtype=np.int32)
+                hidden_states = jnp.ones((num_tokens, hsize),
+                                         dtype=jnp.bfloat16)
+                indices_do_sample = jnp.ones((num_reqs, ), dtype=jnp.int32)
+                hidden_states, indices_do_sample = self._device_array(
+                    (hidden_states, indices_do_sample))
+                start = time.perf_counter()
+                logger.info(
+                    f"Precompile select_hidden_states --> num_tokens={num_tokens} | "
+                    f"num_reqs={num_reqs}")
+                result = self.select_hidden_states_fn(hidden_states,
+                                                      indices_do_sample)
+                result.block_until_ready()
+                end = time.perf_counter()
+                logger.info(f"  -- time: {end - start}s")
 
-                (input_ids, positions, slot_mapping_metadata, num_slices,
-                 block_tables, query_start_loc, seq_lens, num_seqs,
-                 logits_indices) = self._device_array(
-                     (input_ids, positions, slot_mapping_metadata, num_slices,
-                      block_tables, query_start_loc, seq_lens, num_seqs,
-                      logits_indices))
+    def _precompile_compute_logits(self) -> None:
+        logger.info("Compiling compute_logits with different input shapes.")
+        hsize = self.model_config.get_hidden_size()
+        for num_reqs in self.num_reqs_paddings:
+            hidden_states = jnp.ones((num_reqs, hsize), dtype=jnp.bfloat16)
+            hidden_states = self._device_array(hidden_states)
+            logger.info(f"Precompile compute_logits --> num_reqs={num_reqs}")
+            start = time.perf_counter()
+            result = self.compute_logits_fn(hidden_states)
+            result.block_until_ready()
+            end = time.perf_counter()
+            logger.info("Compilation finished in %.2f [secs].", end - start)
 
-                for do_sampling in (True, False):
-                    logger.info(
-                        f"Precompile subgraph --> num_tokens={num_tokens} | "
-                        f"num_reqs={num_reqs} | do_sampling={do_sampling}")
-                    if do_sampling:
-                        temperature = np.full((num_reqs, ),
-                                              0.7,
-                                              dtype=np.float32)
-                        top_k = np.full((num_reqs, ), 20, dtype=np.int32)
-                        top_p = np.full((num_reqs, ), 0.8, dtype=np.float32)
-                        (temperature, top_k, top_p) = self._device_array(
-                            (temperature, top_k, top_p))
-                    else:
-                        temperature = None
-                        top_k = None
-                        top_p = None
-                    sampling_metadata = TPUSupportedSamplingMetadata(
-                        temperature=temperature,
-                        top_k=top_k,
-                        top_p=top_p,
-                        do_sampling=do_sampling,
-                    )
-                    yield (
-                        self.kv_caches,
-                        input_ids,
-                        AttentionMetadata(
-                            input_positions=positions,
-                            slot_mapping=slot_mapping_metadata,
-                            block_tables=block_tables,
-                            seq_lens=seq_lens,
-                            query_start_loc=query_start_loc,
-                            num_seqs=num_seqs,
-                            num_slices=num_slices,
-                        ),
-                        sampling_metadata,
-                        logits_indices,
-                    )
+    def _precompile_sampling(self) -> None:
+        logger.info("Compiling sampling with different input shapes.")
+        hsize = self.model_config.get_hidden_size()
+        for num_reqs in self.num_reqs_paddings:
+            logits = jnp.ones((num_reqs, hsize), dtype=jnp.bfloat16)
+            logits = self._device_array(logits)
+            logger.info(f"Precompile sampling --> num_reqs={num_reqs}")
+            start = time.perf_counter()
+            for do_sampling in (True, False):
+                temperature = np.full((num_reqs, ), 0.7, dtype=np.float32)
+                top_k = np.full((num_reqs, ), 20, dtype=np.int32)
+                top_p = np.full((num_reqs, ), 0.8, dtype=np.float32)
+                (temperature, top_k, top_p) = self._device_array(
+                    (temperature, top_k, top_p))
+                sampling_metadata = TPUSupportedSamplingMetadata(
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                    do_sampling=do_sampling,
+                )
+                result = sample(self.rng_params_for_sampling, self.mesh,
+                                logits, sampling_metadata)
+                result.block_until_ready()
+                end = time.perf_counter()
+                logger.info("Compilation finished in %.2f [secs].",
+                            end - start)
+
+    def capture_model(self) -> None:
+        if os.getenv("SKIP_JAX_PRECOMPILE", False):
+            return
+        logger.info("Precompile all the subgraphs with possible input shapes.")
+
+        self._precompile_backbone()
+        self._precompile_select_hidden_states()
+        self._precompile_compute_logits()
+        self._precompile_sampling()
 
     @staticmethod
     @functools.partial(jax.jit)
@@ -531,8 +575,15 @@ class TPUModelRunner():
             return DUMMY_METADATA, EMPTY_MODEL_RUNNER_OUTPUT,
 
         inputs = self._prepare_inputs(scheduler_output)
-        # TODO(xiang): split this into backbone, select_hidden_states, sampling
-        self.kv_caches, next_tokens, _ = self.model_fn(*inputs)
+        self.kv_caches, hidden_states = self.model_fn(*inputs[:3])
+        hidden_states = self.select_hidden_states_fn(hidden_states, inputs[4])
+        logits = self.compute_logits_fn(hidden_states)
+        next_tokens = sample(
+            self.rng_params_for_sampling,
+            self.mesh,
+            logits,
+            inputs[3],
+        )
 
         num_reqs = self.input_batch.num_reqs
 
