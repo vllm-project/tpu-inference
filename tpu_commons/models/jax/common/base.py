@@ -68,7 +68,7 @@ class Config:
         If there is overlap in overrides between the configs, then print a warning declaring which
         overrides will take precedent."""
 
-        if not getattr(self, "vllm_config"):
+        if not getattr(self, "vllm_config", None):
             return
 
         def _overrides_str(original: str, original_val: Any,

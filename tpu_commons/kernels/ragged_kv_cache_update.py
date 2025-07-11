@@ -78,7 +78,9 @@ def _kv_cache_update(
     page_size: int,
     num_slices_per_block: int,
 ):
-    assert slices.shape[1] % num_slices_per_block == 0
+    print("page_size", page_size)
+    print("sharded kv cache size", kv_cache.shape)
+    assert slices.shape[1] == 1 or slices.shape[1] % num_slices_per_block == 0
     _, num_combined_kv_heads, head_dim = new_kv.shape
     assert kv_cache.shape[1] == num_combined_kv_heads
     assert kv_cache.shape[2] == head_dim
@@ -93,7 +95,7 @@ def _kv_cache_update(
 
     out_specs = [pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY)]
     out_shape = [jax.ShapeDtypeStruct(kv_cache.shape, dtype=kv_cache.dtype)]
-
+    print("out_shape", out_shape)
     scalar_prefetches = [slices]
     scratch = pltpu.VMEM(
         (num_slices_per_block, page_size, num_combined_kv_heads, head_dim),
@@ -104,7 +106,7 @@ def _kv_cache_update(
         scratch,
         pltpu.SemaphoreType.DMA,
     ]
-
+    print("scratch_shapes", scratch_shapes)
     kernel = pl.pallas_call(
         _kv_cache_update_kernel,
         grid_spec=pltpu.PrefetchScalarGridSpec(
@@ -143,6 +145,7 @@ def kv_cache_update(
         kv_cache_pspec: P
     | None = None,  # Only sharding along head_dim is supported
 ):
+    print("mesh", mesh)
     if mesh is None:
         return _kv_cache_update(new_kv, slices, kv_cache, num_slices,
                                 page_size, num_slices_per_block)

@@ -382,7 +382,7 @@ class MLA(Attention):
             rngs, (self.D, self.query_lora_rank), self.q_da_sharding,
             self.cfg.dtype)
         self.kernel_q_up_proj_ANH = self.param_factory.create_kernel_param(
-            rngs, (self.D, self.N, self.qk_head_dim), self.anh_sharding,
+            rngs, (self.query_lora_rank, self.N, self.qk_head_dim), self.anh_sharding,
             self.cfg.dtype)
 
         self.kernel_kv_down_proj_DA = self.param_factory.create_kernel_param(
@@ -391,11 +391,11 @@ class MLA(Attention):
             self.kv_da_sharding,
             self.dtype,
         )
-        self.kernel_kv_up_proj_ANK = self.param_factory.create_kernel_param(
+        self.kernel_kv_up_proj_ANH = self.param_factory.create_kernel_param(
             rngs,
             (self.kv_lora_rank, self.N,
              self.qk_nope_head_dim + self.v_head_dim),
-            self.ank_sharding,
+            self.anh_sharding,
             self.dtype,
         )
 
@@ -440,95 +440,111 @@ class MLA(Attention):
         op_mode = "prefill" if is_prefill else "generate"
         md = attention_metadata
         x = jnp.asarray(x, self.cfg.dtype)
-        x_BSD = nnx.with_sharding_constraint(
-            x, self.activation_attention_btd[op_mode])
-        x_q_BTD = nnx.with_sharding_constraint(x,
-                                               self.activation_q_btd[op_mode])
+        x_SD = nnx.with_sharding_constraint(
+            x, self.activation_attention_td[op_mode])
+        x_q_TD = nnx.with_sharding_constraint(x,
+                                               self.activation_q_td[op_mode])
 
         with jax.named_scope("q_proj"):
-            # Query down projection. [B, T, query_lora_rank]
-            q_BTA = jnp.einsum("BTD,DA -> BTA", x_q_BTD,
+            # Query down projection.  
+            q_TA = jnp.einsum("TD,DA -> TA", x_q_TD,
                                self.kernel_q_down_proj_DA.value)
-            q_BTA = self.q_rms_norm(q_BTA)
+            q_TA = self.q_rms_norm(q_TA)
 
-            # Query up projection. [B, T, N, H]
-            q_BTNH = jnp.einsum("BTA,ANH -> BTNH", q_BTA,
+            # Query up projection.  
+            q_TNH = jnp.einsum("TA,ANH -> TNH", q_TA,
                                 self.kernel_q_up_proj_ANH.value)
             # Split the query into nope and rope.
-            q_nope_BTNH = q_BTNH[..., :self.qk_nope_head_dim]
-            q_rope_BTNH = self.apply_rope(q_BTNH[..., self.qk_nope_head_dim:],
+            q_nope_TNH = q_TNH[..., :self.qk_nope_head_dim]
+            q_rope_TNH = q_TNH[..., self.qk_nope_head_dim:]
+            q_rope_TNH = apply_rope(q_rope_TNH,
                                           md.input_positions,
                                           self.qk_rope_head_dim,
                                           self.rope_theta, self.rope_scaling)
 
             # Concatenate the nope and rope queries.
-            q_BTNH = jnp.concatenate([q_nope_BTNH, q_rope_BTNH], axis=-1)
+            q_TNH = jnp.concatenate([q_nope_TNH, q_rope_TNH], axis=-1)
             # Multiple the query by scaling factor
-            q_BTNH = q_BTNH * self.qk_head_dim**-0.5
+            q_TNH = q_TNH * self.qk_head_dim**-0.5
 
-            q_BTNH = nnx.with_sharding_constraint(q_BTNH,
-                                                  self.query_btnh[op_mode])
+            q_TNH = nnx.with_sharding_constraint(q_TNH,
+                                                  self.query_tnh[op_mode])
 
         with jax.named_scope("kv_proj"):
 
-            # KV down projection. [B, T, kv_lora_rank + qk_rope_head_dim]
-            kv_BSA = jnp.einsum("BSD,DA -> BSA", x_BSD,
+            # KV down projection.  
+            kv_SA = jnp.einsum("SD,DA -> SA", x_SD,
                                 self.kernel_kv_down_proj_DA.value)
-
             # Split the key and value into latent kv vector and k rope vector.
-            k_rope_BSH = kv_BSA[..., self.kv_lora_rank:]
-            k_rope_BSH = self.apply_rope(k_rope_BSH, md.input_positions,
+            k_rope_SH = kv_SA[..., self.kv_lora_rank:]
+            
+            # Reshape k_rope_BSH to include head dimension for RoPE application
+            k_rope_SNH = k_rope_SH[..., None, :] 
+            k_rope_SNH = apply_rope(k_rope_SNH, md.input_positions,
                                          self.qk_rope_head_dim,
                                          self.rope_theta, self.rope_scaling)
-            k_rope_BSNH = jnp.repeat(k_rope_BSH, self.N, axis=2)
+            
+            k_rope_SNH = jnp.broadcast_to(k_rope_SNH, (k_rope_SNH.shape[0], self.N, self.qk_rope_head_dim))
+            
+            kv_SA = kv_SA[..., :self.kv_lora_rank]
+            kv_SA = self.kv_rms_norm(kv_SA)
 
-            kv_BSA = kv_BSA[..., :self.kv_lora_rank]
-            kv_BSA = self.kv_rms_norm(kv_BSA)
-
-            # KV up projection. [B, T, N, qk_nope_head_dim + v_head_dim]
-            kv_nope = jnp.einsum("BSA,ANK -> BSA", kv_BSA,
-                                 self.kernel_kv_up_proj_ANK.value)
-
+            # KV up projection.  
+            kv_nope = jnp.einsum("SA,ANH -> SNH", kv_SA,
+                                 self.kernel_kv_up_proj_ANH.value)
             # Split the latent kv vector into k nope vector and v vector.
-            k_nope_BSNH = kv_nope[..., :self.qk_nope_head_dim]
-            v_BSNH = kv_nope[..., self.qk_nope_head_dim:]
+            k_nope_SNH = kv_nope[..., :self.qk_nope_head_dim]
+            v_SNH = kv_nope[..., self.qk_nope_head_dim:]
+
 
             # Concatenate the key vector.
-            k_BSNH = jnp.concatenate([k_nope_BSNH, k_rope_BSNH], axis=-1)
+            k_SNH = jnp.concatenate([k_nope_SNH, k_rope_SNH], axis=-1)
 
-            k_BSKH = nnx.with_sharding_constraint(k_BSNH,
-                                                  self.keyvalue_bskh[op_mode])
-            v_BSNH = nnx.with_sharding_constraint(v_BSNH,
-                                                  self.keyvalue_bskh[op_mode])
+            k_SNH = nnx.with_sharding_constraint(k_SNH,
+                                                  self.keyvalue_skh[op_mode])
+            v_SNH = nnx.with_sharding_constraint(v_SNH,
+                                                  self.keyvalue_skh[op_mode])
 
         with jax.named_scope("attn_op"):
-            new_kv_cache, outputs_BTNH = self.attention(
+            # TODO(wenxindongwork): K and V have different head dimension, 
+            # which is not supported by the current kv cache implementation. 
+            # For now we are padding the v dimension to match the k dimension. 
+            # Furthermore, deepseekv3 k head dimension is 192, which is 
+            # not supported by the current attention kernel. For now, we will 
+            # pad the q, k dimension to multiple of 128. 
+            # We should update the MLA kv cache implementation in the future. 
+            multiple_of_128  = ((self.qk_head_dim - 1) // 128 + 1) * 128
+            q_TNH = jnp.pad(q_TNH, ((0, 0), (0, 0), (0, multiple_of_128 - self.qk_head_dim)))
+            k_SNH = jnp.pad(k_SNH, ((0, 0), (0, 0), (0, multiple_of_128 - self.qk_head_dim)))
+            v_SNH = jnp.pad(v_SNH, ((0, 0), (0, 0), (0, multiple_of_128 - self.v_head_dim)))
+            new_kv_cache, outputs_TNH = self.attention(
                 is_prefill,
                 kv_cache,
-                q_BTNH,
-                k_BSKH,
-                v_BSNH,
+                q_TNH,
+                k_SNH,
+                v_SNH,
                 attention_metadata,
                 self.mesh,
-                self.N,
-                self.K,
             )
+            # TODO(wenxindongwork): For now, unpad the outputs_TNH to match the v_head_dim.
+            # We should update the MLA attention implementation in the future.
+            outputs_TNH = outputs_TNH[..., :self.v_head_dim, :]
 
         with jax.named_scope("o_proj"):
-            o_BTD = jnp.einsum("BTNH,NHD -> BTD", outputs_BTNH,
+            o_TD = jnp.einsum("TNH,NHD -> TD", outputs_TNH,
                                self.kernel_o_proj_NHD.value)
-            o_BTD = nnx.with_sharding_constraint(
-                o_BTD, self.activation_attention_out_btd[op_mode])
-        return new_kv_cache, o_BTD
+            o_TD = nnx.with_sharding_constraint(
+                o_TD, self.activation_attention_out_td[op_mode])
+        return new_kv_cache, o_TD
 
     def create_sharding(self):
         """Creates sharding rules for activations and weights."""
         mode_dependent_attrs = [
-            "activation_attention_btd",
-            "activation_q_btd",
-            "query_btnh",
-            "keyvalue_bskh",
-            "activation_attention_out_btd",
+            "activation_attention_td",
+            "activation_q_td",
+            "query_tnh",
+            "keyvalue_skh",
+            "activation_attention_out_td",
         ]
         for attr_name in mode_dependent_attrs:
             prefill_sharding_config = getattr(self.sharding_cfg.prefill_rules,
@@ -554,9 +570,9 @@ class MLA(Attention):
         self.kv_da_sharding = NamedSharding(
             self.mesh,
             P(*self.sharding_cfg.generate_rules.attn_mla_kva_weight_da))
-        self.ank_sharding = NamedSharding(
+        self.anh_sharding = NamedSharding(
             self.mesh,
-            P(*self.sharding_cfg.generate_rules.attn_mla_qb_weight_ank))
+            P(*self.sharding_cfg.generate_rules.attn_mla_kvb_weight_anh))
 
         self.nhd_sharding = NamedSharding(
             self.mesh, P(*self.sharding_cfg.generate_rules.attn_o_weight_nhd))
@@ -565,15 +581,15 @@ class MLA(Attention):
         # via shard_map with sharding specs, However, the q/k/v have been sharded outside of attention()
         # So we replicate the sharding below but it should be better organized if we use pallas kernels
         self.pallas_q_spec = {
-            "prefill": P(*self.sharding_cfg.prefill_rules.query_btnh),
-            "generate": P(*self.sharding_cfg.generate_rules.query_btnh),
+            "prefill": P(*self.sharding_cfg.prefill_rules.query_tnh),
+            "generate": P(*self.sharding_cfg.generate_rules.query_tnh),
         }
         self.pallas_kv_spec = {
-            "prefill": P(*self.sharding_cfg.prefill_rules.keyvalue_bskh),
-            "generate": P(*self.sharding_cfg.generate_rules.keyvalue_bskh),
+            "prefill": P(*self.sharding_cfg.prefill_rules.keyvalue_skh),
+            "generate": P(*self.sharding_cfg.generate_rules.keyvalue_skh),
         }
         self.pallas_cache_page_spec = {
-            "prefill": P(*self.sharding_cfg.prefill_rules.keyvalue_cache_kbsh),
+            "prefill": P(*self.sharding_cfg.prefill_rules.keyvalue_cache_lskh),
             "generate":
-            P(*self.sharding_cfg.generate_rules.keyvalue_cache_kbsh),
+            P(*self.sharding_cfg.generate_rules.keyvalue_cache_lskh),
         }
