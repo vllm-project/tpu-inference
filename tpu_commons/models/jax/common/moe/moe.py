@@ -21,7 +21,6 @@ RouterConfig = make_dataclass(
     "RouterConfig",
     [(HuggingFaceArgNames.HIDDEN_SIZE.value, int),
      (HuggingFaceArgNames.INTERMEDIATE_SIZE_MOE.value, int),
-     (HuggingFaceArgNames.INTERMEDIATE_SIZE.value, int),
      (HuggingFaceArgNames.NUM_LOCAL_EXPERTS.value, int),
      (HuggingFaceArgNames.NUM_EXPERTS_PER_TOKEN.value, int),
      ("router_type", RouterType), (HuggingFaceArgNames.HIDDEN_ACT.value, str),
@@ -34,7 +33,6 @@ RouterConfig.__doc__ = f"""Configuration for the Router module.
      Attributes:
         {HuggingFaceArgNames.HIDDEN_SIZE.value}: The dimension of the model.
         {HuggingFaceArgNames.INTERMEDIATE_SIZE_MOE.value}: The hidden size of the expert.
-        {HuggingFaceArgNames.INTERMEDIATE_SIZE.value}: The hidden size of MLP layers.
         {HuggingFaceArgNames.NUM_LOCAL_EXPERTS.value}: The total number of experts.
         {HuggingFaceArgNames.NUM_EXPERTS_PER_TOKEN.value}: The number of experts each token is routed to.
          router_type: The type of router to use (e.g., 'top_k').
@@ -42,7 +40,7 @@ RouterConfig.__doc__ = f"""Configuration for the Router module.
          expert_capacity: The maximum number of tokens an expert can process. Defaults to -1 (no capacity limit).
          routed_bias: Whether to use a bias in the router. Defaults to False. # DeepSeek related. Could be removed
          routed_scaling_factor: Scaling factor for routed weights. Defaults to 1.0.
-        dtype: The data type to use for computations. Defaults to jnp.float32.
+        dtype: The data type to use for computations.
         vllm_config: The VLLM config containing any overrides to apply."""
 
 
@@ -138,6 +136,8 @@ MoEConfig = make_dataclass(
      (HuggingFaceArgNames.NUM_LOCAL_EXPERTS.value, int),
      (HuggingFaceArgNames.HIDDEN_ACT.value, int),
      ("apply_expert_weight_before_computation", bool),
+     ("router", RouterConfig),
+     ("dtype", DTypeLike),
      ("vllm_config", VllmConfig, field(repr=False, default=None))],
     bases=(Config, ))
 MoEConfig.__doc__ = f"""Configuration for the Mixture-of-Experts (MoE) layer.
@@ -148,6 +148,8 @@ MoEConfig.__doc__ = f"""Configuration for the Mixture-of-Experts (MoE) layer.
         {HuggingFaceArgNames.NUM_LOCAL_EXPERTS.value}: The total number of experts.
         {HuggingFaceArgNames.HIDDEN_ACT.value}: The activation function to use within the experts.
         apply_expert_weight_before_computation: Whether to apply expert weights before computation. Defaults to False.
+        router: The config for the Router module.
+        dtype: The data type to use for computations.
         vllm_config: The VLLM config containing any overrides to apply."""
 
 
@@ -168,12 +170,14 @@ class MoE(nnx.Module):
     cfg: MoEConfig
     mesh: Mesh
     param_factory: ParamFactory
-    router: Router
     sharding_cfg: ShardingConfig
     quant: Any | None = None
 
     def __post_init__(self):
         """Initializes the MoE module by creating sharding configurations and generating expert kernels."""
+        self.router = Router(self.cfg.router, self.mesh, self.param_factory,
+                             self.sharding_cfg)
+        self.router.create_sharding()
         self.create_sharding()
 
     def __call__(self, x: Float, op_mode):
@@ -208,7 +212,11 @@ class MoE(nnx.Module):
             return self._moe_fwd(x_TD, full_weights_TE, op_mode)
 
     def generate_kernel(self, rngs: nnx.Rngs):
-        """Generates the kernels (weights) for the gating, up-projection, and down-projection layers of each expert."""
+        """Generates the kernels (weights) for the router and experts (gating, up-projection, and down-projection layers)."""
+        
+        # Generate router kernels
+        self.router.generate_kernel(rngs)
+        
         num_experts = getattr(self.cfg,
                               HuggingFaceArgNames.NUM_LOCAL_EXPERTS.value)
         D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)

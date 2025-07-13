@@ -78,7 +78,6 @@ class Llama3ModelConfig():
                     dtype=self.dtype,
                     vllm_config=self.vllm_config),
                 rms_norm_eps=self.rms_norm_eps,
-                block_type="dense",
                 vllm_config=self.vllm_config)
 
 
