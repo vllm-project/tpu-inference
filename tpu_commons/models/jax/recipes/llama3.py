@@ -69,7 +69,6 @@ class Llama8BModelConfig(ModelConfig):
                                          dtype=self.dtype,
                                          vllm_config=self.vllm_config),
                 rms_norm_eps=1e-5,
-                block_type="dense",
                 vllm_config=self.vllm_config)
 
 

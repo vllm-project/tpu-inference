@@ -25,10 +25,11 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
 
     if os.getenv("NEW_MODEL_DESIGN", False):
         from tpu_commons.models.jax.recipes.llama3 import Llama3_8B
+        from tpu_commons.models.jax.recipes.llama4 import Llama4Scout
 
         # from tpu_commons.models.jax.recipes.llama4 import Llama4Scout
         _MODEL_REGISTRY["Llama3_8B"] = Llama3_8B
-        # _MODEL_REGISTRY["Llama4Scout"] = Llama4Scout
+        _MODEL_REGISTRY["Llama4Scout"] = Llama4Scout
 
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
