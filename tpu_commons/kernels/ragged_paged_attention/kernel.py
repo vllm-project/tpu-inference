@@ -359,6 +359,9 @@ def ragged_paged_attention_kernel(
         b_start = start // packing
         b_step = step // packing
         b_ref = ref.bitcast(jnp.uint32)
+        print("b_ref", b_ref.shape)
+        print("b_start", b_start)
+        print("b_step", b_step)
         b = b_ref[b_start::b_step, :]
 
         # TODO(chengjiyao): use the general strided loading logic for bf16 after

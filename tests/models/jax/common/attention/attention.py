@@ -57,7 +57,7 @@ x = jnp.ones((128, 4096))
 
 kv_cache_config = KVCacheConfig(
     batch_size=1,
-    cache_len=128,
+    cache_len=128 * 4,
     num_kv_heads=32,
     head_dim=256,
     dtype=jnp.bfloat16,
@@ -66,25 +66,33 @@ kv_cache_config = KVCacheConfig(
 # Create proper JAX arrays for the KV cache
 # The KV cache should be shaped as (num_blocks, block_size, num_kv_heads*2, head_dim)
 # where num_blocks = cache_len // block_size
-block_size = 32  # Standard block size for TPU
+block_size = 128  # Standard block size for TPU
 num_blocks = kv_cache_config.cache_len // block_size
-cache_shape = (num_blocks, block_size,
-               kv_cache_config.num_kv_heads*2, kv_cache_config.head_dim)
+cache_shape = (
+    num_blocks,
+    block_size,
+    kv_cache_config.num_kv_heads * 2,
+    kv_cache_config.head_dim,
+)
 key_cache_array = jnp.zeros(cache_shape, dtype=kv_cache_config.dtype)
 
 print(f"KV cache shape: {key_cache_array.shape}")
-print(f"Expected shape: ({num_blocks}, {block_size}, {kv_cache_config.num_kv_heads*2}, {kv_cache_config.head_dim})")
+print(
+    f"Expected shape: ({num_blocks}, {block_size}, {kv_cache_config.num_kv_heads * 2}, {kv_cache_config.head_dim})"
+)
 
 
 attention_metadata = AttentionMetadata(
     input_positions=jnp.arange(128, dtype=jnp.int32),
-    slot_mapping=jnp.zeros((3, 1), dtype=jnp.int32),
+    slot_mapping=jnp.array(
+        [[0 for _ in range(8)], [0 for _ in range(8)], [128 for _ in range(8)]],
+        dtype=jnp.int32,
+    ),
     block_tables=jnp.zeros((1, 4), dtype=jnp.int32),
     seq_lens=jnp.ones((1,), dtype=jnp.int32) * 128,
-    num_slices = jnp.ones((1, ), dtype=jnp.int32),
-    num_seqs = jnp.ones((1, ), dtype=jnp.int32),
-    query_start_loc=jnp.array([0, 128], dtype=jnp.int32)  # This is cu_q_lens
-
+    num_slices=jnp.ones((8,), dtype=jnp.int32),
+    num_seqs=jnp.ones((1,), dtype=jnp.int32),
+    query_start_loc=jnp.array([0, 128], dtype=jnp.int32),  # This is cu_q_lens
 )
 
 output = mla_layer(

@@ -78,9 +78,7 @@ def _kv_cache_update(
     page_size: int,
     num_slices_per_block: int,
 ):
-    print("page_size", page_size)
-    print("sharded kv cache size", kv_cache.shape)
-    assert slices.shape[1] == 1 or slices.shape[1] % num_slices_per_block == 0
+    assert slices.shape[1] % num_slices_per_block == 0
     _, num_combined_kv_heads, head_dim = new_kv.shape
     assert kv_cache.shape[1] == num_combined_kv_heads
     assert kv_cache.shape[2] == head_dim

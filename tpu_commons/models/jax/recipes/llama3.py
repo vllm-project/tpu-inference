@@ -106,8 +106,6 @@ class Llama3_8B(Model):
             strategy_dict = {"tensor_parallelism": 4, "expert_parallelism": 2}
             
         self.sharding = Sharding(strategy_dict=strategy_dict,
-                                 prefill_rules=None,
-                                 generate_rules=None,
                                  mesh=self.mesh,
                                  default_rules_cls=Llama8BShardingRulesConfig,
                                  vllm_config=self.vllm_config)
