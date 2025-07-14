@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-import os
 from typing import TYPE_CHECKING, Optional, Tuple, Union, cast
 
 import torch
@@ -21,8 +20,6 @@ else:
     PoolingParams = None
 
 logger = init_logger(__name__)
-
-VLLM_TORCHAX_ENABLED = os.environ.get('VLLM_TORCHAX_ENABLED', '0') == '1'
 
 
 class TpuPlatform(Platform):
@@ -50,12 +47,8 @@ class TpuPlatform(Platform):
             logger.info("Cannot use %s backend on TPU.", selected_backend)
 
         if use_v1:
-            if VLLM_TORCHAX_ENABLED:
-                logger.info("Using Pallas V1 backend with torchax.")
-                return "tpu_commons.attention.backends.pallas_torchax.PallasAttentionBackend"
-            else:
-                logger.info("Using Pallas V1 backend with torchxla.")
-                return "tpu_commons.attention.backends.pallas_torchxla.PallasAttentionBackend"
+            logger.info("Using Pallas V1 backend with torchax.")
+            return "tpu_commons.attention.backends.pallas_torchax.PallasAttentionBackend"
         else:
             logger.info("Using Pallas backend.")
             return "vllm.attention.backends.pallas.PallasAttentionBackend"
@@ -121,12 +114,8 @@ class TpuPlatform(Platform):
             vllm_config.model_config.dtype = torch.bfloat16
 
         if envs.VLLM_USE_V1:
-            if VLLM_TORCHAX_ENABLED:
-                from tpu_commons.attention.backends.pallas_torchax import \
-                    PallasAttentionBackend
-            else:
-                from tpu_commons.attention.backends.pallas import \
-                    PallasAttentionBackend
+            from tpu_commons.attention.backends.pallas_torchax import \
+                PallasAttentionBackend
             cache_config.block_size = PallasAttentionBackend.get_page_size(
                 vllm_config)  # type: ignore[assignment]
             min_page_size = PallasAttentionBackend.get_min_page_size(

@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-import os
 from collections import OrderedDict
 from typing import Optional, Union
 
@@ -23,14 +22,10 @@ from tpu_commons.logger import init_logger
 
 logger = init_logger(__name__)
 
-VLLM_TORCHAX_ENABLED = os.environ.get('VLLM_TORCHAX_ENABLED', '0') == '1'
-
 
 def create_torchax_kv_cache(shape, dtype, mesh,
                             partition_spec) -> torch.Tensor:
     # This works better than device_put for large tensor allocation.
-    assert VLLM_TORCHAX_ENABLED, \
-        "It's expected that VLLM_TORCHAX_ENABLED is True."
 
     jax_dtype = t2j_dtype(dtype)
     if mesh is None:
@@ -54,8 +49,6 @@ def create_torchax_tensor_with_partition_spec(
         weight_t: torch.Tensor,
         mesh: Optional[Union["xs.Mesh", Mesh]] = None,
         partition_spec: Optional[tuple] = None) -> torch.Tensor:
-    assert VLLM_TORCHAX_ENABLED, \
-        "It's expected that VLLM_TORCHAX_ENABLED is True."
     # Validate that if mesh is None, sharding must also be None
     if mesh is None and (partition_spec is not None and partition_spec != ()):
         raise ValueError(
@@ -273,38 +266,30 @@ class XlaMergedColumnParallelLinear(nn.Module):
 def partition_column_parallel_linear(layer: torch.nn.Module,
                                      mesh: xs.Mesh) -> torch.nn.Module:
     assert isinstance(layer, ColumnParallelLinear)
-    if VLLM_TORCHAX_ENABLED:
-        torchax_t = create_torchax_tensor_with_partition_spec(
-            layer.weight.data, mesh, ('x', None))
-        layer.weight = Parameter(torchax_t,
-                                 requires_grad=layer.weight.requires_grad)
-        logger.info("Applied column-parallel sharding to %s", layer)
-    else:
-        xs.mark_sharding(layer.weight, mesh, ('x', None))
-        logger.info("Applied column-parallel sharding to %s", layer)
+    torchax_t = create_torchax_tensor_with_partition_spec(
+        layer.weight.data, mesh, ('x', None))
+    layer.weight = Parameter(torchax_t,
+                             requires_grad=layer.weight.requires_grad)
+    logger.info("Applied column-parallel sharding to %s", layer)
     return layer
 
 
 def partition_row_parallel_linear(layer: torch.nn.Module,
                                   mesh: xs.Mesh) -> torch.nn.Module:
     assert isinstance(layer, RowParallelLinear)
-    if VLLM_TORCHAX_ENABLED:
 
-        def shard_output_hook(module, input, output):
-            sharding = NamedSharding(mesh, P('x', None))
-            new_output = output[0].apply_jax(jax.lax.with_sharding_constraint,
-                                             sharding)
-            return (new_output, output[1])
+    def shard_output_hook(module, input, output):
+        sharding = NamedSharding(mesh, P('x', None))
+        new_output = output[0].apply_jax(jax.lax.with_sharding_constraint,
+                                         sharding)
+        return (new_output, output[1])
 
-        torchax_t = create_torchax_tensor_with_partition_spec(
-            layer.weight.data, mesh, (None, 'x'))
-        layer.weight = Parameter(torchax_t,
-                                 requires_grad=layer.weight.requires_grad)
-        # layer.register_forward_hook(shard_output_hook)
-        logger.info("Applied row-parallel sharding to %s", layer)
-    else:
-        xs.mark_sharding(layer.weight, mesh, (None, 'x'))
-        logger.info("Applied row-parallel sharding to %s", layer)
+    torchax_t = create_torchax_tensor_with_partition_spec(
+        layer.weight.data, mesh, (None, 'x'))
+    layer.weight = Parameter(torchax_t,
+                             requires_grad=layer.weight.requires_grad)
+    # layer.register_forward_hook(shard_output_hook)
+    logger.info("Applied row-parallel sharding to %s", layer)
     return layer
 
 
@@ -392,7 +377,7 @@ def shard_model(model: torch.nn.Module, mesh: "xs.Mesh") -> None:
                 break
 
         # Replicate the weights and buffers if the module is not processed
-        if not model_processed and VLLM_TORCHAX_ENABLED and mesh is not None:
+        if not model_processed and mesh is not None:
             replicate_weights_buffers(module, mesh)
 
         for child_name, child_module in list(module.named_children()):
