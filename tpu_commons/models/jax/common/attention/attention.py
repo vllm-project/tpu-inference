@@ -75,6 +75,11 @@ MLAConfig = make_dataclass(
 
 MLAConfig.__doc__ = f"""Configuration for the MLA module.
          Attributes:
+        {HuggingFaceArgNames.HIDDEN_SIZE.value}: The dimension of the model.
+        {HuggingFaceArgNames.NUM_ATTENTION_HEADS.value}: The number of query heads.
+        {HuggingFaceArgNames.NUM_KEY_VALUE_HEADS.value}: The number of key/value heads.
+        {HuggingFaceArgNames.ROPE_THETA.value}: The base period for Rotary Position Embeddings.
+        {HuggingFaceArgNames.ROPE_SCALING.value}: Optional dictionary of scaling factors for RoPE.
         {HuggingFaceArgNames.Q_LORA_RANK.value}: The dimension for the latent query vector.
         {HuggingFaceArgNames.KV_LORA_RANK.value}: The dimension for the latent key/value vector.
         {HuggingFaceArgNames.QK_NOPE_HEAD_DIM.value}: The dimension of the no rope portion of the qv tensor.
