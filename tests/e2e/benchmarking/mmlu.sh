@@ -24,7 +24,7 @@ TIMEOUT_SECONDS=1200
 TARGET_ROUGE1="40"
 TARGET_THROUGHPUT="1500"
 
-model_list="Qwen/Qwen2.5-1.5B-Instruct meta-llama/Llama-3.1-8B-Instruct"
+model_list="Qwen/Qwen2.5-1.5B-Instruct Qwen/Qwen2.5-0.5B-Instruct meta-llama/Llama-3.1-8B-Instruct"
 root_dir=/workspace
 dataset_name=mlperf
 dataset_path=""
@@ -38,7 +38,7 @@ helpFunction()
    echo -e "\t-r The path your root directory containing both 'vllm' and 'tpu_commons' (default: /workspace/, which is used in the Dockerfile)"
    echo -e "\t-d The dataset name (default: mlperf, which will download the dataset)"
    echo -e "\t-p The path to the processed MLPerf dataset (default: None, which will download the dataset)"
-   echo -e "\t-m A space-separated list of HuggingFace model ids to use (default: Qwen/Qwen2.5-1.5B-Instruct and meta-llama/Llama-3.1-8B-Instruct)"
+   echo -e "\t-m A space-separated list of HuggingFace model ids to use (default: Qwen/Qwen2.5-1.5B-Instruct, Qwen/Qwen2.5-0.5B-Instruct, and meta-llama/Llama-3.1-8B-Instruct)"
    echo -e "\t-n Number of prompts to use for the benchmark (default: 10)"
    exit 1
 }
@@ -203,6 +203,12 @@ for model_name in $model_list; do
     echo "--------------------------------------------------"
     echo "Running benchmark for model: $model_name"
     echo "--------------------------------------------------"
+
+    if [ "$MODEL_IMPL_TYPE" == "vllm" ] && [ "$model_name" == "Qwen/Qwen2.5-0.5B-Instruct" ]; then
+        echo "Skipping $model_name for MODEL_IMPL_TYPE: vllm"
+        continue
+    fi
+
     # Spin up the vLLM server
     echo "Spinning up the vLLM server..."
     (vllm serve "$model_name" --max-model-len=1024 --disable-log-requests --max-num-batched-tokens 8192 2>&1 | tee -a "$LOG_FILE") &
