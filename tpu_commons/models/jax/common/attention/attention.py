@@ -18,6 +18,7 @@ from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
 from tpu_commons.models.jax.common.sharding import ShardingConfig
 from tpu_commons.models.jax.layers.rope import apply_rope
+from tpu_commons.models.jax.quantization_utils import quantize
 
 KVCache = Tuple[jax.Array, jax.Array]
 
@@ -245,6 +246,12 @@ class Attention(nnx.Module):
                   `(seq, num_q_heads, head_dim)`.
         """
         md = attention_metadata
+        k_scale, v_scale = None, None
+        # TODO jacobplatin: probably want a more robust check
+        is_kv_cache_quantized = kv_cache.dtype != jnp.bfloat16
+        if is_kv_cache_quantized:
+            k, k_scale = quantize(kv_cache[0], kv_cache.dtype)
+            v, v_scale = quantize(kv_cache[1], kv_cache.dtype)
         kv_cache = update_kv_cache(k_SKH, v_SKH, kv_cache, md.slot_mapping,
                                    md.num_slices, mesh)
 
@@ -259,6 +266,8 @@ class Attention(nnx.Module):
             P(),  # md.block_tables: Replicated
             P(),  # md.query_start_loc: Replicated
             P(),  # md.num_seqs: Replicated
+            P(),  # k_scale
+            P(),  # v_scale
         )
         out_specs = P(*self.sharding_cfg.generate_rules.attn_o_tnh
                       )  # output_TNH: Shard the 'model' dimension
@@ -290,6 +299,8 @@ class Attention(nnx.Module):
                 md.block_tables,
                 md.query_start_loc,
                 md.num_seqs,
+                k_scale,
+                v_scale,
             )
 
         return kv_cache, output_TNH

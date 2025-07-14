@@ -17,14 +17,20 @@ from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 logger = init_logger(__name__)
 
 
-def quantize_model(model: nnx.Module, quant_dtype: jnp.dtype, params, rng,
-                   mesh, vllm_config: VllmConfig):
-    print(f"Quantizing model with dtype: {quant_dtype}")
+def quantize_model(model: nnx.Module,
+                   quant_dtype: jnp.dtype,
+                   rng: jax.Array,
+                   mesh: Mesh,
+                   vllm_config: VllmConfig,
+                   rules: list = None):
+    logger.info(f"Quantizing model with dtype: {quant_dtype}")
     logger.info(f"Memory usage before applying quantization of params: "
                 f"hbm={utils.hbm_usage_gb(jax.local_devices())}Gb")
     # TODO: make this use the config
     # Note that was getting an error of not being a multiple of 128 if using tile_size > 128
     tile_size = None
+
+    # TODO: rules
 
     rules = [
         qwix.QuantizationRule(
@@ -70,27 +76,21 @@ def quantize_model(model: nnx.Module, quant_dtype: jnp.dtype, params, rng,
                                                0,
                                                100,
                                                dtype=jnp.int32),
+            slot_mapping=jax.random.randint(rng, (3, 128),
+                                            0,
+                                            100,
+                                            dtype=jnp.int32),
+            block_tables=jax.random.randint(rng, (256, 128),
+                                            0,
+                                            100,
+                                            dtype=jnp.int32),
             seq_lens=jax.random.randint(rng, (256, ), 0, 100, dtype=jnp.int32),
-            block_indices=jax.random.randint(rng, (256, 16),
-                                             0,
-                                             100,
-                                             dtype=jnp.int32),
-            kv_cache_write_indices=jax.random.randint(rng, (3, 128),
-                                                      0,
-                                                      100,
-                                                      dtype=jnp.int32),
-            num_decode_seqs=jax.random.randint(rng, (1),
+            query_start_loc=jax.random.randint(rng, (257, ),
                                                0,
                                                100,
                                                dtype=jnp.int32),
-            prefill_query_start_offsets=jax.random.randint(rng, (257),
-                                                           0,
-                                                           100,
-                                                           dtype=jnp.int32),
-            num_prefill_seqs=jax.random.randint(rng, (1),
-                                                0,
-                                                100,
-                                                dtype=jnp.int32),
+            num_seqs=jax.random.randint(rng, (1, ), 0, 100, dtype=jnp.int32),
+            num_slices=jax.random.randint(rng, (1, ), 0, 100, dtype=jnp.int32),
         ),
     }
     model = qwix.quantize_model(model, qwix.PtqProvider(rules), **model_input)
@@ -131,6 +131,21 @@ def _get_common_model(
 ) -> nnx.Module:
     model = model_class(vllm_config, rng, mesh)
     model.load_weights(model)
+    quant_dtype = vllm_config.additional_config.get("quantization",
+                                                    {}).get("dtype", None)
+    quant_rules_override = vllm_config.additional_config.get(
+        "quantization", {}).get("rules", None)
+    if quant_dtype:
+        if quant_rules_override:
+            raise ValueError(
+                "Cannot specify both quantization rules and quantization dtype in your quantization config"
+            )
+        model = quantize_model(model,
+                               quant_dtype,
+                               rng,
+                               mesh,
+                               vllm_config,
+                               rules=quant_rules_override)
     return model
 
 
@@ -149,11 +164,6 @@ def _get_nnx_model(
             pspecs = nnx.get_partition_spec(state)
             sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
             nnx.update(model, sharded_state)
-            quant_dtype = os.environ.get("QUANT_DTYPE", None)
-            if quant_dtype:
-                model = quantize_model(model, quant_dtype, None, rng, mesh,
-                                       vllm_config)
-            return model
 
         with mesh:
             jit_model = create_sharded_model()
@@ -178,10 +188,6 @@ def _get_nnx_model(
         def create_jit_model(model):
             state = nnx.state(model)
             nnx.update(model, state)
-            quant_dtype = os.environ.get("QUANT_DTYPE", None)
-            if quant_dtype:
-                model = quantize_model(model, quant_dtype, None, rng, mesh,
-                                       vllm_config)
             return model
 
         with mesh:

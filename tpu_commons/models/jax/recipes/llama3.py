@@ -26,11 +26,9 @@ from tpu_commons.models.jax.common.sharding import (Sharding, ShardingConfig,
 from tpu_commons.models.jax.common.transformer_block import (
     TransformerBlock, TransformerBlockConfig)
 from tpu_commons.models.jax.layers.misc import shard_put
-from tpu_commons.models.jax.layers.sampling import sample
 from tpu_commons.models.jax.recipes.recipe import RecipeConfig
 from tpu_commons.models.jax.utils.weight_utils import (ParameterType,
                                                        WeightLoader, get_param)
-from tpu_commons.sample.metadata_jax import TPUSupportedSamplingMetadata
 
 logger = init_logger(__name__)
 pp = pprint.PrettyPrinter(depth=6)
@@ -164,7 +162,8 @@ class Llama3_8B(Model):
 
     def load_weights(self, rng: PRNGKey, cache_dir: Optional[str] = None):
         try:
-            use_random_weights = self.vllm_config.additional_config["random_weights"]
+            use_random_weights = self.vllm_config.additional_config[
+                "random_weights"]
             logger.warning(
                 "Using randomly initialized weights instead of loading parameter weights."
             )
@@ -172,9 +171,9 @@ class Llama3_8B(Model):
         except KeyError:
             use_random_weights = False
         weight_loader = Llama3WeightLoader(vllm_config=self.vllm_config,
-                                            model_config=self.cfg.model,
-                                            cache_dir=None,
-                                            sharding_cfg=self.cfg.sharding)
+                                           model_config=self.cfg.model,
+                                           cache_dir=None,
+                                           sharding_cfg=self.cfg.sharding)
         weight_loader.load_weights(self)
 
     def __call__(
@@ -182,7 +181,6 @@ class Llama3_8B(Model):
         kv_caches: List[jax.Array],
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
-        tpu_sampling_metadata: TPUSupportedSamplingMetadata,
         logits_indices: jax.Array = None,
         *args,
     ) -> Tuple[List[KVCacheType], jax.Array, jax.Array]:
@@ -197,15 +195,7 @@ class Llama3_8B(Model):
         final_activation = self.final_norm(x)
         final_activation = final_activation[logits_indices]
         decoder_output = self.lm_head.decode(final_activation)
-
-        next_tokens = sample(
-            self.rng.params(),
-            self.mesh,
-            decoder_output,
-            tpu_sampling_metadata,
-        )
-
-        return kv_caches, next_tokens, decoder_output
+        return kv_caches, decoder_output
 
 
 class Llama3WeightLoader(WeightLoader):
