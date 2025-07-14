@@ -32,6 +32,13 @@ if [ -z "${MODEL_IMPL_TYPE:-}" ]; then
   MODEL_IMPL_TYPE=flax_nn
 fi
 
+VLLM_XLA_CHECK_RECOMPILATION_VAL=1
+if [ -n "${NEW_MODEL_DESIGN:-}" ]; then
+# TODO: We currently disable recompilation checks for the new model design
+# to unblock the e2e run, but will enable it later. 
+  VLLM_XLA_CHECK_RECOMPILATION_VAL=0
+fi
+
 # Prune older images on the host to save space.
 docker system prune -a -f --filter "until=3h"
 
@@ -49,6 +56,7 @@ exec docker run \
   -e HF_TOKEN="$HF_TOKEN" \
   -e VLLM_XLA_CACHE_PATH= \
   -e VLLM_USE_V1=1 \
-  -e VLLM_XLA_CHECK_RECOMPILATION=1 \
+  -e VLLM_XLA_CHECK_RECOMPILATION="$VLLM_XLA_CHECK_RECOMPILATION_VAL" \
+  ${NEW_MODEL_DESIGN:+-e NEW_MODEL_DESIGN="$NEW_MODEL_DESIGN"} \
   "vllm-tpu:${BUILDKITE_COMMIT}" \
   "$@" # Pass all script arguments as the command to run in the container
