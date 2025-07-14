@@ -28,6 +28,8 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas.ops.tpu.ragged_paged_attention.tuned_block_sizes import \
     get_tuned_block_sizes
+from qwix.core import qarray
+from qwix.core.einsum import einsum as qwix_einsum
 
 DEFAULT_MASK_VALUE = -0.7 * float(jnp.finfo(jnp.dtype("float32")).max)
 
@@ -82,8 +84,8 @@ def ref_ragged_paged_attention(
     sliding_window: int | None = None,
     soft_cap: float | None = None,
     mask_value: float | None = DEFAULT_MASK_VALUE,
-    k_scale: float | None = None,
-    v_scale: float | None = None,
+    k_scale: jax.Array | None = None,
+    v_scale: jax.Array | None = None,
 ):
     static_validate_inputs(
         queries,
@@ -120,10 +122,10 @@ def ref_ragged_paged_attention(
         v = kv_pages[indices, :, 1::2, :].reshape(-1, num_kv_heads,
                                                   head_dim)[:kv_len]
         if k_scale is not None:
-            k = k.astype(jnp.float32) * k_scale
+            k = k.astype(jnp.float32) * jnp.broadcast_to(k_scale, k.shape)
             k = k.astype(q.dtype)
         if v_scale is not None:
-            v = v.astype(jnp.float32) * v_scale
+            v = v.astype(jnp.float32) * jnp.broadcast_to(v_scale, v.shape)
             v = v.astype(q.dtype)
         k = jnp.repeat(k, num_query_per_kv, axis=1)
         v = jnp.repeat(v, num_query_per_kv, axis=1)
@@ -163,8 +165,8 @@ def dynamic_validate_inputs(
     sliding_window: int | None = None,
     soft_cap: float | None = None,
     mask_value: float | None = None,
-    k_scale: float | None = None,
-    v_scale: float | None = None,
+    k_scale: jax.Array | None = None,
+    v_scale: jax.Array | None = None,
     # Kernel tuning params.
     num_kv_pages_per_block: int | None = None,
     num_queries_per_block: int | None = None,
@@ -227,8 +229,8 @@ def static_validate_inputs(
     sliding_window: int | None = None,
     soft_cap: float | None = None,
     mask_value: float | None = None,
-    k_scale: float | None = None,
-    v_scale: float | None = None,
+    k_scale: jax.Array | None = None,
+    v_scale: jax.Array | None = None,
     # Kernel tuning params.
     num_kv_pages_per_block: int | None = None,
     num_queries_per_block: int | None = None,
@@ -237,8 +239,10 @@ def static_validate_inputs(
     _, num_q_heads, head_dim = q.shape
     _, _, num_combined_kv_heads, head_dim_k = kv_pages.shape
     assert num_combined_kv_heads % 2 == 0
-    assert isinstance(k_scale, float) or k_scale is None
-    assert isinstance(v_scale, float) or v_scale is None
+    assert (isinstance(k_scale, jax.Array)
+            and k_scale.shape == (1, )) or k_scale is None
+    assert (isinstance(v_scale, jax.Array)
+            and v_scale.shape == (1, )) or v_scale is None
     num_kv_heads = num_combined_kv_heads // 2
     max_num_seqs, pages_per_seq = page_indices.shape
     if num_seqs.shape != (1, ):
@@ -289,6 +293,8 @@ def ragged_paged_attention_kernel(
     seq_buf_idx_ref,
     # TODO(jevinjiang): if OOM in SMEM, consider pack to other scalar refs.
     num_seqs_ref,
+    k_scale_ref,
+    v_scale_ref,
     # Input
     q_ref,  # [num_q_per_blk, num_q_heads_per_blk, head_dim]
     kv_pages_hbm_ref,  # [total_num_pages, page_size, num_combined_kv_heads, head_dim]
@@ -305,8 +311,6 @@ def ragged_paged_attention_kernel(
     sliding_window: int | None = None,
     soft_cap: float | None = None,
     mask_value: float | None = DEFAULT_MASK_VALUE,
-    k_scale: float | None = None,
-    v_scale: float | None = None,
 ):
     if mask_value is None:
         mask_value = DEFAULT_MASK_VALUE
@@ -442,15 +446,16 @@ def ragged_paged_attention_kernel(
             return next_heads_blk_idx, next_seq_idx, next_kv_blk_idx, next_buf_idx
 
         def flash_attention(
-            q,  # [num_q_per_blk * num_q_heads_per_kv_head, head_dim]
-            k,  # [num_kv_per_blk, head_dim]
-            v,  # [num_kv_per_blk, head_dim]
-            head_l_ref,  # [num_q_per_blk * num_q_heads_per_kv_head, 128]
-            head_m_ref,  # [num_q_per_blk * num_q_heads_per_kv_head, 128]
-            head_acc_ref,  # [num_q_per_blk, num_q_heads_per_kv_head, head_dim]
-            *,
-            kv_blk_idx,
-        ):
+                q,  # [num_q_per_blk * num_q_heads_per_kv_head, head_dim]
+                k,  # [num_kv_per_blk, head_dim]
+                v,  # [num_kv_per_blk, head_dim]
+                head_l_ref,  # [num_q_per_blk * num_q_heads_per_kv_head, 128]
+                head_m_ref,  # [num_q_per_blk * num_q_heads_per_kv_head, 128]
+                head_acc_ref,  # [num_q_per_blk, num_q_heads_per_kv_head, head_dim]
+                *,
+                kv_blk_idx,
+                k_scale=None,
+                v_scale=None):
             assert q.shape == (
                 num_q_per_blk * num_q_heads_per_kv_head,
                 head_dim,
@@ -489,9 +494,12 @@ def ragged_paged_attention_kernel(
             k = jnp.where(kv_mask, k.astype(jnp.float32), 0).astype(k.dtype)
             v = jnp.where(kv_mask, v.astype(jnp.float32), 0).astype(v.dtype)
 
-            qk = (jnp.einsum(
-                "nd,md->nm", q, k, preferred_element_type=jnp.float32) *
-                  sm_scale)
+            einsum = functools.partial(jnp.einsum,
+                                       preferred_element_type=jnp.float32)
+            if k_scale is not None:
+                k = qarray.QArray(k, k_scale, zero_point=None, qtype=k.dtype)
+                einsum = qwix_einsum
+            qk = (einsum("nd,md->nm", q, k) * sm_scale)
             store_start = jnp.maximum(q_start - q_len_start, 0)
             store_end = jnp.minimum(q_end - q_len_start, num_q_per_blk)
 
@@ -516,7 +524,12 @@ def ragged_paged_attention_kernel(
             qk += jnp.where(causal_mask, mask_value, 0.0)
             m_curr = jnp.max(qk, axis=1, keepdims=True)
             s_curr = jnp.exp(qk - m_curr)
-            qkv = jnp.dot(s_curr, v, preferred_element_type=jnp.float32)
+            if k_scale is not None:
+                v = qarray.QArray(v, v_scale, zero_point=None, qtype=v.dtype)
+                qkv = qwix_einsum("nm,md->nd", s_curr, v)
+                # s_curr = qarray.dequantize(s_curr)
+            else:
+                qkv = jnp.dot(s_curr, v, preferred_element_type=jnp.float32)
             lm_store_shape = head_m_ref.shape
             m_curr = jnp.broadcast_to(m_curr, lm_store_shape)
             l_curr = jnp.broadcast_to(s_curr.sum(axis=1, keepdims=True),
@@ -602,14 +615,13 @@ def ragged_paged_attention_kernel(
                 for step_idx in range(kv_load_step):
                     k = k_list[step_idx]
                     v = v_list[step_idx]
-                    if k_scale is not None:
-                        # NOTE: Conversion between arbitrary data types is not supported.
-                        # That's why it is converted to float32 first.
-                        k = k.astype(jnp.float32) * k_scale
-                        k = k.astype(q_ref.dtype)
-                    if v_scale is not None:
-                        v = v.astype(jnp.float32) * v_scale
-                        v = v.astype(q_ref.dtype)
+
+                    k_scale, v_scale = None, None
+                    if k_scale_ref is not None:
+                        k_scale = k_scale_ref[0]
+                    if v_scale_ref is not None:
+                        v_scale = v_scale_ref[0]
+
                     kv_head_idx = kv_head_chunk_idx + step_idx
                     q_head_idx = kv_head_idx * num_q_heads_per_kv_head
                     # TODO(jevinjiang): extra handling for packed type that can start at
@@ -625,6 +637,8 @@ def ragged_paged_attention_kernel(
                         acc_ref.at[:, q_head_idx:q_head_idx +
                                    num_q_heads_per_kv_head, :],
                         kv_blk_idx=kv_blk_idx,
+                        k_scale=k_scale,
+                        v_scale=v_scale,
                     )
             return kv_blk_idx + 1, next_buf_idx
 
@@ -701,8 +715,8 @@ def get_min_heads_per_blk(num_q_heads, num_combined_kv_heads, q_dtype,
         "vmem_limit_bytes",
         "sliding_window",
         "soft_cap",
-        "k_scale",
-        "v_scale",
+        # "k_scale",
+        # "v_scale",
     ],
 )
 def ragged_paged_attention(
@@ -714,13 +728,13 @@ def ragged_paged_attention(
     page_indices: jax.Array,  # i32[max_num_seqs, pages_per_seq]
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     num_seqs: jax.Array,  # i32[1]
+    k_scale: jax.Array | None,
+    v_scale: jax.Array | None,
     *,
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
     soft_cap: float | None = None,
     mask_value: float | None = DEFAULT_MASK_VALUE,
-    k_scale: float | None = None,
-    v_scale: float | None = None,
     num_kv_pages_per_block: int | None = None,
     num_queries_per_block: int | None = None,
     vmem_limit_bytes: int | None = None,
@@ -843,6 +857,8 @@ def ragged_paged_attention(
         cu_q_lens,
         jnp.array((0, 0), jnp.int32),  # seq_idx, buf_idx
         num_seqs,
+        k_scale,
+        v_scale,
     )
     kernel = pl.pallas_call(
         functools.partial(
@@ -851,8 +867,6 @@ def ragged_paged_attention(
             sliding_window=sliding_window,
             soft_cap=soft_cap,
             mask_value=mask_value,
-            k_scale=k_scale,
-            v_scale=v_scale,
         ),
         grid_spec=pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=len(scalar_prefetches),

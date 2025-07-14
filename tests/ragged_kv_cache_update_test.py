@@ -6,6 +6,7 @@ from jax._src import test_util as jtu
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
+from tpu_commons.kernels.quantized_kvcache import quantize
 from tpu_commons.kernels.ragged_kv_cache_update import kv_cache_update
 
 
@@ -21,14 +22,18 @@ def kv_cache_update_ref(new_kv, slot_mapping, kv_cache):
 @jtu.with_config(jax_numpy_dtype_promotion="standard")
 class KVCacheUpdateTest(jtu.JaxTestCase):
 
-    def _generate_data(self, page_size, combined_kv_head_num, head_dim,
-                       num_slices_per_block):
+    def _generate_data(self,
+                       page_size,
+                       combined_kv_head_num,
+                       head_dim,
+                       num_slices_per_block,
+                       kv_cache_dtype=jnp.bfloat16):
         page_num = 20
         padded_num_tokens = 128
         prng_key = jax.random.key(1234)
         kv_cache = jnp.zeros(
             (page_num * page_size, combined_kv_head_num, head_dim),
-            dtype=jnp.bfloat16)
+            dtype=kv_cache_dtype)
         new_kv = jax.random.normal(
             prng_key, (padded_num_tokens, combined_kv_head_num, head_dim),
             dtype=jnp.bfloat16)
@@ -60,12 +65,25 @@ class KVCacheUpdateTest(jtu.JaxTestCase):
         combined_kv_head_num=[2, 16],
         head_dim=[128, 256],
         num_slices_per_block=[4, 8],
+        kv_cache_dtype=[jnp.bfloat16, jnp.int8],
     )
     def test_basic(self, page_size: int, combined_kv_head_num: int,
-                   head_dim: int, num_slices_per_block: int):
+                   head_dim: int, num_slices_per_block: int,
+                   kv_cache_dtype: jnp.dtype):
         new_kv, slot_mapping, kv_cache, num_slices = self._generate_data(
-            page_size, combined_kv_head_num, head_dim, num_slices_per_block)
+            page_size,
+            combined_kv_head_num,
+            head_dim,
+            num_slices_per_block,
+            kv_cache_dtype=kv_cache_dtype)
         old_kv_cache_copy = kv_cache.copy()
+
+        is_kv_cache_quantized = kv_cache.dtype != jnp.bfloat16
+        if is_kv_cache_quantized and combined_kv_head_num == 2:
+            self.skipTest(
+                "Quantization not supported for combined_kv_head_num=2")
+        if is_kv_cache_quantized:
+            new_kv, _ = quantize(new_kv, kv_cache_dtype)
 
         updated_kv_cache = kv_cache_update(
             new_kv,

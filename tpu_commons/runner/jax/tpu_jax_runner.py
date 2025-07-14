@@ -4,7 +4,7 @@ import random
 import time
 from contextlib import nullcontext
 from dataclasses import asdict
-from typing import Any, List, Optional, cast
+from typing import Any, List, Optional, Tuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -33,6 +33,7 @@ from tpu_commons.runner.tpu_torch_xla_runner import (_get_padded_token_len,
                                                      _get_req_paddings,
                                                      _get_token_paddings)
 from tpu_commons.runner.utils import (ForbidCompile, LatencyTracker,
+                                      get_jnp_dtype_from_str,
                                       get_padded_num_reqs_with_upper_limit)
 from tpu_commons.sample.metadata_jax import TPUSupportedSamplingMetadata
 
@@ -214,7 +215,8 @@ class TPUModelRunner():
         return kv_cache_spec
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
-        self.kv_caches: List[jax.Array] = []
+        self.kv_caches: List[jax.Array] | List[Tuple[jax.Array,
+                                                     jax.Array]] = []
 
         kv_cache_groups = kv_cache_config.kv_cache_groups
         if len(kv_cache_groups) > 1:
@@ -224,7 +226,18 @@ class TPUModelRunner():
 
         kv_cache_spec = kv_cache_groups[0].kv_cache_spec
         layer_names = kv_cache_groups[0].layer_names
+
+        # TODO (jacobplatin): figure out how to make this part of the kv_cache_config instead of an env var
+        maybe_quantized_kv_cache_dtype = os.environ.get(
+            "QUANTIZED_KV_CACHE_DTYPE")
+        self.is_kv_cache_quantized = False
+
         cache_dtype = jnp.bfloat16
+        if maybe_quantized_kv_cache_dtype is not None:
+            self.is_kv_cache_quantized = True
+            cache_dtype = get_jnp_dtype_from_str(
+                maybe_quantized_kv_cache_dtype)
+
         # TODO(xiang): fix this together with get_kv_cache_spec
         # cache_dtype = kv_cache_spec.dtype
 
@@ -252,6 +265,7 @@ class TPUModelRunner():
         logger.info(f"Init kv-cache | "
                     f"shape={len(layer_names)} * {cache_shape} | "
                     f"sharding={sharding} | "
+                    f"dtype={cache_dtype} | "
                     f"hbm={utils.hbm_usage_gb(self.devices)}Gb")
 
     def _precompile_backbone(self) -> None:

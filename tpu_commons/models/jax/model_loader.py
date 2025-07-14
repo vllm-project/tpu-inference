@@ -3,14 +3,98 @@ import os
 from typing import Any
 
 import jax
+import jax.numpy as jnp
+import qwix
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 
+from tpu_commons import utils_jax as utils
 from tpu_commons.logger import init_logger
+from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 
 logger = init_logger(__name__)
+
+
+def quantize_model(model: nnx.Module, quant_dtype: jnp.dtype, params, rng,
+                   mesh, vllm_config: VllmConfig):
+    print(f"Quantizing model with dtype: {quant_dtype}")
+    logger.info(f"Memory usage before applying quantization of params: "
+                f"hbm={utils.hbm_usage_gb(jax.local_devices())}Gb")
+    # TODO: make this use the config
+    # Note that was getting an error of not being a multiple of 128 if using tile_size > 128
+    tile_size = None
+
+    rules = [
+        qwix.QuantizationRule(
+            module_path='.*self_attn.*',
+            weight_qtype='int8',  # quantizes weights in int8.
+        ),
+        qwix.QuantizationRule(
+            # module_path='.*',
+            module_path='.*mlp.*',
+            weight_qtype=quant_dtype,
+            act_qtype=quant_dtype,
+            tile_size=tile_size,
+        ),
+    ]
+
+    # TODO: make this use the config
+    cache_shape = (1691, 128, 16, 128)
+    kv_caches = []
+    cache_dtype = jnp.bfloat16
+
+    sharding = NamedSharding(mesh, PartitionSpec(None, None, "model"))
+
+    def _allocate() -> Any:
+        return jnp.empty(
+            shape=cache_shape,
+            dtype=cache_dtype,
+        )
+
+    sharded_allocate = jax.jit(_allocate, out_shardings=sharding)
+    num_decoder_layers = vllm_config.model_config.hf_config.num_hidden_layers
+    for _ in range(num_decoder_layers):
+        kv_cache = sharded_allocate()
+        kv_caches.append(kv_cache)
+
+    model_input = {
+        "kv_caches":
+        kv_caches,
+        "input_ids":
+        jax.random.randint(rng, (128, ), 0, 100, dtype=jnp.int32),
+        "attention_metadata":
+        AttentionMetadata(
+            input_positions=jax.random.randint(rng, (128),
+                                               0,
+                                               100,
+                                               dtype=jnp.int32),
+            seq_lens=jax.random.randint(rng, (256, ), 0, 100, dtype=jnp.int32),
+            block_indices=jax.random.randint(rng, (256, 16),
+                                             0,
+                                             100,
+                                             dtype=jnp.int32),
+            kv_cache_write_indices=jax.random.randint(rng, (3, 128),
+                                                      0,
+                                                      100,
+                                                      dtype=jnp.int32),
+            num_decode_seqs=jax.random.randint(rng, (1),
+                                               0,
+                                               100,
+                                               dtype=jnp.int32),
+            prefill_query_start_offsets=jax.random.randint(rng, (257),
+                                                           0,
+                                                           100,
+                                                           dtype=jnp.int32),
+            num_prefill_seqs=jax.random.randint(rng, (1),
+                                                0,
+                                                100,
+                                                dtype=jnp.int32),
+        ),
+    }
+    model = qwix.quantize_model(model, qwix.PtqProvider(rules), **model_input)
+    return model
 
 
 def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
@@ -65,6 +149,10 @@ def _get_nnx_model(
             pspecs = nnx.get_partition_spec(state)
             sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
             nnx.update(model, sharded_state)
+            quant_dtype = os.environ.get("QUANT_DTYPE", None)
+            if quant_dtype:
+                model = quantize_model(model, quant_dtype, None, rng, mesh,
+                                       vllm_config)
             return model
 
         with mesh:
@@ -90,6 +178,10 @@ def _get_nnx_model(
         def create_jit_model(model):
             state = nnx.state(model)
             nnx.update(model, state)
+            quant_dtype = os.environ.get("QUANT_DTYPE", None)
+            if quant_dtype:
+                model = quantize_model(model, quant_dtype, None, rng, mesh,
+                                       vllm_config)
             return model
 
         with mesh:

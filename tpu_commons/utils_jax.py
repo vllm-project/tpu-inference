@@ -2,9 +2,13 @@
 from typing import Any, List, Tuple
 
 import jax
+import jax.tree_util
 from ray._private.accelerators import TPUAcceleratorManager
 
 from tpu_commons.core import PATHWAYS_ENABLED
+from tpu_commons.logger import init_logger
+
+logger = init_logger(__name__)
 
 GBYTES = 1024 * 1024 * 1024
 

@@ -6,6 +6,7 @@ import functools
 import time
 from typing import Optional
 
+import jax.numpy as jnp
 from jax._src.interpreters import pxla
 from vllm.logger import init_logger
 
@@ -123,3 +124,26 @@ class ForbidCompile:
             pxla._cached_lowering_to_hlo = self._original_func
         # Don't suppress any exceptions that occurred inside the 'with' block
         return False
+
+
+def get_jnp_dtype_from_str(dtype_str: str) -> type:
+    """
+    Gets the JAX numpy dtype from a string.
+    Args:
+      dtype_str: The string representation of the dtype.
+    Returns:
+      The JAX numpy dtype.
+    """
+    str_to_dtype_dict = {
+        "float32": jnp.float32,
+        "float16": jnp.float16,
+        "bfloat16": jnp.bfloat16,
+        "int8": jnp.int8,
+        "fp8": jnp.
+        float8_e4m3fn  # TODO (jacobplatin): is this the correct float8 dtype?
+    }
+
+    if dtype_str not in str_to_dtype_dict:
+        raise ValueError(f"Unsupported dtype: {dtype_str}")
+
+    return str_to_dtype_dict[dtype_str]
