@@ -104,16 +104,12 @@ def update_kv_cache(k: jax.Array, v: jax.Array, kv_cache: jax.Array,
     """
     L, S, K_2, H = kv_cache.shape
     T, K, H = k.shape
-    
-    print(f"update_kv_cache input shapes: kv_cache={kv_cache.shape}, k={k.shape}, v={v.shape}")
-    print(f"L={L}, S={S}, K_2={K_2}, H={H}")
 
     # (T, K*2, H)
     # NOTE(xiang): KV needs to be interleaved as required by kernel
     kv = jnp.concat([k, v], axis=-1).reshape(T, K_2, H)
-    
+
     kv_cache = kv_cache.reshape(-1, K_2, H)
-    print(f"Flattened kv_cache shape: {kv_cache.shape}")
     kv_cache = kv_cache_update(
         kv,
         slices,
@@ -123,7 +119,5 @@ def update_kv_cache(k: jax.Array, v: jax.Array, kv_cache: jax.Array,
         num_slices_per_block=NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK,
         mesh=mesh,
         kv_cache_pspec=P(None, "model", None))
-    print(f"After kv_cache_update shape: {kv_cache.shape}")
-    print(f"Trying to reshape to: ({L}, {S}, {K_2}, {H})")
     kv_cache = kv_cache.reshape(L, S, K_2, H)
     return kv_cache

@@ -110,7 +110,6 @@ class Attention(nnx.Module):
 
     def __post_init__(self):
         self.create_sharding()
-        # self._generate_kernel()
 
     def generate_kernel(self, rngs: nnx.Rngs):
         """Initializes the weight kernels for Q, K, V, and O projections."""
@@ -120,66 +119,57 @@ class Attention(nnx.Module):
         H = getattr(self.cfg, HuggingFaceArgNames.HEAD_DIM.value)
 
         self.kernel_q_proj_NDH = self.param_factory.create_kernel_param(
-            rngs, (N, D, H), self.ndh_sharding, self.cfg.dtype
-        )
+            rngs, (N, D, H), self.ndh_sharding, self.cfg.dtype)
         self.kernel_k_proj_KDH = self.param_factory.create_kernel_param(
-            rngs, (K, D, H), self.kdh_sharding, self.cfg.dtype
-        )
+            rngs, (K, D, H), self.kdh_sharding, self.cfg.dtype)
         self.kernel_v_proj_KDH = self.param_factory.create_kernel_param(
-            rngs, (K, D, H), self.kdh_sharding, self.cfg.dtype
-        )
+            rngs, (K, D, H), self.kdh_sharding, self.cfg.dtype)
         self.kernel_o_proj_NHD = self.param_factory.create_kernel_param(
-            rngs, (N, H, D), self.nhd_sharding, self.cfg.dtype
-        )
+            rngs, (N, H, D), self.nhd_sharding, self.cfg.dtype)
 
     def create_sharding(self):
         """Creates sharding rules for activations and weights."""
         mode_dependent_attrs = [
-            "activation_attention_td",
-            "activation_q_td",
-            "query_tnh",
-            "keyvalue_skh",
-            "activation_attention_out_td",
+            "activation_attention_td", "activation_q_td", "query_tnh",
+            "keyvalue_skh", "activation_attention_out_td"
         ]
         for attr_name in mode_dependent_attrs:
-            prefill_sharding_config = getattr(
-                self.sharding_cfg.prefill_rules, attr_name
-            )
+            prefill_sharding_config = getattr(self.sharding_cfg.prefill_rules,
+                                              attr_name)
             generate_sharding_config = getattr(
-                self.sharding_cfg.generate_rules, attr_name
-            )
+                self.sharding_cfg.generate_rules, attr_name)
 
             sharding_dict = {
-                "prefill": NamedSharding(self.mesh, P(*prefill_sharding_config)),
-                "generate": NamedSharding(self.mesh, P(*generate_sharding_config)),
+                'prefill': NamedSharding(self.mesh,
+                                         P(*prefill_sharding_config)),
+                'generate': NamedSharding(self.mesh,
+                                          P(*generate_sharding_config))
             }
             setattr(self, attr_name, sharding_dict)
 
         # static sharding for kernel/weights
         self.ndh_sharding = NamedSharding(
-            self.mesh, P(*self.sharding_cfg.generate_rules.attn_q_weight_ndh)
-        )
+            self.mesh, P(*self.sharding_cfg.generate_rules.attn_q_weight_ndh))
         self.kdh_sharding = NamedSharding(
-            self.mesh, P(*self.sharding_cfg.generate_rules.attn_k_weight_kdh)
-        )
+            self.mesh, P(*self.sharding_cfg.generate_rules.attn_k_weight_kdh))
         self.nhd_sharding = NamedSharding(
-            self.mesh, P(*self.sharding_cfg.generate_rules.attn_o_weight_nhd)
-        )
+            self.mesh, P(*self.sharding_cfg.generate_rules.attn_o_weight_nhd))
 
         # TODO: the pallas kernels of flash_attention/paged_attention need to be called
         # via shard_map with sharding specs, However, the q/k/v have been sharded outside of attention()
         # So we replicate the sharding below but it should be better organized if we use pallas kernels
         self.pallas_q_spec = {
-            "prefill": P(*self.sharding_cfg.prefill_rules.query_tnh),
-            "generate": P(*self.sharding_cfg.generate_rules.query_tnh),
+            'prefill': P(*self.sharding_cfg.prefill_rules.query_tnh),
+            'generate': P(*self.sharding_cfg.generate_rules.query_tnh)
         }
         self.pallas_kv_spec = {
-            "prefill": P(*self.sharding_cfg.prefill_rules.keyvalue_skh),
-            "generate": P(*self.sharding_cfg.generate_rules.keyvalue_skh),
+            'prefill': P(*self.sharding_cfg.prefill_rules.keyvalue_skh),
+            'generate': P(*self.sharding_cfg.generate_rules.keyvalue_skh)
         }
         self.pallas_cache_page_spec = {
-            "prefill": P(*self.sharding_cfg.prefill_rules.keyvalue_cache_lskh),
-            "generate": P(*self.sharding_cfg.generate_rules.keyvalue_cache_lskh),
+            'prefill': P(*self.sharding_cfg.prefill_rules.keyvalue_cache_lskh),
+            'generate':
+            P(*self.sharding_cfg.generate_rules.keyvalue_cache_lskh)
         }
 
     def __call__(
@@ -211,23 +201,33 @@ class Attention(nnx.Module):
         op_mode = "prefill" if is_prefill else "generate"
         md = attention_metadata
         x = jnp.asarray(x, self.cfg.dtype)
-        x_SD = nnx.with_sharding_constraint(x, self.activation_attention_td[op_mode])
+        x_SD = nnx.with_sharding_constraint(
+            x, self.activation_attention_td[op_mode])
         x_q_TD = nnx.with_sharding_constraint(x, self.activation_q_td[op_mode])
-        rope_scaling = getattr(self.cfg, HuggingFaceArgNames.ROPE_SCALING.value)
+        rope_scaling = getattr(self.cfg,
+                               HuggingFaceArgNames.ROPE_SCALING.value)
         rope_theta = getattr(self.cfg, HuggingFaceArgNames.ROPE_THETA.value)
         H = getattr(self.cfg, HuggingFaceArgNames.HEAD_DIM.value)
         with jax.named_scope("q_proj"):
-            q_TNH = jnp.einsum("TD,NDH -> TNH", x_q_TD, self.kernel_q_proj_NDH.value)
-            q_TNH = apply_rope(q_TNH, md.input_positions, H, rope_theta, rope_scaling)
-            q_TNH = nnx.with_sharding_constraint(q_TNH, self.query_tnh[op_mode])
+            q_TNH = jnp.einsum('TD,NDH -> TNH', x_q_TD,
+                               self.kernel_q_proj_NDH.value)
+            q_TNH = apply_rope(q_TNH, md.input_positions, H, rope_theta,
+                               rope_scaling)
+            q_TNH = nnx.with_sharding_constraint(q_TNH,
+                                                 self.query_tnh[op_mode])
         with jax.named_scope("k_proj"):
-            k_SKH = jnp.einsum("SD,KDH -> SKH", x_SD, self.kernel_k_proj_KDH.value)
-            k_SKH = apply_rope(k_SKH, md.input_positions, H, rope_theta, rope_scaling)
-            k_SKH = nnx.with_sharding_constraint(k_SKH, self.keyvalue_skh[op_mode])
+            k_SKH = jnp.einsum('SD,KDH -> SKH', x_SD,
+                               self.kernel_k_proj_KDH.value)
+            k_SKH = apply_rope(k_SKH, md.input_positions, H, rope_theta,
+                               rope_scaling)
+            k_SKH = nnx.with_sharding_constraint(k_SKH,
+                                                 self.keyvalue_skh[op_mode])
 
         with jax.named_scope("v_proj"):
-            v_SKH = jnp.einsum("SD,KDH -> SKH", x_SD, self.kernel_v_proj_KDH.value)
-            v_SKH = nnx.with_sharding_constraint(v_SKH, self.keyvalue_skh[op_mode])
+            v_SKH = jnp.einsum('SD,KDH -> SKH', x_SD,
+                               self.kernel_v_proj_KDH.value)
+            v_SKH = nnx.with_sharding_constraint(v_SKH,
+                                                 self.keyvalue_skh[op_mode])
 
         with jax.named_scope("attn_op"):
             new_kv_cache, outputs_TNH = self.attention(
@@ -241,12 +241,10 @@ class Attention(nnx.Module):
             )
 
         with jax.named_scope("o_proj"):
-            o_TD = jnp.einsum(
-                "TNH,NHD -> TD", outputs_TNH, self.kernel_o_proj_NHD.value
-            )
+            o_TD = jnp.einsum('TNH,NHD -> TD', outputs_TNH,
+                              self.kernel_o_proj_NHD.value)
             o_TD = nnx.with_sharding_constraint(
-                o_TD, self.activation_attention_out_td[op_mode]
-            )
+                o_TD, self.activation_attention_out_td[op_mode])
         return new_kv_cache, o_TD
 
     def get_cfg(self) -> AttentionConfig:
@@ -286,24 +284,23 @@ class Attention(nnx.Module):
                   `(seq, num_q_heads, head_dim)`.
         """
         md = attention_metadata
-        kv_cache = update_kv_cache(
-            k_SKH, v_SKH, kv_cache, md.slot_mapping, md.num_slices, mesh
-        )
+        kv_cache = update_kv_cache(k_SKH, v_SKH, kv_cache, md.slot_mapping,
+                                   md.num_slices, mesh)
 
         H = q_TNH.shape[-1]
-        # TODO: we use generate_rules as the default sharding for ragged_paged_attention,
+        #TODO: we use generate_rules as the default sharding for ragged_paged_attention,
         # but it could be configurable based on the op_mode.
         in_specs = (
             P(*self.sharding_cfg.generate_rules.query_tnh),  # q_TNH
-            P(*self.sharding_cfg.generate_rules.keyvalue_cache_lskh),  # kv_cache:
+            P(*self.sharding_cfg.generate_rules.keyvalue_cache_lskh
+              ),  # kv_cache:
             P(),  # md.seq_lens: Replicated
             P(),  # md.block_tables: Replicated
             P(),  # md.query_start_loc: Replicated
             P(),  # md.num_seqs: Replicated
         )
-        out_specs = P(
-            *self.sharding_cfg.generate_rules.attn_o_tnh
-        )  # output_TNH: Shard the 'model' dimension
+        out_specs = P(*self.sharding_cfg.generate_rules.attn_o_tnh
+                      )  # output_TNH: Shard the 'model' dimension
 
         def _ragged_paged_attention(*args):
             return ragged_paged_attention(
@@ -325,15 +322,14 @@ class Attention(nnx.Module):
                 in_specs=in_specs,
                 out_specs=out_specs,
                 check_rep=False,
+            ))(
+                q_TNH,
+                kv_cache,
+                md.seq_lens,
+                md.block_tables,
+                md.query_start_loc,
+                md.num_seqs,
             )
-        )(
-            q_TNH,
-            kv_cache,
-            md.seq_lens,
-            md.block_tables,
-            md.query_start_loc,
-            md.num_seqs,
-        )
 
         return kv_cache, output_TNH
 
@@ -392,7 +388,6 @@ class MLA(Attention):
             self.anh_sharding,
             self.cfg.dtype,
         )
-
         self.kernel_kv_down_proj_DA = self.param_factory.create_kernel_param(
             rngs,
             (self.D, self.kv_lora_rank + self.qk_rope_head_dim),
@@ -405,11 +400,9 @@ class MLA(Attention):
             self.anh_sharding,
             self.dtype,
         )
-
         self.kernel_o_proj_NHD = self.param_factory.create_kernel_param(
             rngs, (self.N, self.v_head_dim, self.D), self.nhd_sharding, self.cfg.dtype
         )
-
         self.q_rms_norm = nnx.RMSNorm(
             self.query_lora_rank,
             epsilon=self.rms_norm_eps,
@@ -454,7 +447,6 @@ class MLA(Attention):
             # Query down projection.
             q_TA = jnp.einsum("TD,DA -> TA", x_q_TD, self.kernel_q_down_proj_DA.value)
             q_TA = self.q_rms_norm(q_TA)
-
             # Query up projection.
             q_TNH = jnp.einsum("TA,ANH -> TNH", q_TA, self.kernel_q_up_proj_ANH.value)
             # Split the query into nope and rope.
@@ -467,12 +459,10 @@ class MLA(Attention):
                 self.rope_theta,
                 self.rope_scaling,
             )
-
             # Concatenate the nope and rope queries.
             q_TNH = jnp.concatenate([q_nope_TNH, q_rope_TNH], axis=-1)
             # Multiple the query by scaling factor
             q_TNH = q_TNH * self.qk_head_dim**-0.5
-
             q_TNH = nnx.with_sharding_constraint(q_TNH, self.query_tnh[op_mode])
 
         with jax.named_scope("kv_proj"):
@@ -480,7 +470,6 @@ class MLA(Attention):
             kv_SA = jnp.einsum("SD,DA -> SA", x_SD, self.kernel_kv_down_proj_DA.value)
             # Split the key and value into latent kv vector and k rope vector.
             k_rope_SH = kv_SA[..., self.kv_lora_rank :]
-
             # Reshape k_rope_BSH to include head dimension for RoPE application
             k_rope_SNH = k_rope_SH[..., None, :]
             k_rope_SNH = apply_rope(
@@ -490,14 +479,11 @@ class MLA(Attention):
                 self.rope_theta,
                 self.rope_scaling,
             )
-
             k_rope_SNH = jnp.broadcast_to(
                 k_rope_SNH, (k_rope_SNH.shape[0], self.N, self.qk_rope_head_dim)
             )
-
             kv_SA = kv_SA[..., : self.kv_lora_rank]
             kv_SA = self.kv_rms_norm(kv_SA)
-
             # KV up projection.
             kv_nope = jnp.einsum(
                 "SA,ANH -> SNH", kv_SA, self.kernel_kv_up_proj_ANH.value
@@ -505,10 +491,8 @@ class MLA(Attention):
             # Split the latent kv vector into k nope vector and v vector.
             k_nope_SNH = kv_nope[..., : self.qk_nope_head_dim]
             v_SNH = kv_nope[..., self.qk_nope_head_dim :]
-
             # Concatenate the key vector.
             k_SNH = jnp.concatenate([k_nope_SNH, k_rope_SNH], axis=-1)
-
             k_SNH = nnx.with_sharding_constraint(k_SNH, self.keyvalue_skh[op_mode])
             v_SNH = nnx.with_sharding_constraint(v_SNH, self.keyvalue_skh[op_mode])
 
@@ -531,7 +515,6 @@ class MLA(Attention):
             v_SNH = jnp.pad(
                 v_SNH, ((0, 0), (0, 0), (0, multiple_of_128 - self.v_head_dim))
             )
-
             new_kv_cache, outputs_TNH = self.attention(
                 is_prefill,
                 kv_cache,
@@ -590,7 +573,6 @@ class MLA(Attention):
         self.anh_sharding = NamedSharding(
             self.mesh, P(*self.sharding_cfg.generate_rules.attn_mla_kvb_weight_anh)
         )
-
         self.nhd_sharding = NamedSharding(
             self.mesh, P(*self.sharding_cfg.generate_rules.attn_o_weight_nhd)
         )
