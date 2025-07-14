@@ -363,6 +363,7 @@ def ragged_paged_attention_kernel(
         print("b_start", b_start)
         print("b_step", b_step)
         b = b_ref[b_start::b_step, :]
+        print("b", b.shape)
 
         # TODO(chengjiyao): use the general strided loading logic for bf16 after
         # fixing the issue in mosaic's infer vector layout pass
