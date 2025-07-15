@@ -15,6 +15,8 @@ from tpu_commons import utils_jax as utils
 from tpu_commons.logger import init_logger
 from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
 
+import ray
+
 logger = init_logger(__name__)
 
 
@@ -27,6 +29,7 @@ class TPUWorker(WorkerBase):
                  distributed_init_method: str,
                  is_driver_worker: bool = False,
                  devices=[]):
+        
         super().__init__(
             vllm_config=vllm_config,
             local_rank=local_rank,
@@ -34,10 +37,12 @@ class TPUWorker(WorkerBase):
             distributed_init_method=distributed_init_method,
             is_driver_worker=is_driver_worker,
         )
+        
+        # logger.info('Initializing TPUWorker with config:', vllm_config)
+        logger.info(f"local_rank: {local_rank}, rank: {rank}, ")
 
-        if rank != local_rank:
-            raise NotImplementedError(
-                "Multi host serving is not supported yet.")
+        # if rank != local_rank:
+        #     raise NotImplementedError(f"local_rank: {local_rank}, rank: {rank}, ")
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
@@ -68,6 +73,8 @@ class TPUWorker(WorkerBase):
     def init_device(self):
         if not self.devices:
             tp = self.parallel_config.tensor_parallel_size
+            print(f"Initializing TPUWorker with tp={tp}")
+            print(f"Using devices: {jax.devices()}")
             self.devices = jax.devices()[:tp]
         logger.warning(f"Init devices | "
                        f"devices={self.devices} | "
