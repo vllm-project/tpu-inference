@@ -35,16 +35,20 @@ class RotaryEmbedding:
         cache = jnp.concatenate((cos, sin), axis=-1)
         return cache
 
-    def apply_rope(self, positions: jax.Array, x: jax.Array):
-        # positions should be 1d according to vllm.
-        assert x.ndim == 3
+    def apply_rope(self, positions: jax.Array, x_TNH: jax.Array):
+        assert x_TNH.ndim == 3
         cos_sin = self.sin_cos_cache[positions]
+        # cos, sin: (T, H/2)
         cos, sin = jnp.split(cos_sin, 2, axis=-1)
         assert sin.ndim == 2 and cos.ndim == 2
+        # cos, sin: (T, 1, H/2)
         cos, sin = cos[:, None, :], sin[:, None, :]
-        x1, x2 = x[..., ::2], x[..., 1::2]
-        assert cos.shape[0] == x1.shape[0] and cos.shape[-1] == x1.shape[-1]
-        return jnp.concatenate([x1 * cos - x2 * sin, x2 * cos + x1 * sin],
+        # first_half, second_half: (T, N, H/2)
+        first_half, second_half = jnp.split(x_TNH, 2, axis=-1)
+        return jnp.concatenate([
+            first_half * cos - second_half * sin,
+            second_half * cos + first_half * sin
+        ],
                                axis=-1)
 
 
@@ -99,11 +103,27 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         cache = jnp.concatenate((cos, sin), axis=-1)
         return cache
 
+    def apply_rope(self, positions: jax.Array, x_TNH: jax.Array):
+        assert x_TNH.ndim == 3
+        cos_sin = self.sin_cos_cache[positions]
+        # cos, sin: (T, H/2)
+        cos, sin = jnp.split(cos_sin, 2, axis=-1)
+        assert sin.ndim == 2 and cos.ndim == 2
+        # cos, sin: (T, 1, H/2)
+        cos, sin = cos[:, None, :], sin[:, None, :]
+        # even, odd: (T, N, H/2)
+        even, odd = x_TNH[..., ::2], x_TNH[..., 1::2]
+        return jnp.stack([even * cos - odd * sin, odd * cos + even * sin],
+                         axis=-1).reshape(x_TNH.shape)
 
+
+# Calculates the temperature scaling factor for YaRN to adjust
+# RoPE embedding magnitudes.
 def _yarn_get_mscale(scale, mscale):
     return jnp.where(scale <= 1, 1.0, 0.1 * mscale * jnp.log(scale) + 1.0)
 
 
+# Inverses dim formula to find dim based on number of rotations.
 def _yarn_find_correction_dim(num_rotations,
                               dim,
                               base=10000,
@@ -113,6 +133,7 @@ def _yarn_find_correction_dim(num_rotations,
                                                               math.log(base))
 
 
+# Finds dim range bounds based on rotations.
 def _yarn_find_correction_range(low_rot,
                                 high_rot,
                                 dim,
@@ -126,10 +147,11 @@ def _yarn_find_correction_range(low_rot,
     return max(low, 0), min(high, dim - 1)  # Clamp values just in case
 
 
+# Creates a 1D mask that ramps linearly from 0 to 1 between min and max indices.
 def _yarn_linear_ramp_mask(min, max, dim):
     if min == max:
         max += 0.001  # Prevent singularity
 
-    linear_func = (jnp.arange(dim) - min) / (max - min)
+    linear_func = (jnp.arange(dim, dtype=jnp.float32) - min) / (max - min)
     ramp_func = jnp.clip(linear_func, 0, 1)
     return ramp_func
