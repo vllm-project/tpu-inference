@@ -45,7 +45,7 @@ MIN_NUM_SEQS = 8
 NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK = 8
 
 DUMMY_METADATA = AttentionMetadata(
-    input_positions=jnp.empty((0, )),
+    input_positions=[],
     seq_lens=[],
     block_tables=[],
     slot_mapping=[],
