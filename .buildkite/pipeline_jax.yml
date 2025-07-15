@@ -65,7 +65,8 @@ steps:
            /workspace/tpu_commons/tests/worker/test_tpu_worker_jax.py \
            /workspace/tpu_commons/tests/runner/jax/test_block_table_jax.py \
            /workspace/tpu_commons/tests/runner/jax/test_input_batch_jax.py \
-           /workspace/tpu_commons/tests/models/jax/test_sampling_metadata.py
+           /workspace/tpu_commons/tests/models/jax/test_sampling_metadata.py \
+           /workspace/tpu_commons/tests/models/jax/test_attention_interface.py
 
   # -----------------------------------------------------------------
   # NOTIFICATION STEP
