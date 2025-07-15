@@ -105,7 +105,9 @@ class Llama3_8B(Model):
             strategy_dict = self.vllm_config.additional_config["sharding"][
                 "sharding_strategy"]
         except (KeyError, TypeError):
-            strategy_dict = {"tensor_parallelism": 4, "expert_parallelism": 2}
+            strategy_dict = {"tensor_parallelism": 16}
+            
+        print(f"Using sharding strategy: {strategy_dict}")
         self.sharding = Sharding(strategy_dict=strategy_dict,
                                  mesh=self.mesh,
                                  default_rules_cls=Llama8BShardingRulesConfig,
