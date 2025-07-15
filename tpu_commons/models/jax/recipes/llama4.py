@@ -18,9 +18,8 @@ from tpu_commons.models.jax.common.attention.llama4_attention import \
 from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.constants import RouterType
 from tpu_commons.models.jax.common.kv_cache import KVCacheType
-from tpu_commons.models.jax.common.layers import (DenseFFWConfig,
-                                                  Embedder, EmbedderConfig,
-                                                  RMSNorm)
+from tpu_commons.models.jax.common.layers import (DenseFFWConfig, Embedder,
+                                                  EmbedderConfig, RMSNorm)
 from tpu_commons.models.jax.common.model import Model, ModelConfig
 from tpu_commons.models.jax.common.moe.moe import MoEConfig, RouterConfig
 from tpu_commons.models.jax.common.sharding import (Sharding, ShardingConfig,
@@ -30,7 +29,7 @@ from tpu_commons.models.jax.common.transformer_block import (
 from tpu_commons.models.jax.layers.misc import shard_put
 from tpu_commons.models.jax.layers.sampling import sample
 from tpu_commons.models.jax.recipes.recipe import RecipeConfig
-from tpu_commons.models.jax.utils.weight_utils import (WeightLoader, get_param)
+from tpu_commons.models.jax.utils.weight_utils import WeightLoader, get_param
 from tpu_commons.sample.metadata_jax import TPUSupportedSamplingMetadata
 
 logger = init_logger(__name__)
@@ -39,6 +38,7 @@ pp = pprint.PrettyPrinter(depth=6)
 
 @dataclass
 class Llama4ModelConfig(ModelConfig):
+    # Add parameters shared across multiple layers here.
     hidden_size: int = 5120
     dtype: jnp.dtype = jnp.bfloat16
     num_layers: int = 48
@@ -60,46 +60,48 @@ class Llama4ModelConfig(ModelConfig):
         if not self.layers:
             self.layers = SharedExpertsTransformerBlockConfig(
                 shared_experts=1,
-                attention=Llama4AttentionConfig(hidden_size=self.hidden_size,
-                                                num_attention_heads=40,
-                                                num_key_value_heads=8,
-                                                head_dim=128,
-                                                rope_theta=500000.0,
-                                                rope_scaling={
-                                                    "scale_factor": 8.0,
-                                                    "low_freq_factor": 1.0,
-                                                    "high_freq_factor": 4.0,
-                                                    "original_max_position_embeddings": 8192
-                                                },
-                                                use_qk_norm=True,
-                                                dtype=self.dtype,
-                                                vllm_config=self.vllm_config),
+                attention=Llama4AttentionConfig(
+                    hidden_size=self.hidden_size,
+                    num_attention_heads=40,
+                    num_key_value_heads=8,
+                    head_dim=128,
+                    rope_theta=500000.0,
+                    rope_scaling={
+                        "scale_factor": 8.0,
+                        "low_freq_factor": 1.0,
+                        "high_freq_factor": 4.0,
+                        "original_max_position_embeddings": 8192
+                    },
+                    use_qk_norm=True,
+                    dtype=self.dtype,
+                    vllm_config=self.vllm_config),
                 dense_ffw=DenseFFWConfig(hidden_size=self.hidden_size,
                                          intermediate_size=16384,
                                          hidden_act="silu",
                                          dtype=self.dtype,
                                          vllm_config=self.vllm_config),
-                moe=MoEConfig(hidden_size=self.hidden_size,
-                              intermediate_size_moe=self.intermediate_size_moe,
-                              dtype=self.dtype,
-                              num_local_experts=self.num_local_experts,
-                              hidden_act="silu",
-                              apply_expert_weight_before_computation=False,
-                              router=RouterConfig(hidden_size=self.hidden_size,
-                                     intermediate_size_moe=self.intermediate_size_moe,
-                                     num_local_experts=self.num_local_experts,
-                                     num_experts_per_token=1,
-                                     router_type=RouterType.TOP_K,
-                                     hidden_act="silu",
-                                     expert_capacity=-1,
-                                     routed_bias=False,
-                                     routed_scaling_factor=1.0,
-                                     dtype=self.dtype,
-                                     vllm_config=self.vllm_config),
-                              vllm_config=self.vllm_config),
+                moe=MoEConfig(
+                    hidden_size=self.hidden_size,
+                    intermediate_size_moe=self.intermediate_size_moe,
+                    dtype=self.dtype,
+                    num_local_experts=self.num_local_experts,
+                    hidden_act="silu",
+                    apply_expert_weight_before_computation=False,
+                    router=RouterConfig(
+                        hidden_size=self.hidden_size,
+                        intermediate_size_moe=self.intermediate_size_moe,
+                        num_local_experts=self.num_local_experts,
+                        num_experts_per_token=1,
+                        router_type=RouterType.TOP_K,
+                        hidden_act="silu",
+                        expert_capacity=-1,
+                        routed_bias=False,
+                        routed_scaling_factor=1.0,
+                        dtype=self.dtype,
+                        vllm_config=self.vllm_config),
+                    vllm_config=self.vllm_config),
                 rms_norm_eps=1e-5,
-                vllm_config=self.vllm_config
-            )
+                vllm_config=self.vllm_config)
 
 
 @dataclass
@@ -145,6 +147,10 @@ class Llama4Scout(Model):
         logger.info(f"Using the following config:\n{self.cfg}")
         logger.info(f"Using the following shardings:\n{self.sharding}")
         self.mesh = self.sharding.mesh
+        self.weight_loader = Llama4WeightLoader(vllm_config=self.vllm_config,
+                                                model_config=self.cfg.model,
+                                                cache_dir=None,
+                                                sharding_cfg=self.cfg.sharding)
         self._init_layers()
 
     def _init_layers(self):
@@ -194,10 +200,6 @@ class Llama4Scout(Model):
                                 sharding_cfg=self.cfg.sharding)
         self.lm_head.generate_kernel(self.rng)
 
-    # For compatibility with flax.
-    def apply(self, variables, *args, **kwargs):
-        return self.__call__(*args, **kwargs)
-
     def load_weights(self, rng: PRNGKey, cache_dir: Optional[str] = None):
         try:
             use_random_weights = self.vllm_config.additional_config[
@@ -208,11 +210,7 @@ class Llama4Scout(Model):
             return
         except KeyError:
             use_random_weights = False
-        weight_loader = Llama4WeightLoader(vllm_config=self.vllm_config,
-                                           model_config=self.cfg.model,
-                                           cache_dir=None,
-                                           sharding_cfg=self.cfg.sharding)
-        weight_loader.load_weights(self)
+        self.weight_loader.load_weights(self)
 
     def __call__(
         self,
