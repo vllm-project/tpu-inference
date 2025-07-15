@@ -28,15 +28,21 @@ def get_num_kv_heads_by_tp(num_kv_heads: int, tp_size: int) -> int:
 
 def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
     usage = []
+    print(f"{devices=}")
     for device in devices:
         if PATHWAYS_ENABLED:
             # The Pathways backend doesn't support memory_stats().
             # TODO(fhzhang): find the proper way to support this.
             usage.append((32384, 33550237184))
         else:
-            hbm_used = device.memory_stats()["bytes_in_use"]
-            hbm_limit = device.memory_stats()["bytes_limit"]
-            usage.append((hbm_used, hbm_limit))
+            try:
+                hbm_used = device.memory_stats()["bytes_in_use"]
+                hbm_limit = device.memory_stats()["bytes_limit"]
+                usage.append((hbm_used, hbm_limit))
+                print(f"Device {device} HBM usage: {hbm_used / GBYTES:.2f} / {hbm_limit / GBYTES:.2f} GB used, ")
+            except (RuntimeError, KeyError, TypeError) as ex:
+                print(f"\tMemstats unavailable, error: {ex}")
+                usage.append((0, 33550237184))
 
     return usage
 

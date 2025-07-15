@@ -28,6 +28,7 @@ class TPUWorker(WorkerBase):
                  is_driver_worker: bool = False,
                  devices=[]):
         
+        
         super().__init__(
             vllm_config=vllm_config,
             local_rank=local_rank,
@@ -36,8 +37,11 @@ class TPUWorker(WorkerBase):
             is_driver_worker=is_driver_worker,
         )
 
-        if rank != local_rank:
-            raise NotImplementedError(f"local_rank: {local_rank}, rank: {rank}, ")
+        # logger.info('Initializing TPUWorker with config:', vllm_config)
+        logger.info(f"local_rank: {local_rank}, rank: {rank}, ")
+
+        # if rank != local_rank:
+        #     raise NotImplementedError(f"local_rank: {local_rank}, rank: {rank}, ")
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
@@ -68,6 +72,8 @@ class TPUWorker(WorkerBase):
     def init_device(self):
         if not self.devices:
             tp = self.parallel_config.tensor_parallel_size
+            print(f"Initializing TPUWorker with tp={tp}")
+            print(f"Using devices: {jax.devices()}")
             self.devices = jax.devices()[:tp]
         logger.warning(f"Init devices | "
                        f"devices={self.devices} | "

@@ -117,8 +117,8 @@ class TPUModelRunner():
             axis_names = ("data", "model")
             # In case we are in disagg mode, the number of devices can exceed 8.
             # TODO(fhzhang): fix this properly as we implement disagg serving.
-            if len(self.devices) > 8:
-                self.devices = self.devices[:8]
+            # if len(self.devices) > 8:
+            #     self.devices = self.devices[:8]
             mesh_shape = (1, len(self.devices))
             self.mesh = jax.make_mesh(mesh_shape,
                                       axis_names,
