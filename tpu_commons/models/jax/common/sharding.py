@@ -1,5 +1,6 @@
 import json
 from dataclasses import dataclass
+from typing import List, Any
 
 import jax
 import numpy as np
@@ -181,6 +182,7 @@ class Sharding:
                  prefill_rules: dict | None = None,
                  generate_rules: dict | None = None,
                  mesh: Mesh = None,
+                 devices: List[Any] = None,
                  default_rules_cls=ShardingRulesConfig,
                  vllm_config: VllmConfig = None):
         """Initializes the Sharding manager.
@@ -197,6 +199,10 @@ class Sharding:
         """
         self.sharding_strategy = ShardingStrategy(**strategy_dict)
         self.vllm_config = vllm_config
+        if devices:
+            self.devices = devices
+        else:
+            self.devices = jax.devices()
         if mesh:
             self.mesh = mesh
         else:
@@ -279,7 +285,7 @@ class Sharding:
                 'data'
             ]  # default to data parallelism if no other strategy is specified
 
-        devices = np.asarray(jax.devices()).reshape(mesh_shape)
+        devices = np.asarray(self.devices).reshape(mesh_shape)
         return Mesh(devices, axis_names=tuple(mesh_axis_names))
 
     def _apply_overrides(self, config_obj: ShardingRulesConfig,
