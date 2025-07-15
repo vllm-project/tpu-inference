@@ -1,6 +1,7 @@
 tpu-info
 yapf == 0.43.0
 pytest
+pytest-mock
 absl-py
 numpy
 google-cloud-storage
