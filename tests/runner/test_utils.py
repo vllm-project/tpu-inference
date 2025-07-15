@@ -156,6 +156,33 @@ def test_forbid_compile_raises_on_new_shape(jitted_function, scalar_input,
     # assert pxla._cached_lowering_to_hlo.cache_info(
     # ).misses == misses_after_warmup  # No new misses
 
+    x1 = scalar_input
+    print(
+        f"\nx1: {x1}, shape: {x1.shape}, dtype: {x1.dtype}, weak_type: {hasattr(x1, 'weak_type') and x1.weak_type}"
+    )
+    jitted_function(x1)
+    misses_after_warmup = pxla._cached_lowering_to_hlo.cache_info().misses
+    print(
+        f"Cache info after warmup: {pxla._cached_lowering_to_hlo.cache_info()}"
+    )
+
+    x2 = scalar_input + 1.0
+    print(
+        f"x2: {x2}, shape: {x2.shape}, dtype: {x2.dtype}, weak_type: {hasattr(x2, 'weak_type') and x2.weak_type}"
+    )
+
+    with ForbidCompile():
+        jitted_function(x2)
+
+    misses_after_plus_one = pxla._cached_lowering_to_hlo.cache_info().misses
+    print(
+        f"Cache info after scalar + 1: {pxla._cached_lowering_to_hlo.cache_info()}"
+    )
+
+    if misses_after_plus_one > misses_after_warmup:
+        print("ERROR: Unexpected cache miss occurred for scalar_input + 1.0")
+    assert misses_after_plus_one == misses_after_warmup
+
     # Now, call with a VECTOR input. This has a different shape,
     # forcing a NEW compilation (cache MISS).
     # This *should* raise a RuntimeError within the ForbidCompile context.
