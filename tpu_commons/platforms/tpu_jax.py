@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-from typing import TYPE_CHECKING, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Optional, Tuple, Union, cast
 
 import jax.numpy as jnp
 import vllm.envs as envs
@@ -96,15 +96,17 @@ class TpuPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        if not envs.VLLM_USE_V1:
+            raise RuntimeError("VLLM_USE_V1=1 must be set for JAX backend.")
+
         from vllm.config import CompilationLevel
 
         cache_config = vllm_config.cache_config
-        # For TPU, the default block size is 32
+        # For v0, the default block size is 16.
         if cache_config and cache_config.block_size is None:
-            cache_config.block_size = 32
+            cache_config.block_size = cast(BlockSize, 16)
         compilation_config = vllm_config.compilation_config
 
-        # TODO(xiang): fix the compilation level for jax
         # TPU only supports DYNAMO_ONCE compilation level
         if compilation_config.level != CompilationLevel.DYNAMO_ONCE:
             logger.info("[TPU] Forcing DYNAMO_ONCE compilation level")
@@ -116,6 +118,7 @@ class TpuPlatform(Platform):
         assert vllm_config.speculative_config is None, \
             "TPU does not support speculative decoding"
 
+        # NOTE(xiang): convert dtype to jnp.dtype
         if not isinstance(vllm_config.model_config.dtype, str):
             logger.warning(
                 "The model dtype is not properly set for JAX backend. "
@@ -125,8 +128,6 @@ class TpuPlatform(Platform):
             vllm_config.model_config.dtype = _DTYPE.get(
                 vllm_config.model_config.dtype, jnp.bfloat16)
 
-        # TODO(xiang): Pytorch uses very large block size,
-        #              fix block size by either overriding or guarded kernel.
         if envs.VLLM_USE_V1:
             from vllm.v1.attention.backends.pallas import \
                 PallasAttentionBackend
@@ -143,31 +144,17 @@ class TpuPlatform(Platform):
                 )
                 cache_config.block_size = min_page_size  # type: ignore[assignment]
 
-        parallel_config = vllm_config.parallel_config
-        scheduler_config = vllm_config.scheduler_config
         if os.getenv("EXP_SCHEDULER") is not None:
             from tpu_commons.core.experimental_scheduler_config import \
                 ExperimentalSchedulerConfig
             experimental_scheduler_config = ExperimentalSchedulerConfig.initialize_from_config(
                 vllm_config.scheduler_config, {})
             vllm_config.scheduler_config = experimental_scheduler_config
-        if parallel_config.worker_cls == "auto":
-            if scheduler_config.is_multi_step:
-                if envs.VLLM_USE_V1:
-                    raise NotImplementedError(
-                        "Multi-step scheduling is not supported (and not "
-                        "needed) on vLLM V1. Please launch without "
-                        "--num-scheduler-steps.")
-                else:
-                    parallel_config.worker_cls = \
-                        "vllm.worker.multi_step_tpu_worker.MultiStepTPUWorker"
-            else:
-                if envs.VLLM_USE_V1:
-                    parallel_config.worker_cls = \
+
+        parallel_config = vllm_config.parallel_config
+        scheduler_config = vllm_config.scheduler_config
+        parallel_config.worker_cls = \
                         "tpu_commons.worker.tpu_worker_jax.TPUWorker"
-                else:
-                    parallel_config.worker_cls = \
-                        "vllm.worker.tpu_worker.TPUWorker"
 
         # TODO(xiang): fix this for multi-host case
         print('===========================')
