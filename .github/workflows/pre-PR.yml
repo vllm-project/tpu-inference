@@ -1,0 +1,76 @@
+name: Apply Conditional PR Template
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+jobs:
+  apply-template:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # Fetches all history so git diff can be used locally
+          fetch-depth: 0
+
+      - name: Determine changed paths
+        id: changed-files
+        run: |
+          # Ensure the event provides the necessary commit SHAs for the diff
+          BASE_SHA=${{ github.event.pull_request.base.sha }}
+          HEAD_SHA=${{ github.event.pull_request.head.sha }}
+
+          if [ -z "$BASE_SHA" ] || [ -z "$HEAD_SHA" ]; then
+            echo "::error::'base' or 'head' SHA not found in the event payload."
+            echo "::error::Check the 'Debug Event Payload' step to see what 'act' is providing."
+            echo "::error::Ensure your 'pull_request_event.json' for 'act' is correctly formatted and used."
+            exit 1
+          fi
+
+          echo "Installing git..."
+          apt-get update && apt-get install -y git
+
+          # Get the list of changed files between the two commits
+          CHANGED_FILES=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+
+          # --- Check for modeling files ---
+          if echo "$CHANGED_FILES" | grep -E -q '^tpu_commons/models/jax/(common|recipes)/'; then
+            echo "modeling=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "modeling=false" >> "$GITHUB_OUTPUT"
+          fi
+
+        shell: bash
+
+      - name: Set PR description
+        run: |
+          TEMPLATE_PATH=""
+          echo "Modeling output: ${{ steps.changed-files.outputs.modeling }}"
+
+          if [[ "${{ steps.changed-files.outputs.modeling }}" == "true" ]]; then
+            TEMPLATE_PATH=".github/PULL_REQUEST_TEMPLATE/MODELING_CODE_PR.md"
+          else
+            TEMPLATE_PATH=".github/PULL_REQUEST_TEMPLATE.md"
+          fi
+
+
+          if [[ -f "$TEMPLATE_PATH" ]]; then
+            TEMPLATE_CONTENT=$(cat "$TEMPLATE_PATH")
+            echo "TEMPLATE_CONTENT<<EOF" >> $GITHUB_ENV
+            echo "$TEMPLATE_CONTENT" >> $GITHUB_ENV
+            echo "EOF" >> $GITHUB_ENV
+          else
+            echo "Template file not found at $TEMPLATE_PATH"
+            exit 1
+          fi
+
+      - name: Update PR body
+        if: env.TEMPLATE_CONTENT != ''
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          body: ${{ env.TEMPLATE_CONTENT }}
+          edit-mode: replace
+
+
