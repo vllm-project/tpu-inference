@@ -35,9 +35,9 @@ class BlockTable:
         self.num_blocks_per_row = np.zeros(max_num_reqs, dtype=np.int32)
 
         self.slot_mapping_cpu = np.zeros(self.max_num_batched_tokens,
-                                         dtype=jnp.int64)
+                                         dtype=jnp.int32)
         self.slot_mapping = jnp.zeros(self.max_num_batched_tokens,
-                                      dtype=jnp.int64)
+                                      dtype=jnp.int32)
 
     def append_row(
         self,

@@ -63,7 +63,8 @@ steps:
            python3 -m pytest -s -v \
            /workspace/tpu_commons/tests/test_utils_jax.py \
            /workspace/tpu_commons/tests/worker/test_tpu_worker_jax.py \
-           /workspace/tpu_commons/tests/runner/jax/test_block_table_jax.py
+           /workspace/tpu_commons/tests/runner/jax/test_block_table_jax.py \
+           /workspace/tpu_commons/tests/runner/jax/test_input_batch_jax.py
 
   # -----------------------------------------------------------------
   # NOTIFICATION STEP
