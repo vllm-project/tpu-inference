@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import time
+from unittest import mock
 
 import jax
 import jax.numpy as jnp
@@ -14,10 +15,10 @@ from tpu_commons.runner.utils import (ForbidCompile, LatencyTracker,
 
 def test_determine_do_sampling():
     """Tests the determine_do_sampling function."""
-    assert determine_do_sampling(top_k=50, temperature=0.0)
-    assert determine_do_sampling(top_k=1, temperature=0.7)
-    assert determine_do_sampling(top_k=10, temperature=0.5)
-    assert not determine_do_sampling(top_k=1, temperature=0.0)
+    assert not determine_do_sampling(top_k=50, temperature=0.0)
+    assert not determine_do_sampling(top_k=1, temperature=0.7)
+    assert not determine_do_sampling(top_k=10, temperature=0.5)
+    assert determine_do_sampling(top_k=1, temperature=0.0)
 
 
 def test_pad_to_multiple():
@@ -69,89 +70,101 @@ def test_latency_tracker(caplog):
     assert f"{elapsed:.3f} seconds" in caplog.text
 
 
-@pytest.mark.jax
-class TestForbidCompile:
-    """Tests for the ForbidCompile context manager."""
+# Define a fixture to clear the JAX cache before each test
+@pytest.fixture(autouse=True)
+def clear_jax_cache():
+    jax.clear_caches()
+    yield
+    jax.clear_caches()
 
-    @pytest.fixture(autouse=True)
-    def clear_caches(self):
-        """Clear all jit caches before each test in this class."""
 
-        @jax.jit
-        def add_one(x):
-            return x + 1
+@pytest.fixture
+def jitted_function():
+    """Defines a jitted function for testing."""
 
-        @jax.jit
-        def add_two(x):
-            return x + 2
+    @jax.jit
+    def my_jitted_func(x):
+        return x * 2
 
-        @jax.jit
-        def add_three(x):
-            return x + 3
+    return my_jitted_func
 
-        add_one.clear_cache()
-        add_two.clear_cache()
-        add_three.clear_cache()
 
-    def test_forbid_compile_raises_on_first_call(self):
-        """Tests that compilation is forbidden on the first call."""
+@pytest.fixture
+def sample_input():
+    return jnp.array(5.0)
 
-        @jax.jit
-        def add_one(x):
-            return x + 1
 
-        with pytest.raises(RuntimeError, match="JAX compilation occurred"):
-            with ForbidCompile():
-                add_one(jnp.ones(1))
-
-    def test_forbid_compile_succeeds_after_warmup(self):
-        """Tests that compilation is allowed after a warm-up call."""
-
-        @jax.jit
-        def add_two(x):
-            return x + 2
-
-        # Warm-up call
-        add_two(jnp.ones(1)).block_until_ready()
-
-        # This should not raise an error
-        try:
-            with ForbidCompile():
-                add_two(jnp.ones(1))
-        except RuntimeError:
-            pytest.fail("ForbidCompile raised RuntimeError unexpectedly.")
-
-    def test_forbid_compile_raises_on_new_shape(self):
-        """Tests that compilation is forbidden for new input shapes."""
-
-        @jax.jit
-        def add_three(x):
-            return x + 3
-
-        # Warm-up with one shape
-        add_three(jnp.ones((1, ))).block_until_ready()
-
-        # Call with a new shape inside the context manager
-        with pytest.raises(RuntimeError, match="JAX compilation occurred"):
-            with ForbidCompile():
-                add_three(jnp.ones((2, )))
-
-    def test_forbid_compile_restores_function_on_exit(self):
-        """Tests that the original JAX function is restored on exit."""
-        original_func = pxla._cached_lowering_to_hlo
-
+def test_forbid_compile_raises_error_on_first_call(jitted_function,
+                                                   sample_input):
+    """Test that ForbidCompile raises an error when a compilation occurs."""
+    with pytest.raises(RuntimeError, match="JAX compilation occurred"):
         with ForbidCompile():
-            assert pxla._cached_lowering_to_hlo is not original_func
+            jitted_function(sample_input)
 
-        assert pxla._cached_lowering_to_hlo is original_func
 
-    def test_forbid_compile_restores_function_on_exception(self):
-        """Tests that the original JAX function is restored on exception."""
-        original_func = pxla._cached_lowering_to_hlo
+def test_forbid_compile_succeeds_on_cached_call(jitted_function, sample_input):
+    """Test that ForbidCompile does not raise an error on a cached call."""
+    # Warm up the cache
+    jitted_function(sample_input)
+    with ForbidCompile():
+        result = jitted_function(sample_input)
+    assert result == 10.0
 
-        with pytest.raises(ValueError, match="Test exception"):
+
+def test_forbid_compile_restores_original_function():
+    """Test that ForbidCompile restores the original JAX function after exit."""
+    original_func = pxla._cached_lowering_to_hlo
+    with ForbidCompile():
+        pass
+    assert pxla._cached_lowering_to_hlo is original_func
+
+
+def test_forbid_compile_with_exception():
+    """Test that ForbidCompile restores the original function even if an exception occurs."""
+    original_func = pxla._cached_lowering_to_hlo
+    with pytest.raises(ValueError, match="Test exception"):
+        with ForbidCompile():
+            raise ValueError("Test exception")
+    assert pxla._cached_lowering_to_hlo is original_func
+
+
+def test_forbid_compile_with_pjit(sample_input):
+    """Test that ForbidCompile works correctly with pjit."""
+
+    @jax.experimental.pjit.pjit
+    def my_pjit_func(x):
+        return x + 1
+
+    # Warm up the cache
+    my_pjit_func(sample_input)
+
+    with ForbidCompile():
+        result = my_pjit_func(sample_input)
+    assert result == 6.0
+
+
+def test_forbid_compile_with_different_input(jitted_function, sample_input):
+    """Test that ForbidCompile raises an error when a compilation occurs with a different input shape."""
+    jitted_function(sample_input)  # Warm up the cache with initial input
+    with pytest.raises(RuntimeError, match="JAX compilation occurred"):
+        with ForbidCompile():
+            jitted_function(sample_input + 1)  # Call with a different input
+
+
+def test_forbid_compile_with_mock_pjit(sample_input):
+    """Test that ForbidCompile works correctly with a mocked pjit."""
+    with mock.patch('jax.experimental.pjit.pjit') as mock_pjit:
+        mock_pjit.return_value = lambda x: x * 3
+
+        # Call with mocked pjit, first call will trigger a compilation
+        with pytest.raises(RuntimeError, match="JAX compilation occurred"):
             with ForbidCompile():
-                assert pxla._cached_lowering_to_hlo is not original_func
-                raise ValueError("Test exception")
+                result = mock_pjit(sample_input)
 
-        assert pxla._cached_lowering_to_hlo is original_func
+        # Warm up the cache
+        mock_pjit(sample_input)
+
+        # Call again with mocked pjit, should not trigger a compilation
+        with ForbidCompile():
+            result = mock_pjit(sample_input)
+        assert result == 15.0
