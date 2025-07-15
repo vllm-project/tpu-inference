@@ -11,8 +11,7 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_commons/tests/ragged_paged_attention_test.py
-       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_commons/tests/ragged_kv_cache_update_test.py
+       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_commons/tests/ragged_paged_attention_test.py /workspace/tpu_commons/tests/ragged_kv_cache_update_test.py
 
    - label: "E2E MMLU tests for JAX models"
      key: test_1
@@ -55,7 +54,7 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - echo 1
+       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_commons/tests/test_utils_jax.py
 
   # -----------------------------------------------------------------
   # NOTIFICATION STEP
