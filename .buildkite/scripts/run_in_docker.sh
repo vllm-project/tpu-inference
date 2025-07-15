@@ -29,13 +29,13 @@ if [ -z "${TPU_BACKEND_TYPE:-}" ]; then
 fi
 
 if [ -z "${MODEL_IMPL_TYPE:-}" ]; then
-  MODEL_IMPL_TYPE=flax_nn
+  MODEL_IMPL_TYPE=flax_nnx
 fi
 
 VLLM_XLA_CHECK_RECOMPILATION_VAL=1
 if [ -n "${NEW_MODEL_DESIGN:-}" ]; then
 # TODO: We currently disable recompilation checks for the new model design
-# to unblock the e2e run, but will enable it later. 
+# to unblock the e2e run, but will enable it later.
   VLLM_XLA_CHECK_RECOMPILATION_VAL=0
 fi
 
