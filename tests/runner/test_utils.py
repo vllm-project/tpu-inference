@@ -89,24 +89,31 @@ def jitted_function():
 
 
 @pytest.fixture
-def sample_input():
+def scalar_input():
+    """Sample scalar input."""
     return jnp.array(5.0)
 
 
+@pytest.fixture
+def vector_input():
+    """Sample vector input with a different shape."""
+    return jnp.array([5.0, 10.0])
+
+
 def test_forbid_compile_raises_error_on_first_call(jitted_function,
-                                                   sample_input):
+                                                   scalar_input):
     """Test that ForbidCompile raises an error when a compilation occurs."""
     with pytest.raises(RuntimeError, match="JAX compilation occurred"):
         with ForbidCompile():
-            jitted_function(sample_input)
+            jitted_function(scalar_input)
 
 
-def test_forbid_compile_succeeds_on_cached_call(jitted_function, sample_input):
+def test_forbid_compile_succeeds_on_cached_call(jitted_function, scalar_input):
     """Test that ForbidCompile does not raise an error on a cached call."""
     # Warm up the cache
-    jitted_function(sample_input)
+    jitted_function(scalar_input)
     with ForbidCompile():
-        result = jitted_function(sample_input)
+        result = jitted_function(scalar_input)
     assert result == 10.0
 
 
@@ -127,9 +134,37 @@ def test_forbid_compile_with_exception():
     assert pxla._cached_lowering_to_hlo is original_func
 
 
-def test_forbid_compile_with_different_input(jitted_function, sample_input):
-    """Test that ForbidCompile raises an error when a compilation occurs with a different input shape."""
-    jitted_function(sample_input)  # Warm up the cache with initial input
-    with pytest.raises(RuntimeError, match="JAX compilation occurred"):
-        with ForbidCompile():
-            jitted_function(sample_input + 1)  # Call with a different input
+def test_forbid_compile_raises_on_new_shape(jitted_function, scalar_input,
+                                            vector_input):
+    """
+    Tests that ForbidCompile raises a RuntimeError when a jitted function
+    is called with an input shape that triggers a new compilation.
+    """
+    # Clear cache for a clean test state.
+    pxla._cached_lowering_to_hlo.cache_clear()
+
+    # Warm up the JIT cache with the SCALAR input.
+    # This causes the first compilation and cache miss.
+    jitted_function(scalar_input)
+    misses_after_warmup = pxla._cached_lowering_to_hlo.cache_info().misses
+    assert misses_after_warmup == 1
+
+    # This call uses the same shape/dtype, so it should be a cache HIT.
+    # No RuntimeError expected.
+    with ForbidCompile():
+        jitted_function(scalar_input + 1.0)
+    assert pxla._cached_lowering_to_hlo.cache_info(
+    ).misses == misses_after_warmup  # No new misses
+
+    # Now, call with a VECTOR input. This has a different shape,
+    # forcing a NEW compilation (cache MISS).
+    # This *should* raise a RuntimeError within the ForbidCompile context.
+    expected_error_message = "JAX compilation occurred but was forbidden in this context."
+    with pytest.raises(RuntimeError, match=expected_error_message):
+        with ForbidCompile(message=expected_error_message):
+            jitted_function(vector_input)
+
+    # To confirm a miss would have happened, call outside the context:
+    jitted_function(vector_input)
+    misses_after_vector = pxla._cached_lowering_to_hlo.cache_info().misses
+    assert misses_after_vector > misses_after_warmup, "A new compilation was expected for the vector input"
