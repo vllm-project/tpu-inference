@@ -154,6 +154,10 @@ class LlamaForCausalLM(Model):
         logger.info(f"Using the following config:\n{self.cfg}")
         logger.info(f"Using the following shardings:\n{self.sharding}")
         self.mesh = self.sharding.mesh
+        self.weight_loader = Llama3WeightLoader(vllm_config=self.vllm_config,
+                                                model_config=self.cfg.model,
+                                                cache_dir=None,
+                                                sharding_cfg=self.cfg.sharding)
         self._init_layers()
 
     def _init_layers(self):
@@ -195,23 +199,6 @@ class LlamaForCausalLM(Model):
                                 sharding_cfg=self.cfg.sharding)
         self.lm_head.generate_kernel(self.rng)
 
-    # For compatibility with flax.
-    def apply(self, variables, *args, **kwargs):
-        return self.__call__(*args, **kwargs)
-
-    def load_weights(self, rng: PRNGKey, cache_dir: Optional[str] = None):
-        self.rng = nnx.Rngs(rng)
-        if self.use_random_init:
-            #TODO: Support loading random weights, either here or in tpu_runner
-            logger.warning(
-                "Model name or path not provided - randomly initializing the weights."
-            )
-        else:
-            weight_loader = Llama3WeightLoader(vllm_config=self.vllm_config,
-                                               model_config=self.cfg.model,
-                                               cache_dir=cache_dir,
-                                               sharding_cfg=self.cfg.sharding)
-            weight_loader.load_weights(self)
 
     def __call__(
         self,

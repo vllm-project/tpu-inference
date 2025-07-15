@@ -16,7 +16,7 @@ from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
 from tpu_commons.models.jax.common.layers import (DenseFFW, DenseFFWConfig,
                                                   RMSNorm)
-from tpu_commons.models.jax.common.moe.moe import MoE, MoEConfig, Router
+from tpu_commons.models.jax.common.moe.moe import MoE, MoEConfig
 from tpu_commons.models.jax.common.sharding import ShardingConfig
 
 ATTENTION_BLOCK_REGISTR = {"default": Attention, "llama4": Llama4Attention}
@@ -25,8 +25,7 @@ TransformerBlockConfig = make_dataclass(
     "TransformerBlockConfig",
     [("attention", AttentionConfig), ("dense_ffw", DenseFFWConfig),
      (HuggingFaceArgNames.RMS_NORM_EPS.value, float),
-     ("moe", MoEConfig, field(default=None)),
-     ("block_type", str, "default"), ("attention_type", str, "default"),
+     ("moe", MoEConfig, field(default=None)), ("block_type", str, "default"),
      ("vllm_config", VllmConfig, field(repr=False, default=None))],
     bases=(Config, ))
 TransformerBlockConfig.__doc__ = f"""light weighted transformer config, which includes config for all sub-modules
@@ -35,7 +34,6 @@ TransformerBlockConfig.__doc__ = f"""light weighted transformer config, which in
         attention: AttentionConfig config used to specify attention layer parameters.
         dense_ffw: DenseFFWConfig config used to specify feed-forward layer parameters.
         block_type: str The type of transformer block (currently support ["moe", "dense"]).
-        attention_type: str The type of attention block (currently support ["default", "llama4"]).
         {HuggingFaceArgNames.RMS_NORM_EPS.value}: float The epsilon value for RMSNorm.
         vllm_config: VllmConfig The VLLM config containing any overrides to apply.
         """
@@ -48,10 +46,10 @@ class TransformerBlock(nnx.Module):
     """
     cfg: TransformerBlockConfig
     block_type: str
-    attention_type: str
     param_factory: ParamFactory
     mesh: Mesh
     sharding_cfg: ShardingConfig
+    attention_type: str = "default"
     quant: Any | None = None
 
     def _create_module(self, module_cls: Type[nnx.Module], cfg: Any,
@@ -78,8 +76,7 @@ class TransformerBlock(nnx.Module):
         self.attn = self._create_module(attn_block, cfg=self.cfg.attention)
 
         if self.block_type == "moe":
-            self.moe = self._create_module(MoE,
-                                           cfg=self.cfg.moe)
+            self.moe = self._create_module(MoE, cfg=self.cfg.moe)
         elif self.block_type == "dense":
             self.mlp = self._create_module(DenseFFW, cfg=self.cfg.dense_ffw)
 
@@ -140,7 +137,7 @@ class TransformerBlock(nnx.Module):
 SharedExpertsTransformerBlockConfig = make_dataclass(
     "SharedExpertsTransformerBlockConfig",
     [(HuggingFaceArgNames.SHARED_EXPERTS.value, int)],
-    bases=(TransformerBlockConfig,),
+    bases=(TransformerBlockConfig, ),
     kw_only=True)
 
 SharedExpertsTransformerBlockConfig.__doc__ = f"""Transformer block with MoE block and shared experts block (i.e. Dense Block).
@@ -150,6 +147,7 @@ Additional Args:
 Inherits TransformerBlockConfig docstring:
 {TransformerBlockConfig.__doc__}
 """
+
 
 @dataclass(kw_only=True)
 class SharedExpertsTransformerBlock(TransformerBlock):
@@ -163,7 +161,8 @@ class SharedExpertsTransformerBlock(TransformerBlock):
         moe_intermediate_size = getattr(
             self.cfg.moe, HuggingFaceArgNames.INTERMEDIATE_SIZE_MOE.value)
         shared_experts_cfg = deepcopy(self.cfg.dense_ffw)
-        setattr(shared_experts_cfg, HuggingFaceArgNames.INTERMEDIATE_SIZE.value,
+        setattr(shared_experts_cfg,
+                HuggingFaceArgNames.INTERMEDIATE_SIZE.value,
                 shared_experts * moe_intermediate_size)
         self.shared_experts = self._create_module(DenseFFW,
                                                   cfg=shared_experts_cfg)
