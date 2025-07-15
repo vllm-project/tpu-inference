@@ -115,6 +115,10 @@ class Llama3_8B(Model):
         logger.info(f"Using the following config:\n{self.cfg}")
         logger.info(f"Using the following shardings:\n{self.sharding}")
         self.mesh = self.sharding.mesh
+        self.weight_loader = Llama3WeightLoader(vllm_config=self.vllm_config,
+                                                model_config=self.cfg.model,
+                                                cache_dir=None,
+                                                sharding_cfg=self.cfg.sharding)
         self._init_layers()
 
     def _init_layers(self):
@@ -155,25 +159,6 @@ class Llama3_8B(Model):
                                 sharding_cfg=self.cfg.sharding)
         self.lm_head.generate_kernel(self.rng)
 
-    # For compatibility with flax.
-    def apply(self, variables, *args, **kwargs):
-        return self.__call__(*args, **kwargs)
-
-    def load_weights(self, rng: PRNGKey, cache_dir: Optional[str] = None):
-        try:
-            use_random_weights = self.vllm_config.additional_config[
-                "random_weights"]  # noqa: F841
-            logger.warning(
-                "Using randomly initialized weights instead of loading parameter weights."
-            )
-            return
-        except KeyError:
-            use_random_weights = False  # noqa: F841
-        weight_loader = Llama3WeightLoader(vllm_config=self.vllm_config,
-                                           model_config=self.cfg.model,
-                                           cache_dir=None,
-                                           sharding_cfg=self.cfg.sharding)
-        weight_loader.load_weights(self)
 
     def __call__(
         self,
