@@ -27,6 +27,8 @@ from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.common.sharding import Sharding
 from tpu_commons.models.jax.layers.sampling import sample
 from tpu_commons.models.jax.model_loader import get_model
+from tpu_commons.models.jax.sampling_metadata import \
+    TPUSupportedSamplingMetadata
 from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
                                                     InputBatch)
 from tpu_commons.runner.tpu_torch_xla_runner import (_get_padded_token_len,
@@ -34,7 +36,6 @@ from tpu_commons.runner.tpu_torch_xla_runner import (_get_padded_token_len,
                                                      _get_token_paddings)
 from tpu_commons.runner.utils import (ForbidCompile, LatencyTracker,
                                       get_padded_num_reqs_with_upper_limit)
-from tpu_commons.sample.metadata_jax import TPUSupportedSamplingMetadata
 
 logger = init_logger(__name__)
 
