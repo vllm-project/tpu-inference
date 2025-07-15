@@ -17,8 +17,8 @@ def test_determine_do_sampling():
     """Tests the determine_do_sampling function."""
     assert not determine_do_sampling(top_k=50, temperature=0.0)
     assert not determine_do_sampling(top_k=1, temperature=0.7)
-    assert not determine_do_sampling(top_k=10, temperature=0.5)
-    assert determine_do_sampling(top_k=1, temperature=0.0)
+    assert not determine_do_sampling(top_k=1, temperature=0.0)
+    assert determine_do_sampling(top_k=10, temperature=0.5)
 
 
 def test_pad_to_multiple():
