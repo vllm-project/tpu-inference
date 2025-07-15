@@ -18,7 +18,8 @@ from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
 from tpu_commons.models.jax.common.sharding import ShardingConfig
 from tpu_commons.models.jax.layers.rope import apply_rope
-from tpu_commons.models.jax.quantization_utils import quantize
+from tpu_commons.models.jax.utils.quantization.quantization_utils import \
+    quantize
 
 KVCache = Tuple[jax.Array, jax.Array]
 
@@ -250,8 +251,8 @@ class Attention(nnx.Module):
         # TODO jacobplatin: probably want a more robust check
         is_kv_cache_quantized = kv_cache.dtype != jnp.bfloat16
         if is_kv_cache_quantized:
-            k, k_scale = quantize(kv_cache[0], kv_cache.dtype)
-            v, v_scale = quantize(kv_cache[1], kv_cache.dtype)
+            k_SKH, k_scale = quantize(k_SKH, kv_cache.dtype)
+            v_SKH, v_scale = quantize(v_SKH, kv_cache.dtype)
         kv_cache = update_kv_cache(k_SKH, v_SKH, kv_cache, md.slot_mapping,
                                    md.num_slices, mesh)
 

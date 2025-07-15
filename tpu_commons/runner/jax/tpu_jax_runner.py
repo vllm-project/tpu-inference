@@ -33,7 +33,7 @@ from tpu_commons.runner.tpu_torch_xla_runner import (_get_padded_token_len,
                                                      _get_req_paddings,
                                                      _get_token_paddings)
 from tpu_commons.runner.utils import (ForbidCompile, LatencyTracker,
-                                      get_jnp_dtype_from_str,
+                                      create_kv_caches,
                                       get_padded_num_reqs_with_upper_limit)
 from tpu_commons.sample.metadata_jax import TPUSupportedSamplingMetadata
 
@@ -228,46 +228,22 @@ class TPUModelRunner():
         kv_cache_spec = kv_cache_groups[0].kv_cache_spec
         layer_names = kv_cache_groups[0].layer_names
 
-        # TODO (jacobplatin): figure out how to make this part of the kv_cache_config instead of an env var
-        maybe_quantized_kv_cache_dtype = os.environ.get(
-            "QUANTIZED_KV_CACHE_DTYPE")
-        self.is_kv_cache_quantized = False
+        maybe_kv_cache_quant_dtype = self.vllm_config.additional_config.get(
+            "quantization", {}).get("kv_quant_dtype", None)
 
-        cache_dtype = jnp.bfloat16
-        if maybe_quantized_kv_cache_dtype is not None:
-            self.is_kv_cache_quantized = True
-            cache_dtype = get_jnp_dtype_from_str(
-                maybe_quantized_kv_cache_dtype)
-
-        # TODO(xiang): fix this together with get_kv_cache_spec
-        # cache_dtype = kv_cache_spec.dtype
-
-        cache_shape = (
-            kv_cache_config.num_blocks,
-            kv_cache_spec.block_size,
-            kv_cache_spec.num_kv_heads * 2,
-            kv_cache_spec.head_size,
+        self.kv_caches = create_kv_caches(
+            num_blocks=kv_cache_config.num_blocks,
+            block_size=kv_cache_spec.block_size,
+            num_kv_heads=kv_cache_spec.
+            num_kv_heads,  # NOTE: we'll multiply by 2 in the function
+            head_size=kv_cache_spec.head_size,
+            mesh=self.mesh,
+            layer_names=layer_names,
+            kv_cache_quant_dtype=maybe_kv_cache_quant_dtype,
+            devices=self.devices,
         )
 
-        # Shard the num_kv_heads dim along the 'model' axis.
-        sharding = NamedSharding(self.mesh, PartitionSpec(None, None, "model"))
-
-        def _allocate() -> Any:
-            return jnp.empty(
-                shape=cache_shape,
-                dtype=cache_dtype,
-            )
-
-        sharded_allocate = jax.jit(_allocate, out_shardings=sharding)
-        for _ in layer_names:
-            self.kv_caches.append(sharded_allocate())
-
         logger.info(jax.lib.xla_bridge.get_backend().platform_version)
-        logger.info(f"Init kv-cache | "
-                    f"shape={len(layer_names)} * {cache_shape} | "
-                    f"sharding={sharding} | "
-                    f"dtype={cache_dtype} | "
-                    f"hbm={utils.hbm_usage_gb(self.devices)}Gb")
 
     def _precompile_backbone(self) -> None:
         for num_tokens in self.num_tokens_paddings:

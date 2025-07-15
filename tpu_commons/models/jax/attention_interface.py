@@ -10,7 +10,6 @@ from tpu_commons.kernels.ragged_kv_cache_update import kv_cache_update
 from tpu_commons.kernels.ragged_paged_attention.kernel import \
     ragged_paged_attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.models.jax.quantization_utils import quantize
 
 # TODO(xiang): put this in attention metadata
 # Block size used for kv cache updating kernel
@@ -26,8 +25,6 @@ def sharded_ragged_paged_attention(sm_scale: float, mesh: Mesh):
         P(),  # page_indices
         P(),  # cu_q_lens
         P(),  # num_seqs
-        P(),  # k_scale
-        P(),  # v_scale
     )
     out_specs = P(None, "model", None)
 
@@ -79,12 +76,6 @@ def attention(
         head_dim_original = q.shape[-1]
 
     md = attention_metadata
-    k_scale, v_scale = None, None
-    # TODO jacobplatin: probably want a more robust check
-    is_kv_cache_quantized = kv_cache.dtype != jnp.bfloat16
-    if is_kv_cache_quantized:
-        k, k_scale = quantize(k, kv_cache.dtype)
-        v, v_scale = quantize(v, kv_cache.dtype)
     kv_cache = update_kv_cache(k, v, kv_cache, md.slot_mapping, md.num_slices,
                                mesh)
 
@@ -92,19 +83,16 @@ def attention(
     output = sharded_ragged_paged_attention(head_dim_original**-0.5, mesh)(
         q,
         kv_cache,
-        # kv_cache_scale,
         md.seq_lens,
         md.block_tables,
         md.query_start_loc,
         md.num_seqs,
-        k_scale,
-        v_scale)
+    )
 
     return kv_cache, output
 
 
-def update_kv_cache(k: jax.Array, v: jax.Array,
-                    kv_cache: jax.Array | Tuple[jax.Array, jax.Array],
+def update_kv_cache(k: jax.Array, v: jax.Array, kv_cache: jax.Array,
                     slices: jax.Array, num_slices: jax.Array,
                     mesh: Mesh) -> jax.Array:
     """ Write K and V into KV cache.
