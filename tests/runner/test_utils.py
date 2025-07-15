@@ -91,7 +91,7 @@ def jitted_function():
 @pytest.fixture
 def scalar_input():
     """Sample scalar input."""
-    return jnp.array(5.0)
+    return jnp.array(5.0, dtype=jnp.float32)
 
 
 @pytest.fixture
