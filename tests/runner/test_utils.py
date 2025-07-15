@@ -69,14 +69,6 @@ def test_latency_tracker(caplog):
     assert f"{elapsed:.3f} seconds" in caplog.text
 
 
-# Define a fixture to clear the JAX cache before each test
-@pytest.fixture(autouse=True)
-def clear_jax_cache():
-    jax.clear_caches()
-    yield
-    jax.clear_caches()
-
-
 @pytest.fixture
 def jitted_function():
     """Defines a jitted function for testing."""
