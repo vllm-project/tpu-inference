@@ -22,6 +22,7 @@ steps:
        queue: tpu_v6e_queue
      commands:
        - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
+       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_commons/tests/test_lora.py
 
    - label: "E2E MLPerf tests for JAX new model implementation"
      key: test_2
