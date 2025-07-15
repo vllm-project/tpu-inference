@@ -6,7 +6,8 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 from tpu_commons.models.jax.layers.binary_search import topk_mask, topp_mask
-from tpu_commons.sample.metadata_jax import TPUSupportedSamplingMetadata
+from tpu_commons.models.jax.sampling_metadata import \
+    TPUSupportedSamplingMetadata
 
 
 @functools.partial(
