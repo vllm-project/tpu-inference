@@ -181,9 +181,8 @@ class Llama3_8B(Model):
         kv_caches: List[jax.Array],
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
-        logits_indices: jax.Array = None,
         *args,
-    ) -> Tuple[List[KVCacheType], jax.Array, jax.Array]:
+    ) -> Tuple[List[KVCacheType], jax.Array]:
         is_prefill = False
         x = self.embedder.encode(input_ids)
         for (i, block) in enumerate(self.layers):
@@ -193,9 +192,11 @@ class Llama3_8B(Model):
             kv_caches[i] = new_kv_cache
 
         final_activation = self.final_norm(x)
-        final_activation = final_activation[logits_indices]
-        decoder_output = self.lm_head.decode(final_activation)
-        return kv_caches, decoder_output
+
+        return kv_caches, final_activation
+
+    def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
+        return self.lm_head.decode(hidden_states)
 
 
 class Llama3WeightLoader(WeightLoader):

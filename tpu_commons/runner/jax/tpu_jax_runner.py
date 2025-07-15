@@ -110,7 +110,8 @@ class TPUModelRunner():
                 )
                 sharding_strategy = {"tensor_parallelism": len(self.devices)}
             sharding = Sharding(strategy_dict=sharding_strategy,
-                                vllm_config=self.vllm_config)
+                                vllm_config=self.vllm_config,
+                                devices=self.devices)
             self.mesh = sharding.mesh
         else:
             axis_names = ("data", "model")
