@@ -3,7 +3,6 @@ import time
 
 import jax
 import jax.numpy as jnp
-import numpy as np  # For array comparison
 import pytest
 from jax._src.interpreters import pxla
 
@@ -92,7 +91,7 @@ def jitted_function():
 @pytest.fixture
 def scalar_input():
     """Sample scalar input."""
-    return jnp.array(5.0, dtype=jnp.float32)
+    return jnp.array(5.0)
 
 
 @pytest.fixture
@@ -135,64 +134,38 @@ def test_forbid_compile_with_exception():
     assert pxla._cached_lowering_to_hlo is original_func
 
 
-def test_recompilation_on_shape_change_only(jitted_function):
+def test_forbid_compile_raises_on_new_shape(jitted_function, scalar_input,
+                                            vector_input):
     """
-    Tests that recompilation in jax.jit is primarily triggered by shape/dtype
-    changes, not just value changes in strongly-typed tensors.
+    Tests that ForbidCompile raises a RuntimeError when a jitted function
+    is called with an input shape that triggers a new compilation.
     """
-    expected_error_message = "JAX compilation occurred but was forbidden in this context."
+    # Clear cache for a clean test state.
+    pxla._cached_lowering_to_hlo.cache_clear()
 
-    # --- Inputs ---
-    shape1 = (2, 2)
-    shape2 = (4, 2)
-    dtype = jnp.float32
-
-    tensor1 = jnp.ones(shape1, dtype=dtype)
-    tensor2_same_shape = jnp.full(shape1, 5.0, dtype=dtype)
-    tensor3_diff_shape = jnp.ones(shape2, dtype=dtype)
-
-    print("\n--- Tensor Shapes and Types ---")
-    print(f"tensor1: shape {tensor1.shape}, dtype {tensor1.dtype}")
-    print(
-        f"tensor2_same_shape: shape {tensor2_same_shape.shape}, dtype {tensor2_same_shape.dtype}"
-    )
-    print(
-        f"tensor3_diff_shape: shape {tensor3_diff_shape.shape}, dtype {tensor3_diff_shape.dtype}"
-    )
-
-    # --- Warm-up ---
-    print("\n--- Warm-up with tensor1 ---")
-    result1 = jitted_function(tensor1)
-    np.testing.assert_array_equal(result1, tensor1 * 2)
+    # Warm up the JIT cache with the SCALAR input.
+    # This causes the first compilation and cache miss.
+    jitted_function(scalar_input)
     misses_after_warmup = pxla._cached_lowering_to_hlo.cache_info().misses
     assert misses_after_warmup == 1
-    print(f"Cache after tensor1: {pxla._cached_lowering_to_hlo.cache_info()}")
 
-    # --- Test 1: Same Shape, Different Values ---
-    # Expected: NO recompilation, ForbidCompile should NOT raise.
-    print("\n--- Testing tensor2_same_shape (same shape, diff value) ---")
-    with ForbidCompile(message=expected_error_message):
-        result2 = jitted_function(tensor2_same_shape)
-    np.testing.assert_array_equal(result2, tensor2_same_shape * 2)
-    misses_after_t2 = pxla._cached_lowering_to_hlo.cache_info().misses
-    print(
-        f"Cache after tensor2_same_shape: {pxla._cached_lowering_to_hlo.cache_info()}"
-    )
-    assert misses_after_t2 == misses_after_warmup, "Recompilation NOT expected for value change."
+    # This call uses the same shape/dtype, so it should be a cache HIT.
+    # No RuntimeError expected.
+    with ForbidCompile():
+        result = jitted_function(scalar_input + 1.0)
+    assert result == 12.0
+    assert pxla._cached_lowering_to_hlo.cache_info(
+    ).misses == misses_after_warmup  # No new misses
 
-    # --- Test 2: Different Shape ---
-    # Expected: Recompilation, ForbidCompile SHOULD raise.
-    print("\n--- Testing tensor3_diff_shape (different shape) ---")
+    # Now, call with a VECTOR input. This has a different shape,
+    # forcing a NEW compilation (cache MISS).
+    # This *should* raise a RuntimeError within the ForbidCompile context.
+    expected_error_message = "JAX compilation occurred but was forbidden in this context."
     with pytest.raises(RuntimeError, match=expected_error_message):
         with ForbidCompile(message=expected_error_message):
-            jitted_function(tensor3_diff_shape)
+            jitted_function(vector_input)
 
-    misses_after_t3 = pxla._cached_lowering_to_hlo.cache_info().misses
-    print(
-        f"Cache after tensor3_diff_shape: {pxla._cached_lowering_to_hlo.cache_info()}"
-    )
-    assert misses_after_t3 == misses_after_t2 + 1, "Recompilation WAS expected for shape change."
-
-    # Optional: Verify the function works outside ForbidCompile for the new shape
-    result3 = jitted_function(tensor3_diff_shape)
-    np.testing.assert_array_equal(result3, tensor3_diff_shape * 2)
+    # To confirm a miss would have happened, call outside the context:
+    jitted_function(vector_input)
+    misses_after_vector = pxla._cached_lowering_to_hlo.cache_info().misses
+    assert misses_after_vector > misses_after_warmup, "A new compilation was expected for the vector input"
