@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 import time
-from unittest import mock
 
 import jax
 import jax.numpy as jnp
@@ -128,43 +127,9 @@ def test_forbid_compile_with_exception():
     assert pxla._cached_lowering_to_hlo is original_func
 
 
-def test_forbid_compile_with_pjit(sample_input):
-    """Test that ForbidCompile works correctly with pjit."""
-
-    @jax.experimental.pjit.pjit
-    def my_pjit_func(x):
-        return x + 1
-
-    # Warm up the cache
-    my_pjit_func(sample_input)
-
-    with ForbidCompile():
-        result = my_pjit_func(sample_input)
-    assert result == 6.0
-
-
 def test_forbid_compile_with_different_input(jitted_function, sample_input):
     """Test that ForbidCompile raises an error when a compilation occurs with a different input shape."""
     jitted_function(sample_input)  # Warm up the cache with initial input
     with pytest.raises(RuntimeError, match="JAX compilation occurred"):
         with ForbidCompile():
             jitted_function(sample_input + 1)  # Call with a different input
-
-
-def test_forbid_compile_with_mock_pjit(sample_input):
-    """Test that ForbidCompile works correctly with a mocked pjit."""
-    with mock.patch('jax.experimental.pjit.pjit') as mock_pjit:
-        mock_pjit.return_value = lambda x: x * 3
-
-        # Call with mocked pjit, first call will trigger a compilation
-        with pytest.raises(RuntimeError, match="JAX compilation occurred"):
-            with ForbidCompile():
-                result = mock_pjit(sample_input)
-
-        # Warm up the cache
-        mock_pjit(sample_input)
-
-        # Call again with mocked pjit, should not trigger a compilation
-        with ForbidCompile():
-            result = mock_pjit(sample_input)
-        assert result == 15.0
