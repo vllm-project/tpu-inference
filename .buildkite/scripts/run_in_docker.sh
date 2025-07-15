@@ -11,12 +11,16 @@ if [ "$#" -eq 0 ]; then
   exit 1
 fi
 
-# For HF_TOKEN.
+if ! grep -q "^HF_TOKEN=" /etc/environment; then
+  gcloud secrets versions access latest --secret=bm-agent-hf-token --quiet | \
+  sudo tee -a /etc/environment > /dev/null <<< "HF_TOKEN=$(cat)"
+  echo "Added HF_TOKEN to /etc/environment."
+else
+  echo "HF_TOKEN already exists in /etc/environment."
+fi
+
 # shellcheck disable=1091
 source /etc/environment
-
-# TODO @jacobplatin: remove eventually
-export HF_TOKEN=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
 
 if [ -z "${BUILDKITE_COMMIT:-}" ]; then
   echo "ERROR: BUILDKITE_COMMIT environment variable is not set." >&2
