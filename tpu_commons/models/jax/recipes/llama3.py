@@ -26,11 +26,9 @@ from tpu_commons.models.jax.common.sharding import (Sharding, ShardingConfig,
 from tpu_commons.models.jax.common.transformer_block import (
     TransformerBlock, TransformerBlockConfig)
 from tpu_commons.models.jax.layers.misc import shard_put
-from tpu_commons.models.jax.layers.sampling import sample
 from tpu_commons.models.jax.recipes.recipe import RecipeConfig
 from tpu_commons.models.jax.utils.weight_utils import (ParameterType,
                                                        WeightLoader, get_param)
-from tpu_commons.sample.metadata_jax import TPUSupportedSamplingMetadata
 
 logger = init_logger(__name__)
 pp = pprint.PrettyPrinter(depth=6)
@@ -164,17 +162,18 @@ class Llama3_8B(Model):
 
     def load_weights(self, rng: PRNGKey, cache_dir: Optional[str] = None):
         try:
-            use_random_weights = self.vllm_config.additional_config["random_weights"]
+            use_random_weights = self.vllm_config.additional_config[
+                "random_weights"]  # noqa: F841
             logger.warning(
                 "Using randomly initialized weights instead of loading parameter weights."
             )
             return
         except KeyError:
-            use_random_weights = False
+            use_random_weights = False  # noqa: F841
         weight_loader = Llama3WeightLoader(vllm_config=self.vllm_config,
-                                            model_config=self.cfg.model,
-                                            cache_dir=None,
-                                            sharding_cfg=self.cfg.sharding)
+                                           model_config=self.cfg.model,
+                                           cache_dir=None,
+                                           sharding_cfg=self.cfg.sharding)
         weight_loader.load_weights(self)
 
     def __call__(
@@ -193,11 +192,12 @@ class Llama3_8B(Model):
             kv_caches[i] = new_kv_cache
 
         final_activation = self.final_norm(x)
-        
+
         return kv_caches, final_activation
-    
+
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        return  self.lm_head.decode(hidden_states) 
+        return self.lm_head.decode(hidden_states)
+
 
 class Llama3WeightLoader(WeightLoader):
 
