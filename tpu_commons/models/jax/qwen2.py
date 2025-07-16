@@ -69,7 +69,11 @@ class Qwen2Attention(nnx.Module):
 
         self.head_dim_original = config.hidden_size // config.num_attention_heads
 
-        # Pad head_dim for kernel performance.
+        sharding_size = mesh.shape["model"]
+        self.num_heads = utils.get_padded_num_heads(self.num_heads,
+                                                    sharding_size)
+        self.num_kv_heads = utils.get_padded_num_heads(self.num_kv_heads,
+                                                       sharding_size)
         self.head_dim = utils.get_padded_head_dim(self.head_dim_original)
 
         self.mesh = mesh
