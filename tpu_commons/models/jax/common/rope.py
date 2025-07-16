@@ -10,11 +10,12 @@ class RotaryEmbedding:
     """
 
     def __init__(self, rotary_dim: int, rope_theta: float,
-                 original_max_position_embeddings: int):
+                 original_max_position_embeddings: int, dtype: jnp.dtype):
         self.rotary_dim = rotary_dim
         self.rope_theta = rope_theta
         self.original_max_position_embeddings = original_max_position_embeddings
         self.sin_cos_cache = self._compute_sin_cos()
+        self.dtype = dtype
 
     def _compute_inv_freq(self):
         fractions = jnp.arange(0, self.rotary_dim, 2,
@@ -45,11 +46,12 @@ class RotaryEmbedding:
         cos, sin = cos[:, None, :], sin[:, None, :]
         # first_half, second_half: (T, N, H/2)
         first_half, second_half = jnp.split(x_TNH, 2, axis=-1)
-        return jnp.concatenate([
+        combined = jnp.concatenate([
             first_half * cos - second_half * sin,
             second_half * cos + first_half * sin
         ],
-                               axis=-1)
+                                   axis=-1)
+        return combined.astype(self.dtype)
 
 
 class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
@@ -57,24 +59,28 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
     Rotary Embedding for deepseek, with scaling and YaRN method.
     """
 
-    def __init__(self,
-                 rotary_dim: int,
-                 rope_theta: float,
-                 original_max_position_embeddings: int,
-                 scaling_factor: float,
-                 beta_fast: int = 32,
-                 beta_slow: int = 1,
-                 mscale: float = 1,
-                 mscale_all_dim: float = 0):
+    def __init__(
+        self,
+        rotary_dim: int,
+        rope_theta: float,
+        original_max_position_embeddings: int,
+        scaling_factor: float,
+        dtype: jnp.dtype,
+        beta_fast: int = 32,
+        beta_slow: int = 1,
+        mscale: float = 1,
+        mscale_all_dim: float = 0,
+    ):
         self.scaling_factor = scaling_factor
         self.beta_fast = beta_fast
         self.beta_slow = beta_slow
+        self.dtype = dtype
 
         self.mscale = _yarn_get_mscale(scaling_factor,
                                        mscale) / _yarn_get_mscale(
                                            scaling_factor, mscale_all_dim)
         super().__init__(rotary_dim, rope_theta,
-                         original_max_position_embeddings)
+                         original_max_position_embeddings, dtype)
 
     def _compute_inv_freq(self):
         fractions = jnp.arange(0, self.rotary_dim, 2,
@@ -113,8 +119,9 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         cos, sin = cos[:, None, :], sin[:, None, :]
         # even, odd: (T, N, H/2)
         even, odd = x_TNH[..., ::2], x_TNH[..., 1::2]
-        return jnp.stack([even * cos - odd * sin, odd * cos + even * sin],
-                         axis=-1).reshape(x_TNH.shape)
+        combined = jnp.stack([even * cos - odd * sin, odd * cos + even * sin],
+                             axis=-1).reshape(x_TNH.shape)
+        return combined.astype(self.dtype)
 
 
 # Calculates the temperature scaling factor for YaRN to adjust

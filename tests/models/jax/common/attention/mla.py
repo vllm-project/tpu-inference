@@ -2,27 +2,42 @@ import unittest
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from flax import nnx
 from jax.sharding import Mesh
 
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.models.jax.common.attention.deepseek_v3_attention import MLA, MLAConfig
+from tpu_commons.models.jax.common.attention.deepseek_v3_attention import (
+    MLA, MLAConfig)
 from tpu_commons.models.jax.common.base import ParamFactory
 from tpu_commons.models.jax.common.kv_cache import KVCacheConfig
 from tpu_commons.models.jax.common.sharding import ShardingConfig
+from tpu_commons.models.jax.recipes.deepseek_v3 import (
+    DeepSeekV3GenerateShardingRulesConfig,
+    DeepSeekV3PrefillShardingRulesConfig, DeepSeekV3ShardingRulesConfig)
 
 
 class TestMLA(unittest.TestCase):
+
     def setUp(self):
-        self.mesh = Mesh(jax.devices("tpu"), axis_names=("model",))
+        self.mesh = Mesh(
+            np.array(jax.devices("tpu")).reshape(1, -1),
+            axis_names=(
+                "expert",
+                "model",
+            ),
+        )
         self.param_factory = ParamFactory(
             kernel_initializer=nnx.initializers.xavier_normal(),
             scale_initializer=nnx.initializers.ones,
         )
-        self.sharding_cfg = ShardingConfig()
+        self.sharding_cfg = ShardingConfig(
+            default_rules_cls=DeepSeekV3ShardingRulesConfig,
+            prefill_rules=DeepSeekV3PrefillShardingRulesConfig,
+            generate_rules=DeepSeekV3GenerateShardingRulesConfig,
+        )
 
     def test_mla_forward_pass(self):
-        
         mla_config = MLAConfig(
             hidden_size=256,
             num_attention_heads=32,
@@ -94,16 +109,18 @@ class TestMLA(unittest.TestCase):
                 dtype=jnp.int32,
             ),
             block_tables=jnp.zeros((1, 8), dtype=jnp.int32),
-            seq_lens=jnp.ones((1,), dtype=jnp.int32) * seq_len,
+            seq_lens=jnp.ones((1, ), dtype=jnp.int32) * seq_len,
             num_slices=jnp.array([num_slices], dtype=jnp.int32),
-            num_seqs=jnp.ones((1,), dtype=jnp.int32),
-            query_start_loc=jnp.array([0, seq_len], dtype=jnp.int32),  # This is cu_q_lens
+            num_seqs=jnp.ones((1, ), dtype=jnp.int32),
+            query_start_loc=jnp.array([0, seq_len],
+                                      dtype=jnp.int32),  # This is cu_q_lens
         )
 
         # Run forward pass
-        new_kv_cache, output = mla(
-            x, is_prefill=True, kv_cache=kv_cache, attention_metadata=attention_metadata
-        )
+        new_kv_cache, output = mla(x,
+                                   is_prefill=True,
+                                   kv_cache=kv_cache,
+                                   attention_metadata=attention_metadata)
 
         # Verify output shapes
         self.assertEqual(output.shape, (seq_len, mla_config.hidden_size))

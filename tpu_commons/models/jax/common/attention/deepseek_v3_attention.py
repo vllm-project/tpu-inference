@@ -14,8 +14,8 @@ from tpu_commons.models.jax.common.attention.attention import (Attention,
                                                                KVCache)
 from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
+from tpu_commons.models.jax.common.rope import DeepseekScalingRotaryEmbedding
 from tpu_commons.models.jax.common.sharding import ShardingConfig
-from tpu_commons.models.jax.layers.rope import apply_rope
 
 MLAConfig = make_dataclass(
     "MLAConfig",
@@ -145,6 +145,17 @@ class MLA(Attention):
             param_dtype=self.dtype,
             rngs=rngs,
         )
+        self.rope = DeepseekScalingRotaryEmbedding(
+            self.qk_rope_head_dim,
+            self.rope_theta,
+            self.rope_scaling["original_max_position_embeddings"],
+            self.rope_scaling["factor"],
+            self.dtype,
+            beta_fast=self.rope_scaling["beta_fast"],
+            beta_slow=self.rope_scaling["beta_slow"],
+            mscale=self.rope_scaling["mscale"],
+            mscale_all_dim=self.rope_scaling["mscale_all_dim"],
+        )
 
     def __call__(
         self,
@@ -185,13 +196,7 @@ class MLA(Attention):
             # Split the query into nope and rope.
             q_nope_TNH = q_TNH[..., :self.qk_nope_head_dim]
             q_rope_TNH = q_TNH[..., self.qk_nope_head_dim:]
-            q_rope_TNH = apply_rope(
-                q_rope_TNH,
-                md.input_positions,
-                self.qk_rope_head_dim,
-                self.rope_theta,
-                self.rope_scaling,
-            )
+            q_rope_TNH = self.rope.apply_rope(md.input_positions, q_rope_TNH)
             # Concatenate the nope and rope queries.
             q_TNH = jnp.concatenate([q_nope_TNH, q_rope_TNH], axis=-1)
             # Multiple the query by scaling factor
@@ -207,13 +212,7 @@ class MLA(Attention):
             k_rope_SH = kv_SA[..., self.kv_lora_rank:]
             # Reshape k_rope_BSH to include head dimension for RoPE application
             k_rope_SNH = k_rope_SH[..., None, :]
-            k_rope_SNH = apply_rope(
-                k_rope_SNH,
-                md.input_positions,
-                self.qk_rope_head_dim,
-                self.rope_theta,
-                self.rope_scaling,
-            )
+            k_rope_SNH = self.rope.apply_rope(md.input_positions, k_rope_SNH)
             k_rope_SNH = jnp.broadcast_to(
                 k_rope_SNH,
                 (k_rope_SNH.shape[0], self.N, self.qk_rope_head_dim))
