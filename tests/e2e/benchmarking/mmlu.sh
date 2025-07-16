@@ -32,6 +32,11 @@ if [ "$NEW_MODEL_DESIGN" = "True" ]; then
     model_list="meta-llama/Llama-3.1-8B-Instruct"
     extra_serve_args+=("--hf_overrides")
     extra_serve_args+=('{"architectures": ["Llama3_8B"]}')
+    if [ "$QUANTIZATION" = "True" ]; then
+        echo "QUANTIZATION is True. Running with quantization."
+        extra_serve_args+=("--additional_args")
+        extra_serve_args+=('{"quantization": {"rules_file": "tpu_commons/models/jax/utils/quantization/quantize_all_modules_int8_wa.yaml", "kv_cache_quant_dtype": "int8"}}')
+    fi
 else
     echo "NEW_MODEL_DESIGN is not set to True. Running with default settings."
 fi

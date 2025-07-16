@@ -224,3 +224,45 @@ While this will run the code in a Docker image, you can also run the bare `tests
 being sure to pass the proper args for your machine.
 
 You might need to run the benchmark client *twice* to make sure all compilations are cached server-side.
+
+## Quantization
+Currently, we support both per-tensor KV cache quantization and overall model/activation quantization through the [Qwix](https://github.com/google/qwix?tab=readme-ov-file#quantization-config) framework.  NOTE: these are only supported using the `NEW_MODEL_DESIGN`!
+
+### KV cache quantization
+In order to enable KV cache quantization, simply add the following to your base command:
+
+```
+... --additional_config='{"quantization": {"kv_cache_quant_dtype": "int8"}}'
+```
+
+We currently support int8, int4, and FP8 (`float8_e4m3fn`) quantization dtypes.
+
+### Model/activation quantization
+In order to enable overall model quantization, simply add the following to your base command:
+
+```
+.... --additional_config='{"quantization": {"dtype": "int8"}}'
+```
+
+By default, we will use the following Qwix rules (with the given `dtype`), which will quantize attention weights-only and MLP with weights and activations:
+
+```
+[
+    qwix.QuantizationRule(
+        module_path='.*attn.*',
+        weight_qtype=quant_dtype,
+    ),
+    qwix.QuantizationRule(
+        module_path='.*mlp.*',
+        weight_qtype=quant_dtype,
+        act_qtype=quant_dtype,
+        tile_size=None,
+    ),
+]
+```
+
+You may also create a file that defines your own rules (e.g. `tpu_commons/models/jax/utils/quantization/quantize_all_modules_int8_wa.yaml`), where each entry under `rules` corresponds to a `qwix.QuantizationRule`.  To pass this file (which is mutually exclusive with `quantization.dtype`), you can something similar to:
+
+```
+... --additional_config='{"quantization": {"rules_file": "tpu_commons/models/jax/utils/quantization/quantize_all_modules_int8_wa.yaml"}}'
+```

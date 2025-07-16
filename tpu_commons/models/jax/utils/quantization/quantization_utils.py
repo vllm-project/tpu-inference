@@ -152,13 +152,14 @@ def qwix_quantize_nnx_model(model: nnx.Module,
     return model
 
 
-def quantize(x: jax.Array, quant_dtype: jnp.dtype):
+def quantize(x: jax.Array, quant_dtype: jnp.dtype, clip_to_dtype: bool = True):
     """Quantizes uses a per-tensor approach.
       TODO (jacobplatin): support a per-token approach
 
     Args:
         x: the value to quantize
         quant_dtype: the dtype to quantize to
+        clip_to_dtype: whether to clip the value to
 
     Returns:
          x (jax.Array): the quantized value
@@ -178,11 +179,15 @@ def quantize(x: jax.Array, quant_dtype: jnp.dtype):
         raise ValueError(f"Unsupported quant dtype: {quant_dtype}")
 
     scale = jnp.max(jnp.abs(x)) / dtype_max
-
     # Ensure scales are not zero to avoid division by zero errors.
     scale = jnp.maximum(scale, 1e-6)
+    x /= scale
 
-    x = (x / scale).astype(quant_dtype)
+    if clip_to_dtype:
+        dtype_info = jnp.finfo(quant_dtype)
+        x = jnp.clip(x, a_min=dtype_info.min, a_max=dtype_info.max)
+
+    x = (x).astype(quant_dtype)
 
     # Upcast to float32 to avoid a SMEM Mosaic error with bfloat16
     # NOTE: the scales are really floats but static types don't play

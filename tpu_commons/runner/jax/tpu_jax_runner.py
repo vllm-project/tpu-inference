@@ -228,7 +228,7 @@ class TPUModelRunner():
         layer_names = kv_cache_groups[0].layer_names
 
         maybe_kv_cache_quant_dtype = self.vllm_config.additional_config.get(
-            "quantization", {}).get("kv_quant_dtype", None)
+            "quantization", {}).get("kv_cache_quant_dtype", None)
 
         self.kv_caches = create_kv_caches(
             num_blocks=kv_cache_config.num_blocks,

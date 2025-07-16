@@ -63,7 +63,7 @@ def _maybe_apply_qwix_quantization(vllm_config: VllmConfig, model: nnx.Module,
     maybe_quant_rules_files = vllm_config.additional_config.get(
         "quantization", {}).get("rules_file", None)
     maybe_kv_cache_quant_dtype = vllm_config.additional_config.get(
-        "quantization", {}).get("kv_quant_dtype", None)
+        "quantization", {}).get("kv_cache_quant_dtype", None)
     if maybe_quant_dtype or maybe_quant_rules_files:
         block_size = vllm_config.cache_config.block_size
         model_config = vllm_config.model_config
@@ -72,6 +72,7 @@ def _maybe_apply_qwix_quantization(vllm_config: VllmConfig, model: nnx.Module,
         # NOTE: it's REALLY important this is jitted, or else you'll run into hanging
         model = nnx.jit(
             qwix_quantize_nnx_model,
+            donate_argnames=("model", ),
             static_argnames=(
                 "quant_dtype",
                 "mesh",
