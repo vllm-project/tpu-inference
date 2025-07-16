@@ -48,6 +48,13 @@ class HuggingFaceArgNames(enum.Enum):
     ATTENION_DROPOUT: str = "attention_dropout"
     ATTENTION_BIAS: str = "attention_bias"
 
+    # MLA params
+    KV_LORA_RANK: str = "kv_lora_rank"
+    Q_LORA_RANK: str = "q_lora_rank"
+    QK_NOPE_HEAD_DIM: str = "qk_nope_head_dim"
+    QK_ROPE_HEAD_DIM: str = "qk_rope_head_dim"
+    V_HEAD_DIM: str = "v_head_dim"
+
     # MoE
     INTERMEDIATE_SIZE_MOE: str = "intermediate_size_moe"
     NUM_LOCAL_EXPERTS: str = "num_local_experts"  # Llama moe
