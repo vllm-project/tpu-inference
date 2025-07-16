@@ -153,14 +153,12 @@ def test_forbid_compile_raises_on_new_shape(jitted_function, jnp_array_input,
     misses_after_warmup = pxla._cached_lowering_to_hlo.cache_info().misses
     assert misses_after_warmup == 1
 
-    ######## TODO: Add this back when is fixed
     # This call uses the same shape/dtype, so it should be a cache HIT.
     # No RuntimeError expected.
     with ForbidCompile():
         jitted_function(jnp_array_input_same_shape)
     assert pxla._cached_lowering_to_hlo.cache_info(
     ).misses == misses_after_warmup  # No new misses
-    ########
 
     # Now, call with a VECTOR input. This has a different shape,
     # forcing a NEW compilation (cache MISS).
