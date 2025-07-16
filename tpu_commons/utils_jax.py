@@ -53,3 +53,12 @@ def get_padded_head_dim(head_dim: int) -> int:
     """Pads head_dim up to the nearest multiple of 128 for kernel performance."""
     # Details can be seen at: tpu_commons/kernels/ragged_kv_cache_update.py::_kv_cache_update()
     return (head_dim + 127) // 128 * 128
+
+
+def get_padded_num_heads(num_heads: int, sharding_size: int) -> int:
+    if num_heads >= sharding_size:
+        assert num_heads % sharding_size == 0
+    else:
+        assert sharding_size % num_heads == 0
+        num_heads = sharding_size
+    return num_heads
