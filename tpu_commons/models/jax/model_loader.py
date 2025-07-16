@@ -41,14 +41,22 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
         f"Supported architectures: {list(_MODEL_REGISTRY.keys())}")
 
 
-def _get_common_model(
-    model_class: Any,
-    vllm_config: VllmConfig,
-    rng: jax.Array,
-    mesh: Mesh,
-) -> nnx.Module:
-    model = model_class(vllm_config, rng, mesh)
-    model.load_weights(model)
+def _maybe_apply_qwix_quantization(vllm_config: VllmConfig, model: nnx.Module,
+                                   rng: jax.Array, mesh: Mesh) -> nnx.Module:
+    """
+    Will apply Qwix quantization if either dtype or rules file is provided.  If dtype is provided,
+    then we'll use the default set of rules (see README for more details).  Otherwise, the
+    rules from the provided file will be used.
+
+    Args:
+        vllm_config: the vllm config
+        model: the model to quantize
+        rng: the random number generator to use
+        mesh: the mesh to use
+
+    Returns:
+        the potentially quantized model
+    """
     maybe_quant_dtype = vllm_config.additional_config.get("quantization",
                                                           {}).get(
                                                               "dtype", None)
@@ -57,11 +65,11 @@ def _get_common_model(
     maybe_kv_cache_quant_dtype = vllm_config.additional_config.get(
         "quantization", {}).get("kv_quant_dtype", None)
     if maybe_quant_dtype or maybe_quant_rules_files:
-        # NOTE: it's REALLY important this is jitted, or else you'll run into hanging
         block_size = vllm_config.cache_config.block_size
         model_config = vllm_config.model_config
         head_size = model_config.get_head_size()
         num_kv_heads = model_config.get_total_num_kv_heads()
+        # NOTE: it's REALLY important this is jitted, or else you'll run into hanging
         model = nnx.jit(
             qwix_quantize_nnx_model,
             static_argnames=(
@@ -83,6 +91,19 @@ def _get_common_model(
                head_size,
                maybe_kv_cache_quant_dtype,
                rules_file_path=maybe_quant_rules_files)
+
+    return model
+
+
+def _get_common_model(
+    model_class: Any,
+    vllm_config: VllmConfig,
+    rng: jax.Array,
+    mesh: Mesh,
+) -> nnx.Module:
+    model = model_class(vllm_config, rng, mesh)
+    model.load_weights(model)
+    model = _maybe_apply_qwix_quantization(vllm_config, model, rng, mesh)
     return model
 
 
@@ -101,6 +122,7 @@ def _get_nnx_model(
             pspecs = nnx.get_partition_spec(state)
             sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
             nnx.update(model, sharded_state)
+            return model
 
         with mesh:
             jit_model = create_sharded_model()

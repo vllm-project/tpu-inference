@@ -96,7 +96,7 @@ class LlamaAttention(nnx.Module):
 
     def __call__(
         self,
-        kv_cache: Optional[jax.Array] | Optional[Tuple[jax.Array, jax.Array]],
+        kv_cache: Optional[jax.Array],
         x: jax.Array,
         attention_metadata: AttentionMetadata,
     ) -> Tuple[jax.Array, jax.Array]:
@@ -162,7 +162,7 @@ class LlamaDecoderLayer(nnx.Module):
 
     def __call__(
         self,
-        kv_cache: jax.Array | Tuple[jax.Array, jax.Array],
+        kv_cache: jax.Array,
         x: jax.Array,
         attention_metadata: AttentionMetadata,
     ) -> Tuple[jax.Array, jax.Array]:
@@ -210,19 +210,18 @@ class LlamaModel(nnx.Module):
 
     def __call__(
         self,
-        kv_caches: List[jax.Array] | List[Tuple[jax.Array, jax.Array]],
+        kv_caches: List[jax.Array],
         x: jax.Array,
         attention_metadata: AttentionMetadata,
     ) -> Tuple[List[jax.Array], jax.Array]:
         for i, layer in enumerate(self.layers):
-            with jax.named_scope(f"layer_{i}"):
-                kv_cache = kv_caches[i]
-                kv_cache, x = layer(
-                    kv_cache,
-                    x,
-                    attention_metadata,
-                )
-                kv_caches[i] = kv_cache
+            kv_cache = kv_caches[i]
+            kv_cache, x = layer(
+                kv_cache,
+                x,
+                attention_metadata,
+            )
+            kv_caches[i] = kv_cache
         x = self.norm(x)
         return kv_caches, x
 

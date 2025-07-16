@@ -6,8 +6,9 @@ from jax._src import test_util as jtu
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
-from tpu_commons.kernels.quantized_kvcache import quantize
 from tpu_commons.kernels.ragged_kv_cache_update import kv_cache_update
+from tpu_commons.models.jax.utils.quantization.quantization_utils import \
+    quantize
 
 
 def kv_cache_update_ref(new_kv, slot_mapping, kv_cache):

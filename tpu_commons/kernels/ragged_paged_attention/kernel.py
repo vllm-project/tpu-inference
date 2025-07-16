@@ -454,8 +454,9 @@ def ragged_paged_attention_kernel(
                 head_acc_ref,  # [num_q_per_blk, num_q_heads_per_kv_head, head_dim]
                 *,
                 kv_blk_idx,
-                k_scale=None,
-                v_scale=None):
+                k_scale=None,  # If passed, will be of shape [1,]
+                v_scale=None,  # If passed, will be of shape [1,]
+        ):
             assert q.shape == (
                 num_q_per_blk * num_q_heads_per_kv_head,
                 head_dim,
@@ -527,7 +528,6 @@ def ragged_paged_attention_kernel(
             if k_scale is not None:
                 v = qarray.QArray(v, v_scale, zero_point=None, qtype=v.dtype)
                 qkv = qwix_einsum("nm,md->nd", s_curr, v)
-                # s_curr = qarray.dequantize(s_curr)
             else:
                 qkv = jnp.dot(s_curr, v, preferred_element_type=jnp.float32)
             lm_store_shape = head_m_ref.shape
@@ -715,8 +715,6 @@ def get_min_heads_per_blk(num_q_heads, num_combined_kv_heads, q_dtype,
         "vmem_limit_bytes",
         "sliding_window",
         "soft_cap",
-        # "k_scale",
-        # "v_scale",
     ],
 )
 def ragged_paged_attention(
@@ -754,8 +752,8 @@ def ragged_paged_attention(
     sliding_window: the sliding window size for the attention.
     soft_cap: the logit soft cap for the attention.
     mask_value: mask value for causal mask.
-    k_scale: the scale for the key cache.
-    v_scale: the scale for the value cache.
+    k_scale: the scale for the key cache.  Should be a jax.Array of shape (1,).
+    v_scale: the scale for the value cache. Should be a jax.Array of shape (1,).
     num_kv_pages_per_block: number of kv pages to be processed in one flash
       attention block in the pallas kernel.
     num_queries_per_block: number of kv pages to be processed in one flash

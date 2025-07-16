@@ -163,13 +163,13 @@ class Llama3_8B(Model):
     def load_weights(self, rng: PRNGKey, cache_dir: Optional[str] = None):
         try:
             use_random_weights = self.vllm_config.additional_config[
-                "random_weights"]
+                "random_weights"]  # noqa: F841
             logger.warning(
                 "Using randomly initialized weights instead of loading parameter weights."
             )
             return
         except KeyError:
-            use_random_weights = False
+            use_random_weights = False  # noqa: F841
         weight_loader = Llama3WeightLoader(vllm_config=self.vllm_config,
                                            model_config=self.cfg.model,
                                            cache_dir=None,

@@ -25,10 +25,9 @@ DEFAULT_NUM_BLOCKS_FOR_JIT_KV_CACHE = 2000
 DEFAULT_QWIX_RULES = lambda quant_dtype: [  # noqa: E731
     qwix.QuantizationRule(
         module_path='.*attn.*',
-        weight_qtype=quant_dtype,  # quantizes weights in int8.
+        weight_qtype=quant_dtype,
     ),
     qwix.QuantizationRule(
-        # module_path='.*',
         module_path='.*mlp.*',
         weight_qtype=quant_dtype,
         act_qtype=quant_dtype,
@@ -88,7 +87,6 @@ def qwix_quantize_nnx_model(model: nnx.Module,
     Returns:
         model: the quantized model
     """
-    # TODO: add support for rules!
     if quant_dtype is not None and rules_file_path is not None:
         raise ValueError(
             "Cannot specify both quantization rules and quantization dtype in your quantization config"

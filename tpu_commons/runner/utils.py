@@ -144,8 +144,7 @@ def get_jnp_dtype_from_str(dtype_str: str) -> type:
         "float16": jnp.float16,
         "bfloat16": jnp.bfloat16,
         "int8": jnp.int8,
-        "fp8": jnp.
-        float8_e4m3fn  # TODO (jacobplatin): is this the correct float8 dtype?
+        "fp8": jnp.float8_e4m3fn
     }
 
     if dtype_str not in str_to_dtype_dict:
@@ -176,7 +175,7 @@ def create_kv_caches(
         mesh: The mesh to shard the KV caches across.
         layer_names: The names of the decoder layers in the model.
         devices: The devices to shard the KV caches across.
-        kv_cache_quant_dtype: The dtype of the KV cache.
+        kv_cache_quant_dtype: Quantized dtype for the KV cache (default is bfloat16, unquantized).
 
     Returns:
         A list of KV caches, one per each decoder layer in the model.

@@ -25,6 +25,8 @@ def sharded_ragged_paged_attention(sm_scale: float, mesh: Mesh):
         P(),  # page_indices
         P(),  # cu_q_lens
         P(),  # num_seqs
+        P(),  # k_scale
+        P(),  # v_scale
     )
     out_specs = P(None, "model", None)
 
@@ -87,6 +89,8 @@ def attention(
         md.block_tables,
         md.query_start_loc,
         md.num_seqs,
+        None,  # k_scale
+        None,  # v_scale
     )
 
     return kv_cache, output

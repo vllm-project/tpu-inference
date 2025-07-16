@@ -4,7 +4,7 @@ import random
 import time
 from contextlib import nullcontext
 from dataclasses import asdict
-from typing import Any, List, Optional, Tuple, cast
+from typing import Any, List, Optional, cast
 
 import jax
 import jax.numpy as jnp
@@ -216,8 +216,7 @@ class TPUModelRunner():
         return kv_cache_spec
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
-        self.kv_caches: List[jax.Array] | List[Tuple[jax.Array,
-                                                     jax.Array]] = []
+        self.kv_caches: List[jax.Array] = []
 
         kv_cache_groups = kv_cache_config.kv_cache_groups
         if len(kv_cache_groups) > 1:
