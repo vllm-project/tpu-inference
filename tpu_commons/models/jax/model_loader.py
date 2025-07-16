@@ -23,11 +23,11 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
     _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
 
-    # if os.getenv("NEW_MODEL_DESIGN", False):
-    from tpu_commons.models.jax.recipes.llama3 import Llama3_8B
-    print("Using new model design for Llama3_8B")
-    # from tpu_commons.models.jax.recipes.llama4 import Llama4Scout
-    _MODEL_REGISTRY["Llama3_8B"] = Llama3_8B
+    if os.getenv("NEW_MODEL_DESIGN", False):
+        from tpu_commons.models.jax.recipes.llama3 import Llama3_8B
+        print("Using new model design for Llama3_8B")
+        # from tpu_commons.models.jax.recipes.llama4 import Llama4Scout
+        _MODEL_REGISTRY["Llama3_8B"] = Llama3_8B
         # _MODEL_REGISTRY["Llama4Scout"] = Llama4Scout
 
     architectures = getattr(config, "architectures", [])
@@ -103,7 +103,7 @@ def get_flax_model(
     mesh: Mesh,
 ) -> nnx.Module:
     model_class = _get_model_architecture(vllm_config.model_config.hf_config)
-    if True:
+    if os.getenv("NEW_MODEL_DESIGN", False):
         jit_model = _get_common_model(model_class, vllm_config, rng, mesh)
     else:
         jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh)
