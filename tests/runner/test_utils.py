@@ -138,6 +138,7 @@ def test_forbid_compile_with_exception():
 
 
 def test_forbid_compile_raises_on_new_shape(jitted_function, jnp_array_input,
+                                            jnp_array_input_same_shape,
                                             jnp_array_input_new):
     """
     Tests that ForbidCompile raises a RuntimeError when a jitted function
