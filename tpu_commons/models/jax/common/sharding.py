@@ -77,16 +77,6 @@ class ShardingRulesConfig:
     # Attention Out weight: (NumHeads, HeadDim, Dim)
     attn_o_weight_nhd: tuple = (None, None, None)
 
-    # MLA Query down projection weight: (Dim, QueryLoraRank)
-    attn_mla_qa_weight_da: tuple = (None, None)
-    # MLA Query up projection weight: (QueryLoraRank, NumHeads, HeadDim)
-    attn_mla_qb_weight_anh: tuple = (None, None, None)
-    # MLA KV down projection weight: (Dim, KVLoRA + QKRopeHeadDim)
-    attn_mla_kva_weight_da: tuple = (None, None)
-    # MLA KV up projection weight: (KVLoRA, NumHeads, QKNopeHeadDim + VHeadDim)
-    attn_mla_kvb_weight_anh: tuple = (None, None, None)
-
-
     # K/V cache for generation: (NumKVHeads, Batch, Sequence, HeadDim)
     keyvalue_cache_lskh: tuple = (None, None, None)
 
@@ -367,10 +357,6 @@ class Sharding:
                                             ATTN_TENSOR_AXIS_NAME)
         generate_rules.attn_o_weight_nhd = (None, ATTN_HEAD_AXIS_NAME,
                                             ATTN_TENSOR_AXIS_NAME)
-        # MLA Query up projection weight: (QueryLoraRank, NumHeads, HeadDim)
-        generate_rules.attn_mla_qb_weight_anh: tuple = (None, ATTN_HEAD_AXIS_NAME, ATTN_TENSOR_AXIS_NAME)
-        # MLA KV up projection weight: (KVLoRA, NumHeads, QKNopeHeadDim + VHeadDim)
-        generate_rules.attn_mla_kvb_weight_anh: tuple = (None, ATTN_HEAD_AXIS_NAME, ATTN_TENSOR_AXIS_NAME)
 
         generate_rules.activation_ffw_td = (DATA_AXIS_NAME,
                                             MLP_TENSOR_AXIS_NAME)

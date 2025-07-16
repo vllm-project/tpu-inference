@@ -6,7 +6,7 @@ from flax import nnx
 from jax.sharding import Mesh
 
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.models.jax.common.attention.attention import MLA, MLAConfig
+from tpu_commons.models.jax.common.attention.deepseek_v3_attention import MLA, MLAConfig
 from tpu_commons.models.jax.common.base import ParamFactory
 from tpu_commons.models.jax.common.kv_cache import KVCacheConfig
 from tpu_commons.models.jax.common.sharding import ShardingConfig
