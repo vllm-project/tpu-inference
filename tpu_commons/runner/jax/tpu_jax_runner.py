@@ -1,6 +1,6 @@
 # Here we try to bring as much code as possible from Hex-LLM, instead of `tpu_torch_xla_runner.py` -> jax conversion.
 # This runner is a port of https://source.corp.google.com/h/vertex-model-garden/hex-llm/+/main:hex_llm/worker/runner_jax.py
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple, Dict
 
 from dataclasses import asdict
 import jax
@@ -27,6 +27,8 @@ from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
                                                     InputBatch)
 from tpu_commons.runner.jax.input_prep import InputPrep
 from tpu_commons.runner.tpu_torch_xla_runner import _get_token_paddings
+from flax import nnx
+from tpu_commons.models.jax.utils.weight_utils import load_nnx_weights
 
 logger = init_logger(__name__)
 
@@ -352,7 +354,7 @@ class TPUModelRunner():
             logprobs=None,
             spec_token_ids=None,
             sampled_token_ids=sampled_token_ids,
-            pooler_output=[],
+            # pooler_output=[],
         )
 
     def _init_mesh(self) -> None:
@@ -395,11 +397,16 @@ class TPUModelRunner():
 
     def _init_model(self) -> None:
         logger.info("Init model start...")
-        self.model_fn = get_model(
+        self.model_fn, self.model = get_model(
             self.vllm_config,
             self.rng_key,
             self.mesh,
         )
+        try:
+          self.transformer_state = nnx.variables(self.model)
+        except Exception as e:
+            logger.warning(f"Failed to get variables from model {type(self.model)} with {e}")
+
 
     def _init_jit(self) -> None:
         self.outputs_sharding = NamedSharding(self.mesh, PartitionSpec(None))
@@ -526,6 +533,9 @@ class TPUModelRunner():
             self.input_batch.condense(removed_req_indices)
 
         return len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
+
+    def _sync_weights(self, updated_weights: Any, mappings: Any = None) -> None:
+          load_nnx_weights(source_state=updated_weights, target_model=self.model, mappings=mappings, mesh=self.mesh)
 
 
 def write_outputs(

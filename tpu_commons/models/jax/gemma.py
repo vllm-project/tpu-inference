@@ -1,10 +1,10 @@
-from typing import List, Optional, Tuple, Any
+from typing import List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh
-from transformers import LlamaConfig, modeling_flax_utils
+from transformers import GemmaConfig, modeling_flax_utils
 from vllm.config import VllmConfig
 
 from tpu_commons.logger import init_logger
@@ -12,19 +12,18 @@ from tpu_commons.models.jax.attention_interface import KVCache, attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.layers.rope import apply_rope
 from tpu_commons.models.jax.layers.sampling import sample
-from tpu_commons.models.jax.utils.weight_utils import load_hf_weights, load_nnx_weights
-from flax.nnx import statelib
+from tpu_commons.models.jax.utils.weight_utils import load_hf_weights
+
 logger = init_logger(__name__)
 
 init_fn = nnx.initializers.uniform()
 
 
-class LlamaMLP(nnx.Module):
+class GemmaMLP(nnx.Module):
 
-    def __init__(self, config: LlamaConfig, dtype: jnp.dtype, rng: nnx.Rngs):
+    def __init__(self, config: GemmaConfig, dtype: jnp.dtype, rng: nnx.Rngs):
         hidden_size = config.hidden_size
         intermediate_size = config.intermediate_size
-        act = config.hidden_act
 
         self.gate_proj = nnx.Linear(
             hidden_size,
@@ -47,7 +46,8 @@ class LlamaMLP(nnx.Module):
             param_dtype=dtype,
             rngs=rng,
         )
-        self.act_fn = modeling_flax_utils.ACT2FN[act]
+        # Gemma uses GELU activation instead of SiLU
+        self.act_fn = jax.nn.gelu
 
     def __call__(self, x: jax.Array) -> jax.Array:
         gate = self.act_fn(self.gate_proj(x))
@@ -57,9 +57,9 @@ class LlamaMLP(nnx.Module):
         return result
 
 
-class LlamaAttention(nnx.Module):
+class GemmaAttention(nnx.Module):
 
-    def __init__(self, config: LlamaConfig, dtype: jnp.dtype, rng: nnx.Rngs,
+    def __init__(self, config: GemmaConfig, dtype: jnp.dtype, rng: nnx.Rngs,
                  mesh: Mesh):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
@@ -136,9 +136,9 @@ class LlamaAttention(nnx.Module):
         return new_kv_cache, o
 
 
-class LlamaDecoderLayer(nnx.Module):
+class GemmaDecoderLayer(nnx.Module):
 
-    def __init__(self, config: LlamaConfig, dtype: jnp.dtype, rng: nnx.Rngs,
+    def __init__(self, config: GemmaConfig, dtype: jnp.dtype, rng: nnx.Rngs,
                  mesh: Mesh):
         rms_norm_eps = config.rms_norm_eps
         hidden_size = config.hidden_size
@@ -149,7 +149,7 @@ class LlamaDecoderLayer(nnx.Module):
             param_dtype=dtype,
             rngs=rng,
         )
-        self.self_attn = LlamaAttention(config=config,
+        self.self_attn = GemmaAttention(config=config,
                                         dtype=dtype,
                                         rng=rng,
                                         mesh=mesh)
@@ -159,7 +159,7 @@ class LlamaDecoderLayer(nnx.Module):
             param_dtype=dtype,
             rngs=rng,
         )
-        self.mlp = LlamaMLP(
+        self.mlp = GemmaMLP(
             config=config,
             dtype=dtype,
             rng=rng,
@@ -190,7 +190,7 @@ class LlamaDecoderLayer(nnx.Module):
         return kv_cache, outputs
 
 
-class LlamaModel(nnx.Module):
+class GemmaModel(nnx.Module):
 
     def __init__(self, vllm_config: VllmConfig, rng: nnx.Rngs,
                  mesh: Mesh) -> None:
@@ -201,7 +201,7 @@ class LlamaModel(nnx.Module):
         hidden_size = hf_config.hidden_size
 
         self.layers = [
-            LlamaDecoderLayer(
+            GemmaDecoderLayer(
                 config=hf_config,
                 dtype=dtype,
                 rng=rng,
@@ -235,7 +235,7 @@ class LlamaModel(nnx.Module):
         return kv_caches, x
 
 
-class LlamaForCausalLM(nnx.Module):
+class GemmaForCausalLM(nnx.Module):
 
     def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,
                  mesh: Mesh) -> None:
@@ -254,45 +254,14 @@ class LlamaForCausalLM(nnx.Module):
             param_dtype=dtype,
             rngs=self.rng,
         )
-        self.model = LlamaModel(
+        self.model = GemmaModel(
             vllm_config=vllm_config,
             rng=self.rng,
             mesh=mesh,
         )
 
-        # TODO(xiang): Llama3.2 does not use lm_head
         self.lm_head = nnx.Param(
             init_fn(self.rng.params(), (hidden_size, vocab_size), dtype), )
-
-    def get_model_input(self):
-        """Returns a dummy model input for the transformer.
-
-        This dummy input has a batch size compatible with TP sharding on a
-        8-device axis.
-        """
-        dummy_batch_size = 1
-        # This number has to be a multiple of kv cache block size (32 by default), and attention kernel block size (128 by default)
-        dummy_seq_len = 128
-        dummy_num_blocks = dummy_seq_len // 32
-        dummy_attention_metadata = AttentionMetadata(
-            input_positions=jnp.arange(dummy_seq_len).reshape(
-                (dummy_batch_size, dummy_seq_len)
-            ),
-            seq_lens=jnp.array([dummy_seq_len] * dummy_batch_size),
-            block_indices=jnp.ones((dummy_batch_size, dummy_num_blocks), dtype= jnp.int32),
-            kv_cache_write_indices=jnp.ones((dummy_batch_size, dummy_num_blocks), dtype=jnp.int32),
-            chunked_prefill_enabled=False,
-        )
-        return {
-            'is_prefill': True,
-            'do_sampling': False,
-            'kv_caches': [(jnp.ones((8, 1904, 32, 128), dtype=jnp.bfloat16), jnp.ones((8, 1904, 32, 128), dtype=jnp.bfloat16)) for _ in range(32)],
-            'input_ids': jnp.ones(
-                (dummy_batch_size, dummy_seq_len), dtype=jnp.int32
-            ),
-            'attention_metadata': dummy_attention_metadata,
-            # Dummy attention mask, not used in this example.
-        }
 
     def __call__(
         self,
@@ -333,17 +302,17 @@ class LlamaForCausalLM(nnx.Module):
         # In future, if we need returning logits, it should be through topK not the entire logits, or at least through a flag not a default.
         return kv_caches, next_tokens, None
 
-    def load_weights(self, rng_key: jax.Array, mappings: dict = None, nnx_params: Any = None):
-        if nnx_params is not None:
-          return self.load_weights_from_nnx(rng_key, mappings, nnx_params)
-        else:
-          return self.load_weights_from_hf(rng_key)
-
-    def load_weights_from_hf(self, rng_key: jax.Array):
+    def load_weights(self, rng_key: jax.Array):
         # NOTE: Since we are using nnx.eval_shape to init the model,
         # we have to pass dynamic arrays here for __call__'s usage.
         self.rng = nnx.Rngs(rng_key)
-
+        model_path = self.vllm_config.model_config.model
+        hf_config = self.vllm_config.model_config.hf_config
+        logger.info(f"Loading Gemma checkpoint from: {model_path}")
+        logger.info(f"Model config - Hidden size: {hf_config.hidden_size}, "
+                   f"Layers: {hf_config.num_hidden_layers}, "
+                   f"Attention heads: {hf_config.num_attention_heads}, "
+                   f"KV heads: {hf_config.num_key_value_heads}")
         # Key: path to a HF layer weight
         # Value: a tuple of (path to a nnx layer weight, nnx weight sharding)
         mappings = {
@@ -371,12 +340,5 @@ class LlamaForCausalLM(nnx.Module):
         }
         load_hf_weights(vllm_config=self.vllm_config,
                         model=self,
-                        mappings=mappings,
-                        mesh=self.mesh)
-
-    def load_weights_from_nnx(self, rng_key: jax.Array, mappings: dict, nnx_params: Any = None):
-        self.rng = nnx.Rngs(rng_key)
-        load_nnx_weights(source_state=nnx_params,
-                        target_model=self,
                         mappings=mappings,
                         mesh=self.mesh)

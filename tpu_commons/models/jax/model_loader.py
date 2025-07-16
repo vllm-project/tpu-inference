@@ -11,6 +11,9 @@ from vllm.config import VllmConfig
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.common.model import Model
 from tpu_commons.models.jax.utils.param_overview import get_parameter_overview
+from tpu_commons.models.jax.utils.weight_utils import apply_sharding
+
+from typing import List
 
 logger = init_logger(__name__)
 
@@ -35,8 +38,14 @@ def _get_model_architecture(config: PretrainedConfig) -> nn.Module:
             from tpu_commons.models.jax.recipes.llama4 import Llama4Scout
             _MODEL_REGISTRY["Llama3_8B"] = Llama3_8B
             _MODEL_REGISTRY["Llama4Scout"] = Llama4Scout
+        from tpu_commons.models.jax.gemma import GemmaForCausalLM
     else:
         raise NotImplementedError("Unsupported MODEL_IMPL_TYPE")
+
+    _MODEL_REGISTRY = {
+        "LlamaForCausalLM": LlamaForCausalLM,
+        "GemmaForCausalLM": GemmaForCausalLM,
+    }
 
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
@@ -79,7 +88,7 @@ def get_nn_model(
         donate_argnums=3,
     )
     model_fn = functools.partial(jit_model, params)
-    return model_fn
+    return model_fn, model
 
 
 def get_nnx_model(
@@ -87,27 +96,104 @@ def get_nnx_model(
     rng: jax.Array,
     mesh: Mesh,
 ):
+    lora_config = vllm_config.additional_config.get("lora_config") if vllm_config.additional_config else None
     model_class = _get_model_architecture(vllm_config.model_config.hf_config)
 
+    def maybe_apply_lora_to_model(base_model, mesh=None, lora_config=None):
+        from qwix import lora
+
+        """Apply LoRA to the base model."""
+        if lora_config is None:
+
+            return base_model
+
+        # Use LoRA configuration from vllm_config
+        # Default values for Llama 8B if not specified in lora_config
+        rank = lora_config.get('rank', 16)
+        alpha = lora_config.get('alpha', 32.0)
+        module_path = lora_config.get('module_path',
+            ".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*down_proj|.*up_proj")
+        # dropout = getattr(lora_config, 'dropout', 0.0)
+        # bias = getattr(lora_config, 'bias', "none")
+
+        lora_provider = lora.LoraProvider(
+            module_path=module_path,
+            rank=rank,
+            alpha=alpha,
+            # dropout=dropout,
+            # bias=bias,
+        )
+
+        model_input = base_model.get_model_input()
+
+        lora_model = lora.apply_lora_to_model(
+            base_model, lora_provider, **model_input
+        )
+        del model_input
+
+        with mesh:
+            state = nnx.state(lora_model)
+            pspecs = nnx.get_partition_spec(state)
+            sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
+            nnx.update(lora_model, sharded_state)
+        return lora_model
 
     if issubclass(model_class, Model): # TODO: Get this to wrok for nnx.eval_shape.
         model = model_class(vllm_config, rng, mesh)
+        model = maybe_apply_lora_to_model(model, mesh, lora_config)
         model.load_weights(model)
+
+        # Apply LoRA if lora_config is present
         jit_model = model
     else:
         if os.getenv("JAX_RANDOM_WEIGHTS", False):
-            # Create a sharded model with random inited weights.
-            @nnx.jit
-            def create_sharded_model():
-                model = model_class(vllm_config, rng, mesh)
-                state = nnx.state(model)
-                pspecs = nnx.get_partition_spec(state)
-                sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
-                nnx.update(model, sharded_state)
-                return model
+          def create_model():
+              model = model_class(vllm_config, rng, mesh)
+              # TODO(lancewang): Enable lora
+              # model = maybe_apply_lora_to_model(model, mesh, lora_config)
+              return model
+          abstract_model = nnx.eval_shape(lambda: create_model())
 
-            with mesh:
-                jit_model = create_sharded_model()
+          graph_def, abs_state = nnx.split(abstract_model)
+
+          sharding_mappings = {
+              "lm_head": (None, "model"),
+              "embed.embedding": ("model", None),
+              "model.layers.*.input_layernorm.scale": (None,),
+              "model.layers.*.mlp.down_proj.kernel": ("model", None),
+              "model.layers.*.mlp.gate_proj.kernel": (None, "model"),
+              "model.layers.*.mlp.up_proj.kernel": (None, "model"),
+              "model.layers.*.post_attention_layernorm.scale": (None,),
+              "model.layers.*.self_attn.k_proj.kernel": ("model", None, None),
+              "model.layers.*.self_attn.o_proj.kernel": ("model", None, None),
+              "model.layers.*.self_attn.q_proj.kernel": ("model", None, None),
+              "model.layers.*.self_attn.v_proj.kernel": ("model", None, None),
+              "model.norm.scale": (None,),
+          }
+          lora_sharding_mappings = {
+              # LoRA mappings
+              "model.layers.*.mlp.gate_proj.kernel_lora_a": (None, None),
+              "model.layers.*.mlp.gate_proj.kernel_lora_b": (None, "model"),
+              "model.layers.*.mlp.up_proj.kernel_lora_a": (None, None),
+              "model.layers.*.mlp.up_proj.kernel_lora_b": (None, "model"),
+              "model.layers.*.mlp.down_proj.kernel_lora_a": ("model", None),
+              "model.layers.*.mlp.down_proj.kernel_lora_b": (None, None),
+              "model.layers.*.self_attn.q_proj.kernel_lora_a": ("model", None),
+              "model.layers.*.self_attn.q_proj.kernel_lora_b": (None, None),
+              "model.layers.*.self_attn.k_proj.kernel_lora_a": ("model", None),
+              "model.layers.*.self_attn.k_proj.kernel_lora_b": (None, None),
+              "model.layers.*.self_attn.v_proj.kernel_lora_a": ("model", None),
+              "model.layers.*.self_attn.v_proj.kernel_lora_b": (None, None),
+              "model.layers.*.self_attn.o_proj.kernel_lora_a": ("model", None),
+              "model.layers.*.self_attn.o_proj.kernel_lora_b": (None, None),
+          }
+
+          sharded_state = apply_sharding(abs_state, sharding_mappings, rng, mesh)
+
+          model = nnx.merge(graph_def, sharded_state)
+          # We should not jit the model here, because we need to update the model weights
+          jit_model = model
+
         else:
             # We first create an abstract model without allocating any weights,
             # then fill in its weigths during load_weights from HF.
@@ -120,8 +206,15 @@ def get_nnx_model(
             #    the load_weights. This would be easy to OOM if the layer is super large.
             # 3. The model architecture definition won't need to worry about the sharding.
             #    The sharding definition is taken over by the load_weights instead.
-            model = nnx.eval_shape(lambda: model_class(vllm_config, rng, mesh))
+
+            def create_model():
+                model = model_class(vllm_config, rng, mesh)
+                model = maybe_apply_lora_to_model(model, mesh, lora_config)
+                return model
+
+            model = nnx.eval_shape(lambda: create_model())
             model.load_weights(rng)
+
             # Although the created model can already work, we still need to jit
             # the model creation again, otherwise the model forward will have
             # non-trivial overhead in PjitFunction.
@@ -157,7 +250,7 @@ def get_nnx_model(
         return model(*args)
 
     model_fn = functools.partial(run_model, graphdef, state)
-    return model_fn
+    return model_fn, model
 
 
 def get_vllm_model(
@@ -176,14 +269,14 @@ def get_vllm_model(
 
     jit_model = model.jit_step_func()
     model_fn = functools.partial(jit_model, params)
-    return model_fn
+    return model_fn, model
 
 
 def get_model(
     vllm_config: VllmConfig,
     rng: jax.Array,
     mesh: Mesh,
-) -> nn.Module:
+) -> List[nn.Module]:
     impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
     logger.info(f"Loading model, implementation type={impl}")
     if impl == "flax_nn":

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-from typing import Optional
+from typing import Optional, Any
 
 import jax
 import vllm.envs as envs
@@ -134,3 +134,6 @@ class TPUWorker(WorkerBase):
     def check_health(self) -> None:
         # worker will always be healthy as long as it's running.
         return
+
+    def sync_weights(self, updated_weights: Any, mappings: Any) -> None:
+        return self.model_runner._sync_weights(updated_weights, mappings)

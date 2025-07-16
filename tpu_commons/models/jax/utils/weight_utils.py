@@ -22,6 +22,13 @@ from tpu_commons.models.jax.common.sharding import ShardingConfig
 from tpu_commons.models.jax.layers.misc import shard_put
 from tpu_commons.models.jax.utils import file_utils
 
+from flax import nnx
+from flax.nnx import statelib
+import jax
+import jaxtyping
+import re
+from typing import Any
+
 logger = init_logger(__name__)
 
 HF_WEIGHTS_FORMAT = "*.safetensors"
@@ -302,3 +309,122 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
         model_weight.value = shard(hf_weight, model_sharding)
 
     nnx.update(model, params)
+
+def build_flat_dict(flat_state, mappings):
+    new_flat_dict = {}
+    for keys, v in flat_state:
+        path = '.'.join(str(key) for key in keys)
+        mapped = False
+        for src, (tgt, sharding) in mappings.items():
+            regex = "^" + re.escape(tgt).replace("\\.\\*", r"\.(\d+)") + "$"
+            matched = re.match(regex, path)
+            if matched:
+              # Extract wildcards if any
+              wildcards = matched.groups()
+              src_parts = []
+              wc_index = 0
+              for part in src.split("."):
+                  if part == "*":
+                      src_parts.append(wildcards[wc_index])
+                      wc_index += 1
+                  else:
+                      src_parts.append(part)
+              actual_src = ".".join(src_parts)
+              new_flat_dict[actual_src] = v, sharding
+              mapped = True
+              break
+        if not mapped:
+          print(f"!!! No mapping for flat state: {keys}")
+    return new_flat_dict
+
+
+def transfer_state_with_mappings(src_state, tgt_state, mappings, shard=None):
+    src_flat = src_state.flat_state()
+    tgt_flat = tgt_state.flat_state()
+
+    new_src_dict = build_flat_dict(tgt_flat, mappings)
+    transpose_keys = {
+        "q_proj": (1, 0, 2),
+        "k_proj": (1, 0, 2),
+        "v_proj": (1, 0, 2),
+    }
+    print(f"YY {new_src_dict=}")
+    for src_keys, v in src_flat:
+        flattened_src_keys = '.'.join(str(k) for k in src_keys)
+        new_v = jnp.copy(v.value)
+        print(f"Processing source key: {flattened_src_keys} and value: {new_v.shape}")
+        if flattened_src_keys not in new_src_dict:
+            print(f"!!! No mapping for source key: {flattened_src_keys}")
+            continue
+        sharding = new_src_dict[flattened_src_keys][1]
+
+        # E.g. layers.*.attn.k_proj.w, layers.*.attn.k_proj.w_lora_a
+        # E.g. layers.*.mlp.down_proj.kernel, layers.*.mlp.down_proj.kernel_lora_a
+        if src_keys[-2] in transpose_keys and 'lora' not in src_keys[-1]:
+            v_maybe_t = jnp.transpose(new_v, transpose_keys[src_keys[-2]])
+        else:
+            v_maybe_t = new_v
+        assert new_src_dict[flattened_src_keys][0].value.shape == v_maybe_t.shape, \
+            f"Shape mismatch for {flattened_src_keys}: {new_src_dict[flattened_src_keys][0].value.shape} vs {v_maybe_t.shape}"
+        new_src_dict[flattened_src_keys][0].value = shard(v_maybe_t, sharding) if shard else v_maybe_t
+
+    tgt_state = tgt_state.from_flat_path(tgt_flat)
+    return tgt_state
+
+class LoadType(Enum):
+    ALL = 1
+    LORA_ONLY = 2
+    BASE_ONLY = 3
+
+def load_nnx_weights(source_state, target_model: nnx.Module,
+                     mappings: Dict[str, str], mesh: Mesh, load_type: LoadType = LoadType.ALL):
+    """
+    Load weights from a source nnx model into a target nnx model.
+
+    Args:
+        source_model: The nnx model to extract weights from
+        target_model: The nnx model to load weights into
+        mappings: Dictionary mapping source model keys to target model keys
+                 Format: {"source_key": "target_key"}
+        mesh: JAX mesh for sharding
+    """
+    import functools
+    from tpu_commons.models.jax.layers.misc import shard_put
+
+    shard = functools.partial(shard_put, mesh=mesh)
+
+    _, target_lora, target_base, _, _ = nnx.split(target_model, nnx.LoRAParam, nnx.Param, nnx.RngKey, nnx.RngCount)
+    source_lora, source_base, _, _ = nnx.split_state(source_state, nnx.LoRAParam, nnx.Param, nnx.RngKey, nnx.RngCount)
+
+    if load_type == LoadType.ALL or load_type == LoadType.LORA_ONLY:
+      updated_lora = transfer_state_with_mappings(source_lora, target_lora, mappings, shard)
+      nnx.update(target_model, updated_lora)
+
+    if load_type == LoadType.ALL or load_type == LoadType.BASE_ONLY:
+      updated_base = transfer_state_with_mappings(source_base, target_base, mappings, shard)
+      nnx.update(target_model, updated_base)
+
+def apply_sharding(model_state, shardings, rng, mesh):
+    flat_state = model_state.flat_state()
+    new_state = {}
+
+    for src_keys, v in flat_state:
+        flattened_src_keys = '.'.join('*' if isinstance(k, int) else k for k in src_keys)
+        if flattened_src_keys not in shardings:
+          print(f"!!! No sharding found for {flattened_src_keys}")
+          dim_tuple = ()
+        else:
+          dim_tuple = shardings[flattened_src_keys]
+        pspec = jax.sharding.PartitionSpec(*dim_tuple)
+        sharding = jax.sharding.NamedSharding(mesh, pspec)
+        if v.type == nnx.Param:
+          new_state[src_keys] = jax.device_put(jnp.zeros(v.value.shape, dtype=v.value.dtype), sharding)
+        elif v.type == nnx.RngKey:
+          new_state[src_keys] = rng
+        elif v.type == nnx.RngCount:
+          new_state[src_keys] = jax.device_put(jnp.array(0, dtype=v.value.dtype), sharding)
+        else:
+          raise ValueError(f"Unsupported type {v.type} for sharding")
+
+    return model_state.from_flat_path(new_state)
+
