@@ -30,7 +30,7 @@ WORKDIR /workspace/tpu_commons
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 COPY requirements_benchmarking.txt .
-# These are needed for the E2E benchmarking tests (i.e. tests/e2e/benchmarking/llama3.1_8b_mmlu.sh)
+# These are needed for the E2E benchmarking tests (i.e. tests/e2e/benchmarking/mlperf.sh)
 RUN pip install -r requirements_benchmarking.txt
 COPY . .
 RUN pip install -e .
