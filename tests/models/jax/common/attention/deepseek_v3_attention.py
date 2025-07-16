@@ -10,7 +10,6 @@ from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.common.attention.deepseek_v3_attention import (
     MLA, MLAConfig)
 from tpu_commons.models.jax.common.base import ParamFactory
-from tpu_commons.models.jax.common.kv_cache import KVCacheConfig
 from tpu_commons.models.jax.common.sharding import ShardingConfig
 from tpu_commons.models.jax.recipes.deepseek_v3 import (
     DeepSeekV3GenerateShardingRulesConfig,
@@ -59,7 +58,7 @@ class TestMLA(unittest.TestCase):
                 "original_max_position_embeddings": 4096,
                 "type": "yarn",
             },
-        )
+            vllm_config={})
 
         mla = MLA(
             cfg=mla_config,
@@ -74,27 +73,20 @@ class TestMLA(unittest.TestCase):
         seq_len = 32
         x = jnp.ones((seq_len, mla_config.hidden_size), dtype=jnp.bfloat16)
 
-        # Create KV cache configuration and cache
+        # Create KV cache
         # TODO(wenxindongwork): test with unpadded head dimension once
         # MLA kv cache implementation is added.
         qk_head_dim = mla_config.qk_nope_head_dim + mla_config.qk_rope_head_dim
         multiple_of_128 = ((qk_head_dim - 1) // 128 + 1) * 128
         block_size = 16
-        kv_cache_config = KVCacheConfig(
-            batch_size=1,
-            cache_len=128,
-            num_kv_heads=mla_config.num_key_value_heads,
-            head_dim=multiple_of_128,
-            dtype=jnp.bfloat16,
-        )
-        num_blocks = kv_cache_config.cache_len // block_size
+        num_blocks = 8
         cache_shape = (
             num_blocks,
             block_size,
-            kv_cache_config.num_kv_heads * 2,
-            kv_cache_config.head_dim,
+            mla_config.num_key_value_heads * 2,
+            multiple_of_128,
         )
-        kv_cache = jnp.zeros(cache_shape, dtype=kv_cache_config.dtype)
+        kv_cache = jnp.zeros(cache_shape, dtype=jnp.bfloat16)
 
         # Create attention metadata
         num_slices = 8
