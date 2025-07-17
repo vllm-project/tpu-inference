@@ -63,20 +63,19 @@ class WeightLoader(abc.ABC):
                  vllm_config: VllmConfig,
                  model_config,
                  framework: str = "flax",
-                 cache_dir: Optional[str] = None,
-                 sharding_cfg=None):
+                 filter_regex=None):
         self.vllm_config = vllm_config
         self.model_config = model_config
-        self.sharding_cfg = sharding_cfg
         self.framework = framework
-        self.cache_dir = cache_dir
+        self.filter_regex = filter_regex
         self.transformation_cfg = TransformationConfig()
         self.setup()
 
     def setup(self):
         self.names_and_weights_generator = hf_model_weights_iterator(
             model_name_or_path=self.vllm_config.model_config.model,
-            framework=self.framework)
+            framework=self.framework,
+            filter_regex=self.filter_regex)
 
     def set_transpose_param_map(self,
                                 transpose_param_dict: Mapping[str,
@@ -101,7 +100,7 @@ class WeightLoader(abc.ABC):
 
     def reshape_params(self, param_key: str, param_tensor: jax.Array,
                        param_type: str):
-        for key in self.transformation_cfg.reshape[param_type]:
+        for key in self.transformation_cfg.reshape.get(param_type, []):
             if key in param_key:
                 reshape_shape = self.transformation_cfg.reshape[param_type][
                     key]
@@ -118,6 +117,7 @@ class WeightLoader(abc.ABC):
 def hf_model_weights_iterator(
     model_name_or_path: str,
     framework: str,
+    filter_regex: Optional[str] = None,
 ) -> Generator[tuple, Any, None]:
     """The old single-thread model weights loader, will be deprecated."""
     weights_location, weights_files = get_model_weights_files(
@@ -201,7 +201,7 @@ def get_model_weights_files(model_name_or_path: str) -> Tuple[str, List[str]]:
             "Weights files are not downloaded to local disk at once due to insufficient disk space. "
             "They will be downloaded on the fly during loading.")
 
-    # Sort to ensure the order of files is consistent.
+    # # Sort to ensure the order of files is consistent.
     weights_files.sort()
 
     return weights_location, weights_files
