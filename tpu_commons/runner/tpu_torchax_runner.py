@@ -951,10 +951,38 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # Run the decoder
         if not VLLM_TORCHAX_EAGER:
             input_args = (input_ids.jax(), self.position_ids.jax())
+            logger.info("check input_ids shape and dtype: %s, %s",
+                        input_ids.shape, input_ids.dtype)
+            logger.info("check position_ids shape and dtype: %s, %s",
+                        self.position_ids.shape, self.position_ids.dtype)
+            logger.info("check inputs_id %s and position_ids %s", input_ids,
+                        self.position_ids)
+            logger.info("check attn_metadata: %s", attn_metadata)
+            for k, v in attn_metadata.items():
+                if not isinstance(v, PallasMetadata):
+                    logger.info("key %s is not PallasMetadata, ", k)
+                logger.info("slot_mapping shape and dtype: %s, %s",
+                            v.slot_mapping.shape, v.slot_mapping.dtype)
+                logger.info("block_tables shape and dtype: %s, %s",
+                            v.block_tables.shape, v.block_tables.dtype)
+                logger.info("context_lens shape and dtype: %s, %s",
+                            v.context_lens.shape, v.context_lens.dtype)
+                logger.info("query_start_loc shape and dtype: %s, %s",
+                            v.query_start_loc.shape, v.query_start_loc.dtype)
+                logger.info("num_seqs shape and dtype: %s, %s",
+                            v.num_seqs.shape, v.num_seqs.dtype)
+                logger.info("num_slices shape and dtype: %s, %s",
+                            v.num_slices.shape, v.num_slices.dtype)
+            for k, v in self.kv_caches_dict.items():
+                logger.info("kv_cache %s shape and dtype: %s, %s", k, v.shape,
+                            v.dtype)
             num_scheduled_tokens_padded = input_ids.shape[0]
+            logger.info("check params_and_buffers %s",
+                        self.params_and_buffers_jax)
             hidden_states, new_kv_caches = self.model_func(
                 self.params_and_buffers_jax, input_args, self.kv_caches_dict,
                 attn_metadata, num_scheduled_tokens_padded)
+            logger.info("check hidden_states %s", hidden_states)
             # Set the new KV caches to the static forward context.
             static_forward_context = self.vllm_config.compilation_config.\
                                             static_forward_context
@@ -973,8 +1001,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                     inputs_embeds=inputs_embeds,
                 )
         with torchax.default_env():
+            logger.info("check logits_indices %s", logits_indices)
             hidden_states = self.select_hidden_states(hidden_states,
                                                       logits_indices)
+            logger.info("check sampled hidden shape %s", hidden_states.shape)
             if not VLLM_TORCHAX_EAGER:
                 logits = self.compute_logits_func(self.params_and_buffers_jax,
                                                   hidden_states, None)
@@ -989,6 +1019,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                                                 grammar_bitmask_padded, logits,
                                                 arange)
             selected_token_ids = self.sample_from_logits(logits)
+            logger.info("check selected_token_ids %s", selected_token_ids)
             selected_token_ids = torchax.tensor.Tensor(selected_token_ids,
                                                        self.torchax_env)
             # NOTE (NickLucche) Use the original logits (before any penalties or
@@ -1239,12 +1270,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
         if VLLM_TORCHAX_ENABLED:
             input_args = (input_ids.jax(), position_ids.jax())
-            for k, v in self.params_and_buffers.items():
-                if not isinstance(v, torchax.tensor.Tensor):
-                    logger.info("key %s is not torchax tensor, ", k)
-            for name, kv_cache in self.kv_caches_dict.items():
-                if not isinstance(kv_cache, torchax.tensor.Tensor):
-                    logger.info("key %s is not torchax tensor, ", name)
             out, new_kv_caches = self.model_func(self.params_and_buffers_jax,
                                                  input_args,
                                                  self.kv_caches_dict,
