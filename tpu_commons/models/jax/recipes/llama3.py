@@ -152,7 +152,8 @@ class LlamaForCausalLM(Model):
             serving=Llama3ServingConfig(vllm_config=self.vllm_config))
 
         logger.info(f"Using the following config:\n{self.cfg}")
-        logger.info(f"Using the following shardings:\n{self.sharding}")
+        logger.info(
+            f"Using the following sharding overrides:\n{self.sharding}")
         self.mesh = self.sharding.mesh
         self.weight_loader = Llama3WeightLoader(vllm_config=self.vllm_config,
                                                 model_config=self.cfg.model,
@@ -198,7 +199,6 @@ class LlamaForCausalLM(Model):
                                 param_factory=param_factory,
                                 sharding_cfg=self.cfg.sharding)
         self.lm_head.generate_kernel(self.rng)
-
 
     def __call__(
         self,

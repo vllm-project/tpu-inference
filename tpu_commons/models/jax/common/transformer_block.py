@@ -191,3 +191,7 @@ class SharedExpertsTransformerBlock(TransformerBlock):
             raise ValueError(f"Invalid block type: {self.block_type}")
         logits += ffw_residual
         return new_cache, logits
+
+    def generate_kernel(self, rngs: nnx.Rngs):
+        super().generate_kernel(rngs)
+        self.shared_experts.generate_kernel(rngs)
