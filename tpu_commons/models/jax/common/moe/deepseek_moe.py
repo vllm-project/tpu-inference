@@ -22,7 +22,7 @@ DeepSeekV3RoutingConfig = make_dataclass(
         (HuggingFaceArgNames.NUM_GROUPS.value, int),
         (HuggingFaceArgNames.ROUTED_SCALING_FACTOR.value, float),
         (HuggingFaceArgNames.TOPK_GROUP.value, int),
-        (HuggingFaceArgNames.NORM_TOPK_PROB.value, float),
+        (HuggingFaceArgNames.NORM_TOPK_PROB.value, bool),
         ("dtype", DTypeLike),
         ("vllm_config", VllmConfig, field(repr=False, default=None)),
     ],

@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field, make_dataclass
-from typing import Any
+from typing import Any, Union
 
 import jax
 import jax.numpy as jnp
@@ -14,6 +14,8 @@ from tpu_commons.models.jax.common.constants import (HuggingFaceArgNames,
                                                      RouterType)
 from tpu_commons.models.jax.common.layers import FlaxUtils
 from tpu_commons.models.jax.common.sharding import ShardingConfig
+from tpu_commons.models.jax.common.moe.deepseek_moe import DeepSeekV3RoutingConfig, DeepSeekV3Router
+
 
 modeling_flax_utils = FlaxUtils()
 
@@ -129,7 +131,7 @@ MoEConfig = make_dataclass(
      (HuggingFaceArgNames.NUM_LOCAL_EXPERTS.value, int),
      (HuggingFaceArgNames.HIDDEN_ACT.value, int),
      ("apply_expert_weight_before_computation", bool),
-     ("router", RouterConfig), ("dtype", DTypeLike),
+     ("router", Union[RouterConfig, DeepSeekV3RoutingConfig]), ("dtype", DTypeLike),
      ("vllm_config", VllmConfig, field(repr=False, default=None))],
     bases=(Config, ))
 MoEConfig.__doc__ = f"""Configuration for the Mixture-of-Experts (MoE) layer.
@@ -167,8 +169,12 @@ class MoE(nnx.Module):
 
     def __post_init__(self):
         """Initializes the MoE module by creating sharding configurations and generating expert kernels."""
-        self.router = Router(self.cfg.router, self.mesh, self.param_factory,
-                             self.sharding_cfg)
+        if isinstance(self.cfg.router, DeepSeekV3RoutingConfig):
+            self.router = DeepSeekV3Router(self.cfg.router, self.mesh, self.param_factory,
+                                self.sharding_cfg)
+        else:
+            self.router = Router(self.cfg.router, self.mesh, self.param_factory,
+                                self.sharding_cfg)
         self.router.create_sharding()
         self.create_sharding()
 
