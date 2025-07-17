@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field, make_dataclass
 from typing import Any, Dict, Tuple
 
+
 import jax
 import jax.numpy as jnp
 from flax import nnx
@@ -18,6 +19,7 @@ from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
 from tpu_commons.models.jax.common.sharding import ShardingConfig
 from tpu_commons.models.jax.layers.rope import apply_rope
+
 
 KVCache = Tuple[jax.Array, jax.Array]
 
