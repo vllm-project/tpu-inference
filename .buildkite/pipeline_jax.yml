@@ -71,7 +71,7 @@ steps:
            /workspace/tpu_commons/tests/models/jax/test_model_loader.py
            /workspace/tpu_commons/tests/core/test_orchestrator.py \
            /workspace/tpu_commons/tests/core/test_disagg_utils.py \
-           /workspace/tpu_commons/tests/core/tests/core/test_tpu_jax_engine.py
+           /workspace/tpu_commons/tests/core/test_tpu_jax_engine.py
 
   # -----------------------------------------------------------------
   # NOTIFICATION STEP
