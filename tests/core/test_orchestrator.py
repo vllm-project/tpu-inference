@@ -81,7 +81,7 @@ class OrchestratorTest(unittest.TestCase):
             {mock_req.request_id: prefill_kv_cache}, prefill_runner_output)
 
         mock_prefill_engine.is_prefill_idle.side_effect = [False, False, True, True]
-        mock_generate_engine.is_generate_idle.side_effect = [False, False, False, False, True, True]
+        mock_generate_engine.is_generate_idle.side_effect = [True, False, False, False, True, True]
 
         mock_prefill_engine.model_runner.transfer_kv_cache.return_value = MagicMock()
 
