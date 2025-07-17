@@ -27,6 +27,8 @@ from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.common.sharding import Sharding
 from tpu_commons.models.jax.layers.sampling import sample
 from tpu_commons.models.jax.model_loader import get_model
+from tpu_commons.models.jax.sampling_metadata import \
+    TPUSupportedSamplingMetadata
 from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
                                                     InputBatch)
 from tpu_commons.runner.tpu_torch_xla_runner import (_get_padded_token_len,
@@ -34,7 +36,6 @@ from tpu_commons.runner.tpu_torch_xla_runner import (_get_padded_token_len,
                                                      _get_token_paddings)
 from tpu_commons.runner.utils import (ForbidCompile, LatencyTracker,
                                       get_padded_num_reqs_with_upper_limit)
-from tpu_commons.sample.metadata_jax import TPUSupportedSamplingMetadata
 
 logger = init_logger(__name__)
 
@@ -45,7 +46,7 @@ MIN_NUM_SEQS = 8
 NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK = 8
 
 DUMMY_METADATA = AttentionMetadata(
-    input_positions=jnp.empty((0, )),
+    input_positions=[],
     seq_lens=[],
     block_tables=[],
     slot_mapping=[],
@@ -109,7 +110,8 @@ class TPUModelRunner():
                 )
                 sharding_strategy = {"tensor_parallelism": len(self.devices)}
             sharding = Sharding(strategy_dict=sharding_strategy,
-                                vllm_config=self.vllm_config)
+                                vllm_config=self.vllm_config,
+                                devices=self.devices)
             self.mesh = sharding.mesh
         else:
             axis_names = ("data", "model")
@@ -198,14 +200,18 @@ class TPUModelRunner():
         model_config = self.vllm_config.model_config
         parallel_config = self.vllm_config.parallel_config
 
-        # Pad head_dim for kernel performance.
+        # Pad num_kv_heads to multiple of TP size.
+        num_kv_heads = utils.get_padded_num_heads(
+            model_config.get_total_num_kv_heads(), self.mesh.shape["model"])
+
+        # Pad head_dim to multiple of 128.
         head_size = model_config.get_head_size()
         head_size = utils.get_padded_head_dim(head_size)
 
         for i in range(model_config.get_num_layers(parallel_config)):
             kv_cache_spec[f"layers.{i}"] = FullAttentionSpec(
                 block_size=block_size,
-                num_kv_heads=model_config.get_total_num_kv_heads(),
+                num_kv_heads=num_kv_heads,
                 head_size=head_size,
                 dtype=torch.bfloat16,
                 use_mla=False,

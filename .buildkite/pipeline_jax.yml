@@ -2,8 +2,8 @@ steps:
   # -----------------------------------------------------------------
   # TEST STEPS - Calling wrapper
   # -----------------------------------------------------------------
-   - label: "ragged_paged_attention_test.py"
-     key: tpu_test_0
+   - label: "Kernel tests"
+     key: test_0
      soft_fail: true
      env:
        TPU_BACKEND_TYPE: "jax"
@@ -11,22 +11,24 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_commons/tests/ragged_paged_attention_test.py
-       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_commons/tests/ragged_kv_cache_update_test.py
+       - |
+         .buildkite/scripts/run_in_docker.sh \
+           python3 -m pytest -s -v \
+           /workspace/tpu_commons/tests/ragged_paged_attention_test.py \
+           /workspace/tpu_commons/tests/ragged_kv_cache_update_test.py
 
-   - label: "benchmarking/mmlu.sh for JAX + FlaxNNX models"
-     key: tpu_test_1_model_impl_flax_nnx
+   - label: "E2E MMLU tests for JAX models"
+     key: test_1
      soft_fail: true
      env:
        TPU_BACKEND_TYPE: "jax"
-       MODEL_IMPL_TYPE: "flax_nnx"
      agents:
        queue: tpu_v6e_queue
      commands:
        - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mmlu.sh
 
-   - label: "benchmarking/mmlu.sh for JAX + vLLM models"
-     key: tpu_test_1_model_impl_vllm
+   - label: "E2E MMLU tests for JAX + vLLM models"
+     key: test_2
      soft_fail: true
      env:
        TPU_BACKEND_TYPE: "jax"
@@ -36,14 +38,51 @@ steps:
      commands:
        - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mmlu.sh
 
+   - label: "E2E MMLU tests for JAX new model implementation"
+     key: test_3
+     soft_fail: true
+     env:
+       TPU_BACKEND_TYPE: "jax"
+       NEW_MODEL_DESIGN: "True"
+     agents:
+       queue: tpu_v6e_queue
+     commands:
+       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mmlu.sh
+
+  # A placeholder for adding more JAX workload unit tests
+   - label: "JAX unit tests"
+     key: test_4
+     soft_fail: true
+     env:
+       TPU_BACKEND_TYPE: "jax"
+     agents:
+       queue: tpu_v6e_queue
+     commands:
+       - |
+         .buildkite/scripts/run_in_docker.sh \
+           python3 -m pytest -s -v \
+           /workspace/tpu_commons/tests/test_utils_jax.py \
+           /workspace/tpu_commons/tests/worker/test_tpu_worker_jax.py \
+           /workspace/tpu_commons/tests/runner/test_utils.py \
+           /workspace/tpu_commons/tests/runner/jax/test_block_table_jax.py \
+           /workspace/tpu_commons/tests/runner/jax/test_input_batch_jax.py \
+           /workspace/tpu_commons/tests/models/jax/test_sampling_metadata.py \
+           /workspace/tpu_commons/tests/models/jax/test_attention_interface.py \
+           /workspace/tpu_commons/tests/models/jax/test_model_loader.py \
+           /workspace/tpu_commons/tests/core/test_orchestrator.py \
+           /workspace/tpu_commons/tests/core/test_disagg_utils.py \
+           /workspace/tpu_commons/tests/core/test_tpu_jax_engine.py
+
   # -----------------------------------------------------------------
   # NOTIFICATION STEP
   # -----------------------------------------------------------------
    - label: "TPU Test Notification"
      depends_on:
-       - tpu_test_0
-       - tpu_test_1_model_impl_flax_nnx
-       - tpu_test_1_model_impl_vllm
+       - test_0
+       - test_1
+       - test_2
+       - test_3
+       - test_4
      agents:
        queue: tpu_v6e_queue
-     commands: "bash .buildkite/scripts/check_results.sh 'TPU JAX Tests Failed' tpu_test_0 tpu_test_1_model_impl_flax_nnx tpu_test_1_model_impl_vllm"
+     commands: "bash .buildkite/scripts/check_results.sh 'TPU JAX Tests Failed' test_0 test_1 test_2 test_3 test_4"

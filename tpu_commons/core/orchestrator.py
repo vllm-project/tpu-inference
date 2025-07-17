@@ -141,6 +141,8 @@ class Driver:
             self._interleaved_mode = False
 
         self.requests: dict[str, Request] = {}
+        # We use this to make sure we output prefill token before the generate tokens.
+        self._first_token_done: dict[str, threading.Event] = {}
 
         # Stages 1-4 represent the life cycle of a request.
         # Stage 1
@@ -267,6 +269,7 @@ class Driver:
         """Used to place new requests for prefilling and generation."""
         # Don't block so we can fail and shed load when the queue is full.
         self._prefill_backlog.put(request, block=False)
+        self._first_token_done[request.request_id] = threading.Event()
 
     def _prefill_thread(self, idx: int):
         """Thread which runs in the background performing prefills."""
@@ -317,7 +320,7 @@ class Driver:
                 self.requests[req_id] = vllm_request
 
             if prefill_engine.is_prefill_idle():
-                logging.info("Nothing to process, we are done, exiting...")
+                logging.info(f"prefill-{idx}: Nothing to process, we are done, exiting...")
                 break
 
             # Compute new kv cache for the prefill_content.
@@ -348,6 +351,8 @@ class Driver:
             vllm_model_runner_output.req_id_to_index = copy.deepcopy(
                 vllm_model_runner_output.req_id_to_index)
             self._output(vllm_model_runner_output)
+            for req_id in vllm_model_runner_output.req_ids:
+                self._first_token_done[req_id].set()
 
             # TODO(fhzhang): remove transferred requests from the prefill engine once we are done.
 
@@ -381,8 +386,7 @@ class Driver:
                                 kv_cache)
                     prefill_output["cache"] = kv_cache
 
-                if request.is_finished():
-                    prefill_engine.free_request(request)
+                prefill_engine.free_request(request)
 
                 push_targets.append((target_idx, prefill_output))
 
@@ -436,7 +440,10 @@ class Driver:
                     break
 
                 if prefill_output is None:
-                    return
+                    logging.info(
+                        f"generate-{idx} Empty output: {generate_engine.dump_stats()}"
+                    )
+                    break
 
                 block = False
                 request = prefill_output["request"]
@@ -445,13 +452,17 @@ class Driver:
                     new_block_ids = generate_engine.get_new_block_ids(
                         request, request.num_tokens)
                     logging.info(
-                        f"insert request for generation: {request.request_id}, "
+                        f"generate-{idx}: insert request for generation: {request.request_id}, "
                         f"{generate_engine.dump_stats()}")
                     with LatencyTracker(
                             f"KVCacheInsert-{len(new_block_ids[0])}"):
                         generate_engine.model_runner.insert_request_with_kv_cache(
                             request, kv_cache, new_block_ids)
                 generate_engine.add_request(request, 1)
+
+            if generate_engine.is_generate_idle():
+                logging.info(f"generate-{idx}: Nothing to process, we are done, exiting...")
+                break
 
             with LatencyTracker("generate"):
                 model_output = generate_engine.generate()
@@ -461,6 +472,10 @@ class Driver:
             model_output.req_id_to_index = copy.deepcopy(
                 model_output.req_id_to_index)
 
+            for req_id in model_output.req_ids:
+                if req_id in self._first_token_done:
+                    self._first_token_done[req_id].wait()
+                    self._first_token_done.pop(req_id)
             self._output(model_output)
 
             # TODO(fhzhang): consider moving this out of the generate thread.
@@ -483,7 +498,7 @@ class Driver:
         logging.debug(f"output: {model_runner_output}")
         #   sampled_token_id = model_runner_output.sampled_token_ids[]
         # logging.info("Detokenize model runner output: %s", model_runner_output)
-        req_ids = list(model_runner_output.prompt_logprobs_dict.keys())
+        req_ids = model_runner_output.req_ids
         for req_id in req_ids:
             request = self.requests[req_id]
             sampled_token_index = model_runner_output.req_id_to_index[req_id]

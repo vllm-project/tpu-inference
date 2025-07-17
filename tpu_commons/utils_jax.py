@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from typing import Any, List, Tuple
 
-import jax
-from ray._private.accelerators import TPUAcceleratorManager
-
 from tpu_commons.core import PATHWAYS_ENABLED
 
 GBYTES = 1024 * 1024 * 1024
@@ -18,19 +15,6 @@ def enable_megacore() -> None:
 
 def get_megacore() -> bool:
     return _megacore
-
-
-def get_local_available_devices() -> int:
-    return TPUAcceleratorManager.get_current_node_num_accelerators()
-
-
-def set_visible_device_ids(tpu_ids: List[int]) -> None:
-    validate = TPUAcceleratorManager.validate_resource_request_quantity(
-        len(tpu_ids))
-    if not validate[0]:
-        raise ValueError(validate[1])
-    tpu_ids = [str(tpu_id) for tpu_id in tpu_ids]
-    TPUAcceleratorManager.set_current_process_visible_accelerator_ids(tpu_ids)
 
 
 def get_num_kv_heads_by_tp(num_kv_heads: int, tp_size: int) -> int:
@@ -64,12 +48,16 @@ def hbm_usage_gb(devices: Any) -> List[Tuple[float, float]]:
     return usage
 
 
-def array_info(name: str, x: jax.Array) -> str:
-    rep = f"{name} | shape={x.shape} | dtype={x.dtype} | sharding={x.sharding}"
-    return rep
-
-
 def get_padded_head_dim(head_dim: int) -> int:
     """Pads head_dim up to the nearest multiple of 128 for kernel performance."""
     # Details can be seen at: tpu_commons/kernels/ragged_kv_cache_update.py::_kv_cache_update()
     return (head_dim + 127) // 128 * 128
+
+
+def get_padded_num_heads(num_heads: int, sharding_size: int) -> int:
+    if num_heads >= sharding_size:
+        assert num_heads % sharding_size == 0
+    else:
+        assert sharding_size % num_heads == 0
+        num_heads = sharding_size
+    return num_heads
