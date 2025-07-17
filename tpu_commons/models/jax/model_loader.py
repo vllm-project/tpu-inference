@@ -9,8 +9,8 @@ from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 
 from tpu_commons.logger import init_logger
-from tpu_commons.models.jax.utils.quantization.quantization_utils import \
-    qwix_quantize_nnx_model
+from tpu_commons.models.jax.utils.quantization.quantization_utils import (
+    convert_quantization_config_file_path_to_dict, qwix_quantize_nnx_model)
 
 logger = init_logger(__name__)
 
@@ -57,41 +57,42 @@ def _maybe_apply_qwix_quantization(vllm_config: VllmConfig, model: nnx.Module,
     Returns:
         the potentially quantized model
     """
-    maybe_quant_dtype = vllm_config.additional_config.get("quantization",
-                                                          {}).get(
-                                                              "dtype", None)
-    maybe_quant_rules_files = vllm_config.additional_config.get(
-        "quantization", {}).get("rules_file", None)
-    maybe_kv_cache_quant_dtype = vllm_config.additional_config.get(
-        "quantization", {}).get("kv_cache_quant_dtype", None)
-    if maybe_quant_dtype or maybe_quant_rules_files:
+    # NOTE: we expect the value of "quantization" to be the name of a file in `tpu_commons/models/jax/utils/quantization/configs`
+    # if given
+    maybe_qwix_config = None
+    maybe_kv_cache_quant_dtype = None
+    if vllm_config.additional_config.get("quantization"):
+        maybe_quantization_config = convert_quantization_config_file_path_to_dict(
+            vllm_config.additional_config["quantization"])
+        maybe_qwix_config = maybe_quantization_config.get("qwix").get("rules")
+        maybe_kv_cache_quant_dtype = maybe_quantization_config.get(
+            "kv_cache", {}).get("dtype")
+    if maybe_qwix_config:
         block_size = vllm_config.cache_config.block_size
         model_config = vllm_config.model_config
         head_size = model_config.get_head_size()
         num_kv_heads = model_config.get_total_num_kv_heads()
         # NOTE: it's REALLY important this is jitted, or else you'll run into hanging
-        model = nnx.jit(
-            qwix_quantize_nnx_model,
-            donate_argnames=("model", ),
-            static_argnames=(
-                "quant_dtype",
-                "mesh",
-                "num_hidden_layers",
-                "kv_cache_block_size",
-                "kv_cache_num_combined_kv_heads",
-                "kv_cache_head_size",
-                "kv_cache_quant_dtype",
-                "rules_file_path",
-            ))(model,
-               maybe_quant_dtype,
-               rng,
-               mesh,
-               vllm_config.model_config.hf_config.num_hidden_layers,
-               block_size,
-               num_kv_heads,
-               head_size,
-               maybe_kv_cache_quant_dtype,
-               rules_file_path=maybe_quant_rules_files)
+        qwix_quantize_nnx_model_with_config = functools.partial(
+            qwix_quantize_nnx_model, qwix_config=maybe_qwix_config)
+        model = nnx.jit(qwix_quantize_nnx_model_with_config,
+                        donate_argnums=(0, ),
+                        static_argnames=(
+                            "mesh",
+                            "num_hidden_layers",
+                            "kv_cache_block_size",
+                            "kv_cache_num_kv_heads",
+                            "kv_cache_head_size",
+                            "kv_cache_quant_dtype",
+                        ))(model=model,
+                           rng=rng,
+                           mesh=mesh,
+                           num_hidden_layers=vllm_config.model_config.
+                           hf_config.num_hidden_layers,
+                           kv_cache_block_size=block_size,
+                           kv_cache_num_kv_heads=num_kv_heads,
+                           kv_cache_head_size=head_size,
+                           kv_cache_quant_dtype=maybe_kv_cache_quant_dtype)
 
     return model
 

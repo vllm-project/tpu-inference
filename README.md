@@ -226,43 +226,37 @@ being sure to pass the proper args for your machine.
 You might need to run the benchmark client *twice* to make sure all compilations are cached server-side.
 
 ## Quantization
-Currently, we support both per-tensor KV cache quantization and overall model/activation quantization through the [Qwix](https://github.com/google/qwix?tab=readme-ov-file#quantization-config) framework.  NOTE: these are only supported using the `NEW_MODEL_DESIGN`!
+### Overview
+Currently, we support both per-tensor KV cache quantization (int8, int4, and fp8 (`float8_e4m3fn)) and overall model weight/activation quantization through the [Qwix](https://github.com/google/qwix?tab=readme-ov-file#quantization-config) framework.
 
-### KV cache quantization
-In order to enable KV cache quantization, simply add the following to your base command:
-
-```
-... --additional_config='{"quantization": {"kv_cache_quant_dtype": "int8"}}'
-```
-
-We currently support int8, int4, and FP8 (`float8_e4m3fn`) quantization dtypes.
-
-### Model/activation quantization
-In order to enable overall model quantization, simply add the following to your base command:
+To enable quantization, you can specify a quantization config filename found inside the quantization config directory (`tpu_commons/models/jax/utils/quantization/configs/`), for example:
 
 ```
-.... --additional_config='{"quantization": {"dtype": "int8"}}'
+... --additional_config='{"quantization": "int8_default.yaml"}'
 ```
 
-By default, we will use the following Qwix rules (with the given `dtype`), which will quantize attention weights-only and MLP with weights and activations:
+### Creating your own quantization config
+To create your own quantization:
+
+1. Add a new file to the quantization config irectory (`tpu_commons/models/jax/utils/quantization/configs/`)
+2. For Qwix quantization, add a new entry to the file as follows:
 
 ```
-[
-    qwix.QuantizationRule(
-        module_path='.*attn.*',
-        weight_qtype=quant_dtype,
-    ),
-    qwix.QuantizationRule(
-        module_path='.*mlp.*',
-        weight_qtype=quant_dtype,
-        act_qtype=quant_dtype,
-        tile_size=None,
-    ),
-]
+qwix:
+  rules:
+    # NOTE: each entry corresponds to a qwix.QuantizationRule
+    - module_path: '.*'
+      weight_qtype: 'int8'
+      act_qtype: 'int8'
 ```
 
-You may also create a file that defines your own rules (e.g. `tpu_commons/models/jax/utils/quantization/quantize_all_modules_int8_wa.yaml`), where each entry under `rules` corresponds to a `qwix.QuantizationRule`.  To pass this file (which is mutually exclusive with `quantization.dtype`), you can something similar to:
+where each entry under `rules` corresponds to a `qwix.QuantizationRule`.  To learn more about Qwix and defining Qwix rules, please see the relevant docs [here](https://github.com/google/qwix?tab=readme-ov-file#quantization-config).
+
+1. For KV cache quantization, add a new entry to the file as follows:
 
 ```
-... --additional_config='{"quantization": {"rules_file": "tpu_commons/models/jax/utils/quantization/quantize_all_modules_int8_wa.yaml"}}'
+kv_cache:
+    dtype: [int8 OR int4 OR fp8 (`float8_e4m3fn`)]
 ```
+
+where the dtype corresponds to the dtype you'd like to quantize your KV cache to.

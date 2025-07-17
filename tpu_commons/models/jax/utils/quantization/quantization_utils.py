@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional, Union
+import os
+from typing import List, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -20,64 +21,63 @@ MAX_INT8 = 127.5
 MAX_INT4 = 7.5
 E4M3_MAX = jnp.finfo(jnp.float8_e4m3fn).max.astype(jnp.float32)
 
+QUANTIZATION_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "configs")
 DEFAULT_NUM_BLOCKS_FOR_JIT_KV_CACHE = 2000
 
-DEFAULT_QWIX_RULES = lambda quant_dtype: [  # noqa: E731
-    qwix.QuantizationRule(
-        module_path='.*attn.*',
-        weight_qtype=quant_dtype,
-    ),
-    qwix.QuantizationRule(
-        module_path='.*mlp.*',
-        weight_qtype=quant_dtype,
-        act_qtype=quant_dtype,
-        tile_size=None,
-    ),
-]
 
-
-def parse_quantization_yaml_file_to_rules(quantization_config_file_path: str):
+def parse_qwix_config_to_rules(
+        qwix_config: List[dict]) -> List[qwix.QuantizationRule]:
     """
     Parse a yaml file containing Qwix quantization rules into a list of QuantizationRule objects.
 
     Args:
-        quantization_config_file_path: the path to the yaml file
+        qwix_config: a dictionary containing the Qwix quantization rules
 
     Returns:
         a list of QuantizationRule objects
     """
-    with open(quantization_config_file_path, 'r') as f:
-        yaml_dict = yaml.safe_load(f)
-
     rules = []
-    for rule in yaml_dict['rules']:
+    for rule in qwix_config:
         rules.append(qwix.QuantizationRule(**rule))
 
     return rules
 
 
-def qwix_quantize_nnx_model(model: nnx.Module,
-                            quant_dtype: str | jnp.dtype,
-                            rng: jax.Array,
-                            mesh: Mesh,
-                            num_hidden_layers: int,
-                            kv_cache_block_size: int,
-                            kv_cache_num_combined_kv_heads: int,
-                            kv_cache_head_size: int,
-                            kv_cache_quant_dtype: Optional[Union[
-                                str, jnp.dtype]] = None,
-                            rules_file_path: str = None) -> nnx.Module:
+def qwix_quantize_nnx_model(
+    model: nnx.Module,
+    qwix_config: List[dict],
+    rng: jax.Array,
+    mesh: Mesh,
+    num_hidden_layers: int,
+    kv_cache_block_size: int,
+    kv_cache_num_kv_heads: int,
+    kv_cache_head_size: int,
+    kv_cache_quant_dtype: Optional[Union[str,
+                                         jnp.dtype]] = None) -> nnx.Module:
     """
     Quantizes a Flax NNX model using Qwix.
 
     Args:
         model: the model to quantize
-        quant_dtype: the dtype to quantize the model to
+        qwix_config: a list of dictionaries, where each dictionary corresponds to a Qwix quantization rule
+            For example:
+            [
+                {
+                    "module_path": ".*attn.*",
+                    "weight_qtype": "int8",
+                },
+                {
+                    "module_path": ".*mlp.*",
+                    "weight_qtype": "int8",
+                    "act_qtype": "int8",
+                    "tile_size": None,
+                },
+            ]
         rng: the random number generator to use
         mesh: the mesh to use
         num_hidden_layers: the number of hidden layers in the model
         kv_cache_page_size: the page size of the kv cache
-        num_combined_kv_heads: the number of combined kv heads
+        kv_cache_num_kv_heads: the number of kv heads
         head_size: the head size of the kv cache
         kv_cache_quant_dtype: the dtype to quantize the kv cache to (optional)
         rules_file_path: the path to the YAML file containing the quantization rules.
@@ -87,13 +87,7 @@ def qwix_quantize_nnx_model(model: nnx.Module,
     Returns:
         model: the quantized model
     """
-    if quant_dtype is not None and rules_file_path is not None:
-        raise ValueError(
-            "Cannot specify both quantization rules and quantization dtype in your quantization config"
-        )
-    qwix_rules = parse_quantization_yaml_file_to_rules(
-        rules_file_path
-    ) if rules_file_path is not None else DEFAULT_QWIX_RULES(quant_dtype)
+    qwix_rules = parse_qwix_config_to_rules(qwix_config)
     logger.info(f"Qwix rules: {qwix_rules}")
     logger.info(f"Memory usage before applying quantization of params: "
                 f"hbm={utils.hbm_usage_gb(jax.local_devices())}Gb")
@@ -101,7 +95,7 @@ def qwix_quantize_nnx_model(model: nnx.Module,
     kv_caches = create_kv_caches(
         num_blocks=DEFAULT_NUM_BLOCKS_FOR_JIT_KV_CACHE,
         block_size=kv_cache_block_size,
-        num_kv_heads=kv_cache_num_combined_kv_heads,
+        num_kv_heads=kv_cache_num_kv_heads,
         head_size=kv_cache_head_size,
         mesh=mesh,
         layer_names=[f"layer.{i}" for i in range(num_hidden_layers)],
@@ -181,7 +175,8 @@ def quantize(x: jax.Array, quant_dtype: jnp.dtype, clip_to_dtype: bool = True):
     scale = jnp.max(jnp.abs(x)) / dtype_max
     # Ensure scales are not zero to avoid division by zero errors.
     scale = jnp.maximum(scale, 1e-6)
-    x /= scale
+    # TODO (jacobplatin): is this cast to FP32 something we want?
+    x = x.astype(jnp.float32) / scale
 
     if clip_to_dtype:
         dtype_info = jnp.finfo(quant_dtype)
@@ -195,3 +190,25 @@ def quantize(x: jax.Array, quant_dtype: jnp.dtype, clip_to_dtype: bool = True):
     scale = scale.reshape(-1).astype(jnp.float32)
 
     return x, scale
+
+
+def convert_quantization_config_file_path_to_dict(
+        quantization_config_file_path: str) -> dict:
+    """
+    Converts a quantization config YAML file path to a dictionary.
+
+    Args:
+        quantization_config_file_path: the path to the quantization config YAML file
+
+    Returns:
+        a dictionary containing the quantization config
+    """
+    all_entries = os.listdir(QUANTIZATION_CONFIG_PATH)
+    for filename in all_entries:
+        if filename == quantization_config_file_path:
+            path = os.path.join(QUANTIZATION_CONFIG_PATH, filename)
+            with open(path, "r") as f:
+                return yaml.safe_load(f)
+    raise ValueError(
+        f"Could not find quantization config file with name '{quantization_config_file_path}' in 'tpu_commons/models/jax/utils/quantization/configs."
+    )
