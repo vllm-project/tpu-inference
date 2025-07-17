@@ -181,7 +181,7 @@ class TPUModelRunner():
         return hidden_states[indices_do_sample]
 
     def load_model(self):
-        self.model_fn, self.compute_logits_fn = get_model(
+        self.model_fn, self.compute_logits_fn, self.state = get_model(
             self.vllm_config,
             self.rng_key,
             self.mesh,
@@ -295,7 +295,7 @@ class TPUModelRunner():
                 ),
             )
             start = time.perf_counter()
-            self.kv_caches, hidden_states = self.model_fn(*inputs[:3])
+            self.kv_caches, hidden_states = self.model_fn(self.state, *inputs[:3])
             end = time.perf_counter()
             logger.info("Compilation finished in %.2f [secs].", end - start)
             hidden_states.block_until_ready()
@@ -331,7 +331,7 @@ class TPUModelRunner():
             hidden_states = self._device_array(hidden_states)
             logger.info(f"Precompile compute_logits --> num_reqs={num_reqs}")
             start = time.perf_counter()
-            result = self.compute_logits_fn(hidden_states)
+            result = self.compute_logits_fn(self.state, hidden_states)
             result.block_until_ready()
             end = time.perf_counter()
             logger.info("Compilation finished in %.2f [secs].", end - start)
@@ -593,10 +593,10 @@ class TPUModelRunner():
 
         inputs = self._prepare_inputs(scheduler_output)
         with self.maybe_forbid_compile:
-            self.kv_caches, hidden_states = self.model_fn(*inputs[:3])
+            self.kv_caches, hidden_states = self.model_fn(self.state, *inputs[:3])
             hidden_states = self.select_hidden_states_fn(
                 hidden_states, inputs[4])
-            logits = self.compute_logits_fn(hidden_states)
+            logits = self.compute_logits_fn(self.state, hidden_states)
             next_tokens = sample(
                 self.rng_params_for_sampling,
                 self.mesh,
