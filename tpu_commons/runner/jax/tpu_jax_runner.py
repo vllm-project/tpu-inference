@@ -53,6 +53,46 @@ DUMMY_METADATA = AttentionMetadata(
 )
 
 
+def optimize_mesh_for_tpu_v6e(mesh, devices):
+    """Apply transformations to the mesh to optimize for TPU v6e"""
+    new_mesh = mesh.devices.copy()
+    if devices[0].device_kind != "TPU v6 lite":
+        logger.warning(
+            "Not optimizing the mesh for TPU v6e because the device kind is not TPU v6 lite"
+        )
+        return mesh
+    num_devices = len(devices)
+    mesh_is_1d_ring = num_devices in new_mesh.shape
+    if not mesh_is_1d_ring:
+        logger.warning(
+            "Not optimizing the mesh for TPU v6e because the mesh is not a 1D ring"
+        )
+        return mesh
+    # check that the physical topology is 2x4
+    device_coords = [d.coords for d in devices]
+    coord_size = len(device_coords[0])
+    max_coords = tuple(
+        max(dc[i] for dc in device_coords) for i in range(coord_size))
+    min_coords = tuple(
+        min(dc[i] for dc in device_coords) for i in range(coord_size))
+    dims = tuple(h - l + 1 for (h, l) in zip(max_coords, min_coords))
+    print(dims, new_mesh)
+    if dims != (2, 4, 1):
+        logger.warning(
+            "Not optimizing the mesh for TPU v6e because the physical topology is not 2x4"
+        )
+        return mesh
+    axis_idx = new_mesh.shape.index(num_devices)
+    new_mesh = np.moveaxis(new_mesh, axis_idx, 0)
+    new_mesh[4:] = new_mesh[-1:3:-1]
+    new_mesh = np.moveaxis(new_mesh, 0, axis_idx)
+    logger.info("Optimized the mesh for TPU v6e")
+    from jax.sharding import Mesh
+
+    mesh = Mesh(new_mesh, axis_names=tuple(mesh.axis_names))
+    return mesh
+
+
 class TPUModelRunner():
 
     def __init__(
@@ -113,6 +153,10 @@ class TPUModelRunner():
                                 vllm_config=self.vllm_config,
                                 devices=self.devices)
             self.mesh = sharding.mesh
+            if True:
+                logger.info(f"Init mesh | mesh={self.mesh}")
+                self.mesh = optimize_mesh_for_tpu_v6e(self.mesh, self.devices)
+                logger.info(f"Init mesh after optimization | mesh={self.mesh}")
         else:
             axis_names = ("data", "model")
             # In case we are in disagg mode, the number of devices can exceed 8.
