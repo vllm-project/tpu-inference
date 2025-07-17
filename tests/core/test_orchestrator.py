@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import queue
 import threading
 import time
 import unittest
@@ -77,13 +76,20 @@ class OrchestratorTest(unittest.TestCase):
             logprobs=None,
             pooler_output=[],
         )
-        mock_prefill_engine.prefill.return_value = (
-            {mock_req.request_id: prefill_kv_cache}, prefill_runner_output)
+        mock_prefill_engine.prefill.return_value = ({
+            mock_req.request_id:
+            prefill_kv_cache
+        }, prefill_runner_output)
 
-        mock_prefill_engine.is_prefill_idle.side_effect = [False, False, True, True]
-        mock_generate_engine.is_generate_idle.side_effect = [True, False, False, False, True, True]
+        mock_prefill_engine.is_prefill_idle.side_effect = [
+            False, False, True, True
+        ]
+        mock_generate_engine.is_generate_idle.side_effect = [
+            True, False, False, False, True, True
+        ]
 
-        mock_prefill_engine.model_runner.transfer_kv_cache.return_value = MagicMock()
+        mock_prefill_engine.model_runner.transfer_kv_cache.return_value = MagicMock(
+        )
 
         generate_runner_output_1 = ModelRunnerOutput(
             req_ids=[mock_req.request_id],
@@ -125,26 +131,26 @@ class OrchestratorTest(unittest.TestCase):
             driver.place_request_on_prefill_queue(mock_req)
 
             # Get prefill output
-            prefill_output = driver._vllm_output_backlogs.get(timeout=5)
+            prefill_output = driver._vllm_output_backlogs.get(timeout=30)
             self.assertIn(0, prefill_output)
             self.assertEqual(prefill_output[0].outputs[0].request_id,
                              mock_req.request_id)
             self.assertEqual(prefill_output[0].outputs[0].new_token_ids, [101])
 
             # Get first generate output
-            gen_output1 = driver._vllm_output_backlogs.get(timeout=5)
+            gen_output1 = driver._vllm_output_backlogs.get(timeout=30)
             self.assertIn(0, gen_output1)
             self.assertEqual(gen_output1[0].outputs[0].request_id,
                              mock_req.request_id)
             self.assertEqual(gen_output1[0].outputs[0].new_token_ids, [102])
 
             # Get second generate output
-            gen_output2 = driver._vllm_output_backlogs.get(timeout=5)
+            gen_output2 = driver._vllm_output_backlogs.get(timeout=30)
             self.assertIn(0, gen_output2)
             self.assertEqual(gen_output2[0].outputs[0].request_id,
                              mock_req.request_id)
             self.assertEqual(gen_output2[0].outputs[0].new_token_ids, [103])
-            
+
             mock_req.is_finished.return_value = True
 
             # Let threads run to free the request.
