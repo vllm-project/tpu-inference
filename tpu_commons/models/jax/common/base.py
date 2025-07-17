@@ -140,6 +140,7 @@ class ParamFactory:
     """
     kernel_initializer: Initializer
     scale_initializer: Initializer
+    random_init: bool
 
     def _create_param(self,
                       initializer: Initializer,
@@ -152,8 +153,12 @@ class ParamFactory:
                                       static_argnames=('shape', 'dtype'),
                                       out_shardings=sharding)
         key = rngs.params()
-        param_data = sharded_initializer(key, shape, dtype)
-        return nnx.Param(param_data, sharding=sharding)
+        if self.random_init:
+            param_data = sharded_initializer(key, shape, dtype)
+            return nnx.Param(param_data, sharding=sharding)
+        else:
+            param_struct = jax.ShapeDtypeStruct(shape=shape, dtype=dtype)
+            return nnx.Param(param_struct, sharding=sharding)
 
     def create_kernel_param(self, *args, **kwargs) -> nnx.Param:
         """Creates a kernel/weight parameter using the kernel_initializer."""

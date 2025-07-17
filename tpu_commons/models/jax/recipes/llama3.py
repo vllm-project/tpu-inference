@@ -108,7 +108,8 @@ class Llama3_8B(Model):
                                  mesh=self.mesh,
                                  default_rules_cls=Llama8BShardingRulesConfig,
                                  vllm_config=self.vllm_config)
-
+        self.use_random_init = self.vllm_config.additional_config.get(
+            "random_weights", False)
         self.cfg = Llama8BConfig(
             model=Llama8BModelConfig(vllm_config=self.vllm_config),
             sharding=self.sharding.sharding_cfg,
@@ -121,7 +122,8 @@ class Llama3_8B(Model):
     def _init_layers(self):
         param_factory = ParamFactory(
             kernel_initializer=nnx.initializers.xavier_normal(),
-            scale_initializer=nnx.initializers.ones)
+            scale_initializer=nnx.initializers.ones,
+            random_init=self.use_random_init)
         self.embedder = Embedder(cfg=self.cfg.model.emb,
                                  mesh=self.mesh,
                                  param_factory=param_factory,
