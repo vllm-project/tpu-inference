@@ -24,11 +24,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
 
     if os.getenv("NEW_MODEL_DESIGN", False):
-<<<<<<< HEAD
-        from tpu_commons.models.jax.recipes.llama3 import Llama3_8B
-=======
         from tpu_commons.models.jax.recipes.llama3 import Llama3
->>>>>>> dd54e92 (To support Llama3 70B model on new model implementation; To achieve accuracy & perf parity between new and the existing one)
 
         # from tpu_commons.models.jax.recipes.llama4 import Llama4Scout
         _MODEL_REGISTRY["Llama3"] = Llama3
