@@ -7,6 +7,7 @@ from jax.sharding import Mesh
 from transformers import LlamaConfig, modeling_flax_utils
 from vllm.config import VllmConfig
 
+from tpu_commons import utils_jax as utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_interface import attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
@@ -66,6 +67,12 @@ class LlamaAttention(nnx.Module):
         self.rope_theta = config.rope_theta
         self.rope_scaling = getattr(config, "rope_scaling", None)
         self.head_dim = config.head_dim
+
+        sharding_size = mesh.shape["model"]
+        self.num_heads = utils.get_padded_num_heads(self.num_heads,
+                                                    sharding_size)
+        self.num_kv_heads = utils.get_padded_num_heads(self.num_kv_heads,
+                                                       sharding_size)
 
         self.mesh = mesh
 

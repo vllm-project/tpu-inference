@@ -72,7 +72,6 @@ class Attention(nnx.Module):
 
     def __post_init__(self):
         self.create_sharding()
-        #self._generate_kernel()
 
     def generate_kernel(self, rngs: nnx.Rngs):
         """Initializes the weight kernels for Q, K, V, and O projections."""

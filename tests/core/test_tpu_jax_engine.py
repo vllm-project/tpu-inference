@@ -6,7 +6,6 @@ from unittest.mock import Mock
 import torch
 from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.sampling_params import SamplingParams
-from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec)
 from vllm.v1.request import Request
@@ -63,16 +62,10 @@ class JaxEngineTest(unittest.TestCase):
         )
         cache_config.num_gpu_blocks = num_blocks
 
-        kv_cache_manager = KVCacheManager(
-            kv_cache_config=kv_cache_config,
-            max_model_len=vllm_config.scheduler_config.max_model_len,
-            enable_caching=False,
-        )
-
         mock_executor = Mock()
         mock_executor.driver_worker.model_runner = Mock()
 
-        engine = JaxEngine(vllm_config, kv_cache_manager, mock_executor)
+        engine = JaxEngine(vllm_config, kv_cache_config, mock_executor)
         return engine
 
     def create_requests(self,
@@ -103,7 +96,7 @@ class JaxEngineTest(unittest.TestCase):
         requests = self.create_requests(num_requests=2, num_tokens=40)
 
         for req in requests:
-            engine.add_request(req)
+            engine.add_request(req, 40)
 
         assert len(engine._new_requests) == 2
         assert not engine._requests
@@ -119,8 +112,6 @@ class JaxEngineTest(unittest.TestCase):
 
         assert not engine._new_requests
         assert len(engine._requests) == 2
-        assert engine._requests[0].request_id == "0"
-        assert engine._requests[1].request_id == "1"
 
     def test_jax_engine_schedule_new_requests_with_limit(self):
         """Tests scheduling new requests when they exceed the token limit."""
@@ -128,7 +119,7 @@ class JaxEngineTest(unittest.TestCase):
         requests = self.create_requests(num_requests=2, num_tokens=40)
 
         for req in requests:
-            engine.add_request(req)
+            engine.add_request(req, 40)
 
         output = engine._schedule_prefill()
 
@@ -149,7 +140,7 @@ class JaxEngineTest(unittest.TestCase):
         requests = self.create_requests(num_requests=1, num_tokens=80)
         req = requests[0]
 
-        engine.add_request(req)
+        engine.add_request(req, 80)
 
         # First schedule call
         output1 = engine._schedule_prefill()
@@ -182,7 +173,7 @@ class JaxEngineTest(unittest.TestCase):
 
         # Add and partially schedule a long request
         running_req = self.create_requests(num_requests=1, num_tokens=80)[0]
-        engine.add_request(running_req)
+        engine.add_request(running_req, 80)
 
         # Temporarily reduce capacity to simulate chunking
         engine._max_num_tokens = 50
@@ -193,7 +184,7 @@ class JaxEngineTest(unittest.TestCase):
         # Add a new request
         new_req = self.create_requests(num_requests=1, num_tokens=40)[0]
         new_req.request_id = "new_req_1"
-        engine.add_request(new_req)
+        engine.add_request(new_req, 40)
 
         # Second schedule call
         output2 = engine._schedule_prefill()
