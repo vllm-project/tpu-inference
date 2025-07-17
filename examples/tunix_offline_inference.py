@@ -19,7 +19,19 @@ from qwix import lora
 
 os.environ["TPU_BACKEND_TYPE"] = "jax"
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-os.environ["JAX_RANDOM_WEIGHTS"] = "True"
+# os.environ["JAX_RANDOM_WEIGHTS"] = "True"
+
+mesh_shape = (1, len(jax.devices()))  # e.g., (1, 8) for v2-8
+axis_names = ("fsdp", "tp")  #
+mesh = jax.make_mesh(mesh_shape,
+                          axis_names,
+                          devices=jax.devices())
+
+# These 2 functions creates different mesh with vLLM backend.
+# devices = np.array(jax.devices()).reshape(1, -1)  # e.g., (1, 8) for v2-8
+# axis_names = ("fsdp", "tp")  #
+# mesh1 = Mesh(devices, axis_names)
+
 
 def create_parser():
     parser = FlexibleArgumentParser()
@@ -75,9 +87,6 @@ def load_llama3_model(model_version: str = "llama3-1b", enable_lora: bool = Fals
       nnx.update(model, sharded_state)
       return model
 
-  devices = np.array(jax.devices()).reshape(1, -1)  # e.g., (1, 8) for v2-8
-  axis_names = ("fsdp", "tp")  #
-  mesh = Mesh(devices, axis_names)
   print(f"Current mesh is {mesh=}")
   with mesh:
       model = create_sharded_model(enable_lora=enable_lora)
@@ -118,9 +127,12 @@ def main(args: dict):
     enable_lora = False
 
     tunix_model = load_llama3_model(tunix_model_type, enable_lora=enable_lora)
-    # _, params = nnx.split(tunix_model)
+    _, updated_weights = nnx.split(tunix_model)
 
-    # args["additional_config"]["custom_nnx_weights"] = params
+    # args["additional_config"]["overrides"] = {
+    #     "mesh_shape": (1, len(jax.devices())),
+    # }
+
     if enable_lora:
       args["additional_config"]["lora_config"] = {
             "rank": 64,
@@ -171,7 +183,6 @@ def main(args: dict):
         print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
         print("-" * 50)
 
-    updated_weights = nnx.state(tunix_model)
     mappings = {
       "lm_head.w": ("lm_head", (None, "model")),
       "embedder.input_embedding": ("embed.embedding", ("model", None)),
@@ -212,7 +223,13 @@ def main(args: dict):
         "layers.*.attn.o_proj.w_lora_a": ("model.layers.*.self_attn.o_proj.kernel_lora_a",("model", None)),
         "layers.*.attn.o_proj.w_lora_b": ("model.layers.*.self_attn.o_proj.kernel_lora_b",(None, None))
       }
-    llm.llm_engine.model_executor.collective_rpc("sync_weights", args=(updated_weights, mappings))
+    transpose_keys = {
+        "q_proj": (1, 0, 2),
+        "k_proj": (1, 0, 2),
+        "v_proj": (1, 0, 2),
+    }
+
+    llm.llm_engine.model_executor.collective_rpc("sync_weights", args=(updated_weights, mappings, transpose_keys))
     outputs = llm.generate(prompts, sampling_params)
     print("-" * 50)
     for output in outputs:

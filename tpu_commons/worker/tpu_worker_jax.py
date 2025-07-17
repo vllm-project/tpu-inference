@@ -135,5 +135,5 @@ class TPUWorker(WorkerBase):
         # worker will always be healthy as long as it's running.
         return
 
-    def sync_weights(self, updated_weights: Any, mappings: Any) -> None:
-        return self.model_runner._sync_weights(updated_weights, mappings)
+    def sync_weights(self, updated_weights: Any, mappings: Any, transpose_keys: Any = None) -> None:
+        return self.model_runner._sync_weights(updated_weights, mappings, transpose_keys)

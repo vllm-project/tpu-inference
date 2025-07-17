@@ -1,6 +1,6 @@
 # Here we try to bring as much code as possible from Hex-LLM, instead of `tpu_torch_xla_runner.py` -> jax conversion.
 # This runner is a port of https://source.corp.google.com/h/vertex-model-garden/hex-llm/+/main:hex_llm/worker/runner_jax.py
-from typing import Any, List, Optional, Tuple, Dict
+from typing import Any, List, Optional, Tuple, Dict, Callable
 
 from dataclasses import asdict
 import jax
@@ -27,8 +27,8 @@ from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
                                                     InputBatch)
 from tpu_commons.runner.jax.input_prep import InputPrep
 from tpu_commons.runner.tpu_torch_xla_runner import _get_token_paddings
-from flax import nnx
-from tpu_commons.models.jax.utils.weight_utils import load_nnx_weights
+from tpu_commons.models.jax.utils.weight_utils import transfer_state_with_mappings
+import jaxtyping
 
 logger = init_logger(__name__)
 
@@ -291,7 +291,7 @@ class TPUModelRunner():
         if inputs is not None:
             model_inputs, (running_indices, output_token_indices) = inputs
             # TODO (jacobplatin): use logits and single_step_attn_scores_decode?
-            self.kv_caches, next_tokens, logits = self.model_fn(*model_inputs)
+            self.kv_caches, next_tokens, logits = self.model_fn(self.model_params, *model_inputs)
             self.output_cache = self.write_outputs(self.output_cache,
                                                    next_tokens,
                                                    running_indices,
@@ -379,7 +379,13 @@ class TPUModelRunner():
         else:
             # Support for legacy tpu_commons.
             axis_names = ("data", "model")
-            mesh_shape = (1, len(self.devices))
+            try:
+                mesh_shape = self.vllm_config.additional_config["overrides"]["mesh_shape"]
+            except KeyError:
+                logger.warning(
+                    f"No mesh shape passed! Using default of (1, {len(self.devices)})")
+                mesh_shape = (1, len(self.devices))
+
             self.mesh = jax.make_mesh(mesh_shape,
                                       axis_names,
                                       devices=self.devices)
@@ -397,15 +403,12 @@ class TPUModelRunner():
 
     def _init_model(self) -> None:
         logger.info("Init model start...")
-        self.model_fn, self.model = get_model(
+        self.model_fn, self.model_params = get_model(
             self.vllm_config,
             self.rng_key,
             self.mesh,
         )
-        try:
-          self.transformer_state = nnx.variables(self.model)
-        except Exception as e:
-            logger.warning(f"Failed to get variables from model {type(self.model)} with {e}")
+        self.transformer_state = self.model_params
 
 
     def _init_jit(self) -> None:
@@ -534,8 +537,10 @@ class TPUModelRunner():
 
         return len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
 
-    def _sync_weights(self, updated_weights: Any, mappings: Any = None) -> None:
-          load_nnx_weights(source_state=updated_weights, target_model=self.model, mappings=mappings, mesh=self.mesh)
+    def _sync_weights(self, updated_weights: jaxtyping.PyTree, mappings: Dict[str, Tuple[str, Tuple[str]]], transpose_keys: Dict[str, Tuple[int]], reshard_fn: Callable[[jaxtyping.PyTree,jaxtyping.PyTree], jaxtyping.PyTree] = None) -> None:
+        if reshard_fn is not None:
+            updated_weights = reshard_fn(updated_weights, self.model_params)
+        self.model_params = transfer_state_with_mappings(updated_weights, self.model_params, mappings, transpose_keys)
 
 
 def write_outputs(

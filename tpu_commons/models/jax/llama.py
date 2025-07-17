@@ -12,8 +12,8 @@ from tpu_commons.models.jax.attention_interface import KVCache, attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.layers.rope import apply_rope
 from tpu_commons.models.jax.layers.sampling import sample
-from tpu_commons.models.jax.utils.weight_utils import load_hf_weights, load_nnx_weights
-from flax.nnx import statelib
+from tpu_commons.models.jax.utils.weight_utils import load_hf_weights
+
 logger = init_logger(__name__)
 
 init_fn = nnx.initializers.uniform()
@@ -333,13 +333,7 @@ class LlamaForCausalLM(nnx.Module):
         # In future, if we need returning logits, it should be through topK not the entire logits, or at least through a flag not a default.
         return kv_caches, next_tokens, None
 
-    def load_weights(self, rng_key: jax.Array, mappings: dict = None, nnx_params: Any = None):
-        if nnx_params is not None:
-          return self.load_weights_from_nnx(rng_key, mappings, nnx_params)
-        else:
-          return self.load_weights_from_hf(rng_key)
-
-    def load_weights_from_hf(self, rng_key: jax.Array):
+    def load_weights(self, rng_key: jax.Array):
         # NOTE: Since we are using nnx.eval_shape to init the model,
         # we have to pass dynamic arrays here for __call__'s usage.
         self.rng = nnx.Rngs(rng_key)
@@ -371,12 +365,5 @@ class LlamaForCausalLM(nnx.Module):
         }
         load_hf_weights(vllm_config=self.vllm_config,
                         model=self,
-                        mappings=mappings,
-                        mesh=self.mesh)
-
-    def load_weights_from_nnx(self, rng_key: jax.Array, mappings: dict, nnx_params: Any = None):
-        self.rng = nnx.Rngs(rng_key)
-        load_nnx_weights(source_state=nnx_params,
-                        target_model=self,
                         mappings=mappings,
                         mesh=self.mesh)

@@ -338,17 +338,12 @@ def build_flat_dict(flat_state, mappings):
     return new_flat_dict
 
 
-def transfer_state_with_mappings(src_state, tgt_state, mappings, shard=None):
+def transfer_state_with_mappings(src_state, tgt_state, mappings, transpose_keys=None, shard=None):
     src_flat = src_state.flat_state()
     tgt_flat = tgt_state.flat_state()
 
     new_src_dict = build_flat_dict(tgt_flat, mappings)
-    transpose_keys = {
-        "q_proj": (1, 0, 2),
-        "k_proj": (1, 0, 2),
-        "v_proj": (1, 0, 2),
-    }
-    print(f"YY {new_src_dict=}")
+
     for src_keys, v in src_flat:
         flattened_src_keys = '.'.join(str(k) for k in src_keys)
         new_v = jnp.copy(v.value)
@@ -360,7 +355,7 @@ def transfer_state_with_mappings(src_state, tgt_state, mappings, shard=None):
 
         # E.g. layers.*.attn.k_proj.w, layers.*.attn.k_proj.w_lora_a
         # E.g. layers.*.mlp.down_proj.kernel, layers.*.mlp.down_proj.kernel_lora_a
-        if src_keys[-2] in transpose_keys and 'lora' not in src_keys[-1]:
+        if transpose_keys is not None and (len(src_keys) >= 2 and src_keys[-2] in transpose_keys) and ('lora' not in src_keys[-1]):
             v_maybe_t = jnp.transpose(new_v, transpose_keys[src_keys[-2]])
         else:
             v_maybe_t = new_v
@@ -371,38 +366,6 @@ def transfer_state_with_mappings(src_state, tgt_state, mappings, shard=None):
     tgt_state = tgt_state.from_flat_path(tgt_flat)
     return tgt_state
 
-class LoadType(Enum):
-    ALL = 1
-    LORA_ONLY = 2
-    BASE_ONLY = 3
-
-def load_nnx_weights(source_state, target_model: nnx.Module,
-                     mappings: Dict[str, str], mesh: Mesh, load_type: LoadType = LoadType.ALL):
-    """
-    Load weights from a source nnx model into a target nnx model.
-
-    Args:
-        source_model: The nnx model to extract weights from
-        target_model: The nnx model to load weights into
-        mappings: Dictionary mapping source model keys to target model keys
-                 Format: {"source_key": "target_key"}
-        mesh: JAX mesh for sharding
-    """
-    import functools
-    from tpu_commons.models.jax.layers.misc import shard_put
-
-    shard = functools.partial(shard_put, mesh=mesh)
-
-    _, target_lora, target_base, _, _ = nnx.split(target_model, nnx.LoRAParam, nnx.Param, nnx.RngKey, nnx.RngCount)
-    source_lora, source_base, _, _ = nnx.split_state(source_state, nnx.LoRAParam, nnx.Param, nnx.RngKey, nnx.RngCount)
-
-    if load_type == LoadType.ALL or load_type == LoadType.LORA_ONLY:
-      updated_lora = transfer_state_with_mappings(source_lora, target_lora, mappings, shard)
-      nnx.update(target_model, updated_lora)
-
-    if load_type == LoadType.ALL or load_type == LoadType.BASE_ONLY:
-      updated_base = transfer_state_with_mappings(source_base, target_base, mappings, shard)
-      nnx.update(target_model, updated_base)
 
 def apply_sharding(model_state, shardings, rng, mesh):
     flat_state = model_state.flat_state()

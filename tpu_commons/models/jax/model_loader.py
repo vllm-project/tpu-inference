@@ -77,7 +77,7 @@ def get_nn_model(
     kv_cache_sharding = NamedSharding(mesh, PartitionSpec("model"))
     outputs_sharding = NamedSharding(mesh, PartitionSpec(None))
     logits_cache_sharding = NamedSharding(mesh, PartitionSpec(None))
-    jit_model = jax.jit(
+    model_fn = jax.jit(
         model.apply,
         out_shardings=(
             kv_cache_sharding,
@@ -87,8 +87,7 @@ def get_nn_model(
         static_argnums=(1, 2),
         donate_argnums=3,
     )
-    model_fn = functools.partial(jit_model, params)
-    return model_fn, model
+    return model_fn, params
 
 
 def get_nnx_model(
@@ -187,13 +186,10 @@ def get_nnx_model(
               "model.layers.*.self_attn.o_proj.kernel_lora_a": ("model", None),
               "model.layers.*.self_attn.o_proj.kernel_lora_b": (None, None),
           }
-
+          if lora_config is not None:
+              sharding_mappings |= lora_sharding_mappings
           sharded_state = apply_sharding(abs_state, sharding_mappings, rng, mesh)
-
           model = nnx.merge(graph_def, sharded_state)
-          # We should not jit the model here, because we need to update the model weights
-          jit_model = model
-
         else:
             # We first create an abstract model without allocating any weights,
             # then fill in its weigths during load_weights from HF.
@@ -218,14 +214,14 @@ def get_nnx_model(
             # Although the created model can already work, we still need to jit
             # the model creation again, otherwise the model forward will have
             # non-trivial overhead in PjitFunction.
-            @nnx.jit(donate_argnums=(0, ))
-            def create_jit_model(model):
-                state = nnx.state(model)
-                nnx.update(model, state)
-                return model
+        @nnx.jit(donate_argnums=(0, ))
+        def create_jit_model(model):
+            state = nnx.state(model)
+            nnx.update(model, state)
+            return model
 
-            with mesh:
-                jit_model = create_jit_model(model)
+        with mesh:
+            jit_model = create_jit_model(model)
 
     kv_cache_sharding = NamedSharding(mesh, PartitionSpec("model"))
     outputs_sharding = NamedSharding(mesh, PartitionSpec(None))
@@ -249,8 +245,8 @@ def get_nnx_model(
         model = nnx.merge(graphdef, state)
         return model(*args)
 
-    model_fn = functools.partial(run_model, graphdef, state)
-    return model_fn, model
+    model_fn = functools.partial(run_model, graphdef)
+    return model_fn, state
 
 
 def get_vllm_model(
@@ -267,9 +263,8 @@ def get_vllm_model(
     )
     params = model.load_weights()
 
-    jit_model = model.jit_step_func()
-    model_fn = functools.partial(jit_model, params)
-    return model_fn, model
+    model_fn = model.jit_step_func()
+    return model_fn, params
 
 
 def get_model(
