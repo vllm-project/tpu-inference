@@ -119,7 +119,7 @@ class Llama3(Model):
                                  vllm_config=self.vllm_config)
         self.use_random_init = self.vllm_config.additional_config.get(
             "random_weights", False)
-        # Determine model variant and set parameters
+        # TODO: support to loading from HF checkpoints.
         model_name = self.vllm_config.model_config.model.lower()
         if "70b" in model_name:
             logger.info("Initializing Llama3 70B model variant.")

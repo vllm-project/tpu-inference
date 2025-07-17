@@ -160,27 +160,10 @@ class ParamFactory:
             param_struct = jax.ShapeDtypeStruct(shape=shape, dtype=dtype)
             return nnx.Param(param_struct, sharding=sharding)
 
-    def fill_kernel_param(self, param: nnx.Param, rngs: nnx.Rngs) -> nnx.Param:
-        meta_data = param.value
-        if not isinstance(meta_data, jax.ShapeDtypeStruct):
-            raise TypeError(
-                f"Expected param.value to be a ShapeDtypeStruct, but got {type(meta_data)}"
-            )
-
-        return self._create_param(initializer=self.kernel_initializer,
-                                  rngs=rngs,
-                                  shape=meta_data.shape,
-                                  sharding=param.sharding,
-                                  dtype=meta_data.dtype)
+    def create_kernel_param(self, *args, **kwargs) -> nnx.Param:
+        """Creates a kernel/weight parameter using the kernel_initializer."""
+        return self._create_param(self.kernel_initializer, *args, **kwargs)
 
     def create_scale_param(self, *args, **kwargs) -> nnx.Param:
         """Creates a scale/gain parameter using the scale_initializer."""
         return self._create_param(self.scale_initializer, *args, **kwargs)
-
-    def create_kernel_param(self,
-                            rngs: nnx.Rngs,
-                            shape: tuple[int, ...],
-                            sharding: NamedSharding,
-                            dtype: Any = jnp.float32) -> nnx.Param:
-        meta_data = jax.ShapeDtypeStruct(shape, dtype)
-        return nnx.Param(meta_data, sharding=sharding)
