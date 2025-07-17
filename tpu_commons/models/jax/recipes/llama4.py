@@ -57,6 +57,7 @@ class Llama4ModelConfig(ModelConfig):
     layers: SharedExpertsTransformerBlockConfig = None
     vllm_config: VllmConfig = field(repr=False, default=None)
     interleave_moe_layer_step: int = 1  # All layers are MoE for Scout
+    # nope_layer_interval: 4  # TODO:? It's not in HF but it is in MaxText
     intermediate_size_moe: int = 8192
     num_local_experts: int = 16
     hidden_act = "silu"
@@ -179,6 +180,7 @@ class Llama4Scout(Model):
             # This can be adjusted for other variants.
             is_moe_layer = ((i + 1) %
                             self.cfg.model.interleave_moe_layer_step == 0)
+            # is_rope_layer = ((i % ))
             block_type = "moe" if is_moe_layer else "dense"
             block = SharedExpertsTransformerBlock(
                 cfg=self.cfg.model.layers,
