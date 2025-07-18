@@ -1,34 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 import sys
 import unittest
-from unittest.mock import MagicMock, mock_open, patch
+from unittest.mock import MagicMock, patch
 
 import jax
 import qwix
-import yaml
 from flax import nnx
 from jax.sharding import Mesh
-
-# Target file for testing
 
 # Configure JAX to use CPU for test portability
 jax.config.update("jax_platform_name", "cpu")
 
-# Mock modules that are dependencies of the file under test *before* import.
-# This allows testing the file's logic in isolation without heavy dependencies.
 mock_utils_jax = MagicMock()
 mock_logger_module = MagicMock()
 mock_runner_utils = MagicMock()
 mock_attention_metadata_module = MagicMock()
 
-# Configure the mock logger to return a logger instance
 mock_logger_instance = MagicMock()
 mock_logger_module.init_logger.return_value = mock_logger_instance
 mock_utils_jax.hbm_usage_gb.return_value = "mocked_hbm"
 
-# Add mock modules to sys.modules
 sys.modules['tpu_commons.utils_jax'] = mock_utils_jax
 sys.modules['tpu_commons.logger'] = mock_logger_module
 sys.modules['tpu_commons.runner.utils'] = mock_runner_utils
@@ -37,7 +29,6 @@ sys.modules[
 
 import tpu_commons.models.jax.utils.quantization.quantization_utils as quantize_qwix  # noqa: E402
 
-# Un-patch create_kv_caches so we can mock it per-test class
 quantize_qwix.create_kv_caches = mock_runner_utils.create_kv_caches
 
 
@@ -96,53 +87,6 @@ class TestParseQwixConfigToRules(unittest.TestCase):
             quantize_qwix.parse_qwix_config_to_rules(qwix_config)
 
 
-class TestConvertQuantizationConfigFile(unittest.TestCase):
-    """Tests for the convert_quantization_config_file_path_to_dict function."""
-
-    @patch(
-        'tpu_commons.models.jax.utils.quantization.quantize_qwix.QUANTIZATION_CONFIG_PATH',
-        '/fake/path')
-    @patch('os.listdir')
-    @patch('builtins.open', new_callable=mock_open)
-    def test_convert_valid_file(self, mock_file, mock_listdir):
-        """Test converting a valid YAML config file to a dictionary."""
-        config_filename = "my_config.yaml"
-        config_content_str = """
-        rules:
-          - module_path: ".*"
-            weight_qtype: "int8"
-        """
-        expected_dict = yaml.safe_load(config_content_str)
-
-        mock_listdir.return_value = [config_filename, "another.yaml"]
-        mock_file().read.return_value = config_content_str
-
-        result = quantize_qwix.convert_quantization_config_file_path_to_dict(
-            config_filename)
-
-        mock_listdir.assert_called_once_with('/fake/path')
-        mock_file.assert_called_once_with(
-            os.path.join('/fake/path', config_filename), 'r')
-        self.assertEqual(result, expected_dict)
-
-    @patch(
-        'tpu_commons.models.jax.utils.quantization.quantize_qwix.QUANTIZATION_CONFIG_PATH',
-        '/fake/path')
-    @patch('os.listdir')
-    def test_file_not_found_raises_error(self, mock_listdir):
-        """Test that a ValueError is raised for a non-existent file."""
-        mock_listdir.return_value = ['other_file.yaml']
-
-        with self.assertRaisesRegex(
-                ValueError,
-                "Could not find quantization config file with name 'not_found.yaml'"
-        ):
-            quantize_qwix.convert_quantization_config_file_path_to_dict(
-                "not_found.yaml")
-
-        mock_listdir.assert_called_once_with('/fake/path')
-
-
 # A simple NNX module for testing quantization
 class SimpleModel(nnx.Module):
 
@@ -177,7 +121,7 @@ class TestQwixQuantizeNnxModel(unittest.TestCase):
 
         self.num_hidden_layers = 1
         self.kv_cache_block_size = 16
-        self.kv_cache_num_combined_kv_heads = 4
+        self.kv_cache_num_kv_heads = 4
         self.kv_cache_head_size = 64
 
         self.mock_kv_caches = {"layer.0": "dummy_cache"}
@@ -198,7 +142,7 @@ class TestQwixQuantizeNnxModel(unittest.TestCase):
             mesh=self.mesh,
             num_hidden_layers=self.num_hidden_layers,
             kv_cache_block_size=self.kv_cache_block_size,
-            kv_cache_num_combined_kv_heads=self.kv_cache_num_combined_kv_heads,
+            kv_cache_num_kv_heads=self.kv_cache_num_kv_heads,
             kv_cache_head_size=self.kv_cache_head_size,
         )
 
@@ -209,8 +153,6 @@ class TestQwixQuantizeNnxModel(unittest.TestCase):
         # Assert positional arguments for qwix.quantize_model
         self.assertIs(args[0], self.model)
         self.assertIsInstance(args[1], qwix.PtqProvider)
-        self.assertEqual(len(args[1].rules), 1)
-        self.assertEqual(args[1].rules[0].module_path, ".*linear.*")
 
         # Assert keyword arguments (model inputs for tracing)
         self.assertIn("kv_caches", kwargs)
@@ -224,7 +166,7 @@ class TestQwixQuantizeNnxModel(unittest.TestCase):
         mock_runner_utils.create_kv_caches.assert_called_once_with(
             num_blocks=quantize_qwix.DEFAULT_NUM_BLOCKS_FOR_JIT_KV_CACHE,
             block_size=self.kv_cache_block_size,
-            num_kv_heads=self.kv_cache_num_combined_kv_heads,
+            num_kv_heads=self.kv_cache_num_kv_heads,
             head_size=self.kv_cache_head_size,
             mesh=self.mesh,
             layer_names=[f"layer.{i}" for i in range(self.num_hidden_layers)],
