@@ -72,10 +72,9 @@ class RMSNorm(nnx.Module):
 
     def __post_init__(self):
         """Initializes the scale parameter."""
-        # No Sharding on the scale parameter
-        self.scale_sharding = NamedSharding(self.mesh, P())
+        self.create_sharding()
 
-    def __call__(self, x: Float) -> Float:
+    def __call__(self, x: Float, op_mode='generate') -> Float:
         """Applies RMS Normalization to the input tensor.
 
         Args:
@@ -85,11 +84,15 @@ class RMSNorm(nnx.Module):
             The normalized tensor with the same shape as the input.
         """
         x = jnp.asarray(x, jnp.float32)
+        x_TD = nnx.with_sharding_constraint(x, self.activation_ffw_td[op_mode])
 
-        var = jnp.mean(jnp.square(x), axis=-1, keepdims=True)
-        normed_x = x * jax.lax.rsqrt(var + self.epsilon)
+        var = jnp.mean(jnp.square(x_TD), axis=-1, keepdims=True)
+        normed_x = x_TD * jax.lax.rsqrt(var + self.epsilon)
 
-        return (normed_x * self.scale.value).astype(self.dtype)
+        normed_x *= self.scale.value
+        normed_x = nnx.with_sharding_constraint(
+            normed_x, self.activation_ffw_td[op_mode])
+        return normed_x.astype(self.dtype)
 
     def generate_kernel(self, rngs: nnx.Rngs):
         self.scale = self.param_factory.create_scale_param(
@@ -97,6 +100,30 @@ class RMSNorm(nnx.Module):
             shape=(self.dims, ),
             sharding=self.scale_sharding,
             dtype=self.dtype)
+
+    def create_sharding(self):
+        """Creates and sets sharding attributes for weights and activations."""
+        mode_dependent_attrs = [
+            "activation_ffw_td",
+        ]
+        for attr_name in mode_dependent_attrs:
+            prefill_sharding_config = getattr(self.sharding_cfg.prefill_rules,
+                                              attr_name)
+            generate_sharding_config = getattr(
+                self.sharding_cfg.generate_rules, attr_name)
+
+            sharding_dict = {
+                'prefill': NamedSharding(self.mesh,
+                                         P(*prefill_sharding_config)),
+                'generate': NamedSharding(self.mesh,
+                                          P(*generate_sharding_config))
+            }
+            setattr(self, attr_name, sharding_dict)
+
+        # No Sharding on the scale parameter
+        self.scale_sharding = NamedSharding(self.mesh, P())
+
+        return
 
 
 DenseFFWConfig = make_dataclass(
@@ -283,9 +310,9 @@ class Embedder(nnx.Module):
 
         V = getattr(self.cfg, HuggingFaceArgNames.VOCAB_SIZE.value)
         D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
-        self.input_embedding_table_VD = self.param_factory.create_kernel_param(
+        self.input_embedding_table_DV = self.param_factory.create_kernel_param(
             rngs,
-            shape=(V, D),
+            shape=(D, V),
             sharding=self.dv_sharding,
             dtype=self.cfg.dtype)
 
@@ -303,8 +330,8 @@ class Embedder(nnx.Module):
         x = jnp.asarray(x, jnp.float32)
         x_TD = nnx.with_sharding_constraint(x, self.prelogit_td)
 
-        logits_TV = jnp.einsum('TD,VD -> TV', x_TD,
-                               self.input_embedding_table_VD.value)
+        logits_TV = jnp.einsum('TD,DV -> TV', x_TD,
+                               self.input_embedding_table_DV.value)
         return logits_TV
 
     def encode(self, x: Int) -> Float:
@@ -317,7 +344,9 @@ class Embedder(nnx.Module):
             The corresponding embedding vectors, with shape
             `(batch, sequence, d_model)`.
         """
-        embedding_TD = self.input_embedding_table_VD.value[x]
+        embedding_DT = jnp.take(self.input_embedding_table_DV.value, x, axis=1)
+        embedding_TD = embedding_DT.T
+
         D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
         if self.cfg.normalize_embeddings:
             embedding_TD *= jnp.sqrt(D).astype(self.cfg.dtype)

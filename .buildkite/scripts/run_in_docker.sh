@@ -11,12 +11,16 @@ if [ "$#" -eq 0 ]; then
   exit 1
 fi
 
-# For HF_TOKEN.
+if ! grep -q "^HF_TOKEN=" /etc/environment; then
+  gcloud secrets versions access latest --secret=bm-agent-hf-token --quiet | \
+  sudo tee -a /etc/environment > /dev/null <<< "HF_TOKEN=$(cat)"
+  echo "Added HF_TOKEN to /etc/environment."
+else
+  echo "HF_TOKEN already exists in /etc/environment."
+fi
+
 # shellcheck disable=1091
 source /etc/environment
-
-# TODO @jacobplatin: remove eventually
-export HF_TOKEN=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
 
 if [ -z "${BUILDKITE_COMMIT:-}" ]; then
   echo "ERROR: BUILDKITE_COMMIT environment variable is not set." >&2
@@ -29,7 +33,14 @@ if [ -z "${TPU_BACKEND_TYPE:-}" ]; then
 fi
 
 if [ -z "${MODEL_IMPL_TYPE:-}" ]; then
-  MODEL_IMPL_TYPE=flax_nn
+  MODEL_IMPL_TYPE=flax_nnx
+fi
+
+VLLM_XLA_CHECK_RECOMPILATION_VAL=1
+if [ -n "${NEW_MODEL_DESIGN:-}" ]; then
+# TODO: We currently disable recompilation checks for the new model design
+# to unblock the e2e run, but will enable it later.
+  VLLM_XLA_CHECK_RECOMPILATION_VAL=0
 fi
 
 # Prune older images on the host to save space.
@@ -49,6 +60,7 @@ exec docker run \
   -e HF_TOKEN="$HF_TOKEN" \
   -e VLLM_XLA_CACHE_PATH= \
   -e VLLM_USE_V1=1 \
-  -e VLLM_XLA_CHECK_RECOMPILATION=1 \
+  -e VLLM_XLA_CHECK_RECOMPILATION="$VLLM_XLA_CHECK_RECOMPILATION_VAL" \
+  ${NEW_MODEL_DESIGN:+-e NEW_MODEL_DESIGN="$NEW_MODEL_DESIGN"} \
   "vllm-tpu:${BUILDKITE_COMMIT}" \
   "$@" # Pass all script arguments as the command to run in the container
