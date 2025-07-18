@@ -57,6 +57,8 @@ class TPUWorker(WorkerBase):
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         self.profile_dir)
         self.devices = devices
+        
+        logger.info(f"Using devices: {self.devices}")
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:

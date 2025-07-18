@@ -224,6 +224,7 @@ def get_param(params: nnx.State, path: str) -> nnx.State:
 
 def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
                     mesh: Mesh):
+    sharding_size = mesh.shape["model"]
     shard = functools.partial(shard_put, mesh=mesh)
 
     model_config = vllm_config.model_config
@@ -261,6 +262,19 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
         "o_proj": (1, 2, 0),
     }
 
+    # key: (padding_dim, padding_size)
+    pad_keys = {
+        "q_proj": (1, sharding_size // num_heads),
+        "k_proj": (1, sharding_size // num_kv_heads),
+        "v_proj": (1, sharding_size // num_kv_heads),
+        "o_proj": (0, sharding_size // num_heads),
+    }
+    bias_pad_keys = {
+        "q_proj.bias": (0, sharding_size // num_heads),
+        "k_proj.bias": (0, sharding_size // num_kv_heads),
+        "v_proj.bias": (0, sharding_size // num_kv_heads),
+    }
+
     params = nnx.state(model)
     for hf_key, hf_weight in hf_model_weights_iterator(model_path,
                                                        framework="flax"):
@@ -279,6 +293,7 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
         model_weight = get_param(params, model_key)
 
         logger.debug(
+            "before transform | "
             f"{hf_key}: {hf_weight.shape}  -->  {model_key}: {model_weight.value.shape} {model_sharding}"
         )
 
@@ -307,8 +322,30 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
                 if key in hf_key:
                     hf_weight = jnp.transpose(hf_weight, transpose_keys[key])
                     break
-            if head_dim_pad == 0:
-                assert model_weight.value.shape == hf_weight.shape
+
+        # Pad num-kv-heads
+        if hf_key.endswith(".bias"):
+            for key, value in bias_pad_keys.items():
+                dim = value[0]
+                dim_size = value[1]
+                if key in hf_key and dim_size != 0:
+                    hf_weight = jnp.repeat(hf_weight, dim_size, axis=dim)
+                    break
+        else:
+            for key, value in pad_keys.items():
+                dim = value[0]
+                dim_size = value[1]
+                if key in hf_key and dim_size != 0:
+                    hf_weight = jnp.repeat(hf_weight, dim_size, axis=dim)
+                    break
+
+        logger.debug(
+            "after transform | "
+            f"{hf_key}: {hf_weight.shape}  -->  {model_key}: {model_weight.value.shape} {model_sharding}"
+        )
+
+        if head_dim_pad == 0:
+            assert model_weight.value.shape == hf_weight.shape
 
         # Update the model weight
         model_weight.value = shard(hf_weight, model_sharding)

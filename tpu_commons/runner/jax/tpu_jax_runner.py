@@ -181,7 +181,7 @@ class TPUModelRunner():
         return hidden_states[indices_do_sample]
 
     def load_model(self):
-        self.model_fn, self.compute_logits_fn = get_model(
+        self.model_fn, self.compute_logits_fn, self.state = get_model(
             self.vllm_config,
             self.rng_key,
             self.mesh,
@@ -200,14 +200,18 @@ class TPUModelRunner():
         model_config = self.vllm_config.model_config
         parallel_config = self.vllm_config.parallel_config
 
-        # Pad head_dim for kernel performance.
+        # Pad num_kv_heads to multiple of TP size.
+        num_kv_heads = utils.get_padded_num_heads(
+            model_config.get_total_num_kv_heads(), self.mesh.shape["model"])
+
+        # Pad head_dim to multiple of 128.
         head_size = model_config.get_head_size()
         head_size = utils.get_padded_head_dim(head_size)
 
         for i in range(model_config.get_num_layers(parallel_config)):
             kv_cache_spec[f"layers.{i}"] = FullAttentionSpec(
                 block_size=block_size,
-                num_kv_heads=model_config.get_total_num_kv_heads(),
+                num_kv_heads=num_kv_heads,
                 head_size=head_size,
                 dtype=torch.bfloat16,
                 use_mla=False,
@@ -291,7 +295,8 @@ class TPUModelRunner():
                 ),
             )
             start = time.perf_counter()
-            self.kv_caches, hidden_states = self.model_fn(*inputs[:3])
+            self.kv_caches, hidden_states = self.model_fn(
+                self.state, *inputs[:3])
             end = time.perf_counter()
             logger.info("Compilation finished in %.2f [secs].", end - start)
             hidden_states.block_until_ready()
@@ -317,7 +322,8 @@ class TPUModelRunner():
                                                       indices_do_sample)
                 result.block_until_ready()
                 end = time.perf_counter()
-                logger.info(f"  -- time: {end - start}s")
+                logger.info("Compilation finished in %.2f [secs].",
+                            end - start)
 
     def _precompile_compute_logits(self) -> None:
         logger.info("Compiling compute_logits with different input shapes.")
@@ -327,7 +333,7 @@ class TPUModelRunner():
             hidden_states = self._device_array(hidden_states)
             logger.info(f"Precompile compute_logits --> num_reqs={num_reqs}")
             start = time.perf_counter()
-            result = self.compute_logits_fn(hidden_states)
+            result = self.compute_logits_fn(self.state, hidden_states)
             result.block_until_ready()
             end = time.perf_counter()
             logger.info("Compilation finished in %.2f [secs].", end - start)
@@ -589,10 +595,11 @@ class TPUModelRunner():
 
         inputs = self._prepare_inputs(scheduler_output)
         with self.maybe_forbid_compile:
-            self.kv_caches, hidden_states = self.model_fn(*inputs[:3])
+            self.kv_caches, hidden_states = self.model_fn(
+                self.state, *inputs[:3])
             hidden_states = self.select_hidden_states_fn(
                 hidden_states, inputs[4])
-            logits = self.compute_logits_fn(hidden_states)
+            logits = self.compute_logits_fn(self.state, hidden_states)
             next_tokens = sample(
                 self.rng_params_for_sampling,
                 self.mesh,
