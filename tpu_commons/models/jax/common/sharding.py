@@ -1,6 +1,6 @@
 import json
 from dataclasses import dataclass
-from typing import List, Any
+from typing import Any, List
 
 import jax
 import numpy as np
@@ -10,12 +10,12 @@ from vllm.config import VllmConfig
 BATCH_AXIS_NAME = 'data'
 SEQUENCE_AXIS_NAME = 'data'
 DATA_AXIS_NAME = 'data'
-ATTN_HEAD_AXIS_NAME = 'expert'
-ATTN_TENSOR_AXIS_NAME = 'model'
+ATTN_HEAD_AXIS_NAME = 'model'
+ATTN_TENSOR_AXIS_NAME = None
 MLP_TENSOR_AXIS_NAME = ('model', 'expert')
 MOE_TENSOR_AXIS_NAME = 'model'
 EXPERT_AXIS_NAME = 'expert'
-VOCAB_AXIS_NAME = ('data', 'expert', 'seq', 'model')
+VOCAB_AXIS_NAME = ('data', 'expert', 'model')
 
 
 @dataclass
@@ -68,12 +68,12 @@ class ShardingRulesConfig:
     # K/V vector: (Batch, Sequence, NumKVHeads, HeadDim)
     keyvalue_skh: tuple = (None, None, None)
 
-    # Attention Q weight: (NumHeads, Dim, HeadDim)
-    attn_q_weight_ndh: tuple = (None, None, None)
-    # Attention K weight: (NumKVHeads, Dim, HeadDim)
-    attn_k_weight_kdh: tuple = (None, None, None)
-    # Attention V weight: (NumKVHeads, Dim, HeadDim)
-    attn_v_weight_kdh: tuple = (None, None, None)
+    # Attention Q weight: (Dim, NumHeads, HeadDim)
+    attn_q_weight_dnh: tuple = (None, None, None)
+    # Attention K weight: (Dim, NumKVHeads, HeadDim)
+    attn_k_weight_dkh: tuple = (None, None, None)
+    # Attention V weight: (Dim, NumKVHeads, HeadDim)
+    attn_v_weight_dkh: tuple = (None, None, None)
     # Attention Out weight: (NumHeads, HeadDim, Dim)
     attn_o_weight_nhd: tuple = (None, None, None)
 
@@ -322,12 +322,11 @@ class Sharding:
         prefill_rules.activation_q_td = (DATA_AXIS_NAME, ATTN_TENSOR_AXIS_NAME)
         #TODO: the default qkv and kvcache is sharded on head dim
         # We may change it after we finalize the KVCache design
-        prefill_rules.attn_o_tnh = (DATA_AXIS_NAME, ATTN_TENSOR_AXIS_NAME,
-                                    None)
-        prefill_rules.query_tnh = (DATA_AXIS_NAME, ATTN_TENSOR_AXIS_NAME, None)
-        prefill_rules.keyvalue_skh = (DATA_AXIS_NAME, ATTN_TENSOR_AXIS_NAME,
+        prefill_rules.attn_o_tnh = (DATA_AXIS_NAME, ATTN_HEAD_AXIS_NAME, None)
+        prefill_rules.query_tnh = (DATA_AXIS_NAME, ATTN_HEAD_AXIS_NAME, None)
+        prefill_rules.keyvalue_skh = (DATA_AXIS_NAME, ATTN_HEAD_AXIS_NAME,
                                       None)
-        prefill_rules.keyvalue_cache_lskh = (None, None, ATTN_TENSOR_AXIS_NAME,
+        prefill_rules.keyvalue_cache_lskh = (None, None, ATTN_HEAD_AXIS_NAME,
                                              None)
 
         # Populate Generate (Decode) Config
@@ -340,26 +339,23 @@ class Sharding:
                                           ATTN_TENSOR_AXIS_NAME)
         #TODO: the default qkv and kvcache is sharded on head dim
         # We may change it after we finalize the KVCache design
-        generate_rules.attn_o_tnh = (DATA_AXIS_NAME, ATTN_TENSOR_AXIS_NAME,
-                                     None)
-        generate_rules.query_tnh = (DATA_AXIS_NAME, ATTN_TENSOR_AXIS_NAME,
-                                    None)
-        generate_rules.keyvalue_skh = (DATA_AXIS_NAME, ATTN_TENSOR_AXIS_NAME,
+        generate_rules.attn_o_tnh = (DATA_AXIS_NAME, ATTN_HEAD_AXIS_NAME, None)
+        generate_rules.query_tnh = (DATA_AXIS_NAME, ATTN_HEAD_AXIS_NAME, None)
+        generate_rules.keyvalue_skh = (DATA_AXIS_NAME, ATTN_HEAD_AXIS_NAME,
                                        None)
         # The KV Cache is of shape (L, S, 2 * K, H), we shard on the head dim, but need to optimize on 2*K dim
-        generate_rules.keyvalue_cache_lskh = (None, None,
-                                              ATTN_TENSOR_AXIS_NAME, None)
-        generate_rules.attn_q_weight_ndh = (None, ATTN_HEAD_AXIS_NAME,
+        generate_rules.keyvalue_cache_lskh = (None, None, ATTN_HEAD_AXIS_NAME,
+                                              None)
+        generate_rules.attn_q_weight_dnh = (None, ATTN_HEAD_AXIS_NAME,
                                             ATTN_TENSOR_AXIS_NAME)
-        generate_rules.attn_k_weight_kdh = (None, ATTN_HEAD_AXIS_NAME,
+        generate_rules.attn_k_weight_dkh = (None, ATTN_HEAD_AXIS_NAME,
                                             ATTN_TENSOR_AXIS_NAME)
-        generate_rules.attn_v_weight_kdh = (None, ATTN_HEAD_AXIS_NAME,
+        generate_rules.attn_v_weight_dkh = (None, ATTN_HEAD_AXIS_NAME,
                                             ATTN_TENSOR_AXIS_NAME)
-        generate_rules.attn_o_weight_nhd = (None, ATTN_HEAD_AXIS_NAME,
+        generate_rules.attn_o_weight_nhd = (ATTN_HEAD_AXIS_NAME, None,
                                             ATTN_TENSOR_AXIS_NAME)
 
-        generate_rules.activation_ffw_td = (DATA_AXIS_NAME,
-                                            MLP_TENSOR_AXIS_NAME)
+        generate_rules.activation_ffw_td = (DATA_AXIS_NAME, None)
         generate_rules.ffw_hidden_tf = (DATA_AXIS_NAME, MLP_TENSOR_AXIS_NAME)
         # FFW weights are typically sharded along the hidden dimension (F).
         generate_rules.ffw_weight_df = (None, MLP_TENSOR_AXIS_NAME)
@@ -376,7 +372,7 @@ class Sharding:
         generate_rules.activation_td = (DATA_AXIS_NAME, ATTN_TENSOR_AXIS_NAME)
         generate_rules.prelogit_td = (DATA_AXIS_NAME, ATTN_TENSOR_AXIS_NAME)
         generate_rules.logits_tv = (DATA_AXIS_NAME, MLP_TENSOR_AXIS_NAME)
-        generate_rules.vocab_dv = (None, MLP_TENSOR_AXIS_NAME)
+        generate_rules.vocab_dv = (None, VOCAB_AXIS_NAME)
 
     def make_sharding_config(
             self,

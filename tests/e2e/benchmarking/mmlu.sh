@@ -31,7 +31,7 @@ if [ "$NEW_MODEL_DESIGN" = "True" ]; then
     echo "NEW_MODEL_DESIGN is True. Running with the new model list and custom hf_overrides."
     model_list="meta-llama/Llama-3.1-8B-Instruct"
     extra_serve_args+=("--hf_overrides")
-    extra_serve_args+=('{"architectures": ["Llama3_8B"]}')
+    extra_serve_args+=('{"architectures": ["Llama3"]}')
 else
     echo "NEW_MODEL_DESIGN is not set to True. Running with default settings."
 fi

@@ -9,6 +9,7 @@ from flax import nnx
 from jax.sharding import Mesh
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
+from vllm.engine.arg_utils import EngineArgs
 
 
 class MockCausalLM(nnx.Module):
@@ -135,6 +136,25 @@ def test_get_flax_model(vllm_config, mesh):
 
     # 1. Get the compiled model and logit computation functions
     model_fn, compute_logits_fn, _ = model_loader.get_flax_model(
+        vllm_config, rng, mesh)
+
+    assert callable(model_fn)
+    assert callable(compute_logits_fn)
+
+
+def test_get_vllm_model(mesh):
+    """
+    An integration test for the main public function `get_vllm_model`.
+    It verifies that the function returns two valid, JIT-compiled functions
+    that execute correctly and produce outputs with the expected sharding.
+    """
+    rng = jax.random.PRNGKey(42)
+
+    engine_args = EngineArgs(model="Qwen/Qwen2-1.5B-Instruct")
+    vllm_config = engine_args.create_engine_config()
+    vllm_config.model_config.dtype = jnp.bfloat16
+
+    model_fn, compute_logits_fn, _ = model_loader.get_vllm_model(
         vllm_config, rng, mesh)
 
     assert callable(model_fn)
