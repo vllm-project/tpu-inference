@@ -235,7 +235,9 @@ class LlamaForCausalLM(Model):
         return kv_caches, final_activation
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        return self.lm_head.decode(hidden_states)
+        logits = jnp.dot(hidden_states, self.lm_head.input_embedding_table_DV.value)
+
+        return logits
 
 
 class Llama3WeightLoader(WeightLoader):
