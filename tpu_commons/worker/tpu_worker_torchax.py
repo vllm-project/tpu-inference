@@ -16,10 +16,6 @@ import vllm.envs as envs
 
 import jax
 
-import torch_xla.core.xla_model as xm
-import torch_xla.debug.profiler as xp
-import torch_xla.runtime as xr
-
 from tpu_commons.models.torchax.torchax_wrapper import with_torchax_global
 
 from vllm.config import ParallelConfig, VllmConfig
@@ -152,16 +148,6 @@ class TPUWorker:
         # NOTE(woosuk): Set per-rank cache path since different ranks
         # can have slightly different XLA graphs.
         world_size = self.parallel_config.world_size
-        # The PyTorch/XLA compilation cache uses the Torch IR to generate keys.
-        # Consequently, changes in optimization flags, which affect compilation
-        # results, don't change the cache key. This can result in the wrong
-        # compilation being used. To prevent this, disabling the XLA compilation
-        # cache during development is recommended.We can disable it by
-        # `export VLLM_XLA_CACHE_PATH=`
-        if envs.VLLM_XLA_CACHE_PATH:
-            per_rank_path = os.path.join(envs.VLLM_XLA_CACHE_PATH,
-                                         f"tp{world_size}_rank{rank}")
-            xr.initialize_cache(per_rank_path, readonly=False)
 
         # Init ModelRunner here, so that we have access to self.device.
         self.model_runner = \
@@ -177,9 +163,6 @@ class TPUWorker:
         # `max_num_tokens >= max_num_batched_tokens` due to padding.
         with self.model_runner.maybe_setup_dummy_loras(self.lora_config):
             self.model_runner.profile_run(self.model_runner.max_num_tokens)
-
-        # Synchronize before measuring the memory usage.
-        xm.wait_device_ops()
 
         # During the profiling run, the model runs without KV cache. After
         # the profiling run, the model always runs with KV cache. Here we clear
@@ -275,8 +258,6 @@ class TPUWorker:
         local_rank: int = -1,
     ) -> None:
         """Initialize the distributed environment."""
-        if self.use_spmd:
-            xr.use_spmd()
         # NOTE(woosuk): This is just to initialize the TP group and broadcast
         # the input objects on CPU. The all-reduce and all-gather ops on TPU
         # are invoked by `xm.all_reduce` and `xm.all_gather` which use their
