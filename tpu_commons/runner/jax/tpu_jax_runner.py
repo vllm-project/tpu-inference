@@ -295,7 +295,8 @@ class TPUModelRunner():
                 ),
             )
             start = time.perf_counter()
-            self.kv_caches, hidden_states = self.model_fn(self.state, *inputs[:3])
+            self.kv_caches, hidden_states = self.model_fn(
+                self.state, *inputs[:3])
             end = time.perf_counter()
             logger.info("Compilation finished in %.2f [secs].", end - start)
             hidden_states.block_until_ready()
@@ -321,7 +322,8 @@ class TPUModelRunner():
                                                       indices_do_sample)
                 result.block_until_ready()
                 end = time.perf_counter()
-                logger.info(f"  -- time: {end - start}s")
+                logger.info("Compilation finished in %.2f [secs].",
+                            end - start)
 
     def _precompile_compute_logits(self) -> None:
         logger.info("Compiling compute_logits with different input shapes.")
@@ -593,7 +595,8 @@ class TPUModelRunner():
 
         inputs = self._prepare_inputs(scheduler_output)
         with self.maybe_forbid_compile:
-            self.kv_caches, hidden_states = self.model_fn(self.state, *inputs[:3])
+            self.kv_caches, hidden_states = self.model_fn(
+                self.state, *inputs[:3])
             hidden_states = self.select_hidden_states_fn(
                 hidden_states, inputs[4])
             logits = self.compute_logits_fn(self.state, hidden_states)
