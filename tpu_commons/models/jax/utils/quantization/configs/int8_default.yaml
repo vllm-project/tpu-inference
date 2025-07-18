@@ -1,8 +1,6 @@
 qwix:
   rules:
     # NOTE: each entry corresponds to a qwix.QuantizationRule
-    - module_path: '.*attn.*'
-      weight_qtype: 'int8'
     - module_path: '.*'
       weight_qtype: 'int8'
       act_qtype: 'int8'

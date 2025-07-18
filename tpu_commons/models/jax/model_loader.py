@@ -15,32 +15,6 @@ from tpu_commons.models.jax.utils.quantization.quantization_utils import (
 logger = init_logger(__name__)
 
 
-def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
-    # NOTE: Use inline imports here, otherwise the normal imports
-    # would cause JAX init failure when using multi hosts with Ray.
-    _MODEL_REGISTRY = {}
-
-    from tpu_commons.models.jax.llama import LlamaForCausalLM
-    from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
-    _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
-    _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
-
-    if os.getenv("NEW_MODEL_DESIGN", False):
-        from tpu_commons.models.jax.recipes.llama3 import Llama3
-
-        # from tpu_commons.models.jax.recipes.llama4 import Llama4Scout
-        _MODEL_REGISTRY["Llama3"] = Llama3
-        # _MODEL_REGISTRY["Llama4Scout"] = Llama4Scout
-
-    architectures = getattr(config, "architectures", [])
-    for arch in architectures:
-        if arch in _MODEL_REGISTRY:
-            return _MODEL_REGISTRY[arch]
-    raise ValueError(
-        f"Model architectures {architectures} are not supported for now. "
-        f"Supported architectures: {list(_MODEL_REGISTRY.keys())}")
-
-
 def _apply_qwix_quantization(vllm_config: VllmConfig, model: nnx.Module,
                              rng: jax.Array, mesh: Mesh) -> nnx.Module:
     """
@@ -69,35 +43,53 @@ def _apply_qwix_quantization(vllm_config: VllmConfig, model: nnx.Module,
         head_size = model_config.get_head_size()
         num_kv_heads = model_config.get_total_num_kv_heads()
         # NOTE: it's REALLY important this is jitted, or else you'll run into hanging
-
-        model = nnx.jit(
-            functools.partial(
-                qwix_quantize_nnx_model,
-                qwix_config=qwix_config,
-                rng=rng,
-                mesh=mesh,
-                num_hidden_layers=vllm_config.model_config.hf_config.
-                num_hidden_layers,
-                kv_cache_block_size=block_size,
-                kv_cache_num_kv_heads=num_kv_heads,
-                kv_cache_head_size=head_size,
-            ),
-            donate_argnums=(0, ),
-        )(model)
+        qwix_quantize_nnx_model_with_config = functools.partial(
+            qwix_quantize_nnx_model, qwix_config=qwix_config)
+        model = nnx.jit(qwix_quantize_nnx_model_with_config,
+                        donate_argnums=(0, ),
+                        static_argnames=(
+                            "mesh",
+                            "num_hidden_layers",
+                            "kv_cache_block_size",
+                            "kv_cache_num_kv_heads",
+                            "kv_cache_head_size",
+                        ))(model=model,
+                           rng=rng,
+                           mesh=mesh,
+                           num_hidden_layers=vllm_config.model_config.
+                           hf_config.num_hidden_layers,
+                           kv_cache_block_size=block_size,
+                           kv_cache_num_kv_heads=num_kv_heads,
+                           kv_cache_head_size=head_size)
 
     return model
 
 
-def _get_common_model(
-    model_class: Any,
-    vllm_config: VllmConfig,
-    rng: jax.Array,
-    mesh: Mesh,
-) -> nnx.Module:
-    model = model_class(vllm_config, rng, mesh)
-    model.load_weights(model)
-    model = _apply_qwix_quantization(vllm_config, model, rng, mesh)
-    return model
+def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
+    # NOTE: Use inline imports here, otherwise the normal imports
+    # would cause JAX init failure when using multi hosts with Ray.
+    _MODEL_REGISTRY = {}
+
+    from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
+    from tpu_commons.models.jax.recipes.llama3 import Llama3
+
+    # _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
+    _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
+
+    if os.getenv("NEW_MODEL_DESIGN", False):
+        from tpu_commons.models.jax.recipes.llama3 import Llama3
+
+        # from tpu_commons.models.jax.recipes.llama4 import Llama4Scout
+        _MODEL_REGISTRY["Llama3"] = Llama3
+        # _MODEL_REGISTRY["Llama4Scout"] = Llama4Scout
+
+    architectures = getattr(config, "architectures", [])
+    for arch in architectures:
+        if arch in _MODEL_REGISTRY:
+            return _MODEL_REGISTRY[arch]
+    raise ValueError(
+        f"Model architectures {architectures} are not supported for now. "
+        f"Supported architectures: {list(_MODEL_REGISTRY.keys())}")
 
 
 def _get_nnx_model(
@@ -115,6 +107,7 @@ def _get_nnx_model(
             pspecs = nnx.get_partition_spec(state)
             sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
             nnx.update(model, sharded_state)
+            model = _apply_qwix_quantization(vllm_config, model, rng, mesh)
             return model
 
         with mesh:
@@ -140,6 +133,7 @@ def _get_nnx_model(
         def create_jit_model(model):
             state = nnx.state(model)
             nnx.update(model, state)
+            model = _apply_qwix_quantization(vllm_config, model, rng, mesh)
             return model
 
         with mesh:
@@ -153,11 +147,7 @@ def get_flax_model(
     mesh: Mesh,
 ) -> nnx.Module:
     model_class = _get_model_architecture(vllm_config.model_config.hf_config)
-    if os.getenv("NEW_MODEL_DESIGN", False):
-        jit_model = _get_common_model(model_class, vllm_config, rng, mesh)
-    else:
-        jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh)
-
+    jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh)
     kv_cache_sharding = NamedSharding(mesh, PartitionSpec(None, None, "model"))
     hidden_states_sharding = NamedSharding(mesh, PartitionSpec(None,
                                                                None))  # (T, D)
