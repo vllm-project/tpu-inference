@@ -31,11 +31,10 @@ from tpu_commons.models.jax.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
                                                     InputBatch)
-from tpu_commons.runner.tpu_torch_xla_runner import (_get_padded_token_len,
-                                                     _get_req_paddings,
-                                                     _get_token_paddings)
 from tpu_commons.runner.utils import (ForbidCompile, LatencyTracker,
-                                      get_padded_num_reqs_with_upper_limit)
+                                      get_padded_num_reqs_with_upper_limit,
+                                      get_padded_token_len, get_req_paddings,
+                                      get_token_paddings)
 
 logger = init_logger(__name__)
 
@@ -138,7 +137,7 @@ class TPUModelRunner():
         # to avoid dynamic shapes. Also, avoid suboptimal alignment.
         self.max_num_reqs = max(scheduler_config.max_num_seqs, MIN_NUM_SEQS)
         # [16, 32, 64, 128, 256, 512, 1024, 2048]
-        self.num_tokens_paddings = _get_token_paddings(
+        self.num_tokens_paddings = get_token_paddings(
             min_token_size=16,
             max_token_size=scheduler_config.max_num_batched_tokens,
             padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
@@ -169,7 +168,7 @@ class TPUModelRunner():
         # Used to initialize positions / context_lens / seq_lens
         # Keep in int64 to avoid overflow with long context
         self.arange_cpu = np.arange(self.max_num_tokens, dtype=np.int64)
-        self.num_reqs_paddings = _get_req_paddings(
+        self.num_reqs_paddings = get_req_paddings(
             min_req_size=MIN_NUM_SEQS, max_req_size=self.max_num_reqs)
 
         self.temperatures_cpu = np.zeros(self.max_num_tokens, dtype=np.float32)
@@ -727,7 +726,7 @@ class TPUModelRunner():
             num_scheduled_tokens_per_req)
 
         # Do the padding and copy the tensors to the TPU.
-        padded_total_num_scheduled_tokens = _get_padded_token_len(
+        padded_total_num_scheduled_tokens = get_padded_token_len(
             self.num_tokens_paddings, total_num_scheduled_tokens)
         # Zero out to avoid spurious values from prev iteration (last cp chunk)
         self.input_ids_cpu[
