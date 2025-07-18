@@ -199,8 +199,7 @@ class Llama3(Model):
         return self.__call__(*args, **kwargs)
 
     def load_weights(self, rng: PRNGKey, cache_dir: Optional[str] = None):
-        model_name_or_path = self.vllm_config.model_config.model
-        if not model_name_or_path:
+        if self.use_random_init:
             #TODO: Support loading random weights, either here or in tpu_runner
             logger.warning(
                 "Model name or path not provided - randomly initializing the weights."
@@ -221,10 +220,10 @@ class Llama3(Model):
     ) -> Tuple[List[KVCacheType], jax.Array]:
         is_prefill = False
         x = self.embedder.encode(input_ids)
-        for (i, block) in enumerate(self.layers):
+        for (i, layer) in enumerate(self.layers):
             kv_cache = kv_caches[i]
             with jax.named_scope(f'layer_{i}'):
-                new_kv_cache, x = block(x, is_prefill, kv_cache,
+                new_kv_cache, x = layer(x, is_prefill, kv_cache,
                                         attention_metadata)
             kv_caches[i] = new_kv_cache
 
