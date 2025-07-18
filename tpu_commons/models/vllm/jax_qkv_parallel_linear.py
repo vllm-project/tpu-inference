@@ -52,10 +52,12 @@ class JaxQKVParallelLinear(torch.nn.Module):
         # The weight of qkv linear is a concatenation of q, k, and v weights
         # along the output dimension.
         qkv_weight = torch_view(t2j(qkv_linear.weight.data))
-        q_weight = Parameter(qkv_weight[:q_proj_size], requires_grad=False)
-        k_weight = Parameter(qkv_weight[q_proj_size:q_proj_size + k_proj_size],
+        q_weight = Parameter(qkv_weight[:q_proj_size].detach(),
                              requires_grad=False)
-        v_weight = Parameter(qkv_weight[q_proj_size + k_proj_size:],
+        k_weight = Parameter(qkv_weight[q_proj_size:q_proj_size +
+                                        k_proj_size].detach(),
+                             requires_grad=False)
+        v_weight = Parameter(qkv_weight[q_proj_size + k_proj_size:].detach(),
                              requires_grad=False)
         self.register_parameter("q_weight", q_weight)
         self.register_parameter("k_weight", k_weight)
@@ -63,10 +65,12 @@ class JaxQKVParallelLinear(torch.nn.Module):
 
         if qkv_linear.bias is not None:
             bias = torch_view(t2j(qkv_linear.bias))
-            q_bias = Parameter(bias[:q_proj_size], requires_grad=False)
-            k_bias = Parameter(bias[q_proj_size:q_proj_size + k_proj_size],
+            q_bias = Parameter(bias[:q_proj_size].detach(),
                                requires_grad=False)
-            v_bias = Parameter(bias[q_proj_size + k_proj_size:],
+            k_bias = Parameter(bias[q_proj_size:q_proj_size +
+                                    k_proj_size].detach(),
+                               requires_grad=False)
+            v_bias = Parameter(bias[q_proj_size + k_proj_size:].detach(),
                                requires_grad=False)
             self.register_parameter("q_bias", q_bias)
             self.register_parameter("k_bias", k_bias)

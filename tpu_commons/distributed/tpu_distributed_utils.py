@@ -278,10 +278,10 @@ def partition_column_parallel_linear(layer: torch.nn.Module,
             layer.weight.data, mesh, ('x', None))
         layer.weight = Parameter(torchax_t,
                                  requires_grad=layer.weight.requires_grad)
-        logger.info("Applied column-parallel sharding to %s", layer)
+        logger.debug("Applied column-parallel sharding to %s", layer)
     else:
         xs.mark_sharding(layer.weight, mesh, ('x', None))
-        logger.info("Applied column-parallel sharding to %s", layer)
+        logger.debug("Applied column-parallel sharding to %s", layer)
     return layer
 
 
@@ -301,10 +301,10 @@ def partition_row_parallel_linear(layer: torch.nn.Module,
         layer.weight = Parameter(torchax_t,
                                  requires_grad=layer.weight.requires_grad)
         # layer.register_forward_hook(shard_output_hook)
-        logger.info("Applied row-parallel sharding to %s", layer)
+        logger.debug("Applied row-parallel sharding to %s", layer)
     else:
         xs.mark_sharding(layer.weight, mesh, (None, 'x'))
-        logger.info("Applied row-parallel sharding to %s", layer)
+        logger.debug("Applied row-parallel sharding to %s", layer)
     return layer
 
 
@@ -312,7 +312,7 @@ def partition_qkv_parallel_linear(layer: torch.nn.Module,
                                   mesh: xs.Mesh) -> torch.nn.Module:
     assert isinstance(layer, QKVParallelLinear)
     xla_layer = XlaQKVParallelLinear(layer, mesh)
-    logger.info("Applied qkv parallel sharding to %s", layer)
+    logger.debug("Applied qkv parallel sharding to %s", layer)
     return xla_layer
 
 
@@ -320,13 +320,13 @@ def partition_merged_col_parallel_linear(layer: torch.nn.Module,
                                          mesh: xs.Mesh) -> torch.nn.Module:
     assert isinstance(layer, MergedColumnParallelLinear)
     xla_layer = XlaMergedColumnParallelLinear(layer, mesh)
-    logger.info("Applied merged column parallel sharding to %s", layer)
+    logger.debug("Applied merged column parallel sharding to %s", layer)
     return xla_layer
 
 
 def replicate_weights_buffers(module: torch.nn.Module,
                               mesh: "xs.Mesh") -> None:
-    logger.info("Replicating weights and buffers for module %s", module)
+    logger.debug("Replicating weights and buffers for module %s", module)
     for name, param in module.named_parameters(recurse=False):
         torchax_t = create_torchax_tensor_with_partition_spec(
             param.data, mesh, ())
@@ -337,11 +337,11 @@ def replicate_weights_buffers(module: torch.nn.Module,
         if isinstance(buffer, torchax.tensor.Tensor):
             # If the parameter is already a torchax tensor, we can skip
             # replication.
-            logger.info("parameter %s is already a torchax tensor, skipping",
-                        name)
+            logger.debug("parameter %s is already a torchax tensor, skipping",
+                         name)
             continue
-        logger.info("replicating buffer %s, buffer is on device %s", name,
-                    buffer.device)
+        logger.debug("replicating buffer %s, buffer is on device %s", name,
+                     buffer.device)
         torchax_t = create_torchax_tensor_with_partition_spec(buffer, mesh, ())
         # TODO: handle persistent buffer
         setattr(module, name, torchax_t)
@@ -374,8 +374,8 @@ def shard_model(model: torch.nn.Module, mesh: "xs.Mesh") -> None:
         model_processed = False
         for module_type, wrapping_func in MODULE_TYPE_TO_WRAPPING_FUNC.items():
             if get_fqn(module) == module_type:
-                logger.info("processing module %s with type %s", module,
-                            module_type)
+                logger.debug("processing module %s with type %s", module,
+                             module_type)
                 wrapped_module = wrapping_func(module, mesh)
 
                 assert parent is not None and name is not None, (
@@ -384,7 +384,7 @@ def shard_model(model: torch.nn.Module, mesh: "xs.Mesh") -> None:
                     # Wrapped module and module are different py object.
                     # The original module should be replaced by the
                     # wrapped_module.
-                    logger.info("replace %s with %s", module, wrapped_module)
+                    logger.debug("replace %s with %s", module, wrapped_module)
                     setattr(parent, name, wrapped_module)
 
                 module = wrapped_module
@@ -399,10 +399,10 @@ def shard_model(model: torch.nn.Module, mesh: "xs.Mesh") -> None:
             _process_module(child_module, child_name, module)
 
     # for name, tensor in model.named_parameters():
-    #     logger.info("weight %s: %s %s", name, tensor.shape, tensor.dtype)
+    #     logger.debug("weight %s: %s %s", name, tensor.shape, tensor.dtype)
 
     # for name, tensor in model.named_buffers():
-    #     logger.info("buffer %s: %s %s", name, tensor.shape, tensor.dtype)
+    #     logger.debug("buffer %s: %s %s", name, tensor.shape, tensor.dtype)
 
     assert mesh is not None, "Mesh must be provided for sharding."
     _process_module(model)
