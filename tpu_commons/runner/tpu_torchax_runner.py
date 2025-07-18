@@ -44,7 +44,9 @@ from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import ParallelConfig, VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import set_forward_context
 from tpu_commons.logger import init_logger
-from tpu_commons.runner.utils import get_padded_num_reqs_with_upper_limit, MIN_NUM_SEQS
+from tpu_commons.runner.utils import (get_padded_num_reqs_with_upper_limit,
+                                      get_padded_token_len, get_req_paddings,
+                                      get_token_paddings, MIN_NUM_SEQS)
 from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.model_executor.model_loader import get_model_loader
 
@@ -189,7 +191,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # InputBatch needs to work with sampling tensors greater than padding
         # to avoid dynamic shapes. Also, avoid suboptimal alignment.
         self.max_num_reqs = max(scheduler_config.max_num_seqs, MIN_NUM_SEQS)
-        self.num_tokens_paddings = _get_token_paddings(
+        self.num_tokens_paddings = get_token_paddings(
             min_token_size=16,
             max_token_size=scheduler_config.max_num_batched_tokens,
             padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
@@ -281,7 +283,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # Used to initialize positions / context_lens / seq_lens
         # Keep in int64 to avoid overflow with long context
         self.arange_np = np.arange(self.max_num_tokens, dtype=np.int64)
-        self.num_reqs_paddings = _get_req_paddings(
+        self.num_reqs_paddings = get_req_paddings(
             min_req_size=MIN_NUM_SEQS, max_req_size=self.max_num_reqs)
 
         # Layer pairings for cross-layer KV sharing.
@@ -680,7 +682,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             num_scheduled_tokens_per_req)
 
         # Do the padding and copy the tensors to the TPU.
-        padded_total_num_scheduled_tokens = _get_padded_token_len(
+        padded_total_num_scheduled_tokens = get_padded_token_len(
             self.num_tokens_paddings, total_num_scheduled_tokens)
         # Zero out to avoid spurious values from prev iteration (last cp chunk)
         self.input_ids_cpu[
@@ -1826,66 +1828,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             batched_dummy_mm_inputs,
             device=self.device,
         )
-
-
-def _get_req_paddings(min_req_size: int, max_req_size: int) -> list[int]:
-    logger.info("Preparing request paddings:")
-    # assert min_req_size is power of 2
-    assert (min_req_size & (min_req_size - 1) == 0) and min_req_size > 0
-    paddings: list = []
-    num = max(MIN_NUM_SEQS, min_req_size)
-    while num <= max_req_size and (len(paddings) == 0 or paddings[-1] != num):
-        paddings.append(num)
-        logger.info("    %d", num)
-        num = get_padded_num_reqs_with_upper_limit(num + 1, max_req_size)
-    return paddings
-
-
-def _get_token_paddings(min_token_size: int, max_token_size: int,
-                        padding_gap: int) -> list[int]:
-    """Generate a list of padding size, starting from min_token_size,
-    ending with a number that can cover max_token_size
-
-    If padding_gap == 0 then:
-        increase 2X each time (exponential)
-    else:
-        first increase the size to twice,
-        then increase the padding size by padding_gap.
-    """
-    # assert min_token_size is power of 2
-    assert (min_token_size & (min_token_size - 1) == 0) and min_token_size > 0
-    paddings = []
-    num = min_token_size
-
-    if padding_gap == 0:
-        logger.info("Using exponential token paddings:")
-        while True:
-            logger.info("    %d", num)
-            paddings.append(num)
-            if num >= max_token_size:
-                break
-            num *= 2
-    else:
-        logger.info("Using incremental token paddings:")
-        while num <= padding_gap:
-            logger.info("    %d", num)
-            paddings.append(num)
-            num *= 2
-        num //= 2
-        while num < max_token_size:
-            num += padding_gap
-            logger.info("    %d", num)
-            paddings.append(num)
-
-    return paddings
-
-
-def _get_padded_token_len(paddings: list[int], x: int) -> int:
-    """Return the first element in paddings list greater or equal to x.
-    """
-    index = bisect.bisect_left(paddings, x)
-    assert index < len(paddings)
-    return paddings[index]
 
 
 def _get_padded_num_kv_cache_update_slices(num_tokens: int, max_num_reqs: int,
