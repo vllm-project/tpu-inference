@@ -217,10 +217,10 @@ In order to run an [E2E benchmark test](https://github.com/vllm-project/tpu_comm
 following command locally:
 
 ```
-BUILDKITE_COMMIT=3843efc .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/llama3.1_8b_mmlu.sh
+BUILDKITE_COMMIT=3843efc .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
 ```
 
-While this will run the code in a Docker image, you can also run the bare `tests/e2e/benchmarking/llama3.1_8b_mmlu.sh` script itself,
+While this will run the code in a Docker image, you can also run the bare `tests/e2e/benchmarking/mlperf.sh` script itself,
 being sure to pass the proper args for your machine.
 
 You might need to run the benchmark client *twice* to make sure all compilations are cached server-side.

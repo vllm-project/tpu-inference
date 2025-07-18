@@ -8,7 +8,9 @@
 
 # You can also manually invoke this script to run an E2E benchmark on any given model and dataset, making sure
 # you specify the --dataset-name, --dataset-path, and --root-dir flags
-# Example usage: bash tests/e2e/benchmarking/mmlu.sh -r /mnt/disks/jacobplatin -d mmlu -p /mnt/disks/jacobplatin/mmlu/data/test
+
+# Example default usage: bash tests/e2e/benchmarking/mlperf.sh -r /local/root_dir
+# Example local docker + JAX TPU usage: TPU_BACKEND_TYPE=jax NEW_MODEL_DESIGN=True BUILDKITE_COMMIT=3c545c0c3 .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
 
 # Logs the vLLM server output to a file
 LOG_FILE="server.log"

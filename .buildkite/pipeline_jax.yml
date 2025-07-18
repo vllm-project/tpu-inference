@@ -17,7 +17,7 @@ steps:
            /workspace/tpu_commons/tests/ragged_paged_attention_test.py \
            /workspace/tpu_commons/tests/ragged_kv_cache_update_test.py
 
-   - label: "E2E MMLU tests for JAX models"
+   - label: "E2E MLPerf tests for JAX models"
      key: test_1
      soft_fail: true
      env:
@@ -25,9 +25,9 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mmlu.sh
+       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
 
-   - label: "E2E MMLU tests for JAX + vLLM models"
+   - label: "E2E MLPerf tests for JAX + vLLM models"
      key: test_2
      soft_fail: true
      env:
@@ -36,9 +36,9 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mmlu.sh
+       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
 
-   - label: "E2E MMLU tests for JAX new model implementation"
+   - label: "E2E MLPerf tests for JAX new model implementation"
      key: test_3
      soft_fail: true
      env:
@@ -47,7 +47,7 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mmlu.sh
+       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
 
   # A placeholder for adding more JAX workload unit tests
    - label: "JAX unit tests"
