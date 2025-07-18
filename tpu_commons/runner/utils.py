@@ -131,28 +131,6 @@ class ForbidCompile:
         return False
 
 
-def get_jnp_dtype_from_str(dtype_str: str) -> type:
-    """
-    Gets the JAX numpy dtype from a string.
-    Args:
-      dtype_str: The string representation of the dtype.
-    Returns:
-      The JAX numpy dtype.
-    """
-    str_to_dtype_dict = {
-        "float32": jnp.float32,
-        "float16": jnp.float16,
-        "bfloat16": jnp.bfloat16,
-        "int8": jnp.int8,
-        "fp8": jnp.float8_e4m3fn
-    }
-
-    if dtype_str not in str_to_dtype_dict:
-        raise ValueError(f"Unsupported dtype: {dtype_str}")
-
-    return str_to_dtype_dict[dtype_str]
-
-
 def create_kv_caches(
     num_blocks: int,
     block_size: int,

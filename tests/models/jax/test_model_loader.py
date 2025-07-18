@@ -148,9 +148,8 @@ def mock_causal_lm_instance(vllm_config, mesh) -> MockCausalLM:
     return MockCausalLM(vllm_config, rng, mesh)
 
 
-def test_maybe_apply_qwix_quantization_no_config(vllm_config,
-                                                 mock_causal_lm_instance,
-                                                 mesh):
+def test_apply_qwix_quantization_no_config(vllm_config,
+                                           mock_causal_lm_instance, mesh):
     """
     Tests that the model is returned unmodified when no 'quantization' key
     is in the vllm_config.
@@ -162,13 +161,13 @@ def test_maybe_apply_qwix_quantization_no_config(vllm_config,
 
     # Mock the functions that should not be called
     with patch(
-            "tpu_commons.models.jax.model_loader.convert_quantization_config_file_path_to_dict"
+            "tpu_commons.models.jax.model_loader.quantization_config_file_path_to_dict"
     ) as mock_convert, patch(
             "tpu_commons.models.jax.model_loader.qwix_quantize_nnx_model"
     ) as mock_quantize:
 
         # Action
-        output_model = model_loader._maybe_apply_qwix_quantization(
+        output_model = model_loader._apply_qwix_quantization(
             vllm_config, input_model, rng, mesh)
 
         # Assertions
@@ -177,9 +176,8 @@ def test_maybe_apply_qwix_quantization_no_config(vllm_config,
         mock_quantize.assert_not_called()
 
 
-def test_maybe_apply_qwix_quantization_no_qwix_rules(vllm_config,
-                                                     mock_causal_lm_instance,
-                                                     mesh):
+def test_apply_qwix_quantization_no_qwix_rules(vllm_config,
+                                               mock_causal_lm_instance, mesh):
     """
     Tests that the model is returned unmodified when the quantization config
     is present but lacks qwix rules.
@@ -188,15 +186,14 @@ def test_maybe_apply_qwix_quantization_no_qwix_rules(vllm_config,
     vllm_config.additional_config = {}
     rng = jax.random.PRNGKey(0)
     input_model = mock_causal_lm_instance
-    output_model = model_loader._maybe_apply_qwix_quantization(
+    output_model = model_loader._apply_qwix_quantization(
         vllm_config, input_model, rng, mesh)
 
     assert output_model is input_model
 
 
-def test_maybe_apply_qwix_quantization_is_applied(vllm_config,
-                                                  mock_causal_lm_instance,
-                                                  mesh):
+def test_apply_qwix_quantization_is_applied(vllm_config,
+                                            mock_causal_lm_instance, mesh):
     """
     Tests that qwix quantization is correctly applied when a valid config
     with qwix rules is provided.
@@ -225,12 +222,12 @@ def test_maybe_apply_qwix_quantization_is_applied(vllm_config,
     mock_config_dict = {"qwix": mock_qwix_rules}
 
     with patch(
-            "tpu_commons.models.jax.model_loader.convert_quantization_config_file_path_to_dict",
+            "tpu_commons.models.jax.model_loader.quantization_config_file_path_to_dict",
             return_value=mock_config_dict) as mock_convert, \
                     patch("flax.nnx.jit", return_value=quantized_model_mock) as mock_jit:
 
-        model_loader._maybe_apply_qwix_quantization(vllm_config, input_model,
-                                                    rng, mesh)
+        model_loader._apply_qwix_quantization(vllm_config, input_model, rng,
+                                              mesh)
 
         mock_convert.assert_called_once_with("my_qwix_config.json")
 

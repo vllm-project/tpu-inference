@@ -11,6 +11,8 @@ from vllm.platforms.interface import Platform, PlatformEnum, _Backend
 from vllm.sampling_params import SamplingParams, SamplingType
 
 from tpu_commons.logger import init_logger
+from tpu_commons.models.jax.utils.quantization.quantization_utils import (
+    parse_qwix_config_to_rules, quantization_config_file_path_to_dict)
 
 if TYPE_CHECKING:
     from vllm.config import BlockSize, ModelConfig, VllmConfig
@@ -171,6 +173,20 @@ class TpuPlatform(Platform):
             " without setting `--disable_chunked_mm_input`. " \
             "Forcing --disable_chunked_mm_input.")
             scheduler_config.disable_chunked_mm_input = True
+
+        # Validate additional config
+        if additional_config := vllm_config.additional_config:
+            # Try loading/parsing the quantization config so that we can fail fast
+            if quantization_file_name := additional_config.get("quantization"):
+                try:
+                    quantization_dict = quantization_config_file_path_to_dict(
+                        quantization_file_name)
+                    parse_qwix_config_to_rules(
+                        quantization_dict["qwix"]["rules"])
+                except Exception as e:
+                    raise ValueError(
+                        f"Invalid quantization config; please see README for details on quantization config: {e}"
+                    )
 
     @classmethod
     def is_pin_memory_available(cls):

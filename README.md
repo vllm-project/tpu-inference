@@ -238,7 +238,7 @@ To enable quantization, you can specify a quantization config filename found ins
 ### Creating your own quantization config
 To create your own quantization:
 
-1. Add a new file to the quantization config irectory (`tpu_commons/models/jax/utils/quantization/configs/`)
+1. Add a new file to the quantization config directory (`tpu_commons/models/jax/utils/quantization/configs/`)
 2. For Qwix quantization, add a new entry to the file as follows:
 
 ```

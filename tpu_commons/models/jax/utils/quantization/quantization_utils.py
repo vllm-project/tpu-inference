@@ -17,18 +17,17 @@ from tpu_commons.runner.utils import create_kv_caches
 
 logger = init_logger(__name__)
 
-MAX_INT8 = 127.5
-MAX_INT4 = 7.5
-E4M3_MAX = jnp.finfo(jnp.float8_e4m3fn).max.astype(jnp.float32)
-
 QUANTIZATION_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "configs")
 DEFAULT_NUM_BLOCKS_FOR_JIT_KV_CACHE = 2000
+DEFAULT_NUM_TOKENS_FOR_MODEL_INPUTS = 512
+DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS = 256
+DEFAULT_MAX_NUM_BLOCKS_PER_REQ = 16
 
 
 def parse_qwix_config_to_rules(
         qwix_config: List[dict]) -> List[qwix.QuantizationRule]:
     """
-    Parse a yaml file containing Qwix quantization rules into a list of QuantizationRule objects.
+    Parse a list of dictionaries containing Qwix quantization rules into a list of QuantizationRule objects.
 
     Args:
         qwix_config: a dictionary containing the Qwix quantization rules
@@ -100,16 +99,37 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
             sharding = NamedSharding(mesh, PartitionSpec(None))
         return jax.device_put(*args, device=sharding, **kwargs)
 
-    input_ids = jax.random.randint(rng, (512, ), 0, 100, dtype=jnp.int32)
-    positions = jax.random.randint(rng, (512, ), 0, 100, dtype=jnp.int32)
-    slot_mapping_metadata = jax.random.randint(rng, (3, 512),
-                                               0,
-                                               100,
-                                               dtype=jnp.int32)
+    # NOTE: the inputs don't need to match the actual ones, as long as the consumed weights are the same
+    input_ids = jax.random.randint(rng,
+                                   (DEFAULT_NUM_TOKENS_FOR_MODEL_INPUTS, ),
+                                   0,
+                                   100,
+                                   dtype=jnp.int32)
+    positions = jax.random.randint(rng,
+                                   (DEFAULT_NUM_TOKENS_FOR_MODEL_INPUTS, ),
+                                   0,
+                                   100,
+                                   dtype=jnp.int32)
+    # NOTE: this is 3 since slices it's a list of (kv_cache_start, new_kv_start, slice_len)
+    slot_mapping_metadata = jax.random.randint(
+        rng, (3, DEFAULT_NUM_TOKENS_FOR_MODEL_INPUTS), 0, 100, dtype=jnp.int32)
     num_slices = jax.random.randint(rng, (1, ), 0, 100, dtype=jnp.int32)
-    block_tables = jax.random.randint(rng, (256, 16), 0, 100, dtype=jnp.int32)
-    query_start_loc = jax.random.randint(rng, (257, ), 0, 100, dtype=jnp.int32)
-    seq_lens = jax.random.randint(rng, (256, ), 0, 100, dtype=jnp.int32)
+    block_tables = jax.random.randint(rng,
+                                      (DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS,
+                                       DEFAULT_MAX_NUM_BLOCKS_PER_REQ),
+                                      0,
+                                      100,
+                                      dtype=jnp.int32)
+    query_start_loc = jax.random.randint(
+        rng, (DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS + 1, ),
+        0,
+        100,
+        dtype=jnp.int32)
+    seq_lens = jax.random.randint(rng,
+                                  (DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS, ),
+                                  0,
+                                  100,
+                                  dtype=jnp.int32)
     num_seqs = jax.random.randint(rng, (1, ), 0, 100, dtype=jnp.int32)
 
     (input_ids, positions, slot_mapping_metadata, num_slices, block_tables,
@@ -138,10 +158,22 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
     return model
 
 
-def convert_quantization_config_file_path_to_dict(
+def quantization_config_file_path_to_dict(
         quantization_config_file_path: str) -> dict:
     """
     Converts a quantization config YAML file path to a dictionary.
+
+    The expected format of the quantization config YAML file is as follows:
+    ```yaml
+        qwix:
+            rules:
+                # NOTE: each entry corresponds to a qwix.QuantizationRule
+                - module_path: '.*attn.*'
+                weight_qtype: 'int8'
+                - module_path: '.*'
+                weight_qtype: 'int8'
+                act_qtype: 'int8'
+    ```
 
     Args:
         quantization_config_file_path: the path to the quantization config YAML file

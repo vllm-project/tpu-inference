@@ -34,8 +34,8 @@ if [ "$NEW_MODEL_DESIGN" = "True" ]; then
     extra_serve_args+=('{"architectures": ["Llama3_8B"]}')
     if [ "$QUANTIZATION" = "True" ]; then
         echo "QUANTIZATION is True. Running with quantization."
-        extra_serve_args+=("--additional_args")
-        extra_serve_args+=('{"quantization": {"rules_file": "tpu_commons/models/jax/utils/quantization/quantize_all_modules_int8_wa.yaml"}}')
+        extra_serve_args+=("--additional_config")
+        extra_serve_args+=('{"quantization": {"quantization": "tpu_commons/models/jax/utils/quantization/configs/int8_default.yaml"}}')
     fi
 else
     echo "NEW_MODEL_DESIGN is not set to True. Running with default settings."

@@ -182,7 +182,6 @@ def test_create_kv_caches(mesh: Mesh):
     Tests that `create_kv_caches` correctly allocates and shards the KV caches
     for all specified layers.
     """
-    # 1. Setup
     num_blocks = 64
     block_size = 16
     num_kv_heads = 8
@@ -190,15 +189,11 @@ def test_create_kv_caches(mesh: Mesh):
     layer_names = ["decoder.0", "decoder.1", "decoder.2"]  # Test with 3 layers
     devices = jax.devices()
 
-    # Define the expected shape and sharding for the caches
     expected_shape = (num_blocks, block_size, num_kv_heads * 2, head_size)
     expected_sharding = NamedSharding(mesh, PartitionSpec(None, None, "model"))
     expected_dtype = jnp.bfloat16
 
-    # 2. Patch dependencies to isolate the function
-    # We patch the logger, a utility function, and the default dtype constant.
     with patch("tpu_commons.logger.init_logger", return_value=MagicMock()):
-        # 3. Action: Call the function under test
         kv_caches = create_kv_caches(
             num_blocks=num_blocks,
             block_size=block_size,
@@ -209,12 +204,9 @@ def test_create_kv_caches(mesh: Mesh):
             devices=devices,
         )
 
-        # 4. Assertions
-        # Verify the return type and the number of caches created
         assert isinstance(kv_caches, list)
         assert len(kv_caches) == len(layer_names)
 
-        # Verify the properties of each individual cache array
         for cache_array in kv_caches:
             assert isinstance(cache_array, jax.Array)
             assert cache_array.shape == expected_shape
