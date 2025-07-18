@@ -134,7 +134,7 @@ def test_get_flax_model(vllm_config, mesh):
     rng = jax.random.PRNGKey(42)
 
     # 1. Get the compiled model and logit computation functions
-    model_fn, compute_logits_fn = model_loader.get_flax_model(
+    model_fn, compute_logits_fn, _ = model_loader.get_flax_model(
         vllm_config, rng, mesh)
 
     assert callable(model_fn)
