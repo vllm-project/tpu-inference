@@ -102,9 +102,9 @@ class Llama3RecipeConfig(RecipeConfig):
     serving: Llama3ServingConfig = field(default_factory=Llama3ServingConfig)
 
 
-class Llama3(Model):
+class LlamaForCausalLM(Model):
 
-    def __init__(self, vllm_config: VllmConfig, rng: PRNGKey, mesh: Mesh):
+    def __init__(self, vllm_config: VllmConfig, rng: jax.Array, mesh: Mesh):
         self.vllm_config = vllm_config
         self.rng = nnx.Rngs(rng)
         self.mesh = mesh
@@ -112,7 +112,9 @@ class Llama3(Model):
             strategy_dict = self.vllm_config.additional_config["sharding"][
                 "sharding_strategy"]
         except (KeyError, TypeError):
-            strategy_dict = {"tensor_parallelism": 4, "expert_parallelism": 2}
+            strategy_dict = {"tensor_parallelism": 1}
+        #TODO: after all models are migrated to the new sharding, 
+        # we need to only create sharding obj in TPU runner
         self.sharding = Sharding(strategy_dict=strategy_dict,
                                  mesh=self.mesh,
                                  default_rules_cls=Llama3ShardingRulesConfig,
@@ -199,6 +201,7 @@ class Llama3(Model):
         return self.__call__(*args, **kwargs)
 
     def load_weights(self, rng: PRNGKey, cache_dir: Optional[str] = None):
+        self.rng = nnx.Rngs(rng)
         if self.use_random_init:
             #TODO: Support loading random weights, either here or in tpu_runner
             logger.warning(

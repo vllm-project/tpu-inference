@@ -28,16 +28,6 @@ TARGET_THROUGHPUT="1500"
 
 model_list="Qwen/Qwen2.5-1.5B-Instruct Qwen/Qwen2.5-0.5B-Instruct meta-llama/Llama-3.1-8B-Instruct"
 
-extra_serve_args=()
-if [ "$NEW_MODEL_DESIGN" = "True" ]; then
-    echo "NEW_MODEL_DESIGN is True. Running with the new model list and custom hf_overrides."
-    model_list="meta-llama/Llama-3.1-8B-Instruct"
-    extra_serve_args+=("--hf_overrides")
-    extra_serve_args+=('{"architectures": ["Llama3"]}')
-else
-    echo "NEW_MODEL_DESIGN is not set to True. Running with default settings."
-fi
-
 root_dir=/workspace
 dataset_name=mlperf
 dataset_path=""
@@ -224,7 +214,7 @@ for model_name in $model_list; do
 
     # Spin up the vLLM server
     echo "Spinning up the vLLM server..."
-    (vllm serve "$model_name" --max-model-len=1024 --disable-log-requests --max-num-batched-tokens 8192 "${extra_serve_args[@]}" 2>&1 | tee -a "$LOG_FILE") &
+    (vllm serve "$model_name" --max-model-len=1024 --disable-log-requests --max-num-batched-tokens 8192 2>&1 | tee -a "$LOG_FILE") &
 
 
 
