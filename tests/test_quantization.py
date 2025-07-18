@@ -6,15 +6,12 @@ import unittest
 from unittest.mock import MagicMock, mock_open, patch
 
 import jax
-import jax.numpy as jnp
-import numpy as np
 import qwix
 import yaml
 from flax import nnx
 from jax.sharding import Mesh
 
 # Target file for testing
-from tpu_commons.models.jax.utils.quantization import quantization_utils
 
 # Configure JAX to use CPU for test portability
 jax.config.update("jax_platform_name", "cpu")
@@ -42,69 +39,6 @@ import tpu_commons.models.jax.utils.quantization.quantization_utils as quantize_
 
 # Un-patch create_kv_caches so we can mock it per-test class
 quantize_qwix.create_kv_caches = mock_runner_utils.create_kv_caches
-
-
-class TestQuantizeFunction(unittest.TestCase):
-    """Tests for the per-tensor `quantize` helper function."""
-
-    def test_quantize_int8(self):
-        """Verify int8 quantization and scaling."""
-        x = jnp.arange(-4, 5, dtype=jnp.float32)
-        q_x, scale = quantization_utils.quantize(x, jnp.int8)
-
-        self.assertEqual(q_x.dtype, jnp.int8)
-        expected_scale = (4.0 / quantization_utils.MAX_INT8)
-        np.testing.assert_allclose(scale.item(), expected_scale, rtol=1e-6)
-
-        # Dequantized value should be close to original
-        dequantized_x = q_x.astype(jnp.float32) * scale
-        np.testing.assert_allclose(dequantized_x, x, atol=1.0)
-
-    def test_quantize_int4(self):
-        """Verify int4 quantization and scaling."""
-        x = jnp.arange(-4, 5, dtype=jnp.float32) * 1.5  # Max abs value is 6.0
-        q_x, scale = quantization_utils.quantize(x, jnp.int4)
-
-        self.assertEqual(q_x.dtype, jnp.int4)
-        expected_scale = 6.0 / quantization_utils.MAX_INT4
-        np.testing.assert_allclose(scale.item(), expected_scale, rtol=1e-6)
-
-        # Dequantized value should be close to original
-        dequantized_x = q_x.astype(jnp.float32) * scale
-        np.testing.assert_allclose(dequantized_x, x, atol=1, rtol=0.5)
-
-    def test_quantize_float8(self):
-        """Verify float8_e4m3fn quantization and scaling."""
-        e4m3_max = jnp.finfo(jnp.float8_e4m3fn).max.astype(jnp.float32)
-        x = jnp.array([-0.5, 0.1, 0.8, 1.0], dtype=jnp.float32) * e4m3_max
-        q_x, scale = quantization_utils.quantize(x, jnp.float8_e4m3fn)
-
-        self.assertEqual(q_x.dtype, jnp.float8_e4m3fn)
-        np.testing.assert_allclose(scale.item(), 1.0, rtol=1e-6)
-
-        # Dequantized value should be close to original
-        dequantized_x = q_x.astype(jnp.float32) * scale
-        np.testing.assert_allclose(dequantized_x, x, rtol=1e-1, atol=10)
-
-    def test_quantize_zero_input(self):
-        """Verify that a zero input produces a non-zero scale."""
-        x = jnp.zeros((10, 10), dtype=jnp.float32)
-        _, scale = quantization_utils.quantize(x, jnp.int8)
-        # Scale should be clamped to 1e-6 to avoid division by zero
-        self.assertAlmostEqual(scale.item(), 1e-6)
-
-    def test_unsupported_dtype_raises_error(self):
-        """Verify an unsupported dtype raises ValueError."""
-        x = jnp.ones(10)
-        with self.assertRaises(ValueError):
-            quantization_utils.quantize(x, jnp.float32)
-
-    def test_scale_shape_and_dtype(self):
-        """Verify the scale output has shape (1,) and dtype float32."""
-        x = jnp.ones((5, 5))
-        _, scale = quantization_utils.quantize(x, jnp.int8)
-        self.assertEqual(scale.shape, (1, ))
-        self.assertEqual(scale.dtype, jnp.float32)
 
 
 class TestParseQwixConfigToRules(unittest.TestCase):
@@ -266,7 +200,6 @@ class TestQwixQuantizeNnxModel(unittest.TestCase):
             kv_cache_block_size=self.kv_cache_block_size,
             kv_cache_num_combined_kv_heads=self.kv_cache_num_combined_kv_heads,
             kv_cache_head_size=self.kv_cache_head_size,
-            kv_cache_quant_dtype=None,
         )
 
         self.assertIs(returned_model, quantized_model_mock)
@@ -296,26 +229,7 @@ class TestQwixQuantizeNnxModel(unittest.TestCase):
             mesh=self.mesh,
             layer_names=[f"layer.{i}" for i in range(self.num_hidden_layers)],
             devices=jax.local_devices(),
-            kv_cache_quant_dtype=None,
         )
-
-    def test_kv_cache_quantization_dtype_is_passed(self, mock_quantize_model):
-        """Test that the kv_cache_quant_dtype is passed correctly."""
-        quantize_qwix.qwix_quantize_nnx_model(
-            model=self.model,
-            qwix_config=self.qwix_config,
-            rng=self.rng,
-            mesh=self.mesh,
-            num_hidden_layers=self.num_hidden_layers,
-            kv_cache_block_size=self.kv_cache_block_size,
-            kv_cache_num_combined_kv_heads=self.kv_cache_num_combined_kv_heads,
-            kv_cache_head_size=self.kv_cache_head_size,
-            kv_cache_quant_dtype='int8',
-        )
-
-        mock_runner_utils.create_kv_caches.assert_called_once()
-        call_kwargs = mock_runner_utils.create_kv_caches.call_args.kwargs
-        self.assertEqual(call_kwargs['kv_cache_quant_dtype'], 'int8')
 
 
 if __name__ == '__main__':

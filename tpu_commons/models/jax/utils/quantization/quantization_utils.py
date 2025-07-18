@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
-from typing import List, Optional, Union
+from typing import List
 
 import jax
 import jax.numpy as jnp
@@ -43,17 +43,11 @@ def parse_qwix_config_to_rules(
     return rules
 
 
-def qwix_quantize_nnx_model(
-    model: nnx.Module,
-    qwix_config: List[dict],
-    rng: jax.Array,
-    mesh: Mesh,
-    num_hidden_layers: int,
-    kv_cache_block_size: int,
-    kv_cache_num_kv_heads: int,
-    kv_cache_head_size: int,
-    kv_cache_quant_dtype: Optional[Union[str,
-                                         jnp.dtype]] = None) -> nnx.Module:
+def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
+                            rng: jax.Array, mesh: Mesh, num_hidden_layers: int,
+                            kv_cache_block_size: int,
+                            kv_cache_num_kv_heads: int,
+                            kv_cache_head_size: int) -> nnx.Module:
     """
     Quantizes a Flax NNX model using Qwix.
 
@@ -79,7 +73,6 @@ def qwix_quantize_nnx_model(
         kv_cache_page_size: the page size of the kv cache
         kv_cache_num_kv_heads: the number of kv heads
         head_size: the head size of the kv cache
-        kv_cache_quant_dtype: the dtype to quantize the kv cache to (optional)
         rules_file_path: the path to the YAML file containing the quantization rules.
             See the README for more information on how to create/use this file.
             (optional)
@@ -100,7 +93,6 @@ def qwix_quantize_nnx_model(
         mesh=mesh,
         layer_names=[f"layer.{i}" for i in range(num_hidden_layers)],
         devices=jax.local_devices(),
-        kv_cache_quant_dtype=kv_cache_quant_dtype,
     )
 
     def _device_array(*args, sharding=None, **kwargs) -> jax.Array:
@@ -144,52 +136,6 @@ def qwix_quantize_nnx_model(
     model = qwix.quantize_model(model, qwix.PtqProvider(qwix_rules),
                                 **model_input)
     return model
-
-
-def quantize(x: jax.Array, quant_dtype: jnp.dtype, clip_to_dtype: bool = True):
-    """Quantizes uses a per-tensor approach.
-      TODO (jacobplatin): support a per-token approach
-
-    Args:
-        x: the value to quantize
-        quant_dtype: the dtype to quantize to
-        clip_to_dtype: whether to clip the value to
-
-    Returns:
-         x (jax.Array): the quantized value
-         scale (jax.Array): the scale factor (of shape (1,))
-          NOTE: this should really be a float, but static types don't play
-          nicely with JAX tracing
-    """
-    # Would be nicer to do this as a dictionary, but indexing with
-    # a jnp.dtype didn't work for some reason
-    if quant_dtype == jnp.int8:
-        dtype_max = MAX_INT8
-    elif quant_dtype == jnp.int4:
-        dtype_max = MAX_INT4
-    elif quant_dtype == jnp.float8_e4m3fn:
-        dtype_max = E4M3_MAX
-    else:
-        raise ValueError(f"Unsupported quant dtype: {quant_dtype}")
-
-    scale = jnp.max(jnp.abs(x)) / dtype_max
-    # Ensure scales are not zero to avoid division by zero errors.
-    scale = jnp.maximum(scale, 1e-6)
-    # TODO (jacobplatin): is this cast to FP32 something we want?
-    x = x.astype(jnp.float32) / scale
-
-    if clip_to_dtype:
-        dtype_info = jnp.finfo(quant_dtype)
-        x = jnp.clip(x, a_min=dtype_info.min, a_max=dtype_info.max)
-
-    x = (x).astype(quant_dtype)
-
-    # Upcast to float32 to avoid a SMEM Mosaic error with bfloat16
-    # NOTE: the scales are really floats but static types don't play
-    # nicely with JAX tracing
-    scale = scale.reshape(-1).astype(jnp.float32)
-
-    return x, scale
 
 
 def convert_quantization_config_file_path_to_dict(

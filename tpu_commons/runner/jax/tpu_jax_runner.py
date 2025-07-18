@@ -29,8 +29,6 @@ from tpu_commons.models.jax.layers.sampling import sample
 from tpu_commons.models.jax.model_loader import get_model
 from tpu_commons.models.jax.sampling_metadata import \
     TPUSupportedSamplingMetadata
-from tpu_commons.models.jax.utils.quantization.quantization_utils import \
-    convert_quantization_config_file_path_to_dict
 from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
                                                     InputBatch)
 from tpu_commons.runner.tpu_torch_xla_runner import (_get_padded_token_len,
@@ -234,22 +232,14 @@ class TPUModelRunner():
         kv_cache_spec = kv_cache_groups[0].kv_cache_spec
         layer_names = kv_cache_groups[0].layer_names
 
-        maybe_kv_cache_quant_dtype = None
-        if self.vllm_config.additional_config.get("quantization"):
-            maybe_quantization_config = convert_quantization_config_file_path_to_dict(
-                self.vllm_config.additional_config.get("quantization"))
-            maybe_kv_cache_quant_dtype = maybe_quantization_config.get(
-                "kv_cache", {}).get("dtype")
-
+        # NOTE: we'll the num_kv_heads by 2 in the function
         self.kv_caches = create_kv_caches(
             num_blocks=kv_cache_config.num_blocks,
             block_size=kv_cache_spec.block_size,
-            num_kv_heads=kv_cache_spec.
-            num_kv_heads,  # NOTE: we'll multiply by 2 in the function
+            num_kv_heads=kv_cache_spec.num_kv_heads,
             head_size=kv_cache_spec.head_size,
             mesh=self.mesh,
             layer_names=layer_names,
-            kv_cache_quant_dtype=maybe_kv_cache_quant_dtype,
             devices=self.devices,
         )
 

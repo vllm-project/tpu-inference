@@ -4,7 +4,7 @@ Implements a few utility functions for the various runners.
 """
 import functools
 import time
-from typing import Any, List, Optional, Union
+from typing import Any, List, Optional
 
 import jax
 import jax.numpy as jnp
@@ -161,7 +161,6 @@ def create_kv_caches(
     mesh: Mesh,
     layer_names: List[str],
     devices: List[Any],
-    kv_cache_quant_dtype: Optional[Union[str, jnp.dtype]] = None
 ) -> List[jax.Array]:
     """
     Creates the KV caches, one per each decoder layer in the model, where the shape of each cache is
@@ -175,18 +174,13 @@ def create_kv_caches(
         mesh: The mesh to shard the KV caches across.
         layer_names: The names of the decoder layers in the model.
         devices: The devices to shard the KV caches across.
-        kv_cache_quant_dtype: Quantized dtype for the KV cache (default is bfloat16, unquantized).
 
     Returns:
         A list of KV caches, one per each decoder layer in the model.
 
     """
+    # TODO (jacobplatz): update this for quantized KV cache
     cache_dtype = DEFAULT_KV_CACHE_DTYPE
-    if kv_cache_quant_dtype is not None:
-        cache_dtype = get_jnp_dtype_from_str(
-            kv_cache_quant_dtype) if isinstance(kv_cache_quant_dtype,
-                                                str) else kv_cache_quant_dtype
-
     # TODO(xiang): fix this together with get_kv_cache_spec
     # cache_dtype = kv_cache_spec.dtype
 

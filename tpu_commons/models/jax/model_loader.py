@@ -60,13 +60,10 @@ def _maybe_apply_qwix_quantization(vllm_config: VllmConfig, model: nnx.Module,
     # NOTE: we expect the value of "quantization" to be the name of a file in `tpu_commons/models/jax/utils/quantization/configs`
     # if given
     maybe_qwix_config = None
-    maybe_kv_cache_quant_dtype = None
     if vllm_config.additional_config.get("quantization"):
         maybe_quantization_config = convert_quantization_config_file_path_to_dict(
             vllm_config.additional_config["quantization"])
         maybe_qwix_config = maybe_quantization_config.get("qwix").get("rules")
-        maybe_kv_cache_quant_dtype = maybe_quantization_config.get(
-            "kv_cache", {}).get("dtype")
     if maybe_qwix_config:
         block_size = vllm_config.cache_config.block_size
         model_config = vllm_config.model_config
@@ -83,7 +80,6 @@ def _maybe_apply_qwix_quantization(vllm_config: VllmConfig, model: nnx.Module,
                             "kv_cache_block_size",
                             "kv_cache_num_kv_heads",
                             "kv_cache_head_size",
-                            "kv_cache_quant_dtype",
                         ))(model=model,
                            rng=rng,
                            mesh=mesh,
@@ -91,9 +87,7 @@ def _maybe_apply_qwix_quantization(vllm_config: VllmConfig, model: nnx.Module,
                            hf_config.num_hidden_layers,
                            kv_cache_block_size=block_size,
                            kv_cache_num_kv_heads=num_kv_heads,
-                           kv_cache_head_size=head_size,
-                           kv_cache_quant_dtype=maybe_kv_cache_quant_dtype)
-
+                           kv_cache_head_size=head_size)
     return model
 
 

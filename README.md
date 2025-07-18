@@ -227,7 +227,7 @@ You might need to run the benchmark client *twice* to make sure all compilations
 
 ## Quantization
 ### Overview
-Currently, we support both per-tensor KV cache quantization (int8, int4, and fp8 (`float8_e4m3fn)) and overall model weight/activation quantization through the [Qwix](https://github.com/google/qwix?tab=readme-ov-file#quantization-config) framework.
+Currently, we support overall model weight/activation quantization through the [Qwix](https://github.com/google/qwix?tab=readme-ov-file#quantization-config) framework.
 
 To enable quantization, you can specify a quantization config filename found inside the quantization config directory (`tpu_commons/models/jax/utils/quantization/configs/`), for example:
 
@@ -251,12 +251,3 @@ qwix:
 ```
 
 where each entry under `rules` corresponds to a `qwix.QuantizationRule`.  To learn more about Qwix and defining Qwix rules, please see the relevant docs [here](https://github.com/google/qwix?tab=readme-ov-file#quantization-config).
-
-1. For KV cache quantization, add a new entry to the file as follows:
-
-```
-kv_cache:
-    dtype: [int8 OR int4 OR fp8 (`float8_e4m3fn`)]
-```
-
-where the dtype corresponds to the dtype you'd like to quantize your KV cache to.
