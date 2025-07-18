@@ -13,10 +13,7 @@ from unittest.mock import patch
 import numpy as np
 import torch
 import torch.nn as nn
-# TPU XLA related
 from torch.utils import _pytree as pytree
-
-# TPU XLA related
 import vllm.envs as envs
 
 import jax
@@ -173,8 +170,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self.hidden_size = model_config.get_hidden_size()
         self.vocab_size = model_config.get_vocab_size()
 
-        if self.lora_config is not None:
-            self.vocab_size += self.lora_config.lora_extra_vocab_size
+        # Torchax runner doesn't support lora now
+        assert self.lora_config is None
 
         # Lazy initialization
         self.model: nn.Module  # Set after load_model
@@ -239,20 +236,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # means this layer will perform attention using the keys and values
         # from the KV cache of `shared_kv_cache_layers[layer_name]`.
         self.shared_kv_cache_layers: dict[str, str] = {}
-
-        # tensors for structured decoding
-        self.grammar_bitmask_cpu = torch.zeros(
-            (self.max_num_reqs, cdiv(self.vocab_size, 32)),
-            dtype=torch.int32,
-            device="cpu",
-            pin_memory=self.pin_memory)
-        self.require_structured_out_cpu = torch.zeros(
-            (self.max_num_reqs, 1),
-            dtype=torch.bool,
-            device="cpu",
-            pin_memory=self.pin_memory)
-        self.structured_decode_arange = torch.arange(
-            0, 32, device="cpu", pin_memory=self.pin_memory)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> bool:
         """Update the cached states and the persistent batch with the scheduler
@@ -507,6 +490,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
+        # torchax runner doesn't support lora.
+        assert self.lora_config is None
 
         # Get the number of scheduled tokens for each request.
         num_scheduled_tokens_per_req = []
@@ -600,17 +585,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         seq_lens = create_torchax_tensor_with_partition_spec(
             self.seq_lens_cpu[:self.max_num_reqs], self.mesh)
 
-        if self.lora_config is not None:
-            # We need to respect padding when activating LoRA adapters
-            padded_num_scheduled_tokens_per_req = np.copy(
-                num_scheduled_tokens_per_req
-            )  # Copying to avoid accidental state corruption bugs
-            padded_num_scheduled_tokens_per_req[-1] += \
-                padded_total_num_scheduled_tokens - total_num_scheduled_tokens
-
-            self.set_active_loras(self.input_batch,
-                                  padded_num_scheduled_tokens_per_req)
-
         num_seqs = create_torchax_tensor_with_partition_spec(
             torch.tensor([num_reqs], dtype=torch.int32), self.mesh)
         num_slices = create_torchax_tensor_with_partition_spec(
@@ -696,6 +670,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
     ) -> ModelRunnerOutput:
         # Multi-model is not supported
         assert intermediate_tensors is None, "Multi-model is not supported"
+        assert scheduler_output.grammar_bitmask is None, \
+            "Structured decoding is not supported."
 
         # Update cached state
         self._update_states(scheduler_output)
@@ -730,21 +706,9 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                                               hidden_states, None)
             tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
                 from_input_batch(self.input_batch, padded_num_reqs, self.device)
-            if scheduler_output.grammar_bitmask is not None:
-                require_struct_decoding, grammar_bitmask_padded, arange = \
-                    self.prepare_structured_decoding_input(logits, scheduler_output)
-                logits = self.structured_decode(require_struct_decoding,
-                                                grammar_bitmask_padded, logits,
-                                                arange)
             selected_token_ids = self.sample_from_logits(logits)
             selected_token_ids = torchax.tensor.Tensor(selected_token_ids,
                                                        self.torchax_env)
-            # NOTE (NickLucche) Use the original logits (before any penalties or
-            # temperature scaling) for the top-k logprobs. We can't enforce it due
-            # to recompilations outside torch.compiled code, so just make sure
-            # `sample_from_logits` does not modify the logits in-place.
-            logprobs = self.gather_logprobs(logits, selected_token_ids) \
-                if tpu_sampling_metadata.logprobs else None
 
             # Remove padding on cpu and keep dynamic op outside of xla graph.
             if self.use_spmd:
@@ -753,8 +717,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 selected_token_ids = selected_token_ids[:num_reqs]
             else:
                 selected_token_ids = selected_token_ids.cpu()[:num_reqs]
-        logprobs_lists = logprobs.tolists() \
-            if tpu_sampling_metadata.logprobs else None
 
         # Update the cache state concurrently. Code above will not block until
         # we use `selected_token_ids`. Add mark_step if post-processing changes
@@ -824,7 +786,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=valid_sampled_token_ids,
             spec_token_ids=None,
-            logprobs=logprobs_lists,
+            logprobs=None,
             prompt_logprobs_dict=prompt_logprobs_dict,
             pooler_output=[],
         )
@@ -886,11 +848,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
         torchax.disable_globally()
 
-        # Sync all pending XLA execution during model initialization and weight
-        # loading.
         if not hasattr(self, "model"):
             self.model = model
-        self.sampler = TPUSampler()
 
     @torch.no_grad()
     def _dummy_run(self, num_tokens: int) -> None:
@@ -948,11 +907,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             self.kv_caches_dict[layer_name] = kv_cache[0]
         self._hidden_states_dtype = torchax.ops.mappings.j2t_dtype(out.dtype)
 
-    def _set_active_loras(self, prompt_lora_mapping, token_lora_mapping,
-                          lora_requests) -> None:
-        super()._set_active_loras(prompt_lora_mapping, token_lora_mapping,
-                                  lora_requests)
-
     def _precompile_backbone(self) -> None:
         logger.info("Compiling the model with different input shapes.")
         start = time.perf_counter()
@@ -1000,30 +954,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         end = time.perf_counter()
         logger.info("Compilation finished in %.2f [secs].", end - start)
 
-    def _precompile_structured_decoding(self) -> None:
-        logger.info(
-            "Compiling structured_decoding with different input shapes.")
-        start = time.perf_counter()
-        for num_reqs in self.num_reqs_paddings:
-            dummy_logits = torch.zeros((num_reqs, self.vocab_size),
-                                       device=self.device,
-                                       dtype=self._hidden_states_dtype)
-            dummy_require_struct_decoding = \
-                create_torchax_tensor_with_partition_spec(
-                    self.require_structured_out_cpu[:num_reqs], self.mesh, ()
-                )
-            dummy_grammar_bitmask = \
-                create_torchax_tensor_with_partition_spec(
-                    self.grammar_bitmask_cpu[:num_reqs], self.mesh, ()
-                )
-            arange = create_torchax_tensor_with_partition_spec(
-                self.structured_decode_arange, self.mesh, ())
-            self.structured_decode(dummy_require_struct_decoding,
-                                   dummy_grammar_bitmask, dummy_logits, arange)
-            logger.info("  -- num_seqs: %d", num_reqs)
-        end = time.perf_counter()
-        logger.info("Compilation finished in %.2f [secs].", end - start)
-
     def _precompile_sample_from_logits(self) -> None:
         logger.info(
             "Compiling sample_from_logits with different input shapes.")
@@ -1033,39 +963,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 torch.zeros((num_reqs, self.vocab_size),
                             dtype=self._hidden_states_dtype), self.mesh,
                 ()).jax()
-            for all_greedy in [False, True]:
-                generate_params_if_all_greedy = not all_greedy
-                sampling_metadata = (
-                    TPUSupportedSamplingMetadata.from_input_batch(
-                        self.input_batch,
-                        num_reqs,
-                        self.device,
-                        generate_params_if_all_greedy,
-                    ))
-                sampling_metadata.all_greedy = all_greedy
-                with self.maybe_select_dummy_loras(
-                        self.lora_config, np.array([num_reqs],
-                                                   dtype=np.int32)):
-                    self.sample_from_logits(dummy_logits)
+            self.sample_from_logits(dummy_logits)
             logger.info("  -- num_seqs: %d", num_reqs)
-        # xm.wait_device_ops()
-        end = time.perf_counter()
-        logger.info("Compilation finished in %.2f [secs].", end - start)
-
-    def _precompile_gather_logprobs(self) -> None:
-        logger.info("Compiling gather_logprobs with different input shapes.")
-        start = time.perf_counter()
-        for num_reqs in self.num_reqs_paddings:
-            dummy_logits = create_torchax_tensor_with_partition_spec(
-                torch.zeros((num_reqs, self.vocab_size),
-                            dtype=self._hidden_states_dtype), self.mesh, ())
-            dummy_tokens = create_torchax_tensor_with_partition_spec(
-                torch.zeros((num_reqs, 1), dtype=torch.int64), self.mesh, ())
-            with self.maybe_select_dummy_loras(
-                    self.lora_config, np.array([num_reqs], dtype=np.int32)):
-                self.gather_logprobs(dummy_logits, dummy_tokens)
-            logger.info("  -- num_seqs: %d", num_reqs)
-        # xm.wait_device_ops()
         end = time.perf_counter()
         logger.info("Compilation finished in %.2f [secs].", end - start)
 
@@ -1073,14 +972,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         """
         Precompile all the subgraphs with possible input shapes.
         """
-        # with self.torchax_env:
-        with self.maybe_setup_dummy_loras(self.lora_config):
-            self._precompile_backbone()
-            self._precompile_select_hidden_states()
-            self._precompile_compute_logits()
-            self._precompile_structured_decoding()
-            self._precompile_sample_from_logits()
-            self._precompile_gather_logprobs()
+        self._precompile_backbone()
+        self._precompile_select_hidden_states()
+        self._precompile_compute_logits()
+        self._precompile_sample_from_logits()
 
     def profile_run(
         self,
@@ -1123,8 +1018,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # Trigger compilation for general shape.
         self._dummy_run(num_tokens)
 
-        # xm.mark_step()
-        # xm.wait_device_ops()
         gc.collect()
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
@@ -1237,83 +1130,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
     def sample_from_logits(logits):
         return jnp.argmax(logits, axis=-1, keepdims=True)
 
-    def gather_logprobs(self, logits: torch.Tensor,
-                        sampled_tokens: torch.Tensor) -> LogprobsTensors:
-        """
-        Gather the top_logprobs with corresponding tokens. Use a fixed number
-        of logprobs as an alternative to having multiple pre-compiled graphs.
-        Select the number of logprobs actually demanded by each request on CPU.
-        """
-        logprobs = self.sampler.compute_logprobs(logits)
-        return self.sampler.gather_logprobs(
-            logprobs,
-            self.model_config.max_logprobs,
-            token_ids=sampled_tokens.squeeze(-1))
-
-    def structured_decode(self, require_struct_decoding: torch.Tensor,
-                          grammar_bitmask: torch.Tensor, logits: torch.Tensor,
-                          arange: torch.Tensor) -> torch.Tensor:
-        return torch.where(
-            require_struct_decoding,
-            self.apply_grammar_bitmask(logits, grammar_bitmask, arange),
-            logits)
-
-    def apply_grammar_bitmask(self, logits: torch.Tensor,
-                              grammar_bitmask: torch.Tensor,
-                              arange: torch.Tensor):
-        assert (logits.shape[0] == grammar_bitmask.shape[0])
-        logits_cloned = logits.clone()
-        for i in range(logits.shape[0]):
-            unpacked_bitmask = (torch.bitwise_right_shift(
-                grammar_bitmask[i][:, None], arange[None, :]) & 1) == 0
-            unpacked_bitmask = unpacked_bitmask.reshape(-1)[:self.vocab_size]
-            logits_cloned[i] = logits_cloned[i].masked_fill(
-                unpacked_bitmask, -float("inf"))
-        return logits_cloned
-
-    def prepare_structured_decoding_input(
-        self, logits: torch.Tensor, scheduler_output: "SchedulerOutput"
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        grammar_bitmask = scheduler_output.grammar_bitmask
-        assert grammar_bitmask is not None
-        num_reqs, _ = logits.shape
-
-        # Reset pre-allocated tensors
-        self.grammar_bitmask_cpu.zero_()
-        self.require_structured_out_cpu.zero_()
-
-        # We receive the structured output bitmask from the scheduler, but the
-        # indices of the requests in the batch may not match the indices of
-        # the bitmask since the scheduler doesn't know how the tpu runner is
-        # ordering the requests in the batch. We need to match the order of
-        # bitmask with the order of requests
-        struct_out_indices: list[int] = []
-        mask_indices: list[int] = []
-        for req_id in self.input_batch.req_ids:
-            mask_index = scheduler_output.structured_output_request_ids.get(
-                req_id)
-            if mask_index is None:
-                continue
-            batch_index = self.input_batch.req_id_to_index[req_id]
-            struct_out_indices.append(batch_index)
-            mask_indices.append(mask_index)
-        self.grammar_bitmask_cpu[struct_out_indices] = torch.from_numpy(
-            grammar_bitmask[mask_indices])
-        # It's not guaranteed that all requests in this batch require
-        # structured output, so create a bool tensor to represent
-        # the requests that need structured output.
-        struct_out_indices = torch.tensor(struct_out_indices, dtype=torch.long)
-        self.require_structured_out_cpu[struct_out_indices] = True
-        # return self.require_structured_out_cpu[:num_reqs].to(logits.device), \
-        #     self.grammar_bitmask_cpu[:num_reqs].to(logits.device), \
-        #     self.structured_decode_arange.to(logits.device)
-        return create_torchax_tensor_with_partition_spec(
-            self.require_structured_out_cpu[:num_reqs], self.mesh, ()), \
-                create_torchax_tensor_with_partition_spec(
-            self.grammar_bitmask_cpu[:num_reqs], self.mesh, ()), \
-                create_torchax_tensor_with_partition_spec(
-            self.structured_decode_arange, self.mesh, ())
-
 
 def _get_req_paddings(min_req_size: int, max_req_size: int) -> list[int]:
     logger.info("Preparing request paddings:")
@@ -1386,32 +1202,3 @@ def _get_padded_num_kv_cache_update_slices(num_tokens: int, max_num_reqs: int,
     ) // NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK * \
         NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK
     return padded_num_slices
-
-
-def replace_set_lora(model):
-
-    def _tpu_set_lora(
-        self,
-        index: int,
-        lora_a: torch.Tensor,
-        lora_b: torch.Tensor,
-        embeddings_tensor: Optional[torch.Tensor],
-        bias: Optional[torch.Tensor] = None,
-    ):
-        # TODO: The integer index leads to a recompilation, but converting it
-        # to a tensor doesn't seem to work anymore. This might be fixed with a
-        # later release of torch_xla.
-        self._original_set_lora(index, lora_a, lora_b, embeddings_tensor, bias)
-        # xm.mark_step()
-
-    def _tpu_reset_lora(self, index: int):
-        self._original_reset_lora(index)
-        # xm.mark_step()
-
-    for _, module in model.named_modules():
-        if isinstance(module, BaseLayerWithLoRA):
-            module._original_set_lora = module.set_lora
-            module._original_reset_lora = module.reset_lora
-            module.set_lora = _tpu_set_lora.__get__(module, module.__class__)
-            module.reset_lora = _tpu_reset_lora.__get__(
-                module, module.__class__)
