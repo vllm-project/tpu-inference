@@ -1,22 +1,17 @@
+import os
 import unittest
 from unittest.mock import MagicMock, patch
 
-import os
 os.environ["TPU_BACKEND_TYPE"] = "jax"
 
 import jax.numpy as jnp
 import numpy as np
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, VllmConfig)
-from vllm.v1.request import Request
 from vllm.sampling_params import SamplingType
+from vllm.v1.request import Request
+
 from tpu_commons.runner.jax.input_batch_jax import CachedRequestState
-
-from tpu_commons.runner.jax.tpu_jax_runner import (
-    _get_padded_num_kv_cache_update_slices,
-    _get_padded_token_len,
-)
-
 from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
 
 
@@ -33,21 +28,17 @@ class TestTPUJaxRunner(unittest.TestCase):
              patch('jax.random.key', return_value=self.mock_rng_key), \
              patch('tpu_commons.runner.jax.tpu_jax_runner.get_model', return_value=MagicMock()):
 
-            model_config = ModelConfig(
-                tokenizer_mode="auto",
-                trust_remote_code=False,
-                seed=0,
-                dtype='bfloat16'
-            )
+            model_config = ModelConfig(tokenizer_mode="auto",
+                                       trust_remote_code=False,
+                                       seed=0,
+                                       dtype='bfloat16')
             cache_config = CacheConfig(
                 block_size=16,
                 gpu_memory_utilization=0.9,
                 swap_space=4,
                 cache_dtype="auto",
             )
-            scheduler_config = SchedulerConfig(
-                max_num_seqs=16,
-            )
+            scheduler_config = SchedulerConfig(max_num_seqs=16, )
             parallel_config = ParallelConfig(
                 pipeline_parallel_size=1,
                 tensor_parallel_size=1,
@@ -64,7 +55,8 @@ class TestTPUJaxRunner(unittest.TestCase):
                 additional_config={},
             )
 
-            self.runner = TPUModelRunner(vllm_config, devices=self.mock_devices)
+            self.runner = TPUModelRunner(vllm_config,
+                                         devices=self.mock_devices)
 
     def test_get_slot_mapping_metadata_multiple_requests(self):
         # Setup test case with two requests
@@ -77,9 +69,12 @@ class TestTPUJaxRunner(unittest.TestCase):
 
         # Mock input_batch state
         # Request 0 starts from 0, Request 1 starts from 10
-        self.runner.input_batch.num_computed_tokens_cpu = np.array([0, 10], dtype=np.int32)
+        self.runner.input_batch.num_computed_tokens_cpu = np.array(
+            [0, 10], dtype=np.int32)
 
-        block_table = np.zeros((self.runner.max_num_reqs, self.runner.max_num_blocks_per_req), dtype=np.int32)
+        block_table = np.zeros(
+            (self.runner.max_num_reqs, self.runner.max_num_blocks_per_req),
+            dtype=np.int32)
         # Request 0 uses 1 block, id 100
         block_table[0, 0] = 100
         # Request 1 uses 3 blocks, ids 200, 201, 202
@@ -88,16 +83,19 @@ class TestTPUJaxRunner(unittest.TestCase):
         self.runner.input_batch.block_table[0].block_table_cpu = block_table
 
         # Expected output
-        expected_metadata = np.array([
-            [1600,  0, 10],  # Req 0, block 0 (id 100), 10 tokens
-            [3210, 10,  6],  # Req 1, block 0 (id 200), 6 tokens (10..15)
-            [3216, 16, 16],  # Req 1, block 1 (id 201), 16 tokens (16..31)
-            [3232, 32,  8]   # Req 1, block 2 (id 202), 8 tokens (32..39)
-        ], dtype=np.int64)
+        expected_metadata = np.array(
+            [
+                [1600, 0, 10],  # Req 0, block 0 (id 100), 10 tokens
+                [3210, 10, 6],  # Req 1, block 0 (id 200), 6 tokens (10..15)
+                [3216, 16, 16],  # Req 1, block 1 (id 201), 16 tokens (16..31)
+                [3232, 32, 8]  # Req 1, block 2 (id 202), 8 tokens (32..39)
+            ],
+            dtype=np.int64)
         print(expected_metadata)
 
         # Call the function
-        result = self.runner._get_slot_mapping_metadata(num_reqs, num_scheduled_tokens_per_req)
+        result = self.runner._get_slot_mapping_metadata(
+            num_reqs, num_scheduled_tokens_per_req)
 
         # Assertions
         self.assertIsInstance(result, np.ndarray)
@@ -114,22 +112,28 @@ class TestTPUJaxRunner(unittest.TestCase):
 
         # Mock input_batch state
         # Request starts from token 5
-        self.runner.input_batch.num_computed_tokens_cpu = np.array([5], dtype=np.int32)
+        self.runner.input_batch.num_computed_tokens_cpu = np.array(
+            [5], dtype=np.int32)
 
-        block_table = np.zeros((self.runner.max_num_reqs, self.runner.max_num_blocks_per_req), dtype=np.int32)
+        block_table = np.zeros(
+            (self.runner.max_num_reqs, self.runner.max_num_blocks_per_req),
+            dtype=np.int32)
         # Request uses 2 blocks, ids 50, 51
         block_table[0, 0:2] = [50, 51]
 
         self.runner.input_batch.block_table[0].block_table_cpu = block_table
 
         # Expected output
-        expected_metadata = np.array([
-            [805,  0, 11],  # Req 0, block 0 (id 50), 11 tokens (5..15)
-            [816, 11,  9]   # Req 0, block 1 (id 51), 9 tokens (16..24)
-        ], dtype=np.int64)
+        expected_metadata = np.array(
+            [
+                [805, 0, 11],  # Req 0, block 0 (id 50), 11 tokens (5..15)
+                [816, 11, 9]  # Req 0, block 1 (id 51), 9 tokens (16..24)
+            ],
+            dtype=np.int64)
 
         # Call the function
-        result = self.runner._get_slot_mapping_metadata(num_reqs, num_scheduled_tokens_per_req)
+        result = self.runner._get_slot_mapping_metadata(
+            num_reqs, num_scheduled_tokens_per_req)
 
         # Assertions
         np.testing.assert_array_equal(result, expected_metadata)
@@ -159,8 +163,7 @@ class TestTPUJaxRunner(unittest.TestCase):
         source_kv_caches = [
             jnp.arange(prod_val,
                        dtype=jnp.bfloat16).reshape(source_kv_cache_shape),
-            jnp.arange(prod_val,
-                       2 * prod_val,
+            jnp.arange(prod_val, 2 * prod_val,
                        dtype=jnp.bfloat16).reshape(source_kv_cache_shape)
         ]
         self.runner.kv_caches = source_kv_caches
@@ -229,7 +232,7 @@ class TestTPUJaxRunner(unittest.TestCase):
         # Create a mock request as it would be after prefill + 1 token.
         decode_request = MagicMock(spec=Request)
         decode_request.request_id = "test_req_1"
-        decode_request.num_tokens = prompt_len + 1 # Total tokens
+        decode_request.num_tokens = prompt_len + 1  # Total tokens
         decode_request.prompt_token_ids = list(range(prompt_len))
         decode_request.output_token_ids = [100]
         decode_request.sampling_params = mock_sampling_params
@@ -242,11 +245,9 @@ class TestTPUJaxRunner(unittest.TestCase):
         padded_kv_cache_slices = []
         padding_size = self.runner.block_size - prompt_len
         for slice_per_layer in extracted_kv_cache_slices:
-            padded_slice = jnp.pad(
-                slice_per_layer,
-                ((0, padding_size), (0, 0), (0, 0)),
-                mode='constant'
-            )
+            padded_slice = jnp.pad(slice_per_layer,
+                                   ((0, padding_size), (0, 0), (0, 0)),
+                                   mode='constant')
             # Add a dimension for the number of blocks.
             padded_kv_cache_slices.append(padded_slice[jnp.newaxis, ...])
 
@@ -261,8 +262,9 @@ class TestTPUJaxRunner(unittest.TestCase):
         # 6. ===== Assertions =====
         self.assertIn("test_req_1", self.runner.requests)
         self.assertIn("test_req_1", self.runner.input_batch.req_id_to_index)
-        self.assertEqual(self.runner.requests["test_req_1"].num_computed_tokens,
-                         prompt_len + 1)
+        self.assertEqual(
+            self.runner.requests["test_req_1"].num_computed_tokens,
+            prompt_len + 1)
 
         # Verify the content of the inserted KV cache.
         target_block_id = decode_block_ids[0][0]
@@ -271,12 +273,13 @@ class TestTPUJaxRunner(unittest.TestCase):
 
             # The extracted slice should be padded to the block size.
             padding_size = self.runner.block_size - prompt_len
-            expected_padded_slice = jnp.pad(
-                extracted_kv_cache_slices[i],
-                ((0, padding_size), (0, 0), (0, 0)),
-                mode='constant')
+            expected_padded_slice = jnp.pad(extracted_kv_cache_slices[i],
+                                            ((0, padding_size), (0, 0),
+                                             (0, 0)),
+                                            mode='constant')
             np.testing.assert_array_equal(updated_block_content,
                                           expected_padded_slice)
+
 
 if __name__ == '__main__':
     unittest.main()
