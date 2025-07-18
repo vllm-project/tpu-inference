@@ -163,7 +163,7 @@ class TestParseQwixConfigToRules(unittest.TestCase):
 
 
 class TestConvertQuantizationConfigFile(unittest.TestCase):
-    """Tests for the convert_quantization_config_file_path_to_dict function."""
+    """Tests for the quantization_config_file_path_to_dict function."""
 
     @patch(
         'tpu_commons.models.jax.utils.quantization.quantize_qwix.QUANTIZATION_CONFIG_PATH',
@@ -183,7 +183,7 @@ class TestConvertQuantizationConfigFile(unittest.TestCase):
         mock_listdir.return_value = [config_filename, "another.yaml"]
         mock_file().read.return_value = config_content_str
 
-        result = quantize_qwix.convert_quantization_config_file_path_to_dict(
+        result = quantize_qwix.quantization_config_file_path_to_dict(
             config_filename)
 
         mock_listdir.assert_called_once_with('/fake/path')
@@ -203,7 +203,7 @@ class TestConvertQuantizationConfigFile(unittest.TestCase):
                 ValueError,
                 "Could not find quantization config file with name 'not_found.yaml'"
         ):
-            quantize_qwix.convert_quantization_config_file_path_to_dict(
+            quantize_qwix.quantization_config_file_path_to_dict(
                 "not_found.yaml")
 
         mock_listdir.assert_called_once_with('/fake/path')

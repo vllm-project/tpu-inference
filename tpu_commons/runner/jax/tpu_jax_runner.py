@@ -30,7 +30,7 @@ from tpu_commons.models.jax.model_loader import get_model
 from tpu_commons.models.jax.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_commons.models.jax.utils.quantization.quantization_utils import \
-    convert_quantization_config_file_path_to_dict
+    quantization_config_file_path_to_dict
 from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
                                                     InputBatch)
 from tpu_commons.runner.tpu_torch_xla_runner import (_get_padded_token_len,
@@ -236,7 +236,7 @@ class TPUModelRunner():
 
         maybe_kv_cache_quant_dtype = None
         if self.vllm_config.additional_config.get("quantization"):
-            maybe_quantization_config = convert_quantization_config_file_path_to_dict(
+            maybe_quantization_config = quantization_config_file_path_to_dict(
                 self.vllm_config.additional_config.get("quantization"))
             maybe_kv_cache_quant_dtype = maybe_quantization_config.get(
                 "kv_cache", {}).get("dtype")
