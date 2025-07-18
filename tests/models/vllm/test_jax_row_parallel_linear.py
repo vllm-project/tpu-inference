@@ -13,14 +13,14 @@ from vllm.config import set_current_vllm_config
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.engine.arg_utils import EngineArgs
-from vllm.model_executor.layers.linear import QKVParallelLinear
+from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import \
     CompressedTensorsLinearMethod
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import \
     CompressedTensorsW8A8Int8
 
-from tpu_commons.models.vllm.jax_qkv_parallel_linear import \
-    JaxQKVParallelLinear
+from tpu_commons.models.vllm.jax_row_parallel_linear import \
+    JaxRowParallelLinear
 
 P = PartitionSpec
 
@@ -28,7 +28,7 @@ P = PartitionSpec
 @pytest.fixture(autouse=True)
 def setup_environment():
     # This is a fake config used for init dist env.
-    # QKVParallelLinear needs dist env to be initialized.
+    # RowParallelLinear needs dist env to be initialized.
     engine_args = EngineArgs(
         model="Qwen/Qwen2-1.5B-Instruct",
         max_model_len=64,
@@ -51,36 +51,34 @@ def setup_environment():
 
 @pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize("mesh", [test_utils.get_spmd_mesh()])
-def test_jax_qkv_parallel_linear(bias, mesh):
+def test_jax_row_parallel_linear(bias, mesh):
     dtype = torch.bfloat16
 
-    qkv_linear = QKVParallelLinear(
-        hidden_size=4096,
-        head_size=128,
-        total_num_heads=32,
-        total_num_kv_heads=8,
+    row_linear = RowParallelLinear(
+        input_size=4096,
+        output_size=8192,
         bias=bias,
         params_dtype=dtype,
         return_bias=False,
     )
 
-    qkv_linear.weight.data = torch.rand_like(qkv_linear.weight.data) / 10
+    row_linear.weight.data = torch.rand_like(row_linear.weight.data) / 10
     if bias:
-        qkv_linear.bias.data = torch.rand_like(qkv_linear.bias.data)
-    qkv_linear = qkv_linear.to('cpu')
-    qkv_linear.quant_method.process_weights_after_loading(qkv_linear)
+        row_linear.bias.data = torch.rand_like(row_linear.bias.data)
+    row_linear = row_linear.to('cpu')
+    row_linear.quant_method.process_weights_after_loading(row_linear)
 
     input_tensor = torch.rand(10, 4096, dtype=dtype) / 10
     input_tensor = input_tensor.to('cpu')
-    output = qkv_linear(input_tensor).to(dtype)
+    output = row_linear(input_tensor).to(dtype)
 
     with jax.default_device(jax.devices("tpu")[0]), torchax.default_env():
-        jax_qkv_linear = JaxQKVParallelLinear(qkv_linear, mesh=mesh)
+        jax_row_linear = JaxRowParallelLinear(row_linear, mesh=mesh)
         jax_input_tensor = torch_view(t2j(input_tensor, use_dlpack=False))
         jax_input_tensor.apply_jax_(jax.device_put,
                                     NamedSharding(mesh, P(None, None)))
     with torchax.default_env():
-        jax_output = jax_qkv_linear(jax_input_tensor)
+        jax_output = jax_row_linear(jax_input_tensor)
         # j2t() doens't support bfloat16, so we cast it into float32 as an intermedate step.
         jax_output = j2t(jax_output.to(torch.float32)).to(dtype)
 
@@ -89,14 +87,12 @@ def test_jax_qkv_parallel_linear(bias, mesh):
 
 @pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize("mesh", [test_utils.get_spmd_mesh()])
-def test_jax_qkv_parallel_linear_w8a8_int8(bias, mesh):
+def test_jax_row_parallel_linear_w8a8_int8(bias, mesh):
     dtype = torch.bfloat16
 
-    qkv_linear = QKVParallelLinear(
-        hidden_size=4096,
-        head_size=128,
-        total_num_heads=32,
-        total_num_kv_heads=8,
+    row_linear = RowParallelLinear(
+        input_size=4096,
+        output_size=8192,
         bias=bias,
         params_dtype=dtype,
         return_bias=False,
@@ -104,18 +100,18 @@ def test_jax_qkv_parallel_linear_w8a8_int8(bias, mesh):
     )
 
     # Assert we're testing the right code path when quant config is set.
-    assert isinstance(qkv_linear.quant_method, CompressedTensorsLinearMethod)
-    assert isinstance(qkv_linear.scheme, CompressedTensorsW8A8Int8)
+    assert isinstance(row_linear.quant_method, CompressedTensorsLinearMethod)
+    assert isinstance(row_linear.scheme, CompressedTensorsW8A8Int8)
 
-    qkv_linear.weight.data = torch.randint_like(qkv_linear.weight.data,
+    row_linear.weight.data = torch.randint_like(row_linear.weight.data,
                                                 low=-128,
                                                 high=128)
-    qkv_linear.weight_scale.data = torch.rand_like(
-        qkv_linear.weight_scale.data) / 10
+    row_linear.weight_scale.data = torch.rand_like(
+        row_linear.weight_scale.data) / 10
     if bias:
-        qkv_linear.bias.data = torch.rand_like(qkv_linear.bias.data)
-    qkv_linear = qkv_linear.to('cpu')
-    qkv_linear.quant_method.process_weights_after_loading(qkv_linear)
+        row_linear.bias.data = torch.rand_like(row_linear.bias.data)
+    row_linear = row_linear.to('cpu')
+    row_linear.quant_method.process_weights_after_loading(row_linear)
 
     input_tensor = torch.rand(16, 4096, dtype=dtype) / 10
     input_tensor = input_tensor.to('cpu')
@@ -123,15 +119,15 @@ def test_jax_qkv_parallel_linear_w8a8_int8(bias, mesh):
     with patch(
             "vllm.model_executor.layers.quantization.kernels.scaled_mm.xla.XLAScaledMMLinearKernel.apply_weights",
             new=test_utils.quantized_matmul_ref):
-        output = qkv_linear(input_tensor).to(dtype)
+        output = row_linear(input_tensor).to(dtype)
 
     with jax.default_device(jax.devices("tpu")[0]), torchax.default_env():
-        jax_qkv_linear = JaxQKVParallelLinear(qkv_linear, mesh=mesh)
+        jax_row_linear = JaxRowParallelLinear(row_linear, mesh=mesh)
         jax_input_tensor = torch_view(t2j(input_tensor, use_dlpack=False))
         jax_input_tensor.apply_jax_(jax.device_put,
                                     NamedSharding(mesh, P(None, None)))
     with torchax.default_env():
-        jax_output = jax_qkv_linear(jax_input_tensor)
+        jax_output = jax_row_linear(jax_input_tensor)
         # j2t() doens't support bfloat16, so we cast it into float32 as an intermedate step.
         jax_output = j2t(jax_output.to(torch.float32)).to(dtype)
 

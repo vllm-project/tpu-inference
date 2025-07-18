@@ -3,6 +3,7 @@ import jax.numpy as jnp
 import pytest
 import torch
 import torchax
+import utils as test_utils
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import j2t, t2j, t2j_dtype
@@ -27,12 +28,6 @@ def setup_torchax():
     torchax.enable_globally()
     yield
     torchax.disable_globally()
-
-
-def _get_spmd_mesh():
-    axis_names = ("data", "model")
-    mesh_shape = (1, len(jax.devices()))
-    return jax.make_mesh(mesh_shape, axis_names, devices=jax.devices())
 
 
 def generate_attention_metadata(num_tokens, mesh) -> AttentionMetadata:
@@ -103,7 +98,7 @@ def generate_kv_caches(num_kv_heads, head_size, mesh, dtype):
     return [sharded_allocate()]
 
 
-@pytest.mark.parametrize("mesh", [_get_spmd_mesh()])
+@pytest.mark.parametrize("mesh", [test_utils.get_spmd_mesh()])
 @pytest.mark.parametrize("num_heads", [8, 32])
 @pytest.mark.parametrize("head_size", [96, 128])
 @pytest.mark.parametrize("num_kv_heads", [8])
