@@ -33,6 +33,7 @@ def _jax_attn_func(
     num_heads: int,
     num_kv_heads: int,
 ) -> Tuple[jax.Array, jax.Array]:
+    del scale  # Unused for now, as the attention function applies a default scale.
 
     # Get shapes from vllm
     q_len, q_compute_dim = q.shape

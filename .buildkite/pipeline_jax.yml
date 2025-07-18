@@ -17,7 +17,7 @@ steps:
            /workspace/tpu_commons/tests/ragged_paged_attention_test.py \
            /workspace/tpu_commons/tests/ragged_kv_cache_update_test.py
 
-   - label: "E2E MMLU tests for JAX models"
+   - label: "E2E MLPerf tests for JAX models"
      key: test_1
      soft_fail: true
      env:
@@ -25,9 +25,9 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mmlu.sh
+       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
 
-   - label: "E2E MMLU tests for JAX + vLLM models"
+   - label: "E2E MLPerf tests for JAX + vLLM models"
      key: test_2
      soft_fail: true
      env:
@@ -36,9 +36,9 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mmlu.sh
+       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
 
-   - label: "E2E MMLU tests for JAX new model implementation"
+   - label: "E2E MLPerf tests for JAX new model implementation"
      key: test_3
      soft_fail: true
      env:
@@ -47,7 +47,7 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mmlu.sh
+       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
 
    - label: "E2E MMLU tests for JAX new model implementation with quantization"
      key: test_4
@@ -72,18 +72,7 @@ steps:
      commands:
        - |
          .buildkite/scripts/run_in_docker.sh \
-           python3 -m pytest -s -v \
-           /workspace/tpu_commons/tests/test_utils_jax.py \
-           /workspace/tpu_commons/tests/worker/test_tpu_worker_jax.py \
-           /workspace/tpu_commons/tests/runner/test_utils.py \
-           /workspace/tpu_commons/tests/runner/jax/test_block_table_jax.py \
-           /workspace/tpu_commons/tests/runner/jax/test_input_batch_jax.py \
-           /workspace/tpu_commons/tests/models/jax/test_sampling_metadata.py \
-           /workspace/tpu_commons/tests/models/jax/test_attention_interface.py \
-           /workspace/tpu_commons/tests/models/jax/test_model_loader.py \
-           /workspace/tpu_commons/tests/core/test_orchestrator.py \
-           /workspace/tpu_commons/tests/core/test_disagg_utils.py \
-           /workspace/tpu_commons/tests/core/test_tpu_jax_engine.py
+           python3 -m pytest -s -v /workspace/tpu_commons/tests/
 
   # -----------------------------------------------------------------
   # NOTIFICATION STEP

@@ -78,12 +78,12 @@ class Attention(nnx.Module):
         D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
         H = getattr(self.cfg, HuggingFaceArgNames.HEAD_DIM.value)
 
-        self.kernel_q_proj_NDH = self.param_factory.create_kernel_param(
-            rngs, (N, D, H), self.ndh_sharding, self.cfg.dtype)
-        self.kernel_k_proj_KDH = self.param_factory.create_kernel_param(
-            rngs, (K, D, H), self.kdh_sharding, self.cfg.dtype)
-        self.kernel_v_proj_KDH = self.param_factory.create_kernel_param(
-            rngs, (K, D, H), self.kdh_sharding, self.cfg.dtype)
+        self.kernel_q_proj_DNH = self.param_factory.create_kernel_param(
+            rngs, (D, N, H), self.dnh_sharding, self.cfg.dtype)
+        self.kernel_k_proj_DKH = self.param_factory.create_kernel_param(
+            rngs, (D, K, H), self.dkh_sharding, self.cfg.dtype)
+        self.kernel_v_proj_DKH = self.param_factory.create_kernel_param(
+            rngs, (D, K, H), self.dkh_sharding, self.cfg.dtype)
         self.kernel_o_proj_NHD = self.param_factory.create_kernel_param(
             rngs, (N, H, D), self.nhd_sharding, self.cfg.dtype)
 
@@ -108,10 +108,10 @@ class Attention(nnx.Module):
             setattr(self, attr_name, sharding_dict)
 
         # static sharding for kernel/weights
-        self.ndh_sharding = NamedSharding(
-            self.mesh, P(*self.sharding_cfg.generate_rules.attn_q_weight_ndh))
-        self.kdh_sharding = NamedSharding(
-            self.mesh, P(*self.sharding_cfg.generate_rules.attn_k_weight_kdh))
+        self.dnh_sharding = NamedSharding(
+            self.mesh, P(*self.sharding_cfg.generate_rules.attn_q_weight_dnh))
+        self.dkh_sharding = NamedSharding(
+            self.mesh, P(*self.sharding_cfg.generate_rules.attn_k_weight_dkh))
         self.nhd_sharding = NamedSharding(
             self.mesh, P(*self.sharding_cfg.generate_rules.attn_o_weight_nhd))
 
@@ -160,34 +160,26 @@ class Attention(nnx.Module):
         """
         op_mode = "prefill" if is_prefill else "generate"
         md = attention_metadata
-        x = jnp.asarray(x, self.cfg.dtype)
-        x_SD = nnx.with_sharding_constraint(
-            x, self.activation_attention_td[op_mode])
+        x_SD = jnp.asarray(x, self.cfg.dtype)
         x_q_TD = nnx.with_sharding_constraint(x, self.activation_q_td[op_mode])
         rope_scaling = getattr(self.cfg,
                                HuggingFaceArgNames.ROPE_SCALING.value)
         rope_theta = getattr(self.cfg, HuggingFaceArgNames.ROPE_THETA.value)
         H = getattr(self.cfg, HuggingFaceArgNames.HEAD_DIM.value)
         with jax.named_scope("q_proj"):
-            q_TNH = jnp.einsum('TD,NDH -> TNH', x_q_TD,
-                               self.kernel_q_proj_NDH.value)
+            q_TNH = jnp.einsum('TD,DNH -> TNH', x_q_TD,
+                               self.kernel_q_proj_DNH.value)
             q_TNH = apply_rope(q_TNH, md.input_positions, H, rope_theta,
                                rope_scaling)
-            q_TNH = nnx.with_sharding_constraint(q_TNH,
-                                                 self.query_tnh[op_mode])
         with jax.named_scope("k_proj"):
-            k_SKH = jnp.einsum('SD,KDH -> SKH', x_SD,
-                               self.kernel_k_proj_KDH.value)
+            k_SKH = jnp.einsum('SD,DKH -> SKH', x_SD,
+                               self.kernel_k_proj_DKH.value)
             k_SKH = apply_rope(k_SKH, md.input_positions, H, rope_theta,
                                rope_scaling)
-            k_SKH = nnx.with_sharding_constraint(k_SKH,
-                                                 self.keyvalue_skh[op_mode])
 
         with jax.named_scope("v_proj"):
-            v_SKH = jnp.einsum('SD,KDH -> SKH', x_SD,
-                               self.kernel_v_proj_KDH.value)
-            v_SKH = nnx.with_sharding_constraint(v_SKH,
-                                                 self.keyvalue_skh[op_mode])
+            v_SKH = jnp.einsum('SD,DKH -> SKH', x_SD,
+                               self.kernel_v_proj_DKH.value)
 
         with jax.named_scope("attn_op"):
             new_kv_cache, outputs_TNH = self.attention(
@@ -203,8 +195,6 @@ class Attention(nnx.Module):
         with jax.named_scope("o_proj"):
             o_TD = jnp.einsum('TNH,NHD -> TD', outputs_TNH,
                               self.kernel_o_proj_NHD.value)
-            o_TD = nnx.with_sharding_constraint(
-                o_TD, self.activation_attention_out_td[op_mode])
         return new_kv_cache, o_TD
 
     def get_cfg(self) -> AttentionConfig:

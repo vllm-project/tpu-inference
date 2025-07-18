@@ -26,10 +26,10 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
 
     if os.getenv("NEW_MODEL_DESIGN", False):
-        from tpu_commons.models.jax.recipes.llama3 import Llama3_8B
+        from tpu_commons.models.jax.recipes.llama3 import Llama3
 
         # from tpu_commons.models.jax.recipes.llama4 import Llama4Scout
-        _MODEL_REGISTRY["Llama3_8B"] = Llama3_8B
+        _MODEL_REGISTRY["Llama3"] = Llama3
         # _MODEL_REGISTRY["Llama4Scout"] = Llama4Scout
 
     architectures = getattr(config, "architectures", [])
@@ -188,9 +188,9 @@ def get_flax_model(
         model = nnx.merge(graphdef, state)
         return model.compute_logits(*args)
 
-    model_fn = functools.partial(run_model, graphdef, state)
-    compute_logits_fn = functools.partial(run_compute_logits, graphdef, state)
-    return model_fn, compute_logits_fn
+    model_fn = functools.partial(run_model, graphdef)
+    compute_logits_fn = functools.partial(run_compute_logits, graphdef)
+    return model_fn, compute_logits_fn, state
 
 
 def get_vllm_model(
@@ -208,10 +208,8 @@ def get_vllm_model(
     params = model.load_weights()
 
     jit_model = model.jit_step_func()
-    model_fn = functools.partial(jit_model, params)
-    compute_logits_fn = functools.partial(model.jit_compute_logits_func(),
-                                          params)
-    return model_fn, compute_logits_fn
+    compute_logits_fn = model.jit_compute_logits_func()
+    return jit_model, compute_logits_fn, params
 
 
 def get_model(

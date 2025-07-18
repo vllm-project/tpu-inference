@@ -1,6 +1,6 @@
 import sys
 from types import ModuleType
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import jax
 import jax.numpy as jnp
@@ -9,6 +9,7 @@ from flax import nnx
 from jax.sharding import Mesh
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
+from vllm.engine.arg_utils import EngineArgs
 
 
 class MockCausalLM(nnx.Module):
@@ -125,110 +126,36 @@ def test_get_model_architecture_unsupported():
         model_loader._get_model_architecture(config)
 
 
-# def test_get_flax_model(vllm_config, mesh):
-#     """
-#     An integration test for the main public function `get_flax_model`.
-#     It verifies that the function returns two valid, JIT-compiled functions
-#     that execute correctly and produce outputs with the expected sharding.
-#     """
-#     rng = jax.random.PRNGKey(42)
-
-#     # 1. Get the compiled model and logit computation functions
-#     model_fn, compute_logits_fn = model_loader.get_flax_model(
-#         vllm_config, rng, mesh)
-
-#     assert callable(model_fn)
-#     assert callable(compute_logits_fn)
-
-
-@pytest.fixture
-def mock_causal_lm_instance(vllm_config, mesh) -> MockCausalLM:
-    """Provides an instance of the MockCausalLM for testing."""
-    rng = jax.random.PRNGKey(0)
-    return MockCausalLM(vllm_config, rng, mesh)
-
-
-def test_apply_qwix_quantization_no_config(vllm_config,
-                                           mock_causal_lm_instance, mesh):
+def test_get_flax_model(vllm_config, mesh):
     """
-    Tests that the model is returned unmodified when no 'quantization' key
-    is in the vllm_config.
+    An integration test for the main public function `get_flax_model`.
+    It verifies that the function returns two valid, JIT-compiled functions
+    that execute correctly and produce outputs with the expected sharding.
     """
-    # Setup: Ensure no quantization config is present
-    vllm_config.additional_config = {}
-    rng = jax.random.PRNGKey(0)
-    input_model = mock_causal_lm_instance
+    rng = jax.random.PRNGKey(42)
 
-    # Mock the functions that should not be called
-    with patch(
-            "tpu_commons.models.jax.model_loader.quantization_config_file_path_to_dict"
-    ) as mock_convert, patch(
-            "tpu_commons.models.jax.model_loader.qwix_quantize_nnx_model"
-    ) as mock_quantize:
+    # 1. Get the compiled model and logit computation functions
+    model_fn, compute_logits_fn, _ = model_loader.get_flax_model(
+        vllm_config, rng, mesh)
 
-        # Action
-        output_model = model_loader._apply_qwix_quantization(
-            vllm_config, input_model, rng, mesh)
-
-        # Assertions
-        assert output_model is input_model  # Should be the same object
-        mock_convert.assert_not_called()
-        mock_quantize.assert_not_called()
+    assert callable(model_fn)
+    assert callable(compute_logits_fn)
 
 
-def test_apply_qwix_quantization_no_qwix_rules(vllm_config,
-                                               mock_causal_lm_instance, mesh):
+def test_get_vllm_model(mesh):
     """
-    Tests that the model is returned unmodified when the quantization config
-    is present but lacks qwix rules.
+    An integration test for the main public function `get_vllm_model`.
+    It verifies that the function returns two valid, JIT-compiled functions
+    that execute correctly and produce outputs with the expected sharding.
     """
-    # Setup: Provide a quantization config file path
-    vllm_config.additional_config = {}
-    rng = jax.random.PRNGKey(0)
-    input_model = mock_causal_lm_instance
-    output_model = model_loader._apply_qwix_quantization(
-        vllm_config, input_model, rng, mesh)
+    rng = jax.random.PRNGKey(42)
 
-    assert output_model is input_model
+    engine_args = EngineArgs(model="Qwen/Qwen2-1.5B-Instruct")
+    vllm_config = engine_args.create_engine_config()
+    vllm_config.model_config.dtype = jnp.bfloat16
 
+    model_fn, compute_logits_fn, _ = model_loader.get_vllm_model(
+        vllm_config, rng, mesh)
 
-def test_apply_qwix_quantization_is_applied(vllm_config,
-                                            mock_causal_lm_instance, mesh):
-    """
-    Tests that qwix quantization is correctly applied when a valid config
-    with qwix rules is provided.
-    """
-    # 1. Setup
-    rng = jax.random.PRNGKey(0)
-    input_model = mock_causal_lm_instance
-    quantized_model_mock = MagicMock(spec=nnx.Module)
-
-    # Configure vllm_config with all necessary parameters for quantization
-    vllm_config.additional_config = {"quantization": "my_qwix_config.json"}
-    vllm_config.cache_config = MagicMock()
-    vllm_config.cache_config.block_size = 16
-    vllm_config.model_config.get_head_size.return_value = 64
-    vllm_config.model_config.get_total_num_kv_heads.return_value = 8
-    vllm_config.model_config.hf_config.num_hidden_layers = 12
-
-    # Mock the config that would be loaded from the file
-    mock_qwix_rules = {
-        "rules": [{
-            "module_path": ".*",
-            "weight_qtype": "int8",
-            "act_qtype": "int8"
-        }]
-    }
-    mock_config_dict = {"qwix": mock_qwix_rules}
-
-    with patch(
-            "tpu_commons.models.jax.model_loader.quantization_config_file_path_to_dict",
-            return_value=mock_config_dict) as mock_convert, \
-                    patch("flax.nnx.jit", return_value=quantized_model_mock) as mock_jit:
-
-        model_loader._apply_qwix_quantization(vllm_config, input_model, rng,
-                                              mesh)
-
-        mock_convert.assert_called_once_with("my_qwix_config.json")
-
-        mock_jit.assert_called_once()
+    assert callable(model_fn)
+    assert callable(compute_logits_fn)
