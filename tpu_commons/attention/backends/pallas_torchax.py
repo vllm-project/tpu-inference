@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -17,17 +16,9 @@ from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils import cdiv, next_power_of_2
 
 from tpu_commons.logger import init_logger
-
-VLLM_TORCHAX_ENABLED = os.environ.get('VLLM_TORCHAX_ENABLED', '0') == '1'
-
-if VLLM_TORCHAX_ENABLED:
-    # Register custom op dispatcher.
-    try:
-        from tpu_commons.models.torchax.torchax_wrapper import (
-            kv_cache_update, ragged_paged_attention)
-    except ImportError:
-        from vllm.compilation.torchax_wrapper import (kv_cache_update,
-                                                      ragged_paged_attention)
+# Register custom op dispatcher.
+from tpu_commons.models.torchax.torchax_wrapper import (kv_cache_update,
+                                                        ragged_paged_attention)
 
 logger = init_logger(__name__)
 
@@ -237,14 +228,10 @@ class PallasAttentionBackendImpl(AttentionImpl):
             slot_mapping = attn_metadata.slot_mapping
             kv_cache = write_to_kv_cache(key, value, kv_cache, slot_mapping,
                                          attn_metadata.num_slices)
-            if VLLM_TORCHAX_ENABLED:
-                forward_context: ForwardContext = get_forward_context()
-                layer.kv_cache[forward_context.virtual_engine] = kv_cache
+            forward_context: ForwardContext = get_forward_context()
+            layer.kv_cache[forward_context.virtual_engine] = kv_cache
 
-        if VLLM_TORCHAX_ENABLED:
-            ragged_paged_attention_op = ragged_paged_attention
-        else:
-            ragged_paged_attention_op = torch.ops.xla.ragged_paged_attention
+        ragged_paged_attention_op = ragged_paged_attention
 
         output = ragged_paged_attention_op(
             query,
@@ -293,9 +280,6 @@ def write_to_kv_cache(key: torch.Tensor, value: torch.Tensor,
     value = value.view(-1, num_kv_heads, head_size)
     kv = torch.cat([key, value], axis=-1).reshape(-1, num_combined_kv_heads,
                                                   head_size)
-
-    if not VLLM_TORCHAX_ENABLED:
-        torch.ops.xla.dynamo_set_buffer_donor_(kv_cache, True)
 
     kv_cache = kv_cache.reshape(-1, num_combined_kv_heads, head_size)
     kv_cache = call_jax(
