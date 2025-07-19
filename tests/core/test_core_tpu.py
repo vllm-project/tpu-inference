@@ -1,18 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
-import unittest
+
+from dataclasses import asdict
+import msgspec
+import multiprocessing as mp
+import os
+import queue
+import signal
+import threading
 import time
+import torch
+import unittest
+import zmq
+
 from unittest.mock import MagicMock, call, patch
 
-import torch
 from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
-from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine import (
+    EngineCoreOutput,
+    EngineCoreOutputs,
+    EngineCoreRequest,
+    EngineCoreRequestType,
+)
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.request import Request
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+from vllm.v1.utils import EngineHandshakeMetadata, EngineZmqAddresses
 
 # The class we are testing
-from tpu_commons.core.core_tpu import EngineCore
+from tpu_commons.core.core_tpu import EngineCore, EngineCoreProc
 
 
 class EngineCoreTest(unittest.TestCase):
@@ -274,6 +291,242 @@ class EngineCoreTest(unittest.TestCase):
         self.engine_core.save_tensorized_model(config)
         self.mock_prefill_executor.save_tensorized_model.assert_called_once_with(
             tensorizer_config=config)
+
+
+class EngineCoreProcTest(unittest.TestCase):
+
+    @staticmethod
+    def run_engine_proc_with_mocks(vllm_config, handshake_address, ppid):
+        """This static method runs in a separate process to test EngineCoreProc."""
+
+        # Ensure the child process exits if the parent process dies.
+        def ppid_checker():
+            while True:
+                try:
+                    os.kill(ppid, 0)
+                except OSError:
+                    os.kill(os.getpid(), signal.SIGKILL)
+                time.sleep(1)
+
+        threading.Thread(target=ppid_checker, daemon=True).start()
+
+        # We patch EngineCore.__init__ to inject our mocks.
+        with patch("tpu_commons.core.core_tpu.EngineCore.__init__"
+                   ) as mock_engine_core_init:
+
+            def mock_init(self, *args, **kwargs):
+                """A mocked __init__ for EngineCore."""
+
+            mock_engine_core_init.side_effect = mock_init
+
+            # executor_class is not used due to the patch.
+            engine_proc = EngineCoreProc(
+                vllm_config=vllm_config,
+                on_head_node=True,
+                handshake_address=handshake_address,
+                executor_class=MagicMock(),
+                log_stats=False,
+            )
+            engine_proc.vllm_config = vllm_config
+            # Mock the orchestrator to produce predictable output
+            engine_proc.orchestrator = MagicMock()
+            engine_proc.orchestrator._vllm_output_backlogs = queue.Queue()
+
+
+            def place_req_on_queue(req):
+                """Simulate orchestrator processing and producing output."""
+                output = EngineCoreOutputs(outputs=[
+                    EngineCoreOutput(request_id=req.request_id,
+                                     new_token_ids=[101])
+                ])
+                # The orchestrator is expected to produce a dict mapping
+                # client_index to outputs. We assume one client (index 0).
+                engine_proc.orchestrator._vllm_output_backlogs.put({0: output})
+
+            engine_proc.orchestrator.place_request_on_prefill_queue.side_effect = (
+                place_req_on_queue)
+
+            # Mock executors for utility methods
+            engine_proc.prefill_executors = [MagicMock()]
+            engine_proc.decode_executors = [MagicMock()]
+            engine_proc.prefill_executors[0].is_sleeping = False
+            engine_proc.run_busy_loop()
+
+    def setUp(self):
+        """Set up the test by spawning EngineCoreProc and performing a handshake."""
+        # Use "spawn" to avoid issues with CUDA in forked processes.
+        self.ctx = mp.get_context("spawn")
+
+        self.vllm_config = self._create_vllm_config()
+
+        # ZMQ addresses for communication
+        self.handshake_address = "ipc://handshake_test"
+        self.input_address = "ipc://input_test"
+        self.output_address = "ipc://output_test"
+
+        # Start the engine process
+        self.engine_proc = self.ctx.Process(
+            target=self.run_engine_proc_with_mocks,
+            args=(self.vllm_config, self.handshake_address, os.getpid()),
+        )
+        self.engine_proc.start()
+
+        # Set up ZMQ sockets for the test (client side)
+        self.zmq_ctx = zmq.Context()
+
+        # Perform handshake to ensure the engine is ready
+        self.handshake_socket = self.zmq_ctx.socket(zmq.ROUTER)
+        self.handshake_socket.bind(self.handshake_address)
+        self.perform_handshake()
+
+        # Set up client sockets for sending/receiving data
+        self.input_socket = self.zmq_ctx.socket(zmq.ROUTER)
+        self.input_socket.bind(self.input_address)
+        # The engine connects with a DEALER, so we receive its identity first.
+        self.engine_identity = self.input_socket.recv()
+
+        self.output_socket = self.zmq_ctx.socket(zmq.PULL)
+        self.output_socket.bind(self.output_address)
+
+        # Setup serializers
+        self.encoder = MsgpackEncoder()
+        self.decoder = MsgpackDecoder(EngineCoreOutputs)
+
+    def tearDown(self):
+        """Clean up the test environment."""
+        if self.engine_proc.is_alive():
+            os.kill(self.engine_proc.pid, signal.SIGTERM)
+        self.engine_proc.join(timeout=5)
+        if self.engine_proc.is_alive():
+            self.engine_proc.kill()
+
+        self.handshake_socket.close()
+        self.input_socket.close()
+        self.output_socket.close()
+        self.zmq_ctx.term()
+
+    def _create_vllm_config(self):
+        """Creates a mock VllmConfig for testing."""
+        mock_model_config = ModelConfig(
+            model="facebook/opt-125m",
+            tokenizer="facebook/opt-125m",
+            tokenizer_mode="auto",
+            trust_remote_code=True,
+            dtype="float16",
+            seed=42,
+        )
+        mock_cache_config = CacheConfig(
+            block_size=16,
+            gpu_memory_utilization=0.9,
+            swap_space=0,
+            cache_dtype="auto",
+        )
+        mock_scheduler_config = SchedulerConfig(
+            max_num_seqs=8,
+            max_num_batched_tokens=1024,
+            max_model_len=1024,
+        )
+        return VllmConfig(
+            scheduler_config=mock_scheduler_config,
+            model_config=mock_model_config,
+            cache_config=mock_cache_config,
+        )
+
+    def perform_handshake(self):
+        """Performs the ZMQ handshake between the test and the engine process."""
+        # Wait for HELLO from engine
+        engine_identity, hello_msg_bytes = self.handshake_socket.recv_multipart(
+        )
+        # hello_msg_bytes = self.handshake_socket.recv()
+        hello_msg = msgspec.msgpack.decode(hello_msg_bytes)
+        self.assertEqual(hello_msg["status"], "HELLO")
+
+        # Send INIT to engine
+        addresses = EngineZmqAddresses(
+            inputs=[self.input_address],
+            outputs=[self.output_address],
+        )
+        def custom_dict_factory(data):
+            result = {}
+            for k, v in data:
+                if isinstance(v, float) or isinstance(v, bool):
+                    result[k] = int(v)
+                elif isinstance(v, (int, str)):
+                    result[k] = v
+                else:
+                    result[k] = str(v) # Convert other types to string
+            return result
+        handshake_metadata = EngineHandshakeMetadata(
+            addresses=addresses,
+            parallel_config=asdict(
+                self.vllm_config.parallel_config, dict_factory=custom_dict_factory
+            ),
+        )
+        init_msg = msgspec.msgpack.encode(handshake_metadata)
+
+        self.handshake_socket.send_multipart([engine_identity, init_msg])
+        # self.handshake_socket.send(init_msg)
+
+        # Wait for READY from engine
+        _, ready_msg_bytes = self.handshake_socket.recv_multipart()
+        # ready_msg_bytes = self.handshake_socket.recv()
+        ready_msg = msgspec.msgpack.decode(ready_msg_bytes)
+        self.assertEqual(ready_msg["status"], "READY")
+
+    def test_add_request_and_receive_output(self):
+        """Tests sending a request and receiving the corresponding output."""
+        request = EngineCoreRequest(
+            request_id="test_req",
+            prompt_token_ids=[1, 2, 3],
+            mm_inputs=None,
+            mm_hashes=None,
+            mm_placeholders=None,
+            sampling_params=SamplingParams(temperature=0.0),
+            pooling_params=None,
+            eos_token_id=None,
+            arrival_time=time.time(),
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None)
+
+        # Send the request to the engine process
+        msg = (EngineCoreRequestType.ADD.value, *self.encoder.encode(request))
+        self.input_socket.send_multipart([self.engine_identity, *msg])
+
+        output_frames = self.output_socket.recv_multipart(copy=False)
+        outputs = self.decoder.decode(output_frames)
+
+        # Assertions
+        self.assertIsInstance(outputs, EngineCoreOutputs)
+        self.assertEqual(len(outputs.outputs), 1)
+        output = outputs.outputs[0]
+        self.assertEqual(output.request_id, "test_req")
+        self.assertEqual(output.new_token_ids, [101])
+
+    def test_utility_method(self):
+        """Tests calling a utility method on the engine."""
+        # Prepare the utility request
+        call_id = 123
+        method_name = "is_sleeping"
+        args = ()
+        utility_request = (0, call_id, method_name, args)
+
+        # Send the request
+        msg = (EngineCoreRequestType.UTILITY.value,
+               *self.encoder.encode(utility_request))
+        self.input_socket.send_multipart([self.engine_identity, *msg])
+
+        # Receive the output
+        output_frames = self.output_socket.recv_multipart(copy=False)
+        outputs = self.decoder.decode(output_frames)
+
+        # Assertions
+        self.assertIsNotNone(outputs.utility_output)
+        utility_output = outputs.utility_output
+        self.assertEqual(utility_output.call_id, call_id)
+        # The mock is_sleeping returns False
+        self.assertFalse(utility_output.result)
+        self.assertIsNone(utility_output.failure_message)
 
 
 if __name__ == '__main__':
