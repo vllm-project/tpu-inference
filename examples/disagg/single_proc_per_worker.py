@@ -1,13 +1,21 @@
 """
 
-This script simulates the mult-host disagg KV transfer on a single host VM.
+This script simulates the "mult-host disagg KV transfer" on a single host VM.
 
-For a TPU VM which has 8 chips, it splits the chips into 2 groups, each group takes 4 chips.
+For a TPU VM which has 8 chips, we split the chips into 2 groups,
+each group takes 4 chips. The script simulates 2 hosts using the 2 groups:
 
-TODO: add more explanations
+- Group-1: The prefill worker running on host-1 with 4 chips.
+- Group-2: The decode worker running on host-2 with another 4 chips.
+
+Each worker runs one process on its host, again only 4 chips are visibile to
+the process.
+- The prefill worker creates a KV array sharded on 4 chips, launches a P2P
+  transfer server, then waits for the data pulling.
+- The decode worker also launches a P2P transfer server, builds a connection
+  with the prefill's server, then pulls the KV array from it.
 """
 
-import argparse
 import glob
 import multiprocessing
 import os
@@ -27,8 +35,6 @@ GCE_TPU_HEADERS = {"Metadata-Flavor": "Google"}
 TPU_CHIPS_PER_PROCESS_BOUNDS = "TPU_CHIPS_PER_PROCESS_BOUNDS"
 TPU_PROCESS_BOUNDS = "TPU_PROCESS_BOUNDS"
 TPU_VISIBLE_CHIPS = "TPU_VISIBLE_CHIPS"
-
-LOCAL_ADDR = '0.0.0.0:0'
 
 
 def get_num_chips() -> int:
@@ -69,7 +75,7 @@ def get_uuid() -> int:
 
 def get_mesh() -> Mesh:
     sharding_size = jax.device_count()
-    return jax.make_mesh((sharding_size, ), ("model"))
+    return jax.make_mesh((sharding_size, ), ("model", ))
 
 
 def get_kv_spec(mesh: Mesh) -> List[int]:
@@ -80,35 +86,37 @@ def get_kv_spec(mesh: Mesh) -> List[int]:
     return jax.ShapeDtypeStruct(shape, dtype, sharding=sharding)
 
 
-def get_global_kv(mesh: Mesh) -> jax.Array:
-    spec = get_kv_spec(mesh)
-    global_kv = jax.device_put(jnp.ones(spec.shape, dtype=spec.dtype),
-                               spec.sharding)
-    return global_kv
-
-
-def prefill_worker(num_procs: int, squeue: multiprocessing.Queue):
+def prefill_worker(squeue: multiprocessing.Queue):
 
     def log(s):
         print(f"Prefill --> {s}")
 
-    log("start")
+    log("Start")
     # Slice 4 chips and make them only visible to this process
+    # NOTE: We don't use McJAX to initialize, because wer are actually
+    #       simulating multi-host on single-host, need to split the chips manually.
+    # NOTE: The chips must be bounds="1,4,1", visible="0,1,2,3".
+    #       But the physical connection is:
+    #       0, 2, 4, 6
+    #       1, 3, 5, 7
+    #       bounds="2,2,1", visible="0,1,2,3", error!
+    #       bounds="1,4,1", visible="0,2,4,6", error!
     os.environ[TPU_CHIPS_PER_PROCESS_BOUNDS] = "1,4,1"
-    os.environ[TPU_PROCESS_BOUNDS] = f"{num_procs},1,1"
+    os.environ[TPU_PROCESS_BOUNDS] = "1,1,1"
     os.environ[TPU_VISIBLE_CHIPS] = "0,1,2,3"
 
     mesh = get_mesh()
     log(f"local={jax.local_device_count()} | global={jax.device_count()} | mesh={mesh}"
         )
 
-    kv = get_global_kv(mesh)
+    kv_spec = get_kv_spec(mesh)
+    kv = jax.device_put(jnp.ones(kv_spec.shape, dtype=kv_spec.dtype),
+                        kv_spec.sharding)
     log(kv.shape)
     log(kv.sharding)
 
-    uuid = get_uuid()
     s = start_transfer_server(
-        jax.devices()[0].client,
+        jax.local_devices()[0].client,
         '0.0.0.0:7080',
         ['0.0.0.0:0'],
     )
@@ -117,20 +125,20 @@ def prefill_worker(num_procs: int, squeue: multiprocessing.Queue):
     squeue.put(s.address())
 
     log("Awaiting pull...")
+    uuid = get_uuid()
     s.await_pull(uuid, kv)
 
-    log("done")
+    log("Done")
 
 
-def decode_worker(num_procs: int, squeue: multiprocessing.Queue):
+def decode_worker(squeue: multiprocessing.Queue):
 
     def log(s):
         print(f"Decode --> {s}")
 
-    log("start")
-    # Slice 4 chips and make them only visible to this process
+    log("Start")
     os.environ[TPU_CHIPS_PER_PROCESS_BOUNDS] = "1,4,1"
-    os.environ[TPU_VISIBLE_CHIPS] = f"{num_procs},1,1"
+    os.environ[TPU_PROCESS_BOUNDS] = "1,1,1"
     os.environ[TPU_VISIBLE_CHIPS] = "4,5,6,7"
 
     mesh = get_mesh()
@@ -139,9 +147,8 @@ def decode_worker(num_procs: int, squeue: multiprocessing.Queue):
 
     kv_spec = get_kv_spec(mesh)
 
-    uuid = get_uuid()
     s = start_transfer_server(
-        jax.devices()[0].client,
+        jax.local_devices()[0].client,
         '0.0.0.0:7081',
         ['0.0.0.0:0'],
     )
@@ -153,47 +160,36 @@ def decode_worker(num_procs: int, squeue: multiprocessing.Queue):
     log(f"Created connection with {prefill_addr}")
 
     log("Pulling...")
+    uuid = get_uuid()
     kv = conn.pull(uuid, kv_spec)
     log(kv.shape)
     log(kv.sharding)
 
-    log("done")
+    log("Done")
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="A simple command-line argument parser example.", )
-    parser.add_argument("--num_procs_per_worker",
-                        type=int,
-                        required=False,
-                        default=1)
-    args = parser.parse_args()
-
     tpu_type = get_tpu_metadata("accelerator-type")
     instance_id = get_tpu_metadata("instance-id")
     worker_id = get_tpu_metadata("agent-worker-number")
+    _ = get_tpu_metadata("tpu-env")
     print(
         f"TPU_type={tpu_type} | instance_id={instance_id} | worker_id={worker_id}"
     )
     assert tpu_type == "v6e-8"
 
-    print("================ TPU environments ================")
-    print(get_tpu_metadata("tpu-env"))
-    print("================ TPU environments ================")
-
-    num_proces_per_worker = args.num_procs_per_worker
     squeue = multiprocessing.Queue()
     # NOTE: Must be "fork" otherwise will be jax coredump during start_transfer_server
     prefill = multiprocessing.get_context("fork").Process(
-        target=prefill_worker, args=(num_proces_per_worker, squeue))
-    decode = multiprocessing.get_context("fork").Process(
-        target=decode_worker, args=(num_proces_per_worker, squeue))
+        target=prefill_worker, args=(squeue, ))
+    decode = multiprocessing.get_context("fork").Process(target=decode_worker,
+                                                         args=(squeue, ))
 
     prefill.start()
     decode.start()
 
-    prefill.join()
     decode.join()
+    prefill.join()
 
 
 if __name__ == "__main__":
