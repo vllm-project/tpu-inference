@@ -195,7 +195,6 @@ class TPUWorker:
         if self.rank < 1:
             if self.profile_dir is None:
                 raise RuntimeError("Profiler is not enabled.")
-            import jax
             profiler = jax.profiler
             if is_start:
                 if self.profiler is None:

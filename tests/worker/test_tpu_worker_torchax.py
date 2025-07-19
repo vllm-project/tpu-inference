@@ -4,7 +4,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 # Dependencies that will be mocked
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.outputs import ModelRunnerOutput
 
 # The class we are testing
 from tpu_commons.worker.tpu_worker_torchax import TPUWorker
@@ -295,113 +297,111 @@ class TestTPUWorker:
     # --- Core Logic Tests ---
     #
 
-    # @patch('tpu_commons.worker.tpu_worker_torchax.TPUModelRunner')
-    # def test_execute_model(self, mock_runner_cls, mock_vllm_config):
-    #     """Tests that the driver worker executes the model and returns output."""
-    #     worker = TPUWorker(vllm_config=mock_vllm_config,
-    #                        local_rank=0,
-    #                        rank=0,
-    #                        distributed_init_method="test",
-    #                        is_driver_worker=True)
-    #     worker.model_runner = mock_runner_cls.return_value  # Assign mocked runner instance
-    #     mock_scheduler_output = MagicMock(spec=SchedulerOutput)
-    #     mock_model_output = MagicMock(spec=ModelRunnerOutput)
-    #     worker.model_runner.execute_model.return_value = mock_model_output
+    @patch('tpu_commons.worker.tpu_worker_torchax.TPUModelRunner')
+    def test_execute_model(self, mock_runner_cls, mock_vllm_config):
+        """Tests that the driver worker executes the model and returns output."""
+        worker = TPUWorker(vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test",
+                           is_driver_worker=True)
+        worker.model_runner = mock_runner_cls.return_value  # Assign mocked runner instance
+        mock_scheduler_output = MagicMock(spec=SchedulerOutput)
+        mock_model_output = MagicMock(spec=ModelRunnerOutput)
+        worker.model_runner.execute_model.return_value = mock_model_output
 
-    #     result = worker.execute_model(mock_scheduler_output)
+        result = worker.execute_model(mock_scheduler_output)
 
-    #     worker.model_runner.execute_model.assert_called_once_with(
-    #         mock_scheduler_output)
-    #     assert result == mock_model_output
+        worker.model_runner.execute_model.assert_called_once_with(
+            mock_scheduler_output)
+        assert result == mock_model_output
 
-    # @patch('tpu_commons.worker.tpu_worker_torchax.TPUModelRunner')
-    # def test_execute_model_non_driver_returns_none(self, mock_runner_cls,
-    #                                                mock_vllm_config):
-    #     """Tests that a non-driver worker executes the model but returns None."""
-    #     worker = TPUWorker(
-    #         vllm_config=mock_vllm_config,
-    #         local_rank=0,
-    #         rank=0,
-    #         distributed_init_method="test",
-    #         is_driver_worker=False  # Not a driver
-    #     )
-    #     worker.model_runner = mock_runner_cls.return_value
-    #     mock_scheduler_output = MagicMock(spec=SchedulerOutput)
+    @patch('tpu_commons.worker.tpu_worker_torchax.TPUModelRunner')
+    def test_execute_model_non_driver_returns_none(self, mock_runner_cls,
+                                                   mock_vllm_config):
+        """Tests that a non-driver worker executes the model but returns None."""
+        worker = TPUWorker(
+            vllm_config=mock_vllm_config,
+            local_rank=0,
+            rank=0,
+            distributed_init_method="test",
+            is_driver_worker=False  # Not a driver
+        )
+        worker.model_runner = mock_runner_cls.return_value
+        mock_scheduler_output = MagicMock(spec=SchedulerOutput)
 
-    #     result = worker.execute_model(mock_scheduler_output)
+        result = worker.execute_model(mock_scheduler_output)
 
-    #     worker.model_runner.execute_model.assert_called_once_with(
-    #         mock_scheduler_output)
-    #     assert result is None
+        worker.model_runner.execute_model.assert_called_once_with(
+            mock_scheduler_output)
+        assert result is None
 
-    # #
-    # # --- Profiling and Health Check Tests ---
-    # #
+    #
+    # --- Profiling and Health Check Tests ---
+    #
 
-    # @patch('tpu_commons.worker.tpu_worker_torchax.jax')
-    # @patch.dict('os.environ', {"PYTHON_TRACER_LEVEL": "1"}, clear=True)
-    # def test_profile_start(self, mock_jax, mock_vllm_config):
-    #     """Tests starting the JAX profiler."""
-    #     worker = TPUWorker(mock_vllm_config, 0, 0, "test")
-    #     worker.profile_dir = "/tmp/profile_dir"
+    @patch('tpu_commons.worker.tpu_worker_torchax.jax')
+    def test_profile_start(self, mock_jax, mock_vllm_config):
+        """Tests starting the JAX profiler."""
+        mock_jax.profiler = MagicMock()
 
-    #     worker.profile(is_start=True)
+        worker = TPUWorker(mock_vllm_config, 0, 0, "test")
+        worker.profile_dir = "/tmp/profile_dir"
 
-    #     mock_jax.profiler.ProfileOptions.assert_called_once()
-    #     mock_jax.profiler.start_trace.assert_called_once()
-    #     args, kwargs = mock_jax.profiler.start_trace.call_args
-    #     assert args[0] == "/tmp/profile_dir"
-    #     # Verify options from env var were used
-    #     assert kwargs['profiler_options'].python_tracer_level == '1'
+        worker.profile(is_start=True)
 
-    # @patch('tpu_commons.worker.tpu_worker_torchax.jax')
-    # def test_profile_stop(self, mock_jax, mock_vllm_config):
-    #     """Tests stopping the JAX profiler."""
-    #     worker = TPUWorker(mock_vllm_config, 0, 0, "test")
-    #     worker.profile(is_start=False)
-    #     mock_jax.profiler.stop_trace.assert_called_once()
+        mock_jax.profiler.start_trace.assert_called_once()
+        args, kwargs = mock_jax.profiler.start_trace.call_args
+        assert args[0] == "/tmp/profile_dir"
 
-    # def test_check_health(self, mock_vllm_config):
-    #     """Tests that check_health runs without error."""
-    #     worker = TPUWorker(mock_vllm_config, 0, 0, "test")
-    #     try:
-    #         worker.check_health()
-    #     except Exception as e:
-    #         pytest.fail(
-    #             f"TPUWorker.check_health() raised an unexpected exception: {e}"
-    #         )
+    @patch('tpu_commons.worker.tpu_worker_torchax.jax')
+    def test_profile_stop(self, mock_jax, mock_vllm_config):
+        """Tests stopping the JAX profiler."""
+        worker = TPUWorker(mock_vllm_config, 0, 0, "test")
+        worker.profile_dir = "/tmp/profile_dir"
+        worker.profile(is_start=False)
+        mock_jax.profiler.stop_trace.assert_called_once()
 
-    # #
-    # # --- Pass-through Method Tests ---
-    # #
+    def test_check_health(self, mock_vllm_config):
+        """Tests that check_health runs without error."""
+        worker = TPUWorker(mock_vllm_config, 0, 0, "test")
+        try:
+            worker.check_health()
+        except Exception as e:
+            pytest.fail(
+                f"TPUWorker.check_health() raised an unexpected exception: {e}"
+            )
 
-    # @pytest.mark.parametrize(
-    #     "worker_method_name, runner_method_name, method_args", [
-    #         ("load_model", "load_model", []),
-    #         ("get_model", "get_model", []),
-    #         ("get_kv_cache_spec", "get_kv_cache_spec", []),
-    #         ("initialize_from_config", "initialize_kv_cache",
-    #          [MagicMock(spec=KVCacheConfig)]),
-    #     ])
-    # def test_runner_passthrough_methods(self, worker_method_name,
-    #                                     runner_method_name, method_args,
-    #                                     mock_vllm_config):
-    #     """Tests methods that are simple pass-throughs to the TPUModelRunner."""
-    #     worker = TPUWorker(mock_vllm_config, 0, 0, "test")
-    #     worker.model_runner = MagicMock()
+    #
+    # --- Pass-through Method Tests ---
+    #
 
-    #     # Call the worker method and assert the underlying runner method was called
-    #     getattr(worker, worker_method_name)(*method_args)
-    #     mock_runner_method = getattr(worker.model_runner, runner_method_name)
-    #     mock_runner_method.assert_called_once_with(*method_args)
+    @pytest.mark.parametrize(
+        "worker_method_name, runner_method_name, method_args", [
+            ("load_model", "load_model", []),
+            ("get_model", "get_model", []),
+            ("get_kv_cache_spec", "get_kv_cache_spec", []),
+            ("initialize_from_config", "initialize_kv_cache",
+             [MagicMock(spec=KVCacheConfig)]),
+        ])
+    def test_runner_passthrough_methods(self, worker_method_name,
+                                        runner_method_name, method_args,
+                                        mock_vllm_config):
+        """Tests methods that are simple pass-throughs to the TPUModelRunner."""
+        worker = TPUWorker(mock_vllm_config, 0, 0, "test")
+        worker.model_runner = MagicMock()
 
-    # def test_compile_or_warm_up_model(self, mock_vllm_config):
-    #     """Tests the special case pass-through for model compilation/warmup."""
-    #     worker = TPUWorker(mock_vllm_config, 0, 0, "test")
-    #     worker.model_runner = MagicMock()
+        # Call the worker method and assert the underlying runner method was called
+        getattr(worker, worker_method_name)(*method_args)
+        mock_runner_method = getattr(worker.model_runner, runner_method_name)
+        mock_runner_method.assert_called_once_with(*method_args)
 
-    #     worker.compile_or_warm_up_model()
+    def test_compile_or_warm_up_model(self, mock_vllm_config):
+        """Tests the special case pass-through for model compilation/warmup."""
+        worker = TPUWorker(mock_vllm_config, 0, 0, "test")
+        worker.model_runner = MagicMock()
+        worker.model_config.enforce_eager = False
+        worker.compile_or_warm_up_model()
 
-    #     # This method calls two different runner methods
-    #     worker.model_runner.capture_model.assert_called_once()
-    #     worker.model_runner._init_random.assert_called_once()
+        # This method calls two different runner methods
+        worker.model_runner.capture_model.assert_called_once()
