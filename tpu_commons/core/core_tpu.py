@@ -240,7 +240,7 @@ class EngineCore:
         self.prefill_executors[0].sleep(level)
 
     def wake_up(self, tags: Optional[list[str]] = None):
-        self.prefill_executors[0].wake_up(tags)
+        self.prefill_executors[0].wake_up(tags=tags)
 
     def is_sleeping(self) -> bool:
         return self.prefill_executors[0].is_sleeping

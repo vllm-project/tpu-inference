@@ -1,14 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-import os
 from collections import OrderedDict
-from typing import Optional, Union
+from typing import Optional
 
 import jax
 import jax.numpy as jnp
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch_xla.distributed.spmd as xs
 import torchax
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
@@ -23,14 +21,10 @@ from tpu_commons.logger import init_logger
 
 logger = init_logger(__name__)
 
-VLLM_TORCHAX_ENABLED = os.environ.get('VLLM_TORCHAX_ENABLED', '0') == '1'
-
 
 def create_torchax_kv_cache(shape, dtype, mesh,
                             partition_spec) -> torch.Tensor:
     # This works better than device_put for large tensor allocation.
-    assert VLLM_TORCHAX_ENABLED, \
-        "It's expected that VLLM_TORCHAX_ENABLED is True."
 
     jax_dtype = t2j_dtype(dtype)
     if mesh is None:
@@ -52,10 +46,8 @@ def create_torchax_kv_cache(shape, dtype, mesh,
 
 def create_torchax_tensor_with_partition_spec(
         weight_t: torch.Tensor,
-        mesh: Optional[Union["xs.Mesh", Mesh]] = None,
+        mesh: Optional[Mesh] = None,
         partition_spec: Optional[tuple] = None) -> torch.Tensor:
-    assert VLLM_TORCHAX_ENABLED, \
-        "It's expected that VLLM_TORCHAX_ENABLED is True."
     # Validate that if mesh is None, sharding must also be None
     if mesh is None and (partition_spec is not None and partition_spec != ()):
         raise ValueError(
@@ -84,9 +76,7 @@ def create_torchax_tensor_with_partition_spec(
 
 class XlaQKVParallelLinear(nn.Module):
 
-    def __init__(self,
-                 qkv_linear: nn.Module,
-                 mesh: Optional["xs.Mesh"] = None):
+    def __init__(self, qkv_linear: nn.Module, mesh: Optional[Mesh] = None):
         super().__init__()
         assert isinstance(qkv_linear, QKVParallelLinear)
         self.skip_bias_add = qkv_linear.skip_bias_add
@@ -104,7 +94,7 @@ class XlaQKVParallelLinear(nn.Module):
         if mesh is not None:
             self._shard_weight(mesh)
 
-    def _shard_weight(self, mesh: "xs.Mesh"):
+    def _shard_weight(self, mesh: Mesh):
         self.q_weight = Parameter(create_torchax_tensor_with_partition_spec(
             self.q_weight, mesh, ('x', None)),
                                   requires_grad=False)
@@ -189,7 +179,7 @@ class XlaMergedColumnParallelLinear(nn.Module):
 
     def __init__(self,
                  merged_col_parallel_linear: nn.Module,
-                 mesh: Optional["xs.Mesh"] = None):
+                 mesh: Optional[Mesh] = None):
         super().__init__()
         assert isinstance(merged_col_parallel_linear,
                           MergedColumnParallelLinear)
@@ -204,7 +194,7 @@ class XlaMergedColumnParallelLinear(nn.Module):
         if mesh is not None:
             self._shard_weight(mesh)
 
-    def _shard_weight(self, mesh: "xs.Mesh"):
+    def _shard_weight(self, mesh: Mesh):
         # Shard all weights in the weight_list
         for i in range(self.n_linear_layers):
             weight = getattr(self, f"weight_{i}")
@@ -271,45 +261,37 @@ class XlaMergedColumnParallelLinear(nn.Module):
 
 
 def partition_column_parallel_linear(layer: torch.nn.Module,
-                                     mesh: xs.Mesh) -> torch.nn.Module:
+                                     mesh: Mesh) -> torch.nn.Module:
     assert isinstance(layer, ColumnParallelLinear)
-    if VLLM_TORCHAX_ENABLED:
-        torchax_t = create_torchax_tensor_with_partition_spec(
-            layer.weight.data, mesh, ('x', None))
-        layer.weight = Parameter(torchax_t,
-                                 requires_grad=layer.weight.requires_grad)
-        logger.info("Applied column-parallel sharding to %s", layer)
-    else:
-        xs.mark_sharding(layer.weight, mesh, ('x', None))
-        logger.info("Applied column-parallel sharding to %s", layer)
+    torchax_t = create_torchax_tensor_with_partition_spec(
+        layer.weight.data, mesh, ('x', None))
+    layer.weight = Parameter(torchax_t,
+                             requires_grad=layer.weight.requires_grad)
+    logger.info("Applied column-parallel sharding to %s", layer)
     return layer
 
 
 def partition_row_parallel_linear(layer: torch.nn.Module,
-                                  mesh: xs.Mesh) -> torch.nn.Module:
+                                  mesh: Mesh) -> torch.nn.Module:
     assert isinstance(layer, RowParallelLinear)
-    if VLLM_TORCHAX_ENABLED:
 
-        def shard_output_hook(module, input, output):
-            sharding = NamedSharding(mesh, P('x', None))
-            new_output = output[0].apply_jax(jax.lax.with_sharding_constraint,
-                                             sharding)
-            return (new_output, output[1])
+    def shard_output_hook(module, input, output):
+        sharding = NamedSharding(mesh, P('x', None))
+        new_output = output[0].apply_jax(jax.lax.with_sharding_constraint,
+                                         sharding)
+        return (new_output, output[1])
 
-        torchax_t = create_torchax_tensor_with_partition_spec(
-            layer.weight.data, mesh, (None, 'x'))
-        layer.weight = Parameter(torchax_t,
-                                 requires_grad=layer.weight.requires_grad)
-        # layer.register_forward_hook(shard_output_hook)
-        logger.info("Applied row-parallel sharding to %s", layer)
-    else:
-        xs.mark_sharding(layer.weight, mesh, (None, 'x'))
-        logger.info("Applied row-parallel sharding to %s", layer)
+    torchax_t = create_torchax_tensor_with_partition_spec(
+        layer.weight.data, mesh, (None, 'x'))
+    layer.weight = Parameter(torchax_t,
+                             requires_grad=layer.weight.requires_grad)
+    # layer.register_forward_hook(shard_output_hook)
+    logger.info("Applied row-parallel sharding to %s", layer)
     return layer
 
 
 def partition_qkv_parallel_linear(layer: torch.nn.Module,
-                                  mesh: xs.Mesh) -> torch.nn.Module:
+                                  mesh: Mesh) -> torch.nn.Module:
     assert isinstance(layer, QKVParallelLinear)
     xla_layer = XlaQKVParallelLinear(layer, mesh)
     logger.info("Applied qkv parallel sharding to %s", layer)
@@ -317,15 +299,14 @@ def partition_qkv_parallel_linear(layer: torch.nn.Module,
 
 
 def partition_merged_col_parallel_linear(layer: torch.nn.Module,
-                                         mesh: xs.Mesh) -> torch.nn.Module:
+                                         mesh: Mesh) -> torch.nn.Module:
     assert isinstance(layer, MergedColumnParallelLinear)
     xla_layer = XlaMergedColumnParallelLinear(layer, mesh)
     logger.info("Applied merged column parallel sharding to %s", layer)
     return xla_layer
 
 
-def replicate_weights_buffers(module: torch.nn.Module,
-                              mesh: "xs.Mesh") -> None:
+def replicate_weights_buffers(module: torch.nn.Module, mesh: Mesh) -> None:
     logger.info("Replicating weights and buffers for module %s", module)
     for name, param in module.named_parameters(recurse=False):
         torchax_t = create_torchax_tensor_with_partition_spec(
@@ -360,7 +341,7 @@ def get_fqn(module) -> str:
     return module.__class__.__qualname__
 
 
-def shard_model(model: torch.nn.Module, mesh: "xs.Mesh") -> None:
+def shard_model(model: torch.nn.Module, mesh: Mesh) -> None:
     """
     Recursively check a PyTorch model and apply appropriate sharding based on
     the MODULE_TYPE_TO_WRAPPING_FUNC mapping.
@@ -392,7 +373,7 @@ def shard_model(model: torch.nn.Module, mesh: "xs.Mesh") -> None:
                 break
 
         # Replicate the weights and buffers if the module is not processed
-        if not model_processed and VLLM_TORCHAX_ENABLED and mesh is not None:
+        if not model_processed and mesh is not None:
             replicate_weights_buffers(module, mesh)
 
         for child_name, child_module in list(module.named_children()):

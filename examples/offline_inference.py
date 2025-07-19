@@ -15,13 +15,14 @@ def create_parser():
     # Add engine args
     EngineArgs.add_cli_args(parser)
     parser.set_defaults(model="meta-llama/Llama-3.2-1B-Instruct")
+    parser.set_defaults(max_model_len=1024)
+
     # Add sampling params
     sampling_group = parser.add_argument_group("Sampling parameters")
     sampling_group.add_argument("--max-tokens", type=int)
     sampling_group.add_argument("--temperature", type=float)
     sampling_group.add_argument("--top-p", type=float)
     sampling_group.add_argument("--top-k", type=int)
-
     return parser
 
 

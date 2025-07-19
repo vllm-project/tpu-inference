@@ -199,7 +199,12 @@ class JaxEngine():
         ):
             req = self._request_map[req_id]
             req.num_computed_tokens += num_tokens
-            req.num_cached_tokens += num_tokens
+            # TODO(fhzhang): This is prefix cache related and initialized to -1.
+            # figure out whether we should be setting this.
+            if req.num_cached_tokens >= 0:
+                req.num_cached_tokens += num_tokens
+            else:
+                req.num_cached_tokens = num_tokens
             req.status = RequestStatus.RUNNING
 
             prefill_done = req.num_computed_tokens == req.num_prompt_tokens
@@ -281,10 +286,17 @@ class JaxEngine():
         if scheduler_output.total_num_scheduled_tokens <= 0:
             logger.warning("No active requests!")
             return EMPTY_MODEL_RUNNER_OUTPUT
+        
+        if len(runner_output.req_ids) == 0:
+            logger.error(f"Runner returned empty results for {scheduler_output}")
+            raise RuntimeError(f"Runner returned empty results for {scheduler_output}!")
 
         sampled_token_ids = runner_output.sampled_token_ids
         for req_id in scheduler_output.num_scheduled_tokens.keys():
             request = self._request_map[req_id]
+
+            request.status = RequestStatus.RUNNING
+
             req_index = runner_output.req_id_to_index[req_id]
             new_token_ids = sampled_token_ids[
                 req_index] if sampled_token_ids else []
@@ -301,7 +313,12 @@ class JaxEngine():
                     # Stop processing more tokens for this request in this step.
                     break
             request.num_computed_tokens += num_appended
-            request.num_cached_tokens += num_appended
+            # TODO(fhzhang): This is prefix cache related and initialized to -1.
+            # figure out whether we should be setting this.
+            if request.num_cached_tokens >= 0:
+                request.num_cached_tokens += num_appended
+            else:
+                request.num_cached_tokens = num_appended
         self._requests = [
             r for r in self._requests if r.request_id in self._request_map
         ]

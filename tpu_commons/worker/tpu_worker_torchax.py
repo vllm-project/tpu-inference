@@ -14,18 +14,9 @@ import torch.nn as nn
 
 import vllm.envs as envs
 
-VLLM_TORCHAX_ENABLED = os.environ.get('VLLM_TORCHAX_ENABLED', '0') == '1'
-if VLLM_TORCHAX_ENABLED:
-    import jax
+import jax
 
-import torch_xla.core.xla_model as xm
-import torch_xla.debug.profiler as xp
-import torch_xla.runtime as xr
-
-try:
-    from tpu_commons.models.torchax.torchax_wrapper import with_torchax_global
-except ImportError:
-    from vllm.compilation.torchax_wrapper import with_torchax_global
+from tpu_commons.models.torchax.torchax_wrapper import with_torchax_global
 
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
@@ -40,10 +31,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
 
-try:
-    from tpu_commons.runner.tpu_torchax_runner import TPUModelRunner
-except ImportError:
-    from vllm.v1.worker.tpu_model_runner import TPUModelRunner
+from tpu_commons.runner.tpu_torchax_runner import TPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -140,23 +128,16 @@ class TPUWorker:
 
         # Device initialization should happen after initializing
         # the distributed runtime.
-        if VLLM_TORCHAX_ENABLED:
-            self.device = torch.device("jax:0")
-        else:
-            self.device = xm.xla_device()
+        self.device = torch.device("jax:0")
         self.device_config.device = self.device
 
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
-        if VLLM_TORCHAX_ENABLED:
-            rank = jax.process_index()
-        else:
-            rank = xr.global_ordinal()
+        rank = jax.process_index()
 
         if self.model_config.seed is not None:
-            if not VLLM_TORCHAX_ENABLED:
-                xm.set_rng_state(self.model_config.seed, self.device)
+            pass
 
         # Increase the cache size limit, which is the maximum number of
         # dynamo graphs that can be compiled.
@@ -167,16 +148,6 @@ class TPUWorker:
         # NOTE(woosuk): Set per-rank cache path since different ranks
         # can have slightly different XLA graphs.
         world_size = self.parallel_config.world_size
-        # The PyTorch/XLA compilation cache uses the Torch IR to generate keys.
-        # Consequently, changes in optimization flags, which affect compilation
-        # results, don't change the cache key. This can result in the wrong
-        # compilation being used. To prevent this, disabling the XLA compilation
-        # cache during development is recommended.We can disable it by
-        # `export VLLM_XLA_CACHE_PATH=`
-        if envs.VLLM_XLA_CACHE_PATH:
-            per_rank_path = os.path.join(envs.VLLM_XLA_CACHE_PATH,
-                                         f"tp{world_size}_rank{rank}")
-            xr.initialize_cache(per_rank_path, readonly=False)
 
         # Init ModelRunner here, so that we have access to self.device.
         self.model_runner = \
@@ -193,9 +164,6 @@ class TPUWorker:
         with self.model_runner.maybe_setup_dummy_loras(self.lora_config):
             self.model_runner.profile_run(self.model_runner.max_num_tokens)
 
-        # Synchronize before measuring the memory usage.
-        xm.wait_device_ops()
-
         # During the profiling run, the model runs without KV cache. After
         # the profiling run, the model always runs with KV cache. Here we clear
         # the dynamo cache and cached bytecode to ensure the model always has
@@ -206,32 +174,11 @@ class TPUWorker:
 
         # Get the maximum amount of memory used by the model weights and
         # intermediate activations.
-        if VLLM_TORCHAX_ENABLED:
-            m = jax.local_devices()[0].memory_stats()
-            total_memory_size = m["bytes_limit"]
-            current_mem = m["bytes_in_use"]
-            # TODO: Torchax OOMs if we use the same heuristic as torchxla.
-            profiled = m["peak_bytes_in_use"]
-        elif self.use_spmd:
-            # This is a workaround for the TPU SPMD mode. The get_memory_info
-            # API doesn't work with SPMD mode in PyTorch/XLA.
-            # TODO: use xm.get_memory_info for SPMD once it's supported in
-            # PyTorch/XLA.
-            import tpu_info
-            chip_type, _ = tpu_info.device.get_local_chips()
-            device_usage = tpu_info.metrics.get_chip_usage(chip_type)
-            total_memory_size = device_usage[0].total_memory
-            current_mem = device_usage[0].memory_usage
-        else:
-            m = xm.get_memory_info(self.device)
-            total_memory_size = m["bytes_limit"]
-            current_mem = m["bytes_used"]
-        # Ideally we would use profiled = m["peak_bytes_used"] to
-        # get weights + activations. But there is memory used during
-        # compilation / weight loading that impacts the peak and
-        # there is no way to reset peak memory in XLA, So we
-        # use the heuristic of 2% of weights.
-        profiled = current_mem * 1.02
+        m = jax.local_devices()[0].memory_stats()
+        total_memory_size = m["bytes_limit"]
+        current_mem = m["bytes_in_use"]
+        # TODO: Torchax OOMs if we use the same heuristic as torchxla.
+        profiled = m["peak_bytes_in_use"]
 
         # Calculate the TPU KV cache size based on profiling.
         usable_memory_size = int(total_memory_size *
@@ -265,11 +212,8 @@ class TPUWorker:
         if self.rank < 1:
             if self.profile_dir is None:
                 raise RuntimeError("Profiler is not enabled.")
-            if not VLLM_TORCHAX_ENABLED:
-                profiler = xp
-            else:
-                import jax
-                profiler = jax.profiler
+            import jax
+            profiler = jax.profiler
             if is_start:
                 if self.profiler is None:
                     self.profiler = profiler.start_server(9012)
@@ -314,8 +258,6 @@ class TPUWorker:
         local_rank: int = -1,
     ) -> None:
         """Initialize the distributed environment."""
-        if self.use_spmd:
-            xr.use_spmd()
         # NOTE(woosuk): This is just to initialize the TP group and broadcast
         # the input objects on CPU. The all-reduce and all-gather ops on TPU
         # are invoked by `xm.all_reduce` and `xm.all_gather` which use their
