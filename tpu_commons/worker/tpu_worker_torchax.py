@@ -73,6 +73,10 @@ class TPUWorker:
         self.rank = rank
         self.distributed_init_method = distributed_init_method
 
+        if rank != local_rank:
+            raise NotImplementedError(
+                "Multi host serving is not supported yet.")
+
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
         else:
@@ -107,7 +111,6 @@ class TPUWorker:
 
     @with_torchax_global
     def init_device(self):
-        os.environ["PJRT_DEVICE"] = "TPU"
         # Note: Currently the XLA compiler wrongly uses 2D ring strategy on 1D
         # ring, the xla tpu compiler flag
         # `xla_tpu_force_1d_allreduce_at_chunk_count` is a temporary solution to
@@ -131,19 +134,8 @@ class TPUWorker:
         self.device = torch.device("jax:0")
         self.device_config.device = self.device
 
-        # Set random seed.
-        set_random_seed(self.model_config.seed)
-
         rank = jax.process_index()
 
-        if self.model_config.seed is not None:
-            pass
-
-        # Increase the cache size limit, which is the maximum number of
-        # dynamo graphs that can be compiled.
-        # TODO (NickLucche) On gsm we compile 80+ graphs.
-        # Re-evaluate limit, with MM we may get close to this limit.
-        torch._dynamo.config.cache_size_limit = 128
         # Use persistent cache to avoid XLA recompilation.
         # NOTE(woosuk): Set per-rank cache path since different ranks
         # can have slightly different XLA graphs.
@@ -161,16 +153,7 @@ class TPUWorker:
     @with_torchax_global
     def determine_available_memory(self) -> int:
         # `max_num_tokens >= max_num_batched_tokens` due to padding.
-        with self.model_runner.maybe_setup_dummy_loras(self.lora_config):
-            self.model_runner.profile_run(self.model_runner.max_num_tokens)
-
-        # During the profiling run, the model runs without KV cache. After
-        # the profiling run, the model always runs with KV cache. Here we clear
-        # the dynamo cache and cached bytecode to ensure the model always has
-        # one compiled bytecode. Having one FX graph/cached bytecode per
-        # compiled model is required for `support_torch_compile` decorator to
-        # skip dynamo guard.
-        self.model_runner.reset_dynamo_cache()
+        self.model_runner.profile_run(self.model_runner.max_num_tokens)
 
         # Get the maximum amount of memory used by the model weights and
         # intermediate activations.
@@ -221,9 +204,6 @@ class TPUWorker:
             else:
                 profiler.stop_trace()
 
-    def add_lora(self, lora_request: LoRARequest) -> bool:
-        return self.model_runner.add_lora(lora_request)
-
     def load_model(self) -> None:
         self.model_runner.load_model()
 
@@ -231,10 +211,6 @@ class TPUWorker:
     def compile_or_warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model()
-
-        # Reset the seed to ensure that the random state is not affected by
-        # the model initialization and profiling.
-        set_random_seed(self.model_config.seed)
 
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
