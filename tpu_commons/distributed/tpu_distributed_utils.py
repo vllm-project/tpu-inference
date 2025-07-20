@@ -275,17 +275,10 @@ def partition_row_parallel_linear(layer: torch.nn.Module,
                                   mesh: Mesh) -> torch.nn.Module:
     assert isinstance(layer, RowParallelLinear)
 
-    def shard_output_hook(module, input, output):
-        sharding = NamedSharding(mesh, P('x', None))
-        new_output = output[0].apply_jax(jax.lax.with_sharding_constraint,
-                                         sharding)
-        return (new_output, output[1])
-
     torchax_t = create_torchax_tensor_with_partition_spec(
         layer.weight.data, mesh, (None, 'x'))
     layer.weight = Parameter(torchax_t,
                              requires_grad=layer.weight.requires_grad)
-    # layer.register_forward_hook(shard_output_hook)
     logger.info("Applied row-parallel sharding to %s", layer)
     return layer
 
@@ -378,12 +371,6 @@ def shard_model(model: torch.nn.Module, mesh: Mesh) -> None:
 
         for child_name, child_module in list(module.named_children()):
             _process_module(child_module, child_name, module)
-
-    # for name, tensor in model.named_parameters():
-    #     logger.info("weight %s: %s %s", name, tensor.shape, tensor.dtype)
-
-    # for name, tensor in model.named_buffers():
-    #     logger.info("buffer %s: %s %s", name, tensor.shape, tensor.dtype)
 
     assert mesh is not None, "Mesh must be provided for sharding."
     _process_module(model)
