@@ -113,11 +113,7 @@ if __name__ == "__main__":
         main(args)
     else:
         from unittest.mock import patch
+        from tpu_commons.core.core_tpu import DisaggEngineCoreProc
 
-        from tpu_commons.core.core_tpu import EngineCore as TPUEngineCore
-        from tpu_commons.core.core_tpu import \
-            EngineCoreProc as TPUEngineCoreProc
-        with patch('vllm.v1.engine.core.EngineCore', TPUEngineCore):
-            with patch('vllm.v1.engine.core.EngineCoreProc',
-                       TPUEngineCoreProc):
-                main(args)
+        with patch("vllm.v1.engine.core.EngineCoreProc", DisaggEngineCoreProc):
+            main(args)
