@@ -557,10 +557,10 @@ class TPUModelRunner():
         req_state = CachedRequestState(
             req_id=request.request_id,
             prompt_token_ids=request.prompt_token_ids,
-            output_token_ids=[],
+            output_token_ids=[request.all_token_ids[-1]],
             sampling_params=request.sampling_params,
             block_ids=tuple(block_ids),
-            num_computed_tokens=request.num_tokens,
+            num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
             mm_inputs=getattr(request, "mm_inputs", []),
             mm_hashes=[],
@@ -586,7 +586,8 @@ class TPUModelRunner():
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
             # Return empty ModelRunnerOutput if there's no work to do.
-            logger.warning(f"Nothing scheduled: {scheduler_output}!")
+            # TODO(fhzhang): We rely on empty cycles to remove requests in input batch. Fix it to reduce overhead.
+            logger.debug(f"Nothing scheduled: {scheduler_output}!")
             if len(scheduler_output.finished_req_ids) == 0:
                 raise Exception(
                     "Should not schedule a request that does nothing!")

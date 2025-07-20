@@ -233,9 +233,12 @@ class TestTPUJaxRunner(unittest.TestCase):
         decode_request = MagicMock(spec=Request)
         decode_request.request_id = "test_req_1"
         decode_request.num_tokens = prompt_len + 1  # Total tokens
+        decode_request.num_computed_tokens = prompt_len
         decode_request.prompt_token_ids = list(range(prompt_len))
+        decode_request.all_token_ids = [123, 232, 908]
         decode_request.output_token_ids = [100]
         decode_request.sampling_params = mock_sampling_params
+
         decode_request.lora_request = None
         decode_request.mm_inputs, decode_request.mm_positions = [], []
         decode_request.pooling_params, decode_request.generator = None, None
@@ -264,7 +267,10 @@ class TestTPUJaxRunner(unittest.TestCase):
         self.assertIn("test_req_1", self.runner.input_batch.req_id_to_index)
         self.assertEqual(
             self.runner.requests["test_req_1"].num_computed_tokens,
-            prompt_len + 1)
+            prompt_len)
+        self.assertEqual(
+            self.runner.requests["test_req_1"].output_token_ids,
+            [908])
 
         # Verify the content of the inserted KV cache.
         target_block_id = decode_block_ids[0][0]
