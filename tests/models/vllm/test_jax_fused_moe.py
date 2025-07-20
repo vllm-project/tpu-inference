@@ -1,6 +1,7 @@
 import jax
 import pytest
 import torch
+import torchax
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.interop import torch_view
 from torchax.ops.mappings import j2t, t2j
@@ -13,6 +14,8 @@ from vllm.model_executor.layers.fused_moe.moe_torch_iterative import \
 from tpu_commons.models.vllm.jax_fused_moe import JaxFusedMoE
 
 P = PartitionSpec
+
+torchax.enable_globally()
 
 
 def _get_spmd_mesh():
