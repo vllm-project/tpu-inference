@@ -87,7 +87,7 @@ class Router(nnx.Module):
             self.cfg, HuggingFaceArgNames.NUM_EXPERTS_PER_TOKEN)
         router_logits_TE = jnp.einsum('TD,DE -> TE', x_TD,
                                       self.kernel_DE.value)
-        activated_gating_TF = nnx.softmax(router_logits_TE.astype(jnp.float32),
+        activated_gating_TF = nnx.softmax(router_logits_TE.astype(self.cfg.dtype),
                                           axis=-1)
         weights_TX, selected_experts_TX = jax.lax.top_k(
             activated_gating_TF, num_experts_per_tok)
@@ -185,7 +185,7 @@ class MoE(nnx.Module):
         Returns:
             Output array of shape (sequence_length, d_model) after passing through MoE.
         """
-        x = jnp.asarray(x, jnp.float32)
+        x = jnp.asarray(x, self.cfg.dtype)
         x_TD = nnx.with_sharding_constraint(x, self.activation_ffw_td[op_mode])
         weights_TX, indices_TX = self.router(x_TD, op_mode)
         num_experts = getattr(self.cfg,
