@@ -18,7 +18,13 @@ from tpu_commons.models.vllm.jax_merged_column_parallel_linear import \
 
 P = PartitionSpec
 
-torchax.enable_globally()
+
+@pytest.fixture(scope="module", autouse=True)
+def setup_torchax():
+    """Enable torchax globally before all tests, disable after all tests."""
+    torchax.enable_globally()
+    yield
+    torchax.disable_globally()
 
 
 @pytest.fixture(autouse=True)
