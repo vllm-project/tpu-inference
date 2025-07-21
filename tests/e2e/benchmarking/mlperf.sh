@@ -8,7 +8,9 @@
 
 # You can also manually invoke this script to run an E2E benchmark on any given model and dataset, making sure
 # you specify the --dataset-name, --dataset-path, and --root-dir flags
-# Example usage: bash tests/e2e/benchmarking/mmlu.sh -r /mnt/disks/jacobplatin -d mmlu -p /mnt/disks/jacobplatin/mmlu/data/test
+
+# Example default usage: bash tests/e2e/benchmarking/mlperf.sh -r /local/root_dir
+# Example local docker + JAX TPU usage: TPU_BACKEND_TYPE=jax NEW_MODEL_DESIGN=True BUILDKITE_COMMIT=3c545c0c3 .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
 
 # Logs the vLLM server output to a file
 LOG_FILE="server.log"
@@ -25,16 +27,6 @@ TARGET_ROUGE1="40"
 TARGET_THROUGHPUT="1500"
 
 model_list="Qwen/Qwen2.5-1.5B-Instruct Qwen/Qwen2.5-0.5B-Instruct meta-llama/Llama-3.1-8B-Instruct"
-
-extra_serve_args=()
-if [ "$NEW_MODEL_DESIGN" = "True" ]; then
-    echo "NEW_MODEL_DESIGN is True. Running with the new model list and custom hf_overrides."
-    model_list="meta-llama/Llama-3.1-8B-Instruct"
-    extra_serve_args+=("--hf_overrides")
-    extra_serve_args+=('{"architectures": ["Llama3_8B"]}')
-else
-    echo "NEW_MODEL_DESIGN is not set to True. Running with default settings."
-fi
 
 root_dir=/workspace
 dataset_name=mlperf
@@ -222,7 +214,7 @@ for model_name in $model_list; do
 
     # Spin up the vLLM server
     echo "Spinning up the vLLM server..."
-    (vllm serve "$model_name" --max-model-len=1024 --disable-log-requests --max-num-batched-tokens 8192 "${extra_serve_args[@]}" 2>&1 | tee -a "$LOG_FILE") &
+    (vllm serve "$model_name" --max-model-len=1024 --disable-log-requests --max-num-batched-tokens 8192 2>&1 | tee -a "$LOG_FILE") &
 
 
 

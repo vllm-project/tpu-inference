@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 from dataclasses import dataclass
 from typing import Any, Optional
 
 import torch
-# Required to register custom ops.
-import torch_xla.experimental.custom_kernel  # noqa: F401
 from jax.tree_util import register_pytree_node_class
 from torchax.interop import call_jax
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
@@ -17,17 +14,9 @@ from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils import cdiv, next_power_of_2
 
 from tpu_commons.logger import init_logger
-
-VLLM_TORCHAX_ENABLED = os.environ.get('VLLM_TORCHAX_ENABLED', '0') == '1'
-
-if VLLM_TORCHAX_ENABLED:
-    # Register custom op dispatcher.
-    try:
-        from tpu_commons.models.torchax.torchax_wrapper import (
-            kv_cache_update, ragged_paged_attention)
-    except ImportError:
-        from vllm.compilation.torchax_wrapper import (kv_cache_update,
-                                                      ragged_paged_attention)
+# Register custom op dispatcher.
+from tpu_commons.models.torchax.torchax_wrapper import (kv_cache_update,
+                                                        ragged_paged_attention)
 
 logger = init_logger(__name__)
 
@@ -169,18 +158,12 @@ class PallasAttentionBackendImpl(AttentionImpl):
             raise NotImplementedError("Alibi slopes is not supported.")
         if kv_cache_dtype != "auto":
             raise NotImplementedError("FP8 KV cache dtype is not supported.")
-        if blocksparse_params is not None:
-            raise NotImplementedError("Blocksparse is not supported.")
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
                                       "PallasAttentionBackendImpl")
-
-        tpu_version = torch_xla.tpu.version()
-        if tpu_version < 4:
-            raise NotImplementedError("TPU version must be 4 or higher.")
 
     def forward(
         self,
@@ -237,14 +220,10 @@ class PallasAttentionBackendImpl(AttentionImpl):
             slot_mapping = attn_metadata.slot_mapping
             kv_cache = write_to_kv_cache(key, value, kv_cache, slot_mapping,
                                          attn_metadata.num_slices)
-            if VLLM_TORCHAX_ENABLED:
-                forward_context: ForwardContext = get_forward_context()
-                layer.kv_cache[forward_context.virtual_engine] = kv_cache
+            forward_context: ForwardContext = get_forward_context()
+            layer.kv_cache[forward_context.virtual_engine] = kv_cache
 
-        if VLLM_TORCHAX_ENABLED:
-            ragged_paged_attention_op = ragged_paged_attention
-        else:
-            ragged_paged_attention_op = torch.ops.xla.ragged_paged_attention
+        ragged_paged_attention_op = ragged_paged_attention
 
         output = ragged_paged_attention_op(
             query,
@@ -293,9 +272,6 @@ def write_to_kv_cache(key: torch.Tensor, value: torch.Tensor,
     value = value.view(-1, num_kv_heads, head_size)
     kv = torch.cat([key, value], axis=-1).reshape(-1, num_combined_kv_heads,
                                                   head_size)
-
-    if not VLLM_TORCHAX_ENABLED:
-        torch.ops.xla.dynamo_set_buffer_donor_(kv_cache, True)
 
     kv_cache = kv_cache.reshape(-1, num_combined_kv_heads, head_size)
     kv_cache = call_jax(

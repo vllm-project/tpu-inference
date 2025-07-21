@@ -2,6 +2,7 @@
 """
 Implements a few utility functions for the various runners.
 """
+import bisect
 import functools
 import time
 from typing import Optional
@@ -46,6 +47,66 @@ def get_padded_num_reqs_with_upper_limit(x: int, upper_limit: int) -> int:
     return min(res, upper_limit)
 
 
+def get_req_paddings(min_req_size: int, max_req_size: int) -> list[int]:
+    logger.info("Preparing request paddings:")
+    # assert min_req_size is power of 2
+    assert (min_req_size & (min_req_size - 1) == 0) and min_req_size > 0
+    paddings: list = []
+    num = max(MIN_NUM_SEQS, min_req_size)
+    while num <= max_req_size and (len(paddings) == 0 or paddings[-1] != num):
+        paddings.append(num)
+        logger.info("    %d", num)
+        num = get_padded_num_reqs_with_upper_limit(num + 1, max_req_size)
+    return paddings
+
+
+def get_token_paddings(min_token_size: int, max_token_size: int,
+                       padding_gap: int) -> list[int]:
+    """Generate a list of padding size, starting from min_token_size,
+    ending with a number that can cover max_token_size
+
+    If padding_gap == 0 then:
+        increase 2X each time (exponential)
+    else:
+        first increase the size to twice,
+        then increase the padding size by padding_gap.
+    """
+    # assert min_token_size is power of 2
+    assert (min_token_size & (min_token_size - 1) == 0) and min_token_size > 0
+    paddings = []
+    num = min_token_size
+
+    if padding_gap == 0:
+        logger.info("Using exponential token paddings:")
+        while True:
+            logger.info("    %d", num)
+            paddings.append(num)
+            if num >= max_token_size:
+                break
+            num *= 2
+    else:
+        logger.info("Using incremental token paddings:")
+        while num <= padding_gap:
+            logger.info("    %d", num)
+            paddings.append(num)
+            num *= 2
+        num //= 2
+        while num < max_token_size:
+            num += padding_gap
+            logger.info("    %d", num)
+            paddings.append(num)
+
+    return paddings
+
+
+def get_padded_token_len(paddings: list[int], x: int) -> int:
+    """Return the first element in paddings list greater or equal to x.
+    """
+    index = bisect.bisect_left(paddings, x)
+    assert index < len(paddings)
+    return paddings[index]
+
+
 class LatencyTracker:
 
     def __init__(self, name="Operation"):
@@ -58,7 +119,7 @@ class LatencyTracker:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.end_time = time.perf_counter()
         elapsed_time = self.end_time - self.start_time
-        logger.info(f"Latency for '{self.name}': {elapsed_time:.3f} seconds")
+        logger.debug(f"Latency for '{self.name}': {elapsed_time:.3f} seconds")
 
 
 class ForbidCompile:

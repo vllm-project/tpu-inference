@@ -15,10 +15,9 @@
 
 import threading
 import warnings
-from typing import Any, Tuple
-import numpy as np
-import jax
+from typing import Any, Iterable, Tuple
 
+import jax
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
@@ -64,9 +63,8 @@ class JaxEngine():
         self._pending_num_prefill_tokens = 0
         self._kv_cache_manager_lock = threading.Lock()
 
-    def get_new_block_ids(
-        self, vllm_request: Request, num_tokens: int
-    ) -> tuple[list[int], ...]:
+    def get_new_block_ids(self, vllm_request: Request,
+                          num_tokens: int) -> tuple[list[int], ...]:
         with self._kv_cache_manager_lock:
             computed_blocks, _ = self.kv_cache_manager.get_computed_blocks(
                 vllm_request)
@@ -111,30 +109,59 @@ class JaxEngine():
         self._new_requests.append(req)
         self._pending_num_prefill_tokens += num_tokens
 
+    def _make_cached_request_data(
+        self,
+        running_reqs: Iterable[Request],
+        num_scheduled_tokens: dict[str, int],
+        req_to_new_block_ids: dict[str, tuple[list[int], ...]],
+    ) -> CachedRequestData:
+        req_ids: list[str] = []
+        new_token_ids: list[list[int]] = []
+        new_block_ids: list[tuple[list[int], ...]] = []
+        num_computed_tokens: list[int] = []
+
+        for req in running_reqs:
+            req_id = req.request_id
+            req_ids.append(req_id)
+            num_tokens = num_scheduled_tokens[req_id]
+            token_ids = req.all_token_ids[req.num_computed_tokens:req.
+                                          num_computed_tokens + num_tokens]
+            new_token_ids.append(token_ids)
+            new_block_ids.append(req_to_new_block_ids[req_id])
+            num_computed_tokens.append(req.num_computed_tokens)
+        # Right now all requests are not resumed from preemption.
+        resumed_from_preemption = [False] * len(running_reqs)
+
+        return CachedRequestData(
+            req_ids=req_ids,
+            resumed_from_preemption=resumed_from_preemption,
+            new_token_ids=new_token_ids,
+            new_block_ids=new_block_ids,
+            num_computed_tokens=num_computed_tokens,
+        )
+
     def _schedule_prefill(self) -> SchedulerOutput:
         """Schedule the next batch to be processed.
 
         We currently prioritize oldest requests in the queue.
         """
         capacity_left = self._max_num_tokens
-        cached_reqs = []
         num_scheduled_tokens: dict[str, int] = {}
+        req_to_new_block_ids: dict[str, tuple[list[int], ...]] = {}
         for req in self._requests:
             assert capacity_left > 0
 
             num_tokens_to_schedule = min(
                 capacity_left, req.num_tokens - req.num_computed_tokens)
             new_block_ids = self.get_new_block_ids(req, num_tokens_to_schedule)
+            req_to_new_block_ids[req.request_id] = new_block_ids
 
-            new_token_ids = req.all_token_ids[req.num_computed_tokens:req.
-                                              num_computed_tokens +
-                                              num_tokens_to_schedule]
-            req_data = CachedRequestData.from_request(req, False,
-                                                      new_token_ids,
-                                                      new_block_ids)
-            cached_reqs.append(req_data)
-            capacity_left -= num_tokens_to_schedule
             num_scheduled_tokens[req.request_id] = num_tokens_to_schedule
+
+            capacity_left -= num_tokens_to_schedule
+
+        cached_reqs_data = self._make_cached_request_data(
+            self._requests, num_scheduled_tokens, req_to_new_block_ids)
 
         new_reqs = []
         scheduled_new_reqs_list: set[Request] = set()
@@ -155,7 +182,7 @@ class JaxEngine():
 
         return SchedulerOutput(
             scheduled_new_reqs=new_reqs,
-            scheduled_cached_reqs=cached_reqs,
+            scheduled_cached_reqs=cached_reqs_data,
             num_scheduled_tokens=num_scheduled_tokens,
             total_num_scheduled_tokens=(self._max_num_tokens - capacity_left),
             scheduled_spec_decode_tokens={},
@@ -184,8 +211,7 @@ class JaxEngine():
 
         logger.info(f"Scheduled output: {scheduler_output}")
 
-        _, runner_output = self.model_runner._execute_model(
-            scheduler_output)
+        _, runner_output = self.model_runner._execute_model(scheduler_output)
 
         if scheduler_output.total_num_scheduled_tokens <= 0:
             logger.warning("No active requests!")
@@ -199,7 +225,12 @@ class JaxEngine():
         ):
             req = self._request_map[req_id]
             req.num_computed_tokens += num_tokens
-            req.num_cached_tokens += num_tokens
+            # TODO(fhzhang): This is prefix cache related and initialized to -1.
+            # figure out whether we should be setting this.
+            if req.num_cached_tokens >= 0:
+                req.num_cached_tokens += num_tokens
+            else:
+                req.num_cached_tokens = num_tokens
             req.status = RequestStatus.RUNNING
 
             prefill_done = req.num_computed_tokens == req.num_prompt_tokens
@@ -215,7 +246,9 @@ class JaxEngine():
                 block_ids = self.get_block_ids(req_id)
                 with LatencyTracker(f"ExtractKVCache-{len(block_ids[0])}"):
                     # Assume one KV cache group for now.
-                    kv_cache_map[req_id] = self.model_runner.get_kv_cache_for_block_ids(block_ids[0])
+                    kv_cache_map[
+                        req_id] = self.model_runner.get_kv_cache_for_block_ids(
+                            block_ids[0])
                 logger.debug(
                     f"prefill done: for {req_id} with {num_tokens} tokens")
                 self._completed_requests.append(req_id)
@@ -240,22 +273,17 @@ class JaxEngine():
         logger.debug(
             f"scheduling generation... #active_reqs={len(active_requests)}")
 
-        cached_reqs: list[CachedRequestData] = []
         num_scheduled_tokens: dict[str, int] = {}
-        req_to_new_block_ids = {}
+        req_to_new_block_ids: dict[str, tuple[list[int], ...]] = {}
         for request_id, request in active_requests.items():
             with self._kv_cache_manager_lock:
                 new_blocks = self.kv_cache_manager.allocate_slots(request, 1)
             req_to_new_block_ids[request_id] = new_blocks.get_block_ids()
-            num_computed_tokens = request.num_computed_tokens
-            new_token_ids = request.all_token_ids[
-                num_computed_tokens:num_computed_tokens + 1]
-            req_data = CachedRequestData.from_request(
-                request, False, new_token_ids,
-                req_to_new_block_ids[request_id])
-
-            cached_reqs.append(req_data)
             num_scheduled_tokens[request_id] = 1
+
+        cached_reqs = self._make_cached_request_data(active_requests.values(),
+                                                     num_scheduled_tokens,
+                                                     req_to_new_block_ids)
 
         return SchedulerOutput(
             scheduled_new_reqs=[],
@@ -282,9 +310,18 @@ class JaxEngine():
             logger.warning("No active requests!")
             return EMPTY_MODEL_RUNNER_OUTPUT
 
+        if len(runner_output.req_ids) == 0:
+            logger.error(
+                f"Runner returned empty results for {scheduler_output}")
+            raise RuntimeError(
+                f"Runner returned empty results for {scheduler_output}!")
+
         sampled_token_ids = runner_output.sampled_token_ids
         for req_id in scheduler_output.num_scheduled_tokens.keys():
             request = self._request_map[req_id]
+
+            request.status = RequestStatus.RUNNING
+
             req_index = runner_output.req_id_to_index[req_id]
             new_token_ids = sampled_token_ids[
                 req_index] if sampled_token_ids else []
@@ -301,7 +338,12 @@ class JaxEngine():
                     # Stop processing more tokens for this request in this step.
                     break
             request.num_computed_tokens += num_appended
-            request.num_cached_tokens += num_appended
+            # TODO(fhzhang): This is prefix cache related and initialized to -1.
+            # figure out whether we should be setting this.
+            if request.num_cached_tokens >= 0:
+                request.num_cached_tokens += num_appended
+            else:
+                request.num_cached_tokens = num_appended
         self._requests = [
             r for r in self._requests if r.request_id in self._request_map
         ]

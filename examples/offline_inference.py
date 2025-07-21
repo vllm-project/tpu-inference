@@ -15,13 +15,14 @@ def create_parser():
     # Add engine args
     EngineArgs.add_cli_args(parser)
     parser.set_defaults(model="meta-llama/Llama-3.2-1B-Instruct")
+    parser.set_defaults(max_model_len=1024)
+
     # Add sampling params
     sampling_group = parser.add_argument_group("Sampling parameters")
     sampling_group.add_argument("--max-tokens", type=int)
     sampling_group.add_argument("--temperature", type=float)
     sampling_group.add_argument("--top-p", type=float)
     sampling_group.add_argument("--top-k", type=int)
-
     return parser
 
 
@@ -112,11 +113,7 @@ if __name__ == "__main__":
         main(args)
     else:
         from unittest.mock import patch
+        from tpu_commons.core.core_tpu import DisaggEngineCoreProc
 
-        from tpu_commons.core.core_tpu import EngineCore as TPUEngineCore
-        from tpu_commons.core.core_tpu import \
-            EngineCoreProc as TPUEngineCoreProc
-        with patch('vllm.v1.engine.core.EngineCore', TPUEngineCore):
-            with patch('vllm.v1.engine.core.EngineCoreProc',
-                       TPUEngineCoreProc):
-                main(args)
+        with patch("vllm.v1.engine.core.EngineCoreProc", DisaggEngineCoreProc):
+            main(args)

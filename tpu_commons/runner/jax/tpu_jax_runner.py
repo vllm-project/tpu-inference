@@ -31,11 +31,10 @@ from tpu_commons.models.jax.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
                                                     InputBatch)
-from tpu_commons.runner.tpu_torch_xla_runner import (_get_padded_token_len,
-                                                     _get_req_paddings,
-                                                     _get_token_paddings)
 from tpu_commons.runner.utils import (ForbidCompile, LatencyTracker,
-                                      get_padded_num_reqs_with_upper_limit)
+                                      get_padded_num_reqs_with_upper_limit,
+                                      get_padded_token_len, get_req_paddings,
+                                      get_token_paddings)
 
 logger = init_logger(__name__)
 
@@ -99,30 +98,23 @@ class TPUModelRunner():
         self.rng_key = jax.random.key(self.model_config.seed)
 
     def _init_mesh(self) -> None:
-        if os.getenv("NEW_MODEL_DESIGN", False):
-            try:
-                # TODO: Update override steps.
-                sharding_strategy = \
-                    self.vllm_config.additional_config["sharding"]["sharding_strategy"]
-            except KeyError:
-                logger.warning(
-                    f"No sharding strategy passed! Using default of full model parallelism={len(self.devices)}"
-                )
-                sharding_strategy = {"tensor_parallelism": len(self.devices)}
-            sharding = Sharding(strategy_dict=sharding_strategy,
-                                vllm_config=self.vllm_config,
-                                devices=self.devices)
-            self.mesh = sharding.mesh
-        else:
-            axis_names = ("data", "model")
-            # In case we are in disagg mode, the number of devices can exceed 8.
-            # TODO(fhzhang): fix this properly as we implement disagg serving.
-            if len(self.devices) > 8:
-                self.devices = self.devices[:8]
-            mesh_shape = (1, len(self.devices))
-            self.mesh = jax.make_mesh(mesh_shape,
-                                      axis_names,
-                                      devices=self.devices)
+        # In case we are in disagg mode, the number of devices can exceed 8.
+        # TODO(fhzhang): fix this properly as we implement disagg serving.
+        if len(self.devices) > 8:
+            self.devices = self.devices[:8]
+        try:
+            # TODO: Update override steps.
+            sharding_strategy = \
+                self.vllm_config.additional_config["sharding"]["sharding_strategy"]
+        except KeyError:
+            logger.warning(
+                f"No sharding strategy passed! Using default of full model parallelism={len(self.devices)}"
+            )
+            sharding_strategy = {"tensor_parallelism": len(self.devices)}
+        sharding = Sharding(strategy_dict=sharding_strategy,
+                            vllm_config=self.vllm_config,
+                            devices=self.devices)
+        self.mesh = sharding.mesh
         logger.warning(f"Init mesh | mesh={self.mesh}")
 
     def _init_inputs(self) -> None:
@@ -138,7 +130,7 @@ class TPUModelRunner():
         # to avoid dynamic shapes. Also, avoid suboptimal alignment.
         self.max_num_reqs = max(scheduler_config.max_num_seqs, MIN_NUM_SEQS)
         # [16, 32, 64, 128, 256, 512, 1024, 2048]
-        self.num_tokens_paddings = _get_token_paddings(
+        self.num_tokens_paddings = get_token_paddings(
             min_token_size=16,
             max_token_size=scheduler_config.max_num_batched_tokens,
             padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
@@ -169,7 +161,7 @@ class TPUModelRunner():
         # Used to initialize positions / context_lens / seq_lens
         # Keep in int64 to avoid overflow with long context
         self.arange_cpu = np.arange(self.max_num_tokens, dtype=np.int64)
-        self.num_reqs_paddings = _get_req_paddings(
+        self.num_reqs_paddings = get_req_paddings(
             min_req_size=MIN_NUM_SEQS, max_req_size=self.max_num_reqs)
 
         self.temperatures_cpu = np.zeros(self.max_num_tokens, dtype=np.float32)
@@ -181,7 +173,7 @@ class TPUModelRunner():
         return hidden_states[indices_do_sample]
 
     def load_model(self):
-        self.model_fn, self.compute_logits_fn = get_model(
+        self.model_fn, self.compute_logits_fn, self.state = get_model(
             self.vllm_config,
             self.rng_key,
             self.mesh,
@@ -295,7 +287,8 @@ class TPUModelRunner():
                 ),
             )
             start = time.perf_counter()
-            self.kv_caches, hidden_states = self.model_fn(*inputs[:3])
+            self.kv_caches, hidden_states = self.model_fn(
+                self.state, *inputs[:3])
             end = time.perf_counter()
             logger.info("Compilation finished in %.2f [secs].", end - start)
             hidden_states.block_until_ready()
@@ -321,7 +314,8 @@ class TPUModelRunner():
                                                       indices_do_sample)
                 result.block_until_ready()
                 end = time.perf_counter()
-                logger.info(f"  -- time: {end - start}s")
+                logger.info("Compilation finished in %.2f [secs].",
+                            end - start)
 
     def _precompile_compute_logits(self) -> None:
         logger.info("Compiling compute_logits with different input shapes.")
@@ -331,7 +325,7 @@ class TPUModelRunner():
             hidden_states = self._device_array(hidden_states)
             logger.info(f"Precompile compute_logits --> num_reqs={num_reqs}")
             start = time.perf_counter()
-            result = self.compute_logits_fn(hidden_states)
+            result = self.compute_logits_fn(self.state, hidden_states)
             result.block_until_ready()
             end = time.perf_counter()
             logger.info("Compilation finished in %.2f [secs].", end - start)
@@ -556,10 +550,10 @@ class TPUModelRunner():
         req_state = CachedRequestState(
             req_id=request.request_id,
             prompt_token_ids=request.prompt_token_ids,
-            output_token_ids=[],
+            output_token_ids=[request.all_token_ids[-1]],
             sampling_params=request.sampling_params,
             block_ids=tuple(block_ids),
-            num_computed_tokens=request.num_tokens,
+            num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
             mm_inputs=getattr(request, "mm_inputs", []),
             mm_hashes=[],
@@ -585,7 +579,8 @@ class TPUModelRunner():
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
             # Return empty ModelRunnerOutput if there's no work to do.
-            logger.warning(f"Nothing scheduled: {scheduler_output}!")
+            # TODO(fhzhang): We rely on empty cycles to remove requests in input batch. Fix it to reduce overhead.
+            logger.debug(f"Nothing scheduled: {scheduler_output}!")
             if len(scheduler_output.finished_req_ids) == 0:
                 raise Exception(
                     "Should not schedule a request that does nothing!")
@@ -593,10 +588,11 @@ class TPUModelRunner():
 
         inputs = self._prepare_inputs(scheduler_output)
         with self.maybe_forbid_compile:
-            self.kv_caches, hidden_states = self.model_fn(*inputs[:3])
+            self.kv_caches, hidden_states = self.model_fn(
+                self.state, *inputs[:3])
             hidden_states = self.select_hidden_states_fn(
                 hidden_states, inputs[4])
-            logits = self.compute_logits_fn(hidden_states)
+            logits = self.compute_logits_fn(self.state, hidden_states)
             next_tokens = sample(
                 self.rng_params_for_sampling,
                 self.mesh,
@@ -724,7 +720,7 @@ class TPUModelRunner():
             num_scheduled_tokens_per_req)
 
         # Do the padding and copy the tensors to the TPU.
-        padded_total_num_scheduled_tokens = _get_padded_token_len(
+        padded_total_num_scheduled_tokens = get_padded_token_len(
             self.num_tokens_paddings, total_num_scheduled_tokens)
         # Zero out to avoid spurious values from prev iteration (last cp chunk)
         self.input_ids_cpu[
@@ -915,22 +911,24 @@ class TPUModelRunner():
             req_ids_to_add.append(req_id)
 
         # Update the states of the running/resumed requests.
-        for req_data in scheduler_output.scheduled_cached_reqs:
-            req_id = req_data.req_id
+        req_data = scheduler_output.scheduled_cached_reqs
+        for i, req_id in enumerate(req_data.req_ids):
             req_state = self.requests[req_id]
+            num_computed_tokens = req_data.num_computed_tokens[i]
+            new_block_ids = req_data.new_block_ids[i]
+            resumed_from_preemption = req_data.resumed_from_preemption[i]
 
             # Update the cached states.
-            req_state.num_computed_tokens = req_data.num_computed_tokens
-            if not req_data.resumed_from_preemption:
+            req_state.num_computed_tokens = num_computed_tokens
+            if not resumed_from_preemption:
                 # Append the new blocks to the existing block IDs.
-                for block_ids, new_block_ids in zip(req_state.block_ids,
-                                                    req_data.new_block_ids,
-                                                    strict=True):
-                    block_ids.extend(new_block_ids)
+                for block_ids, new_ids in zip(req_state.block_ids,
+                                              new_block_ids):
+                    block_ids.extend(new_ids)
             else:
                 # The request is resumed from preemption.
                 # Replace the existing block IDs with the new ones.
-                req_state.block_ids = req_data.new_block_ids
+                req_state.block_ids = new_block_ids
 
             req_index = self.input_batch.req_id_to_index.get(req_id)
             if req_index is None:
@@ -942,9 +940,8 @@ class TPUModelRunner():
 
             # Update the persistent batch.
             self.input_batch.num_computed_tokens_cpu[req_index] = (
-                req_data.num_computed_tokens)
-            self.input_batch.block_table.append_row(req_data.new_block_ids,
-                                                    req_index)
+                num_computed_tokens)
+            self.input_batch.block_table.append_row(new_block_ids, req_index)
 
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.

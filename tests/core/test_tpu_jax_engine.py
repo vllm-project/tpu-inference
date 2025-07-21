@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for JaxEngine._schedule_prefill."""
+"""Tests for JaxEngine."""
 import unittest
 from unittest.mock import Mock
 
@@ -8,7 +8,7 @@ from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.sampling_params import SamplingParams
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec)
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 
 from tpu_commons.core.tpu_jax_engine import JaxEngine
 
@@ -104,7 +104,7 @@ class JaxEngineTest(unittest.TestCase):
         output = engine._schedule_prefill()
 
         assert len(output.scheduled_new_reqs) == 2
-        assert not output.scheduled_cached_reqs
+        assert output.scheduled_cached_reqs.num_reqs == 0
         assert output.total_num_scheduled_tokens == 80
 
         assert output.num_scheduled_tokens[requests[0].request_id] == 40
@@ -125,7 +125,7 @@ class JaxEngineTest(unittest.TestCase):
 
         # The first request is fully scheduled, the second is partially scheduled.
         assert len(output.scheduled_new_reqs) == 2
-        assert not output.scheduled_cached_reqs
+        assert output.scheduled_cached_reqs.num_reqs == 0
         assert output.total_num_scheduled_tokens == 50
 
         assert output.num_scheduled_tokens[requests[0].request_id] == 40
@@ -146,7 +146,7 @@ class JaxEngineTest(unittest.TestCase):
         output1 = engine._schedule_prefill()
 
         assert len(output1.scheduled_new_reqs) == 1
-        assert not output1.scheduled_cached_reqs
+        assert output1.scheduled_cached_reqs.num_reqs == 0
         assert output1.total_num_scheduled_tokens == 50
         assert output1.num_scheduled_tokens[req.request_id] == 50
 
@@ -159,13 +159,12 @@ class JaxEngineTest(unittest.TestCase):
         output2 = engine._schedule_prefill()
 
         assert not output2.scheduled_new_reqs
-        assert len(output2.scheduled_cached_reqs) == 1
+        assert output2.scheduled_cached_reqs.num_reqs == 1
         assert output2.total_num_scheduled_tokens == 30  # 80 - 50
         assert output2.num_scheduled_tokens[req.request_id] == 30
 
-        cached_req_data = output2.scheduled_cached_reqs[0]
-        assert cached_req_data.req_id == req.request_id
-        assert len(cached_req_data.new_token_ids) == 30
+        assert output2.scheduled_cached_reqs.req_ids[0] == req.request_id
+        assert len(output2.scheduled_cached_reqs.new_token_ids[0]) == 30
 
     def test_jax_engine_schedule_mixed_requests(self):
         """Tests scheduling a mix of running and new requests."""
@@ -190,9 +189,9 @@ class JaxEngineTest(unittest.TestCase):
         output2 = engine._schedule_prefill()
 
         # The running request's next chunk should be scheduled first
-        assert len(output2.scheduled_cached_reqs) == 1
-        assert output2.scheduled_cached_reqs[
-            0].req_id == running_req.request_id
+        assert output2.scheduled_cached_reqs.num_reqs == 1
+        assert output2.scheduled_cached_reqs.req_ids[
+            0] == running_req.request_id
         assert output2.num_scheduled_tokens[running_req.request_id] == 30
 
         # Then the new request should be scheduled
@@ -201,6 +200,183 @@ class JaxEngineTest(unittest.TestCase):
         assert output2.num_scheduled_tokens[new_req.request_id] == 40
 
         assert output2.total_num_scheduled_tokens == 70  # 30 + 40
+
+    def test_has_more_capacity_true(self):
+        """Tests has_more_capacity when there is room for more requests."""
+        engine = self.create_test_jax_engine(max_num_seqs=8,
+                                             max_num_batched_tokens=1024)
+        engine.model_runner.max_num_reqs = 8
+        engine.model_runner.input_batch.num_reqs = 4
+
+        engine._pending_num_prefill_tokens = 512
+        engine._requests = [Mock()] * 2
+        engine._new_requests = [Mock()] * 2
+
+        self.assertTrue(engine.has_more_capacity())
+
+    def test_has_more_capacity_token_limit_reached(self):
+        """Tests has_more_capacity when the token limit is reached."""
+        engine = self.create_test_jax_engine(max_num_seqs=8,
+                                             max_num_batched_tokens=1024)
+        engine.model_runner.max_num_reqs = 8
+        engine.model_runner.input_batch.num_reqs = 4
+
+        # Token limit reached
+        engine._pending_num_prefill_tokens = 1024
+        engine._requests = [Mock()] * 2
+        engine._new_requests = [Mock()] * 2
+        self.assertFalse(engine.has_more_capacity())
+
+        # Token limit exceeded
+        engine._pending_num_prefill_tokens = 1025
+        self.assertFalse(engine.has_more_capacity())
+
+    def test_has_more_capacity_seq_limit_reached(self):
+        """Tests has_more_capacity when the sequence limit is reached."""
+        engine = self.create_test_jax_engine(max_num_seqs=8,
+                                             max_num_batched_tokens=1024)
+        engine.model_runner.max_num_reqs = 8
+        engine.model_runner.input_batch.num_reqs = 4
+
+        engine._pending_num_prefill_tokens = 512
+        # Sequence limit reached
+        engine._requests = [Mock()] * 4
+        engine._new_requests = [Mock()] * 4
+        self.assertFalse(engine.has_more_capacity())
+
+        # Sequence limit exceeded
+        engine._requests = [Mock()] * 5
+        engine._new_requests = [Mock()] * 4
+        self.assertFalse(engine.has_more_capacity())
+
+    def test_has_more_capacity_model_runner_limit_reached(self):
+        """Tests has_more_capacity when model runner's request limit is reached."""
+        engine = self.create_test_jax_engine(max_num_seqs=8,
+                                             max_num_batched_tokens=1024)
+        engine.model_runner.max_num_reqs = 8
+        # Model runner limit reached
+        engine.model_runner.input_batch.num_reqs = 8
+
+        engine._pending_num_prefill_tokens = 512
+        engine._requests = [Mock()] * 2
+        engine._new_requests = [Mock()] * 2
+        self.assertFalse(engine.has_more_capacity())
+
+        # Model runner limit exceeded
+        engine.model_runner.input_batch.num_reqs = 9
+        self.assertFalse(engine.has_more_capacity())
+
+    def test_has_more_capacity_at_limits(self):
+        """Tests has_more_capacity at the boundary of the limits."""
+        engine = self.create_test_jax_engine(max_num_seqs=8,
+                                             max_num_batched_tokens=1024)
+        engine.model_runner.max_num_reqs = 8
+
+        # Just under the limits
+        engine._pending_num_prefill_tokens = 1023
+        engine._requests = [Mock()] * 3
+        engine._new_requests = [Mock()] * 4  # Total 7 < 8
+        engine.model_runner.input_batch.num_reqs = 7
+        self.assertTrue(engine.has_more_capacity())
+
+    def test_prefill(self):
+        """Tests the prefill method with a mocked model runner."""
+        engine = self.create_test_jax_engine()
+        requests = self.create_requests(num_requests=2, num_tokens=10)
+
+        for req in requests:
+            engine.add_request(req, req.num_tokens)
+
+        # Mock the model runner's _execute_model method
+        mock_runner_output = Mock()
+        mock_runner_output.req_ids = [req.request_id for req in requests]
+        mock_runner_output.req_id_to_index = {
+            req.request_id: i
+            for i, req in enumerate(requests)
+        }
+        mock_runner_output.sampled_token_ids = [[100]] * len(requests)
+        engine.model_runner._execute_model.return_value = (None,
+                                                           mock_runner_output)
+
+        for req in requests:
+            self.assertIn(req.request_id, engine._request_map)
+
+        kv_cache_map, runner_output = engine.prefill()
+
+        # Assert that the model runner's execute method was called
+        engine.model_runner._execute_model.assert_called_once()
+
+        # Check the number of scheduled tokens is correctly updated.
+        # By default all prompt tokens are scheduled
+        self.assertEqual(engine._pending_num_prefill_tokens, 2 * 10 - 2 * 10)
+
+        # Verify results for each request
+        for req in requests:
+            self.assertNotIn(req.request_id, engine._request_map)
+            self.assertIn(req.request_id, engine._completed_requests)
+            # We generate the first token in prefill, hence 11 here.
+            self.assertEqual(req.num_computed_tokens, 11)
+            self.assertEqual(req.num_cached_tokens, 11)
+            self.assertEqual(req.status.value, RequestStatus.RUNNING)
+
+        # Check the model runner output
+        self.assertEqual(runner_output.req_ids,
+                         [req.request_id for req in requests])
+        self.assertEqual(runner_output.req_id_to_index, {
+            req.request_id: i
+            for i, req in enumerate(requests)
+        })
+        self.assertEqual(runner_output.sampled_token_ids,
+                         [[100]] * len(requests))
+        self.assertEqual(len(kv_cache_map), 2)
+
+    def test_generate(self):
+        """Tests the generate method with a mocked model runner."""
+        engine = self.create_test_jax_engine()
+        requests = self.create_requests(num_requests=2, num_tokens=10)
+        # Add requests to the engine
+        for req in requests:
+            engine.add_request(req, 1)
+
+        # Mock the model runner's _execute_model method for generation
+        mock_runner_output = Mock()
+        mock_runner_output.req_ids = [req.request_id for req in requests]
+        mock_runner_output.req_id_to_index = {
+            req.request_id: i
+            for i, req in enumerate(requests)
+        }
+        mock_runner_output.sampled_token_ids = [[200]] * len(requests)
+        engine.model_runner._execute_model.return_value = (None,
+                                                           mock_runner_output)
+
+        # Perform generation
+        runner_output = engine.generate()
+
+        # Assert that the model runner's execute method was called
+        engine.model_runner._execute_model.assert_called_once()
+
+        # Verify results for each request
+        for req in requests:
+            self.assertIn(req.request_id, engine._request_map)
+            self.assertEqual(req.num_computed_tokens, 1)
+            self.assertEqual(req.num_cached_tokens, 1)
+            self.assertEqual(req.status.value, RequestStatus.RUNNING)
+
+        # Check the model runner output
+        self.assertEqual(runner_output.req_ids,
+                         [req.request_id for req in requests])
+        self.assertEqual(runner_output.req_id_to_index, {
+            req.request_id: i
+            for i, req in enumerate(requests)
+        })
+        self.assertEqual(runner_output.sampled_token_ids,
+                         [[200]] * len(requests))
+
+        # Test with empty output
+        engine.model_runner._execute_model.return_value = (None,
+                                                           Mock(req_ids=[]))
+        with self.assertRaises(RuntimeError):
+            engine.generate()
 
 
 if __name__ == '__main__':

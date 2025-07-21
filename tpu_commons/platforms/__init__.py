@@ -5,20 +5,20 @@ import os
 __all__ = ["get_tpu_platform_cls"]
 
 
-def get_tpu_platform_cls(backend_type="pytorch_xla"):
+def get_tpu_platform_cls(backend_type="jax"):
     """Get the appropriate TPU worker implementation."""
-    if backend_type == "pytorch_xla" or backend_type == "torchax":
-        from tpu_commons.platforms.tpu_torch_xla import TpuPlatform
-        return TpuPlatform
-    elif backend_type == "jax":
+    if backend_type == "jax":
         from tpu_commons.platforms.tpu_jax import TpuPlatform
+        return TpuPlatform
+    elif backend_type == "torchax":
+        from tpu_commons.platforms.tpu_torchax import TpuPlatform
         return TpuPlatform
     else:
         raise ValueError(f"Unknown TPU backend type: {backend_type}")
 
 
 # For convenience, also export the default worker
-TPU_BACKEND_TYPE = os.environ.get("TPU_BACKEND_TYPE", "pytorch_xla").lower()
+TPU_BACKEND_TYPE = os.environ.get("TPU_BACKEND_TYPE", "jax").lower()
 try:
     TpuPlatform = get_tpu_platform_cls(TPU_BACKEND_TYPE)
     __all__.append("TpuPlatform")

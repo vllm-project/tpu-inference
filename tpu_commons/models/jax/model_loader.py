@@ -18,7 +18,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     # would cause JAX init failure when using multi hosts with Ray.
     _MODEL_REGISTRY = {}
 
-    from tpu_commons.models.jax.llama import LlamaForCausalLM
+    from tpu_commons.models.jax.recipes.llama3 import LlamaForCausalLM
     from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
     _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
     _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
@@ -38,17 +38,6 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     raise ValueError(
         f"Model architectures {architectures} are not supported for now. "
         f"Supported architectures: {list(_MODEL_REGISTRY.keys())}")
-
-
-def _get_common_model(
-    model_class: Any,
-    vllm_config: VllmConfig,
-    rng: jax.Array,
-    mesh: Mesh,
-) -> nnx.Module:
-    model = model_class(vllm_config, rng, mesh)
-    model.load_weights(model)
-    return model
 
 
 def _get_nnx_model(
@@ -104,11 +93,7 @@ def get_flax_model(
     mesh: Mesh,
 ) -> nnx.Module:
     model_class = _get_model_architecture(vllm_config.model_config.hf_config)
-    if os.getenv("NEW_MODEL_DESIGN", False):
-        jit_model = _get_common_model(model_class, vllm_config, rng, mesh)
-    else:
-        jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh)
-
+    jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh)
     kv_cache_sharding = NamedSharding(mesh, PartitionSpec(None, None, "model"))
     hidden_states_sharding = NamedSharding(mesh, PartitionSpec(None,
                                                                None))  # (T, D)
@@ -139,9 +124,9 @@ def get_flax_model(
         model = nnx.merge(graphdef, state)
         return model.compute_logits(*args)
 
-    model_fn = functools.partial(run_model, graphdef, state)
-    compute_logits_fn = functools.partial(run_compute_logits, graphdef, state)
-    return model_fn, compute_logits_fn
+    model_fn = functools.partial(run_model, graphdef)
+    compute_logits_fn = functools.partial(run_compute_logits, graphdef)
+    return model_fn, compute_logits_fn, state
 
 
 def get_vllm_model(
@@ -159,10 +144,8 @@ def get_vllm_model(
     params = model.load_weights()
 
     jit_model = model.jit_step_func()
-    model_fn = functools.partial(jit_model, params)
-    compute_logits_fn = functools.partial(model.jit_compute_logits_func(),
-                                          params)
-    return model_fn, compute_logits_fn
+    compute_logits_fn = model.jit_compute_logits_func()
+    return jit_model, compute_logits_fn, params
 
 
 def get_model(

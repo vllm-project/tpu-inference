@@ -88,10 +88,10 @@ class DeepSeekV3Router(nnx.Module):
         """Get the topk indices of the scores.
 
         Args:
-            scores: The scores to get the topk indices of. Shape (batch_size, sequence_length, num_experts).
+            scores: The scores to get the topk indices of. Shape (sequence, num_experts).
 
         Returns:
-            The topk indices of the scores. Shape (batch_size, sequence_length, num_experts_per_tok).
+            The topk indices of the scores. Shape (sequence, num_experts_per_tok).
         """
 
         scores = scores + self.bias_E
@@ -116,30 +116,30 @@ class DeepSeekV3Router(nnx.Module):
         """Routes tokens to top k experts.
 
         Args:
-            x: Input array of shape (batch_size, sequence_length, d_model).
+            x: Input array of shape (sequence, d_model).
             op_mode: The operation mode ('prefill' or 'generate') to determine sharding.
 
         Returns:
             A tuple containing:
-                - weights: Normalized weights for selected experts, shape (batch_size, sequence_length, num_experts_per_tok).
-                - indices: Indices of selected experts, shape (batch_size, sequence_length, num_experts_per_tok).
+                - weights: Normalized weights for selected experts, shape (sequence, num_experts_per_tok).
+                - indices: Indices of selected experts, shape (sequence, num_experts_per_tok).
         """
         x = jnp.asarray(x, self.dtype)
-        x = nnx.with_sharding_constraint(x, self.activation_ffw_btd[op_mode])
+        x_td = nnx.with_sharding_constraint(x, self.activation_ffw_td[op_mode])
 
-        scores = jnp.einsum("BTD,DE -> BTE", x, self.kernel_DE.value)
-        scores = nnx.sigmoid(scores)
+        scores_te = jnp.einsum("TD,DE -> TE", x_td, self.kernel_DE.value)
+        scores_te = nnx.sigmoid(scores_te)
 
-        original_scores = scores
-        topk_indices = self.get_topk_indices(scores)
-        weights = jnp.take_along_axis(original_scores, topk_indices, axis=-1)
+        original_scores = scores_te
+        topk_indices_tk = self.get_topk_indices(scores_te)
+        weights_tk = jnp.take_along_axis(original_scores, topk_indices_tk, axis=-1)
 
         if self.norm_topk_prob:
-            weights /= jnp.sum(weights, axis=-1)[..., None] + 1e-20
+            weights_tk /= jnp.sum(weights_tk, axis=-1)[..., None] + 1e-20
 
-        weights *= self.routed_scaling_factor
+        weights_tk *= self.routed_scaling_factor
 
-        return weights, topk_indices
+        return weights_tk, topk_indices_tk
 
     def generate_kernel(self, rngs: nnx.Rngs):
         """Generates the router kernel (weights and bias) for routing."""
@@ -158,7 +158,7 @@ class DeepSeekV3Router(nnx.Module):
     def create_sharding(self):
         """Creates sharding configurations for activations and kernel."""
         mode_dependent_attrs = [
-            "activation_ffw_btd",
+            "activation_ffw_td",
         ]
         for attr_name in mode_dependent_attrs:
             prefill_sharding_config = getattr(
