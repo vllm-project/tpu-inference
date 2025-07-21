@@ -103,7 +103,7 @@ class Llama4ModelConfig(ModelConfig):
                               dtype=self.dtype,
                               num_local_experts=self.num_local_experts,
                               hidden_act=self.hidden_act,
-                              apply_expert_weight_before_computation=False,
+                              apply_expert_weight_before_computation=True,
                               router=RouterConfig(
                                   hidden_size=self.hidden_size,
                                   num_local_experts=self.num_local_experts,
@@ -190,9 +190,12 @@ class Llama4Scout(Model):
                 i + 1) % self.cfg.model.no_rope_layer_interval != 0
             block_type = "moe" if is_moe_layer else "dense"
             block_cfg_nope = self.cfg.model.layers
-            block_cfg_rope = replace(self.cfg.model.layers)
             # RoPE layers do not use chunked attention
-            block_cfg_rope.attention.attention_chunk_size = None
+            block_cfg_rope = replace(
+                self.cfg.model.layers,
+                attention=replace(self.cfg.model.layers.attention,
+                                  attention_chunk_size=None),
+            )
             block_cfg = block_cfg_rope if use_attention_rope else block_cfg_nope
             block = SharedExpertsTransformerBlock(
                 cfg=block_cfg,
@@ -421,8 +424,8 @@ class Llama4WeightLoader(WeightLoader):
                     up_model_weight.value.block_until_ready()
                     del up_w
                     print_param_info(up_model_weight, "up_proj")
-                    cumulative_global_memory += gate_model_weight.value.nbytes / 1e9
-                    cumulative_local_memory += gate_model_weight.value.addressable_shards[
+                    cumulative_global_memory += up_model_weight.value.nbytes / 1e9
+                    cumulative_local_memory += up_model_weight.value.addressable_shards[
                         0].data.nbytes / 1e9
                     logger.info(
                         f"{up_loaded_name}: {loaded_weight.shape}  -->  {up_mapped_name}: {up_model_weight.value.shape}"
