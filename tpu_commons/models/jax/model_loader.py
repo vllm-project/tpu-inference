@@ -18,17 +18,10 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     # would cause JAX init failure when using multi hosts with Ray.
     _MODEL_REGISTRY = {}
 
-    from tpu_commons.models.jax.llama import LlamaForCausalLM
+    from tpu_commons.models.jax.recipes.llama3 import LlamaForCausalLM
     from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
     _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
     _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
-
-    if os.getenv("NEW_MODEL_DESIGN", False):
-        from tpu_commons.models.jax.recipes.llama3 import Llama3
-
-        # from tpu_commons.models.jax.recipes.llama4 import Llama4Scout
-        _MODEL_REGISTRY["Llama3"] = Llama3
-        # _MODEL_REGISTRY["Llama4Scout"] = Llama4Scout
 
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
@@ -37,17 +30,6 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     raise ValueError(
         f"Model architectures {architectures} are not supported for now. "
         f"Supported architectures: {list(_MODEL_REGISTRY.keys())}")
-
-
-def _get_common_model(
-    model_class: Any,
-    vllm_config: VllmConfig,
-    rng: jax.Array,
-    mesh: Mesh,
-) -> nnx.Module:
-    model = model_class(vllm_config, rng, mesh)
-    model.load_weights(model)
-    return model
 
 
 def _get_nnx_model(
@@ -103,11 +85,7 @@ def get_flax_model(
     mesh: Mesh,
 ) -> nnx.Module:
     model_class = _get_model_architecture(vllm_config.model_config.hf_config)
-    if os.getenv("NEW_MODEL_DESIGN", False):
-        jit_model = _get_common_model(model_class, vllm_config, rng, mesh)
-    else:
-        jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh)
-
+    jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh)
     kv_cache_sharding = NamedSharding(mesh, PartitionSpec(None, None, "model"))
     hidden_states_sharding = NamedSharding(mesh, PartitionSpec(None,
                                                                None))  # (T, D)
