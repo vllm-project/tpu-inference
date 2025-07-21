@@ -2,8 +2,9 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from tpu_commons.core.disagg_executor import DisaggExecutor
 from vllm.config import VllmConfig
+
+from tpu_commons.core.disagg_executor import DisaggExecutor
 
 
 class DisaggExecutorTest(unittest.TestCase):
@@ -23,19 +24,18 @@ class DisaggExecutorTest(unittest.TestCase):
         self.mock_vllm_config.prompt_adapter_config = None
         self.mock_vllm_config.observability_config = MagicMock()
 
-        # Create a DisaggExecutor instance with the mock config
-        self.executor = DisaggExecutor(vllm_config=self.mock_vllm_config)
-
         # Patch the collective_rpc method to avoid actual RPC calls
         self.patcher = patch(
             "tpu_commons.core.disagg_executor.DisaggExecutor.collective_rpc")
         self.mock_collective_rpc = self.patcher.start()
         self.addCleanup(self.patcher.stop)
 
+        # Create a DisaggExecutor instance with the mock config
+        self.executor = DisaggExecutor(vllm_config=self.mock_vllm_config)
+
     def test_init_with_devices(self):
         """Test init_with_devices."""
-        mock_devices = [MagicMock()] * 4
-        self.executor.init_with_devices(mock_devices)
+        self.executor._init_executor()
 
         # Check that collective_rpc was called with the expected arguments
         self.mock_collective_rpc.assert_called()
