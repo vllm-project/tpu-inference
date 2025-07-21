@@ -50,6 +50,7 @@ class TransformerBlock(nnx.Module):
     mesh: Mesh
     sharding_cfg: ShardingConfig
     attention_type: str = "default"
+    use_attention_rope: bool = True
     quant: Any | None = None
 
     def _create_module(self, module_cls: Type[nnx.Module], cfg: Any,
@@ -99,16 +100,19 @@ class TransformerBlock(nnx.Module):
             dtype=self.cfg.dense_ffw.dtype,
         )
 
-    def __call__(
-            self, x: jax.Array, is_prefill: bool, kv_cache: KVCache,
-            attention_metadata: AttentionMetadata
-    ) -> Tuple[KVCache, jax.Array]:
+    def __call__(self,
+                 x: jax.Array,
+                 is_prefill: bool,
+                 kv_cache: KVCache,
+                 attention_metadata: AttentionMetadata,
+                 use_attention_rope: bool = True) -> Tuple[KVCache, jax.Array]:
         op_mode = "prefill" if is_prefill else "generate"
         # Attn Block
         attn_residual = x
         x = self.pre_attention_norm(x)
         new_cache, attn_output = self.attn(x, is_prefill, kv_cache,
-                                           attention_metadata)
+                                           attention_metadata,
+                                           use_attention_rope)
         attn_output += attn_residual
 
         # FFW Block
@@ -167,13 +171,19 @@ class SharedExpertsTransformerBlock(TransformerBlock):
         self.shared_experts = self._create_module(DenseFFW,
                                                   cfg=shared_experts_cfg)
 
-    def __call__(self, x, is_prefill, kv_cache, attention_metadata):
+    def __call__(self,
+                 x,
+                 is_prefill,
+                 kv_cache,
+                 attention_metadata,
+                 use_attention_rope=True):
         op_mode = "prefill" if is_prefill else "generate"
         # Attn Block
         attn_residual = x
         x = self.pre_attention_norm(x)
         new_cache, attn_output = self.attn(x, is_prefill, kv_cache,
-                                           attention_metadata)
+                                           attention_metadata,
+                                           use_attention_rope)
         attn_output += attn_residual
 
         # FFW Block

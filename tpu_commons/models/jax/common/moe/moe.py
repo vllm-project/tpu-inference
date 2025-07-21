@@ -24,7 +24,8 @@ RouterConfig = make_dataclass(
      (HuggingFaceArgNames.NUM_EXPERTS_PER_TOKEN.value, int),
      ("router_type", RouterType), ("expert_capacity", int),
      ("dtype", DTypeLike),
-     ("vllm_config", VllmConfig, field(repr=False, default=None))],
+     ("vllm_config", VllmConfig, field(repr=False, default=None)),
+     ("router_act", str, "softmax")],
     bases=(Config, ))
 RouterConfig.__doc__ = f"""Configuration for the Router module.
 
@@ -33,6 +34,7 @@ RouterConfig.__doc__ = f"""Configuration for the Router module.
         {HuggingFaceArgNames.NUM_LOCAL_EXPERTS.value}: The total number of experts.
         {HuggingFaceArgNames.NUM_EXPERTS_PER_TOKEN.value}: The number of experts each token is routed to.
          router_type: The type of router to use (e.g., 'top_k').
+         router_act: The activation function to use for normalizing router scores.
          expert_capacity: The maximum number of tokens an expert can process. Defaults to -1 (no capacity limit).
         dtype: The data type to use for computations.
         vllm_config: The VLLM config containing any overrides to apply."""
@@ -75,6 +77,7 @@ class Router(nnx.Module):
         """
         x = jnp.asarray(x, self.cfg.dtype)
         x_TD = nnx.with_sharding_constraint(x, self.activation_ffw_td[op_mode])
+        router_act = modeling_flax_utils.ACT2FN[self.cfg.router_act]
         num_experts_per_tok = getattr(
             self.cfg, HuggingFaceArgNames.NUM_EXPERTS_PER_TOKEN.value)
         router_logits_TE = jnp.einsum('TD,DE -> TE', x_TD,
@@ -84,8 +87,13 @@ class Router(nnx.Module):
                                           axis=-1)
         weights_TX, selected_experts_TX = jax.lax.top_k(
             activated_gating_TF, num_experts_per_tok)
-        normalized_weights_TX = nnx.softmax(weights_TX.astype(self.cfg.dtype),
-                                            axis=-1)
+        if self.cfg.router_act != "sigmoid":
+            normalized_weights_TX = router_act(weights_TX.astype(
+                self.cfg.dtype),
+                                               axis=-1)
+        else:
+            normalized_weights_TX = router_act(
+                weights_TX.astype(self.cfg.dtype))
         return normalized_weights_TX, selected_experts_TX
 
     def generate_kernel(self, rngs: nnx.Rngs):
