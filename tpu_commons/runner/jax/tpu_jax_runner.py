@@ -10,23 +10,11 @@ import jax
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
-import vllm.envs as envs
 from flax import nnx
 from jax.sharding import NamedSharding, PartitionSpec
-from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer import (get_kv_transfer_group,
-                                          has_kv_transfer_group)
-from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
-from vllm.sequence import IntermediateTensors
-from vllm.tasks import SupportedTask
-from vllm.utils import cdiv
-from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheSpec)
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
-from vllm.v1.request import Request
 
-from tpu_commons import utils as common_utils
+import vllm.envs as envs
+from tpu_commons import utils_jax as utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.common.sharding import Sharding
@@ -41,6 +29,18 @@ from tpu_commons.models.jax.utils.weight_utils import \
 from tpu_commons.runner import utils as runner_utils
 from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
                                                     InputBatch)
+from tpu_commons.runner.utils import (ForbidCompile, LatencyTracker,
+                                      get_padded_num_reqs_with_upper_limit,
+                                      get_padded_token_len, get_req_paddings,
+                                      get_token_paddings)
+from vllm.config import VllmConfig
+from vllm.sequence import IntermediateTensors
+from vllm.utils import cdiv
+from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
+                                        KVCacheSpec)
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
+from vllm.v1.request import Request
 
 logger = init_logger(__name__)
 

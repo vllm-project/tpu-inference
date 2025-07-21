@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 import os
+from collections import defaultdict
 from typing import Any, List, Tuple
 
-from tpu_commons.core import PATHWAYS_ENABLED
+import jax
+
 from tpu_commons.logger import init_logger
+from vllm import envs
 
 GBYTES = 1024 * 1024 * 1024
 
@@ -31,6 +34,9 @@ def get_num_kv_heads_by_tp(num_kv_heads: int, tp_size: int) -> int:
 
 def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
     usage = []
+    if envs.VLLM_TPU_USING_PATHWAYS:
+        return pathways_hbm_usage_gb(devices)
+
     multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "").lower()
     if multihost_backend == "ray":
         # MemoryStats is only supported for addressable PjRt devices.
@@ -43,16 +49,15 @@ def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
                 logger.info(
                     "Get memory stats for device %s. Assuming all devices have the same usage.",
                     device)
+                logger.info(
+                    "Get memory stats for device %s. Assuming all devices have the same usage.",
+                    device)
                 usage.extend([(hbm_used, hbm_limit)] * len(devices))
                 break
             except Exception as e:
                 logger.warning(
                     "Failed to get memory stats for device %s: %s. ", device,
                     e)
-    elif PATHWAYS_ENABLED:
-        # The Pathways backend doesn't support memory_stats().
-        # TODO(fhzhang): find the proper way to support this.
-        usage.extend([(32384, 33550237184)] * len(devices))
     else:
         for device in devices:
             hbm_used = device.memory_stats()["bytes_in_use"]
@@ -60,6 +65,21 @@ def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
             usage.append((hbm_used, hbm_limit))
 
     return usage
+
+
+def pathways_hbm_usage_gb(devices: Any) -> List[Tuple[float, float]]:
+    live_arrays = jax.live_arrays()
+    hbm_used = defaultdict(int)
+    # TODO(wenxindong): Find a way to get the accurate hbm limit on Pathways.
+    hbm_limit = 33550237184
+    for array in live_arrays:
+        assert hasattr(array, 'sharding') and hasattr(
+            array.sharding, 'device_set'
+        ), "This function must not be called within jax tracer (e.g. jit, vmap, grad)"
+        for device in array.sharding.device_set:
+            hbm_used[device] += array.dtype.itemsize * array.size // len(
+                array.sharding.device_set)
+    return [(hbm_used[device], hbm_limit) for device in devices]
 
 
 def hbm_usage_gb(devices: Any) -> List[Tuple[float, float]]:
