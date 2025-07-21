@@ -99,7 +99,7 @@ TPU_BACKEND_TYPE=torchax
 TPU_BACKEND_TYPE=pytorch_xla
 ```
 
-To switch different model implementations (default it flax_nnx):
+To switch different model implementations (default is flax_nnx):
 
 ```
 MODEL_IMPL_TYPE=flax_nnx
