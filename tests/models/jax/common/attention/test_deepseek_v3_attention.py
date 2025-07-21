@@ -29,6 +29,7 @@ class TestMLA(unittest.TestCase):
         self.param_factory = ParamFactory(
             kernel_initializer=nnx.initializers.xavier_normal(),
             scale_initializer=nnx.initializers.ones,
+            random_init=True,
         )
         self.sharding_cfg = ShardingConfig(
             default_rules_cls=DeepSeekV3ShardingRulesConfig,
