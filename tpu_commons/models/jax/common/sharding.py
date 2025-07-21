@@ -80,8 +80,12 @@ class ShardingRulesConfig:
     # K/V cache for generation: (NumKVHeads, Batch, Sequence, HeadDim)
     keyvalue_cache_lskh: tuple = (None, None, None)
 
-    # Activation for ffw input: (Batch, Sequence, Dim)
+    # Activation for ffw input: (Sequence, Dim)
     activation_ffw_td: tuple = (None, None)
+
+    # Activation for ffw input: (Sequence, Expert, Dim)
+    activation_ffw_ted: tuple = (None, None, None)
+
     # FFW hidden activation: (Batch, Sequence, FfwDim)
     ffw_hidden_tf: tuple = (None, None)
 
@@ -355,8 +359,10 @@ class Sharding:
                                             ATTN_TENSOR_AXIS_NAME)
         generate_rules.attn_o_weight_nhd = (ATTN_HEAD_AXIS_NAME, None,
                                             ATTN_TENSOR_AXIS_NAME)
-
-        generate_rules.activation_ffw_td = (DATA_AXIS_NAME, None)
+        generate_rules.activation_ffw_ted = (DATA_AXIS_NAME, EXPERT_AXIS_NAME,
+                                             MOE_TENSOR_AXIS_NAME)
+        generate_rules.activation_ffw_td = (DATA_AXIS_NAME,
+                                            MLP_TENSOR_AXIS_NAME)
         generate_rules.ffw_hidden_tf = (DATA_AXIS_NAME, MLP_TENSOR_AXIS_NAME)
         # FFW weights are typically sharded along the hidden dimension (F).
         generate_rules.ffw_weight_df = (None, MLP_TENSOR_AXIS_NAME)

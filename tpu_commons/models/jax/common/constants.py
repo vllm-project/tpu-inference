@@ -48,7 +48,7 @@ class HuggingFaceArgNames(enum.Enum):
     HEAD_DIM: str = "head_dim"
     NUM_ATTENTION_HEADS: str = "num_attention_heads"
     NUM_KEY_VALUE_HEADS: str = "num_key_value_heads"
-    ATTENION_DROPOUT: str = "attention_dropout"
+    ATTENTION_DROPOUT: str = "attention_dropout"
     ATTENTION_BIAS: str = "attention_bias"
     ATTENTION_CHUNK_SIZE: str = "attention_chunk_size"
 

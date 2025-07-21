@@ -82,11 +82,13 @@ class Router(nnx.Module):
             self.cfg, HuggingFaceArgNames.NUM_EXPERTS_PER_TOKEN.value)
         router_logits_TE = jnp.einsum('TD,DE -> TE', x_TD,
                                       self.kernel_DE.value)
-        activated_gating_TF = nnx.softmax(router_logits_TE.astype(
-            self.cfg.dtype),
-                                          axis=-1)
+        # TODO: Why do we need this?
+        # activated_gating_TF = nnx.softmax(router_logits_TE.astype(jnp.float32),
+        #                                   axis=-1)
         weights_TX, selected_experts_TX = jax.lax.top_k(
-            activated_gating_TF, num_experts_per_tok)
+            # activated_gating_TF, num_experts_per_tok)
+            router_logits_TE,
+            num_experts_per_tok)
         if self.cfg.router_act != "sigmoid":
             normalized_weights_TX = router_act(weights_TX.astype(
                 self.cfg.dtype),
@@ -199,16 +201,19 @@ class MoE(nnx.Module):
         one_hot_indices_TXE = jax.nn.one_hot(indices_TX,
                                              num_classes=num_experts,
                                              dtype=self.cfg.dtype)
-        full_weights_TE = jnp.sum(one_hot_indices_TXE * weights_TX[..., None],
-                                  axis=2)
+        full_weights_TE = jnp.sum(
+            one_hot_indices_TXE * weights_TX[..., None],
+            axis=1)  # TODO: Confirm that this should be axis=1.
 
         if self.cfg.apply_expert_weight_before_computation:
             with jax.named_scope("pre_computing_weight"):
                 # need optimization for the out-product
-                weighted_x_TXD = jnp.einsum('TD,TX->TXD', x_TD, weights_TX)
+
+                x_TED = jnp.tile(x_TD[:, None, :], (1, num_experts, 1))
+                full_weights_TED = full_weights_TE[..., None]
             # TODO: need fix the mod_fwd call for pre_weighting
-            return self._moe_fwd(weighted_x_TXD,
-                                 jnp.ones_like(full_weights_TE), op_mode)
+            return self._moe_fwd_reapply_expert_weight(x_TED, full_weights_TED,
+                                                       op_mode)
         else:
             return self._moe_fwd(x_TD, full_weights_TE, op_mode)
 
@@ -241,6 +246,39 @@ class MoE(nnx.Module):
             shape=shape_down,
             dtype=self.cfg.dtype,
             sharding=self.efd_sharding)
+
+    def _moe_fwd_reapply_expert_weight(self, x_TED: jax.Array, weights_TED,
+                                       op_mode):
+        """Performs the forward pass of the MoE experts with expert weights pre-applied.
+
+        Args:
+            x_TED: Input array for the experts, shape (sequence_length, num_experts, d_model).
+            weights_TED: Expert weights, shape (sequence_length, num_experts).
+            op_mode: The operation mode ('prefill' or 'generate') to determine sharding.
+
+        Returns:
+            Output array of shape (batch_size, sequence_length, d_model).
+        """
+        x_TED = jnp.asarray(x_TED, self.cfg.dtype)
+        with jax.named_scope("activation_expert_weighting"):
+            x_TED = x_TED * weights_TED
+        x_TED = nnx.with_sharding_constraint(x_TED,
+                                             self.activation_ffw_ted[op_mode])
+        act = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_ACT.value)
+        with jax.named_scope("gating"):
+            gating_TEF = jnp.einsum('TED,EDF -> TEF', x_TED,
+                                    self.kernel_gating_EDF.value)
+            activated_gating_TEF = modeling_flax_utils.ACT2FN[act](gating_TEF)
+        with jax.named_scope("up_projection"):
+            up_proj_TEF = jnp.einsum('TED,EDF -> TEF', x_TED,
+                                     self.kernel_up_proj_EDF.value)
+        fuse_TEF = activated_gating_TEF * up_proj_TEF
+        with jax.named_scope("down_projection"):
+            down_proj_TED = jnp.einsum('TEF,EFD -> TED', fuse_TEF,
+                                       self.kernel_down_proj_EFD.value)
+        with jax.named_scope("sum"):
+            output_TD = down_proj_TED.sum(axis=1)
+        return output_TD.astype(self.cfg.dtype)
 
     def _moe_fwd(self, x: Float, weights, op_mode):
         """Performs the basic forward pass of the MoE experts without dropping or megablocks.
@@ -279,7 +317,9 @@ class MoE(nnx.Module):
         """Creates sharding configurations for activations and expert kernels."""
         mode_dependent_attrs = [
             "activation_ffw_td",
+            "activation_ffw_ted",
         ]
+
         for attr_name in mode_dependent_attrs:
             prefill_sharding_config = getattr(self.sharding_cfg.prefill_rules,
                                               attr_name)
