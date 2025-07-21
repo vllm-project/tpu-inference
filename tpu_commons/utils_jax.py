@@ -2,10 +2,13 @@
 from typing import Any, List, Tuple
 
 from tpu_commons.core import PATHWAYS_ENABLED
+from tpu_commons.logger import init_logger
+import os
 
 GBYTES = 1024 * 1024 * 1024
 
 _megacore = False
+logger = init_logger(__name__)
 
 
 def enable_megacore() -> None:
@@ -28,12 +31,28 @@ def get_num_kv_heads_by_tp(num_kv_heads: int, tp_size: int) -> int:
 
 def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
     usage = []
-    for device in devices:
-        if PATHWAYS_ENABLED:
-            # The Pathways backend doesn't support memory_stats().
-            # TODO(fhzhang): find the proper way to support this.
-            usage.append((32384, 33550237184))
-        else:
+    multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "").lower()
+    if multihost_backend == "ray":
+        # MemoryStats is only supported for addressable PjRt devices.
+        # Assume all the devices have similar memory usage for now.
+        # TODO(ranlihao): find a proper way to get the memory usage of each device.
+        for device in devices:
+            try:
+                hbm_used = device.memory_stats()["bytes_in_use"]
+                hbm_limit = device.memory_stats()["bytes_limit"]
+                logger.info("Get memory stats for device %s. Assuming all devices have the same usage.",
+                            device)
+                usage.extend([(hbm_used, hbm_limit)] * len(devices))
+                break
+            except Exception as e:
+                logger.warning(
+                    "Failed to get memory stats for device %s: %s. ", device, e)
+    elif PATHWAYS_ENABLED:
+        # The Pathways backend doesn't support memory_stats().
+        # TODO(fhzhang): find the proper way to support this.
+        usage.extend([(32384, 33550237184)] * len(devices))
+    else:
+        for device in devices:
             hbm_used = device.memory_stats()["bytes_in_use"]
             hbm_limit = device.memory_stats()["bytes_limit"]
             usage.append((hbm_used, hbm_limit))
