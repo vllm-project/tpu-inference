@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 import functools
 import itertools
+import os
 import queue
 import threading
 import time
+import traceback
+import signal
 from typing import Any, Callable, Optional, TypeVar, Union
 
 import jax
@@ -16,7 +19,7 @@ from vllm.v1.engine.core import EngineCoreProc as vLLMEngineCoreProc
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
 
-from tpu_commons.core import disagg_executor, disagg_utils, orchestrator
+from tpu_commons.core import disagg_executor, disagg_utils
 from tpu_commons.runner.utils import LatencyTracker
 
 logger = init_logger(__name__)
@@ -25,6 +28,21 @@ POLLING_TIMEOUT_S = 2.5
 HANDSHAKE_TIMEOUT_MINS = 5
 
 _R = TypeVar('_R')  # Return type for collective_rpc
+
+
+class JetThread(threading.Thread):
+    """Thread that kills the program if it fails.
+
+    If a driver thread goes down, we can't operate.
+    """
+
+    def run(self):
+        try:
+            super().run()
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            print(f"Thread {self.name} encountered an error: {e}")
+            traceback.print_exc()
+            os.kill(os.getpid(), signal.SIGKILL)
 
 
 class DisaggEngineCoreProc(vLLMEngineCoreProc):
@@ -94,14 +112,14 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
         }
 
         self._prefill_threads = [
-            orchestrator.JetThread(
+            JetThread(
                 target=functools.partial(self._prefill, idx),
                 name=f"prefill-{idx}",
                 daemon=True,
             ) for idx in range(len(self._prefill_engines))
         ]
         self._transfer_threads = [
-            orchestrator.JetThread(
+            JetThread(
                 target=functools.partial(
                     self._transfer,
                     idx,
@@ -111,7 +129,7 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
             ) for idx in range(len(self._prefill_engines))
         ]
         self._decode_threads = [
-            orchestrator.JetThread(
+            JetThread(
                 target=functools.partial(
                     self._decode,
                     idx,
