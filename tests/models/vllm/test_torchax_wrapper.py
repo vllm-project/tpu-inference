@@ -139,8 +139,8 @@ def test_wrap_model(vllm_config):
         params_and_buffers_jax = pytree.tree_map_only(torch.Tensor,
                                                       lambda x: x.jax(),
                                                       params_and_buffers)
-        inputs = (torch.randn(5, 10).to('jax').jax(),
-                  torch.randn(5, 10).to('jax').jax())
+        inputs = (torch.zeros(5, 10).to('jax').jax(),
+                  torch.zeros(5, 10).to('jax').jax())
         kv_caches = {
             'attn': torch.zeros(5, 10).to('jax').jax(),
         }
