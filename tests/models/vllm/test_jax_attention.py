@@ -2,6 +2,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 import torch
+import torchax
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import j2t, t2j, t2j_dtype
@@ -17,6 +18,8 @@ from tpu_commons.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 
 P = PartitionSpec
+
+torchax.enable_globally()
 
 
 def _get_spmd_mesh():
