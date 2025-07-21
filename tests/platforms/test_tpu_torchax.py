@@ -118,8 +118,8 @@ class TestTpuPlatform:
 
     def test_get_lora_vocab_padding_size(self):
         """Test get_lora_vocab_padding_size raises NotImplementedError."""
-        with pytest.raises(NotImplementedError):
-            TpuPlatform.get_lora_vocab_padding_size()
+        size = TpuPlatform.get_lora_vocab_padding_size()
+        assert size == 1
 
     def test_inference_mode(self):
         """Test inference_mode returns torch.no_grad context."""
