@@ -16,7 +16,9 @@ from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK = 8
 
 
-def sharded_ragged_paged_attention(sm_scale: float, mesh: Mesh):
+def sharded_ragged_paged_attention(sm_scale: float,
+                                   mesh: Mesh,
+                                   attention_chunk_size: int | None = None):
     """Shards along KV heads."""
     in_specs = (
         P(None, "model", None),  # q
@@ -32,7 +34,7 @@ def sharded_ragged_paged_attention(sm_scale: float, mesh: Mesh):
         return ragged_paged_attention(
             *args,
             sm_scale=sm_scale,
-            sliding_window=None,
+            sliding_window=attention_chunk_size,
             soft_cap=None,
             mask_value=None,
             # NOTE(xiang): v6e chip has 128M VMEM capacity,
@@ -52,13 +54,14 @@ def sharded_ragged_paged_attention(sm_scale: float, mesh: Mesh):
 
 
 def attention(
-        kv_cache: jax.Array,
-        q: jax.Array,
-        k: jax.Array,
-        v: jax.Array,
-        attention_metadata: AttentionMetadata,
-        mesh: Mesh,
-        head_dim_original: int | None = None,  # before padding
+    kv_cache: jax.Array,
+    q: jax.Array,
+    k: jax.Array,
+    v: jax.Array,
+    attention_metadata: AttentionMetadata,
+    mesh: Mesh,
+    head_dim_original: int | None = None,  # before padding,
+    attention_chunk_size: int | None = None
 ) -> Tuple[jax.Array, jax.Array]:
     # T: seq_len
     # N: num_heads
@@ -80,14 +83,15 @@ def attention(
                                mesh)
 
     # (T, N, H)
-    output = sharded_ragged_paged_attention(head_dim_original**-0.5, mesh)(
-        q,
-        kv_cache,
-        md.seq_lens,
-        md.block_tables,
-        md.query_start_loc,
-        md.num_seqs,
-    )
+    output = sharded_ragged_paged_attention(head_dim_original**-0.5, mesh,
+                                            attention_chunk_size)(
+                                                q,
+                                                kv_cache,
+                                                md.seq_lens,
+                                                md.block_tables,
+                                                md.query_start_loc,
+                                                md.num_seqs,
+                                            )
 
     return kv_cache, output
 

@@ -1,6 +1,6 @@
 import pprint
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import List, Optional, Tuple
 
 import jax
@@ -61,6 +61,7 @@ class Llama4ModelConfig(ModelConfig):
     intermediate_size_moe: int = 8192
     num_local_experts: int = 16
     hidden_act = "silu"
+    no_rope_layer_interval = 4
 
     def __post_init__(self):
         # Initialize defaults:
@@ -85,7 +86,11 @@ class Llama4ModelConfig(ModelConfig):
                         "high_freq_factor": 4.0,
                         "original_max_position_embeddings": 8192
                     },
+                    temperature_tuning=True,
+                    temperature_tuning_scale=0.1,
+                    temperature_tuning_floor_scale=8192,
                     use_qk_norm=True,
+                    attention_chunk_size=8192,
                     dtype=self.dtype,
                     vllm_config=self.vllm_config),
                 dense_ffw=DenseFFWConfig(hidden_size=self.hidden_size,
@@ -104,6 +109,7 @@ class Llama4ModelConfig(ModelConfig):
                                   num_local_experts=self.num_local_experts,
                                   num_experts_per_token=1,
                                   router_type=RouterType.TOP_K,
+                                  router_act="sigmoid",
                                   expert_capacity=-1,
                                   dtype=self.dtype,
                                   vllm_config=self.vllm_config),
@@ -166,7 +172,7 @@ class Llama4Scout(Model):
         param_factory = ParamFactory(
             kernel_initializer=nnx.initializers.xavier_normal(),
             scale_initializer=nnx.initializers.ones,
-            random_init = self.use_random_init)
+            random_init=self.use_random_init)
         self.embedder = Embedder(cfg=self.cfg.model.emb,
                                  mesh=self.mesh,
                                  param_factory=param_factory,
@@ -178,14 +184,21 @@ class Llama4Scout(Model):
         for i in range(self.cfg.model.num_layers):
             # For Llama4-Scout, all layers are MoE layers.
             # This can be adjusted for other variants.
-            is_moe_layer = ((i + 1) %
-                            self.cfg.model.interleave_moe_layer_step == 0)
-            # is_rope_layer = ((i % ))
+            is_moe_layer = (i + 1) % \
+                            self.cfg.model.interleave_moe_layer_step == 0
+            use_attention_rope = (
+                i + 1) % self.cfg.model.no_rope_layer_interval != 0
             block_type = "moe" if is_moe_layer else "dense"
+            block_cfg_nope = self.cfg.model.layers
+            block_cfg_rope = replace(self.cfg.model.layers)
+            # RoPE layers do not use chunked attention
+            block_cfg_rope.attention.attention_chunk_size = None
+            block_cfg = block_cfg_rope if use_attention_rope else block_cfg_nope
             block = SharedExpertsTransformerBlock(
-                cfg=self.cfg.model.layers,
+                cfg=block_cfg,
                 block_type=block_type,
                 attention_type="llama4",
+                use_attention_rope=use_attention_rope,
                 param_factory=param_factory,
                 mesh=self.mesh,
                 sharding_cfg=self.cfg.sharding)
@@ -343,7 +356,8 @@ class Llama4WeightLoader(WeightLoader):
                 old_param_name = loaded_name
                 # if loaded_name.endswith(".weight"):
                 #     loaded_name = loaded_name.removesuffix(".weight")
-
+                logger.info(
+                    f"Loaded parameter {loaded_name}: {loaded_weight.shape}")
                 if "gate_up_proj" in loaded_name:
                     # HF's gate_up_proj is a fused tensor of gate and up projections.
                     # It needs to be split.
@@ -371,6 +385,9 @@ class Llama4WeightLoader(WeightLoader):
                         gate_model_weight.sharding.spec,
                         mesh=model_for_loading.mesh)
                     gate_model_weight.value.block_until_ready()
+                    logger.info(
+                        f"{gate_loaded_name}: {loaded_weight.shape}  -->  {gate_mapped_name}: {gate_model_weight.value.shape}"
+                    )
                     del gate_w
                     print_param_info(gate_model_weight, "gate_proj")
                     cumulative_global_memory += gate_model_weight.value.nbytes / 1e9
@@ -408,6 +425,9 @@ class Llama4WeightLoader(WeightLoader):
                     cumulative_local_memory += gate_model_weight.value.addressable_shards[
                         0].data.nbytes / 1e9
                     logger.info(
+                        f"{up_loaded_name}: {loaded_weight.shape}  -->  {up_mapped_name}: {up_model_weight.value.shape}"
+                    )
+                    logger.info(
                         f"Cumulative global memory: {cumulative_global_memory} GB"
                     )
                     logger.info(
@@ -417,7 +437,7 @@ class Llama4WeightLoader(WeightLoader):
 
                 mapped_name = self.map_loaded_to_standardized_name(loaded_name)
                 model_weight = get_param(model_params, mapped_name)
-                logger.debug(
+                logger.info(
                     f"{old_param_name}: {loaded_weight.shape}  -->  {mapped_name}: {model_weight.value.shape}"
                 )
                 if loaded_name.endswith(".bias"):
@@ -433,6 +453,7 @@ class Llama4WeightLoader(WeightLoader):
                         f"Loaded shape for {loaded_name}: {loaded_weight.shape} "
                         f"does not match model shape for {mapped_name}: {model_weight.value.shape}!"
                     )
+                # logger.info(f"Transformed parameter {loaded_name} to {mapped_name}: {loaded_weight.shape} --> {model_weight.value.shape}")
                 model_weight.value = shard_put(loaded_weight,
                                                model_weight.sharding.spec,
                                                mesh=model_for_loading.mesh)

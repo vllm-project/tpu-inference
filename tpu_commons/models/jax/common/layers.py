@@ -21,6 +21,8 @@ class FlaxUtils:
         'silu': nnx.silu,
         'gelu': nnx.gelu,
         'relu': nnx.relu,
+        'sigmoid': nnx.sigmoid,
+        'softmax': nnx.softmax
     }
 
 
