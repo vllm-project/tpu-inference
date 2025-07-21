@@ -1,5 +1,3 @@
-from typing import Optional
-
 import jax
 import torch
 import torch.nn.functional as F
@@ -11,10 +9,10 @@ from vllm.model_executor.layers.linear import MergedColumnParallelLinear
 
 P = PartitionSpec
 
+
 class JaxMergedColumnParallelLinear(torch.nn.Module):
 
-    def __init__(self,
-                 merged_col_parallel_linear: torch.nn.Module,
+    def __init__(self, merged_col_parallel_linear: torch.nn.Module,
                  mesh: Mesh):
         super().__init__()
         assert isinstance(merged_col_parallel_linear,
@@ -31,19 +29,19 @@ class JaxMergedColumnParallelLinear(torch.nn.Module):
         if mesh is not None:
             self._shard_weight(mesh)
 
-    def _shard_weight(self, mesh: "xs.Mesh"):
+    def _shard_weight(self, mesh: Mesh):
         # Shard all weights in the weight_list
         for i in range(self.n_linear_layers):
             weight = getattr(self, f"weight_{i}")
             weight.apply_jax_(jax.device_put,
-                NamedSharding(mesh, P('model', None)))
+                              NamedSharding(mesh, P('model', None)))
             setattr(self, f"weight_{i}", weight)
 
         if self.has_bias:
             for i, _ in enumerate(self.output_sizes):
                 bias = getattr(self, f"bias_{i}")
                 bias.apply_jax_(jax.device_put,
-                                NamedSharding(mesh, P('model',)))
+                                NamedSharding(mesh, P('model', )))
                 setattr(self, f"bias_{i}", bias)
 
     def _load_weights_from_merged_linear(
@@ -55,12 +53,14 @@ class JaxMergedColumnParallelLinear(torch.nn.Module):
             concat_bias = torch_view(t2j(merged_col_parallel_linear.bias.data))
         start_offset = 0
         for i, size in enumerate(output_sizes):
-            weight = Parameter(concat_weight[start_offset:start_offset + size],
+            weight = Parameter(concat_weight[start_offset:start_offset +
+                                             size].detach(),
                                requires_grad=False)
             setattr(self, f"weight_{i}", weight)
 
             if concat_bias is not None:
-                bias = Parameter(concat_bias[start_offset:start_offset + size],
+                bias = Parameter(concat_bias[start_offset:start_offset +
+                                             size].detach(),
                                  requires_grad=False)
                 setattr(self, f"bias_{i}", bias)
             else:
