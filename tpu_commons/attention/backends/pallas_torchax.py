@@ -158,8 +158,6 @@ class PallasAttentionBackendImpl(AttentionImpl):
             raise NotImplementedError("Alibi slopes is not supported.")
         if kv_cache_dtype != "auto":
             raise NotImplementedError("FP8 KV cache dtype is not supported.")
-        if blocksparse_params is not None:
-            raise NotImplementedError("Blocksparse is not supported.")
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "

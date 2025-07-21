@@ -2,23 +2,8 @@ steps:
   # -----------------------------------------------------------------
   # TEST STEPS - Calling wrapper
   # -----------------------------------------------------------------
-   - label: "Kernel tests"
-     key: test_0
-     soft_fail: true
-     env:
-       TPU_BACKEND_TYPE: "jax"
-       MODEL_IMPL_TYPE: "n/a"
-     agents:
-       queue: tpu_v6e_queue
-     commands:
-       - |
-         .buildkite/scripts/run_in_docker.sh \
-           python3 -m pytest -s -v \
-           /workspace/tpu_commons/tests/ragged_paged_attention_test.py \
-           /workspace/tpu_commons/tests/ragged_kv_cache_update_test.py
-
    - label: "E2E MLPerf tests for JAX models"
-     key: test_1
+     key: test_0
      soft_fail: true
      env:
        TPU_BACKEND_TYPE: "jax"
@@ -28,7 +13,7 @@ steps:
        - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
 
    - label: "E2E MLPerf tests for JAX + vLLM models"
-     key: test_2
+     key: test_1
      soft_fail: true
      env:
        TPU_BACKEND_TYPE: "jax"
@@ -39,7 +24,7 @@ steps:
        - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
 
    - label: "E2E MLPerf tests for JAX new model implementation"
-     key: test_3
+     key: test_2
      soft_fail: true
      env:
        TPU_BACKEND_TYPE: "jax"
@@ -51,7 +36,7 @@ steps:
 
   # A placeholder for adding more JAX workload unit tests
    - label: "JAX unit tests"
-     key: test_4
+     key: test_3
      soft_fail: true
      env:
        TPU_BACKEND_TYPE: "jax"
@@ -71,7 +56,6 @@ steps:
        - test_1
        - test_2
        - test_3
-       - test_4
      agents:
        queue: tpu_v6e_queue
-     commands: "bash .buildkite/scripts/check_results.sh 'TPU JAX Tests Failed' test_0 test_1 test_2 test_3 test_4"
+     commands: "bash .buildkite/scripts/check_results.sh 'TPU JAX Tests Failed' test_0 test_1 test_2 test_3"

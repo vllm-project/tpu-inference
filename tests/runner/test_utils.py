@@ -103,7 +103,7 @@ def test_get_req_paddings():
 
 def test_latency_tracker(caplog):
     """Tests the LatencyTracker context manager."""
-    caplog.set_level("INFO")
+    caplog.set_level("DEBUG")
     sleep_duration = 0.01
     with LatencyTracker("test_op") as tracker:
         time.sleep(sleep_duration)

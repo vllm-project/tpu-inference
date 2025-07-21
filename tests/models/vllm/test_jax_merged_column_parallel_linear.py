@@ -3,6 +3,7 @@ import tempfile
 import jax
 import pytest
 import torch
+import torchax
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.interop import torch_view
 from torchax.ops.mappings import j2t, t2j
@@ -16,6 +17,8 @@ from tpu_commons.models.vllm.jax_merged_column_parallel_linear import \
     JaxMergedColumnParallelLinear
 
 P = PartitionSpec
+
+torchax.enable_globally()
 
 
 @pytest.fixture(autouse=True)
@@ -60,12 +63,15 @@ def test_jax_merged_column_parallel_linear(bias, mesh):
         params_dtype=dtype,
         return_bias=False,
     )
-    merged_column_linear.weight.data = torch.rand_like(merged_column_linear.weight.data) / 10
+    merged_column_linear.weight.data = torch.rand_like(
+        merged_column_linear.weight.data) / 10
     if bias:
-        merged_column_linear.bias.data = torch.rand_like(merged_column_linear.bias.data)
+        merged_column_linear.bias.data = torch.rand_like(
+            merged_column_linear.bias.data)
     merged_column_linear = merged_column_linear.to('cpu')
 
-    jax_merged_column_linear = JaxMergedColumnParallelLinear(merged_column_linear, mesh=mesh)
+    jax_merged_column_linear = JaxMergedColumnParallelLinear(
+        merged_column_linear, mesh=mesh)
 
     input_tensor = torch.rand(10, 4096, dtype=dtype) / 10
     input_tensor = input_tensor.to('cpu')
