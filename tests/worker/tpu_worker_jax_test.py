@@ -341,12 +341,3 @@ class TestTPUWorker:
         # This method calls two different runner methods
         worker.model_runner.capture_model.assert_called_once()
         worker.model_runner._init_random.assert_called_once()
-
-    def test_add_lora_not_implemented(self, mock_host_interface,
-                                      mock_vllm_config):
-        """Tests that add_lora correctly raises NotImplementedError."""
-        worker = TPUWorker(mock_host_interface, mock_vllm_config, 0, 0, "test")
-        with pytest.raises(
-                NotImplementedError,
-                match="LoRA is not yet supported by the JAX worker."):
-            worker.add_lora(MagicMock())

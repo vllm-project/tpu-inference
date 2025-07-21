@@ -6,7 +6,7 @@ from typing import Optional
 import torch.nn as nn
 
 from tpu_commons.di.abstracts import (AbstractKVCacheConfig,
-                                      AbstractKVCacheSpec, AbstractLoRARequest,
+                                      AbstractKVCacheSpec,
                                       AbstractModelRunnerOutput,
                                       AbstractSchedulerOutput)
 from tpu_commons.di.interfaces import HostInterface
@@ -52,10 +52,6 @@ class AbstractTpuWorker(ABC):
 
     @abstractmethod
     def profile(self, is_start: bool = True):
-        pass
-
-    @abstractmethod
-    def add_lora(self, lora_request: AbstractLoRARequest) -> bool:
         pass
 
     @abstractmethod
