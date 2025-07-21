@@ -102,13 +102,13 @@ class Llama4Attention(Attention):
                 if self.cfg.use_qk_norm:
                     q_TNH = l2_norm(q_TNH)
             else:
-                if self.cfg.temperature_scaling:
+                if self.cfg.temperature_tuning:
                     attn_scales = (jnp.log(
                         jnp.floor(
-                            (md.input_positions.astype(self.dtype) + 1.0) /
+                            (md.input_positions.astype(self.cfg.dtype) + 1.0) /
                             self.cfg.temperature_tuning_floor_scale) + 1.0) *
                                    self.cfg.temperature_tuning_scale + 1.0)
-                    q_TNH = q_TNH * attn_scales
+                    q_TNH = q_TNH * attn_scales[:, None, None]
 
             q_TNH = nnx.with_sharding_constraint(q_TNH,
                                                  self.query_tnh[op_mode])
