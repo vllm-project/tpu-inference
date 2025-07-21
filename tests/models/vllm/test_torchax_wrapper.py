@@ -144,7 +144,7 @@ def test_wrap_model(vllm_config):
         kv_caches = {
             'attn': torch.zeros(5, 10).to('jax').jax(),
         }
-        attn_meata_data_tensor = torch.rand(5, 10).to('jax').jax()
+        attn_meata_data_tensor = torch.zeros(5, 10).to('jax').jax()
         attn_metadata = {'m': attn_meata_data_tensor}
         num_tokens = 20
 
@@ -178,8 +178,8 @@ def test_model_func_wrapper():
         params_and_buffers_jax = pytree.tree_map_only(torch.Tensor,
                                                       lambda x: x.jax(),
                                                       params_and_buffers)
-        input_ids = torch.randn(5, 10).to('jax')
-        positions = torch.randn(5, 10).to('jax')
+        input_ids = torch.zeros(5, 10).to('jax')
+        positions = torch.zeros(5, 10).to('jax')
         args = (input_ids.jax(), )
         kwargs = {"positions": positions.jax()}
 
