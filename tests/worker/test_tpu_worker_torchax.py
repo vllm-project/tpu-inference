@@ -390,6 +390,20 @@ class TestTPUWorker:
             "concrete_vllm_object")
         assert result is None
 
+    def test_add_lora(self, mock_host_interface, mock_vllm_config):
+        """Tests the pass-through for add_lora."""
+        worker = TPUWorker(host_interface=mock_host_interface,
+                           vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test")
+        worker.model_runner = MagicMock()
+        mock_lora_request = MagicMock()
+
+        worker.add_lora(mock_lora_request)
+
+        worker.model_runner.add_lora.assert_called_once_with(mock_lora_request)
+
     #
     # --- Profiling and Health Check Tests ---
     #

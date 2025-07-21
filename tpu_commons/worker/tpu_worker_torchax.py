@@ -27,6 +27,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
 
 from tpu_commons.di.abstracts import (AbstractKVCacheConfig,
+                                      AbstractLoRARequest,
                                       AbstractSchedulerOutput)
 from tpu_commons.di.interfaces import HostInterface
 from tpu_commons.logger import init_logger
@@ -203,6 +204,9 @@ class TPUWorker(AbstractTpuWorker):
         vllm_scheduler_output = adapted_scheduler_output.vllm_scheduler_output
         output = self.model_runner.execute_model(vllm_scheduler_output)
         return output if self.is_driver_worker else None
+
+    def add_lora(self, lora_request: "AbstractLoRARequest") -> bool:
+        return self.model_runner.add_lora(lora_request)
 
     def profile(self, is_start: bool = True):
         if self.rank < 1:
