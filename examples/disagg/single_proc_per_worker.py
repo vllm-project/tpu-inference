@@ -19,10 +19,11 @@ the process.
 import glob
 import multiprocessing
 import os
-from typing import List
+from typing import List, Tuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import requests
 from jax.experimental.transfer import start_transfer_server
 from jax.sharding import Mesh, NamedSharding
@@ -80,10 +81,16 @@ def get_mesh() -> Mesh:
 
 def get_kv_spec(mesh: Mesh) -> List[int]:
     # (num_blocks, block_size, num_kv_heads, head_dim)
-    shape = (100, 32, 8, 128)
+    shape = (10, 32, 8, 128)
     dtype = jnp.bfloat16
     sharding = NamedSharding(mesh, P(None, None, "model", None))
     return jax.ShapeDtypeStruct(shape, dtype, sharding=sharding)
+
+
+def get_mean_std(x: jax.Array) -> Tuple[float, float]:
+    mean = np.array(jnp.mean(x)).tolist()
+    std = np.array(jnp.std(x)).tolist()
+    return mean, std
 
 
 def prefill_worker(squeue: multiprocessing.Queue):
@@ -110,10 +117,10 @@ def prefill_worker(squeue: multiprocessing.Queue):
         )
 
     kv_spec = get_kv_spec(mesh)
-    kv = jax.device_put(jnp.ones(kv_spec.shape, dtype=kv_spec.dtype),
-                        kv_spec.sharding)
-    log(kv.shape)
-    log(kv.sharding)
+    key = jax.random.PRNGKey(0)
+    kv = jax.device_put(
+        jax.random.uniform(key, shape=kv_spec.shape, dtype=kv_spec.dtype),
+        kv_spec.sharding)
 
     s = start_transfer_server(
         jax.local_devices()[0].client,
@@ -128,6 +135,9 @@ def prefill_worker(squeue: multiprocessing.Queue):
     uuid = get_uuid()
     s.await_pull(uuid, kv)
 
+    mean, std = get_mean_std(kv)
+    log(f"kv | shape={kv.shape} | sharding={kv.sharding} | mean={mean} | std={std}"
+        )
     log("Done")
 
 
@@ -162,8 +172,9 @@ def decode_worker(squeue: multiprocessing.Queue):
     log("Pulling...")
     uuid = get_uuid()
     kv = conn.pull(uuid, kv_spec)
-    log(kv.shape)
-    log(kv.sharding)
+    mean, std = get_mean_std(kv)
+    log(f"kv | shape={kv.shape} | sharding={kv.sharding} | mean={mean} | std={std}"
+        )
 
     log("Done")
 

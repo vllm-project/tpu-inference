@@ -72,7 +72,7 @@ class TpuPlatform(Platform):
 
     @classmethod
     def get_lora_vocab_padding_size(cls) -> int:
-        raise NotImplementedError
+        return 1
 
     @classmethod
     def inference_mode(cls):
