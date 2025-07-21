@@ -145,8 +145,9 @@ class TPUWorker(AbstractTpuWorker):
         return self.model_runner.get_kv_cache_spec()
 
     def initialize_from_config(
-            self, kv_cache_config: Union[AbstractKVCacheConfig,
-                                         KVCacheConfig]) -> None:
+        self,
+        kv_cache_config: Union[AbstractKVCacheConfig, KVCacheConfig],
+    ) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
         adapted_kv_cache_config = adapt_kv_cache_config_if_needed(
             kv_cache_config)
