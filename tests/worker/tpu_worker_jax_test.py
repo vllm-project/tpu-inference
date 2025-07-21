@@ -256,6 +256,19 @@ class TestTPUWorker:
         mock_adapter_fn.assert_called_once_with(mock_scheduler_input)
         assert result is None
 
+    def test_add_lora_not_implemented(self, mock_host_interface,
+                                      mock_vllm_config):
+        """Tests that add_lora raises NotImplementedError."""
+        worker = TPUWorker(host_interface=mock_host_interface,
+                           vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test")
+        with pytest.raises(
+                NotImplementedError,
+                match="LoRA is not supported by the JAX worker yet."):
+            worker.add_lora(MagicMock())
+
     #
     # --- Profiling and Health Check Tests ---
     #
