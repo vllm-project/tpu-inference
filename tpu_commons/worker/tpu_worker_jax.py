@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-from typing import Optional
+from typing import Optional, Union
 
 import jax
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.v1.kv_cache_interface import KVCacheSpec
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 
 from tpu_commons import utils_jax as utils
@@ -91,7 +92,7 @@ class TPUWorker(AbstractTpuWorker):
 
     def execute_model(
         self,
-        scheduler_output: "AbstractSchedulerOutput",
+        scheduler_output: Union[AbstractSchedulerOutput, SchedulerOutput],
     ) -> Optional[ModelRunnerOutput]:
         # NOTE: This method intentionally returns a concrete vLLM type, which
         # violates the pure abstract contract of the base class. This is a
@@ -143,8 +144,9 @@ class TPUWorker(AbstractTpuWorker):
         # and the vLLM side should be updated to handle the translation.
         return self.model_runner.get_kv_cache_spec()
 
-    def initialize_from_config(self,
-                               kv_cache_config: AbstractKVCacheConfig) -> None:
+    def initialize_from_config(
+            self, kv_cache_config: Union[AbstractKVCacheConfig,
+                                         KVCacheConfig]) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
         adapted_kv_cache_config = adapt_kv_cache_config_if_needed(
             kv_cache_config)
