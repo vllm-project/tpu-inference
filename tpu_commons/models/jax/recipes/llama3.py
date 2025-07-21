@@ -102,7 +102,7 @@ class Llama3RecipeConfig(RecipeConfig):
     serving: Llama3ServingConfig = field(default_factory=Llama3ServingConfig)
 
 
-class Llama3(Model):
+class LlamaForCausalLM(Model):
 
     def __init__(self, vllm_config: VllmConfig, rng: jax.Array, mesh: Mesh):
         self.vllm_config = vllm_config

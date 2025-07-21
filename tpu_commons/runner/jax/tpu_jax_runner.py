@@ -99,30 +99,23 @@ class TPUModelRunner():
         self.rng_key = jax.random.key(self.model_config.seed)
 
     def _init_mesh(self) -> None:
-        if os.getenv("NEW_MODEL_DESIGN", False):
-            try:
-                # TODO: Update override steps.
-                sharding_strategy = \
-                    self.vllm_config.additional_config["sharding"]["sharding_strategy"]
-            except KeyError:
-                logger.warning(
-                    f"No sharding strategy passed! Using default of full model parallelism={len(self.devices)}"
-                )
-                sharding_strategy = {"tensor_parallelism": len(self.devices)}
-            sharding = Sharding(strategy_dict=sharding_strategy,
-                                vllm_config=self.vllm_config,
-                                devices=self.devices)
-            self.mesh = sharding.mesh
-        else:
-            axis_names = ("data", "model")
-            # In case we are in disagg mode, the number of devices can exceed 8.
-            # TODO(fhzhang): fix this properly as we implement disagg serving.
-            if len(self.devices) > 8:
-                self.devices = self.devices[:8]
-            mesh_shape = (1, len(self.devices))
-            self.mesh = jax.make_mesh(mesh_shape,
-                                      axis_names,
-                                      devices=self.devices)
+        # In case we are in disagg mode, the number of devices can exceed 8.
+        # TODO(fhzhang): fix this properly as we implement disagg serving.
+        if len(self.devices) > 8:
+            self.devices = self.devices[:8]
+        try:
+            # TODO: Update override steps.
+            sharding_strategy = \
+                self.vllm_config.additional_config["sharding"]["sharding_strategy"]
+        except KeyError:
+            logger.warning(
+                f"No sharding strategy passed! Using default of full model parallelism={len(self.devices)}"
+            )
+            sharding_strategy = {"tensor_parallelism": len(self.devices)}
+        sharding = Sharding(strategy_dict=sharding_strategy,
+                            vllm_config=self.vllm_config,
+                            devices=self.devices)
+        self.mesh = sharding.mesh
         logger.warning(f"Init mesh | mesh={self.mesh}")
 
     def _init_inputs(self) -> None:
