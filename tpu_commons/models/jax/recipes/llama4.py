@@ -281,7 +281,7 @@ class Llama4WeightLoader(WeightLoader):
             "shared_expert.down_proj": (1, 0),
             "shared_expert.gate_proj": (1, 0),
             "shared_expert.up_proj": (1, 0),
-            # "o_proj": (1, 2, 0),
+            "o_proj": (1, 2, 0),
         })
         hidden_size = self.model_config.hidden_size
         attn_heads = self.model_config.layers.attention.num_attention_heads
@@ -292,7 +292,8 @@ class Llama4WeightLoader(WeightLoader):
                 "q_proj": (attn_heads, attn_head_dim, hidden_size),
                 "k_proj": (num_key_value_heads, attn_head_dim, hidden_size),
                 "v_proj": (num_key_value_heads, attn_head_dim, hidden_size),
-                "o_proj": (attn_heads, attn_head_dim, hidden_size),
+                # o_proj is inverted: https://github.com/huggingface/transformers/blob/v4.53.2/src/transformers/models/llama4/modeling_llama4.py#L298
+                "o_proj": (hidden_size, attn_heads, attn_head_dim),
             },
             param_type="weight",
         )
