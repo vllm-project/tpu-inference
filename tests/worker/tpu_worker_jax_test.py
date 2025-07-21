@@ -196,9 +196,11 @@ class TestTPUWorker:
     # --- Core Logic Tests ---
     #
 
+    @patch(
+        'tpu_commons.worker.tpu_worker_jax.adapt_scheduler_output_if_needed')
     @patch('tpu_commons.worker.tpu_worker_jax.TPUModelRunner')
-    def test_execute_model(self, mock_runner_cls, mock_host_interface,
-                           mock_vllm_config):
+    def test_execute_model(self, mock_runner_cls, mock_adapter_fn,
+                           mock_host_interface, mock_vllm_config):
         """Tests that the driver worker executes the model and returns the concrete vLLM output."""
         worker = TPUWorker(host_interface=mock_host_interface,
                            vllm_config=mock_vllm_config,
@@ -209,6 +211,8 @@ class TestTPUWorker:
         worker.model_runner = mock_runner_cls.return_value  # Assign mocked runner instance
         mock_scheduler_input = MagicMock(spec=AbstractSchedulerOutput)
 
+        # The adapter function returns the adapted input
+        mock_adapter_fn.return_value = mock_scheduler_input
         # The adapter has the vllm object
         mock_scheduler_input.vllm_scheduler_output = "concrete_vllm_object"
 
@@ -218,14 +222,19 @@ class TestTPUWorker:
 
         result = worker.execute_model(mock_scheduler_input)
 
+        # Assert the temporary compatibility layer was called
+        mock_adapter_fn.assert_called_once_with(mock_scheduler_input)
         # Assert the runner was called with the unwrapped concrete object
         worker.model_runner.execute_model.assert_called_once_with(
             "concrete_vllm_object")
         # Assert the final result is the concrete model output, not an adapter
         assert result == mock_model_output
 
+    @patch(
+        'tpu_commons.worker.tpu_worker_jax.adapt_scheduler_output_if_needed')
     @patch('tpu_commons.worker.tpu_worker_jax.TPUModelRunner')
     def test_execute_model_non_driver_returns_none(self, mock_runner_cls,
+                                                   mock_adapter_fn,
                                                    mock_host_interface,
                                                    mock_vllm_config):
         """Tests that a non-driver worker executes the model but returns None."""
@@ -239,10 +248,12 @@ class TestTPUWorker:
         )
         worker.model_runner = mock_runner_cls.return_value
         mock_scheduler_input = MagicMock(spec=AbstractSchedulerOutput)
+        mock_adapter_fn.return_value = mock_scheduler_input
         mock_scheduler_input.vllm_scheduler_output = "concrete_vllm_object"
 
         result = worker.execute_model(mock_scheduler_input)
 
+        mock_adapter_fn.assert_called_once_with(mock_scheduler_input)
         assert result is None
 
     #

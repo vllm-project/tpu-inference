@@ -6,6 +6,7 @@ from typing import Optional, Union
 import jax
 import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 
@@ -15,8 +16,8 @@ from tpu_commons.di.abstracts import (AbstractKVCacheConfig,
 from tpu_commons.di.interfaces import HostInterface
 from tpu_commons.logger import init_logger
 from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
-from tpu_commons.worker._temporary_vllm_compat import \
-    adapt_kv_cache_config_if_needed
+from tpu_commons.worker._temporary_vllm_compat import (
+    adapt_kv_cache_config_if_needed, adapt_scheduler_output_if_needed)
 from tpu_commons.worker.base import AbstractTpuWorker
 
 logger = init_logger(__name__)
@@ -91,15 +92,19 @@ class TPUWorker(AbstractTpuWorker):
 
     def execute_model(
         self,
-        scheduler_output: "AbstractSchedulerOutput",
+        scheduler_output: Union[AbstractSchedulerOutput, SchedulerOutput],
     ) -> Optional[ModelRunnerOutput]:
         # NOTE: This method intentionally returns a concrete vLLM type, which
         # violates the pure abstract contract of the base class. This is a
         # deliberate, temporary compromise for the same reasons outlined in
         # the `get_kv_cache_spec` method.
 
+        # Adapt the input if necessary (temporary compatibility layer)
+        adapted_scheduler_output = adapt_scheduler_output_if_needed(
+            scheduler_output)
+
         # Unwrap the adapter to get the concrete vLLM object
-        vllm_scheduler_output = scheduler_output.vllm_scheduler_output
+        vllm_scheduler_output = adapted_scheduler_output.vllm_scheduler_output
         output = self.model_runner.execute_model(vllm_scheduler_output)
         return output if self.is_driver_worker else None
 

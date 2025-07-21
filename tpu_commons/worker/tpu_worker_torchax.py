@@ -21,6 +21,7 @@ from vllm.distributed import (ensure_model_parallel_initialized,
 from vllm.model_executor import set_random_seed
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
 from vllm.v1.attention.backends.pallas import TPU_HEAD_SIZE_ALIGNMENT
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
@@ -33,7 +34,7 @@ from tpu_commons.models.torchax.torchax_wrapper import with_torchax_global
 from tpu_commons.runner.tpu_torchax_runner import TPUModelRunner
 from tpu_commons.worker.base import AbstractTpuWorker
 from tpu_commons.worker._temporary_vllm_compat import (
-    adapt_kv_cache_config_if_needed)
+    adapt_kv_cache_config_if_needed, adapt_scheduler_output_if_needed)
 
 logger = init_logger(__name__)
 
@@ -187,15 +188,19 @@ class TPUWorker(AbstractTpuWorker):
 
     def execute_model(
         self,
-        scheduler_output: "AbstractSchedulerOutput",
+        scheduler_output: Union[AbstractSchedulerOutput, SchedulerOutput],
     ) -> Optional[ModelRunnerOutput]:
         # NOTE: This method intentionally returns a concrete vLLM type, which
         # violates the pure abstract contract of the base class. This is a
         # deliberate, temporary compromise for the same reasons outlined in
         # the `get_kv_cache_spec` method.
 
+        # Adapt the input if necessary (temporary compatibility layer)
+        adapted_scheduler_output = adapt_scheduler_output_if_needed(
+            scheduler_output)
+
         # Unwrap the adapter to get the concrete vLLM object
-        vllm_scheduler_output = scheduler_output.vllm_scheduler_output
+        vllm_scheduler_output = adapted_scheduler_output.vllm_scheduler_output
         output = self.model_runner.execute_model(vllm_scheduler_output)
         return output if self.is_driver_worker else None
 
