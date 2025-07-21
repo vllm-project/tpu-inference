@@ -1,6 +1,7 @@
 import jax
 import pytest
 import torch
+import torchax
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.interop import torch_view
 from torchax.ops.mappings import j2t, t2j
@@ -13,6 +14,14 @@ from vllm.model_executor.layers.fused_moe.moe_torch_iterative import \
 from tpu_commons.models.vllm.jax_fused_moe import JaxFusedMoE
 
 P = PartitionSpec
+
+
+@pytest.fixture(scope="module", autouse=True)
+def setup_torchax():
+    """Enable torchax globally before all tests, disable after all tests."""
+    torchax.enable_globally()
+    yield
+    torchax.disable_globally()
 
 
 def _get_spmd_mesh():

@@ -83,7 +83,7 @@ class RMSNorm(nnx.Module):
         Returns:
             The normalized tensor with the same shape as the input.
         """
-        x = jnp.asarray(x, jnp.float32)
+        x = jnp.asarray(x, self.dtype)
         x_TD = nnx.with_sharding_constraint(x, self.activation_ffw_td[op_mode])
 
         var = jnp.mean(jnp.square(x_TD), axis=-1, keepdims=True)
@@ -182,7 +182,7 @@ class DenseFFW(nnx.Module):
             The output tensor of shape `(batch, sequence, d_model)`.
         """
         # TODO consider to create factories for einsum(?)
-        x = jnp.asarray(x, jnp.float32)
+        x = jnp.asarray(x, self.cfg.dtype)
         x_TD = nnx.with_sharding_constraint(x, self.activation_ffw_td[op_mode])
         act = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_ACT.value)
         with jax.named_scope("wi_0"):
@@ -327,7 +327,7 @@ class Embedder(nnx.Module):
             The output logits over the vocabulary, with shape
             `(batch, sequence, vocab_size)`.
         """
-        x = jnp.asarray(x, jnp.float32)
+        x = jnp.asarray(x, self.cfg.dtype)
         x_TD = nnx.with_sharding_constraint(x, self.prelogit_td)
 
         logits_TV = jnp.einsum('TD,DV -> TV', x_TD,

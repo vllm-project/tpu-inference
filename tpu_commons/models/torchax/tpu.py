@@ -4,16 +4,15 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-import torch_xla.core.xla_model as xm
-import torch_xla.distributed.spmd as xs
 import torchax
+from jax.sharding import Mesh
 from torchax import jax_device
 from vllm.config import ModelConfig, VllmConfig
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.utils import (
     initialize_model, process_weights_after_loading, set_default_torch_dtype)
 
-from tpu_commons.distributed.tpu_distributed_utils import get_fqn, shard_model
+from tpu_commons.distributed.tpu_distributed_utils import shard_model
 from tpu_commons.logger import init_logger
 
 logger = init_logger(__name__)
@@ -28,7 +27,7 @@ class TPUModelLoader(DefaultModelLoader):
         self,
         vllm_config: VllmConfig,
         model_config: ModelConfig,
-        mesh: Optional[xs.Mesh] = None,
+        mesh: Optional[Mesh] = None,
     ) -> nn.Module:
         # Initialize model and load weights on CPU. Then, during SPMD partition,
         # weights are sharded and transferred to TPUs.
@@ -92,29 +91,3 @@ class TPUModelLoader(DefaultModelLoader):
         for _, buffer in model.named_buffers():
             jax_t = buffer.jax()
             assert len(jax_t.global_shards) == num_devices
-
-    def _check_model_is_loaded(self, mesh: Optional[xs.Mesh],
-                               model: nn.Module) -> None:
-        """
-        Ensure the model is properly loaded.
-        1. All model parameters and buffers are on XLA device.
-        2. Non-SPMD friendly layers are replaced as expected.
-        """
-        device = xm.xla_device()
-        device_type = str(device.type)
-
-        # Check parameters
-        for name, param in model.named_parameters():
-            assert param.device.type == device_type, f"Parameter {name} is on \
-                {param.device.type} instead of {device_type}"
-
-        # Check buffers
-        for name, buffer in model.named_buffers():
-            assert buffer.device.type == device_type, \
-                f"Buffer {name} is on {buffer.device.type} instead of \
-                    {device_type}"
-
-        for module in model.modules():
-            if (mesh is not None) and (get_fqn(module) == 'QKVParallelLinear'):
-                raise AssertionError("QKVParallelLinear should be replaced by \
-                            XlaQKVParallelLinear under SPMD mode.")

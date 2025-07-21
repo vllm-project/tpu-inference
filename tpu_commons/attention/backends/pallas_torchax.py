@@ -4,8 +4,6 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 import torch
-# Required to register custom ops.
-import torch_xla.experimental.custom_kernel  # noqa: F401
 from jax.tree_util import register_pytree_node_class
 from torchax.interop import call_jax
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
@@ -160,18 +158,12 @@ class PallasAttentionBackendImpl(AttentionImpl):
             raise NotImplementedError("Alibi slopes is not supported.")
         if kv_cache_dtype != "auto":
             raise NotImplementedError("FP8 KV cache dtype is not supported.")
-        if blocksparse_params is not None:
-            raise NotImplementedError("Blocksparse is not supported.")
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
                                       "PallasAttentionBackendImpl")
-
-        tpu_version = torch_xla.tpu.version()
-        if tpu_version < 4:
-            raise NotImplementedError("TPU version must be 4 or higher.")
 
     def forward(
         self,
