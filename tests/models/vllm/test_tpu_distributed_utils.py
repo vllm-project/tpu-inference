@@ -1,15 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 import os
+import tempfile
 from unittest.mock import patch
 
 import jax
 import pytest
 import torch
 import torchax
-from jax.sharding import Mesh, PartitionSpec
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
+from vllm.config import set_current_vllm_config
+from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
+                                             init_distributed_environment)
+from vllm.engine.arg_utils import EngineArgs
+from vllm.model_executor.layers.linear import QKVParallelLinear
 
 from tpu_commons.distributed.tpu_distributed_utils import (
-    create_torchax_kv_cache, create_torchax_tensor_with_partition_spec)
+    XlaQKVParallelLinear, create_torchax_kv_cache,
+    create_torchax_tensor_with_partition_spec)
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -29,8 +37,7 @@ def set_tpu_backend_env():
 
 @pytest.mark.parametrize("mesh,partition_spec", [
     (None, None),
-    (Mesh(jax.devices(),
-          axis_names=('x', )), PartitionSpec(None, None, 'x', None)),
+    (Mesh(jax.devices(), axis_names=('x', )), P(None, None, 'x', None)),
 ])
 def test_create_torchax_kv_cache(mesh, partition_spec):
     kv_cache_shape = (1024, 16, 16, 128)
@@ -46,7 +53,7 @@ def test_create_torchax_kv_cache(mesh, partition_spec):
 
 @pytest.mark.parametrize("mesh,partition_spec", [
     (None, None),
-    (Mesh(jax.devices(), axis_names=('x', )), PartitionSpec('x', )),
+    (Mesh(jax.devices(), axis_names=('x', )), P('x', )),
 ])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_create_torchax_tensor_with_partition_spec(mesh, partition_spec,
@@ -78,3 +85,88 @@ def test_create_torchax_tensor_with_partition_spec_value_error():
         create_torchax_tensor_with_partition_spec(torch_t,
                                                   mesh=None,
                                                   partition_spec=('x', ))
+
+
+# Test for XLA parallel layers
+
+
+@pytest.fixture
+def setup_environment():
+    """Setup distributed environment for tests that need it."""
+    # This is a fake config used for init dist env.
+    # QKVParallelLinear needs dist env to be initialized.
+    engine_args = EngineArgs(
+        model="Qwen/Qwen2-1.5B-Instruct",
+        max_model_len=64,
+        max_num_batched_tokens=64,
+        max_num_seqs=4,
+    )
+
+    vllm_config = engine_args.create_engine_config()
+
+    with set_current_vllm_config(vllm_config):
+        temp_file = tempfile.mkstemp()[1]
+        init_distributed_environment(
+            1,
+            0,
+            local_rank=0,
+            distributed_init_method=f"file://{temp_file}",
+            backend="gloo")
+        ensure_model_parallel_initialized(1, 1)
+        yield
+
+
+@pytest.mark.parametrize("bias", [True, False])
+@pytest.mark.parametrize("return_bias", [True, False])
+@pytest.mark.parametrize("skip_bias_add", [True, False])
+@pytest.mark.parametrize("use_mesh", [True, False])
+@torch.no_grad()
+def test_xla_qkv_linear(setup_environment, bias, return_bias, skip_bias_add,
+                        use_mesh):
+    torch.manual_seed(123)
+
+    if use_mesh:
+        mesh = Mesh(jax.devices(), axis_names=('x', ))
+    else:
+        mesh = None
+
+    qkv_linear = QKVParallelLinear(
+        hidden_size=4096,
+        head_size=128,
+        total_num_heads=32,
+        total_num_kv_heads=8,
+        bias=bias,
+        params_dtype=torch.bfloat16,
+        return_bias=return_bias,
+        skip_bias_add=skip_bias_add,
+    )
+
+    qkv_linear.weight.data = torch.rand_like(qkv_linear.weight.data) / 10
+    if bias:
+        qkv_linear.bias.data = torch.rand_like(qkv_linear.bias.data)
+
+    xla_qkv_linear = XlaQKVParallelLinear(qkv_linear, mesh=mesh)
+
+    if mesh is None:
+        xla_qkv_linear = xla_qkv_linear.to('jax')
+
+    qkv_linear = qkv_linear.to('jax')
+    input_tensor = torch.rand(10, 4096, dtype=torch.bfloat16) / 10
+    input_tensor = input_tensor.to('jax')
+
+    output = qkv_linear(input_tensor)
+    if mesh is not None:
+        input_tensor.apply_jax_(jax.device_put, NamedSharding(mesh, P()))
+    xla_output = xla_qkv_linear(input_tensor)
+    if return_bias:
+        assert isinstance(xla_output, tuple) and isinstance(output, tuple)
+        assert len(xla_output) == len(output) == 2
+        assert torch.allclose(output[0].cpu(), xla_output[0].cpu())
+        if (not skip_bias_add) or (not bias):
+            assert output[1] is None and output[1] == xla_output[1]
+        else:
+            print("output[1]:", output[1])
+            print("xla_output[1]:", xla_output[1])
+            assert torch.allclose(output[1].cpu(), xla_output[1].cpu())
+    else:
+        assert torch.allclose(output.cpu(), xla_output.cpu())

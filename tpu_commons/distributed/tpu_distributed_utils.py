@@ -168,8 +168,11 @@ class XlaQKVParallelLinear(nn.Module):
         # The concat and the following split will be no-op, and should be
         # optimized away by the compiler.
         qkv_proj = torch.cat([q_proj, k_proj, v_proj], dim=-1)
-        output_bias = torch.cat([q_bias, k_bias, v_bias], dim=-1) if \
-                            self.skip_bias_add else None
+        if not self.skip_bias_add or self.q_bias is None:
+            output_bias = None
+        else:
+            output_bias = torch.cat([self.q_bias, self.k_bias, self.v_bias],
+                                    dim=-1)
         if not self.return_bias:
             return qkv_proj
         return qkv_proj, output_bias
