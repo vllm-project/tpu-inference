@@ -6,23 +6,18 @@
 """A TPU worker class."""
 import copy
 import os
-from typing import Optional
+from typing import Optional, Union
+
+import jax
 
 import torch
 import torch.distributed
 import torch.nn as nn
 
 import vllm.envs as envs
-
-import jax
-
-from tpu_commons.models.torchax.torchax_wrapper import with_torchax_global
-
-from vllm.config import ParallelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
-from tpu_commons.logger import init_logger
-from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
 from vllm.v1.attention.backends.pallas import TPU_HEAD_SIZE_ALIGNMENT
@@ -31,21 +26,29 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
 
+from tpu_commons.di.abstracts import (AbstractKVCacheConfig,
+                                      AbstractSchedulerOutput)
+from tpu_commons.di.interfaces import HostInterface
+from tpu_commons.logger import init_logger
+from tpu_commons.models.torchax.torchax_wrapper import with_torchax_global
 from tpu_commons.runner.tpu_torchax_runner import TPUModelRunner
+from tpu_commons.worker.base import AbstractTpuWorker
+from tpu_commons.worker._temporary_vllm_compat import (
+    adapt_kv_cache_config_if_needed, adapt_scheduler_output_if_needed)
 
 logger = init_logger(__name__)
 
 
-class TPUWorker:
+class TPUWorker(AbstractTpuWorker):
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        local_rank: int,
-        rank: int,
-        distributed_init_method: str,
-        is_driver_worker: bool = False,
-    ):
+    def __init__(self,
+                 host_interface: HostInterface,
+                 vllm_config: VllmConfig,
+                 local_rank: int,
+                 rank: int,
+                 distributed_init_method: str,
+                 is_driver_worker: bool = False):
+        super().__init__(host_interface)
         self.is_driver_worker = is_driver_worker
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -126,8 +129,7 @@ class TPUWorker:
 
         # Initialize the distributed environment.
         self._init_tpu_worker_distributed_environment(
-            self.parallel_config, self.rank, self.distributed_init_method,
-            self.local_rank)
+            self.rank, self.distributed_init_method, self.local_rank)
 
         # Device initialization should happen after initializing
         # the distributed runtime.
@@ -186,9 +188,20 @@ class TPUWorker:
 
     def execute_model(
         self,
-        scheduler_output: "SchedulerOutput",
+        scheduler_output: Union[AbstractSchedulerOutput, SchedulerOutput],
     ) -> Optional[ModelRunnerOutput]:
-        output = self.model_runner.execute_model(scheduler_output)
+        # NOTE: This method intentionally returns a concrete vLLM type, which
+        # violates the pure abstract contract of the base class. This is a
+        # deliberate, temporary compromise for the same reasons outlined in
+        # the `get_kv_cache_spec` method.
+
+        # Adapt the input if necessary (temporary compatibility layer)
+        adapted_scheduler_output = adapt_scheduler_output_if_needed(
+            scheduler_output)
+
+        # Unwrap the adapter to get the concrete vLLM object
+        vllm_scheduler_output = adapted_scheduler_output.vllm_scheduler_output
+        output = self.model_runner.execute_model(vllm_scheduler_output)
         return output if self.is_driver_worker else None
 
     def profile(self, is_start: bool = True):
@@ -215,11 +228,29 @@ class TPUWorker:
         return self.model_runner.get_model()
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
+        # NOTE: This method intentionally returns a concrete vLLM type, which
+        # violates the pure abstract contract of the base class. This is a
+        # deliberate, temporary compromise.
+        #
+        # The vLLM executor that calls this method expects the concrete
+        # `vllm.KVCacheSpec` object to perform its own internal logic. If we
+        # returned an abstract adapter, the vLLM code would break.
+        #
+        # The ideal long-term solution is for the vLLM DI container to be
+        # responsible for this translation. When vLLM can be modified, this
+        # method should be changed to return `dict[str, AbstractKVCacheSpec]`,
+        # and the vLLM side should be updated to handle the translation.
         return self.model_runner.get_kv_cache_spec()
 
-    def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_from_config(
+        self,
+        kv_cache_config: Union[AbstractKVCacheConfig, KVCacheConfig],
+    ) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
-        self.model_runner.initialize_kv_cache(kv_cache_config)
+        adapted_kv_cache_config = adapt_kv_cache_config_if_needed(
+            kv_cache_config)
+        vllm_kv_cache_config = adapted_kv_cache_config.vllm_kv_cache_config
+        self.model_runner.initialize_kv_cache(vllm_kv_cache_config)
 
     def check_health(self) -> None:
         # worker will always be healthy as long as it's running.
@@ -227,7 +258,6 @@ class TPUWorker:
 
     def _init_tpu_worker_distributed_environment(
         self,
-        parallel_config: ParallelConfig,
         rank: int,
         distributed_init_method: Optional[str] = None,
         local_rank: int = -1,
@@ -238,7 +268,7 @@ class TPUWorker:
         # are invoked by `xm.all_reduce` and `xm.all_gather` which use their
         # own context.
         init_distributed_environment(
-            world_size=parallel_config.world_size,
+            world_size=self.parallel_config.world_size,
             rank=rank,
             local_rank=local_rank,
             distributed_init_method=distributed_init_method,

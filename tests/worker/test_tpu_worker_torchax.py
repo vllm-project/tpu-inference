@@ -4,10 +4,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 # Dependencies that will be mocked
-from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
 
+# Import the abstract classes and interfaces for mocking
+from tpu_commons.di.abstracts import (AbstractKVCacheConfig,
+                                      AbstractSchedulerOutput)
+from tpu_commons.di.interfaces import HostInterface
 # The class we are testing
 from tpu_commons.worker.tpu_worker_torchax import TPUWorker
 
@@ -17,6 +19,12 @@ def set_tpu_backend_env():
     """Set TPU_BACKEND_TYPE=torchax for all tests in this module."""
     with patch.dict(os.environ, {"TPU_BACKEND_TYPE": "torchax"}):
         yield
+
+
+@pytest.fixture
+def mock_host_interface():
+    """Provides a mock HostInterface for tests."""
+    return MagicMock(spec=HostInterface)
 
 
 @pytest.fixture
@@ -30,7 +38,7 @@ def mock_vllm_config():
     mock_model_conf.trust_remote_code = False
     mock_model_conf.dtype = torch.bfloat16
 
-    mock_cache_conf = MagicMock(spec=KVCacheConfig)
+    mock_cache_conf = MagicMock()
     mock_cache_conf.gpu_memory_utilization = 0.9
     mock_cache_conf.num_gpu_blocks = 0
     mock_cache_conf.num_cpu_blocks = 0
@@ -59,25 +67,29 @@ class TestTPUWorker:
     # --- Initialization Tests ---
     #
 
-    def test_init_success(self, mock_vllm_config):
+    def test_init_success(self, mock_host_interface, mock_vllm_config):
         """Tests successful initialization of TPUWorker."""
-        worker = TPUWorker(vllm_config=mock_vllm_config,
+        worker = TPUWorker(host_interface=mock_host_interface,
+                           vllm_config=mock_vllm_config,
                            local_rank=0,
                            rank=0,
                            distributed_init_method="test_method",
                            is_driver_worker=True)
+        assert worker.host_interface == mock_host_interface
         assert worker.vllm_config == mock_vllm_config
         assert worker.rank == 0
         assert worker.local_rank == 0
         assert worker.is_driver_worker
         assert worker.profile_dir is None
 
-    def test_init_success_with_bfloat16_cache_dtype(self, mock_vllm_config):
+    def test_init_success_with_bfloat16_cache_dtype(self, mock_host_interface,
+                                                    mock_vllm_config):
         """Tests successful initialization of TPUWorker with bfloat16 cache dtype."""
         # Override the cache_dtype to bfloat16
         mock_vllm_config.cache_config.cache_dtype = "bfloat16"
 
-        worker = TPUWorker(vllm_config=mock_vllm_config,
+        worker = TPUWorker(host_interface=mock_host_interface,
+                           vllm_config=mock_vllm_config,
                            local_rank=0,
                            rank=0,
                            distributed_init_method="test_method",
@@ -90,22 +102,26 @@ class TestTPUWorker:
         # Verify the cache dtype is as expected
         assert worker.vllm_config.cache_config.cache_dtype == "bfloat16"
 
-    def test_init_multi_host_not_implemented(self, mock_vllm_config):
+    def test_init_multi_host_not_implemented(self, mock_host_interface,
+                                             mock_vllm_config):
         """Tests that multi-host (rank != local_rank) raises NotImplementedError."""
         with pytest.raises(NotImplementedError,
                            match="Multi host serving is not supported yet."):
             TPUWorker(
+                host_interface=mock_host_interface,
                 vllm_config=mock_vllm_config,
                 local_rank=0,
                 rank=1,  # Different rank from local_rank
                 distributed_init_method="test_method")
 
     @patch('tpu_commons.worker.tpu_worker_torchax.envs')
-    def test_init_with_spmd_enabled(self, mock_envs, mock_vllm_config):
+    def test_init_with_spmd_enabled(self, mock_envs, mock_host_interface,
+                                    mock_vllm_config):
         """Tests that use_spmd is set correctly when VLLM_XLA_USE_SPMD is True."""
         mock_envs.VLLM_XLA_USE_SPMD = True
 
-        worker = TPUWorker(vllm_config=mock_vllm_config,
+        worker = TPUWorker(host_interface=mock_host_interface,
+                           vllm_config=mock_vllm_config,
                            local_rank=0,
                            rank=0,
                            distributed_init_method="test_method",
@@ -120,11 +136,13 @@ class TestTPUWorker:
         assert worker.parallel_config.world_size == 1
 
     @patch('tpu_commons.worker.tpu_worker_torchax.envs')
-    def test_init_with_spmd_disabled(self, mock_envs, mock_vllm_config):
+    def test_init_with_spmd_disabled(self, mock_envs, mock_host_interface,
+                                     mock_vllm_config):
         """Tests that use_spmd is set correctly when VLLM_XLA_USE_SPMD is False."""
         mock_envs.VLLM_XLA_USE_SPMD = False
 
-        worker = TPUWorker(vllm_config=mock_vllm_config,
+        worker = TPUWorker(host_interface=mock_host_interface,
+                           vllm_config=mock_vllm_config,
                            local_rank=0,
                            rank=0,
                            distributed_init_method="test_method",
@@ -140,10 +158,12 @@ class TestTPUWorker:
 
     @patch('tpu_commons.worker.tpu_worker_torchax.envs')
     def test_init_with_profiler_on_rank_zero(self, mock_envs,
+                                             mock_host_interface,
                                              mock_vllm_config):
         """Tests that the profiler directory is set correctly on rank 0."""
         mock_envs.VLLM_TORCH_PROFILER_DIR = "/tmp/profiles"
-        worker = TPUWorker(vllm_config=mock_vllm_config,
+        worker = TPUWorker(host_interface=mock_host_interface,
+                           vllm_config=mock_vllm_config,
                            local_rank=0,
                            rank=0,
                            distributed_init_method="test_method")
@@ -151,10 +171,12 @@ class TestTPUWorker:
 
     @patch('tpu_commons.worker.tpu_worker_torchax.envs')
     def test_init_with_profiler_on_other_ranks(self, mock_envs,
+                                               mock_host_interface,
                                                mock_vllm_config):
         """Tests that the profiler directory is NOT set on non-rank 0 workers."""
         mock_envs.VLLM_TORCH_PROFILER_DIR = "/tmp/profiles"
-        worker = TPUWorker(vllm_config=mock_vllm_config,
+        worker = TPUWorker(host_interface=mock_host_interface,
+                           vllm_config=mock_vllm_config,
                            local_rank=1,
                            rank=1,
                            distributed_init_method="test_method")
@@ -164,9 +186,10 @@ class TestTPUWorker:
     # --- Device and Cache Initialization Tests ---
     #
 
-    def test_initialize_cache(self, mock_vllm_config):
+    def test_initialize_cache(self, mock_host_interface, mock_vllm_config):
         """Tests setting the number of GPU and CPU cache blocks."""
-        worker = TPUWorker(mock_vllm_config, 0, 0, "test_method")
+        worker = TPUWorker(mock_host_interface, mock_vllm_config, 0, 0,
+                           "test_method")
         worker.initialize_cache(num_gpu_blocks=2048, num_cpu_blocks=1024)
         assert worker.cache_config.num_gpu_blocks == 2048
         assert worker.cache_config.num_cpu_blocks == 1024
@@ -185,7 +208,8 @@ class TestTPUWorker:
         ])
     def test_init_device(self, mock_envs, mock_os, mock_torch, mock_jax,
                          mock_report_usage_stats, mock_runner_cls,
-                         mock_vllm_config, rank, should_report_usage):
+                         mock_host_interface, mock_vllm_config, rank,
+                         should_report_usage):
         """Tests init_device method functionality with different ranks."""
         # Setup mocks
         mock_jax.process_index.return_value = rank
@@ -195,7 +219,8 @@ class TestTPUWorker:
         mock_runner_cls.return_value = mock_runner_instance
 
         # Create worker
-        worker = TPUWorker(vllm_config=mock_vllm_config,
+        worker = TPUWorker(host_interface=mock_host_interface,
+                           vllm_config=mock_vllm_config,
                            local_rank=0,
                            rank=0,
                            distributed_init_method="test_method",
@@ -241,8 +266,8 @@ class TestTPUWorker:
             (256, 256, False),  # 256 is already aligned to 128, no warning
         ])
     def test_determine_available_memory_with_distributed_mocks(
-            self, mock_logger, mock_jax, mock_vllm_config, head_size,
-            expected_padded_size, should_warn):
+            self, mock_logger, mock_jax, mock_host_interface, mock_vllm_config,
+            head_size, expected_padded_size, should_warn):
         """Tests determine_available_memory with distributed environment mocked and different head sizes."""
         # Setup JAX mocks
         mock_device = MagicMock()
@@ -260,7 +285,8 @@ class TestTPUWorker:
         mock_vllm_config.model_config.get_head_size.return_value = head_size
 
         # Create worker
-        worker = TPUWorker(vllm_config=mock_vllm_config,
+        worker = TPUWorker(host_interface=mock_host_interface,
+                           vllm_config=mock_vllm_config,
                            local_rank=0,
                            rank=0,
                            distributed_init_method="test_method",
@@ -297,30 +323,52 @@ class TestTPUWorker:
     # --- Core Logic Tests ---
     #
 
+    @patch(
+        'tpu_commons.worker.tpu_worker_torchax.adapt_scheduler_output_if_needed'
+    )
     @patch('tpu_commons.worker.tpu_worker_torchax.TPUModelRunner')
-    def test_execute_model(self, mock_runner_cls, mock_vllm_config):
-        """Tests that the driver worker executes the model and returns output."""
-        worker = TPUWorker(vllm_config=mock_vllm_config,
+    def test_execute_model(self, mock_runner_cls, mock_adapter_fn,
+                           mock_host_interface, mock_vllm_config):
+        """Tests that the driver worker executes the model and returns the concrete vLLM output."""
+        worker = TPUWorker(host_interface=mock_host_interface,
+                           vllm_config=mock_vllm_config,
                            local_rank=0,
                            rank=0,
                            distributed_init_method="test",
                            is_driver_worker=True)
         worker.model_runner = mock_runner_cls.return_value  # Assign mocked runner instance
-        mock_scheduler_output = MagicMock(spec=SchedulerOutput)
+        mock_scheduler_input = MagicMock(spec=AbstractSchedulerOutput)
+
+        # The adapter function returns the adapted input
+        mock_adapter_fn.return_value = mock_scheduler_input
+        # The adapter has the vllm object
+        mock_scheduler_input.vllm_scheduler_output = "concrete_vllm_object"
+
+        # The model runner returns a concrete vllm output
         mock_model_output = MagicMock(spec=ModelRunnerOutput)
         worker.model_runner.execute_model.return_value = mock_model_output
 
-        result = worker.execute_model(mock_scheduler_output)
+        result = worker.execute_model(mock_scheduler_input)
 
+        # Assert the temporary compatibility layer was called
+        mock_adapter_fn.assert_called_once_with(mock_scheduler_input)
+        # Assert the runner was called with the unwrapped concrete object
         worker.model_runner.execute_model.assert_called_once_with(
-            mock_scheduler_output)
+            "concrete_vllm_object")
+        # Assert the final result is the concrete model output, not an adapter
         assert result == mock_model_output
 
+    @patch(
+        'tpu_commons.worker.tpu_worker_torchax.adapt_scheduler_output_if_needed'
+    )
     @patch('tpu_commons.worker.tpu_worker_torchax.TPUModelRunner')
     def test_execute_model_non_driver_returns_none(self, mock_runner_cls,
+                                                   mock_adapter_fn,
+                                                   mock_host_interface,
                                                    mock_vllm_config):
         """Tests that a non-driver worker executes the model but returns None."""
         worker = TPUWorker(
+            host_interface=mock_host_interface,
             vllm_config=mock_vllm_config,
             local_rank=0,
             rank=0,
@@ -328,12 +376,15 @@ class TestTPUWorker:
             is_driver_worker=False  # Not a driver
         )
         worker.model_runner = mock_runner_cls.return_value
-        mock_scheduler_output = MagicMock(spec=SchedulerOutput)
+        mock_scheduler_input = MagicMock(spec=AbstractSchedulerOutput)
+        mock_adapter_fn.return_value = mock_scheduler_input
+        mock_scheduler_input.vllm_scheduler_output = "concrete_vllm_object"
 
-        result = worker.execute_model(mock_scheduler_output)
+        result = worker.execute_model(mock_scheduler_input)
 
+        mock_adapter_fn.assert_called_once_with(mock_scheduler_input)
         worker.model_runner.execute_model.assert_called_once_with(
-            mock_scheduler_output)
+            "concrete_vllm_object")
         assert result is None
 
     #
@@ -341,11 +392,12 @@ class TestTPUWorker:
     #
 
     @patch('tpu_commons.worker.tpu_worker_torchax.jax')
-    def test_profile_start(self, mock_jax, mock_vllm_config):
+    def test_profile_start(self, mock_jax, mock_host_interface,
+                           mock_vllm_config):
         """Tests starting the JAX profiler."""
         mock_jax.profiler = MagicMock()
 
-        worker = TPUWorker(mock_vllm_config, 0, 0, "test")
+        worker = TPUWorker(mock_host_interface, mock_vllm_config, 0, 0, "test")
         worker.profile_dir = "/tmp/profile_dir"
 
         worker.profile(is_start=True)
@@ -355,16 +407,17 @@ class TestTPUWorker:
         assert args[0] == "/tmp/profile_dir"
 
     @patch('tpu_commons.worker.tpu_worker_torchax.jax')
-    def test_profile_stop(self, mock_jax, mock_vllm_config):
+    def test_profile_stop(self, mock_jax, mock_host_interface,
+                          mock_vllm_config):
         """Tests stopping the JAX profiler."""
-        worker = TPUWorker(mock_vllm_config, 0, 0, "test")
+        worker = TPUWorker(mock_host_interface, mock_vllm_config, 0, 0, "test")
         worker.profile_dir = "/tmp/profile_dir"
         worker.profile(is_start=False)
         mock_jax.profiler.stop_trace.assert_called_once()
 
-    def test_check_health(self, mock_vllm_config):
+    def test_check_health(self, mock_host_interface, mock_vllm_config):
         """Tests that check_health runs without error."""
-        worker = TPUWorker(mock_vllm_config, 0, 0, "test")
+        worker = TPUWorker(mock_host_interface, mock_vllm_config, 0, 0, "test")
         try:
             worker.check_health()
         except Exception as e:
@@ -381,14 +434,12 @@ class TestTPUWorker:
             ("load_model", "load_model", []),
             ("get_model", "get_model", []),
             ("get_kv_cache_spec", "get_kv_cache_spec", []),
-            ("initialize_from_config", "initialize_kv_cache",
-             [MagicMock(spec=KVCacheConfig)]),
         ])
     def test_runner_passthrough_methods(self, worker_method_name,
                                         runner_method_name, method_args,
-                                        mock_vllm_config):
+                                        mock_host_interface, mock_vllm_config):
         """Tests methods that are simple pass-throughs to the TPUModelRunner."""
-        worker = TPUWorker(mock_vllm_config, 0, 0, "test")
+        worker = TPUWorker(mock_host_interface, mock_vllm_config, 0, 0, "test")
         worker.model_runner = MagicMock()
 
         # Call the worker method and assert the underlying runner method was called
@@ -396,9 +447,28 @@ class TestTPUWorker:
         mock_runner_method = getattr(worker.model_runner, runner_method_name)
         mock_runner_method.assert_called_once_with(*method_args)
 
-    def test_compile_or_warm_up_model(self, mock_vllm_config):
+    @patch(
+        'tpu_commons.worker.tpu_worker_torchax.adapt_kv_cache_config_if_needed'
+    )
+    def test_initialize_from_config(self, mock_adapter_fn, mock_host_interface,
+                                    mock_vllm_config):
+        """Tests the special case pass-through for initialize_from_config."""
+        worker = TPUWorker(mock_host_interface, mock_vllm_config, 0, 0, "test")
+        worker.model_runner = MagicMock()
+        mock_input_config = MagicMock(spec=AbstractKVCacheConfig)
+        mock_adapter_fn.return_value = mock_input_config
+        mock_input_config.vllm_kv_cache_config = "concrete_vllm_object"
+
+        worker.initialize_from_config(mock_input_config)
+
+        mock_adapter_fn.assert_called_once_with(mock_input_config)
+        worker.model_runner.initialize_kv_cache.assert_called_once_with(
+            "concrete_vllm_object")
+
+    def test_compile_or_warm_up_model(self, mock_host_interface,
+                                      mock_vllm_config):
         """Tests the special case pass-through for model compilation/warmup."""
-        worker = TPUWorker(mock_vllm_config, 0, 0, "test")
+        worker = TPUWorker(mock_host_interface, mock_vllm_config, 0, 0, "test")
         worker.model_runner = MagicMock()
         worker.model_config.enforce_eager = False
         worker.compile_or_warm_up_model()
