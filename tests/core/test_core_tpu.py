@@ -1,38 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from dataclasses import asdict
-import msgspec
 import multiprocessing as mp
 import os
 import queue
 import signal
 import threading
 import time
-import torch
 import unittest
-import zmq
-
+from dataclasses import asdict
 from unittest.mock import MagicMock, call, patch
 
+import msgspec
+import torch
+import zmq
 from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.engine import (
-    EngineCoreOutput,
-    EngineCoreOutputs,
-    EngineCoreRequest,
-    EngineCoreRequestType,
-    UtilityOutput,
-)
+from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
+                            EngineCoreRequest, EngineCoreRequestType,
+                            UtilityOutput)
 from vllm.v1.engine.core import ModelRunnerOutput
+from vllm.v1.engine.utils import EngineHandshakeMetadata, EngineZmqAddresses
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
-from vllm.v1.utils import EngineHandshakeMetadata, EngineZmqAddresses
 
 # The class we are testing
-from tpu_commons.core.core_tpu import DisaggEngineCoreProc, EngineCore, EngineCoreProc
+from tpu_commons.core.core_tpu import (DisaggEngineCoreProc, EngineCore,
+                                       EngineCoreProc)
 
 
 class EngineCoreTest(unittest.TestCase):
@@ -105,7 +101,8 @@ class EngineCoreTest(unittest.TestCase):
         self.mock_executor_class = MagicMock()
         self.mock_executor_class.return_value.get_kv_cache_specs.return_value = [
             {
-                "layers.0": FullAttentionSpec(
+                "layers.0":
+                FullAttentionSpec(
                     block_size=64,
                     num_kv_heads=8,
                     head_size=128,
@@ -113,7 +110,8 @@ class EngineCoreTest(unittest.TestCase):
                     use_mla=False,
                     sliding_window=None,
                 ),
-                "layers.1": FullAttentionSpec(
+                "layers.1":
+                FullAttentionSpec(
                     block_size=64,
                     num_kv_heads=8,
                     head_size=128,
@@ -121,7 +119,8 @@ class EngineCoreTest(unittest.TestCase):
                     use_mla=False,
                     sliding_window=None,
                 ),
-                "layers.2": FullAttentionSpec(
+                "layers.2":
+                FullAttentionSpec(
                     block_size=64,
                     num_kv_heads=8,
                     head_size=128,
@@ -142,8 +141,8 @@ class EngineCoreTest(unittest.TestCase):
         self.patch_disagg_executor = patch(
             "tpu_commons.core.disagg_executor.DisaggExecutor",
             self.mock_executor_class)
-        self.patch_jax_engine = patch(
-            "tpu_commons.core.core_tpu.JaxEngine", self.mock_engine_class)
+        self.patch_jax_engine = patch("tpu_commons.core.core_tpu.JaxEngine",
+                                      self.mock_engine_class)
         self.patch_orchestrator = patch("tpu_commons.core.orchestrator.Driver",
                                         self.mock_orchestrator_class)
 
@@ -171,8 +170,8 @@ class EngineCoreTest(unittest.TestCase):
 
         # Check that devices were sliced and passed correctly
         self.mock_prefill_executor.init_with_devices.assert_has_calls(
-            [call(self._devices[:4]), call(self._devices[4:8])]
-        )
+            [call(self._devices[:4]),
+             call(self._devices[4:8])])
 
         # Check that JaxEngine was initialized for both
         self.assertEqual(self.mock_engine_class.call_count, 2)
@@ -217,8 +216,7 @@ class EngineCoreTest(unittest.TestCase):
         try:
             self.engine_core.abort_requests(["test_req_1"])
         except Exception as e:
-            self.fail(
-                f"abort_requests raised an unexpected exception: {e}")
+            self.fail(f"abort_requests raised an unexpected exception: {e}")
 
     def test_shutdown(self):
         """Test shutting down the engine."""
@@ -280,10 +278,7 @@ class EngineCoreTest(unittest.TestCase):
 
     def test_collective_rpc(self):
         """Test collective RPC passthrough."""
-        method, args, kwargs = "test_method", (
-            1, "a"), {
-                "key": "value"
-            }
+        method, args, kwargs = "test_method", (1, "a"), {"key": "value"}
         self.engine_core.collective_rpc(method, args=args, kwargs=kwargs)
         self.mock_prefill_executor.collective_rpc.assert_called_once_with(
             method, None, args, kwargs)
@@ -334,7 +329,6 @@ class EngineCoreProcTest(unittest.TestCase):
             # Mock the orchestrator to produce predictable output
             engine_proc.orchestrator = MagicMock()
             engine_proc.orchestrator._vllm_output_backlogs = queue.Queue()
-
 
             def place_req_on_queue(req):
                 """Simulate orchestrator processing and producing output."""
@@ -449,6 +443,7 @@ class EngineCoreProcTest(unittest.TestCase):
             inputs=[self.input_address],
             outputs=[self.output_address],
         )
+
         def custom_dict_factory(data):
             result = {}
             for k, v in data:
@@ -457,13 +452,13 @@ class EngineCoreProcTest(unittest.TestCase):
                 elif isinstance(v, (int, str)):
                     result[k] = v
                 else:
-                    result[k] = str(v) # Convert other types to string
+                    result[k] = str(v)  # Convert other types to string
             return result
+
         handshake_metadata = EngineHandshakeMetadata(
             addresses=addresses,
-            parallel_config=asdict(
-                self.vllm_config.parallel_config, dict_factory=custom_dict_factory
-            ),
+            parallel_config=asdict(self.vllm_config.parallel_config,
+                                   dict_factory=custom_dict_factory),
         )
         init_msg = msgspec.msgpack.encode(handshake_metadata)
 
@@ -587,7 +582,8 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
 
         # VLLM Config
         self.mock_vllm_config = MagicMock(spec=VllmConfig)
-        self.mock_vllm_config.scheduler_config = MagicMock(spec=SchedulerConfig)
+        self.mock_vllm_config.scheduler_config = MagicMock(
+            spec=SchedulerConfig)
 
         self.mock_vllm_config.scheduler_config.max_num_seqs = 16
         self.mock_vllm_config.device_config = MagicMock()
@@ -706,7 +702,7 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
 
         prefill_engine = self.mock_prefill_engine_instance
         transfer_backlog = proc._transfer_backlogs[0]
-        output_queue = proc.output_queue
+        _ = proc.output_queue
 
         # Mock the request
         mock_request = MagicMock(spec=Request)
@@ -724,13 +720,13 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
         # Mock model execution result
         mock_runner_output = MagicMock(spec=ModelRunnerOutput)
         mock_runner_output.req_id_to_index = {mock_request.request_id: 0}
-        mock_runner_output.sampled_token_ids = [[123]]  # >0 tokens indicates done
+        mock_runner_output.sampled_token_ids = [[123]
+                                                ]  # >0 tokens indicates done
         prefill_engine.execute_model.return_value = mock_runner_output
 
         # Mock KV cache operations
-        prefill_engine.scheduler.kv_cache_manager.get_block_ids.return_value = ([
-            10, 11
-        ], )
+        prefill_engine.scheduler.kv_cache_manager.get_block_ids.return_value = (
+            [10, 11], )
         mock_kv_cache = [MagicMock(name="layer0_cache")]
         prefill_engine.model_executor.driver_worker.model_runner.get_kv_cache_for_block_ids.return_value = mock_kv_cache
 
@@ -744,7 +740,9 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
         prefill_engine.scheduler.update_from_output.side_effect = stop_loop_and_return_outputs
 
         # Set up scheduler state required for request removal logic
-        prefill_engine.scheduler.requests = {mock_request.request_id: mock_request}
+        prefill_engine.scheduler.requests = {
+            mock_request.request_id: mock_request
+        }
         prefill_engine.scheduler.running = [mock_request]
         prefill_engine.scheduler._cached_reqs_data = {
             mock_request.request_id: MagicMock()
@@ -752,7 +750,8 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
 
         # 2. Act
         proc.live = True
-        proc._prefill(0)  # This will run one iteration and exit via side_effect
+        proc._prefill(
+            0)  # This will run one iteration and exit via side_effect
 
         # 3. Assert
         # Check that KV cache was put on transfer backlog
@@ -762,8 +761,10 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
 
         # Check that request was freed from the scheduler's state
         self.assertEqual(len(prefill_engine.scheduler.running), 0)
-        prefill_engine.scheduler.kv_cache_manager.free.assert_called_with(mock_request)
-        self.assertNotIn(mock_request.request_id, prefill_engine.scheduler.requests)
+        prefill_engine.scheduler.kv_cache_manager.free.assert_called_with(
+            mock_request)
+        self.assertNotIn(mock_request.request_id,
+                         prefill_engine.scheduler.requests)
 
     def test_transfer_logic(self):
         """Tests the _transfer method logic for routing to the least busy engine."""
@@ -779,8 +780,10 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
         ]
 
         # Mock scheduler counts to control routing. Engine 2 is less busy.
-        self.mock_decode_engine_instance_1.scheduler.get_request_counts.return_value = (5, 0)
-        self.mock_decode_engine_instance_2.scheduler.get_request_counts.return_value = (2, 0)
+        self.mock_decode_engine_instance_1.scheduler.get_request_counts.return_value = (
+            5, 0)
+        self.mock_decode_engine_instance_2.scheduler.get_request_counts.return_value = (
+            2, 0)
 
         # Mock the transfer_kv_cache method on the target engine.
         mock_transferred_cache = MagicMock(name="TransferredKVCache")
@@ -804,8 +807,10 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
         proc._transfer(0)
 
         # 3. Assert
-        self.mock_decode_engine_instance_1.model_executor.driver_worker.model_runner.transfer_kv_cache.assert_not_called()
-        self.mock_decode_engine_instance_2.model_executor.driver_worker.model_runner.transfer_kv_cache.assert_called_once()
+        self.mock_decode_engine_instance_1.model_executor.driver_worker.model_runner.transfer_kv_cache.assert_not_called(
+        )
+        self.mock_decode_engine_instance_2.model_executor.driver_worker.model_runner.transfer_kv_cache.assert_called_once(
+        )
 
         output_item = proc._decode_backlogs[1].get_nowait()
         self.assertEqual(output_item["req_id"], "req-1")
@@ -836,15 +841,15 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
         mock_kv_cache = [MagicMock(name="layer0_cache_decode")]
         prefill_output = {"req_id": "decode-req-1", "cache": mock_kv_cache}
         decode_backlog.put(prefill_output)
-        decode_backlog.put(None)  # Sentinel to stop the inner loop after one item
+        decode_backlog.put(
+            None)  # Sentinel to stop the inner loop after one item
 
         # Mock the decode engine's scheduler and its sub-components
         decode_engine.scheduler = MagicMock()
         decode_engine.scheduler.has_requests.return_value = False
         decode_engine.scheduler.get_request_counts.return_value = (0, 0)
-        decode_engine.scheduler.kv_cache_manager.get_block_ids.return_value = ([
-            20, 21
-        ], )
+        decode_engine.scheduler.kv_cache_manager.get_block_ids.return_value = (
+            [20, 21], )
         # Set up lists to track state changes
         decode_engine.scheduler.running = []
         decode_engine.scheduler.requests = {}
@@ -872,13 +877,15 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
 
         # 3. Assert
         # Check that the request was inserted and its state updated
-        decode_engine.model_executor.driver_worker.model_runner.insert_request_with_kv_cache.assert_called_once()
+        decode_engine.model_executor.driver_worker.model_runner.insert_request_with_kv_cache.assert_called_once(
+        )
         self.assertIn(mock_request, decode_engine.scheduler.running)
         self.assertNotIn(mock_request.request_id, proc._requests)
 
         # Check that the main decode steps were called
         decode_engine.scheduler.schedule.assert_called_once()
-        decode_engine.execute_model.assert_called_once_with(mock_scheduler_output)
+        decode_engine.execute_model.assert_called_once_with(
+            mock_scheduler_output)
 
         # Check that the final output was put on the main output queue
         client_idx, output = output_queue.get_nowait()

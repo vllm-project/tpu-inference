@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-import copy
 import functools
 import itertools
 import queue
@@ -15,7 +14,6 @@ from typing import Any, Callable, Optional, TypeVar, Union
 import jax
 import msgspec
 import zmq
-from tpu_commons.runner.utils import LatencyTracker
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -27,20 +25,21 @@ from vllm.v1.core.kv_cache_utils import (get_kv_cache_config,
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
+from vllm.v1.engine.core import EngineCore as vLLMEngineCore
+from vllm.v1.engine.core import EngineCoreProc as vLLMEngineCoreProc
 from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
-from vllm.v1.engine.core import EngineCore as vLLMEngineCore, EngineCoreProc as vLLMEngineCoreProc
+from vllm.v1.engine.utils import EngineHandshakeMetadata, EngineZmqAddresses
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
-from vllm.v1.utils import EngineHandshakeMetadata, EngineZmqAddresses
-from vllm.sampling_params import SamplingParams
 from vllm.version import __version__ as VLLM_VERSION
 
 from tpu_commons.core import disagg_executor, disagg_utils, orchestrator
 from tpu_commons.core.tpu_jax_engine import JaxEngine
+from tpu_commons.runner.utils import LatencyTracker
 
 logger = init_logger(__name__)
 
@@ -653,6 +652,7 @@ class EngineCoreProc(EngineCore):
                     # Limit the number of buffers to reuse.
                     reuse_buffers.append(buffer)
 
+
 class DisaggEngineCoreProc(vLLMEngineCoreProc):
     """Wrapper for running vLLM EngineCore in background process."""
 
@@ -687,8 +687,10 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
         setattr(vllm_config.device_config, "slice", (0, slice_sizes))
         logger.info(f"Adding slice config to device config: {slice_sizes}")
 
-        executor_fail_callback = lambda: self.input_queue.put_nowait(
-            (EngineCoreRequestType.EXECUTOR_FAILED, b''))
+        def executor_fail_callback():
+            self.input_queue.put_nowait(
+                (EngineCoreRequestType.EXECUTOR_FAILED, b''))
+
         self._prefill_engines = self._create_engine_cores(
             prefill_slice_sizes,
             vllm_config,
@@ -713,8 +715,7 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
             f"{len(self._decode_engines)} Disaggregated decode engines created."
         )
         self._decode_backlogs = {
-            idx:
-            queue.Queue(vllm_config.scheduler_config.max_num_seqs)
+            idx: queue.Queue(vllm_config.scheduler_config.max_num_seqs)
             for idx, engine in enumerate(self._decode_engines)
         }
 
@@ -819,16 +820,15 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
             # as well.
             assert request.mm_inputs is not None
             request.mm_inputs = self._prefill_engines[
-                0
-            ].mm_input_cache_server.get_and_update_p1(
-                request.mm_inputs, request.mm_hashes
-            )
+                0].mm_input_cache_server.get_and_update_p1(
+                    request.mm_inputs, request.mm_hashes)
 
         req = Request.from_engine_core_request(request)
 
         if req.use_structured_output:
             # Start grammar compilation asynchronously
-            self._prefill_engines[0].structured_output_manager.grammar_init(req)
+            self._prefill_engines[0].structured_output_manager.grammar_init(
+                req)
 
         return req
 
@@ -901,18 +901,15 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
                 for req_id, idx in model_output.req_id_to_index.items():
                     if len(model_output.sampled_token_ids[idx]) > 0:
                         request = self._requests[req_id]
-                        block_ids = (
-                            prefill_engine.scheduler.kv_cache_manager.get_block_ids(
-                                req_id
-                            )
-                        )
-                        with LatencyTracker(f"ExtractKVCache-{req_id}-{block_ids}"):
+                        block_ids = (prefill_engine.scheduler.kv_cache_manager.
+                                     get_block_ids(req_id))
+                        with LatencyTracker(
+                                f"ExtractKVCache-{req_id}-{block_ids}"):
                             # Assume one KV cache group for now.
                             kv_cache_map[req_id] = (
-                                prefill_engine.model_executor.driver_worker.model_runner.get_kv_cache_for_block_ids(
-                                    block_ids[0]
-                                )
-                            )
+                                prefill_engine.model_executor.driver_worker.
+                                model_runner.get_kv_cache_for_block_ids(
+                                    block_ids[0]))
                         logger.debug(f"prefill done: for {req_id}")
                 transfer_backlog.put(kv_cache_map, block=True)
 
@@ -923,20 +920,26 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
                 for req_id, idx in model_output.req_id_to_index.items():
                     if len(model_output.sampled_token_ids[idx]) > 0:
                         request = self._requests[req_id]
-                        logger.debug(f"request-{req_id}: tokens={request._all_token_ids} after prefill")
+                        logger.debug(
+                            f"request-{req_id}: tokens={request._all_token_ids} after prefill"
+                        )
                         # Remove request from the prefill engine.
 
                         request = prefill_engine.scheduler.requests[req_id]
                         prefill_engine.scheduler.running.remove(request)
-                        prefill_engine.scheduler.encoder_cache_manager.free(request)
-                        prefill_engine.scheduler._cached_reqs_data.pop(req_id, None)
+                        prefill_engine.scheduler.encoder_cache_manager.free(
+                            request)
+                        prefill_engine.scheduler._cached_reqs_data.pop(
+                            req_id, None)
 
                         prefill_engine.scheduler.kv_cache_manager.free(request)
-                        prefill_engine.scheduler.kv_cache_manager.free_block_hashes(request)
+                        prefill_engine.scheduler.kv_cache_manager.free_block_hashes(
+                            request)
 
                         prefill_engine.scheduler.requests.pop(req_id)
 
-                for output in (engine_core_outputs.items() if engine_core_outputs else ()):
+                for output in (engine_core_outputs.items()
+                               if engine_core_outputs else ()):
                     self.output_queue.put_nowait(output)
 
     def _transfer(self, idx: int):
@@ -949,7 +952,9 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
             if kv_cachce_map is None:
                 break
 
-            logger.debug(f"transfer-{idx}: KV Cache items received: {kv_cachce_map.keys()}")
+            logger.debug(
+                f"transfer-{idx}: KV Cache items received: {kv_cachce_map.keys()}"
+            )
 
             push_targets = []
             for req_id, kv_cache in kv_cachce_map.items():
@@ -964,10 +969,8 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
                 # Only transfer the KVCache for the disaggregated serving.
                 with LatencyTracker("KVCacheTransfer"):
                     kv_cache = self._decode_engines[
-                        target_idx
-                    ].model_executor.driver_worker.model_runner.transfer_kv_cache(
-                        kv_cache
-                    )
+                        target_idx].model_executor.driver_worker.model_runner.transfer_kv_cache(
+                            kv_cache)
 
                 # TODO(fhzhang): Now how do we get the kv cache to the decode engine?
                 prefill_output = {
@@ -978,7 +981,7 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
 
             for target_idx, prefill_output in push_targets:
                 self._decode_backlogs[target_idx].put(prefill_output,
-                                                        block=True)
+                                                      block=True)
                 logger.debug(
                     "Successfully transferred prefill request %s "
                     "from prefill engine %d to decode engine %d. decode backlog len %d",
@@ -997,23 +1000,25 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
             while True:
                 # We need to check input batch as well as the request completion is delayed
                 # from scheduler to the runner.
-                if (
-                    sum(decode_engine.scheduler.get_request_counts())
-                    >= self.vllm_config.scheduler_config.max_num_seqs or
-                    decode_engine.model_executor.driver_worker.model_runner.input_batch.num_reqs
-                    >= self.vllm_config.scheduler_config.max_num_seqs
-                ):
+                if (sum(decode_engine.scheduler.get_request_counts())
+                        >= self.vllm_config.scheduler_config.max_num_seqs
+                        or decode_engine.model_executor.driver_worker.
+                        model_runner.input_batch.num_reqs
+                        >= self.vllm_config.scheduler_config.max_num_seqs):
                     break
 
                 try:
-                    prefill_output = decode_backlog.get(block=block, timeout=1.0)
+                    prefill_output = decode_backlog.get(block=block,
+                                                        timeout=1.0)
                 except queue.Empty:
                     if block:
                         continue
                     break
 
                 if prefill_output is None:
-                    logger.info(f"decode-{idx} Empty output, and we are idle, exiting...")
+                    logger.info(
+                        f"decode-{idx} Empty output, and we are idle, exiting..."
+                    )
                     break
 
                 # We got a request, set block to False
@@ -1031,11 +1036,9 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
                 )
                 new_block_ids = kv_cache_manager.get_block_ids(req_id)
 
-                with LatencyTracker(
-                        f"KVCacheInsert-{len(new_block_ids[0])}"):
+                with LatencyTracker(f"KVCacheInsert-{len(new_block_ids[0])}"):
                     decode_engine.model_executor.driver_worker.model_runner.insert_request_with_kv_cache(
-                        vllm_request, kv_cache, new_block_ids
-                    )
+                        vllm_request, kv_cache, new_block_ids)
 
                 vllm_request.status = RequestStatus.RUNNING
                 decode_engine.scheduler.running.append(vllm_request)
@@ -1045,7 +1048,8 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
 
             scheduler_output = decode_engine.scheduler.schedule()
 
-            logger.debug(f"decode-{idx}: scheduler_output - {scheduler_output}")
+            logger.debug(
+                f"decode-{idx}: scheduler_output - {scheduler_output}")
 
             with LatencyTracker(f"decode-{idx}"):
                 model_output = decode_engine.execute_model(scheduler_output)
@@ -1054,7 +1058,8 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
 
                 engine_core_outputs = decode_engine.scheduler.update_from_output(
                     scheduler_output, model_output)  # type: ignore
-                for output in (engine_core_outputs.items() if engine_core_outputs else ()):
+                for output in (engine_core_outputs.items()
+                               if engine_core_outputs else ()):
                     self.output_queue.put_nowait(output)
 
     def shutdown(self):
