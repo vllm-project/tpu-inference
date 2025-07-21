@@ -57,7 +57,7 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
 
         # Patch threads to avoid them running in the background.
         self.jet_thread_patcher = patch(
-            "tpu_commons.core.core_tpu.orchestrator.JetThread", MagicMock)
+            "tpu_commons.core.core_tpu.JetThread", MagicMock)
         self.mock_jet_thread = self.jet_thread_patcher.start()
         self.addCleanup(self.jet_thread_patcher.stop)
 
