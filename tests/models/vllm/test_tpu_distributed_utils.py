@@ -11,7 +11,13 @@ from jax.sharding import Mesh, PartitionSpec
 from tpu_commons.distributed.tpu_distributed_utils import (
     create_torchax_kv_cache, create_torchax_tensor_with_partition_spec)
 
-torchax.enable_globally()
+
+@pytest.fixture(scope="module", autouse=True)
+def setup_torchax():
+    """Enable torchax globally before all tests, disable after all tests."""
+    torchax.enable_globally()
+    yield
+    torchax.disable_globally()
 
 
 @pytest.fixture(autouse=True)
@@ -42,9 +48,10 @@ def test_create_torchax_kv_cache(mesh, partition_spec):
     (None, None),
     (Mesh(jax.devices(), axis_names=('x', )), PartitionSpec('x', )),
 ])
-def test_create_torchax_tensor_with_partition_spec(mesh, partition_spec):
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_create_torchax_tensor_with_partition_spec(mesh, partition_spec,
+                                                   dtype):
     shape = (1024, 1024)
-    dtype = torch.bfloat16
     torch_t = torch.empty(shape, dtype=dtype)
 
     # Create a Torchax tensor with the specified partition spec
