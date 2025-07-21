@@ -111,8 +111,11 @@ class TestTPUWorker:
 
     def test_initialize_cache(self, mock_host_interface, mock_vllm_config):
         """Tests setting the number of GPU and CPU cache blocks."""
-        worker = TPUWorker(mock_host_interface, mock_vllm_config, 0, 0,
-                           "test_method")
+        worker = TPUWorker(host_interface=mock_host_interface,
+                           vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test_method")
         worker.initialize_cache(num_gpu_blocks=2048, num_cpu_blocks=1024)
         assert worker.cache_config.num_gpu_blocks == 2048
         assert worker.cache_config.num_cpu_blocks == 1024
@@ -262,7 +265,11 @@ class TestTPUWorker:
     def test_profile_start(self, mock_jax, mock_host_interface,
                            mock_vllm_config):
         """Tests starting the JAX profiler."""
-        worker = TPUWorker(mock_host_interface, mock_vllm_config, 0, 0, "test")
+        worker = TPUWorker(host_interface=mock_host_interface,
+                           vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test")
         worker.profile_dir = "/tmp/profile_dir"
 
         worker.profile(is_start=True)
@@ -278,13 +285,21 @@ class TestTPUWorker:
     def test_profile_stop(self, mock_jax, mock_host_interface,
                           mock_vllm_config):
         """Tests stopping the JAX profiler."""
-        worker = TPUWorker(mock_host_interface, mock_vllm_config, 0, 0, "test")
+        worker = TPUWorker(host_interface=mock_host_interface,
+                           vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test")
         worker.profile(is_start=False)
         mock_jax.profiler.stop_trace.assert_called_once()
 
     def test_check_health(self, mock_host_interface, mock_vllm_config):
         """Tests that check_health runs without error."""
-        worker = TPUWorker(mock_host_interface, mock_vllm_config, 0, 0, "test")
+        worker = TPUWorker(host_interface=mock_host_interface,
+                           vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test")
         try:
             worker.check_health()
         except Exception as e:
@@ -306,7 +321,11 @@ class TestTPUWorker:
                                         runner_method_name, method_args,
                                         mock_host_interface, mock_vllm_config):
         """Tests methods that are simple pass-throughs to the TPUModelRunner."""
-        worker = TPUWorker(mock_host_interface, mock_vllm_config, 0, 0, "test")
+        worker = TPUWorker(host_interface=mock_host_interface,
+                           vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test")
         worker.model_runner = MagicMock()
 
         # Call the worker method and assert the underlying runner method was called
@@ -318,7 +337,11 @@ class TestTPUWorker:
     def test_initialize_from_config(self, mock_adapter_fn, mock_host_interface,
                                     mock_vllm_config):
         """Tests the special case pass-through for initialize_from_config."""
-        worker = TPUWorker(mock_host_interface, mock_vllm_config, 0, 0, "test")
+        worker = TPUWorker(host_interface=mock_host_interface,
+                           vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test")
         worker.model_runner = MagicMock()
         mock_input_config = MagicMock(spec=AbstractKVCacheConfig)
         mock_adapter_fn.return_value = mock_input_config
@@ -333,7 +356,11 @@ class TestTPUWorker:
     def test_compile_or_warm_up_model(self, mock_host_interface,
                                       mock_vllm_config):
         """Tests the special case pass-through for model compilation/warmup."""
-        worker = TPUWorker(mock_host_interface, mock_vllm_config, 0, 0, "test")
+        worker = TPUWorker(host_interface=mock_host_interface,
+                           vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test")
         worker.model_runner = MagicMock()
 
         worker.compile_or_warm_up_model()
