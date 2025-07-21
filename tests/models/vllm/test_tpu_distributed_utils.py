@@ -13,11 +13,12 @@ from vllm.config import set_current_vllm_config
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.engine.arg_utils import EngineArgs
-from vllm.model_executor.layers.linear import QKVParallelLinear
+from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
+                                               QKVParallelLinear)
 
 from tpu_commons.distributed.tpu_distributed_utils import (
-    XlaQKVParallelLinear, create_torchax_kv_cache,
-    create_torchax_tensor_with_partition_spec)
+    XlaMergedColumnParallelLinear, XlaQKVParallelLinear,
+    create_torchax_kv_cache, create_torchax_tensor_with_partition_spec)
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -165,8 +166,61 @@ def test_xla_qkv_linear(setup_environment, bias, return_bias, skip_bias_add,
         if (not skip_bias_add) or (not bias):
             assert output[1] is None and output[1] == xla_output[1]
         else:
-            print("output[1]:", output[1])
-            print("xla_output[1]:", xla_output[1])
+            assert torch.allclose(output[1].cpu(), xla_output[1].cpu())
+    else:
+        assert torch.allclose(output.cpu(), xla_output.cpu())
+
+
+@pytest.mark.parametrize("bias", [True, False])
+@pytest.mark.parametrize("return_bias", [True, False])
+@pytest.mark.parametrize("skip_bias_add", [True, False])
+@pytest.mark.parametrize("use_mesh", [True, False])
+@torch.no_grad()
+def test_xla_merged_column_linear(setup_environment, bias, return_bias,
+                                  skip_bias_add, use_mesh):
+    torch.manual_seed(123)
+
+    if use_mesh:
+        mesh = Mesh(jax.devices(), axis_names=('x', ))
+    else:
+        mesh = None
+
+    merged_col_plinear = MergedColumnParallelLinear(
+        input_size=32,
+        output_sizes=[128, 256],
+        bias=bias,
+        params_dtype=torch.bfloat16,
+        return_bias=return_bias,
+        skip_bias_add=skip_bias_add,
+    )
+
+    merged_col_plinear.weight.data = torch.rand_like(
+        merged_col_plinear.weight.data) / 10
+    if bias:
+        merged_col_plinear.bias.data = torch.rand_like(
+            merged_col_plinear.bias.data)
+
+    xla_merged_col_plinear = XlaMergedColumnParallelLinear(merged_col_plinear,
+                                                           mesh=mesh)
+
+    if mesh is None:
+        xla_merged_col_plinear = xla_merged_col_plinear.to('jax')
+
+    merged_col_plinear = merged_col_plinear.to('jax')
+    input_tensor = torch.rand(10, 32, dtype=torch.bfloat16) / 10
+    input_tensor = input_tensor.to('jax')
+
+    output = merged_col_plinear(input_tensor)
+    if mesh is not None:
+        input_tensor.apply_jax_(jax.device_put, NamedSharding(mesh, P()))
+    xla_output = xla_merged_col_plinear(input_tensor)
+    if return_bias:
+        assert isinstance(xla_output, tuple) and isinstance(output, tuple)
+        assert len(xla_output) == len(output) == 2
+        assert torch.allclose(output[0].cpu(), xla_output[0].cpu())
+        if (not skip_bias_add) or (not bias):
+            assert output[1] is None and output[1] == xla_output[1]
+        else:
             assert torch.allclose(output[1].cpu(), xla_output[1].cpu())
     else:
         assert torch.allclose(output.cpu(), xla_output.cpu())

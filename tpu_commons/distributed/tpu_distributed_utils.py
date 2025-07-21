@@ -242,8 +242,11 @@ class XlaMergedColumnParallelLinear(nn.Module):
         # Apply linear transformations for each weight/bias pair
         outputs = []
         for i, _ in enumerate(self.output_sizes):
-            output = F.linear(input, getattr(self, f"weight_{i}"),
-                              getattr(self, f"bias_{i}"))
+            if self.skip_bias_add:
+                output = F.linear(input, getattr(self, f"weight_{i}"))
+            else:
+                output = F.linear(input, getattr(self, f"weight_{i}"),
+                                  getattr(self, f"bias_{i}"))
             outputs.append(output)
 
         # Concatenate all outputs
@@ -252,7 +255,9 @@ class XlaMergedColumnParallelLinear(nn.Module):
         # Handle bias return if needed
         if self.return_bias:
             output_bias = None
-            if self.bias_0 is not None:
+            if not self.skip_bias_add or self.bias_0 is None:
+                output_bias = None
+            else:
                 output_bias = torch.cat([
                     getattr(self, f"bias_{i}")
                     for i, _ in enumerate(self.output_sizes)
