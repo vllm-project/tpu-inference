@@ -25,7 +25,7 @@ steps:
 
   # A placeholder for adding more JAX workload unit tests
    - label: "JAX unit tests"
-     key: test_3
+     key: test_2
      soft_fail: true
      env:
        TPU_BACKEND_TYPE: "jax"
@@ -44,7 +44,6 @@ steps:
        - test_0
        - test_1
        - test_2
-       - test_3
      agents:
        queue: tpu_v6e_queue
-     commands: "bash .buildkite/scripts/check_results.sh 'TPU JAX Tests Failed' test_0 test_1 test_2 test_3"
+     commands: "bash .buildkite/scripts/check_results.sh 'TPU JAX Tests Failed' test_0 test_1 test_2"
