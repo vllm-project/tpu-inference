@@ -26,13 +26,13 @@ logger = init_logger(__name__)
 class TPUWorker(AbstractTpuWorker):
 
     def __init__(self,
-                 host_interface: HostInterface,
                  vllm_config: VllmConfig,
                  local_rank: int,
                  rank: int,
                  distributed_init_method: str,
                  is_driver_worker: bool = False,
-                 devices=None):
+                 devices=None,
+                 host_interface: Optional[HostInterface] = None):
         super().__init__(host_interface)
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config

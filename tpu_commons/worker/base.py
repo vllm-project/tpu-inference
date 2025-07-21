@@ -30,7 +30,7 @@ class AbstractTpuWorker(ABC):
     pure and truly reusable across different host systems.
     """
 
-    def __init__(self, host_interface: HostInterface):
+    def __init__(self, host_interface: Optional[HostInterface] = None):
         self.host_interface = host_interface
 
     @abstractmethod
