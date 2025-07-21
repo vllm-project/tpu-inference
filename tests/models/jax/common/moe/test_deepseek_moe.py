@@ -18,7 +18,8 @@ class TestDeepSeekV3Router(unittest.TestCase):
         self.tpu_mesh = Mesh(jax.devices('tpu'), axis_names=('data', ))
         self.param_factory = ParamFactory(
             kernel_initializer=nnx.initializers.xavier_normal(),
-            scale_initializer=nnx.initializers.ones)
+            scale_initializer=nnx.initializers.ones,
+            random_init=True)
         self.sharding_cfg = ShardingConfig()
 
     def test_get_topk_indices_single_group(self):
@@ -95,14 +96,14 @@ class TestDeepSeekV3Router(unittest.TestCase):
                                   self.sharding_cfg,
                                   quant=None)
         router.generate_kernel(nnx.Rngs(42))
-        x = jnp.ones((1, 2, 512))
+        x = jnp.ones((2, 512))
         weights, indices = router(x, "prefill")
-        self.assertEqual(weights.shape, (1, 2, 2))
-        self.assertEqual(indices.shape, (1, 2, 2))
+        self.assertEqual(weights.shape, (2, 2))
+        self.assertEqual(indices.shape, (2, 2))
 
         weights, indices = router(x, "generate")
-        self.assertEqual(weights.shape, (1, 2, 2))
-        self.assertEqual(indices.shape, (1, 2, 2))
+        self.assertEqual(weights.shape, (2, 2))
+        self.assertEqual(indices.shape, (2, 2))
 
 
 if __name__ == '__main__':
