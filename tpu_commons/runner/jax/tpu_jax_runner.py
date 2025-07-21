@@ -911,12 +911,16 @@ class TPUModelRunner():
             req_ids_to_add.append(req_id)
 
         # Update the states of the running/resumed requests.
-        req_data = scheduler_output.scheduled_cached_reqs
-        for i, req_id in enumerate(req_data.req_ids):
+        list_of_req_data = scheduler_output.scheduled_cached_reqs
+        for req_data in list_of_req_data:
+            req_id = req_data.req_id
+            if not req_id:
+                continue
+
             req_state = self.requests[req_id]
-            num_computed_tokens = req_data.num_computed_tokens[i]
-            new_block_ids = req_data.new_block_ids[i]
-            resumed_from_preemption = req_data.resumed_from_preemption[i]
+            num_computed_tokens = req_data.num_computed_tokens
+            new_block_ids = req_data.new_block_ids
+            resumed_from_preemption = req_data.resumed_from_preemption
 
             # Update the cached states.
             req_state.num_computed_tokens = num_computed_tokens
