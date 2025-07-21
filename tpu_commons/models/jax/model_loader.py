@@ -26,6 +26,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     if os.getenv("NEW_MODEL_DESIGN", False):
         from tpu_commons.models.jax.recipes.llama3 import Llama3
 
+        logger.info("Using new model design")
         # from tpu_commons.models.jax.recipes.llama4 import Llama4Scout
         _MODEL_REGISTRY["Llama3"] = Llama3
         # _MODEL_REGISTRY["Llama4Scout"] = Llama4Scout
@@ -45,6 +46,7 @@ def _get_common_model(
     rng: jax.Array,
     mesh: Mesh,
 ) -> nnx.Module:
+    logger.info("Using common model")
     model = model_class(vllm_config, rng, mesh)
     model.load_weights(model)
     return model
@@ -56,7 +58,9 @@ def _get_nnx_model(
     rng: jax.Array,
     mesh: Mesh,
 ) -> nnx.Module:
+    logger.info("Using nnx model")
     if os.getenv("JAX_RANDOM_WEIGHTS", False):
+        logger.info("Using random weights")
         # Create a sharded model with random inited weights.
         @nnx.jit
         def create_sharded_model():
@@ -81,6 +85,7 @@ def _get_nnx_model(
         #    the load_weights. This would be easy to OOM if the layer is super large.
         # 3. The model architecture definition won't need to worry about the sharding.
         #    The sharding definition is taken over by the load_weights instead.
+        logger.info("Using nnx model with real weights")
         model = nnx.eval_shape(lambda: model_class(vllm_config, rng, mesh))
         model.load_weights(rng)
         # Although the created model can already work, we still need to jit
@@ -102,6 +107,7 @@ def get_flax_model(
     rng: jax.Array,
     mesh: Mesh,
 ) -> nnx.Module:
+    logger.info("Using flax model")
     model_class = _get_model_architecture(vllm_config.model_config.hf_config)
     if os.getenv("NEW_MODEL_DESIGN", False):
         jit_model = _get_common_model(model_class, vllm_config, rng, mesh)
@@ -148,6 +154,7 @@ def get_vllm_model(
     rng: jax.Array,
     mesh: Mesh,
 ):
+    logger.info("Using vllm model")
     from tpu_commons.models.vllm.vllm_model_wrapper import VllmModelWrapper
 
     model = VllmModelWrapper(

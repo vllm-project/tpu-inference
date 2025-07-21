@@ -289,7 +289,15 @@ class LlamaForCausalLM(nnx.Module):
     def load_weights(self, rng_key: jax.Array):
         # NOTE: Since we are using nnx.eval_shape to init the model,
         # we have to pass dynamic arrays here for __call__'s usage.
-        self.rng = nnx.Rngs(rng_key)
+        logger.info(
+            f"Loading weights for LlamaForCausalLM: rng_key: {rng_key}")
+        logger.info(
+            f"Loading weights for LlamaForCausalLM: rng_key type: {type(rng_key)}"
+        )
+
+        # self.rng = nnx.Rngs(rng_key)
+        logger.info("Ignoring rng_key")
+        self.rng = nnx.Rngs()
 
         # Key: path to a HF layer weight
         # Value: a tuple of (path to a nnx layer weight, nnx weight sharding)
