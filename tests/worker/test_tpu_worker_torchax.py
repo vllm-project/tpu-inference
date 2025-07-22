@@ -4,10 +4,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 # Dependencies that will be mocked
+from vllm.lora.request import LoRARequest
 from vllm.v1.outputs import ModelRunnerOutput
 
 # Import the abstract classes and interfaces for mocking
 from tpu_commons.di.abstracts import (AbstractKVCacheConfig,
+                                      AbstractLoRARequest,
                                       AbstractSchedulerOutput)
 from tpu_commons.di.interfaces import HostInterface
 # The class we are testing
@@ -390,19 +392,49 @@ class TestTPUWorker:
             "concrete_vllm_object")
         assert result is None
 
-    def test_add_lora(self, mock_host_interface, mock_vllm_config):
+    @patch(
+        'tpu_commons.worker.tpu_worker_torchax.adapt_lora_request_if_needed')
+    def test_add_lora(self, mock_adapter_fn, mock_host_interface,
+                      mock_vllm_config):
         """Tests the pass-through for add_lora."""
         worker = TPUWorker(host_interface=mock_host_interface,
                            vllm_config=mock_vllm_config,
                            local_rank=0,
                            rank=0,
                            distributed_init_method="test")
-        worker.model_runner = MagicMock()
-        mock_lora_request = MagicMock()
+        mock_lora_request = MagicMock(spec=AbstractLoRARequest)
 
-        worker.add_lora(mock_lora_request)
+        # The adapter function returns the adapted input
+        mock_adapter_fn.return_value = mock_lora_request
+        # The adapter has the vllm object
+        mock_lora_request.vllm_lora_request = "concrete_vllm_object"
 
-        worker.model_runner.add_lora.assert_called_once_with(mock_lora_request)
+        with pytest.raises(
+                NotImplementedError,
+                match="LoRA is not supported by the torchax worker yet."):
+            worker.add_lora(mock_lora_request)
+
+    @patch(
+        'tpu_commons.worker.tpu_worker_torchax.adapt_lora_request_if_needed')
+    def test_add_lora_lora_request(self, mock_adapter_fn, mock_host_interface,
+                                   mock_vllm_config):
+        """Tests the pass-through for add_lora."""
+        worker = TPUWorker(host_interface=mock_host_interface,
+                           vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test")
+        mock_lora_request = MagicMock(spec=LoRARequest)
+
+        # The adapter function returns the adapted input
+        mock_adapter_fn.return_value = mock_lora_request
+        # The adapter has the vllm object
+        mock_lora_request.vllm_lora_request = "concrete_vllm_object"
+
+        with pytest.raises(
+                NotImplementedError,
+                match="LoRA is not supported by the torchax worker yet."):
+            worker.add_lora(mock_lora_request)
 
     #
     # --- Profiling and Health Check Tests ---
