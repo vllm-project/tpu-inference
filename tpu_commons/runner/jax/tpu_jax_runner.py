@@ -303,8 +303,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 ),
             )
             start = time.perf_counter()
-            self.kv_caches, hidden_states = self.model_fn(
-                self.state, *inputs[:3])
+            with self.maybe_select_dummy_loras(
+                    self.lora_config, np.array([num_tokens], dtype=np.int32)):
+                self.kv_caches, hidden_states = self.model_fn(
+                    self.state, *inputs[:3])
             end = time.perf_counter()
             logger.info("Compilation finished in %.2f [secs].", end - start)
             hidden_states.block_until_ready()
@@ -384,10 +386,11 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             return
         logger.info("Precompile all the subgraphs with possible input shapes.")
 
-        self._precompile_backbone()
-        self._precompile_select_hidden_states()
-        self._precompile_compute_logits()
-        self._precompile_sampling()
+        with self.maybe_setup_dummy_loras(self.lora_config):
+            self._precompile_backbone()
+            self._precompile_select_hidden_states()
+            self._precompile_compute_logits()
+            self._precompile_sampling()
 
     @staticmethod
     @functools.partial(jax.jit)
