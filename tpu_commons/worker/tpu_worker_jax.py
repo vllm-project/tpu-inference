@@ -47,10 +47,6 @@ class TPUWorker(AbstractTpuWorker):
         self.is_driver_worker = is_driver_worker
         self.devices = devices if devices is not None else []
 
-        if self.rank != self.local_rank:
-            raise NotImplementedError(
-                "Multi host serving is not supported yet.")
-
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
