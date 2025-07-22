@@ -43,7 +43,6 @@ pre-commit run --all-files
 Run `Llama 3.1 8B` offline inference on 4 TPU chips:
 
 ```
-export TPU_BACKEND_TYPE=jax
 python tpu_commons/examples/offline_inference.py \
     --model=meta-llama/Llama-3.1-8B \
     --tensor_parallel_size=4 \
@@ -58,7 +57,6 @@ Run `Llama 3.1 8B Instruct` offline inference on 4 TPU chips in disaggregated mo
 ```
 PREFILL_SLICES=2 \
 DECODE_SLICES=2 \
-TPU_BACKEND_TYPE=jax \
 python tpu_commons/examples/offline_inference.py \
     --task=generate \
     --model=meta-llama/Meta-Llama-3-8B-Instruct \
@@ -72,7 +70,6 @@ Run the vLLM's implementation of `Llama 3.1 8B`, which is in Pytorch. It is the 
 
 ```
 export MODEL_IMPL_TYPE=vllm
-export TPU_BACKEND_TYPE=jax
 python tpu_commons/examples/offline_inference.py \
     --model=meta-llama/Llama-3.1-8B \
     --tensor_parallel_size=4 \
@@ -84,7 +81,6 @@ Run the vLLM Pytorch `Qwen3-30B-A3B` MoE model, use `--enable-expert-parallel` f
 
 ```
 export MODEL_IMPL_TYPE=vllm
-export TPU_BACKEND_TYPE=jax
 python vllm/examples/offline_inference/basic/generate.py \
     --model=Qwen/Qwen3-30B-A3B \
     --tensor_parallel_size=4 \
@@ -95,7 +91,7 @@ python vllm/examples/offline_inference/basic/generate.py \
 
 ### Relevant env
 
-To switch different backends:
+To switch different backends (default is jax):
 
 ```
 TPU_BACKEND_TYPE=jax
@@ -103,7 +99,7 @@ TPU_BACKEND_TYPE=torchax
 TPU_BACKEND_TYPE=pytorch_xla
 ```
 
-To switch different model implementations:
+To switch different model implementations (default is flax_nnx):
 
 ```
 MODEL_IMPL_TYPE=flax_nnx
@@ -162,7 +158,6 @@ DOCKER_URI=<the same URI used in docker build>
 docker pull $DOCKER_URI
 docker run \
   --rm \
-  -e TPU_BACKEND_TYPE=jax \
   $DOCKER_URI \
   python /workspace/tpu_commons/examples/offline_inference.py \
   --model=meta-llama/Llama-3.1-8B \

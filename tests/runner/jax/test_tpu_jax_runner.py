@@ -1,8 +1,5 @@
-import os
 import unittest
 from unittest.mock import MagicMock, patch
-
-os.environ["TPU_BACKEND_TYPE"] = "jax"
 
 import jax.numpy as jnp
 import numpy as np
