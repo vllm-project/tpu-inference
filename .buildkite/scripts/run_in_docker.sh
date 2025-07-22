@@ -29,7 +29,7 @@ if [ -z "${BUILDKITE_COMMIT:-}" ]; then
 fi
 
 if [ -z "${TPU_BACKEND_TYPE:-}" ]; then
-  TPU_BACKEND_TYPE=pytorch_xla
+  TPU_BACKEND_TYPE=jax
 fi
 
 if [ -z "${MODEL_IMPL_TYPE:-}" ]; then

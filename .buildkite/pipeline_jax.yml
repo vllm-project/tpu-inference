@@ -5,8 +5,6 @@ steps:
    - label: "E2E MLPerf tests for JAX models"
      key: test_0
      soft_fail: true
-     env:
-       TPU_BACKEND_TYPE: "jax"
      agents:
        queue: tpu_v6e_queue
      commands:
@@ -16,7 +14,6 @@ steps:
      key: test_1
      soft_fail: true
      env:
-       TPU_BACKEND_TYPE: "jax"
        MODEL_IMPL_TYPE: "vllm"
      agents:
        queue: tpu_v6e_queue
@@ -27,8 +24,6 @@ steps:
    - label: "JAX unit tests"
      key: test_2
      soft_fail: true
-     env:
-       TPU_BACKEND_TYPE: "jax"
      agents:
        queue: tpu_v6e_queue
      commands:
