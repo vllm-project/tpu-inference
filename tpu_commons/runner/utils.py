@@ -232,12 +232,6 @@ def create_kv_caches(
 
     # Shard the num_kv_heads dim along the 'model' axis.
     sharding = NamedSharding(mesh, PartitionSpec(None, None, "model"))
-    devices
-    logger.info(f"Init kv-cache | "
-                f"shape={len(layer_names)} * {cache_shape} | "
-                f"sharding={sharding} | "
-                f"dtype={cache_dtype} | "
-                f"hbm={utils.hbm_usage_gb(devices)}Gb")
 
     def _allocate() -> jax.Array:
         return jnp.empty(
@@ -249,4 +243,9 @@ def create_kv_caches(
     kv_caches = []
     for _ in layer_names:
         kv_caches.append(sharded_allocate())
+    logger.info(f"Init kv-cache | "
+                f"shape={len(layer_names)} * {cache_shape} | "
+                f"sharding={sharding} | "
+                f"dtype={cache_dtype} | "
+                f"hbm={utils.hbm_usage_gb(devices)}Gb")
     return kv_caches

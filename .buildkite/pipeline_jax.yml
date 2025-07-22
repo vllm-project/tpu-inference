@@ -25,7 +25,7 @@ steps:
 
   # A placeholder for adding more JAX workload unit tests
    - label: "JAX unit tests"
-     key: test_3
+     key: test_2
      soft_fail: true
      env:
        TPU_BACKEND_TYPE: "jax"
@@ -34,9 +34,9 @@ steps:
      commands:
        - |
          .buildkite/scripts/run_in_docker.sh \
-           python3 -m pytest -s -v /workspace/tpu_commons/tests/
-   - label: "E2E MMLU tests for JAX new model implementation with quantization"
-     key: test_4
+           python3 -m pytest -s -v /workspace/tpu_commons/tests/ --cov tpu_commons --cov-report term-missing
+   - label: "E2E MLPerf tests for JAX new model implementation with quantization"
+     key: test_3
      soft_fail: true
      env:
        TPU_BACKEND_TYPE: "jax"
@@ -45,7 +45,6 @@ steps:
        queue: tpu_v6e_queue
      commands:
        - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
-
   # -----------------------------------------------------------------
   # NOTIFICATION STEP
   # -----------------------------------------------------------------
@@ -55,7 +54,6 @@ steps:
        - test_1
        - test_2
        - test_3
-       - test_4
      agents:
        queue: tpu_v6e_queue
-     commands: "bash .buildkite/scripts/check_results.sh 'TPU JAX Tests Failed' test_0 test_1 test_2 test_3 test_4"
+     commands: "bash .buildkite/scripts/check_results.sh 'TPU JAX Tests Failed' test_0 test_1 test_2 test_3"

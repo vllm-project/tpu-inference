@@ -1,8 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from typing import Optional, Union
 from unittest.mock import MagicMock
 
 import pytest
+import torch.nn as nn
+from vllm.lora.request import LoRARequest
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.outputs import ModelRunnerOutput
 
 from tpu_commons.di.abstracts import (AbstractKVCacheConfig,
                                       AbstractKVCacheSpec, AbstractLoRARequest,
@@ -28,9 +34,15 @@ class ConcreteTPUWorker(AbstractTpuWorker):
 
     def __init__(self, host_interface: HostInterface):
         super().__init__(host_interface)
-        self._model = 1
+        self._model = nn.Module()
         self.memory_size = 1024 * 1024  # 1 MB
         self.profile_state = None
+
+    def initialize_cache(self, num_gpu_blocks: int,
+                         num_cpu_blocks: int) -> None:
+        # Store the values to verify they were passed correctly.
+        self.num_gpu_blocks = num_gpu_blocks
+        self.num_cpu_blocks = num_cpu_blocks
 
     def init_device(self):
         pass  # No-op for testing
@@ -39,8 +51,9 @@ class ConcreteTPUWorker(AbstractTpuWorker):
         return self.memory_size
 
     def execute_model(
-        self, scheduler_output: "AbstractSchedulerOutput"
-    ) -> "AbstractModelRunnerOutput":
+        self,
+        scheduler_output: Union[AbstractSchedulerOutput, SchedulerOutput],
+    ) -> Optional[ModelRunnerOutput]:
         # Return a mock output if the input is valid
         if scheduler_output:
             return MockAbstractModelRunnerOutput()
@@ -49,7 +62,10 @@ class ConcreteTPUWorker(AbstractTpuWorker):
     def profile(self, is_start: bool = True):
         self.profile_state = "started" if is_start else "stopped"
 
-    def add_lora(self, lora_request: "AbstractLoRARequest") -> bool:
+    def add_lora(
+        self,
+        lora_request: Union[AbstractLoRARequest, LoRARequest],
+    ) -> bool:
         # Mock logic: succeed if a request is provided
         return lora_request is not None
 
@@ -59,7 +75,7 @@ class ConcreteTPUWorker(AbstractTpuWorker):
     def compile_or_warm_up_model(self) -> None:
         pass  # No-op for testing
 
-    def get_model(self):
+    def get_model(self) -> nn.Module:
         return self._model
 
     def get_kv_cache_spec(self) -> dict[str, "AbstractKVCacheSpec"]:
@@ -67,7 +83,9 @@ class ConcreteTPUWorker(AbstractTpuWorker):
         return {"layer_0": MockAbstractKVCacheSpec()}
 
     def initialize_from_config(
-            self, kv_cache_config: "AbstractKVCacheConfig") -> None:
+        self,
+        kv_cache_config: Union[AbstractKVCacheConfig, KVCacheConfig],
+    ) -> None:
         pass  # No-op for testing
 
 
@@ -100,6 +118,19 @@ def test_concrete_worker_instantiation(concrete_worker: ConcreteTPUWorker):
                       AbstractTpuWorker)  # It's also an instance of the ABC
 
 
+def test_initialize_cache(concrete_worker: ConcreteTPUWorker):
+    """
+    Tests that `initialize_cache` correctly stores the block numbers.
+    """
+    assert not hasattr(concrete_worker, "num_gpu_blocks")
+    assert not hasattr(concrete_worker, "num_cpu_blocks")
+
+    concrete_worker.initialize_cache(num_gpu_blocks=128, num_cpu_blocks=64)
+
+    assert concrete_worker.num_gpu_blocks == 128
+    assert concrete_worker.num_cpu_blocks == 64
+
+
 def test_determine_available_memory(concrete_worker: ConcreteTPUWorker):
     """
     Tests the `determine_available_memory` method returns the correct value.
@@ -112,6 +143,17 @@ def test_execute_model(concrete_worker: ConcreteTPUWorker):
     Tests the `execute_model` method's branching logic.
     """
     mock_scheduler_output = MockAbstractSchedulerOutput()
+    _ = concrete_worker.execute_model(mock_scheduler_output)
+
+    # Test the case where the input is None
+    assert concrete_worker.execute_model(None) is None
+
+
+def test_execute_model_scheduler_output(concrete_worker: ConcreteTPUWorker):
+    """
+    Tests the `execute_model` method's branching logic.
+    """
+    mock_scheduler_output = MagicMock(spec=SchedulerOutput)()
     _ = concrete_worker.execute_model(mock_scheduler_output)
 
     # Test the case where the input is None
@@ -172,5 +214,6 @@ def test_noop_methods_run_without_error(concrete_worker: ConcreteTPUWorker):
         concrete_worker.load_model()
         concrete_worker.compile_or_warm_up_model()
         concrete_worker.initialize_from_config(MockAbstractKVCacheConfig())
+        concrete_worker.initialize_from_config(MagicMock(spec=KVCacheConfig)())
     except Exception as e:
         pytest.fail(f"A no-op method raised an unexpected exception: {e}")
