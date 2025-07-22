@@ -251,3 +251,9 @@ qwix:
 ```
 
 where each entry under `rules` corresponds to a `qwix.QuantizationRule`.  To learn more about Qwix and defining Qwix rules, please see the relevant docs [here](https://github.com/google/qwix?tab=readme-ov-file#quantization-config).
+
+1. To use the config, simply pass the name of the file you created in the `--additional_config`, e.g.:
+
+```
+... --additional_config='{"quantization": "YOUR_FILE_NAME_HERE.yaml"}'
+```

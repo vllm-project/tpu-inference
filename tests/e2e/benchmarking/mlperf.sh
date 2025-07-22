@@ -32,7 +32,7 @@ extra_serve_args=()
 if [ "$QUANTIZATION" = "True" ]; then
     echo "QUANTIZATION is True. Running with quantization."
     extra_serve_args+=("--additional_config")
-    extra_serve_args+=('{"quantization": {"quantization": "tpu_commons/models/jax/utils/quantization/configs/int8_default.yaml"}}')
+    extra_serve_args+=('{"quantization": "int8_default.yaml"}')
 fi
 
 root_dir=/workspace
