@@ -2,6 +2,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from vllm.lora.request import LoRARequest
+from vllm.v1.kv_cache_interface import KVCacheConfig
 
 # Import the abstract classes and interfaces for mocking
 from tpu_commons.di.abstracts import (AbstractKVCacheConfig,
@@ -391,6 +392,27 @@ class TestTPUWorker:
                            distributed_init_method="test")
         worker.model_runner = MagicMock()
         mock_input_config = MagicMock(spec=AbstractKVCacheConfig)
+        mock_adapter_fn.return_value = mock_input_config
+        mock_input_config.vllm_kv_cache_config = "concrete_vllm_object"
+
+        worker.initialize_from_config(mock_input_config)
+
+        mock_adapter_fn.assert_called_once_with(mock_input_config)
+        worker.model_runner.initialize_kv_cache.assert_called_once_with(
+            "concrete_vllm_object")
+
+    @patch('tpu_commons.worker.tpu_worker_jax.adapt_kv_cache_config_if_needed')
+    def test_initialize_from_config_kv_cache_config(self, mock_adapter_fn,
+                                                    mock_host_interface,
+                                                    mock_vllm_config):
+        """Tests the special case pass-through for initialize_from_config."""
+        worker = TPUWorker(host_interface=mock_host_interface,
+                           vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test")
+        worker.model_runner = MagicMock()
+        mock_input_config = MagicMock(spec=KVCacheConfig)
         mock_adapter_fn.return_value = mock_input_config
         mock_input_config.vllm_kv_cache_config = "concrete_vllm_object"
 

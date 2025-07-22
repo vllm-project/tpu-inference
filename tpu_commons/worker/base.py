@@ -4,9 +4,9 @@ from abc import ABC, abstractmethod
 from typing import Optional, Union
 
 import torch.nn as nn
-
 from vllm.lora.request import LoRARequest
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
 
 from tpu_commons.di.abstracts import (AbstractKVCacheConfig,
@@ -87,8 +87,10 @@ class AbstractTpuWorker(ABC):
         pass
 
     @abstractmethod
-    def initialize_from_config(self,
-                               kv_cache_config: AbstractKVCacheConfig) -> None:
+    def initialize_from_config(
+        self,
+        kv_cache_config: Union[AbstractKVCacheConfig, KVCacheConfig],
+    ) -> None:
         """Allocate  KV cache with the specified kv_cache_config."""
         pass
 
