@@ -4,10 +4,11 @@ import random
 import time
 from contextlib import nullcontext
 from dataclasses import asdict
-from typing import Any, List, Optional, cast
+from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 import jax
 import jax.numpy as jnp
+import jaxtyping
 import numpy as np
 import vllm.envs as envs
 from flax import nnx
@@ -25,10 +26,13 @@ from tpu_commons import utils_jax as utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.common.sharding import Sharding
+from tpu_commons.models.jax.layers.misc import shard_put
 from tpu_commons.models.jax.layers.sampling import sample
 from tpu_commons.models.jax.model_loader import get_model
 from tpu_commons.models.jax.sampling_metadata import \
     TPUSupportedSamplingMetadata
+from tpu_commons.models.jax.utils.weight_utils import \
+    transfer_state_with_mappings
 from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
                                                     InputBatch)
 from tpu_commons.runner.utils import (ForbidCompile, LatencyTracker,
@@ -964,6 +968,26 @@ class TPUModelRunner():
             self.input_batch.condense(removed_req_indices)
 
         return len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
+
+    def _sync_weights(
+        self,
+        updated_weights: jaxtyping.PyTree,
+        mappings: Dict[str, Tuple[str, Tuple[str]]],
+        transpose_keys: Dict[str, Tuple[int]],
+        reshard_fn: Callable[[jaxtyping.PyTree, jaxtyping.PyTree],
+                             jaxtyping.PyTree] = None
+    ) -> None:
+        if reshard_fn is not None:
+            updated_weights = reshard_fn(updated_weights, self.state)
+            shard = None
+        else:
+            shard = functools.partial(shard_put, mesh=self.mesh)
+        self.state = transfer_state_with_mappings(
+            src_state=updated_weights,
+            tgt_state=self.state,
+            mappings=mappings,
+            transpose_keys=transpose_keys,
+            shard=shard)
 
 
 def _get_padded_num_kv_cache_update_slices(num_tokens: int, max_num_reqs: int,

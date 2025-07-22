@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-from typing import Optional, Union
+from typing import Callable, Dict, Optional, Tuple, Union
 
 import jax
+import jaxtyping
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.lora.request import LoRARequest
@@ -169,3 +170,17 @@ class TPUWorker(AbstractTpuWorker):
     def check_health(self) -> None:
         # worker will always be healthy as long as it's running.
         return
+
+    def sync_weights(
+        self,
+        updated_weights: jaxtyping.PyTree,
+        mappings: Dict[str, Tuple[str, Tuple[str]]],
+        transpose_keys: Dict[str, Tuple[int]],
+        reshard_fn: Callable[[jaxtyping.PyTree, jaxtyping.PyTree],
+                             jaxtyping.PyTree] = None
+    ) -> None:
+        """Sync the updated weights to the model runner."""
+        return self.model_runner._sync_weights(updated_weights=updated_weights,
+                                               mappings=mappings,
+                                               transpose_keys=transpose_keys,
+                                               reshard_fn=reshard_fn)
