@@ -23,6 +23,7 @@ RUN VLLM_TARGET_DEVICE="tpu" pip install -e .
 # Install test dependencies
 RUN python3 -m pip install -e tests/vllm_test_utils
 RUN python3 -m pip install --no-cache-dir git+https://github.com/thuml/depyf.git pytest pytest-asyncio tpu-info datasets 'lm_eval[api]==0.4.4'
+RUN python3 -m pip install pytest-cov
 
 # Install tpu_commons
 WORKDIR /workspace/tpu_commons

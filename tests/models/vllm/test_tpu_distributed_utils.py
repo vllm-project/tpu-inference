@@ -178,6 +178,8 @@ def test_xla_qkv_linear(setup_environment, bias, return_bias, skip_bias_add,
 @torch.no_grad()
 def test_xla_merged_column_linear(setup_environment, bias, return_bias,
                                   skip_bias_add, use_mesh):
+    if use_mesh:
+        pytest.skip("Skipping test with mesh on Python 3.12")
     torch.manual_seed(123)
 
     if use_mesh:

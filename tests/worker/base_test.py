@@ -4,6 +4,7 @@ from typing import Optional, Union
 from unittest.mock import MagicMock
 
 import pytest
+
 from vllm.lora.request import LoRARequest
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
