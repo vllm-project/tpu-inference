@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copied from https://github.com/vllm-project/vllm/blob/main/tests/v1/tpu/worker/test_tpu_model_runner.py
 import pytest
+import torch
 import torchax
 from vllm.attention.layer import Attention
 from vllm.config import (CacheConfig, ModelConfig, SchedulerConfig, VllmConfig,
@@ -16,7 +17,13 @@ from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
 
 from tpu_commons.runner.tpu_torchax_runner import TPUModelRunner
 
-torchax.enable_globally()
+
+@pytest.fixture(scope="module", autouse=True)
+def setup_torchax():
+    """Enable torchax globally before all tests, disable after all tests."""
+    torchax.enable_globally()
+    yield
+    torchax.disable_globally()
 
 
 def get_vllm_config():
@@ -397,11 +404,13 @@ def test_init_kv_cache_with_kv_sharing_target_same_as_current(model_runner):
         assert fwd_context is not None
 
 
-@pytest.mark.skip(reason="This test is broken with torchax runner")
 def test_init_kv_cache_without_kv_sharing():
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
     vllm_config = get_vllm_config()
+    # JAX platfrom will force it to be jnp dtype, and jax platform will be
+    # implicitly imported during vllm import, so write it back
+    vllm_config.model_config.dtype = torch.bfloat16
     with set_current_vllm_config(vllm_config):
         fwd_context = {
             layer_0:
@@ -469,11 +478,13 @@ def test_init_kv_cache_without_kv_sharing():
     assert kv_cache_config.kv_cache_groups[0].layer_names[1] == layer_1
 
 
-@pytest.mark.skip(reason="This test is broken with torchax runner")
 def test_init_kv_cache_with_kv_sharing_valid():
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
     vllm_config = get_vllm_config()
+    # JAX platfrom will force it to be jnp dtype, and jax platform will be
+    # implicitly imported during vllm import, so write it back
+    vllm_config.model_config.dtype = torch.bfloat16
     with set_current_vllm_config(vllm_config):
         fwd_context = {
             layer_0:
@@ -539,18 +550,3 @@ def test_init_kv_cache_with_kv_sharing_valid():
     assert len(kv_cache_config.kv_cache_groups[0].layer_names) == 2
     assert kv_cache_config.kv_cache_groups[0].layer_names[0] == layer_0
     assert kv_cache_config.kv_cache_groups[0].layer_names[1] == layer_1
-
-
-@pytest.mark.skip(reason="Test skipped since it's not ported to tpu_commons")
-def test_most_model_len(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VLLM_TPU_MOST_MODEL_LEN", "2048")
-    vllm_config = get_vllm_config()
-    vllm_config.model_config.max_model_len = 32000
-    vllm_config.scheduler_config.max_num_seqs = 1200
-    model_runner = get_model_runner(vllm_config)
-
-    # verify model runner will adjust num_reqs to avoid SMEM OOM.
-    assert model_runner.num_reqs_most_model_len == 1200
-    # num_page_per_req = 32k // 128
-    # num_reqs = 1024 ** 2 // 2 // num_page_per_req // 4 = 524
-    assert model_runner.num_reqs_max_model_len == 524
