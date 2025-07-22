@@ -82,13 +82,8 @@ class Router(nnx.Module):
             self.cfg, HuggingFaceArgNames.NUM_EXPERTS_PER_TOKEN.value)
         router_logits_TE = jnp.einsum('TD,DE -> TE', x_TD,
                                       self.kernel_DE.value)
-        # TODO: Why do we need this?
-        # activated_gating_TF = nnx.softmax(router_logits_TE.astype(jnp.float32),
-        #                                   axis=-1)
         weights_TX, selected_experts_TX = jax.lax.top_k(
-            # activated_gating_TF, num_experts_per_tok)
-            router_logits_TE,
-            num_experts_per_tok)
+            router_logits_TE, num_experts_per_tok)
         if self.cfg.router_act != "sigmoid":
             normalized_weights_TX = router_act(weights_TX.astype(
                 self.cfg.dtype),
@@ -201,15 +196,14 @@ class MoE(nnx.Module):
         one_hot_indices_TXE = jax.nn.one_hot(indices_TX,
                                              num_classes=num_experts,
                                              dtype=self.cfg.dtype)
-        full_weights_TE = jnp.sum(
-            one_hot_indices_TXE * weights_TX[..., None],
-            axis=1)  # TODO: Confirm that this should be axis=1.
+        full_weights_TE = jnp.sum(one_hot_indices_TXE * weights_TX[..., None],
+                                  axis=1)
 
         if self.cfg.apply_expert_weight_before_computation:
             with jax.named_scope("pre_computing_weight"):
                 # need optimization for the out-product
 
-                x_TED = jnp.tile(x_TD[:, None, :], (1, num_experts, 1))
+                x_TED = jnp.repeat(x_TD[:, None, :], num_experts, 1)
                 full_weights_TED = full_weights_TE[..., None]
             # TODO: need fix the mod_fwd call for pre_weighting
             return self._moe_fwd_reapply_expert_weight(x_TED, full_weights_TED,

@@ -93,6 +93,7 @@ def apply_longrope(
 
 def apply_rope_scaling(freqs: jax.Array, rope_scaling: Dict[str,
                                                             Any]) -> jax.Array:
+    # Seems to match: https://github.com/huggingface/transformers/blob/v4.53.2/src/transformers/modeling_rope_utils.py#L385
     # Values obtained from grid search
     scale_factor = rope_scaling.get("scale_factor", 8.0)
     low_freq_factor = rope_scaling.get("low_freq_factor", 1.0)

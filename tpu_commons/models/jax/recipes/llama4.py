@@ -1,3 +1,4 @@
+import io
 import pprint
 import re
 from dataclasses import dataclass, field, replace
@@ -32,6 +33,7 @@ from tpu_commons.models.jax.utils.weight_utils import WeightLoader, get_param
 
 logger = init_logger(__name__)
 pp = pprint.PrettyPrinter(depth=6)
+string_buffer = io.StringIO()
 
 
 def print_param_info(param: nnx.Param, name: str):
@@ -80,10 +82,11 @@ class Llama4ModelConfig(ModelConfig):
                     num_key_value_heads=8,
                     head_dim=128,
                     rope_theta=500000.0,
+                    # https://huggingface.co/meta-llama/Llama-4-Scout-17B-16E-Instruct/blob/main/config.json
                     rope_scaling={
-                        "scale_factor": 8.0,
+                        "scale_factor": 16.0,
                         "low_freq_factor": 1.0,
-                        "high_freq_factor": 4.0,
+                        "high_freq_factor": 1.0,
                         "original_max_position_embeddings": 8192
                     },
                     temperature_tuning=True,
@@ -226,6 +229,23 @@ class Llama4Scout(Model):
                                 param_factory=param_factory,
                                 sharding_cfg=self.cfg.sharding)
         self.lm_head.generate_kernel(self.rng)
+        self._print_model_architecture()
+
+    def _print_model_architecture(self):
+        num_display_layers = max(self.cfg.model.interleave_moe_layer_step,
+                                 self.cfg.model.no_rope_layer_interval)
+
+        logger.info("### Embedding ###")
+        nnx.display(self.embedder)
+
+        logger.info(f"\n### First {num_display_layers} Layers ###")
+        # Loop through the slice and display each layer
+        for i, layer in enumerate(self.layers[:num_display_layers]):
+            logger.info(f"\n--- Layer {i} ---")
+            nnx.display(layer)
+
+        logger.info("\n### LM Head ###")
+        nnx.display(self.lm_head)
 
     def load_weights(self, rng: PRNGKey, cache_dir: Optional[str] = None):
         try:
