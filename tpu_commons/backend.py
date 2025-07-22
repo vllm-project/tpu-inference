@@ -29,24 +29,24 @@ class TPUBackend(BackendInterface):
 
     def __init__(self, host_interface: HostInterface, **worker_kwargs):
         """
-    Initializes the TPUBackend.
+        Initializes the TPUBackend.
 
-    Args:
-        host_interface: An object that implements the HostInterface, providing
-                        a way for the backend to communicate with the host.
-        **worker_kwargs: Additional keyword arguments to be passed to the
-                         worker's constructor.
-    """
+        Args:
+            host_interface: An object that implements the HostInterface, providing
+                            a way for the backend to communicate with the host.
+            **worker_kwargs: Additional keyword arguments to be passed to the
+                            worker's constructor.
+        """
         tpu_worker_cls = get_tpu_worker_cls()
         self.worker: AbstractTpuWorker = tpu_worker_cls(
             host_interface=host_interface, **worker_kwargs)
 
     def launch_tpu_batch(self, batch_to_launch):
         """
-    Launches a batch of requests on the TPU worker.
+        Launches a batch of requests on the TPU worker.
 
-    Args:
-        batch_to_launch: The batch of requests to be processed.
-    """
+        Args:
+            batch_to_launch: The batch of requests to be processed.
+        """
         adapted_batch = VllmSchedulerOutputAdapter(batch_to_launch)
         return self.worker.execute_model(adapted_batch)
