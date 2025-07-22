@@ -54,7 +54,7 @@ def mock_dependencies(request):
     without having the actual dependencies present.
     """
     # Create mock modules for the models
-    mock_llama_module = ModuleType("tpu_commons.models.jax.llama")
+    mock_llama_module = ModuleType("tpu_commons.models.jax.recipes.llama3")
     setattr(mock_llama_module, "LlamaForCausalLM", MockCausalLM)
 
     mock_qwen2_module = ModuleType("tpu_commons.models.jax.qwen2")
@@ -68,7 +68,7 @@ def mock_dependencies(request):
 
     # Add the mock modules to sys.modules
     original_modules = sys.modules.copy()
-    sys.modules["tpu_commons.models.jax.llama"] = mock_llama_module
+    sys.modules["tpu_commons.models.jax.recipes.llama3"] = mock_llama_module
     sys.modules["tpu_commons.models.jax.qwen2"] = mock_qwen2_module
     sys.modules["tpu_commons.logger"] = mock_logger_module
 
@@ -98,6 +98,8 @@ def vllm_config() -> MagicMock:
     mock_config = MagicMock(spec=VllmConfig)
     mock_config.model_config.hf_config = PretrainedConfig(
         architectures=["LlamaForCausalLM"])
+    mock_config.model_config.model = "test-llama-8b-model"
+    mock_config.additional_config = {}
     return mock_config
 
 

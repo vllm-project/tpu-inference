@@ -21,9 +21,11 @@ each process.
 import glob
 import multiprocessing
 import os
+from typing import Tuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import requests
 from jax.experimental.transfer import start_transfer_server
 from jax.sharding import Mesh, NamedSharding
@@ -85,7 +87,7 @@ def get_mesh() -> Mesh:
 
 def get_kv_spec(mesh: Mesh) -> jax.ShapeDtypeStruct:
     # (num_blocks, block_size, num_kv_heads, head_dim)
-    shape = (100, 32, 8, 128)
+    shape = (10, 32, 8, 128)
     dtype = jnp.bfloat16
     sharding = NamedSharding(mesh, P(None, None, "model", None))
     return jax.ShapeDtypeStruct(shape, dtype, sharding=sharding)
@@ -94,10 +96,16 @@ def get_kv_spec(mesh: Mesh) -> jax.ShapeDtypeStruct:
 # Hard code the shard spec, it could have been calculated.
 def get_kv_shard_spec() -> jax.ShapeDtypeStruct:
     # (num_blocks, block_size, num_kv_heads, head_dim)
-    shape = (100, 32, 2, 128)
+    shape = (10, 32, 2, 128)
     dtype = jnp.bfloat16
     sharding = SingleDeviceSharding(jax.local_devices()[0])
     return jax.ShapeDtypeStruct(shape, dtype, sharding=sharding)
+
+
+def get_mean_std(x: jax.Array) -> Tuple[float, float]:
+    mean = np.array(jnp.mean(x)).tolist()
+    std = np.array(jnp.std(x)).tolist()
+    return mean, std
 
 
 def prefill_worker(pid: int, squeue: multiprocessing.Queue):
@@ -137,9 +145,10 @@ def prefill_worker(pid: int, squeue: multiprocessing.Queue):
         )
 
     kv_spec = get_kv_spec(mesh)
-    kv = jax.device_put(jnp.ones(kv_spec.shape, dtype=kv_spec.dtype),
-                        kv_spec.sharding)
-    log(f"kv | shape={kv.shape} | sharding={kv.sharding}")
+    key = jax.random.PRNGKey(0)
+    kv = jax.device_put(
+        jax.random.uniform(key, shape=kv_spec.shape, dtype=kv_spec.dtype),
+        kv_spec.sharding)
 
     # Fetch the shard on this chip only.
     # NOTE: index must be 0, because each process only sees its local data.
@@ -159,6 +168,9 @@ def prefill_worker(pid: int, squeue: multiprocessing.Queue):
     uuid = get_uuid(pid)
     s.await_pull(uuid, kv_shard)
 
+    mean, std = get_mean_std(kv)
+    log(f"kv | shape={kv.shape} | sharding={kv.sharding} | mean={mean} | std={std}"
+        )
     log("Done")
 
 
@@ -216,7 +228,9 @@ def decode_worker(pid: int, squeue: multiprocessing.Queue):
     kv_spec = get_kv_spec(mesh)
     kv = jax.make_array_from_process_local_data(kv_spec.sharding, kv_shard,
                                                 kv_spec.shape)
-    log(f"kv | shape={kv.shape} | sharding={kv.sharding}")
+    mean, std = get_mean_std(kv)
+    log(f"kv | shape={kv.shape} | sharding={kv.sharding} | mean={mean} | std={std}"
+        )
 
     log("Done")
 

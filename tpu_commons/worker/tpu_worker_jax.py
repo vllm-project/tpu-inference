@@ -12,6 +12,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 
 from tpu_commons import utils_jax as utils
 from tpu_commons.di.abstracts import (AbstractKVCacheConfig,
+                                      AbstractLoRARequest,
                                       AbstractSchedulerOutput)
 from tpu_commons.di.interfaces import HostInterface
 from tpu_commons.logger import init_logger
@@ -103,6 +104,10 @@ class TPUWorker(AbstractTpuWorker):
         vllm_scheduler_output = adapted_scheduler_output.vllm_scheduler_output
         output = self.model_runner.execute_model(vllm_scheduler_output)
         return output if self.is_driver_worker else None
+
+    def add_lora(self, lora_request: "AbstractLoRARequest") -> bool:
+        raise NotImplementedError(
+            "LoRA is not supported by the JAX worker yet.")
 
     def profile(self, is_start: bool = True):
         if is_start:

@@ -9,7 +9,8 @@ from jax._src.interpreters import pxla
 from tpu_commons.runner.utils import (ForbidCompile, LatencyTracker,
                                       determine_do_sampling,
                                       get_padded_num_reqs_with_upper_limit,
-                                      pad_to_multiple)
+                                      get_padded_token_len, get_req_paddings,
+                                      get_token_paddings, pad_to_multiple)
 
 
 def test_determine_do_sampling():
@@ -54,6 +55,50 @@ def test_get_padded_num_reqs_with_upper_limit():
     assert get_padded_num_reqs_with_upper_limit(17, 128) == 32
     assert get_padded_num_reqs_with_upper_limit(100, 64) == 64
     assert get_padded_num_reqs_with_upper_limit(1, 128) == 8
+
+
+def test_get_paddings():
+    # Bucketed padding
+    min_token_size, max_token_size, padding_gap = 16, 512, 64
+    expected_paddings = [16, 32, 64, 128, 192, 256, 320, 384, 448, 512]
+    actual_paddings = get_token_paddings(min_token_size, max_token_size,
+                                         padding_gap)
+
+    # Bucketed padding with max_token_size not a power of two.
+    max_token_size = 317
+    expected_paddings = [16, 32, 64, 128, 192, 256, 320]
+    actual_paddings = get_token_paddings(min_token_size, max_token_size,
+                                         padding_gap)
+    assert actual_paddings == expected_paddings
+
+    # Exponential padding.
+    max_token_size, padding_gap = 1024, 0
+    expected_paddings = [16, 32, 64, 128, 256, 512, 1024]
+    actual_paddings = get_token_paddings(min_token_size, max_token_size,
+                                         padding_gap)
+    assert actual_paddings == expected_paddings
+    # Exponential padding with max_token_size not a power of two.
+    max_token_size = 317
+    expected_paddings = [16, 32, 64, 128, 256, 512]
+    actual_paddings = get_token_paddings(min_token_size, max_token_size,
+                                         padding_gap)
+    assert actual_paddings == expected_paddings
+
+
+def test_get_padded_token_len():
+    min_token_size, max_token_size, padding_gap = 16, 512, 64
+    paddings = get_token_paddings(min_token_size, max_token_size, padding_gap)
+    assert get_padded_token_len(paddings, 1) == 16
+    assert get_padded_token_len(paddings, 16) == 16
+    assert get_padded_token_len(paddings, 20) == 32
+    assert get_padded_token_len(paddings, 300) == 320
+    assert get_padded_token_len(paddings, 512) == 512
+
+
+def test_get_req_paddings():
+    assert get_req_paddings(1, 32) == [8, 16, 32]
+    assert get_req_paddings(8, 32) == [8, 16, 32]
+    assert get_req_paddings(8, 36) == [8, 16, 32, 36]
 
 
 def test_latency_tracker(caplog):

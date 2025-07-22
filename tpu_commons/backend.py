@@ -1,0 +1,52 @@
+"""
+Copyright 2025 Google LLC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+"""
+from tpu_commons.adapters.vllm_adapters import VllmSchedulerOutputAdapter
+from tpu_commons.di.interfaces import BackendInterface, HostInterface
+from tpu_commons.worker import get_tpu_worker_cls
+from tpu_commons.worker.base import AbstractTpuWorker
+
+
+class TPUBackend(BackendInterface):
+    """
+  The main entry point for the host system to interact with the TPU backend.
+
+  This class implements the BackendInterface. It is responsible for creating
+  and managing the concrete TPU worker instance and delegating calls to it.
+  """
+
+    def __init__(self, host_interface: HostInterface, **worker_kwargs):
+        """
+    Initializes the TPUBackend.
+
+    Args:
+        host_interface: An object that implements the HostInterface, providing
+                        a way for the backend to communicate with the host.
+        **worker_kwargs: Additional keyword arguments to be passed to the
+                         worker's constructor.
+    """
+        tpu_worker_cls = get_tpu_worker_cls()
+        self.worker: AbstractTpuWorker = tpu_worker_cls(
+            host_interface=host_interface, **worker_kwargs)
+
+    def launch_tpu_batch(self, batch_to_launch):
+        """
+    Launches a batch of requests on the TPU worker.
+
+    Args:
+        batch_to_launch: The batch of requests to be processed.
+    """
+        adapted_batch = VllmSchedulerOutputAdapter(batch_to_launch)
+        return self.worker.execute_model(adapted_batch)

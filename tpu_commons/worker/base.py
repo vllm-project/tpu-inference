@@ -6,7 +6,7 @@ from typing import Optional
 import torch.nn as nn
 
 from tpu_commons.di.abstracts import (AbstractKVCacheConfig,
-                                      AbstractKVCacheSpec,
+                                      AbstractKVCacheSpec, AbstractLoRARequest,
                                       AbstractModelRunnerOutput,
                                       AbstractSchedulerOutput)
 from tpu_commons.di.interfaces import HostInterface
@@ -34,6 +34,12 @@ class AbstractTpuWorker(ABC):
         self.host_interface = host_interface
 
     @abstractmethod
+    def initialize_cache(self, num_gpu_blocks: int,
+                         num_cpu_blocks: int) -> None:
+        """Initialize the cache with the given number of blocks."""
+        pass
+
+    @abstractmethod
     def init_device(self):
         """Initialize the TPU device and distributed environment."""
         pass
@@ -52,6 +58,11 @@ class AbstractTpuWorker(ABC):
 
     @abstractmethod
     def profile(self, is_start: bool = True):
+        pass
+
+    @abstractmethod
+    def add_lora(self, lora_request: "AbstractLoRARequest") -> bool:
+        """Adds a LoRA adapter to the worker."""
         pass
 
     @abstractmethod

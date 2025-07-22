@@ -32,6 +32,12 @@ class ConcreteTPUWorker(AbstractTpuWorker):
         self.memory_size = 1024 * 1024  # 1 MB
         self.profile_state = None
 
+    def initialize_cache(self, num_gpu_blocks: int,
+                         num_cpu_blocks: int) -> None:
+        # Store the values to verify they were passed correctly.
+        self.num_gpu_blocks = num_gpu_blocks
+        self.num_cpu_blocks = num_cpu_blocks
+
     def init_device(self):
         pass  # No-op for testing
 
@@ -98,6 +104,19 @@ def test_concrete_worker_instantiation(concrete_worker: ConcreteTPUWorker):
     assert isinstance(concrete_worker, ConcreteTPUWorker)
     assert isinstance(concrete_worker,
                       AbstractTpuWorker)  # It's also an instance of the ABC
+
+
+def test_initialize_cache(concrete_worker: ConcreteTPUWorker):
+    """
+    Tests that `initialize_cache` correctly stores the block numbers.
+    """
+    assert not hasattr(concrete_worker, "num_gpu_blocks")
+    assert not hasattr(concrete_worker, "num_cpu_blocks")
+
+    concrete_worker.initialize_cache(num_gpu_blocks=128, num_cpu_blocks=64)
+
+    assert concrete_worker.num_gpu_blocks == 128
+    assert concrete_worker.num_cpu_blocks == 64
 
 
 def test_determine_available_memory(concrete_worker: ConcreteTPUWorker):
