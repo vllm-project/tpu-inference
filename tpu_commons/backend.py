@@ -13,7 +13,8 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
-from tpu_commons.adapters.vllm_adapters import VllmSchedulerOutputAdapter
+from tpu_commons.adapters.vllm_adapters import (VllmLoRARequestAdapter,
+                                                VllmSchedulerOutputAdapter)
 from tpu_commons.di.interfaces import BackendInterface, HostInterface
 from tpu_commons.worker import get_tpu_worker_cls
 from tpu_commons.worker.base import AbstractTpuWorker
@@ -50,3 +51,13 @@ class TPUBackend(BackendInterface):
         """
         adapted_batch = VllmSchedulerOutputAdapter(batch_to_launch)
         return self.worker.execute_model(adapted_batch)
+
+    def add_lora(self, lora_request):
+        """
+        Adds a LoRA adapter to the worker.
+
+        Args:
+            lora_request: The LoRA request to be processed.
+        """
+        adapted_lora_request = VllmLoRARequestAdapter(lora_request)
+        return self.worker.add_lora(adapted_lora_request)
