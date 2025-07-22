@@ -294,14 +294,16 @@ class Llama4WeightLoader(WeightLoader):
     def setup(self):
         super().setup()
         self.set_transpose_param_map({
-            "q_proj": (0, 2, 1),
-            "k_proj": (0, 2, 1),
-            "v_proj": (0, 2, 1),
+            "q_proj": (2, 0, 1),
+            "k_proj": (2, 0, 1),
+            "v_proj": (2, 0, 1),
             "router": (1, 0),
             "shared_expert.down_proj": (1, 0),
             "shared_expert.gate_proj": (1, 0),
             "shared_expert.up_proj": (1, 0),
             "o_proj": (1, 2, 0),
+            "embed_tokens": (1, 0),
+            "lm_head": (1, 0),
         })
         hidden_size = self.model_config.hidden_size
         attn_heads = self.model_config.layers.attention.num_attention_heads
@@ -320,9 +322,9 @@ class Llama4WeightLoader(WeightLoader):
         # Set the mappings from loaded parameter keys to standardized names.
         self.set_loaded_to_standardized_keys({
             "language_model.model.embed_tokens.weight":
-            "embedder.input_embedding_table_VD",
+            "embedder.input_embedding_table_DV",
             "language_model.lm_head.weight":
-            "lm_head.input_embedding_table_VD",
+            "lm_head.input_embedding_table_DV",
             "language_model.model.norm.weight":
             "final_norm.scale",
             "language_model.model.layers.*.input_layernorm.weight":
@@ -330,11 +332,11 @@ class Llama4WeightLoader(WeightLoader):
             "language_model.model.layers.*.post_attention_layernorm.weight":
             "layers.*.pre_mlp_norm.scale",
             "language_model.model.layers.*.self_attn.q_proj.weight":
-            "layers.*.attn.kernel_q_proj_NDH",
+            "layers.*.attn.kernel_q_proj_DNH",
             "language_model.model.layers.*.self_attn.k_proj.weight":
-            "layers.*.attn.kernel_k_proj_KDH",
+            "layers.*.attn.kernel_k_proj_DKH",
             "language_model.model.layers.*.self_attn.v_proj.weight":
-            "layers.*.attn.kernel_v_proj_KDH",
+            "layers.*.attn.kernel_v_proj_DKH",
             "language_model.model.layers.*.self_attn.o_proj.weight":
             "layers.*.attn.kernel_o_proj_NHD",
             "language_model.model.layers.*.feed_forward.router.weight":

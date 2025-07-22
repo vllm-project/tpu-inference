@@ -167,16 +167,16 @@ class Attention(nnx.Module):
         rope_theta = getattr(self.cfg, HuggingFaceArgNames.ROPE_THETA.value)
         H = getattr(self.cfg, HuggingFaceArgNames.HEAD_DIM.value)
         with jax.named_scope("q_proj"):
-            q_TNH = jnp.einsum('TD,NDH -> TNH', x_q_TD,
-                               self.kernel_q_proj_NDH.value)
+            q_TNH = jnp.einsum('TD,DNH -> TNH', x_q_TD,
+                               self.kernel_q_proj_DNH.value)
             if use_attention_rope:
                 q_TNH = apply_rope(q_TNH, md.input_positions, H, rope_theta,
                                    rope_scaling)
             q_TNH = nnx.with_sharding_constraint(q_TNH,
                                                  self.query_tnh[op_mode])
         with jax.named_scope("k_proj"):
-            k_SKH = jnp.einsum('SD,KDH -> SKH', x_SD,
-                               self.kernel_k_proj_KDH.value)
+            k_SKH = jnp.einsum('SD,DKH -> SKH', x_SD,
+                               self.kernel_k_proj_DKH.value)
             if use_attention_rope:
                 k_SKH = apply_rope(k_SKH, md.input_positions, H, rope_theta,
                                    rope_scaling)

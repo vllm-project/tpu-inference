@@ -18,10 +18,12 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     # would cause JAX init failure when using multi hosts with Ray.
     _MODEL_REGISTRY = {}
 
-    from tpu_commons.models.jax.recipes.llama3 import LlamaForCausalLM
     from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
+    from tpu_commons.models.jax.recipes.llama3 import LlamaForCausalLM
+    from tpu_commons.models.jax.recipes.llama4 import Llama4Scout
     _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
     _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
+    _MODEL_REGISTRY["Llama4Scout"] = Llama4Scout
 
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
@@ -38,6 +40,7 @@ def _get_nnx_model(
     rng: jax.Array,
     mesh: Mesh,
 ) -> nnx.Module:
+    from tpu_commons.models.jax.common.model import Model
     if os.getenv("JAX_RANDOM_WEIGHTS", False):
         # Create a sharded model with random inited weights.
         @nnx.jit
@@ -63,7 +66,12 @@ def _get_nnx_model(
         #    the load_weights. This would be easy to OOM if the layer is super large.
         # 3. The model architecture definition won't need to worry about the sharding.
         #    The sharding definition is taken over by the load_weights instead.
-        model = nnx.eval_shape(lambda: model_class(vllm_config, rng, mesh))
+        logger.warning(f"model_class: {model_class}")
+        if issubclass(model_class, Model):
+            logger.warning("Loading Llama4Scout!!!")
+            model = model_class(vllm_config, rng, mesh)
+        else:
+            model = nnx.eval_shape(lambda: model_class(vllm_config, rng, mesh))
         model.load_weights(rng)
         # Although the created model can already work, we still need to jit
         # the model creation again, otherwise the model forward will have
