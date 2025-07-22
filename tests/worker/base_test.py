@@ -4,9 +4,10 @@ from typing import Optional, Union
 from unittest.mock import MagicMock
 
 import pytest
-
+import torch.nn as nn
 from vllm.lora.request import LoRARequest
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
 
 from tpu_commons.di.abstracts import (AbstractKVCacheConfig,
@@ -33,7 +34,7 @@ class ConcreteTPUWorker(AbstractTpuWorker):
 
     def __init__(self, host_interface: HostInterface):
         super().__init__(host_interface)
-        self._model = 1
+        self._model = nn.Module()
         self.memory_size = 1024 * 1024  # 1 MB
         self.profile_state = None
 
@@ -74,7 +75,7 @@ class ConcreteTPUWorker(AbstractTpuWorker):
     def compile_or_warm_up_model(self) -> None:
         pass  # No-op for testing
 
-    def get_model(self):
+    def get_model(self) -> nn.Module:
         return self._model
 
     def get_kv_cache_spec(self) -> dict[str, "AbstractKVCacheSpec"]:
@@ -82,7 +83,9 @@ class ConcreteTPUWorker(AbstractTpuWorker):
         return {"layer_0": MockAbstractKVCacheSpec()}
 
     def initialize_from_config(
-            self, kv_cache_config: "AbstractKVCacheConfig") -> None:
+        self,
+        kv_cache_config: Union[AbstractKVCacheConfig, KVCacheConfig],
+    ) -> None:
         pass  # No-op for testing
 
 
@@ -211,5 +214,6 @@ def test_noop_methods_run_without_error(concrete_worker: ConcreteTPUWorker):
         concrete_worker.load_model()
         concrete_worker.compile_or_warm_up_model()
         concrete_worker.initialize_from_config(MockAbstractKVCacheConfig())
+        concrete_worker.initialize_from_config(MagicMock(spec=KVCacheConfig)())
     except Exception as e:
         pytest.fail(f"A no-op method raised an unexpected exception: {e}")
