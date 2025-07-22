@@ -80,6 +80,7 @@ class Llama4Attention(Attention):
                 - The attention output tensor of shape
                   `(batch_size, seq_len, d_model)`.
         """
+        logger.warning(f"Attention chunking = {self.cfg.attention_chunk_size}")
         op_mode = "prefill" if is_prefill else "generate"
         md = attention_metadata
         x = jnp.asarray(x, self.cfg.dtype)

@@ -25,7 +25,7 @@ TransformerBlockConfig = make_dataclass(
     "TransformerBlockConfig",
     [("attention", AttentionConfig), ("dense_ffw", DenseFFWConfig),
      (HuggingFaceArgNames.RMS_NORM_EPS.value, float),
-     ("moe", MoEConfig, field(default=None)), ("block_type", str, "default"),
+     ("moe", MoEConfig, field(default=None)),
      ("vllm_config", VllmConfig, field(repr=False, default=None))],
     bases=(Config, ))
 TransformerBlockConfig.__doc__ = f"""light weighted transformer config, which includes config for all sub-modules
@@ -33,7 +33,6 @@ TransformerBlockConfig.__doc__ = f"""light weighted transformer config, which in
     Args:
         attention: AttentionConfig config used to specify attention layer parameters.
         dense_ffw: DenseFFWConfig config used to specify feed-forward layer parameters.
-        block_type: str The type of transformer block (currently support ["moe", "dense"]).
         {HuggingFaceArgNames.RMS_NORM_EPS.value}: float The epsilon value for RMSNorm.
         vllm_config: VllmConfig The VLLM config containing any overrides to apply.
         """

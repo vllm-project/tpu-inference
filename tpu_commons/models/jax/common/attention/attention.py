@@ -28,9 +28,8 @@ AttentionConfig = make_dataclass(
      (HuggingFaceArgNames.NUM_KEY_VALUE_HEADS.value, int),
      (HuggingFaceArgNames.HEAD_DIM.value, int),
      (HuggingFaceArgNames.ROPE_SCALING.value, Dict[str, Any]),
-     (HuggingFaceArgNames.ROPE_THETA.value, float),
-     (HuggingFaceArgNames.ATTENTION_CHUNK_SIZE.value, int),
-     ("dtype", DTypeLike),
+     (HuggingFaceArgNames.ROPE_THETA.value, float), ("dtype", DTypeLike),
+     (HuggingFaceArgNames.ATTENTION_CHUNK_SIZE.value, int, None),
      ("vllm_config", VllmConfig, field(repr=False, default=None))],
     bases=(Config, ))
 AttentionConfig.__doc__ = f"""Configuration for the Attention module.
@@ -269,7 +268,7 @@ class Attention(nnx.Module):
                 # NOTE(xiang): v6e chip has 128M VMEM capacity,
                 # set this to 64M to avoid VMEM OOM,
                 # otherwise the default value is 16M.
-                sliding_window=self.cfg.attention_chunk_size,
+                sliding_window=getattr(self.cfg, "attention_chunk_size", None),
                 vmem_limit_bytes=64 * 1024 * 1024,
             )
 

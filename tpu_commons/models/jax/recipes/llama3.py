@@ -235,9 +235,7 @@ class Llama3WeightLoader(WeightLoader):
                  sharding_cfg: Optional[ShardingConfig] = None):
         super().__init__(vllm_config=vllm_config,
                          model_config=model_config,
-                         framework="flax",
-                         cache_dir=cache_dir,
-                         sharding_cfg=sharding_cfg)
+                         framework="flax")
         self.setup()
 
     def setup(self):
