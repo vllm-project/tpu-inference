@@ -292,5 +292,5 @@ class TPUWorker(AbstractTpuWorker):
             backend="gloo",
         )
         ensure_model_parallel_initialized(
-            parallel_config.tensor_parallel_size,
-            parallel_config.pipeline_parallel_size)
+            self.parallel_config.tensor_parallel_size,
+            self.parallel_config.pipeline_parallel_size)
