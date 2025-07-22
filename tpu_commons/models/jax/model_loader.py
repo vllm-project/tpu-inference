@@ -140,7 +140,8 @@ def get_flax_model(
 
     model_fn = functools.partial(run_model, graphdef)
     compute_logits_fn = functools.partial(run_compute_logits, graphdef)
-    return model_fn, compute_logits_fn, state
+    lora_manager = None
+    return model_fn, compute_logits_fn, state, lora_manager
 
 
 def get_vllm_model(
@@ -155,11 +156,12 @@ def get_vllm_model(
         rng=rng,
         mesh=mesh,
     )
-    params = model.load_weights()
+    params, lora_manager = model.load_weights()
+    # TODO(xw32) continue from here to return a Lora manager.
 
     jit_model = model.jit_step_func()
     compute_logits_fn = model.jit_compute_logits_func()
-    return jit_model, compute_logits_fn, params
+    return jit_model, compute_logits_fn, params, lora_manager
 
 
 def get_model(

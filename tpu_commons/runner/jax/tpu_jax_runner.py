@@ -20,6 +20,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.request import Request
+from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from tpu_commons import utils_jax as utils
 from tpu_commons.logger import init_logger
@@ -52,7 +53,7 @@ DUMMY_METADATA = AttentionMetadata(
 )
 
 
-class TPUModelRunner():
+class TPUModelRunner(LoRAModelRunnerMixin):
 
     def __init__(
         self,
@@ -74,6 +75,12 @@ class TPUModelRunner():
 
         self.devices = devices
         self.dtype = self.model_config.dtype
+
+        # xw32q: where is vocab_size used? In vllm, it's used in structured decoding and sample_from_logits. Since they don't exist in tpu_commons, maybe we don't need it.
+        # What is lora_config.lora_extra_vocab_size? "Maximum size of extra vocabulary that can be present in a LoRA adapter" per https://github.com/vanbasten23/vllm/blob/7f4a8b6705622fde952a2e633e86716f902d6e1b/vllm/config.py#L3040
+        self.vocab_size = self.model_config.get_vocab_size()
+        if self.lora_config is not None:
+            self.vocab_size += self.lora_config.lora_extra_vocab_size
 
         self._init_random()
         self._init_mesh()
@@ -180,11 +187,13 @@ class TPUModelRunner():
         return hidden_states[indices_do_sample]
 
     def load_model(self):
-        self.model_fn, self.compute_logits_fn, self.state = get_model(
+        self.model_fn, self.compute_logits_fn, self.state, lora_manager = get_model(
             self.vllm_config,
             self.rng_key,
             self.mesh,
         )
+        self.lora_manager = lora_manager
+        logger.info("xw32 tpu_jax_runner.load_model got a lora_manager.")
         self.rng_params_for_sampling = nnx.Rngs(
             jax.random.key(self.model_config.seed)).params()
 
