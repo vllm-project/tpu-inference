@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Optional, Union
 
 import torch.nn as nn
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.outputs import ModelRunnerOutput
 
 from tpu_commons.di.abstracts import (AbstractKVCacheConfig,
                                       AbstractKVCacheSpec, AbstractLoRARequest,
-                                      AbstractModelRunnerOutput,
                                       AbstractSchedulerOutput)
 from tpu_commons.di.interfaces import HostInterface
 
@@ -52,8 +53,8 @@ class AbstractTpuWorker(ABC):
     @abstractmethod
     def execute_model(
         self,
-        scheduler_output: "AbstractSchedulerOutput",
-    ) -> Optional[AbstractModelRunnerOutput]:
+        scheduler_output: Union[AbstractSchedulerOutput, SchedulerOutput],
+    ) -> Optional[ModelRunnerOutput]:
         pass
 
     @abstractmethod
