@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from typing import Optional, Union
 from unittest.mock import MagicMock
 
 import pytest
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.outputs import ModelRunnerOutput
 
 from tpu_commons.di.abstracts import (AbstractKVCacheConfig,
                                       AbstractKVCacheSpec, AbstractLoRARequest,
@@ -45,8 +48,9 @@ class ConcreteTPUWorker(AbstractTpuWorker):
         return self.memory_size
 
     def execute_model(
-        self, scheduler_output: "AbstractSchedulerOutput"
-    ) -> "AbstractModelRunnerOutput":
+        self,
+        scheduler_output: Union[AbstractSchedulerOutput, SchedulerOutput],
+    ) -> Optional[ModelRunnerOutput]:
         # Return a mock output if the input is valid
         if scheduler_output:
             return MockAbstractModelRunnerOutput()
@@ -131,6 +135,17 @@ def test_execute_model(concrete_worker: ConcreteTPUWorker):
     Tests the `execute_model` method's branching logic.
     """
     mock_scheduler_output = MockAbstractSchedulerOutput()
+    _ = concrete_worker.execute_model(mock_scheduler_output)
+
+    # Test the case where the input is None
+    assert concrete_worker.execute_model(None) is None
+
+
+def test_execute_model_scheduler_output(concrete_worker: ConcreteTPUWorker):
+    """
+    Tests the `execute_model` method's branching logic.
+    """
+    mock_scheduler_output = MagicMock(spec=SchedulerOutput)()
     _ = concrete_worker.execute_model(mock_scheduler_output)
 
     # Test the case where the input is None
