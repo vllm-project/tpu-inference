@@ -21,7 +21,7 @@ from tpu_commons.backend import TPUBackend
 from tpu_commons.di.interfaces import HostInterface
 
 
-class BackendTest(unittest.TestCase):
+class TPUBackendTest(unittest.TestCase):
 
     @patch('tpu_commons.backend.get_tpu_worker_cls')
     def test_backend_initialization(self, mock_get_worker_cls):
