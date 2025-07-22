@@ -6,6 +6,7 @@ from typing import Optional, Union
 import jax
 import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.lora.request import LoRARequest
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
@@ -18,7 +19,8 @@ from tpu_commons.di.interfaces import HostInterface
 from tpu_commons.logger import init_logger
 from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
 from tpu_commons.worker._temporary_vllm_compat import (
-    adapt_kv_cache_config_if_needed, adapt_scheduler_output_if_needed)
+    adapt_kv_cache_config_if_needed, adapt_lora_request_if_needed,
+    adapt_scheduler_output_if_needed)
 from tpu_commons.worker.base import AbstractTpuWorker
 
 logger = init_logger(__name__)
@@ -109,7 +111,16 @@ class TPUWorker(AbstractTpuWorker):
         output = self.model_runner.execute_model(vllm_scheduler_output)
         return output if self.is_driver_worker else None
 
-    def add_lora(self, lora_request: "AbstractLoRARequest") -> bool:
+    def add_lora(
+        self,
+        lora_request: Union[AbstractLoRARequest, LoRARequest],
+    ) -> bool:
+        # Adapt the input if necessary (temporary compatibility layer)
+        adapted_lora_request = adapt_lora_request_if_needed(lora_request)
+
+        # Unwrap the adapter to get the concrete vLLM object
+        vllm_lora_request = adapted_lora_request.vllm_lora_request  # noqa: F841
+
         raise NotImplementedError(
             "LoRA is not supported by the JAX worker yet.")
 

@@ -4,6 +4,7 @@ from typing import Optional, Union
 from unittest.mock import MagicMock
 
 import pytest
+from vllm.lora.request import LoRARequest
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
 
@@ -59,7 +60,10 @@ class ConcreteTPUWorker(AbstractTpuWorker):
     def profile(self, is_start: bool = True):
         self.profile_state = "started" if is_start else "stopped"
 
-    def add_lora(self, lora_request: "AbstractLoRARequest") -> bool:
+    def add_lora(
+        self,
+        lora_request: Union[AbstractLoRARequest, LoRARequest],
+    ) -> bool:
         # Mock logic: succeed if a request is provided
         return lora_request is not None
 

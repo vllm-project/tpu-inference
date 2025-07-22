@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from typing import Optional, Union
 
 import torch.nn as nn
+from vllm.lora.request import LoRARequest
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
 
@@ -62,8 +63,10 @@ class AbstractTpuWorker(ABC):
         pass
 
     @abstractmethod
-    def add_lora(self, lora_request: "AbstractLoRARequest") -> bool:
-        """Adds a LoRA adapter to the worker."""
+    def add_lora(
+        self,
+        lora_request: Union[AbstractLoRARequest, LoRARequest],
+    ) -> bool:
         pass
 
     @abstractmethod
