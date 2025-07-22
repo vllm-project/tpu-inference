@@ -94,8 +94,8 @@ class Llama4Attention(Attention):
         l2_norm = L2Norm()
         logger.warning(f"Using RoPE?? {use_attention_rope}")
         with jax.named_scope("q_proj"):
-            q_TNH = jnp.einsum('TD,NDH -> TNH', x_q_TD,
-                               self.kernel_q_proj_NDH.value)
+            q_TNH = jnp.einsum('TD,DNH -> TNH', x_q_TD,
+                               self.kernel_q_proj_DNH.value)
             if use_attention_rope:
                 q_TNH = apply_rope(q_TNH, md.input_positions, H, rope_theta,
                                    rope_scaling)
@@ -114,8 +114,8 @@ class Llama4Attention(Attention):
             q_TNH = nnx.with_sharding_constraint(q_TNH,
                                                  self.query_tnh[op_mode])
         with jax.named_scope("k_proj"):
-            k_SKH = jnp.einsum('SD,KDH -> SKH', x_SD,
-                               self.kernel_k_proj_KDH.value)
+            k_SKH = jnp.einsum('SD,DKH -> SKH', x_SD,
+                               self.kernel_k_proj_DKH.value)
             if use_attention_rope:
                 k_SKH = apply_rope(k_SKH, md.input_positions, H, rope_theta,
                                    rope_scaling)
@@ -126,8 +126,8 @@ class Llama4Attention(Attention):
                                                  self.keyvalue_skh[op_mode])
 
         with jax.named_scope("v_proj"):
-            v_SKH = jnp.einsum('SD,KDH -> SKH', x_SD,
-                               self.kernel_v_proj_KDH.value)
+            v_SKH = jnp.einsum('SD,DKH -> SKH', x_SD,
+                               self.kernel_v_proj_DKH.value)
             v_SKH = nnx.with_sharding_constraint(v_SKH,
                                                  self.keyvalue_skh[op_mode])
 
