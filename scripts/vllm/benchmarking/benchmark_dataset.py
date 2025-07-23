@@ -266,6 +266,7 @@ class MMLUDataset(BenchmarkDataset):
         self,
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
+        input_len: Optional[int] = None,
         output_len: Optional[int] = None,
         enable_multimodal_chat: bool = False,
         **kwargs,
@@ -287,11 +288,15 @@ class MMLUDataset(BenchmarkDataset):
             #     skip_min_output_len_check=output_len is not None,
             # ):
             #     continue
+            if input_len <= prompt_len:
+                raise ValueError(
+                    f"prompt is too short: prompt_len is {prompt_len} but input_len is {input_len}"
+                )
             samples.append(
                 SampleRequest(
                     prompt=prompt,
                     prompt_len=prompt_len,
-                    expected_output_len=new_output_len,
+                    expected_output_len=output_len or new_output_len,
                     completion=completion,
                 ))
         self.maybe_oversample_requests(samples, num_requests)
@@ -338,6 +343,7 @@ class MLPerfDataset(BenchmarkDataset):
         self,
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
+        input_len: Optional[int] = None,
         output_len: Optional[int] = None,
         **kwargs,
     ) -> list:
@@ -353,11 +359,15 @@ class MLPerfDataset(BenchmarkDataset):
                 completion_ids) if output_len is None else output_len
             # NOTE (jacobplatin): I don't believe that we filter the MLPerf dataset
             # at all, but it could be done here
+            if input_len <= prompt_len:
+                raise ValueError(
+                    f"prompt is too short: prompt_len is {prompt_len} but input_len is {input_len}"
+                )
             samples.append(
                 SampleRequest(
                     prompt=prompt,
                     prompt_len=prompt_len,
-                    expected_output_len=new_output_len,
+                    expected_output_len=output_len or new_output_len,
                     completion=completion,
                 ))
         self.maybe_oversample_requests(samples, num_requests)
