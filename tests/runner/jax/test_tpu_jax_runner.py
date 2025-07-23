@@ -152,7 +152,7 @@ class TestTPUJaxRunner(unittest.TestCase):
         head_size = 128
         num_blocks = 50
         # This is needed for the padding logic in insert_request_with_kv_cache
-        self.runner.vllm_config.cache_config.num_cpu_blocks = num_blocks
+        self.runner.vllm_config.cache_config.num_gpu_blocks = num_blocks
 
         prompt_len = 63
 
@@ -246,21 +246,12 @@ class TestTPUJaxRunner(unittest.TestCase):
 
         # Prepare the KV cache slices for insertion. They must be padded to the
         # full block size and have a leading dimension for the number of blocks.
-        padded_kv_cache_slices = []
-        padding_size = self.runner.block_size - prompt_len
-        for slice_per_layer in extracted_kv_cache_slices:
-            padded_slice = jnp.pad(slice_per_layer,
-                                   ((0, padding_size), (0, 0), (0, 0)),
-                                   mode='constant')
-            # Add a dimension for the number of blocks.
-            padded_kv_cache_slices.append(padded_slice[jnp.newaxis, ...])
 
         # Allocate new block IDs for the decode runner.
         decode_block_ids = [[10]]
-
         # 5. ===== Call the method to be tested =====
         self.runner.insert_request_with_kv_cache(decode_request,
-                                                 padded_kv_cache_slices,
+                                                 extracted_kv_cache_slices,
                                                  decode_block_ids)
 
         # 6. ===== Assertions =====

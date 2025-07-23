@@ -395,9 +395,11 @@ class TPUModelRunner():
     @staticmethod
     @functools.partial(
         jax.jit,
+        static_argnames=("block_size"),
         donate_argnames=("kv_caches"),
     )
     def _jitted_insert_kv_cache(
+        block_size, 
         kv_caches: List[jax.Array],
         kv_cache_slices: List[jax.Array],
         block_numbers: jax.Array,
@@ -410,6 +412,10 @@ class TPUModelRunner():
         new_kv_caches = []
         # Assuming block numbers are non-negative and sorted.
         for i, layer_kv_cache_slices in enumerate(kv_cache_slices):
+            _, num_kv_heads, head_dim = layer_kv_cache_slices.shape
+            padding_config = ((0, block_numbers.shape[0] * block_size - layer_kv_cache_slices.shape[0]), (0, 0), (0, 0))
+            layer_kv_cache_slices = jnp.pad(layer_kv_cache_slices, pad_width = padding_config)
+            layer_kv_cache_slices = layer_kv_cache_slices.reshape(-1, block_size, num_kv_heads, head_dim)
             updated_cache = kv_caches[i].at[block_numbers].set(
                 layer_kv_cache_slices)
             new_kv_caches.append(updated_cache)
@@ -511,30 +517,19 @@ class TPUModelRunner():
         # Pad target_block_numbers. Pad with the max_num_blocks + 1 to avoid writing
         # to unintended blocks. JAX would ignore as it's beyond the number of blocks
         # in the cache.
-        max_num_blocks = self.vllm_config.cache_config.num_cpu_blocks
-        assert max_num_blocks is not None
+        max_num_blocks = self.vllm_config.cache_config.num_gpu_blocks
+        assert max_num_blocks is not None and max_num_blocks != 0
         block_numbers.extend([max_num_blocks + 1] * padding_size)
 
         padded_block_numbers = jnp.array(block_numbers, dtype=jnp.int32)
-
-        # Pad kv_cache_slices.
-        padded_kv_cache_slices = []
-        for layer_slice in kv_cache_slices:
-            # The shape of layer_slice is (num_blocks, block_size, ...).
-            # We need to pad the first dimension.
-            pad_width = [(0, padding_size)] + [(0, 0)] * (layer_slice.ndim - 1)
-            padded_slice = jnp.pad(layer_slice,
-                                   pad_width,
-                                   mode='constant',
-                                   constant_values=0)
-            padded_kv_cache_slices.append(padded_slice)
 
         # Call the JIT-compiled function to perform the scatter operation
         # for all layers in a single, fused kernel.
         with LatencyTracker(f"JittedInsertKVCache-b{padded_num_blocks}"):
             self.kv_caches = self._jitted_insert_kv_cache(
+                self.block_size,
                 self.kv_caches,
-                padded_kv_cache_slices,
+                kv_cache_slices,
                 padded_block_numbers,
             )
 
