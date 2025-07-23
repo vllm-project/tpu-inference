@@ -116,8 +116,11 @@ def shard_model_to_tpu(model: torch.nn.Module, mesh: Mesh,
             x, torch.Tensor) and not isinstance(x, torchax.tensor.Tensor)
 
     def _move_to_tpu_replicated(x):
-        return torch_view(t2j(x)).apply_jax_(jax.device_put,
-                                             NamedSharding(mesh, P()))
+        # In certain cases, if t2j puts the tensor on CPU first and then device_put it to TPU, the tensor layout get messed up. To avoid that, we set jax default_device to TPU.
+        with jax.default_device(jax.devices("tpu")[0]):
+            x = t2j(x, use_dlpack=False)
+        return torch_view(x).apply_jax_(jax.device_put,
+                                        NamedSharding(mesh, P()))
 
     with jax.default_device(jax.devices("cpu")[0]), torchax.default_env():
         shard_parallel_layers_to_tpu(model, mesh, vllm_parallel_config)
@@ -129,7 +132,9 @@ def shard_model_to_tpu(model: torch.nn.Module, mesh: Mesh,
         for qual_name, x in {**params, **buffers}.items():
             if _is_unmoved_tensor(x):
                 tensor_size = fmt_size(x.nbytes)
-                logger.debug(f"{qual_name=} is not sharded, {tensor_size=}")
+                logger.debug(
+                    f"{qual_name=} is not sharded, {tensor_size=}, {x.shape=}, {x.dtype=}"
+                )
 
         params, buffers = pytree.tree_map_only(_is_unmoved_tensor,
                                                _move_to_tpu_replicated,
