@@ -29,7 +29,7 @@ if [ -z "${BUILDKITE_COMMIT:-}" ]; then
 fi
 
 if [ -z "${TPU_BACKEND_TYPE:-}" ]; then
-  TPU_BACKEND_TYPE=pytorch_xla
+  TPU_BACKEND_TYPE=jax
 fi
 
 if [ -z "${MODEL_IMPL_TYPE:-}" ]; then
@@ -54,5 +54,6 @@ exec docker run \
   -e VLLM_XLA_CACHE_PATH= \
   -e VLLM_USE_V1=1 \
   -e VLLM_XLA_CHECK_RECOMPILATION=1 \
+  ${QUANTIZATION:+-e QUANTIZATION="$QUANTIZATION"} \
   "vllm-tpu:${BUILDKITE_COMMIT}" \
   "$@" # Pass all script arguments as the command to run in the container

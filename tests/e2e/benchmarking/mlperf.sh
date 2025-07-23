@@ -10,7 +10,7 @@
 # you specify the --dataset-name, --dataset-path, and --root-dir flags
 
 # Example default usage: bash tests/e2e/benchmarking/mlperf.sh -r /local/root_dir
-# Example local docker + JAX TPU usage: TPU_BACKEND_TYPE=jax NEW_MODEL_DESIGN=True BUILDKITE_COMMIT=3c545c0c3 .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
+# Example local docker + JAX TPU usage: BUILDKITE_COMMIT=0f199f1 .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
 
 # Logs the vLLM server output to a file
 LOG_FILE="server.log"
@@ -33,7 +33,11 @@ if [ "$QUANTIZATION" = "True" ]; then
     echo "QUANTIZATION is True. Running with quantization."
     extra_serve_args+=("--additional_config")
     extra_serve_args+=('{"quantization": "int8_default.yaml"}')
+else
+    echo "QUANTIZATION is False. Running without quantization."
 fi
+
+echo extra_serve_args: "${extra_serve_args[@]}"
 
 root_dir=/workspace
 dataset_name=mlperf
@@ -221,7 +225,7 @@ for model_name in $model_list; do
 
     # Spin up the vLLM server
     echo "Spinning up the vLLM server..."
-    (vllm serve "$model_name" --max-model-len=1024 --disable-log-requests --max-num-batched-tokens 8192 2>&1 | tee -a "$LOG_FILE") &
+    (vllm serve "$model_name" --max-model-len=1024 --disable-log-requests --max-num-batched-tokens 8192 "${extra_serve_args[@]}" 2>&1 | tee -a "$LOG_FILE") &
 
 
 

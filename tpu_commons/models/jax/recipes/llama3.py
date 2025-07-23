@@ -8,7 +8,6 @@ from typing import List, Optional, Tuple
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from flax.typing import PRNGKey
 from jax.sharding import Mesh
 from vllm.config import VllmConfig
 
@@ -200,7 +199,7 @@ class LlamaForCausalLM(Model):
     def apply(self, variables, *args, **kwargs):
         return self.__call__(*args, **kwargs)
 
-    def load_weights(self, rng: PRNGKey, cache_dir: Optional[str] = None):
+    def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):
         self.rng = nnx.Rngs(rng)
         if self.use_random_init:
             #TODO: Support loading random weights, either here or in tpu_runner

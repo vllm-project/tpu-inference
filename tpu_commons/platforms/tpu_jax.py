@@ -44,7 +44,8 @@ class TpuPlatform(Platform):
     supported_quantization: list[str] = ["tpu_int8", "compressed-tensors"]
 
     additional_env_vars: list[str] = [
-        "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS"
+        "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS", "TPU_BACKEND_TYPE",
+        "TPU_MULTIHOST_BACKEND"
     ]
 
     @classmethod
@@ -158,10 +159,20 @@ class TpuPlatform(Platform):
         parallel_config.worker_cls = \
                         "tpu_commons.worker.tpu_worker_jax.TPUWorker"
 
-        # TODO(xiang): fix this for multi-host case
-        if parallel_config.distributed_executor_backend != "uni":
+        multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "").lower()
+        if not multihost_backend:  # Single host
             logger.warning(
                 "JAX requires to use uniproc_executor for single host.")
+            parallel_config.distributed_executor_backend = "uni"
+        elif multihost_backend == "ray":
+            from tpu_commons.executors.ray_distributed_executor import \
+                RayDistributedExecutor
+            parallel_config.distributed_executor_backend = RayDistributedExecutor
+            logger.info("Using Ray as the TPU multihost backend. ")
+        else:
+            logger.warning(
+                f"Unknown TPU multihost backend: {multihost_backend}. "
+                "Using uniproc_executor.")
             parallel_config.distributed_executor_backend = "uni"
 
         assert not vllm_config.speculative_config, (

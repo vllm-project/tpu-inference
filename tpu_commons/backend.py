@@ -13,6 +13,8 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+from typing import Optional
+
 from tpu_commons.adapters.vllm_adapters import (VllmLoRARequestAdapter,
                                                 VllmSchedulerOutputAdapter)
 from tpu_commons.di.interfaces import BackendInterface, HostInterface
@@ -28,13 +30,15 @@ class TPUBackend(BackendInterface):
   and managing the concrete TPU worker instance and delegating calls to it.
   """
 
-    def __init__(self, host_interface: HostInterface, **worker_kwargs):
+    def __init__(self,
+                 host_interface: Optional[HostInterface] = None,
+                 **worker_kwargs):
         """
         Initializes the TPUBackend.
 
         Args:
-            host_interface: An object that implements the HostInterface, providing
-                            a way for the backend to communicate with the host.
+            host_interface: An optional object that implements the HostInterface,
+                            providing a way for the backend to communicate with the host.
             **worker_kwargs: Additional keyword arguments to be passed to the
                             worker's constructor.
         """
@@ -44,10 +48,13 @@ class TPUBackend(BackendInterface):
 
     def launch_tpu_batch(self, batch_to_launch):
         """
-        Launches a batch of requests on the TPU worker.
+        Launches a batch of requests on the TPU worker and returns the result.
 
         Args:
             batch_to_launch: The batch of requests to be processed.
+
+        Returns:
+            The result of the model execution.
         """
         adapted_batch = VllmSchedulerOutputAdapter(batch_to_launch)
         return self.worker.execute_model(adapted_batch)

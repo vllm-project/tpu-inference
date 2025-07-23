@@ -70,18 +70,6 @@ class TestTPUWorker:
         assert worker.profile_dir is None
         assert worker.devices == ['tpu:0']
 
-    def test_init_multi_host_not_implemented(self, mock_host_interface,
-                                             mock_vllm_config):
-        """Tests that multi-host (rank != local_rank) raises NotImplementedError."""
-        with pytest.raises(NotImplementedError,
-                           match="Multi host serving is not supported yet."):
-            TPUWorker(
-                host_interface=mock_host_interface,
-                vllm_config=mock_vllm_config,
-                local_rank=0,
-                rank=1,  # Different rank from local_rank
-                distributed_init_method="test_method")
-
     @patch('tpu_commons.worker.tpu_worker_jax.envs')
     def test_init_with_profiler_on_rank_zero(self, mock_envs,
                                              mock_host_interface,
