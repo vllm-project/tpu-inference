@@ -78,9 +78,12 @@ def _get_nnx_model(
         #    the load_weights. This would be easy to OOM if the layer is super large.
         # 3. The model architecture definition won't need to worry about the sharding.
         #    The sharding definition is taken over by the load_weights instead.
-        model = nnx.eval_shape(
-            lambda: model_class.create_model_for_checkpoint_loading(
-                vllm_config, rng, mesh))
+        if model_class.__name__ == "Qwen2ForCausalLM":
+            model = nnx.eval_shape(lambda: model_class(vllm_config, rng, mesh))
+        else:
+            model = nnx.eval_shape(
+                lambda: model_class.create_model_for_checkpoint_loading(
+                    vllm_config, rng, mesh))
         model.load_weights(rng)
         # Although the created model can already work, we still need to jit
         # the model creation again, otherwise the model forward will have
