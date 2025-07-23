@@ -10,12 +10,13 @@ import jax.numpy as jnp
 import numpy as np
 from flax import nnx
 from jax.sharding import NamedSharding, PartitionSpec
+import numpy as np
 
 from tpu_commons.kernels.ragged_paged_attention.kernel import cdiv
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.common.sharding import Sharding
-from tpu_commons.models.jax.recipes.llama3 import Llama3_8B
+from tpu_commons.models.jax.recipes.llama3 import LlamaForCausalLM
 from tpu_commons.runner.jax.tpu_jax_runner import \
     NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK
 
@@ -335,13 +336,18 @@ class InputCreator:
             input_ids=input_ids,
             attention_metadata=AttentionMetadata(
                 input_positions=input_positions,
+                slot_mapping=kv_cache_write_indices,
+                block_tables=self.block_table,
+                #seq_lens=np.ones((seq_lens, ), dtype=np.int32),
                 seq_lens=seq_lens,
-                block_indices=self.block_table,
-                kv_cache_write_indices=kv_cache_write_indices,
-                num_prefill_seqs=num_prefill_seqs,
-                prefill_query_start_offsets=prefill_query_start_offsets,
-                num_decode_seqs=num_decode_seqs,
-                chunked_prefill_enabled=chunked_prefill_enabled),
+                query_start_loc=prefill_query_start_offsets,
+                num_seqs=np.array(num_prefill_seqs, dtype=jnp.int32),
+                num_slices=np.array([1], dtype=np.int32)),
+                # kv_cache_write_indices=kv_cache_write_indices,
+                # num_prefill_seqs=num_prefill_seqs,
+                # prefill_query_start_offsets=prefill_query_start_offsets,
+                # num_decode_seqs=num_decode_seqs,
+                # chunked_prefill_enabled=chunked_prefill_enabled),
             temperatures=None,
             top_ps=None,
             top_ks=None)
@@ -397,7 +403,9 @@ class Benchmarker:
                                          rng=self.rng)
             model_input = input_creator.create_prefill_input()
             # TODO: add tracing
-            self.model(model_input)
+            self.model(kv_caches=model_input.kv_caches, 
+                       input_ids=model_input.input_ids, 
+                       attention_metadata=model_input.attention_metadata)
 
 
 def main():
@@ -412,6 +420,7 @@ def main():
     argparser.add_argument("--sampler_type", type=str, default="fixed")
     argparser.add_argument("--sampler_std", type=float, default=1.0)
     argparser.add_argument("--additional_config", type=json.loads, default={})
+    argparser.add_argument("--model_config", type=json.loads, default={})
     args = argparser.parse_args()
     sampler = Sampler(type=args.sampler_type, std=args.sampler_std)
     rng = nnx.Rngs(params=0)
@@ -419,12 +428,12 @@ def main():
         key: val
         for (key, val) in vars(args).items() if key != "additional_config"
     }
-    vllm_config = VllmConfig(additional_config=args.additional_config)
+    vllm_config = VllmConfig(additional_config=args.additional_config, model_config=ModelConfig(**args.model_config))
     vllm_config.additional_config.update(
         arg_dict)  # add all of the cmd-line args to additional_config
     mesh = _init_mesh(vllm_config)
-    model = Llama3_8B(vllm_config, rng.params(), mesh)
-
+    model = LlamaForCausalLM(vllm_config, rng.params(), mesh)
+    model.load_weights(jax.random.PRNGKey(42))# Load the model weights
     benchmarker = Benchmarker(vllm_config, model, mesh, sampler, rng)
 
     for _ in range(args.prefill_steps):
