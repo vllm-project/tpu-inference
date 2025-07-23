@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 import jax
 import jax.numpy as jnp
 import pytest
+import torch
 from flax import nnx
 from jax.sharding import Mesh
 from transformers import PretrainedConfig
@@ -154,7 +155,7 @@ def test_get_vllm_model(mesh):
 
     engine_args = EngineArgs(model="Qwen/Qwen2-1.5B-Instruct")
     vllm_config = engine_args.create_engine_config()
-    vllm_config.model_config.dtype = jnp.bfloat16
+    vllm_config.model_config.dtype = torch.bfloat16
 
     model_fn, compute_logits_fn, _ = model_loader.get_vllm_model(
         vllm_config, rng, mesh)
