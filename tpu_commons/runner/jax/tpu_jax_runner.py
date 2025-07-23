@@ -14,6 +14,8 @@ import vllm.envs as envs
 from flax import nnx
 from jax.sharding import NamedSharding, PartitionSpec
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer import (get_kv_transfer_group,
+                                          has_kv_transfer_group)
 from vllm.sequence import IntermediateTensors
 from vllm.utils import cdiv
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
@@ -573,6 +575,8 @@ class TPUModelRunner():
     ) -> tuple[AttentionMetadata, ModelRunnerOutput]:
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
+            self.maybe_setup_kv_connector(scheduler_output)
+
             # Return empty ModelRunnerOutput if there's no work to do.
             # TODO(fhzhang): We rely on empty cycles to remove requests in input batch. Fix it to reduce overhead.
             logger.debug(f"Nothing scheduled: {scheduler_output}!")
@@ -583,8 +587,11 @@ class TPUModelRunner():
 
         inputs = self._prepare_inputs(scheduler_output)
         with self.maybe_forbid_compile:
+            self.maybe_setup_kv_connector(scheduler_output)
             self.kv_caches, hidden_states = self.model_fn(
                 self.state, *inputs[:3])
+            self.maybe_wait_for_kv_save()
+
             hidden_states = self.select_hidden_states_fn(
                 hidden_states, inputs[4])
             logits = self.compute_logits_fn(self.state, hidden_states)
@@ -652,6 +659,27 @@ class TPUModelRunner():
             pooler_output=[],
         )
         return inputs[2], model_runner_output
+
+    # TODO(xiang): check this after implementing TPU connector
+    @staticmethod
+    def maybe_setup_kv_connector(scheduler_output: "VllmSchedulerOutput"):
+        # Update KVConnector with the KVConnector metadata forward().
+        if has_kv_transfer_group():
+            kv_connector = get_kv_transfer_group()
+            assert scheduler_output.kv_connector_metadata is not None
+            kv_connector.bind_connector_metadata(
+                scheduler_output.kv_connector_metadata)
+
+            # Background KV cache transfers happen here.
+            # These transfers are designed to be async and the requests
+            # involved may be disjoint from the running requests.
+            # Do this here to save a collective_rpc.
+            kv_connector.start_load_kv()
+
+    @staticmethod
+    def maybe_wait_for_kv_save() -> None:
+        if has_kv_transfer_group():
+            get_kv_transfer_group().wait_for_save()
 
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
