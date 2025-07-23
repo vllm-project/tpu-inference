@@ -96,7 +96,7 @@ sudo bash ~/tpu_commons/scripts/multihost/run_cluster.sh \
 
 3. On the head node, use `docker exec -it node /bin/bash` to enter the container. And then execute:
 ```
-python /workspace/tpu_commons/examples/offline_inference.py  --model=meta-llama/Llama-3.1-8B  --tensor_parallel_size=16  --task=generate  --max_model_len=1024
+python /workspace/tpu_commons/examples/offline_inference.py  --model=meta-llama/Llama-3.1-70B  --tensor_parallel_size=16  --task=generate  --max_model_len=1024
 ```
 
 ### Run vLLM Pytorch models on the JAX path
