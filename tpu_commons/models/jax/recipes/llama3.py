@@ -163,7 +163,8 @@ class LlamaForCausalLM(Model):
         if not self.param_factory:
             self.param_factory = ParamFactory(
                 kernel_initializer=nnx.initializers.xavier_normal(),
-                scale_initializer=nnx.initializers.ones)
+                scale_initializer=nnx.initializers.ones,
+                random_init=False)
         self.embedder = Embedder(cfg=self.cfg.model.emb,
                                  mesh=self.mesh,
                                  param_factory=self.param_factory,

@@ -173,40 +173,48 @@ class TestLlamaForCausalLM:
                            match="Could not determine Llama3 variant"):
             LlamaForCausalLM(mock_vllm_config_unknown, rng, mesh)
 
+    def test_create_model_with_random_weights(self, mock_vllm_config_8b, rng,
+                                              mesh):
+        """
+        Tests that random weight initialization creates concrete, non-zero-variance arrays.
+        """
+        model = LlamaForCausalLM.create_model_with_random_weights(
+            vllm_config=mock_vllm_config_8b, rng=rng, mesh=mesh)
+
+        embedding_weight = model.embedder.input_embedding_table_DV.value
+        attention_q_kernel = model.layers[0].attn.kernel_q_proj_DNH.value
+        final_norm_scale = model.final_norm.scale.value
+
+        assert isinstance(embedding_weight, jax.Array)
+        assert isinstance(attention_q_kernel, jax.Array)
+        assert isinstance(final_norm_scale, jax.Array)
+
+        assert jnp.std(embedding_weight) > 0
+        assert jnp.std(attention_q_kernel) > 0
+
+        assert jnp.all(final_norm_scale == 1.0)
+
     @patch(
         "tpu_commons.models.jax.recipes.llama3.LlamaForCausalLM._init_layers",
         return_value=None)
-    def test_load_weights_with_random_init(self, _, rng, mesh):
-        """Tests that the weight loader is not called when random_weights is true."""
-        vllm_config = MockVllmConfig(model_name="llama3-8b",
-                                     random_weights=True)
-        model = LlamaForCausalLM(vllm_config, rng, mesh)
-
-        with patch("tpu_commons.models.jax.recipes.llama3.Llama3WeightLoader"
-                   ) as mock_loader:
-            model.load_weights(rng)
-            mock_loader.assert_not_called()
-
-    @patch(
-        "tpu_commons.models.jax.recipes.llama3.LlamaForCausalLM._init_layers",
-        return_value=None)
-    def test_load_weights_from_checkpoint(self, _, rng, mesh):
-        """Tests that the weight loader is called correctly."""
+    @patch("tpu_commons.models.jax.recipes.llama3.Llama3WeightLoader")
+    def test_load_weights_called_correctly(self, mock_loader_cls, _, rng,
+                                           mesh):
+        """Tests that the weight loader is called correctly for checkpoint loading."""
         vllm_config = MockVllmConfig(model_name="llama3-8b",
                                      random_weights=False)
         model = LlamaForCausalLM(vllm_config, rng, mesh)
 
-        with patch("tpu_commons.models.jax.recipes.llama3.Llama3WeightLoader"
-                   ) as mock_loader_cls:
-            mock_loader_instance = MagicMock()
-            mock_loader_cls.return_value = mock_loader_instance
-            model.load_weights(rng, cache_dir="/tmp/cache")
-            mock_loader_cls.assert_called_once_with(
-                vllm_config=vllm_config,
-                model_config=model.cfg.model,
-                cache_dir="/tmp/cache",
-                sharding_cfg=model.cfg.sharding)
-            mock_loader_instance.load_weights.assert_called_once_with(model)
+        mock_loader_instance = MagicMock()
+        mock_loader_cls.return_value = mock_loader_instance
+        model.load_weights(rng, cache_dir="/tmp/cache")
+
+        mock_loader_cls.assert_called_once_with(
+            vllm_config=vllm_config,
+            model_config=model.cfg.model,
+            cache_dir="/tmp/cache",
+            sharding_cfg=model.cfg.sharding)
+        mock_loader_instance.load_weights.assert_called_once_with(model)
 
 
 class TestLlama3WeightLoader:
