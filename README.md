@@ -64,6 +64,41 @@ python tpu_commons/examples/offline_inference.py \
     --max_num_seqs=8
 ```
 
+### Run JAX path examples with Ray-based multi-host serving
+
+Run `Llama 3.1 70B Instruct` offline inference on 4 hosts (v6e-16) in interleaved mode:
+
+1. Designate one machine as the head node and execute:
+```
+sudo bash ~/tpu_commons/scripts/multihost/run_cluster.sh \
+    <docker_image> \
+    <head_node_ip> \
+    --head \
+    <path_to_hf_cache> \
+    -e HF_TOKEN=<your_hf_token> \
+    -e TPU_BACKEND_TYPE=jax \
+    -e TPU_MULTIHOST_BACKEND=ray
+    -e JAX_PLATFORMS=''
+```
+
+2. On every worker machine, execute:
+```
+sudo bash ~/tpu_commons/scripts/multihost/run_cluster.sh \
+    <docker_image> \
+    <head_node_ip> \
+    --worker \
+    <path_to_hf_cache> \
+    -e HF_TOKEN=<your_hf_token> \
+    -e TPU_BACKEND_TYPE=jax \
+    -e TPU_MULTIHOST_BACKEND=ray
+    -e JAX_PLATFORMS=''
+```
+
+3. On the head node, use `docker exec -it node /bin/bash` to enter the container. And then execute:
+```
+python /workspace/tpu_commons/examples/offline_inference.py  --model=meta-llama/Llama-3.1-8B  --tensor_parallel_size=16  --task=generate  --max_model_len=1024
+```
+
 ### Run vLLM Pytorch models on the JAX path
 
 Run the vLLM's implementation of `Llama 3.1 8B`, which is in Pytorch. It is the same command as above with the extra env var `MODEL_IMPL_TYPE=vllm`:
