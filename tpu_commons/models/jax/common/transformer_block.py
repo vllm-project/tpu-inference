@@ -20,9 +20,11 @@ from tpu_commons.models.jax.common.layers import (DenseFFW, DenseFFWConfig,
 from tpu_commons.models.jax.common.moe.moe import MoE, MoEConfig
 from tpu_commons.models.jax.common.sharding import ShardingConfig
 
-ATTENTION_BLOCK_REGISTR = {"default": Attention,
-                        #    "llama4": Llama4Attention,
-                           "mla": MLA}
+ATTENTION_BLOCK_REGISTR = {
+    "default": Attention,
+    #    "llama4": Llama4Attention,
+    "mla": MLA
+}
 
 TransformerBlockConfig = make_dataclass(
     "TransformerBlockConfig",
@@ -165,7 +167,9 @@ class SharedExpertsTransformerBlock(TransformerBlock):
                                  HuggingFaceArgNames.SHARED_EXPERTS.value)
         moe_intermediate_size = getattr(
             self.cfg.moe, HuggingFaceArgNames.INTERMEDIATE_SIZE_MOE.value)
-        shared_experts_cfg = deepcopy(self.cfg.dense_ffw) if self.cfg.dense_ffw_for_shared_moe is None else self.cfg.dense_ffw_for_shared_moe
+        shared_experts_cfg = deepcopy(
+            self.cfg.dense_ffw
+        ) if self.cfg.dense_ffw_for_shared_moe is None else self.cfg.dense_ffw_for_shared_moe
         setattr(shared_experts_cfg,
                 HuggingFaceArgNames.INTERMEDIATE_SIZE.value,
                 shared_experts * moe_intermediate_size)

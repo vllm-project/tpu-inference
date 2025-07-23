@@ -14,6 +14,7 @@ from tpu_commons.models.jax.common.attention.attention import (Attention,
                                                                KVCache)
 from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
+from tpu_commons.models.jax.common.layers import RMSNorm
 from tpu_commons.models.jax.common.rope import DeepseekScalingRotaryEmbedding
 from tpu_commons.models.jax.common.sharding import ShardingConfig
 
@@ -133,18 +134,27 @@ class MLA(Attention):
         self.kernel_o_proj_NHD = self.param_factory.create_kernel_param(
             rngs, (self.N, self.v_head_dim, self.D), self.nhd_sharding,
             self.cfg.dtype)
-        self.q_rms_norm = nnx.RMSNorm(
-            self.query_lora_rank,
+        self.q_rms_norm = RMSNorm(
+            dims=self.query_lora_rank,
+            mesh=self.mesh,
+            param_factory=self.param_factory,
+            sharding_cfg=self.sharding_cfg,
             epsilon=self.rms_norm_eps,
-            param_dtype=self.dtype,
-            rngs=rngs,
+            with_scale=True,
+            dtype=self.dtype,
         )
-        self.kv_rms_norm = nnx.RMSNorm(
-            self.kv_lora_rank,
+        self.q_rms_norm.generate_kernel(rngs)
+
+        self.kv_rms_norm = RMSNorm(
+            dims=self.kv_lora_rank,
+            mesh=self.mesh,
+            param_factory=self.param_factory,
+            sharding_cfg=self.sharding_cfg,
             epsilon=self.rms_norm_eps,
-            param_dtype=self.dtype,
-            rngs=rngs,
+            with_scale=True,
+            dtype=self.dtype,
         )
+        self.kv_rms_norm.generate_kernel(rngs)
         self.rope = DeepseekScalingRotaryEmbedding(
             self.qk_rope_head_dim,
             self.rope_theta,

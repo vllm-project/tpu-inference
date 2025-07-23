@@ -13,9 +13,9 @@ from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.constants import (HuggingFaceArgNames,
                                                      RouterType)
 from tpu_commons.models.jax.common.layers import FlaxUtils
+from tpu_commons.models.jax.common.moe.deepseek_moe import (
+    DeepSeekV3Router, DeepSeekV3RoutingConfig)
 from tpu_commons.models.jax.common.sharding import ShardingConfig
-from tpu_commons.models.jax.common.moe.deepseek_moe import DeepSeekV3RoutingConfig, DeepSeekV3Router
-
 
 modeling_flax_utils = FlaxUtils()
 
@@ -81,7 +81,8 @@ class Router(nnx.Module):
             self.cfg, HuggingFaceArgNames.NUM_EXPERTS_PER_TOKEN.value)
         router_logits_TE = jnp.einsum('TD,DE -> TE', x_TD,
                                       self.kernel_DE.value)
-        activated_gating_TF = nnx.softmax(router_logits_TE.astype(self.cfg.dtype),
+        activated_gating_TF = nnx.softmax(router_logits_TE.astype(
+            self.cfg.dtype),
                                           axis=-1)
         weights_TX, selected_experts_TX = jax.lax.top_k(
             activated_gating_TF, num_experts_per_tok)
@@ -131,7 +132,8 @@ MoEConfig = make_dataclass(
      (HuggingFaceArgNames.NUM_LOCAL_EXPERTS.value, int),
      (HuggingFaceArgNames.HIDDEN_ACT.value, int),
      ("apply_expert_weight_before_computation", bool),
-     ("router", Union[RouterConfig, DeepSeekV3RoutingConfig]), ("dtype", DTypeLike),
+     ("router", Union[RouterConfig, DeepSeekV3RoutingConfig]),
+     ("dtype", DTypeLike),
      ("vllm_config", VllmConfig, field(repr=False, default=None))],
     bases=(Config, ))
 MoEConfig.__doc__ = f"""Configuration for the Mixture-of-Experts (MoE) layer.
@@ -170,11 +172,12 @@ class MoE(nnx.Module):
     def __post_init__(self):
         """Initializes the MoE module by creating sharding configurations and generating expert kernels."""
         if isinstance(self.cfg.router, DeepSeekV3RoutingConfig):
-            self.router = DeepSeekV3Router(self.cfg.router, self.mesh, self.param_factory,
-                                self.sharding_cfg)
+            self.router = DeepSeekV3Router(self.cfg.router, self.mesh,
+                                           self.param_factory,
+                                           self.sharding_cfg)
         else:
-            self.router = Router(self.cfg.router, self.mesh, self.param_factory,
-                                self.sharding_cfg)
+            self.router = Router(self.cfg.router, self.mesh,
+                                 self.param_factory, self.sharding_cfg)
         self.router.create_sharding()
         self.create_sharding()
 
