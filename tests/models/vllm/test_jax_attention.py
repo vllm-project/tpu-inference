@@ -2,6 +2,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 import torch
+import torchax
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import j2t, t2j, t2j_dtype
@@ -9,6 +10,7 @@ from vllm.attention import Attention as VllmAttention
 from vllm.config import set_current_vllm_config
 from vllm.engine.arg_utils import EngineArgs
 
+from tpu_commons import utils_jax as utils
 from tpu_commons.kernels.ragged_paged_attention.kernel import \
     ref_ragged_paged_attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
@@ -17,6 +19,14 @@ from tpu_commons.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 
 P = PartitionSpec
+
+
+@pytest.fixture(scope="module", autouse=True)
+def setup_torchax():
+    """Enable torchax globally before all tests, disable after all tests."""
+    torchax.enable_globally()
+    yield
+    torchax.disable_globally()
 
 
 def _get_spmd_mesh():
@@ -79,7 +89,7 @@ def generate_kv_caches(num_kv_heads, head_size, mesh, dtype):
         1024,  # num_blocks
         16,  # block_size
         num_kv_heads * 2,
-        head_size,
+        utils.get_padded_head_dim(head_size),
     )
     sharding = NamedSharding(mesh, PartitionSpec(None, None, "model", None))
 
@@ -95,7 +105,7 @@ def generate_kv_caches(num_kv_heads, head_size, mesh, dtype):
 
 @pytest.mark.parametrize("mesh", [_get_spmd_mesh()])
 @pytest.mark.parametrize("num_heads", [8, 32])
-@pytest.mark.parametrize("head_size", [128])
+@pytest.mark.parametrize("head_size", [96, 128])
 @pytest.mark.parametrize("num_kv_heads", [8])
 @pytest.mark.parametrize("num_tokens", [15, 63])
 def test_jax_attention(mesh, num_heads, head_size, num_kv_heads, num_tokens):
@@ -158,6 +168,13 @@ def test_jax_attention(mesh, num_heads, head_size, num_kv_heads, num_tokens):
     # j2t() doens't support bfloat16, so we cast it into float32 as an intermedate step.
     jax_output = j2t(jax_output.to(torch.float32)).to(dtype)
 
+    if head_size % 128 != 0:
+        padded_head_size = utils.get_padded_head_dim(head_size)
+        pad_width = [(0, 0), (0, 0), (0, padded_head_size - head_size)]
+        q = jnp.pad(q,
+                    pad_width=pad_width,
+                    mode='constant',
+                    constant_values=0.0)
     ref_output = ref_ragged_paged_attention(jax_view(q),
                                             kv_cache,
                                             md.seq_lens,
@@ -165,6 +182,8 @@ def test_jax_attention(mesh, num_heads, head_size, num_kv_heads, num_tokens):
                                             md.query_start_loc,
                                             md.num_seqs,
                                             sm_scale=scale)
+    if head_size % 128 != 0:
+        ref_output = ref_output[:, :, :head_size]
     ref_output = j2t(ref_output.astype(jnp.float32)).to(dtype)
 
     torch.testing.assert_close(ref_output, jax_output, atol=1e-2, rtol=1e-5)

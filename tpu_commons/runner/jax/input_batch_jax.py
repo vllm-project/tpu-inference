@@ -385,3 +385,7 @@ class InputBatch:
     @property
     def all_greedy(self) -> bool:
         return len(self.random_reqs) == 0
+
+    @property
+    def max_num_logprobs(self) -> Optional[int]:
+        return max(self.num_logprobs.values()) if self.num_logprobs else None

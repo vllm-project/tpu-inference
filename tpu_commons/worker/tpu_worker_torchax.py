@@ -6,23 +6,18 @@
 """A TPU worker class."""
 import copy
 import os
-from typing import Optional
+from typing import Optional, Union
+
+import jax
 
 import torch
 import torch.distributed
 import torch.nn as nn
 
 import vllm.envs as envs
-
-import jax
-
-from tpu_commons.models.torchax.torchax_wrapper import with_torchax_global
-
-from vllm.config import ParallelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
-from tpu_commons.logger import init_logger
-from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
 from vllm.v1.attention.backends.pallas import TPU_HEAD_SIZE_ALIGNMENT
@@ -31,21 +26,33 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
 
+from vllm.lora.request import LoRARequest
+
+from tpu_commons.di.abstracts import (AbstractKVCacheConfig,
+                                      AbstractLoRARequest,
+                                      AbstractSchedulerOutput)
+from tpu_commons.di.interfaces import HostInterface
+from tpu_commons.logger import init_logger
+from tpu_commons.models.torchax.torchax_wrapper import with_torchax_global
 from tpu_commons.runner.tpu_torchax_runner import TPUModelRunner
+from tpu_commons.worker.base import AbstractTpuWorker
+from tpu_commons.worker._temporary_vllm_compat import (
+    adapt_kv_cache_config_if_needed, adapt_scheduler_output_if_needed,
+    adapt_lora_request_if_needed)
 
 logger = init_logger(__name__)
 
 
-class TPUWorker:
+class TPUWorker(AbstractTpuWorker):
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        local_rank: int,
-        rank: int,
-        distributed_init_method: str,
-        is_driver_worker: bool = False,
-    ):
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 local_rank: int,
+                 rank: int,
+                 distributed_init_method: str,
+                 is_driver_worker: bool = False,
+                 host_interface: Optional[HostInterface] = None):
+        super().__init__(host_interface)
         self.is_driver_worker = is_driver_worker
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -72,6 +79,10 @@ class TPUWorker:
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
+
+        if rank != local_rank:
+            raise NotImplementedError(
+                "Multi host serving is not supported yet.")
 
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
@@ -107,7 +118,6 @@ class TPUWorker:
 
     @with_torchax_global
     def init_device(self):
-        os.environ["PJRT_DEVICE"] = "TPU"
         # Note: Currently the XLA compiler wrongly uses 2D ring strategy on 1D
         # ring, the xla tpu compiler flag
         # `xla_tpu_force_1d_allreduce_at_chunk_count` is a temporary solution to
@@ -123,27 +133,15 @@ class TPUWorker:
 
         # Initialize the distributed environment.
         self._init_tpu_worker_distributed_environment(
-            self.parallel_config, self.rank, self.distributed_init_method,
-            self.local_rank)
+            self.rank, self.distributed_init_method, self.local_rank)
 
         # Device initialization should happen after initializing
         # the distributed runtime.
         self.device = torch.device("jax:0")
         self.device_config.device = self.device
 
-        # Set random seed.
-        set_random_seed(self.model_config.seed)
-
         rank = jax.process_index()
 
-        if self.model_config.seed is not None:
-            pass
-
-        # Increase the cache size limit, which is the maximum number of
-        # dynamo graphs that can be compiled.
-        # TODO (NickLucche) On gsm we compile 80+ graphs.
-        # Re-evaluate limit, with MM we may get close to this limit.
-        torch._dynamo.config.cache_size_limit = 128
         # Use persistent cache to avoid XLA recompilation.
         # NOTE(woosuk): Set per-rank cache path since different ranks
         # can have slightly different XLA graphs.
@@ -161,16 +159,7 @@ class TPUWorker:
     @with_torchax_global
     def determine_available_memory(self) -> int:
         # `max_num_tokens >= max_num_batched_tokens` due to padding.
-        with self.model_runner.maybe_setup_dummy_loras(self.lora_config):
-            self.model_runner.profile_run(self.model_runner.max_num_tokens)
-
-        # During the profiling run, the model runs without KV cache. After
-        # the profiling run, the model always runs with KV cache. Here we clear
-        # the dynamo cache and cached bytecode to ensure the model always has
-        # one compiled bytecode. Having one FX graph/cached bytecode per
-        # compiled model is required for `support_torch_compile` decorator to
-        # skip dynamo guard.
-        self.model_runner.reset_dynamo_cache()
+        self.model_runner.profile_run(self.model_runner.max_num_tokens)
 
         # Get the maximum amount of memory used by the model weights and
         # intermediate activations.
@@ -203,16 +192,39 @@ class TPUWorker:
 
     def execute_model(
         self,
-        scheduler_output: "SchedulerOutput",
+        scheduler_output: Union[AbstractSchedulerOutput, SchedulerOutput],
     ) -> Optional[ModelRunnerOutput]:
-        output = self.model_runner.execute_model(scheduler_output)
+        # NOTE: This method intentionally returns a concrete vLLM type, which
+        # violates the pure abstract contract of the base class. This is a
+        # deliberate, temporary compromise for the same reasons outlined in
+        # the `get_kv_cache_spec` method.
+
+        # Adapt the input if necessary (temporary compatibility layer)
+        adapted_scheduler_output = adapt_scheduler_output_if_needed(
+            scheduler_output)
+
+        # Unwrap the adapter to get the concrete vLLM object
+        vllm_scheduler_output = adapted_scheduler_output.vllm_scheduler_output
+        output = self.model_runner.execute_model(vllm_scheduler_output)
         return output if self.is_driver_worker else None
+
+    def add_lora(
+        self,
+        lora_request: Union[AbstractLoRARequest, LoRARequest],
+    ) -> bool:
+        # Adapt the input if necessary (temporary compatibility layer)
+        adapted_lora_request = adapt_lora_request_if_needed(lora_request)
+
+        # Unwrap the adapter to get the concrete vLLM object
+        vllm_lora_request = adapted_lora_request.vllm_lora_request
+
+        raise NotImplementedError(
+            "LoRA is not supported by the torchax worker yet.")
 
     def profile(self, is_start: bool = True):
         if self.rank < 1:
             if self.profile_dir is None:
                 raise RuntimeError("Profiler is not enabled.")
-            import jax
             profiler = jax.profiler
             if is_start:
                 if self.profiler is None:
@@ -220,9 +232,6 @@ class TPUWorker:
                 profiler.start_trace(self.profile_dir)
             else:
                 profiler.stop_trace()
-
-    def add_lora(self, lora_request: LoRARequest) -> bool:
-        return self.model_runner.add_lora(lora_request)
 
     def load_model(self) -> None:
         self.model_runner.load_model()
@@ -232,19 +241,33 @@ class TPUWorker:
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model()
 
-        # Reset the seed to ensure that the random state is not affected by
-        # the model initialization and profiling.
-        set_random_seed(self.model_config.seed)
-
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
+        # NOTE: This method intentionally returns a concrete vLLM type, which
+        # violates the pure abstract contract of the base class. This is a
+        # deliberate, temporary compromise.
+        #
+        # The vLLM executor that calls this method expects the concrete
+        # `vllm.KVCacheSpec` object to perform its own internal logic. If we
+        # returned an abstract adapter, the vLLM code would break.
+        #
+        # The ideal long-term solution is for the vLLM DI container to be
+        # responsible for this translation. When vLLM can be modified, this
+        # method should be changed to return `dict[str, AbstractKVCacheSpec]`,
+        # and the vLLM side should be updated to handle the translation.
         return self.model_runner.get_kv_cache_spec()
 
-    def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_from_config(
+        self,
+        kv_cache_config: Union[AbstractKVCacheConfig, KVCacheConfig],
+    ) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
-        self.model_runner.initialize_kv_cache(kv_cache_config)
+        adapted_kv_cache_config = adapt_kv_cache_config_if_needed(
+            kv_cache_config)
+        vllm_kv_cache_config = adapted_kv_cache_config.vllm_kv_cache_config
+        self.model_runner.initialize_kv_cache(vllm_kv_cache_config)
 
     def check_health(self) -> None:
         # worker will always be healthy as long as it's running.
@@ -252,7 +275,6 @@ class TPUWorker:
 
     def _init_tpu_worker_distributed_environment(
         self,
-        parallel_config: ParallelConfig,
         rank: int,
         distributed_init_method: Optional[str] = None,
         local_rank: int = -1,
@@ -263,12 +285,12 @@ class TPUWorker:
         # are invoked by `xm.all_reduce` and `xm.all_gather` which use their
         # own context.
         init_distributed_environment(
-            world_size=parallel_config.world_size,
+            world_size=self.parallel_config.world_size,
             rank=rank,
             local_rank=local_rank,
             distributed_init_method=distributed_init_method,
             backend="gloo",
         )
         ensure_model_parallel_initialized(
-            parallel_config.tensor_parallel_size,
-            parallel_config.pipeline_parallel_size)
+            self.parallel_config.tensor_parallel_size,
+            self.parallel_config.pipeline_parallel_size)

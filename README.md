@@ -14,7 +14,7 @@ Follow this [guide](https://docs.vllm.ai/en/latest/getting_started/installation/
 **NOTE**: Right after `git clone` vLLM repo and before running any `pip install` commands, run the following command to pin the version:
 
 ```
-git checkout 3c545c0c3b98ee642373a308197d750d0e449403
+git checkout 0f199f197b4e7a835ccc5b4d15363f8faa7824c8
 ```
 
 ### Install `tpu_commons`:
@@ -43,7 +43,6 @@ pre-commit run --all-files
 Run `Llama 3.1 8B` offline inference on 4 TPU chips:
 
 ```
-export TPU_BACKEND_TYPE=jax
 python tpu_commons/examples/offline_inference.py \
     --model=meta-llama/Llama-3.1-8B \
     --tensor_parallel_size=4 \
@@ -58,12 +57,49 @@ Run `Llama 3.1 8B Instruct` offline inference on 4 TPU chips in disaggregated mo
 ```
 PREFILL_SLICES=2 \
 DECODE_SLICES=2 \
-TPU_BACKEND_TYPE=jax \
 python tpu_commons/examples/offline_inference.py \
     --task=generate \
     --model=meta-llama/Meta-Llama-3-8B-Instruct \
     --max_model_len=1024 \
     --max_num_seqs=8
+```
+
+### Run JAX path examples with Ray-based multi-host serving
+
+Run `Llama 3.1 70B Instruct` offline inference on 4 hosts (v6e-16) in interleaved mode:
+
+1. Designate one machine as the head node and execute:
+
+```
+sudo bash ~/tpu_commons/scripts/multihost/run_cluster.sh \
+    <docker_image> \
+    <head_node_ip> \
+    --head \
+    <path_to_hf_cache> \
+    -e HF_TOKEN=<your_hf_token> \
+    -e TPU_BACKEND_TYPE=jax \
+    -e TPU_MULTIHOST_BACKEND=ray
+    -e JAX_PLATFORMS=''
+```
+
+1. On every worker machine, execute:
+
+```
+sudo bash ~/tpu_commons/scripts/multihost/run_cluster.sh \
+    <docker_image> \
+    <head_node_ip> \
+    --worker \
+    <path_to_hf_cache> \
+    -e HF_TOKEN=<your_hf_token> \
+    -e TPU_BACKEND_TYPE=jax \
+    -e TPU_MULTIHOST_BACKEND=ray
+    -e JAX_PLATFORMS=''
+```
+
+1. On the head node, use `docker exec -it node /bin/bash` to enter the container. And then execute:
+
+```
+python /workspace/tpu_commons/examples/offline_inference.py  --model=meta-llama/Llama-3.1-70B  --tensor_parallel_size=16  --task=generate  --max_model_len=1024
 ```
 
 ### Run vLLM Pytorch models on the JAX path
@@ -72,7 +108,6 @@ Run the vLLM's implementation of `Llama 3.1 8B`, which is in Pytorch. It is the 
 
 ```
 export MODEL_IMPL_TYPE=vllm
-export TPU_BACKEND_TYPE=jax
 python tpu_commons/examples/offline_inference.py \
     --model=meta-llama/Llama-3.1-8B \
     --tensor_parallel_size=4 \
@@ -84,7 +119,6 @@ Run the vLLM Pytorch `Qwen3-30B-A3B` MoE model, use `--enable-expert-parallel` f
 
 ```
 export MODEL_IMPL_TYPE=vllm
-export TPU_BACKEND_TYPE=jax
 python vllm/examples/offline_inference/basic/generate.py \
     --model=Qwen/Qwen3-30B-A3B \
     --tensor_parallel_size=4 \
@@ -95,7 +129,7 @@ python vllm/examples/offline_inference/basic/generate.py \
 
 ### Relevant env
 
-To switch different backends:
+To switch different backends (default is jax):
 
 ```
 TPU_BACKEND_TYPE=jax
@@ -103,7 +137,7 @@ TPU_BACKEND_TYPE=torchax
 TPU_BACKEND_TYPE=pytorch_xla
 ```
 
-To switch different model implementations:
+To switch different model implementations (default is flax_nnx):
 
 ```
 MODEL_IMPL_TYPE=flax_nnx
@@ -162,7 +196,6 @@ DOCKER_URI=<the same URI used in docker build>
 docker pull $DOCKER_URI
 docker run \
   --rm \
-  -e TPU_BACKEND_TYPE=jax \
   $DOCKER_URI \
   python /workspace/tpu_commons/examples/offline_inference.py \
   --model=meta-llama/Llama-3.1-8B \
@@ -217,7 +250,7 @@ In order to run an [E2E benchmark test](https://github.com/vllm-project/tpu_comm
 following command locally:
 
 ```
-BUILDKITE_COMMIT=3843efc .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
+BUILDKITE_COMMIT=0f199f1 .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
 ```
 
 While this will run the code in a Docker image, you can also run the bare `tests/e2e/benchmarking/mlperf.sh` script itself,
@@ -238,7 +271,7 @@ To enable quantization, you can specify a quantization config filename found ins
 ### Creating your own quantization config
 To create your own quantization:
 
-1. Add a new file to the quantization config irectory (`tpu_commons/models/jax/utils/quantization/configs/`)
+1. Add a new file to the quantization config directory (`tpu_commons/models/jax/utils/quantization/configs/`)
 2. For Qwix quantization, add a new entry to the file as follows:
 
 ```
@@ -250,8 +283,6 @@ qwix:
       act_qtype: 'int8'
 ```
 
-where each entry under `rules` corresponds to a `qwix.QuantizationRule`.  To learn more about Qwix and defining Qwix rules, please see the relevant docs [here](https://github.com/google/qwix?tab=readme-ov-file#quantization-config).
-
 1. For KV cache quantization, add a new entry to the file as follows:
 
 ```
@@ -260,3 +291,11 @@ kv_cache:
 ```
 
 where the dtype corresponds to the dtype you'd like to quantize your KV cache to.
+
+where each entry under `rules` corresponds to a `qwix.QuantizationRule`.  To learn more about Qwix and defining Qwix rules, please see the relevant docs [here](https://github.com/google/qwix?tab=readme-ov-file#quantization-config).
+
+1. To use the config, simply pass the name of the file you created in the `--additional_config`, e.g.:
+
+```
+... --additional_config='{"quantization": "YOUR_FILE_NAME_HERE.yaml"}'
+```

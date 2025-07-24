@@ -21,6 +21,7 @@ class MockInputBatch:
     temperature_cpu: np.ndarray = None
     top_k_cpu: np.ndarray = None
     top_p_cpu: np.ndarray = None
+    max_num_logprobs: int = None
 
 
 @pytest.fixture(scope="module")
@@ -180,3 +181,60 @@ def test_jax_tree_util_registration():
                                   metadata.temperature)
     np.testing.assert_array_equal(new_metadata.top_k, metadata.top_k)
     np.testing.assert_array_equal(new_metadata.top_p, metadata.top_p)
+
+
+def test_from_input_batch_with_logprobs(mesh: Mesh):
+    """
+    Tests that the `logprobs` flag is correctly set based on `max_num_logprobs`.
+    """
+    # Case 1: Logprobs are requested
+    mock_batch_with_logprobs = MockInputBatch(all_greedy=True,
+                                              max_num_logprobs=5)
+    metadata_with = TPUSupportedSamplingMetadata.from_input_batch(
+        mesh=mesh,
+        input_batch=mock_batch_with_logprobs,
+        padded_num_reqs=4,
+    )
+    assert metadata_with.logprobs, "logprobs should be True when max_num_logprobs > 0"
+
+    # Case 2: Logprobs are not requested (max_num_logprobs is 0)
+    mock_batch_no_logprobs_zero = MockInputBatch(all_greedy=True,
+                                                 max_num_logprobs=0)
+    metadata_without_zero = TPUSupportedSamplingMetadata.from_input_batch(
+        mesh=mesh,
+        input_batch=mock_batch_no_logprobs_zero,
+        padded_num_reqs=4,
+    )
+    assert not metadata_without_zero.logprobs, "logprobs should be False when max_num_logprobs is 0"
+
+    # Case 3: Logprobs are not requested (max_num_logprobs is None)
+    mock_batch_no_logprobs_none = MockInputBatch(all_greedy=True,
+                                                 max_num_logprobs=None)
+    metadata_without_none = TPUSupportedSamplingMetadata.from_input_batch(
+        mesh=mesh,
+        input_batch=mock_batch_no_logprobs_none,
+        padded_num_reqs=4,
+    )
+    assert not metadata_without_none.logprobs, "logprobs should be False when max_num_logprobs is None"
+
+
+def test_from_input_batch_sampling_with_logprobs(mesh: Mesh):
+    """
+    Tests enabling both sampling and logprobs simultaneously.
+    """
+    num_reqs = 2
+    padded_num_reqs = 4
+    mock_batch = MockInputBatch(
+        all_greedy=False,
+        num_reqs=num_reqs,
+        temperature_cpu=np.zeros((padded_num_reqs, ), dtype=np.float32),
+        top_k_cpu=np.zeros((padded_num_reqs, ), dtype=np.int32),
+        top_p_cpu=np.zeros((padded_num_reqs, ), dtype=np.float32),
+        max_num_logprobs=10,
+    )
+
+    metadata = TPUSupportedSamplingMetadata.from_input_batch(
+        mesh=mesh, input_batch=mock_batch, padded_num_reqs=padded_num_reqs)
+
+    assert metadata.do_sampling, "do_sampling should be True"
+    assert metadata.logprobs, "logprobs should be True"

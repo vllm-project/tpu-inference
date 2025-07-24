@@ -11,4 +11,5 @@ google-cloud-storage
 --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html
 jaxtyping
 flax
-torchax==0.0.4
+torchax==0.0.5
+qwix @ git+https://github.com/google/qwix@main

@@ -125,7 +125,7 @@ class LatencyTracker:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.end_time = time.perf_counter()
         elapsed_time = self.end_time - self.start_time
-        logger.info(f"Latency for '{self.name}': {elapsed_time:.3f} seconds")
+        logger.debug(f"Latency for '{self.name}': {elapsed_time:.3f} seconds")
 
 
 class ForbidCompile:
@@ -260,12 +260,6 @@ def create_kv_caches(
 
     # Shard the num_kv_heads dim along the 'model' axis.
     sharding = NamedSharding(mesh, PartitionSpec(None, None, "model"))
-    devices
-    logger.info(f"Init kv-cache | "
-                f"shape={len(layer_names)} * {cache_shape} | "
-                f"sharding={sharding} | "
-                f"dtype={cache_dtype} | "
-                f"hbm={utils.hbm_usage_gb(devices)}Gb")
 
     def _allocate() -> jax.Array:
         return jnp.empty(
@@ -277,4 +271,9 @@ def create_kv_caches(
     kv_caches = []
     for _ in layer_names:
         kv_caches.append(sharded_allocate())
+    logger.info(f"Init kv-cache | "
+                f"shape={len(layer_names)} * {cache_shape} | "
+                f"sharding={sharding} | "
+                f"dtype={cache_dtype} | "
+                f"hbm={utils.hbm_usage_gb(devices)}Gb")
     return kv_caches

@@ -4,15 +4,18 @@ import random
 import time
 from contextlib import nullcontext
 from dataclasses import asdict
-from typing import Any, List, Optional, cast
+from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 import jax
 import jax.numpy as jnp
+import jaxtyping
 import numpy as np
 import vllm.envs as envs
 from flax import nnx
 from jax.sharding import NamedSharding, PartitionSpec
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer import (get_kv_transfer_group,
+                                          has_kv_transfer_group)
 from vllm.sequence import IntermediateTensors
 from vllm.utils import cdiv
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
@@ -25,12 +28,16 @@ from tpu_commons import utils_jax as utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.common.sharding import Sharding
-from tpu_commons.models.jax.layers.sampling import sample
+from tpu_commons.models.jax.layers.misc import shard_put
+from tpu_commons.models.jax.layers.sampling import (compute_logprobs,
+                                                    gather_logprobs, sample)
 from tpu_commons.models.jax.model_loader import get_model
 from tpu_commons.models.jax.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_commons.models.jax.utils.quantization.quantization_utils import \
     quantization_config_file_path_to_dict
+from tpu_commons.models.jax.utils.weight_utils import \
+    transfer_state_with_mappings
 from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
                                                     InputBatch)
 from tpu_commons.runner.utils import (ForbidCompile, LatencyTracker,
@@ -117,15 +124,11 @@ class TPUModelRunner():
             self.mesh = sharding.mesh
         else:
             axis_names = ("data", "model")
-            # In case we are in disagg mode, the number of devices can exceed 8.
-            # TODO(fhzhang): fix this properly as we implement disagg serving.
-            if len(self.devices) > 8:
-                self.devices = self.devices[:8]
             mesh_shape = (1, len(self.devices))
             self.mesh = jax.make_mesh(mesh_shape,
                                       axis_names,
                                       devices=self.devices)
-        logger.warning(f"Init mesh | mesh={self.mesh}")
+        logger.info(f"Init mesh | mesh={self.mesh}")
 
     def _init_inputs(self) -> None:
         model_config = self.model_config
@@ -365,6 +368,28 @@ class TPUModelRunner():
                 logger.info("Compilation finished in %.2f [secs].",
                             end - start)
 
+    def _precompile_gather_logprobs(self) -> None:
+        logger.info("Compiling gather_logprobs with different input shapes.")
+        hsize = self.model_config.get_vocab_size()
+        for num_reqs in self.num_reqs_paddings:
+            logits = jnp.ones((num_reqs, hsize), dtype=jnp.bfloat16)
+            logits, = self._device_array((logits, ))
+            logger.info(f"Precompile gather_logprobs --> num_reqs={num_reqs}")
+            start = time.perf_counter()
+            token_ids = jnp.ones((num_reqs, ), dtype=jnp.int32)
+            token_ids, = self._device_array((token_ids, ))
+            result = self._compute_and_gather_logprobs(
+                logits, token_ids, self.model_config.max_logprobs)
+            result.logprob_token_ids.block_until_ready()
+            end = time.perf_counter()
+            logger.info("Compilation finished in %.2f [secs].", end - start)
+
+    @staticmethod
+    @functools.partial(jax.jit, static_argnames=("max_logprobs", ))
+    def _compute_and_gather_logprobs(logits, next_tokens, max_logprobs):
+        logprobs = compute_logprobs(logits)
+        return gather_logprobs(logprobs, next_tokens, max_logprobs)
+
     def capture_model(self) -> None:
         if os.getenv("SKIP_JAX_PRECOMPILE", False):
             return
@@ -374,6 +399,7 @@ class TPUModelRunner():
         self._precompile_select_hidden_states()
         self._precompile_compute_logits()
         self._precompile_sampling()
+        self._precompile_gather_logprobs()
 
     @staticmethod
     @functools.partial(jax.jit)
@@ -397,9 +423,11 @@ class TPUModelRunner():
     @staticmethod
     @functools.partial(
         jax.jit,
+        static_argnames=("block_size"),
         donate_argnames=("kv_caches"),
     )
     def _jitted_insert_kv_cache(
+        block_size,
         kv_caches: List[jax.Array],
         kv_cache_slices: List[jax.Array],
         block_numbers: jax.Array,
@@ -412,6 +440,13 @@ class TPUModelRunner():
         new_kv_caches = []
         # Assuming block numbers are non-negative and sorted.
         for i, layer_kv_cache_slices in enumerate(kv_cache_slices):
+            _, num_kv_heads, head_dim = layer_kv_cache_slices.shape
+            padding_config = ((0, block_numbers.shape[0] * block_size -
+                               layer_kv_cache_slices.shape[0]), (0, 0), (0, 0))
+            layer_kv_cache_slices = jnp.pad(layer_kv_cache_slices,
+                                            pad_width=padding_config)
+            layer_kv_cache_slices = layer_kv_cache_slices.reshape(
+                -1, block_size, num_kv_heads, head_dim)
             updated_cache = kv_caches[i].at[block_numbers].set(
                 layer_kv_cache_slices)
             new_kv_caches.append(updated_cache)
@@ -513,30 +548,19 @@ class TPUModelRunner():
         # Pad target_block_numbers. Pad with the max_num_blocks + 1 to avoid writing
         # to unintended blocks. JAX would ignore as it's beyond the number of blocks
         # in the cache.
-        max_num_blocks = self.vllm_config.cache_config.num_cpu_blocks
-        assert max_num_blocks is not None
+        max_num_blocks = self.vllm_config.cache_config.num_gpu_blocks
+        assert max_num_blocks is not None and max_num_blocks != 0
         block_numbers.extend([max_num_blocks + 1] * padding_size)
 
         padded_block_numbers = jnp.array(block_numbers, dtype=jnp.int32)
-
-        # Pad kv_cache_slices.
-        padded_kv_cache_slices = []
-        for layer_slice in kv_cache_slices:
-            # The shape of layer_slice is (num_blocks, block_size, ...).
-            # We need to pad the first dimension.
-            pad_width = [(0, padding_size)] + [(0, 0)] * (layer_slice.ndim - 1)
-            padded_slice = jnp.pad(layer_slice,
-                                   pad_width,
-                                   mode='constant',
-                                   constant_values=0)
-            padded_kv_cache_slices.append(padded_slice)
 
         # Call the JIT-compiled function to perform the scatter operation
         # for all layers in a single, fused kernel.
         with LatencyTracker(f"JittedInsertKVCache-b{padded_num_blocks}"):
             self.kv_caches = self._jitted_insert_kv_cache(
+                self.block_size,
                 self.kv_caches,
-                padded_kv_cache_slices,
+                kv_cache_slices,
                 padded_block_numbers,
             )
 
@@ -552,10 +576,10 @@ class TPUModelRunner():
         req_state = CachedRequestState(
             req_id=request.request_id,
             prompt_token_ids=request.prompt_token_ids,
-            output_token_ids=[],
+            output_token_ids=[request.all_token_ids[-1]],
             sampling_params=request.sampling_params,
             block_ids=tuple(block_ids),
-            num_computed_tokens=request.num_tokens,
+            num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
             mm_inputs=getattr(request, "mm_inputs", []),
             mm_hashes=[],
@@ -580,8 +604,11 @@ class TPUModelRunner():
     ) -> tuple[AttentionMetadata, ModelRunnerOutput]:
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
+            self.maybe_setup_kv_connector(scheduler_output)
+
             # Return empty ModelRunnerOutput if there's no work to do.
-            logger.warning(f"Nothing scheduled: {scheduler_output}!")
+            # TODO(fhzhang): We rely on empty cycles to remove requests in input batch. Fix it to reduce overhead.
+            logger.debug(f"Nothing scheduled: {scheduler_output}!")
             if len(scheduler_output.finished_req_ids) == 0:
                 raise Exception(
                     "Should not schedule a request that does nothing!")
@@ -589,17 +616,26 @@ class TPUModelRunner():
 
         inputs = self._prepare_inputs(scheduler_output)
         with self.maybe_forbid_compile:
+            self.maybe_setup_kv_connector(scheduler_output)
             self.kv_caches, hidden_states = self.model_fn(
                 self.state, *inputs[:3])
+            self.maybe_wait_for_kv_save()
+
             hidden_states = self.select_hidden_states_fn(
                 hidden_states, inputs[4])
             logits = self.compute_logits_fn(self.state, hidden_states)
+            tpu_sampling_metadata = inputs[3]
             next_tokens = sample(
                 self.rng_params_for_sampling,
                 self.mesh,
                 logits,
-                inputs[3],
+                tpu_sampling_metadata,
             )
+            if tpu_sampling_metadata.logprobs:
+                logprobs = self._compute_and_gather_logprobs(
+                    logits, next_tokens, self.model_config.max_logprobs)
+            else:
+                logprobs = None
 
         num_reqs = self.input_batch.num_reqs
 
@@ -648,16 +684,42 @@ class TPUModelRunner():
             req_state.output_token_ids.append(token_id)
             self.input_batch.num_tokens[i] += 1
 
+        if logprobs is not None:
+            logprobs_lists = logprobs.tolists()
+        else:
+            logprobs_lists = None
+
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=valid_sampled_token_ids,
             spec_token_ids=None,
-            logprobs=None,
+            logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             pooler_output=[],
         )
         return inputs[2], model_runner_output
+
+    # TODO(xiang): check this after implementing TPU connector
+    @staticmethod
+    def maybe_setup_kv_connector(scheduler_output: "VllmSchedulerOutput"):
+        # Update KVConnector with the KVConnector metadata forward().
+        if has_kv_transfer_group():
+            kv_connector = get_kv_transfer_group()
+            assert scheduler_output.kv_connector_metadata is not None
+            kv_connector.bind_connector_metadata(
+                scheduler_output.kv_connector_metadata)
+
+            # Background KV cache transfers happen here.
+            # These transfers are designed to be async and the requests
+            # involved may be disjoint from the running requests.
+            # Do this here to save a collective_rpc.
+            kv_connector.start_load_kv()
+
+    @staticmethod
+    def maybe_wait_for_kv_save() -> None:
+        if has_kv_transfer_group():
+            get_kv_transfer_group().wait_for_save()
 
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -912,22 +974,24 @@ class TPUModelRunner():
             req_ids_to_add.append(req_id)
 
         # Update the states of the running/resumed requests.
-        for req_data in scheduler_output.scheduled_cached_reqs:
-            req_id = req_data.req_id
+        req_data = scheduler_output.scheduled_cached_reqs
+        for i, req_id in enumerate(req_data.req_ids):
             req_state = self.requests[req_id]
+            num_computed_tokens = req_data.num_computed_tokens[i]
+            new_block_ids = req_data.new_block_ids[i]
+            resumed_from_preemption = req_data.resumed_from_preemption[i]
 
             # Update the cached states.
-            req_state.num_computed_tokens = req_data.num_computed_tokens
-            if not req_data.resumed_from_preemption:
+            req_state.num_computed_tokens = num_computed_tokens
+            if not resumed_from_preemption:
                 # Append the new blocks to the existing block IDs.
-                for block_ids, new_block_ids in zip(req_state.block_ids,
-                                                    req_data.new_block_ids,
-                                                    strict=True):
-                    block_ids.extend(new_block_ids)
+                for block_ids, new_ids in zip(req_state.block_ids,
+                                              new_block_ids):
+                    block_ids.extend(new_ids)
             else:
                 # The request is resumed from preemption.
                 # Replace the existing block IDs with the new ones.
-                req_state.block_ids = req_data.new_block_ids
+                req_state.block_ids = new_block_ids
 
             req_index = self.input_batch.req_id_to_index.get(req_id)
             if req_index is None:
@@ -939,9 +1003,8 @@ class TPUModelRunner():
 
             # Update the persistent batch.
             self.input_batch.num_computed_tokens_cpu[req_index] = (
-                req_data.num_computed_tokens)
-            self.input_batch.block_table.append_row(req_data.new_block_ids,
-                                                    req_index)
+                num_computed_tokens)
+            self.input_batch.block_table.append_row(new_block_ids, req_index)
 
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
@@ -961,6 +1024,26 @@ class TPUModelRunner():
             self.input_batch.condense(removed_req_indices)
 
         return len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
+
+    def _sync_weights(
+        self,
+        updated_weights: jaxtyping.PyTree,
+        mappings: Dict[str, Tuple[str, Tuple[str]]],
+        transpose_keys: Dict[str, Tuple[int]],
+        reshard_fn: Callable[[jaxtyping.PyTree, jaxtyping.PyTree],
+                             jaxtyping.PyTree] = None
+    ) -> None:
+        if reshard_fn is not None:
+            updated_weights = reshard_fn(updated_weights, self.state)
+            shard = None
+        else:
+            shard = functools.partial(shard_put, mesh=self.mesh)
+        self.state = transfer_state_with_mappings(
+            src_state=updated_weights,
+            tgt_state=self.state,
+            mappings=mappings,
+            transpose_keys=transpose_keys,
+            shard=shard)
 
 
 def _get_padded_num_kv_cache_update_slices(num_tokens: int, max_num_reqs: int,

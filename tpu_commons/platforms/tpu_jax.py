@@ -5,12 +5,15 @@ from typing import TYPE_CHECKING, Optional, Tuple, Union, cast
 
 import jax.numpy as jnp
 import vllm.envs as envs
+from torchax.ops.mappings import j2t_dtype
 from tpu_info import device
 from vllm.inputs import ProcessorInputs, PromptType
 from vllm.platforms.interface import Platform, PlatformEnum, _Backend
 from vllm.sampling_params import SamplingParams, SamplingType
 
 from tpu_commons.logger import init_logger
+from tpu_commons.models.jax.utils.quantization.quantization_utils import (
+    parse_qwix_config_to_rules, quantization_config_file_path_to_dict)
 
 if TYPE_CHECKING:
     from vllm.config import BlockSize, ModelConfig, VllmConfig
@@ -42,7 +45,8 @@ class TpuPlatform(Platform):
     supported_quantization: list[str] = ["tpu_int8", "compressed-tensors"]
 
     additional_env_vars: list[str] = [
-        "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS"
+        "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS", "TPU_BACKEND_TYPE",
+        "TPU_MULTIHOST_BACKEND"
     ]
 
     @classmethod
@@ -122,11 +126,17 @@ class TpuPlatform(Platform):
         if not isinstance(vllm_config.model_config.dtype, str):
             logger.warning(
                 "The model dtype is not properly set for JAX backend. "
-                "Overwriting it to jnp.bfloat16")
+                "Overwriting it to bfloat16")
             vllm_config.model_config.dtype = jnp.bfloat16
         else:
             vllm_config.model_config.dtype = _DTYPE.get(
                 vllm_config.model_config.dtype, jnp.bfloat16)
+
+        # If we use vLLM's model implementation in PyTorch, we should set it with torch version of the dtype.
+        impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
+        if impl == "vllm":
+            vllm_config.model_config.dtype = j2t_dtype(
+                vllm_config.model_config.dtype.dtype)
 
         if envs.VLLM_USE_V1:
             from vllm.v1.attention.backends.pallas import \
@@ -156,10 +166,20 @@ class TpuPlatform(Platform):
         parallel_config.worker_cls = \
                         "tpu_commons.worker.tpu_worker_jax.TPUWorker"
 
-        # TODO(xiang): fix this for multi-host case
-        if parallel_config.distributed_executor_backend != "uni":
+        multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "").lower()
+        if not multihost_backend:  # Single host
             logger.warning(
                 "JAX requires to use uniproc_executor for single host.")
+            parallel_config.distributed_executor_backend = "uni"
+        elif multihost_backend == "ray":
+            from tpu_commons.executors.ray_distributed_executor import \
+                RayDistributedExecutor
+            parallel_config.distributed_executor_backend = RayDistributedExecutor
+            logger.info("Using Ray as the TPU multihost backend. ")
+        else:
+            logger.warning(
+                f"Unknown TPU multihost backend: {multihost_backend}. "
+                "Using uniproc_executor.")
             parallel_config.distributed_executor_backend = "uni"
 
         assert not vllm_config.speculative_config, (
@@ -171,6 +191,21 @@ class TpuPlatform(Platform):
             " without setting `--disable_chunked_mm_input`. " \
             "Forcing --disable_chunked_mm_input.")
             scheduler_config.disable_chunked_mm_input = True
+
+        # Validate additional config
+        if additional_config := vllm_config.additional_config:
+            # Try loading/parsing the quantization config so that we can fail fast
+            if quantization_file_name := additional_config.get("quantization"):
+                try:
+                    quantization_dict = quantization_config_file_path_to_dict(
+                        quantization_file_name)
+                    if "qwix" in quantization_dict:
+                        parse_qwix_config_to_rules(
+                            quantization_dict["qwix"]["rules"])
+                except Exception as e:
+                    raise ValueError(
+                        f"Invalid quantization config; please see README for details on quantization config: {e}"
+                    )
 
     @classmethod
     def is_pin_memory_available(cls):
