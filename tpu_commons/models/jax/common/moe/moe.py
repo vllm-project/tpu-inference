@@ -209,7 +209,7 @@ class MoE(nnx.Module):
     def generate_kernel(self, rngs: nnx.Rngs):
         """Generates the kernels (weights) for the gating, up-projection, and down-projection layers of each expert."""
         num_experts = getattr(self.cfg,
-                              HuggingFaceArgNames.NUM_LOCAL_EXPERT.value)
+                              HuggingFaceArgNames.NUM_LOCAL_EXPERTS.value)
         D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
         F = getattr(self.cfg, HuggingFaceArgNames.INTERMEDIATE_SIZE_MOE.value)
         shape_gating = (num_experts, D, F)
