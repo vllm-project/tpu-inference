@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field, make_dataclass
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -8,6 +8,7 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from jax.typing import DTypeLike
 from vllm.config import VllmConfig
+from jax.experimental import shard_map
 
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.common.attention.attention import (Attention,
@@ -16,6 +17,11 @@ from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
 from tpu_commons.models.jax.common.rope import DeepseekScalingRotaryEmbedding
 from tpu_commons.models.jax.common.sharding import ShardingConfig
+
+from tpu_commons.models.jax.attention_interface import update_mla_kv_cache
+from tpu_commons.kernels.ragged_paged_attention.mla_kernel import \
+    ragged_mla_paged_attention
+
 
 MLAConfig = make_dataclass(
     "MLAConfig",
@@ -208,28 +214,32 @@ class MLA(Attention):
             # KV down projection.
             kv_SA = jnp.einsum("SD,DA -> SA", x_SD,
                                self.kernel_kv_down_proj_DA.value)
-            # Split the key and value into latent kv vector and k rope vector.
+            
+            # Split the output into latent kv vector and k rope vector.
             k_rope_SH = kv_SA[..., self.kv_lora_rank:]
-            # Reshape k_rope_BSH to include head dimension for RoPE application
+            # Reshape k_rope_SH to include head dimension for RoPE application
             k_rope_SNH = k_rope_SH[..., None, :]
             k_rope_SNH = self.rope.apply_rope(md.input_positions, k_rope_SNH)
-            k_rope_SNH = jnp.broadcast_to(
-                k_rope_SNH,
-                (k_rope_SNH.shape[0], self.N, self.qk_rope_head_dim))
+            # k_rope_SNH = jnp.broadcast_to(
+            #     k_rope_SNH,
+            #     (k_rope_SNH.shape[0], self.N, self.qk_rope_head_dim))
             kv_SA = kv_SA[..., :self.kv_lora_rank]
-            kv_SA = self.kv_rms_norm(kv_SA)
-            # KV up projection.
-            kv_nope = jnp.einsum("SA,ANH -> SNH", kv_SA,
-                                 self.kernel_kv_up_proj_ANH.value)
-            # Split the latent kv vector into k nope vector and v vector.
-            k_nope_SNH = kv_nope[..., :self.qk_nope_head_dim]
-            v_SNH = kv_nope[..., self.qk_nope_head_dim:]
-            # Concatenate the key vector.
-            k_SNH = jnp.concatenate([k_nope_SNH, k_rope_SNH], axis=-1)
-            k_SNH = nnx.with_sharding_constraint(k_SNH,
-                                                 self.keyvalue_skh[op_mode])
-            v_SNH = nnx.with_sharding_constraint(v_SNH,
-                                                 self.keyvalue_skh[op_mode])
+            kv_SA = self.kv_rms_norm(kv_SA)  # <= this should be cached 
+
+            ##### This should be computed inside the kernel #######
+
+            # # KV up projection.
+            # kv_nope = jnp.einsum("SA,ANH -> SNH", kv_SA,
+            #                      self.kernel_kv_up_proj_ANH.value)
+            # # Split the latent kv vector into k nope vector and v vector.
+            # k_nope_SNH = kv_nope[..., :self.qk_nope_head_dim]
+            # v_SNH = kv_nope[..., self.qk_nope_head_dim:]
+            # # Concatenate the key vector.
+            # k_SNH = jnp.concatenate([k_nope_SNH, k_rope_SNH], axis=-1)
+            # k_SNH = nnx.with_sharding_constraint(k_SNH,
+            #                                      self.keyvalue_skh[op_mode])
+            # v_SNH = nnx.with_sharding_constraint(v_SNH,
+            #                                      self.keyvalue_skh[op_mode])
 
         with jax.named_scope("attn_op"):
             # TODO(wenxindongwork): K and V have different head dimension,
@@ -243,16 +253,18 @@ class MLA(Attention):
             multiple_of_128 = ((self.qk_head_dim - 1) // 128 + 1) * 128
             q_TNH = jnp.pad(q_TNH, ((0, 0), (0, 0),
                                     (0, multiple_of_128 - self.qk_head_dim)))
-            k_SNH = jnp.pad(k_SNH, ((0, 0), (0, 0),
-                                    (0, multiple_of_128 - self.qk_head_dim)))
-            v_SNH = jnp.pad(v_SNH, ((0, 0), (0, 0),
-                                    (0, multiple_of_128 - self.v_head_dim)))
+            # k_SNH = jnp.pad(k_SNH, ((0, 0), (0, 0),
+            #                         (0, multiple_of_128 - self.qk_head_dim)))
+            # v_SNH = jnp.pad(v_SNH, ((0, 0), (0, 0),
+            #                         (0, multiple_of_128 - self.v_head_dim)))
             new_kv_cache, outputs_TNH = self.attention(
                 is_prefill,
                 kv_cache,
                 q_TNH,
-                k_SNH,
-                v_SNH,
+                k_rope_SNH,
+                kv_SA,
+                # k_SNH,
+                # v_SNH,
                 attention_metadata,
                 self.mesh,
             )
@@ -322,3 +334,89 @@ class MLA(Attention):
             "generate":
             P(*self.sharding_cfg.generate_rules.keyvalue_cache_lskh),
         }
+    
+    def attention(
+        self,
+        is_prefill: bool,
+        kv_cache: KVCache,
+        q_TNH: jax.Array,
+        k_rope_SNH: jax.Array,
+        k_SA: jax.Array,
+        # k_SKH: jax.Array,
+        # v_SKH: jax.Array,
+        attention_metadata: AttentionMetadata,
+        mesh: Mesh,
+    ) -> Tuple[KVCache, jax.Array]:
+        """Performs scaled dot-product attention and updates the KV cache.
+
+        This function handles the core attention logic, which varies between
+        prefill and generation modes. In prefill, it computes self-attention
+        over the input sequence with a causal mask. In generation, it attends
+        to the full history of keys and values stored in the cache.
+
+        Args:
+            is_prefill: A boolean indicating if the mode is 'prefill'.
+            kv_cache: The key-value cache to be updated and used.
+            q_TNH: Query tensor of shape `(query_seq, num_attention_heads, head_dim)`.
+            k_SKH: Key tensor of shape `(kv_seq, num_key_value_heads, head_dim)`.
+            v_SKH: Value tensor of shape `(kv_seq, num_key_value_heads, head_dim)`.
+            attention_metadata: Metadata containing sequence lengths.
+            mesh: The JAX device mesh (unused in this specific function but
+                kept for potential future use or API consistency).
+
+        Returns:
+            A tuple containing:
+                - The updated KV cache.
+                - The attention output tensor of shape
+                  `(seq, num_q_heads, head_dim)`.
+        """
+        md = attention_metadata
+        kv_cache = update_mla_kv_cache(k_SA, k_rope_SNH, kv_cache, md.slot_mapping,
+                                   md.num_slices, mesh)
+
+        H = q_TNH.shape[-1]
+        #TODO: we use generate_rules as the default sharding for ragged_paged_attention,
+        # but it could be configurable based on the op_mode.
+        in_specs = (
+            P(*self.sharding_cfg.generate_rules.query_tnh),  # q_TNH
+            P(*self.sharding_cfg.generate_rules.keyvalue_cache_lskh
+              ),  # kv_cache:
+            P(),  # md.seq_lens: Replicated
+            P(),  # md.block_tables: Replicated
+            P(),  # md.query_start_loc: Replicated
+            P(),  # md.num_seqs: Replicated
+        )
+        out_specs = P(*self.sharding_cfg.generate_rules.attn_o_tnh
+                      )  # output_TNH: Shard the 'model' dimension
+
+        def _ragged_mla_paged_attention(*args):
+            return ragged_mla_paged_attention(
+                *args,
+                sm_scale=H**-0.5,
+                sliding_window=None,
+                soft_cap=None,
+                mask_value=None,
+                # NOTE(xiang): v6e chip has 128M VMEM capacity,
+                # set this to 64M to avoid VMEM OOM,
+                # otherwise the default value is 16M.
+                vmem_limit_bytes=64 * 1024 * 1024,
+            )
+
+        output_TNH = jax.jit(
+            shard_map.shard_map(
+                _ragged_mla_paged_attention,
+                mesh=mesh,
+                in_specs=in_specs,
+                out_specs=out_specs,
+                check_rep=False,
+            ))(
+                q_TNH,
+                k_rope_SNH,
+                kv_cache,
+                md.seq_lens,
+                md.block_tables,
+                md.query_start_loc,
+                md.num_seqs,
+            )
+
+        return kv_cache, output_TNH

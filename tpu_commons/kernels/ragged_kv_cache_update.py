@@ -78,9 +78,12 @@ def _kv_cache_update(
     page_size: int,
     num_slices_per_block: int,
 ):
+    print("new_kv.shape", new_kv.shape)
+    print("kv_cache.shape", kv_cache.shape)
+
     assert slices.shape[1] % num_slices_per_block == 0
     _, num_combined_kv_heads, head_dim = new_kv.shape
-    assert kv_cache.shape[1] == num_combined_kv_heads
+    # assert kv_cache.shape[1] == num_combined_kv_heads
     assert kv_cache.shape[2] == head_dim
     assert head_dim % 128 == 0
     # TODO: Add dynamic check to make sure that the all the slice lengths are
@@ -143,6 +146,7 @@ def kv_cache_update(
         kv_cache_pspec: P
     | None = None,  # Only sharding along head_dim is supported
 ):
+    print("mesh", mesh)
     if mesh is None:
         return _kv_cache_update(new_kv, slices, kv_cache, num_slices,
                                 page_size, num_slices_per_block)

@@ -77,14 +77,16 @@ class TestMLA(unittest.TestCase):
         # Create KV cache
         # TODO(wenxindongwork): test with unpadded head dimension once
         # MLA kv cache implementation is added.
-        qk_head_dim = mla_config.qk_nope_head_dim + mla_config.qk_rope_head_dim
-        multiple_of_128 = ((qk_head_dim - 1) // 128 + 1) * 128
+        qk_head_dim = mla_config.kv_lora_rank + mla_config.qk_rope_head_dim
+        multiplier = 128*4
+        multiple_of_128 = ((qk_head_dim - 1) // multiplier + 1) * multiplier
+        print("multiple_of_128", multiple_of_128)
         block_size = 16
         num_blocks = 8
         cache_shape = (
             num_blocks,
             block_size,
-            mla_config.num_key_value_heads * 2,
+            1, #mla_config.num_key_value_heads * 2
             multiple_of_128,
         )
         kv_cache = jnp.zeros(cache_shape, dtype=jnp.bfloat16)
