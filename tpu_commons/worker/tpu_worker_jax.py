@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
 import os
 from typing import Callable, Dict, Optional, Tuple, Union
 
@@ -7,10 +8,13 @@ import jax
 import jaxtyping
 import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
+                                          get_kv_transfer_group,
+                                          has_kv_transfer_group)
 from vllm.lora.request import LoRARequest
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 
 from tpu_commons import utils_jax as utils
 from tpu_commons.di.abstracts import (AbstractKVCacheConfig,
@@ -70,8 +74,12 @@ class TPUWorker(AbstractTpuWorker):
 
         use_jax_profiler_server = os.getenv("USE_JAX_PROFILER_SERVER", False)
         if use_jax_profiler_server:
-            logger.info("Starting JAX profiler server on port 9999")
-            jax.profiler.start_server(9999)
+            jax_profiler_server_port = int(
+                os.getenv("JAX_PROFILER_SERVER_PORT", 9999))
+            logger.info(
+                f"Starting JAX profiler server on port {jax_profiler_server_port}"
+            )
+            jax.profiler.start_server(jax_profiler_server_port)
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
@@ -79,6 +87,7 @@ class TPUWorker(AbstractTpuWorker):
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
     def init_device(self):
+        ensure_kv_transfer_initialized(self.vllm_config)
         if not self.devices:
             tp = self.parallel_config.tensor_parallel_size
             self.devices = jax.devices()[:tp]
@@ -111,6 +120,23 @@ class TPUWorker(AbstractTpuWorker):
         # Unwrap the adapter to get the concrete vLLM object
         vllm_scheduler_output = adapted_scheduler_output.vllm_scheduler_output
         output = self.model_runner.execute_model(vllm_scheduler_output)
+
+        if has_kv_transfer_group():
+            finished_sending, finished_recving = (
+                get_kv_transfer_group().get_finished(
+                    scheduler_output.finished_req_ids))
+            if finished_sending or finished_recving:
+                if output is EMPTY_MODEL_RUNNER_OUTPUT:
+                    output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
+                output.finished_sending = finished_sending
+                output.finished_recving = finished_recving
+
+            # Clear KVConnector state for this step.
+            get_kv_transfer_group().clear_connector_metadata()
+
+            # with a connector, the scheduler expects output from all workers
+            return output
+
         return output if self.is_driver_worker else None
 
     def add_lora(

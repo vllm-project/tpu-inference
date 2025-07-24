@@ -69,7 +69,7 @@ def matmul_kernel(
     if save_acc:
         assert acc_scratch is not None
         is_first_step = in_idx == 0
-        is_last_step = in_idx == n_in - 1
+        is_last_step = in_idx == (n_in - 1)
     else:
         assert acc_scratch is None
         is_first_step = True
