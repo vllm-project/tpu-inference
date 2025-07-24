@@ -112,7 +112,6 @@ class TPUWorker(AbstractTpuWorker):
         vllm_scheduler_output = adapted_scheduler_output.vllm_scheduler_output
         output = self.model_runner.execute_model(vllm_scheduler_output)
 
-        assert isinstance(output, ModelRunnerOutput)
         if has_kv_transfer_group():
             finished_sending, finished_recving = (
                 get_kv_transfer_group().get_finished(

@@ -114,10 +114,10 @@ class TestTPUWorker:
     @patch('tpu_commons.worker.tpu_worker_jax.TPUModelRunner')
     @patch('tpu_commons.worker.tpu_worker_jax.utils')
     @patch('tpu_commons.worker.tpu_worker_jax.jax')
-    def test_init_device_with_provided_devices(self, mock_jax, mock_utils,
-                                               mock_runner_cls,
-                                               mock_host_interface,
-                                               mock_vllm_config):
+    @patch('tpu_commons.worker.tpu_worker_jax.ensure_kv_transfer_initialized')
+    def test_init_device_with_provided_devices(
+            self, mock_ensure_kv_transfer_initialized, mock_jax, mock_utils,
+            mock_runner_cls, mock_host_interface, mock_vllm_config):
         """Tests init_device when devices are provided during construction."""
         mock_devices = ['tpu:0', 'tpu:1']
         worker = TPUWorker(host_interface=mock_host_interface,
@@ -136,10 +136,10 @@ class TestTPUWorker:
     @patch('tpu_commons.worker.tpu_worker_jax.TPUModelRunner')
     @patch('tpu_commons.worker.tpu_worker_jax.utils')
     @patch('tpu_commons.worker.tpu_worker_jax.jax')
-    def test_init_device_autodetects_devices(self, mock_jax, mock_utils,
-                                             mock_runner_cls,
-                                             mock_host_interface,
-                                             mock_vllm_config):
+    @patch('tpu_commons.worker.tpu_worker_jax.ensure_kv_transfer_initialized')
+    def test_init_device_autodetects_devices(
+            self, mock_ensure_kv_transfer_initialized, mock_jax, mock_utils,
+            mock_runner_cls, mock_host_interface, mock_vllm_config):
         """Tests init_device when devices are auto-detected via JAX."""
         worker = TPUWorker(
             host_interface=mock_host_interface,
