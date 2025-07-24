@@ -287,6 +287,7 @@ class Llama4Scout(Model):
         #     )
         #     return(updated_kv_caches, x)
         # kv_caches, x = jax.lax.fori_loop(0, len(self.layers), loop_body, (x, kv_caches))
+        jax.debug.print("Input IDs:\n{val}", val=input_ids)
         for (i, block) in enumerate(self.layers):
             jax.debug.print("**********Transformer layer: {val}**********",
                             val=i)
@@ -307,6 +308,16 @@ class Llama4Scout(Model):
         return kv_caches, final_activation
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
+        jax.debug.print("hidden_states inputs to lm_head shape:\n{val}", val=hidden_states.shape)
+        jax.debug.print("hidden_states inputs to lm_head:\n{val}", val=hidden_states[:4, jnp.concat([jnp.arange(5), jnp.arange(-1, -6, -1)])])
+        jax.debug.print("lm head shape:\n{val}", val=self.lm_head.input_embedding_table_DV.value.shape)
+        jax.debug.print("lm head params:\n{val}", val=self.lm_head.input_embedding_table_DV.value[jnp.concat([jnp.arange(5), jnp.arange(-1, -6, -1)]), jnp.concat([jnp.arange(5), jnp.arange(-1, -6, -1)])])
+        logits = jnp.dot(hidden_states, self.lm_head.input_embedding_table_DV.value)
+        jax.debug.print(
+            "LM head output = {val}",
+            val=logits[:4, jnp.concatenate([jnp.arange(5),
+                                          jnp.arange(-1, -6, -1)])])
+        return logits
         return self.lm_head.decode(hidden_states)
 
 
