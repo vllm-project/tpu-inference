@@ -47,6 +47,7 @@ class TestTPUJaxRunner(unittest.TestCase):
                 scheduler_config=scheduler_config,
                 parallel_config=parallel_config,
                 speculative_config=None,
+                prompt_adapter_config=None,
                 observability_config=None,
                 additional_config={},
             )
