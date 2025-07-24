@@ -12,28 +12,63 @@ def apply_rope(
     rope_theta: float = 10000,
     rope_scaling: Dict[str, Any] = None,
 ) -> jax.Array:
-    fraction = 2 * jnp.arange(0, head_dim // 2) / head_dim
-    timescale = rope_theta**fraction
-    timescale = 1.0 / timescale
+    """
+    Applies Rotary Positional Embedding using the sine and cosine strategy.
 
+    This implementation assumes the input tensor has a shape that might include
+    padding on the last dimension (head_dim). The RoPE is applied only to the
+    first `head_dim` features, and the result is padded back to the original
+    dimension if necessary.
+    """
+    # Calculate inverse frequencies (timescale)
+    fraction = 2 * jnp.arange(0, head_dim // 2) / head_dim
+    timescale = 1.0 / (rope_theta**fraction)
+
+    # Apply scaling if provided
     if rope_scaling:
         timescale = apply_rope_scaling(timescale, rope_scaling)
+    jax.debug.print(
+        "Rope inv_freq_llama:\n{val}",
+        val=timescale[...,
+                      jnp.concatenate([jnp.arange(5),
+                                       jnp.arange(-1, -6, -1)])])
 
+    # Prepare for rotation by calculating sin and cos values
+    # `sinusoid_inp` gets shape (batch, seq_len, head_dim/2)
     sinusoid_inp = positions[..., jnp.newaxis] * timescale[jnp.newaxis, :]
+    # Broadcast over the 'heads' dimension, assuming shape (batch, heads, seq, dim)
     sinusoid_inp = sinusoid_inp[:, jnp.newaxis, ...]
     sin = jnp.sin(sinusoid_inp)
     cos = jnp.cos(sinusoid_inp)
 
-    # Some models pad the inputs head_dim with zeros,
-    # so we need to split the inputs using the head_dim before padding.
+    # Handle potentially padded inputs
     padded_head_dim = inputs.shape[-1]
-    first_half = inputs[..., :head_dim // 2]
-    second_half = inputs[..., head_dim // 2:head_dim]
+
+    # Slice the part of the input that will be rotated
+    rotary_inputs = inputs[..., :head_dim]
+
+    # Reshape to group adjacent features for rotation, matching new_apply_rope
+    reshaped_inputs = rotary_inputs.reshape(*rotary_inputs.shape[:-1], -1, 2)
+
+    # Split into pairs for rotation
+    first_half = reshaped_inputs[..., 0]
+    second_half = reshaped_inputs[..., 1]
+
+    # Apply the rotation
     first_part = first_half * cos - second_half * sin
     second_part = second_half * cos + first_half * sin
-    out = jnp.concatenate([first_part, second_part], axis=-1)
+
+    # Combine the rotated parts and reshape back
+    out_stacked = jnp.stack([first_part, second_part], axis=-1)
+    out = out_stacked.reshape(rotary_inputs.shape)
+
+    # If the original input was padded, pad the output with zeros to match
     if padded_head_dim > head_dim:
-        out = jnp.pad(out, ((0, 0), (0, 0), (0, padded_head_dim - head_dim)))
+        pad_width = padded_head_dim - head_dim
+        # Create a padding configuration that only pads the final dimension
+        pad_config = [(0, 0)] * (out.ndim - 1) + [(0, pad_width)]
+        out = jnp.pad(out, pad_config)
+
     return out.astype(inputs.dtype)
 
 

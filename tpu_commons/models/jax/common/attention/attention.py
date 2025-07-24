@@ -166,12 +166,16 @@ class Attention(nnx.Module):
                                HuggingFaceArgNames.ROPE_SCALING.value)
         rope_theta = getattr(self.cfg, HuggingFaceArgNames.ROPE_THETA.value)
         H = getattr(self.cfg, HuggingFaceArgNames.HEAD_DIM.value)
+        # jax.debug.print("self.kernel_q_proj_DNH:\n{val}", val=self.kernel_q_proj_DNH.value[:5, :5, :5])
         with jax.named_scope("q_proj"):
             q_TNH = jnp.einsum('TD,DNH -> TNH', x_q_TD,
                                self.kernel_q_proj_DNH.value)
+            jax.debug.print("q_TNH:\n{val}", val=q_TNH[:3, :5, :5])
             if use_attention_rope:
                 q_TNH = apply_rope(q_TNH, md.input_positions, H, rope_theta,
                                    rope_scaling)
+                jax.debug.print("q_TNH after rope:\n{val}",
+                                val=q_TNH[:3, :5, :5])
             q_TNH = nnx.with_sharding_constraint(q_TNH,
                                                  self.query_tnh[op_mode])
         with jax.named_scope("k_proj"):
@@ -201,6 +205,11 @@ class Attention(nnx.Module):
         with jax.named_scope("o_proj"):
             o_TD = jnp.einsum('TNH,NHD -> TD', outputs_TNH,
                               self.kernel_o_proj_NHD.value)
+            jax.debug.print(
+                "o_TD:\n{val}",
+                val=o_TD[jnp.array([0, 3])[:, None],
+                         jnp.concat([jnp.arange(5),
+                                     jnp.arange(-1, -6, -1)])])
         return new_kv_cache, o_TD
 
     def get_cfg(self) -> AttentionConfig:

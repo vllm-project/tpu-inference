@@ -173,20 +173,61 @@ class SharedExpertsTransformerBlock(TransformerBlock):
         # Attn Block
         attn_residual = x
         x = self.pre_attention_norm(x)
+        jax.debug.print(
+            "Pre attention norm = {val}",
+            val=x[jax.numpy.array([0, 3])[:, None],
+                  jax.numpy.
+                  concat([jax.numpy.arange(5),
+                          jax.numpy.arange(-1, -6, -1)])])
         new_cache, attn_output = self.attn(x, is_prefill, kv_cache,
                                            attention_metadata,
                                            self.use_attention_rope)
+        jax.debug.print(
+            "attn_output = {val}",
+            val=attn_output[
+                jax.numpy.array([0, 3])[:, None],
+                jax.numpy.
+                concat([jax.numpy.arange(5),
+                        jax.numpy.arange(-1, -6, -1)])])
         attn_output += attn_residual
 
         # FFW Block
         ffw_residual = attn_output
         normed_ffw_input = self.pre_mlp_norm(attn_output)
+        jax.debug.print(
+            "pre mlp norm = {val}",
+            val=normed_ffw_input[
+                jax.numpy.array([0, 3])[:, None],
+                jax.numpy.
+                concat([jax.numpy.arange(5),
+                        jax.numpy.arange(-1, -6, -1)])])
         if self.block_type == "moe":
             logits = self.moe(normed_ffw_input, op_mode)
+            jax.debug.print(
+                "moe output = {val}",
+                val=logits[
+                    jax.numpy.array([0, 3])[:, None],
+                    jax.numpy.
+                    concat([jax.numpy.arange(5),
+                            jax.numpy.arange(-1, -6, -1)])])
             # Add the shared expert outputs to the MoE outputs.
             shared_expert_output = self.shared_experts(normed_ffw_input,
                                                        op_mode)
+            jax.debug.print(
+                "shared expert output = {val}",
+                val=shared_expert_output[
+                    jax.numpy.array([0, 3])[:, None],
+                    jax.numpy.
+                    concat([jax.numpy.arange(5),
+                            jax.numpy.arange(-1, -6, -1)])])
             logits += shared_expert_output
+            jax.debug.print(
+                "combined logits = {val}",
+                val=logits[
+                    jax.numpy.array([0, 3])[:, None],
+                    jax.numpy.
+                    concat([jax.numpy.arange(5),
+                            jax.numpy.arange(-1, -6, -1)])])
         elif self.block_type == "dense":
             logits = self.mlp(normed_ffw_input, op_mode)
         else:
