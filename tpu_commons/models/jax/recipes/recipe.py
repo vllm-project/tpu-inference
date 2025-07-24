@@ -7,8 +7,8 @@ from tpu_commons.models.jax.common.model import ModelConfig
 
 @dataclass(frozen=True)
 class RecipeConfig():
-    sharding: ShardingConfig
     model: ModelConfig
+    sharding: ShardingConfig
     serving: Config
 
     def __str__(self):

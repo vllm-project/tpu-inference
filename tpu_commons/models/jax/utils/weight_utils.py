@@ -61,10 +61,14 @@ class WeightLoader(abc.ABC):
                  vllm_config: VllmConfig,
                  model_config,
                  framework: str = "flax",
+                 cache_dir: Optional[str] = None,
+                 sharding_cfg=None,
                  filter_regex=None):
         self.vllm_config = vllm_config
         self.model_config = model_config
+        self.sharding_cfg = sharding_cfg
         self.framework = framework
+        self.cache_dir = cache_dir
         self.filter_regex = filter_regex
         self.transformation_cfg = TransformationConfig()
         self.setup()
@@ -160,7 +164,7 @@ def hf_model_weights_iterator(
             "Weights files are not downloaded to local disk at once due to insufficient disk space. "
             "They will be downloaded on the fly during loading.")
 
-    # # Sort to ensure the order of files is consistent.
+    # Sort to ensure the order of files is consistent.
     weights_files.sort()
 
     for st_file in weights_files:
