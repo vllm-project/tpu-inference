@@ -59,7 +59,6 @@ class Llama4ModelConfig(ModelConfig):
     layers: SharedExpertsTransformerBlockConfig = None
     vllm_config: VllmConfig = field(repr=False, default=None)
     interleave_moe_layer_step: int = 1  # All layers are MoE for Scout
-    # nope_layer_interval: 4  # TODO:? It's not in HF but it is in MaxText
     intermediate_size_moe: int = 8192
     num_local_experts: int = 16
     hidden_act = "silu"
@@ -268,13 +267,42 @@ class Llama4Scout(Model):
     ) -> Tuple[List[KVCacheType], jax.Array, jax.Array]:
         is_prefill = False
         x = self.embedder.encode(input_ids)
+        jax.debug.print(
+            "Embedder output = {val}",
+            val=x[jnp.array([0, 3])[:, None],
+                  jnp.concat([jnp.
+                              arange(5), jnp.arange(-1, -6, -1)])])
+        # def loop_body(i, val):
+        #     jax.debug.print("**********Transformer layer: {val}**********", val=i)
+        #     # kv_cache = kv_caches[i]
+        #     x, kv_caches = val
+        #     kv_cache = jax.tree_util.tree_map(lambda x: x[i], kv_caches)
+        #     new_kv_cache, x = self.layers[i](x, is_prefill, kv_cache,
+        #                             attention_metadata)
+        #     # kv_caches[i] = new_kv_cache
+        #     updated_kv_caches = jax.tree_util.tree_map(
+        #         lambda cache, update: cache.at[i].set(update),
+        #         kv_caches,
+        #         new_kv_cache
+        #     )
+        #     return(updated_kv_caches, x)
+        # kv_caches, x = jax.lax.fori_loop(0, len(self.layers), loop_body, (x, kv_caches))
         for (i, block) in enumerate(self.layers):
+            jax.debug.print("**********Transformer layer: {val}**********",
+                            val=i)
             kv_cache = kv_caches[i]
             new_kv_cache, x = block(x, is_prefill, kv_cache,
                                     attention_metadata)
+            jax.block_until_ready(x)
             kv_caches[i] = new_kv_cache
 
         final_activation = self.final_norm(x)
+        jax.debug.print(
+            "Final activation = {val}",
+            val=final_activation[
+                jnp.array([0, 3])[:, None],
+                jnp.concat([jnp.
+                            arange(5), jnp.arange(-1, -6, -1)])])
 
         return kv_caches, final_activation
 

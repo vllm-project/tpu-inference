@@ -86,6 +86,7 @@ def main(args: dict):
         "Who wrote the American Declaration of Independence?",
         'Who wrote the novel "Pride and Prejudice"?',
     ]
+    # prompts = ["I love to"]
 
     if envs.VLLM_TORCH_PROFILER_DIR is not None:
         llm.start_profile()
@@ -113,6 +114,7 @@ if __name__ == "__main__":
         main(args)
     else:
         from unittest.mock import patch
+
         from tpu_commons.core.core_tpu import DisaggEngineCoreProc
 
         with patch("vllm.v1.engine.core.EngineCoreProc", DisaggEngineCoreProc):
