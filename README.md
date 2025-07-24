@@ -55,9 +55,8 @@ HF_TOKEN=<huggingface_token> python tpu_commons/examples/offline_inference.py \
 Run `Llama 3.1 8B Instruct` offline inference on 4 TPU chips in disaggregated mode:
 
 ```
-PREFILL_SLICES=2 \
-DECODE_SLICES=2 \
-HF_TOKEN=<huggingface_token> python tpu_commons/examples/offline_inference.py \
+PREFILL_SLICES=2 DECODE_SLICES=2 HF_TOKEN=<huggingface_token> \
+python tpu_commons/examples/offline_inference.py \
     --task=generate \
     --model=meta-llama/Meta-Llama-3-8B-Instruct \
     --max_model_len=1024 \
@@ -112,7 +111,8 @@ Run the vLLM's implementation of `Llama 3.1 8B`, which is in Pytorch. It is the 
 
 ```
 export MODEL_IMPL_TYPE=vllm
-HF_TOKEN=<huggingface_token> python tpu_commons/examples/offline_inference.py \
+export HF_TOKEN=<huggingface_token>
+python tpu_commons/examples/offline_inference.py \
     --model=meta-llama/Llama-3.1-8B \
     --tensor_parallel_size=4 \
     --task=generate \
@@ -123,7 +123,8 @@ Run the vLLM Pytorch `Qwen3-30B-A3B` MoE model, use `--enable-expert-parallel` f
 
 ```
 export MODEL_IMPL_TYPE=vllm
-HF_TOKEN=<huggingface_token> python vllm/examples/offline_inference/basic/generate.py \
+export HF_TOKEN=<huggingface_token>
+python vllm/examples/offline_inference/basic/generate.py \
     --model=Qwen/Qwen3-30B-A3B \
     --tensor_parallel_size=4 \
     --task=generate \
