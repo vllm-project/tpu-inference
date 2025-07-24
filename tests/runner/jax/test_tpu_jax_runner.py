@@ -1,8 +1,5 @@
-import os
 import unittest
 from unittest.mock import MagicMock, patch
-
-os.environ["TPU_BACKEND_TYPE"] = "jax"
 
 import jax.numpy as jnp
 import numpy as np
@@ -11,6 +8,7 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
 from vllm.sampling_params import SamplingType
 from vllm.v1.request import Request
 
+from tpu_commons.models.jax.common.sharding import Sharding
 from tpu_commons.runner.jax.input_batch_jax import CachedRequestState
 from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
 
@@ -23,15 +21,18 @@ class TestTPUJaxRunner(unittest.TestCase):
         self.mock_mesh = MagicMock()
         self.mock_rng_key = MagicMock()
 
-        with patch('jax.devices', return_value=self.mock_devices), \
-             patch('jax.make_mesh', return_value=self.mock_mesh), \
+        mock_sharding_instance = MagicMock(spec=Sharding)
+        mock_sharding_instance.mesh = self.mock_mesh
+
+        with patch('tpu_commons.runner.jax.tpu_jax_runner.Sharding', return_value=mock_sharding_instance), \
              patch('jax.random.key', return_value=self.mock_rng_key), \
              patch('tpu_commons.runner.jax.tpu_jax_runner.get_model', return_value=MagicMock()):
 
             model_config = ModelConfig(tokenizer_mode="auto",
                                        trust_remote_code=False,
                                        seed=0,
-                                       dtype='bfloat16')
+                                       dtype='bfloat16',
+                                       model="meta-llama/Meta-Llama-3-8B")
             cache_config = CacheConfig(
                 block_size=16,
                 gpu_memory_utilization=0.9,
@@ -151,7 +152,7 @@ class TestTPUJaxRunner(unittest.TestCase):
         head_size = 128
         num_blocks = 50
         # This is needed for the padding logic in insert_request_with_kv_cache
-        self.runner.vllm_config.cache_config.num_cpu_blocks = num_blocks
+        self.runner.vllm_config.cache_config.num_gpu_blocks = num_blocks
 
         prompt_len = 63
 
@@ -245,32 +246,21 @@ class TestTPUJaxRunner(unittest.TestCase):
 
         # Prepare the KV cache slices for insertion. They must be padded to the
         # full block size and have a leading dimension for the number of blocks.
-        padded_kv_cache_slices = []
-        padding_size = self.runner.block_size - prompt_len
-        for slice_per_layer in extracted_kv_cache_slices:
-            padded_slice = jnp.pad(slice_per_layer,
-                                   ((0, padding_size), (0, 0), (0, 0)),
-                                   mode='constant')
-            # Add a dimension for the number of blocks.
-            padded_kv_cache_slices.append(padded_slice[jnp.newaxis, ...])
 
         # Allocate new block IDs for the decode runner.
         decode_block_ids = [[10]]
-
         # 5. ===== Call the method to be tested =====
         self.runner.insert_request_with_kv_cache(decode_request,
-                                                 padded_kv_cache_slices,
+                                                 extracted_kv_cache_slices,
                                                  decode_block_ids)
 
         # 6. ===== Assertions =====
         self.assertIn("test_req_1", self.runner.requests)
         self.assertIn("test_req_1", self.runner.input_batch.req_id_to_index)
         self.assertEqual(
-            self.runner.requests["test_req_1"].num_computed_tokens,
-            prompt_len)
-        self.assertEqual(
-            self.runner.requests["test_req_1"].output_token_ids,
-            [908])
+            self.runner.requests["test_req_1"].num_computed_tokens, prompt_len)
+        self.assertEqual(self.runner.requests["test_req_1"].output_token_ids,
+                         [908])
 
         # Verify the content of the inserted KV cache.
         target_block_id = decode_block_ids[0][0]

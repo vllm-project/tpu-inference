@@ -43,7 +43,6 @@ pre-commit run --all-files
 Run `Llama 3.1 8B` offline inference on 4 TPU chips:
 
 ```
-export TPU_BACKEND_TYPE=jax
 python tpu_commons/examples/offline_inference.py \
     --model=meta-llama/Llama-3.1-8B \
     --tensor_parallel_size=4 \
@@ -58,12 +57,46 @@ Run `Llama 3.1 8B Instruct` offline inference on 4 TPU chips in disaggregated mo
 ```
 PREFILL_SLICES=2 \
 DECODE_SLICES=2 \
-TPU_BACKEND_TYPE=jax \
 python tpu_commons/examples/offline_inference.py \
     --task=generate \
     --model=meta-llama/Meta-Llama-3-8B-Instruct \
     --max_model_len=1024 \
     --max_num_seqs=8
+```
+
+### Run JAX path examples with Ray-based multi-host serving
+
+Run `Llama 3.1 70B Instruct` offline inference on 4 hosts (v6e-16) in interleaved mode:
+
+1. Designate one machine as the head node and execute:
+```
+sudo bash ~/tpu_commons/scripts/multihost/run_cluster.sh \
+    <docker_image> \
+    <head_node_ip> \
+    --head \
+    <path_to_hf_cache> \
+    -e HF_TOKEN=<your_hf_token> \
+    -e TPU_BACKEND_TYPE=jax \
+    -e TPU_MULTIHOST_BACKEND=ray
+    -e JAX_PLATFORMS=''
+```
+
+2. On every worker machine, execute:
+```
+sudo bash ~/tpu_commons/scripts/multihost/run_cluster.sh \
+    <docker_image> \
+    <head_node_ip> \
+    --worker \
+    <path_to_hf_cache> \
+    -e HF_TOKEN=<your_hf_token> \
+    -e TPU_BACKEND_TYPE=jax \
+    -e TPU_MULTIHOST_BACKEND=ray
+    -e JAX_PLATFORMS=''
+```
+
+3. On the head node, use `docker exec -it node /bin/bash` to enter the container. And then execute:
+```
+python /workspace/tpu_commons/examples/offline_inference.py  --model=meta-llama/Llama-3.1-70B  --tensor_parallel_size=16  --task=generate  --max_model_len=1024
 ```
 
 ### Run vLLM Pytorch models on the JAX path
@@ -72,7 +105,6 @@ Run the vLLM's implementation of `Llama 3.1 8B`, which is in Pytorch. It is the 
 
 ```
 export MODEL_IMPL_TYPE=vllm
-export TPU_BACKEND_TYPE=jax
 python tpu_commons/examples/offline_inference.py \
     --model=meta-llama/Llama-3.1-8B \
     --tensor_parallel_size=4 \
@@ -84,7 +116,6 @@ Run the vLLM Pytorch `Qwen3-30B-A3B` MoE model, use `--enable-expert-parallel` f
 
 ```
 export MODEL_IMPL_TYPE=vllm
-export TPU_BACKEND_TYPE=jax
 python vllm/examples/offline_inference/basic/generate.py \
     --model=Qwen/Qwen3-30B-A3B \
     --tensor_parallel_size=4 \
@@ -95,7 +126,7 @@ python vllm/examples/offline_inference/basic/generate.py \
 
 ### Relevant env
 
-To switch different backends:
+To switch different backends (default is jax):
 
 ```
 TPU_BACKEND_TYPE=jax
@@ -103,7 +134,7 @@ TPU_BACKEND_TYPE=torchax
 TPU_BACKEND_TYPE=pytorch_xla
 ```
 
-To switch different model implementations:
+To switch different model implementations (default is flax_nnx):
 
 ```
 MODEL_IMPL_TYPE=flax_nnx
@@ -162,7 +193,6 @@ DOCKER_URI=<the same URI used in docker build>
 docker pull $DOCKER_URI
 docker run \
   --rm \
-  -e TPU_BACKEND_TYPE=jax \
   $DOCKER_URI \
   python /workspace/tpu_commons/examples/offline_inference.py \
   --model=meta-llama/Llama-3.1-8B \

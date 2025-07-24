@@ -612,17 +612,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         logits_indices = create_torchax_tensor_with_partition_spec(
             logits_indices, self.mesh).jax()
 
-        if self.lora_config is not None:
-            # We need to respect padding when activating LoRA adapters
-            padded_num_scheduled_tokens_per_req = np.copy(
-                num_scheduled_tokens_per_req
-            )  # Copying to avoid accidental state corruption bugs
-            padded_num_scheduled_tokens_per_req[-1] += \
-                padded_total_num_scheduled_tokens - total_num_scheduled_tokens
-
-            self.set_active_loras(self.input_batch,
-                                  padded_num_scheduled_tokens_per_req)
-
         layer_names = get_layers_from_vllm_config(self.vllm_config,
                                                   Attention).keys()
         per_layer_attn_metadata = {
@@ -630,31 +619,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             for layer_name in layer_names
         }
         return per_layer_attn_metadata, logits_indices, padded_num_reqs
-
-    def _scatter_placeholders(
-        self,
-        embeds: torch.Tensor,
-        is_embed: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        if is_embed is None:
-            return embeds
-
-        placeholders = embeds.new_full(
-            (is_embed.shape[0], embeds.shape[-1]),
-            fill_value=torch.nan,
-        )
-        placeholders[is_embed] = embeds
-        return placeholders
-
-    def _gather_placeholders(
-        self,
-        placeholders: torch.Tensor,
-        is_embed: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        if is_embed is None:
-            return placeholders
-
-        return placeholders[is_embed]
 
     def _get_model_inputs(self, input_ids: torch.Tensor,
                           mm_embeds: list[torch.Tensor]):

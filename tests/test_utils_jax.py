@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -41,6 +42,25 @@ def test_get_num_kv_heads_by_tp_invalid_inputs(num_kv_heads, tp_size):
     """Tests get_num_kv_heads_by_tp with invalid inputs (assertions)."""
     with pytest.raises(AssertionError):
         get_num_kv_heads_by_tp(num_kv_heads, tp_size)
+
+
+@patch.dict(os.environ, {"TPU_MULTIHOST_BACKEND": "ray"})
+def test_hbm_usage_bytes_ray_backend():
+    """Tests hbm_usage_bytes when TPU_MULTIHOST_BACKEND is ray."""
+    mock_device1 = MagicMock()
+    mock_device1.memory_stats.return_value = {
+        "bytes_in_use": 100 * GBYTES,
+        "bytes_limit": 128 * GBYTES
+    }
+    mock_device2 = MagicMock()
+    mock_device2.memory_stats.side_effect = Exception("Memory stats failed")
+
+    devices = [mock_device1, mock_device2]
+    usage = hbm_usage_bytes(devices)
+
+    expected_usage = [(100 * GBYTES, 128 * GBYTES),
+                      (100 * GBYTES, 128 * GBYTES)]
+    assert usage == expected_usage
 
 
 @patch("tpu_commons.utils_jax.PATHWAYS_ENABLED", False)

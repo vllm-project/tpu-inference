@@ -26,7 +26,10 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
 
+from vllm.lora.request import LoRARequest
+
 from tpu_commons.di.abstracts import (AbstractKVCacheConfig,
+                                      AbstractLoRARequest,
                                       AbstractSchedulerOutput)
 from tpu_commons.di.interfaces import HostInterface
 from tpu_commons.logger import init_logger
@@ -34,7 +37,8 @@ from tpu_commons.models.torchax.torchax_wrapper import with_torchax_global
 from tpu_commons.runner.tpu_torchax_runner import TPUModelRunner
 from tpu_commons.worker.base import AbstractTpuWorker
 from tpu_commons.worker._temporary_vllm_compat import (
-    adapt_kv_cache_config_if_needed, adapt_scheduler_output_if_needed)
+    adapt_kv_cache_config_if_needed, adapt_scheduler_output_if_needed,
+    adapt_lora_request_if_needed)
 
 logger = init_logger(__name__)
 
@@ -204,6 +208,19 @@ class TPUWorker(AbstractTpuWorker):
         output = self.model_runner.execute_model(vllm_scheduler_output)
         return output if self.is_driver_worker else None
 
+    def add_lora(
+        self,
+        lora_request: Union[AbstractLoRARequest, LoRARequest],
+    ) -> bool:
+        # Adapt the input if necessary (temporary compatibility layer)
+        adapted_lora_request = adapt_lora_request_if_needed(lora_request)
+
+        # Unwrap the adapter to get the concrete vLLM object
+        vllm_lora_request = adapted_lora_request.vllm_lora_request
+
+        raise NotImplementedError(
+            "LoRA is not supported by the torchax worker yet.")
+
     def profile(self, is_start: bool = True):
         if self.rank < 1:
             if self.profile_dir is None:
@@ -275,5 +292,5 @@ class TPUWorker(AbstractTpuWorker):
             backend="gloo",
         )
         ensure_model_parallel_initialized(
-            parallel_config.tensor_parallel_size,
-            parallel_config.pipeline_parallel_size)
+            self.parallel_config.tensor_parallel_size,
+            self.parallel_config.pipeline_parallel_size)

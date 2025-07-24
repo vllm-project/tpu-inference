@@ -2,6 +2,7 @@ import copy
 import functools
 import tempfile
 from typing import Any, List, Optional, Tuple
+from unittest.mock import patch
 
 import jax
 import torch
@@ -10,7 +11,7 @@ import torchax
 from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
-from torchax.ops.mappings import j2t_dtype
+from torchax.ops.mappings import TORCH_DTYPE_TO_JAX
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
@@ -30,15 +31,24 @@ class _VllmRunner(torch.nn.Module):
         self.vllm_model = vllm_model
 
     def forward(self, **kwargs) -> torch.Tensor:
-        if "hidden_state" in kwargs:
-            return self.compute_logits(kwargs["hidden_state"])
-        else:
-            return self.compute_hidden_state(
-                kwargs["input_ids"],
-                kwargs["positions"],
-                kwargs["intermediate_tensors"],
-                kwargs["inputs_embeds"],
-            )
+        # We don't support multimodal input in Gemma3, but we need patch it to
+        # None to workaround vLLM Gemma3 model bug that
+        # `get_multimodal_embeddings` returns empty list but it's caller checks
+        # for None.
+        with patch(
+                "vllm.model_executor.models.gemma3_mm."
+                "Gemma3ForConditionalGeneration."
+                "get_multimodal_embeddings",
+                return_value=None):
+            if "hidden_state" in kwargs:
+                return self.compute_logits(kwargs["hidden_state"])
+            else:
+                return self.compute_hidden_state(
+                    kwargs["input_ids"],
+                    kwargs["positions"],
+                    kwargs["intermediate_tensors"],
+                    kwargs["inputs_embeds"],
+                )
 
     def compute_hidden_state(
         self,
@@ -87,8 +97,7 @@ class VllmModelWrapper:
 
         # Set up to load the model into CPU first.
         vllm_config_for_load = copy.deepcopy(self.vllm_config)
-        vllm_config_for_load.model_config.dtype = j2t_dtype(
-            self.vllm_config.model_config.dtype.dtype)
+        assert self.vllm_config.model_config.dtype in TORCH_DTYPE_TO_JAX, "The model_config.dtype must be a PyTorch dtype."
         vllm_config_for_load.device_config.device = "cpu"
 
         # Load the vLLM model and wrap it into a new model whose forward

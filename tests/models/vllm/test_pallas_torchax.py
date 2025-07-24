@@ -214,21 +214,6 @@ class TestPallasAttentionBackendImpl:
                 attn_type=AttentionType.DECODER,
             )
 
-    def test_init_with_blocksparse_raises_error(self):
-        with pytest.raises(ValueError,
-                           match="does not support block-sparse attention"):
-            PallasAttentionBackendImpl(
-                num_heads=32,
-                head_size=128,
-                scale=0.088,
-                num_kv_heads=8,
-                alibi_slopes=None,
-                sliding_window=None,
-                kv_cache_dtype="auto",
-                blocksparse_params={"block_size": 16},
-                attn_type=AttentionType.DECODER,
-            )
-
     def test_init_with_encoder_attention_raises_error(self):
         with pytest.raises(NotImplementedError,
                            match="Encoder self-attention"):
@@ -325,21 +310,6 @@ class TestPallasAttentionBackendImpl:
             mock_logger.warning_once.assert_called_once_with(
                 "Using irope in Pallas is not supported yet, it will fall back "
                 "to global attention for long context.")
-
-    def test_init_with_blocksparse_constructor_error(self):
-        with pytest.raises(ValueError,
-                           match="does not support block-sparse attention"):
-            PallasAttentionBackendImpl(
-                num_heads=32,
-                head_size=128,
-                scale=0.088,
-                num_kv_heads=8,
-                alibi_slopes=None,
-                sliding_window=None,
-                kv_cache_dtype="auto",
-                blocksparse_params={"block_size": 16},
-                attn_type=AttentionType.DECODER,
-            )
 
     @patch(
         'tpu_commons.attention.backends.pallas_torchax.ragged_paged_attention')
