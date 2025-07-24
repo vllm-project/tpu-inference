@@ -69,6 +69,7 @@ python tpu_commons/examples/offline_inference.py \
 Run `Llama 3.1 70B Instruct` offline inference on 4 hosts (v6e-16) in interleaved mode:
 
 1. Designate one machine as the head node and execute:
+
 ```
 sudo bash ~/tpu_commons/scripts/multihost/run_cluster.sh \
     <docker_image> \
@@ -81,7 +82,8 @@ sudo bash ~/tpu_commons/scripts/multihost/run_cluster.sh \
     -e JAX_PLATFORMS=''
 ```
 
-2. On every worker machine, execute:
+1. On every worker machine, execute:
+
 ```
 sudo bash ~/tpu_commons/scripts/multihost/run_cluster.sh \
     <docker_image> \
@@ -94,7 +96,8 @@ sudo bash ~/tpu_commons/scripts/multihost/run_cluster.sh \
     -e JAX_PLATFORMS=''
 ```
 
-3. On the head node, use `docker exec -it node /bin/bash` to enter the container. And then execute:
+1. On the head node, use `docker exec -it node /bin/bash` to enter the container. And then execute:
+
 ```
 python /workspace/tpu_commons/examples/offline_inference.py  --model=meta-llama/Llama-3.1-70B  --tensor_parallel_size=16  --task=generate  --max_model_len=1024
 ```
@@ -254,3 +257,36 @@ While this will run the code in a Docker image, you can also run the bare `tests
 being sure to pass the proper args for your machine.
 
 You might need to run the benchmark client *twice* to make sure all compilations are cached server-side.
+
+## Quantization
+### Overview
+Currently, we support overall model weight/activation quantization through the [Qwix](https://github.com/google/qwix?tab=readme-ov-file#quantization-config) framework.
+
+To enable quantization, you can specify a quantization config filename found inside the quantization config directory (`tpu_commons/models/jax/utils/quantization/configs/`), for example:
+
+```
+... --additional_config='{"quantization": "int8_default.yaml"}'
+```
+
+### Creating your own quantization config
+To create your own quantization:
+
+1. Add a new file to the quantization config directory (`tpu_commons/models/jax/utils/quantization/configs/`)
+2. For Qwix quantization, add a new entry to the file as follows:
+
+```
+qwix:
+  rules:
+    # NOTE: each entry corresponds to a qwix.QuantizationRule
+    - module_path: '.*'
+      weight_qtype: 'int8'
+      act_qtype: 'int8'
+```
+
+where each entry under `rules` corresponds to a `qwix.QuantizationRule`.  To learn more about Qwix and defining Qwix rules, please see the relevant docs [here](https://github.com/google/qwix?tab=readme-ov-file#quantization-config).
+
+1. To use the config, simply pass the name of the file you created in the `--additional_config`, e.g.:
+
+```
+... --additional_config='{"quantization": "YOUR_FILE_NAME_HERE.yaml"}'
+```

@@ -38,6 +38,7 @@ from tpu_commons.models.jax.utils.weight_utils import \
 from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
                                                     InputBatch)
 from tpu_commons.runner.utils import (ForbidCompile, LatencyTracker,
+                                      create_kv_caches,
                                       get_padded_num_reqs_with_upper_limit,
                                       get_padded_token_len, get_req_paddings,
                                       get_token_paddings)
@@ -224,35 +225,19 @@ class TPUModelRunner():
 
         kv_cache_spec = kv_cache_groups[0].kv_cache_spec
         layer_names = kv_cache_groups[0].layer_names
-        cache_dtype = jnp.bfloat16
-        # TODO(xiang): fix this together with get_kv_cache_spec
-        # cache_dtype = kv_cache_spec.dtype
 
-        cache_shape = (
-            kv_cache_config.num_blocks,
-            kv_cache_spec.block_size,
-            kv_cache_spec.num_kv_heads * 2,
-            kv_cache_spec.head_size,
+        # NOTE: we'll multiply the num_kv_heads by 2 in the function
+        self.kv_caches = create_kv_caches(
+            num_blocks=kv_cache_config.num_blocks,
+            block_size=kv_cache_spec.block_size,
+            num_kv_heads=kv_cache_spec.num_kv_heads,
+            head_size=kv_cache_spec.head_size,
+            mesh=self.mesh,
+            layer_names=layer_names,
+            devices=self.devices,
         )
 
-        # Shard the num_kv_heads dim along the 'model' axis.
-        sharding = NamedSharding(self.mesh, PartitionSpec(None, None, "model"))
-
-        def _allocate() -> Any:
-            return jnp.empty(
-                shape=cache_shape,
-                dtype=cache_dtype,
-            )
-
-        sharded_allocate = jax.jit(_allocate, out_shardings=sharding)
-        for _ in layer_names:
-            self.kv_caches.append(sharded_allocate())
-
         logger.info(jax.lib.xla_bridge.get_backend().platform_version)
-        logger.info(f"Init kv-cache | "
-                    f"shape={len(layer_names)} * {cache_shape} | "
-                    f"sharding={sharding} | "
-                    f"hbm={utils.hbm_usage_gb(self.devices)}Gb")
 
     def _precompile_backbone(self) -> None:
         for num_tokens in self.num_tokens_paddings:
@@ -401,7 +386,7 @@ class TPUModelRunner():
         donate_argnames=("kv_caches"),
     )
     def _jitted_insert_kv_cache(
-        block_size, 
+        block_size,
         kv_caches: List[jax.Array],
         kv_cache_slices: List[jax.Array],
         block_numbers: jax.Array,
@@ -415,9 +400,12 @@ class TPUModelRunner():
         # Assuming block numbers are non-negative and sorted.
         for i, layer_kv_cache_slices in enumerate(kv_cache_slices):
             _, num_kv_heads, head_dim = layer_kv_cache_slices.shape
-            padding_config = ((0, block_numbers.shape[0] * block_size - layer_kv_cache_slices.shape[0]), (0, 0), (0, 0))
-            layer_kv_cache_slices = jnp.pad(layer_kv_cache_slices, pad_width = padding_config)
-            layer_kv_cache_slices = layer_kv_cache_slices.reshape(-1, block_size, num_kv_heads, head_dim)
+            padding_config = ((0, block_numbers.shape[0] * block_size -
+                               layer_kv_cache_slices.shape[0]), (0, 0), (0, 0))
+            layer_kv_cache_slices = jnp.pad(layer_kv_cache_slices,
+                                            pad_width=padding_config)
+            layer_kv_cache_slices = layer_kv_cache_slices.reshape(
+                -1, block_size, num_kv_heads, head_dim)
             updated_cache = kv_caches[i].at[block_numbers].set(
                 layer_kv_cache_slices)
             new_kv_caches.append(updated_cache)

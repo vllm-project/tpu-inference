@@ -9,8 +9,60 @@ from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 
 from tpu_commons.logger import init_logger
+from tpu_commons.models.jax.utils.quantization.quantization_utils import (
+    quantization_config_file_path_to_dict, qwix_quantize_nnx_model)
 
 logger = init_logger(__name__)
+
+
+def _apply_qwix_quantization(vllm_config: VllmConfig, model: nnx.Module,
+                             rng: jax.Array, mesh: Mesh) -> nnx.Module:
+    """
+    Will apply quantization if a valid quantization config with Qwix rules is provided.  See README
+    for more details.
+
+    Args:
+        vllm_config: the vllm config
+        model: the model to quantize
+        rng: the random number generator to use
+        mesh: the mesh to use
+
+    Returns:
+        the potentially quantized model
+    """
+    # NOTE: we expect the value of "quantization" to be the name of a file in `tpu_commons/models/jax/utils/quantization/configs`
+    # if given
+    qwix_config = None
+    if vllm_config.additional_config.get("quantization"):
+        quantization_config = quantization_config_file_path_to_dict(
+            vllm_config.additional_config["quantization"])
+        qwix_config = quantization_config.get("qwix").get("rules")
+    if qwix_config:
+        block_size = vllm_config.cache_config.block_size
+        model_config = vllm_config.model_config
+        head_size = model_config.get_head_size()
+        num_kv_heads = model_config.get_total_num_kv_heads()
+        # NOTE: it's REALLY important this is jitted, or else you'll run into hanging
+        qwix_quantize_nnx_model_with_config = functools.partial(
+            qwix_quantize_nnx_model, qwix_config=qwix_config)
+        model = nnx.jit(qwix_quantize_nnx_model_with_config,
+                        donate_argnums=(0, ),
+                        static_argnames=(
+                            "mesh",
+                            "num_hidden_layers",
+                            "kv_cache_block_size",
+                            "kv_cache_num_kv_heads",
+                            "kv_cache_head_size",
+                        ))(model=model,
+                           rng=rng,
+                           mesh=mesh,
+                           num_hidden_layers=vllm_config.model_config.
+                           hf_config.num_hidden_layers,
+                           kv_cache_block_size=block_size,
+                           kv_cache_num_kv_heads=num_kv_heads,
+                           kv_cache_head_size=head_size)
+
+    return model
 
 
 def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
@@ -50,6 +102,7 @@ def _get_nnx_model(
                 pspecs = nnx.get_partition_spec(state)
                 sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
                 nnx.update(model, sharded_state)
+                # NOTE: we don't support quantization for the old Qwen2ForCausalLM implementation
                 return model
 
             with mesh:
@@ -60,6 +113,7 @@ def _get_nnx_model(
             def create_sharded_model(model):
                 state = nnx.state(model)
                 nnx.update(model, state)
+                model = _apply_qwix_quantization(vllm_config, model, rng, mesh)
                 return model
 
             with mesh:
@@ -92,6 +146,7 @@ def _get_nnx_model(
         def create_jit_model(model):
             state = nnx.state(model)
             nnx.update(model, state)
+            model = _apply_qwix_quantization(vllm_config, model, rng, mesh)
             return model
 
         with mesh:
