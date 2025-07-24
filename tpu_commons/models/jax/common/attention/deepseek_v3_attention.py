@@ -224,7 +224,9 @@ class MLA(Attention):
             #     k_rope_SNH,
             #     (k_rope_SNH.shape[0], self.N, self.qk_rope_head_dim))
             kv_SA = kv_SA[..., :self.kv_lora_rank]
-            kv_SA = self.kv_rms_norm(kv_SA)  # <= this should be cached 
+            kv_SA = self.kv_rms_norm(kv_SA) 
+
+            # what is cached is [kv_SA, k_rope_SH]
 
             ##### This should be computed inside the kernel #######
 
@@ -371,6 +373,12 @@ class MLA(Attention):
                   `(seq, num_q_heads, head_dim)`.
         """
         md = attention_metadata
+        # remove head dimension from kv_cache
+        kv_cache = kv_cache.reshape(kv_cache.shape[0], kv_cache.shape[1], 2,  -1)
+        # k_rope = k_rope_SNH.reshape(k_rope_SNH.shape[0], -1)
+
+        print("1. kv_cache.shape", kv_cache.shape)
+        # print("k_rope.shape", k_rope.shape)
         kv_cache = update_mla_kv_cache(k_SA, k_rope_SNH, kv_cache, md.slot_mapping,
                                    md.num_slices, mesh)
 
@@ -379,8 +387,9 @@ class MLA(Attention):
         # but it could be configurable based on the op_mode.
         in_specs = (
             P(*self.sharding_cfg.generate_rules.query_tnh),  # q_TNH
-            P(*self.sharding_cfg.generate_rules.keyvalue_cache_lskh
-              ),  # kv_cache:
+            P(*self.sharding_cfg.generate_rules.query_tnh),  # k_rope_SNH
+            P(*self.sharding_cfg.generate_rules.keyvalue_cache_lskh),  # kv_cache
+            P(),  # kv_up_proj_weights
             P(),  # md.seq_lens: Replicated
             P(),  # md.block_tables: Replicated
             P(),  # md.query_start_loc: Replicated
@@ -400,7 +409,15 @@ class MLA(Attention):
                 # set this to 64M to avoid VMEM OOM,
                 # otherwise the default value is 16M.
                 vmem_limit_bytes=64 * 1024 * 1024,
+                qk_nope_head_dim=self.qk_nope_head_dim,
+                qk_rope_head_dim=self.qk_rope_head_dim,
+                v_head_dim=self.v_head_dim,
+                num_heads=self.N,
             )
+        print("in_specs", in_specs)
+        print("mesh", mesh)
+        # pad kv_cache
+
 
         output_TNH = jax.jit(
             shard_map.shard_map(
@@ -413,10 +430,12 @@ class MLA(Attention):
                 q_TNH,
                 k_rope_SNH,
                 kv_cache,
+                self.kernel_kv_up_proj_ANH.value.reshape(self.kv_lora_rank, -1),
                 md.seq_lens,
                 md.block_tables,
                 md.query_start_loc,
                 md.num_seqs,
             )
+
 
         return kv_cache, output_TNH

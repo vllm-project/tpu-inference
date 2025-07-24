@@ -155,7 +155,7 @@ def mla_attention(
         head_dim_original = q.shape[-1]
 
     md = attention_metadata
-    kv_cache = update_mla_kv_cache(latent_kv, kv_cache, md.slot_mapping, md.num_slices,
+    kv_cache = update_mla_kv_cache(latent_kv, k_rope, kv_cache, md.slot_mapping, md.num_slices,
                                mesh)
 
     # (T, N, H)
@@ -206,39 +206,38 @@ def update_kv_cache(k: jax.Array, v: jax.Array, kv_cache: jax.Array,
 def update_mla_kv_cache(latent_kv: jax.Array, k_rope: jax.Array, kv_cache: jax.Array,
                     slices: jax.Array, num_slices: jax.Array,
                     mesh: Mesh) -> jax.Array:
-    """ Write the latent KV into KV cache.
+    """Write the latent KV and k_rope into KV cache for MLA.
 
     Args:
-        latent_kv: (T, 1, H)
-        kv_cache: (L, S, 1, H)
+        latent_kv: (T, 1, H) - Latent KV vectors
+        k_rope: (T, 1, K) - K_rope vector 
+        kv_cache: (L, S, 2, H) - KV cache to update
+        slices: (3, num_slices) - Slot mapping metadata
+        num_slices: (1,) - Number of slices
+        mesh: JAX device mesh
+
+    Returns:
+        Updated KV cache with shape (L, S, 2, H)
     """
     L, S, K, H = kv_cache.shape
-
-    print("latent_kv.shape", latent_kv.shape) #(32, 512)
-    print("k_rope.shape", k_rope.shape) # (32, 32, 32)
+    assert K == 2
+    # Add head dimension to latent_kv if needed
+    if len(latent_kv.shape) == 2:
+        latent_kv = latent_kv[:, None, :]
     
-    # add head dimension to latent_kv
-    latent_kv = latent_kv[:, None, :]
-    
-    # concat latent_kv and k_rope
+    # Concatenate latent_kv and k_rope along the feature dimension
     latent_kv_k_rope = jnp.concat([latent_kv, k_rope], axis=-1)
 
+    # Pad to multiple of 128 for TPU tiling constraints
+    multiplier = 128 * 4
+    padding_needed = multiplier - latent_kv_k_rope.shape[-1] % multiplier
+    latent_kv_k_rope = jnp.pad(latent_kv_k_rope, ((0, 0), (0, 0), (0, padding_needed)))
     
-    # pad to multiple of 128
-    multiplier = 128*4
-    latent_kv_k_rope = jnp.pad(latent_kv_k_rope, ((0, 0), (0, 0), (0, multiplier - latent_kv_k_rope.shape[-1] % multiplier)))
-    print("- latent_kv_k_rope.shape", latent_kv_k_rope.shape)    
-    kv_cache = kv_cache.reshape(-1, K, H)
-    print("- kv_cache.shape", kv_cache.shape)
-    print("slices.shape", slices.shape)
+    # Reshape to match expected format for kv_cache_update
+    latent_kv_k_rope = latent_kv_k_rope.reshape(latent_kv_k_rope.shape[0], 2, -1)
+    kv_cache = kv_cache.reshape(-1, 2, H)
     
-    if latent_kv_k_rope.shape[1] == 1:
-        latent_kv_k_rope = jnp.tile(latent_kv_k_rope, (1, 2, 1))
-        print("- padded latent_kv_k_rope.shape", latent_kv_k_rope.shape)
-        kv_cache = jnp.tile(kv_cache, (1, 2, 1))
-        print("- padded kv_cache.shape", kv_cache.shape)
-
-    
+    # Update KV cache using the existing kernel
     kv_cache = kv_cache_update(
         latent_kv_k_rope,
         slices,
@@ -247,56 +246,9 @@ def update_mla_kv_cache(latent_kv: jax.Array, k_rope: jax.Array, kv_cache: jax.A
         page_size=S,
         num_slices_per_block=NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK,
         mesh=mesh,
-        kv_cache_pspec=P(None, None, "model"))
-    kv_cache = kv_cache[:, 0, :]
-    kv_cache = kv_cache.reshape(L, S, K, H)
-    #untile kv_cache
+        kv_cache_pspec=P(None, None, "model"))  # Should we shard the head_dim ?
     
+    # Reshape back to original format
+    kv_cache = kv_cache.reshape(L, S, K, H)
 
     return kv_cache
-
-
-# def flash_mla_with_kvcache(
-#     q: torch.Tensor,
-#     k_cache: torch.Tensor,
-#     block_table: torch.Tensor,
-#     cache_seqlens: torch.Tensor,
-#     head_dim_v: int,
-#     tile_scheduler_metadata: torch.Tensor,
-#     num_splits: torch.Tensor,
-#     softmax_scale: Optional[float] = None,
-#     causal: bool = False,
-# ) -> Tuple[torch.Tensor, torch.Tensor]:
-#     """
-#     Arguments:
-#         q: (batch_size, seq_len_q, num_heads_q, head_dim).
-#         k_cache: (num_blocks, page_block_size, num_heads_k, head_dim).
-#         block_table: (batch_size, max_num_blocks_per_seq), torch.int32.
-#         cache_seqlens: (batch_size), torch.int32.
-#         head_dim_v: Head_dim of v.
-#         tile_scheduler_metadata: (num_sm_parts, TileSchedulerMetaDataSize), 
-#                                  torch.int32, return by get_mla_metadata.
-#         num_splits: (batch_size + 1), torch.int32, return by get_mla_metadata.
-#         softmax_scale: float. The scaling of QK^T before applying softmax. 
-#                        Default to 1 / sqrt(head_dim).
-#         causal: bool. Whether to apply causal attention mask.
-
-#     Return:
-#         out: (batch_size, seq_len_q, num_heads_q, head_dim_v).
-#         softmax_lse: (batch_size, num_heads_q, seq_len_q), torch.float32.
-#     """
-#     if softmax_scale is None:
-#         softmax_scale = q.shape[-1]**(-0.5)
-#     out, softmax_lse = torch.ops._flashmla_C.fwd_kvcache_mla(
-#         q,
-#         k_cache,
-#         None,
-#         head_dim_v,
-#         cache_seqlens,
-#         block_table,
-#         softmax_scale,
-#         causal,
-#         tile_scheduler_metadata,
-#         num_splits,
-#     )
-#     return out, softmax_lse

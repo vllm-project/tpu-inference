@@ -236,17 +236,18 @@ def static_validate_inputs(
 ):
     _, num_q_heads, head_dim = q.shape
     _, _, num_combined_kv_heads, head_dim_k = kv_pages.shape
-    assert num_combined_kv_heads % 2 == 0
+    # assert num_combined_kv_heads % 2 == 0
     assert isinstance(k_scale, float) or k_scale is None
     assert isinstance(v_scale, float) or v_scale is None
-    num_kv_heads = num_combined_kv_heads // 2
+    num_kv_heads = num_combined_kv_heads  #// 2
     max_num_seqs, pages_per_seq = page_indices.shape
     if num_seqs.shape != (1, ):
         raise ValueError(f"{num_seqs.shape=} must be (1,)")
-    if head_dim_k != head_dim:
-        raise ValueError(
-            f"Q head_dim {head_dim} must be the same as that of K/V {head_dim_k}."
-        )
+    # wenxin: head_dim_k is 128, head_dim is 1024
+    # if head_dim_k != head_dim:
+    #     raise ValueError(
+    #         f"Q head_dim {head_dim} must be the same as that of K/V {head_dim_k}."
+    #     )
     if kv_lens.shape != (max_num_seqs, ):
         raise ValueError(
             f"Expected {kv_lens.shape=} to be ({max_num_seqs},) where"
@@ -317,17 +318,28 @@ def ragged_mla_paged_attention_kernel(
     kv_lora_rank: int,
     qk_nope_head_dim: int,
     v_head_dim: int,
+    num_heads: int,
+    qk_rope_head_dim: int,
 ):
     if mask_value is None:
         mask_value = DEFAULT_MASK_VALUE
     num_q_per_blk, num_q_heads_per_blk, head_dim = q_ref.shape
     pages_per_seq = page_indices_ref.shape[-1]
     num_seqs = num_seqs_ref[0]
+    latent_kv_dim = kv_pages_hbm_ref.shape[3]
     _, num_kv_pages_per_blk, page_size, num_combined_kv_heads_per_blk, _ = (
         kv_bufs.shape)
-    num_kv_heads_per_blk = num_combined_kv_heads_per_blk // 2
+    print("kv_bufs.shape", kv_bufs.shape)
+    num_kv_heads_per_blk = num_combined_kv_heads_per_blk #// 2
     num_kv_per_blk = num_kv_pages_per_blk * page_size
-    num_q_heads_per_kv_head = num_q_heads_per_blk // num_kv_heads_per_blk
+    print("num_kv_heads_per_blk", num_kv_heads_per_blk)
+    print("num_q_heads_per_blk", num_q_heads_per_blk)
+
+    num_upprojected_kv_per_blk= num_kv_per_blk * num_heads
+    print("num_kv_per_blk", num_kv_per_blk)
+    print("num_upprojected_kv_per_blk", num_upprojected_kv_per_blk)
+ 
+    num_q_heads_per_kv_head = num_q_heads_per_blk #// num_kv_heads_per_blk
     heads_blk_idx, q_blk_idx = (
         pl.program_id(0),
         pl.program_id(1),
@@ -337,6 +349,21 @@ def ragged_mla_paged_attention_kernel(
     init_buf_idx = seq_buf_idx_ref[1]
     q_len_start = q_blk_idx * num_q_per_blk
     q_len_end = q_len_start + num_q_per_blk
+
+    def broadcast_to_shape(arr, shape):
+                if arr.shape == shape:
+                    return arr
+                assert len(arr.shape) == len(shape)
+                assert arr.shape[0] == shape[0]
+                assert shape[1] % arr.shape[1] == 0
+                # no-op concatenation.
+                return jnp.concatenate(
+                    [arr for _ in range(shape[1] // arr.shape[1])], axis=1)
+
+    def broadcast_new_axis(arr, shape, axis):
+        # no-op concatenation.
+        return jnp.concatenate(
+            [arr for _ in range(shape[axis]//arr.shape[axis])], axis=axis)
 
     def create_kv_async_copy_descriptors(heads_blk_idx, seq_idx, kv_blk_idx,
                                          buf_idx):
@@ -453,20 +480,25 @@ def ragged_mla_paged_attention_kernel(
 
         def mla_up_projection(latent_kv, kv_up_proj_weights):
             """Perform MLA up-projection: latent_kv @ kv_up_proj_weights"""
-            # latent_kv: [num_kv_per_blk, kv_lora_rank]
+            # latent_kv: [num_kv_per_blk, padded(kv_lora_rank+head_dim)]
             # kv_up_proj_weights: [kv_lora_rank, num_heads, qk_nope_head_dim + v_head_dim]
             # Result: [num_kv_per_blk, num_heads, qk_nope_head_dim + v_head_dim]
             
-            # Reshape weights for efficient computation
-            weights_reshaped = kv_up_proj_weights.reshape(kv_lora_rank, -1)  # [kv_lora_rank, num_heads * (qk_nope_head_dim + v_head_dim)]
-            
-            # Perform matrix multiplication
-            projected = jnp.dot(latent_kv, weights_reshaped, preferred_element_type=jnp.float32)
-            
-            # Reshape back to desired shape
-            projected = projected.reshape(num_kv_per_blk, num_q_heads_per_blk, qk_nope_head_dim + v_head_dim)
-            
-            return projected
+            # Extract the latent part of kv
+            kv_latent = latent_kv[..., :kv_lora_rank]  # [num_kv_per_blk, kv_lora_rank]
+            print("kv_latent.shape", kv_latent.shape)
+            print("kv_up_proj_weights.shape", kv_up_proj_weights.shape)
+
+            projected = lax.dot_general(
+                kv_latent, 
+                kv_up_proj_weights[...],
+                dimension_numbers=(([1], [0]), ((), ())),
+                preferred_element_type=jnp.float32 #?
+            )
+            print("projected.shape", projected.shape)
+            num_heads = 32
+            projected = projected.reshape(projected.shape[0], num_heads, -1)
+            return projected.astype(latent_kv.dtype)
 
         def flash_attention(
             q,  # [num_q_per_blk * num_q_heads_per_kv_head, head_dim]
@@ -478,15 +510,23 @@ def ragged_mla_paged_attention_kernel(
             *,
             kv_blk_idx,
         ):
+            print("q.shape", q.shape)
+            print("k.shape", k.shape)
+            print("v.shape", v.shape)
+            print("head_dim", head_dim)
             assert q.shape == (
                 num_q_per_blk * num_q_heads_per_kv_head,
                 head_dim,
             )
-            assert (k.shape == v.shape == (
-                num_kv_per_blk,
-                head_dim,
-            ))
+            # assert (k.shape == v.shape == (
+            #     num_upprojected_kv_per_blk,
+            #     head_dim,
+            # ))
             assert k.dtype == v.dtype
+            print("head_m_ref.shape", head_m_ref.shape)
+            print("head_l_ref.shape", head_l_ref.shape)
+            print("num_q_per_blk", num_q_per_blk)
+            print("num_q_heads_per_kv_head", num_q_heads_per_kv_head)
             assert (head_m_ref.shape == head_l_ref.shape == (
                 num_q_per_blk * num_q_heads_per_kv_head,
                 128,
@@ -526,12 +566,12 @@ def ragged_mla_paged_attention_kernel(
                 (kv_len - q_len) + q_len_start - q_start +
                 jax.lax.broadcasted_iota(
                     jnp.int32,
-                    (num_q_per_blk * num_q_heads_per_kv_head, num_kv_per_blk),
+                    (num_q_per_blk * num_q_heads_per_kv_head, num_upprojected_kv_per_blk),
                     0,
                 ) // num_q_heads_per_kv_head)
             col_ids = kv_len_start + jax.lax.broadcasted_iota(
                 jnp.int32,
-                (num_q_per_blk * num_q_heads_per_kv_head, num_kv_per_blk),
+                (num_q_per_blk * num_q_heads_per_kv_head, num_upprojected_kv_per_blk),
                 1,
             )
             causal_mask = row_ids < col_ids
@@ -566,15 +606,7 @@ def ragged_mla_paged_attention_kernel(
                 num_q_heads_per_kv_head,
             )
 
-            def broadcast_to_shape(arr, shape):
-                if arr.shape == shape:
-                    return arr
-                assert len(arr.shape) == len(shape)
-                assert arr.shape[0] == shape[0]
-                assert shape[1] % arr.shape[1] == 0
-                # no-op concatenation.
-                return jnp.concatenate(
-                    [arr for _ in range(shape[1] // arr.shape[1])], axis=1)
+            
 
             o_curr = load_with_init(head_acc_ref, 0.0).reshape(-1, head_dim)
             l_alpha = broadcast_to_shape(l_alpha, qkv.shape)
@@ -596,6 +628,7 @@ def ragged_mla_paged_attention_kernel(
             return kv_blk_idx * num_kv_per_blk < kv_len
 
         def compute_with_kv_blk_in_cur_seq(kv_states):
+            print("kv_states", kv_states)
             kv_blk_idx, cur_buf_idx = kv_states
             next_heads_blk_idx, next_seq_idx, next_kv_blk_idx, next_buf_idx = (
                 get_next_prefetch_ids(heads_blk_idx, cur_seq_idx, kv_blk_idx,
@@ -611,41 +644,57 @@ def ragged_mla_paged_attention_kernel(
                     next_buf_idx)
                 next_async_copy_kv.start()
 
+            # Load KV cache block from HBM to VMEM
             cur_async_copy_kv = create_kv_async_copy_descriptors(
                 heads_blk_idx, cur_seq_idx, kv_blk_idx, cur_buf_idx)
-            kv_ref = cur_async_copy_kv.wait().reshape(
-                num_kv_pages_per_blk * page_size *
-                num_combined_kv_heads_per_blk,
-                head_dim,
-            )
+            latent_kv = cur_async_copy_kv.wait()
             
             # For MLA, the kv_cache contains latent KV vectors (not K and V separately)
             # Extract the latent KV vectors from the cache
-            latent_kv = kv_ref[..., :kv_lora_rank]  # [num_kv_per_blk, kv_lora_rank]
-            
+            # The kv_cache has been padded to head_dim, so use the full dimension
+            print("latent_kv.shape", latent_kv.shape)
+            print("latent_kv_scratch.shape", latent_kv_scratch.shape)
+
             # Store latent KV in scratch for up-projection
-            latent_kv_scratch[...] = latent_kv
-            
+            # Extract first and second halves of the latent vectors
+            latent_kv_scratch[..., :latent_kv_dim] = latent_kv[:, :, 0:1, :].reshape(num_kv_per_blk, latent_kv_dim)
+            latent_kv_scratch[..., latent_kv_dim:] = latent_kv[:, :, 1:2, :].reshape(num_kv_per_blk, latent_kv_dim)
+
             # Perform MLA up-projection
-            projected_kv = mla_up_projection(latent_kv, kv_up_proj_weights_ref)
+            print("kv_up_proj_weights_ref", kv_up_proj_weights_ref.shape)
+            projected_kv = mla_up_projection(latent_kv_scratch, kv_up_proj_weights_ref)
+            print("projected_kv.shape", projected_kv.shape)
             
             # Store projected KV in scratch
             projected_kv_scratch[...] = projected_kv
             
             # Split projected KV into K and V components
             k_nope = projected_kv[..., :qk_nope_head_dim]  # [num_kv_per_blk, num_heads, qk_nope_head_dim]
+            k_nope = k_nope.reshape((num_upprojected_kv_per_blk, qk_nope_head_dim))
             v = projected_kv[..., qk_nope_head_dim:]  # [num_kv_per_blk, num_heads, v_head_dim]
+            print("k_nope.shape", k_nope.shape)
+            print("v.shape", v.shape)
             
-            # Get k_rope from the input (this should be computed outside the kernel)
-            # For now, we'll use the k_rope_ref that's passed in
-            k_rope = k_rope_ref  # [num_q_per_blk, num_q_heads_per_blk, head_dim]
+            # Extract k_rope from the latent KV scratch buffer
+            k_rope_dim = k_rope_ref.shape[2]
+            k_rope = latent_kv_scratch[..., kv_lora_rank:kv_lora_rank+k_rope_dim]
+
+            # Broadcast k_rope to match the expected shape
+            k_rope = broadcast_new_axis(k_rope, (num_upprojected_kv_per_blk, k_rope_dim), 0)
+            print("k_rope.shape", k_rope.shape)
             
             # Concatenate k_nope and k_rope to form the full key
-            # We need to handle the broadcasting and concatenation properly
-            k_nope_reshaped = k_nope.reshape(num_kv_per_blk * num_q_heads_per_blk, qk_nope_head_dim)
-            k_rope_reshaped = k_rope.reshape(num_q_per_blk * num_q_heads_per_blk, -1)
-            k = jnp.concatenate([k_nope_reshaped, k_rope_reshaped], axis=-1)
-            v = v.reshape(num_kv_per_blk * num_q_heads_per_blk, v_head_dim)
+            k = jnp.concatenate([k_nope, k_rope], axis=-1)
+            print("k.shape after concat", k.shape)
+            
+            # Pad k to multiple of 128 for TPU tiling constraints
+            k = jnp.pad(k, ((0, 0), (0, 128 - k.shape[1]%128)))
+            print("k.shape", k.shape)
+            
+            # Reshape and pad v
+            v = v.reshape(num_upprojected_kv_per_blk, v_head_dim)
+            v = jnp.pad(v, ((0, 0), (0, 128 - v.shape[1]%128)))
+            print("v.shape", v.shape)
             
             # Apply scaling if specified
             if k_scale is not None:
@@ -656,20 +705,21 @@ def ragged_mla_paged_attention_kernel(
                 v = v.astype(q_ref.dtype)
             
             # Process each head group
-            for kv_head_chunk_idx in range(0, num_kv_heads_per_blk, 1):
+            for kv_head_chunk_idx in range(0, num_kv_heads_per_blk, 2):
                 kv_head_idx = kv_head_chunk_idx
                 q_head_idx = kv_head_idx * num_q_heads_per_kv_head
                 
                 # Extract the relevant portions of k and v for this head group
-                k_start = kv_head_idx * num_kv_per_blk
-                k_end = (kv_head_idx + 1) * num_kv_per_blk
-                v_start = kv_head_idx * num_kv_per_blk
-                v_end = (kv_head_idx + 1) * num_kv_per_blk
+                k_start = kv_head_idx * num_upprojected_kv_per_blk
+                k_end = (kv_head_idx + 1) * num_upprojected_kv_per_blk
+                v_start = kv_head_idx * num_upprojected_kv_per_blk
+                v_end = (kv_head_idx + 1) * num_upprojected_kv_per_blk
                 
                 k_head = k[k_start:k_end]
                 v_head = v[v_start:v_end]
                 
                 # Extract the relevant portion of q for this head group
+                print("q_head_idx:q_head_idx + num_q_heads_per_kv_head", q_head_idx, q_head_idx + num_q_heads_per_kv_head)
                 q = fold_on_2nd_minor(q_ref[:, q_head_idx:q_head_idx + num_q_heads_per_kv_head, :])
                 
                 flash_attention(
@@ -727,12 +777,12 @@ def get_min_heads_per_blk(num_q_heads, num_combined_kv_heads, q_dtype,
         return x in (1, 2, 4, 8) or x % 8 == 0
 
     # TODO(jevinjiang): support unaligned number of heads!
-    if not can_be_xla_fully_tiled(num_combined_kv_heads, kv_packing):
-        raise ValueError(
-            f"Not implemented: {num_combined_kv_heads=} can not be XLA fully tiled."
-        )
-    assert num_combined_kv_heads % 2 == 0
-    num_kv_heads = num_combined_kv_heads // 2
+    # if not can_be_xla_fully_tiled(num_combined_kv_heads, kv_packing):
+    #     raise ValueError(
+    #         f"Not implemented: {num_combined_kv_heads=} can not be XLA fully tiled."
+    #     )
+    # assert num_combined_kv_heads % 2 == 0
+    num_kv_heads = num_combined_kv_heads  #// 2
     assert num_q_heads % num_kv_heads == 0
     ratio = num_q_heads // num_kv_heads
     # TODO(jevinjiang): we can choose smaller tiling for packed type if large
@@ -759,9 +809,10 @@ def get_min_heads_per_blk(num_q_heads, num_combined_kv_heads, q_dtype,
         "soft_cap",
         "k_scale",
         "v_scale",
-        "kv_lora_rank",
         "qk_nope_head_dim",
         "v_head_dim",
+        "num_heads",
+        "qk_rope_head_dim",
     ],
 )
 def ragged_mla_paged_attention(
@@ -784,9 +835,10 @@ def ragged_mla_paged_attention(
     num_kv_pages_per_block: int | None = None,
     num_queries_per_block: int | None = None,
     vmem_limit_bytes: int | None = None,
-    kv_lora_rank: int,
     qk_nope_head_dim: int,
+    qk_rope_head_dim: int,
     v_head_dim: int,
+    num_heads: int,
 ):
     """Ragged paged attention that supports mixed prefill and decode.
 
@@ -812,13 +864,19 @@ def ragged_mla_paged_attention(
     num_queries_per_block: number of kv pages to be processed in one flash
       attention block in the pallas kernel.
     vmem_limit_bytes: the vmem limit for the pallas kernel.
-    kv_lora_rank: the rank of the KV LoRA projection.
     qk_nope_head_dim: the dimension of the non-RoPE key heads.
     v_head_dim: the dimension of the value heads.
 
   Returns:
     The output of the attention.
   """
+    print("q shape", q.shape)
+    print("k_rope shape", k_rope.shape)
+    print("kv_pages shape", kv_pages.shape)
+    print("kv_up_proj_weights shape", kv_up_proj_weights.shape)
+    print("kv_lens shape", kv_lens.shape)
+    print("page_indices shape", page_indices.shape)
+    print("cu_q_lens shape", cu_q_lens.shape)
     static_validate_inputs(
         q,
         kv_pages,
@@ -836,51 +894,60 @@ def ragged_mla_paged_attention(
         num_queries_per_block=num_queries_per_block,
         vmem_limit_bytes=vmem_limit_bytes,
     )
-    print("kv_pages.shape", kv_pages.shape)
     if mask_value is None:
         mask_value = DEFAULT_MASK_VALUE
-    num_q_tokens, num_q_heads, head_dim = q.shape
-    _, page_size, num_combined_kv_heads, _ = kv_pages.shape
+    num_q_tokens, num_q_heads, q_head_dim = q.shape
+    kv_lora_rank = kv_up_proj_weights.shape[0]
+    num_pages, page_size, num_combined_kv_heads, padded_latent_dim = kv_pages.shape
     assert num_combined_kv_heads % 2 == 0
-    num_kv_heads = num_combined_kv_heads // 2
     _, pages_per_seq = page_indices.shape
-    num_q_heads_per_blk, num_combined_kv_heads_per_blk = get_min_heads_per_blk(
-        num_q_heads, num_combined_kv_heads, q.dtype, kv_pages.dtype)
+    
+    num_q_heads_per_blk = num_q_heads
+    num_combined_kv_heads_per_blk = num_combined_kv_heads
+    
     num_q_per_blk = num_queries_per_block
     num_kv_pages_per_blk = num_kv_pages_per_block
     if num_q_per_blk is None or num_kv_pages_per_blk is None:
-        num_kv_pages_per_blk, num_q_per_blk = get_tuned_block_sizes(
-            q.dtype,
-            kv_pages.dtype,
-            num_q_heads_per_blk,
-            num_combined_kv_heads_per_blk // 2,
-            head_dim,
-            page_size,
-            num_q_tokens,
-            pages_per_seq,
-        )
-    num_q_heads_per_kv_head = num_q_heads // num_kv_heads
+        # For MLA, we need to handle the case where num_combined_kv_heads_per_blk = 1
+        if True:
+            # Use a default block size for MLA
+            num_kv_pages_per_blk = 4  # Default value for MLA
+            num_q_per_blk = 32  # Default value for MLA
+        else:
+            num_kv_pages_per_blk, num_q_per_blk = get_tuned_block_sizes(
+                q.dtype,
+                kv_pages.dtype,
+                num_q_heads_per_blk,
+                num_combined_kv_heads_per_blk // 2,
+                padded_latent_dim,
+                page_size,
+                num_q_tokens,
+                pages_per_seq,
+            )
+    num_q_heads_per_kv_head = num_q_heads 
     num_q_blks = cdiv(num_q_tokens, num_q_per_blk)
-    assert num_combined_kv_heads_per_blk % 2 == 0
-    num_kv_heads_per_blk = num_combined_kv_heads_per_blk // 2
+    # For MLA, num_combined_kv_heads_per_blk can be 1, not necessarily even
+
+    num_kv_heads_per_blk = num_combined_kv_heads_per_blk 
     assert num_q_heads_per_blk % num_q_heads_per_kv_head == 0
     num_heads_blks = num_q_heads // num_q_heads_per_blk
     grid = (num_heads_blks, num_q_blks)
+    print("grid", grid)
 
     def q_index_map(heads_blk_idx, q_blk_idx, *_):
         return (q_blk_idx, heads_blk_idx, 0)
 
     q_block_spec = pl.BlockSpec(
-        (num_q_per_blk, num_q_heads_per_blk, head_dim),
+        (num_q_per_blk, num_q_heads_per_blk, q_head_dim),
         q_index_map,
     )
     k_rope_block_spec = pl.BlockSpec(
-        (num_q_per_blk, num_q_heads_per_blk, head_dim),
+        (num_q_per_blk, num_q_heads_per_blk, qk_rope_head_dim),
         q_index_map,
     )
     kv_up_proj_weights_block_spec = pl.BlockSpec(
-        (kv_lora_rank, num_q_heads_per_blk, qk_nope_head_dim + v_head_dim),
-        lambda heads_blk_idx, q_blk_idx, *_: (heads_blk_idx, 0, 0),
+        (kv_lora_rank, (num_q_heads_per_blk)* (qk_nope_head_dim + v_head_dim)),
+        lambda heads_blk_idx, q_blk_idx, *_: (heads_blk_idx, 0),
     )
     in_specs = [
         q_block_spec,
@@ -889,14 +956,16 @@ def ragged_mla_paged_attention(
         kv_up_proj_weights_block_spec,
     ]
     out_specs = q_block_spec
+    print("num_q_per_blk * num_q_heads_per_kv_head", num_q_per_blk, num_q_heads_per_kv_head)
     lm_scratch = pltpu.VMEM(
         # TODO(jevinjiang): use 128 instead of 1 is due to Mosaic does not support
         # unaligned slicing!
         (num_kv_heads_per_blk, num_q_per_blk * num_q_heads_per_kv_head, 128),
         jnp.float32,
     )
+    print("lm_scratch", lm_scratch.shape)
     acc_scratch = pltpu.VMEM(
-        (num_q_per_blk, num_q_heads_per_blk, head_dim),
+        (num_q_per_blk, num_q_heads_per_blk, q_head_dim),
         jnp.float32,
     )
     double_buf_scratch = pltpu.VMEM(
@@ -905,14 +974,18 @@ def ragged_mla_paged_attention(
             num_kv_pages_per_blk,
             page_size,
             num_combined_kv_heads_per_blk,
-            head_dim,
+            padded_latent_dim,
         ),
         kv_pages.dtype,
     )
     # Additional scratch for MLA up-projection
+    print("num_kv_pages_per_blk", num_kv_pages_per_blk)
     num_kv_per_blk = num_kv_pages_per_blk * page_size
+    print("num_kv_per_blk", num_kv_per_blk)
+    # For MLA, the kv_cache has been padded to head_dim, but we need to use the actual available dimension
+    # The kv_cache has shape (..., head_dim) where head_dim is padded to be a multiple of 128
     latent_kv_scratch = pltpu.VMEM(
-        (num_kv_per_blk, kv_lora_rank),
+        (num_kv_per_blk, num_combined_kv_heads_per_blk* padded_latent_dim),
         kv_pages.dtype,
     )
     projected_kv_scratch = pltpu.VMEM(
@@ -947,6 +1020,8 @@ def ragged_mla_paged_attention(
             kv_lora_rank=kv_lora_rank,
             qk_nope_head_dim=qk_nope_head_dim,
             v_head_dim=v_head_dim,
+            num_heads=num_heads,
+            qk_rope_head_dim=qk_rope_head_dim,
         ),
         grid_spec=pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=len(scalar_prefetches),

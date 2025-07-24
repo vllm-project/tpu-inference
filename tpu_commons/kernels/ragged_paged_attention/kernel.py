@@ -616,6 +616,8 @@ def ragged_paged_attention_kernel(
                     # unaligned position!
                     q = fold_on_2nd_minor(q_ref[:, q_head_idx:q_head_idx +
                                                 num_q_heads_per_kv_head, :])
+                    # insert MLA logic here. 
+                    
                     flash_attention(
                         q,
                         k,
