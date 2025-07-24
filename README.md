@@ -155,18 +155,6 @@ To run JAX path without precompiling the model:
 SKIP_JAX_PRECOMPILE=1
 ```
 
-To run JAX path without loading real model weights:
-
-```
-JAX_RANDOM_WEIGHTS=1
-```
-
-To enable experimental scheduler:
-
-```
-EXP_SCHEDULER=1
-```
-
 ### Profiling
 
 There are two ways to profile your workload:

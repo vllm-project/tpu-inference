@@ -154,13 +154,6 @@ class TpuPlatform(Platform):
                 )
                 cache_config.block_size = min_page_size  # type: ignore[assignment]
 
-        if os.getenv("EXP_SCHEDULER") is not None:
-            from tpu_commons.core.experimental_scheduler_config import \
-                ExperimentalSchedulerConfig
-            experimental_scheduler_config = ExperimentalSchedulerConfig.initialize_from_config(
-                vllm_config.scheduler_config, {})
-            vllm_config.scheduler_config = experimental_scheduler_config
-
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
         parallel_config.worker_cls = \
