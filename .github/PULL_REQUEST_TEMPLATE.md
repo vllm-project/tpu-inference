@@ -21,7 +21,7 @@ commands to reproduce.
 
 # Checklist
 
-Before submitting this PR, please make sure (put X in square brackets):
-- [ ] I have performed a self-review of my code.
-- [ ] I have necessary comments in my code, particularly in hard-to-understand areas.
-- [ ] I have made or will make corresponding changes to any relevant documentation.
+Before submitting this PR, please make sure:
+- I have performed a self-review of my code.
+- I have necessary comments in my code, particularly in hard-to-understand areas.
+- I have made or will make corresponding changes to any relevant documentation.
