@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+import io
+import logging
 import time
 from unittest.mock import MagicMock, patch
 
@@ -105,15 +107,38 @@ def test_get_req_paddings():
 
 def test_latency_tracker(caplog):
     """Tests the LatencyTracker context manager."""
-    caplog.set_level("DEBUG")
-    sleep_duration = 0.01
-    with LatencyTracker("test_op") as tracker:
-        time.sleep(sleep_duration)
+    logger_name = "vllm.tpu_commons.runner.utils"
+    logger = logging.getLogger(logger_name)
 
-    elapsed = tracker.end_time - tracker.start_time
-    assert elapsed >= sleep_duration
-    assert "Latency for 'test_op'" in caplog.text
-    assert f"{elapsed:.3f} seconds" in caplog.text
+    original_level = logger.level
+    original_propagate = logger.propagate
+
+    # Create an in-memory stream to capture log output
+    log_capture_string = io.StringIO()
+    # Create a handler that writes to our in-memory stream
+    capture_handler = logging.StreamHandler(log_capture_string)
+
+    try:
+        logger.setLevel(logging.DEBUG)
+        logger.propagate = False
+        logger.addHandler(capture_handler)
+
+        sleep_duration = 0.01
+        with LatencyTracker("test_op") as tracker:
+            time.sleep(sleep_duration)
+
+        elapsed = tracker.end_time - tracker.start_time
+        assert elapsed >= sleep_duration
+        log_contents = log_capture_string.getvalue()
+
+        assert "Latency for 'test_op'" in log_contents
+        assert f"{elapsed:.3f} seconds" in log_contents
+
+    finally:
+        # --- IMPORTANT: Clean up and restore the logger's original state ---
+        logger.setLevel(original_level)
+        logger.propagate = original_propagate
+        logger.removeHandler(capture_handler)
 
 
 # Define a fixture to clear the JAX cache before each test
