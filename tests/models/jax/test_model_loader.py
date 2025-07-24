@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 import jax
 import jax.numpy as jnp
 import pytest
+import torch
 from flax import nnx
 from jax.sharding import Mesh
 from transformers import PretrainedConfig
@@ -43,6 +44,16 @@ class MockCausalLM(nnx.Module):
         batch_size = hidden_states.shape[0]
         logits = jnp.ones((batch_size, self.vocab_size))
         return logits * jnp.mean(self.w.value)  # Dummy op
+
+    @classmethod
+    def create_model_for_checkpoint_loading(cls, vllm_config, rng, mesh):
+        """Mocks creating a model for loading weights by returning an instance."""
+        return cls(vllm_config, rng, mesh)
+
+    @classmethod
+    def create_model_with_random_weights(cls, vllm_config, rng, mesh):
+        """Mocks creating a model with random weights by returning an instance."""
+        return cls(vllm_config, rng, mesh)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -154,7 +165,7 @@ def test_get_vllm_model(mesh):
 
     engine_args = EngineArgs(model="Qwen/Qwen2-1.5B-Instruct")
     vllm_config = engine_args.create_engine_config()
-    vllm_config.model_config.dtype = jnp.bfloat16
+    vllm_config.model_config.dtype = torch.bfloat16
 
     model_fn, compute_logits_fn, _ = model_loader.get_vllm_model(
         vllm_config, rng, mesh)

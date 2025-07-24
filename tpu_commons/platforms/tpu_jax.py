@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Optional, Tuple, Union, cast
 
 import jax.numpy as jnp
 import vllm.envs as envs
+from torchax.ops.mappings import j2t_dtype
 from tpu_info import device
 from vllm.inputs import ProcessorInputs, PromptType
 from vllm.platforms.interface import Platform, PlatformEnum, _Backend
@@ -125,11 +126,17 @@ class TpuPlatform(Platform):
         if not isinstance(vllm_config.model_config.dtype, str):
             logger.warning(
                 "The model dtype is not properly set for JAX backend. "
-                "Overwriting it to jnp.bfloat16")
+                "Overwriting it to bfloat16")
             vllm_config.model_config.dtype = jnp.bfloat16
         else:
             vllm_config.model_config.dtype = _DTYPE.get(
                 vllm_config.model_config.dtype, jnp.bfloat16)
+
+        # If we use vLLM's model implementation in PyTorch, we should set it with torch version of the dtype.
+        impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
+        if impl == "vllm":
+            vllm_config.model_config.dtype = j2t_dtype(
+                vllm_config.model_config.dtype.dtype)
 
         if envs.VLLM_USE_V1:
             from vllm.v1.attention.backends.pallas import \

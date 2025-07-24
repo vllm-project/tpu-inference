@@ -103,10 +103,15 @@ class Llama3RecipeConfig(RecipeConfig):
 
 class LlamaForCausalLM(Model):
 
-    def __init__(self, vllm_config: VllmConfig, rng: jax.Array, mesh: Mesh):
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 rng: jax.Array,
+                 mesh: Mesh,
+                 param_factory: ParamFactory | None = None):
         self.vllm_config = vllm_config
         self.rng = nnx.Rngs(rng)
         self.mesh = mesh
+        self.param_factory = param_factory
         try:
             strategy_dict = self.vllm_config.additional_config["sharding"][
                 "sharding_strategy"]
@@ -118,9 +123,7 @@ class LlamaForCausalLM(Model):
                                  mesh=self.mesh,
                                  default_rules_cls=Llama3ShardingRulesConfig,
                                  vllm_config=self.vllm_config)
-        self.use_random_init = self.vllm_config.additional_config.get(
-            "random_weights", False)
-        # TODO: support to loading from HF checkpoints.
+
         model_name = self.vllm_config.model_config.model.lower()
         if "70b" in model_name:
             logger.info("Initializing Llama3 70B model variant.")
@@ -157,20 +160,21 @@ class LlamaForCausalLM(Model):
         self._init_layers()
 
     def _init_layers(self):
-        param_factory = ParamFactory(
-            kernel_initializer=nnx.initializers.xavier_normal(),
-            scale_initializer=nnx.initializers.ones,
-            random_init=self.use_random_init)
+        if not self.param_factory:
+            self.param_factory = ParamFactory(
+                kernel_initializer=nnx.initializers.xavier_normal(),
+                scale_initializer=nnx.initializers.ones,
+                random_init=False)
         self.embedder = Embedder(cfg=self.cfg.model.emb,
                                  mesh=self.mesh,
-                                 param_factory=param_factory,
+                                 param_factory=self.param_factory,
                                  sharding_cfg=self.cfg.sharding)
         self.embedder.generate_kernel(self.rng)
 
         self.layers = [
             TransformerBlock(cfg=self.cfg.model.layers,
                              block_type="dense",
-                             param_factory=param_factory,
+                             param_factory=self.param_factory,
                              mesh=self.mesh,
                              sharding_cfg=self.cfg.sharding)
             for i in range(self.cfg.model.num_layers)
@@ -181,7 +185,7 @@ class LlamaForCausalLM(Model):
         self.final_norm = RMSNorm(
             dims=self.cfg.model.hidden_size,
             mesh=self.mesh,
-            param_factory=param_factory,
+            param_factory=self.param_factory,
             sharding_cfg=self.cfg.sharding,
             epsilon=self.cfg.model.layers.rms_norm_eps,
             with_scale=True,
@@ -191,9 +195,31 @@ class LlamaForCausalLM(Model):
 
         self.lm_head = Embedder(cfg=self.cfg.model.emb,
                                 mesh=self.mesh,
-                                param_factory=param_factory,
+                                param_factory=self.param_factory,
                                 sharding_cfg=self.cfg.sharding)
         self.lm_head.generate_kernel(self.rng)
+
+    @classmethod
+    def create_model_with_random_weights(cls, vllm_config: VllmConfig,
+                                         rng: jax.Array, mesh: Mesh):
+        """to create a model with random weights."""
+        logger.info("Initializing model with random weights.")
+        param_factory = ParamFactory(
+            kernel_initializer=nnx.initializers.xavier_normal(),
+            scale_initializer=nnx.initializers.ones,
+            random_init=True)
+        return cls(vllm_config, rng, mesh, param_factory)
+
+    @classmethod
+    def create_model_for_checkpoint_loading(cls, vllm_config: VllmConfig,
+                                            rng: jax.Array, mesh: Mesh):
+        """to create a model with abstract shapes for checkpoint loading."""
+        logger.info("Initializing abstract model for checkpoint loading.")
+        param_factory = ParamFactory(
+            kernel_initializer=nnx.initializers.xavier_normal(),
+            scale_initializer=nnx.initializers.ones,
+            random_init=False)
+        return cls(vllm_config, rng, mesh, param_factory)
 
     # For compatibility with flax.
     def apply(self, variables, *args, **kwargs):
@@ -201,17 +227,11 @@ class LlamaForCausalLM(Model):
 
     def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):
         self.rng = nnx.Rngs(rng)
-        if self.use_random_init:
-            #TODO: Support loading random weights, either here or in tpu_runner
-            logger.warning(
-                "Model name or path not provided - randomly initializing the weights."
-            )
-        else:
-            weight_loader = Llama3WeightLoader(vllm_config=self.vllm_config,
-                                               model_config=self.cfg.model,
-                                               cache_dir=cache_dir,
-                                               sharding_cfg=self.cfg.sharding)
-            weight_loader.load_weights(self)
+        weight_loader = Llama3WeightLoader(vllm_config=self.vllm_config,
+                                           model_config=self.cfg.model,
+                                           cache_dir=cache_dir,
+                                           sharding_cfg=self.cfg.sharding)
+        weight_loader.load_weights(self)
 
     def __call__(
         self,

@@ -92,18 +92,34 @@ def _get_nnx_model(
 ) -> nnx.Module:
     if os.getenv("JAX_RANDOM_WEIGHTS", False):
         # Create a sharded model with random inited weights.
-        @nnx.jit
-        def create_sharded_model():
-            model = model_class(vllm_config, rng, mesh)
-            state = nnx.state(model)
-            pspecs = nnx.get_partition_spec(state)
-            sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
-            nnx.update(model, sharded_state)
-            model = _apply_qwix_quantization(vllm_config, model, rng, mesh)
-            return model
+        if model_class.__name__ == "Qwen2ForCausalLM":
+            # TODO: currently Qwen2ForCausalLM is using legacy model implementation
+            # will merge the random init logic when all model are migrated to new model implementation
+            @nnx.jit
+            def create_sharded_model():
+                model = model_class(vllm_config, rng, mesh)
+                state = nnx.state(model)
+                pspecs = nnx.get_partition_spec(state)
+                sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
+                nnx.update(model, sharded_state)
+                # NOTE: we don't support quantization for the old Qwen2ForCausalLM implementation
+                return model
 
-        with mesh:
-            jit_model = create_sharded_model()
+            with mesh:
+                jit_model = create_sharded_model()
+        else:
+
+            @nnx.jit
+            def create_sharded_model(model):
+                state = nnx.state(model)
+                nnx.update(model, state)
+                model = _apply_qwix_quantization(vllm_config, model, rng, mesh)
+                return model
+
+            with mesh:
+                model = model_class.create_model_with_random_weights(
+                    vllm_config, rng, mesh)
+                jit_model = create_sharded_model(model)
     else:
         # We first create an abstract model without allocating any weights,
         # then fill in its weigths during load_weights from HF.
@@ -116,7 +132,12 @@ def _get_nnx_model(
         #    the load_weights. This would be easy to OOM if the layer is super large.
         # 3. The model architecture definition won't need to worry about the sharding.
         #    The sharding definition is taken over by the load_weights instead.
-        model = nnx.eval_shape(lambda: model_class(vllm_config, rng, mesh))
+        if model_class.__name__ == "Qwen2ForCausalLM":
+            model = nnx.eval_shape(lambda: model_class(vllm_config, rng, mesh))
+        else:
+            model = nnx.eval_shape(
+                lambda: model_class.create_model_for_checkpoint_loading(
+                    vllm_config, rng, mesh))
         model.load_weights(rng)
         # Although the created model can already work, we still need to jit
         # the model creation again, otherwise the model forward will have
