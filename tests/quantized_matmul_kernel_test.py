@@ -70,7 +70,7 @@ class QuantizedMatmulKernelTest(jtu.JaxTestCase):
         out_block_size=None,
         in_block_size=None,
         atol=2e-1,
-        rtol=2e-1,
+        rtol=1e-1,
     ):
 
         prng_key = jax.random.key(1234)
@@ -152,12 +152,15 @@ class QuantizedMatmulKernelTest(jtu.JaxTestCase):
             in_block_size=128,
         )
 
-    @parameterized.product(
-        dtype=[jnp.bfloat16],
-        bs=[128, 256, 1024],
-        n_input_features=[4096],
-        n_output_features=[4096],
-        quantize_activation=[True],
+    @parameterized.parameters(
+        (jnp.bfloat16, 128, 1280, 8192, True),
+        (jnp.bfloat16, 128, 28672, 4096, True),
+        (jnp.bfloat16, 128, 4096, 14336, True),
+        (jnp.bfloat16, 128, 4096, 4096, True),
+        (jnp.bfloat16, 128, 6144, 4096, True),
+        (jnp.bfloat16, 128, 7168, 8192, True),
+        (jnp.bfloat16, 128, 8192, 1024, True),
+        (jnp.bfloat16, 128, 8192, 3584, True),
     )
     def test_quantized_matmul_use_tuned_block_sizes(self, dtype, bs,
                                                     n_input_features,
