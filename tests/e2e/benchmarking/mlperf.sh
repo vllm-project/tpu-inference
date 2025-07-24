@@ -223,6 +223,12 @@ for model_name in $model_list; do
         continue
     fi
 
+    # TODO (jacobplatin): remove when Qwen2.5 uses new model implementation
+    if [ "$QUANTIZATION" = "True" ] && [ "$model_name" == "Qwen/Qwen2.5-1.5B-Instruct" ] || [ "$model_name" == "Qwen/Qwen2.5-0.5B-Instruct" ]; then
+       echo "Skipping $model_name for QUANTIZATION: True"
+        continue
+    fi
+
     # Spin up the vLLM server
     echo "Spinning up the vLLM server..."
     (vllm serve "$model_name" --max-model-len=1024 --disable-log-requests --max-num-batched-tokens 8192 "${extra_serve_args[@]}" 2>&1 | tee -a "$LOG_FILE") &
