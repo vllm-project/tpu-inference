@@ -8,7 +8,6 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
 from vllm.sampling_params import SamplingType
 from vllm.v1.request import Request
 
-from tpu_commons.models.jax.common.sharding import Sharding
 from tpu_commons.runner.jax.input_batch_jax import CachedRequestState
 from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
 
@@ -21,18 +20,15 @@ class TestTPUJaxRunner(unittest.TestCase):
         self.mock_mesh = MagicMock()
         self.mock_rng_key = MagicMock()
 
-        mock_sharding_instance = MagicMock(spec=Sharding)
-        mock_sharding_instance.mesh = self.mock_mesh
-
-        with patch('tpu_commons.runner.jax.tpu_jax_runner.Sharding', return_value=mock_sharding_instance), \
+        with patch('jax.devices', return_value=self.mock_devices), \
+             patch('jax.make_mesh', return_value=self.mock_mesh), \
              patch('jax.random.key', return_value=self.mock_rng_key), \
              patch('tpu_commons.runner.jax.tpu_jax_runner.get_model', return_value=MagicMock()):
 
             model_config = ModelConfig(tokenizer_mode="auto",
                                        trust_remote_code=False,
                                        seed=0,
-                                       dtype='bfloat16',
-                                       model="meta-llama/Meta-Llama-3-8B")
+                                       dtype='bfloat16')
             cache_config = CacheConfig(
                 block_size=16,
                 gpu_memory_utilization=0.9,
