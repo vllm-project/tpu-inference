@@ -43,7 +43,7 @@ pre-commit run --all-files
 Run `Llama 3.1 8B` offline inference on 4 TPU chips:
 
 ```
-python tpu_commons/examples/offline_inference.py \
+HF_TOKEN=<huggingface_token> python tpu_commons/examples/offline_inference.py \
     --model=meta-llama/Llama-3.1-8B \
     --tensor_parallel_size=4 \
     --task=generate \
@@ -57,7 +57,7 @@ Run `Llama 3.1 8B Instruct` offline inference on 4 TPU chips in disaggregated mo
 ```
 PREFILL_SLICES=2 \
 DECODE_SLICES=2 \
-python tpu_commons/examples/offline_inference.py \
+HF_TOKEN=<huggingface_token> python tpu_commons/examples/offline_inference.py \
     --task=generate \
     --model=meta-llama/Meta-Llama-3-8B-Instruct \
     --max_model_len=1024 \
@@ -99,7 +99,11 @@ sudo bash ~/tpu_commons/scripts/multihost/run_cluster.sh \
 1. On the head node, use `docker exec -it node /bin/bash` to enter the container. And then execute:
 
 ```
-python /workspace/tpu_commons/examples/offline_inference.py  --model=meta-llama/Llama-3.1-70B  --tensor_parallel_size=16  --task=generate  --max_model_len=1024
+HF_TOKEN=<huggingface_token> python /workspace/tpu_commons/examples/offline_inference.py \
+    --model=meta-llama/Llama-3.1-70B  \
+    --tensor_parallel_size=16  \
+    --task=generate  \
+    --max_model_len=1024
 ```
 
 ### Run vLLM Pytorch models on the JAX path
@@ -108,7 +112,7 @@ Run the vLLM's implementation of `Llama 3.1 8B`, which is in Pytorch. It is the 
 
 ```
 export MODEL_IMPL_TYPE=vllm
-python tpu_commons/examples/offline_inference.py \
+HF_TOKEN=<huggingface_token> python tpu_commons/examples/offline_inference.py \
     --model=meta-llama/Llama-3.1-8B \
     --tensor_parallel_size=4 \
     --task=generate \
@@ -119,7 +123,7 @@ Run the vLLM Pytorch `Qwen3-30B-A3B` MoE model, use `--enable-expert-parallel` f
 
 ```
 export MODEL_IMPL_TYPE=vllm
-python vllm/examples/offline_inference/basic/generate.py \
+HF_TOKEN=<huggingface_token> python vllm/examples/offline_inference/basic/generate.py \
     --model=Qwen/Qwen3-30B-A3B \
     --tensor_parallel_size=4 \
     --task=generate \
