@@ -109,6 +109,7 @@ class ShardingRulesConfig:
     # RMS norm scale weight: (Dim,)
     norm_scale: tuple = (None)
     # Vocab projection weight (tied embeddings): (Dim, VocabSize)
+    vocab_vd: tuple = (None, None)
     vocab_dv: tuple = (None, None)
 
 
@@ -372,6 +373,7 @@ class Sharding:
         generate_rules.activation_td = (DATA_AXIS_NAME, ATTN_TENSOR_AXIS_NAME)
         generate_rules.prelogit_td = (DATA_AXIS_NAME, ATTN_TENSOR_AXIS_NAME)
         generate_rules.logits_tv = (DATA_AXIS_NAME, MLP_TENSOR_AXIS_NAME)
+        generate_rules.vocab_vd = (VOCAB_AXIS_NAME, None)
         generate_rules.vocab_dv = (None, VOCAB_AXIS_NAME)
 
     def make_sharding_config(
