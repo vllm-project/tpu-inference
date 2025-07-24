@@ -177,9 +177,14 @@ class DeepSeekV3Config(RecipeConfig):
 @dataclass
 class DeepSeekV3(Model):
 
-    def __init__(self, vllm_config: VllmConfig, rng: PRNGKey, mesh: Mesh):
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 rng: jax.Array,
+                 mesh: Mesh,
+                 param_factory: ParamFactory | None = None):
         self.vllm_config = vllm_config
         self.rng = nnx.Rngs(rng)
+        self.param_factory = param_factory
         try:
             strategy_dict = self.vllm_config.additional_config["sharding"][
                 "sharding_strategy"]
@@ -210,26 +215,26 @@ class DeepSeekV3(Model):
         self._init_layers()
 
     def _init_layers(self):
-        param_factory = ParamFactory(
-            kernel_initializer=nnx.initializers.xavier_normal(),
-            scale_initializer=nnx.initializers.ones,
-            random_init=self.use_random_init)
+        if not self.param_factory:
+            self.param_factory = ParamFactory(
+                kernel_initializer=nnx.initializers.xavier_normal(),
+                scale_initializer=nnx.initializers.ones,
+                random_init=self.use_random_init)
         self.embedder = Embedder(cfg=self.cfg.model.emb,
                                  mesh=self.mesh,
-                                 param_factory=param_factory,
+                                 param_factory=self.param_factory,
                                  sharding_cfg=self.cfg.sharding)
         self.embedder.generate_kernel(self.rng)
 
         self.layers = []
 
         for i in range(self.cfg.model.first_k_dense_replace):
-            block = TransformerBlock(
-                cfg=self.cfg.model.layers,
-                block_type="dense",
-                attention_type="mla",
-                param_factory=param_factory,
-                mesh=self.mesh,
-                sharding_cfg=self.cfg.sharding)
+            block = TransformerBlock(cfg=self.cfg.model.layers,
+                                     block_type="dense",
+                                     attention_type="mla",
+                                     param_factory=self.param_factory,
+                                     mesh=self.mesh,
+                                     sharding_cfg=self.cfg.sharding)
             self.layers.append(block)
 
         for i in range(self.cfg.model.first_k_dense_replace,
@@ -241,7 +246,7 @@ class DeepSeekV3(Model):
                 cfg=self.cfg.model.layers,
                 block_type=block_type,
                 attention_type="mla",
-                param_factory=param_factory,
+                param_factory=self.param_factory,
                 mesh=self.mesh,
                 sharding_cfg=self.cfg.sharding)
             self.layers.append(block)
@@ -252,7 +257,7 @@ class DeepSeekV3(Model):
         self.final_norm = RMSNorm(
             dims=self.cfg.model.hidden_size,
             mesh=self.mesh,
-            param_factory=param_factory,
+            param_factory=self.param_factory,
             sharding_cfg=self.cfg.sharding,
             epsilon=self.cfg.model.layers.rms_norm_eps,
             with_scale=True,
@@ -262,12 +267,37 @@ class DeepSeekV3(Model):
 
         self.lm_head = Embedder(cfg=self.cfg.model.emb,
                                 mesh=self.mesh,
-                                param_factory=param_factory,
+                                param_factory=self.param_factory,
                                 sharding_cfg=self.cfg.sharding)
         self.lm_head.generate_kernel(self.rng)
 
         # TODO: Add MTP.
+    @classmethod
+    def create_model_with_random_weights(cls, vllm_config: VllmConfig,
+                                         rng: jax.Array, mesh: Mesh):
+        """to create a model with random weights."""
+        logger.info("Initializing model with random weights.")
+        param_factory = ParamFactory(
+            kernel_initializer=nnx.initializers.xavier_normal(),
+            scale_initializer=nnx.initializers.ones,
+            random_init=True)
+        return cls(vllm_config, rng, mesh, param_factory)
 
+    @classmethod
+    def create_model_for_checkpoint_loading(cls, vllm_config: VllmConfig,
+                                            rng: jax.Array, mesh: Mesh):
+        """to create a model with abstract shapes for checkpoint loading."""
+        logger.info("Initializing abstract model for checkpoint loading.")
+        param_factory = ParamFactory(
+            kernel_initializer=nnx.initializers.xavier_normal(),
+            scale_initializer=nnx.initializers.ones,
+            random_init=False)
+        return cls(vllm_config, rng, mesh, param_factory)
+    
+    # For compatibility with flax.
+    def apply(self, variables, *args, **kwargs):
+        return self.__call__(*args, **kwargs)
+    
     def load_weights(self, rng: PRNGKey, cache_dir: Optional[str] = None):
         try:
             use_random_weights = self.vllm_config.additional_config[
@@ -330,7 +360,7 @@ class DeepSeekV3WeightLoader(WeightLoader):
             r"kv_b_proj": (2, 0, 1),
             r"o_proj": (1, 2, 0),
             # moe
-            r"mlp\.gate\.": (1, 0),
+            r"mlp\.gate\.weight": (1, 0),
             r"mlp\.experts\.\d+\.gate_proj": (0, 2, 1),
             r"mlp\.experts\.\d+\.down_proj": (0, 2, 1),
             r"mlp\.experts\.\d+\.up_proj": (0, 2, 1),
@@ -395,6 +425,8 @@ class DeepSeekV3WeightLoader(WeightLoader):
             # MOE(routed experts)
             "model.layers.*.mlp.gate.weight":
             "layers.*.moe.router.kernel_DE",
+            "model.layers.*.mlp.gate.e_score_correction_bias":
+            "layers.*.moe.router.bias_E",
             "model.layers.*.mlp.experts.*.gate_proj.weight":
             "layers.*.moe.kernel_gating_EDF",
             "model.layers.*.mlp.experts.*.down_proj.weight":
@@ -432,7 +464,6 @@ class DeepSeekV3WeightLoader(WeightLoader):
     def transpose_params(self, param_key: str, param_tensor: jax.Array):
         for key in self.transformation_cfg.transpose:
             if re.search(key, param_key):
-                print(f"[debug] transpose_params: {key=}, {param_key=}")
                 return jnp.transpose(param_tensor,
                                      self.transformation_cfg.transpose[key])
         return param_tensor  # Base case / no-op
@@ -460,19 +491,10 @@ class DeepSeekV3WeightLoader(WeightLoader):
             f"{name}: {weight.shape}  -->  {mapped_name}: {model_weight.value.shape}"
         )
 
-        def _pt_to_np(pt_weights, cast_dtype=None):
-            if cast_dtype:
-                return pt_weights.to(torch.float32).numpy().astype(cast_dtype)
-            else:
-                return pt_weights.to(torch.float32).numpy()
-
         # Convert weights from torch into numpy
-        if weight.dtype == torch.bfloat16:
-            weight = _pt_to_np(weight, ml_dtypes.bfloat16)
-        elif weight.dtype == torch.float8_e4m3fn:
-            weight = _pt_to_np(weight, ml_dtypes.float8_e4m3fn)
-        else:  # float32
-            weight = _pt_to_np(weight)
+        # TODO: set cast_type based on model weight's type.
+        cast_type = ml_dtypes.bfloat16
+        weight = weight.to(torch.float32).numpy().astype(cast_type)
 
         # Reshape and transpose weights if necessary.
         weight = self.reshape_params(name, weight, "weight")
@@ -500,14 +522,25 @@ class DeepSeekV3WeightLoader(WeightLoader):
         mlp_experts_gate_proj_weights = {}
         mlp_experts_up_proj_weights = {}
         mlp_experts_down_proj_weights = {}
+        fp8_weights = {}
         with jax.default_device(jax.devices("cpu")[0]):
             for loaded_name, loaded_weight in self.names_and_weights_generator:
                 # TODO: load scale as well.
-                if not loaded_name.endswith(".weight"):
-                    continue
                 if 'layers.61' in loaded_name:
                     # skip loading MTP module.
                     continue
+                if loaded_weight.dtype == torch.float8_e4m3fn:
+                    fp8_weights[loaded_name] = loaded_weight
+                    continue
+                if loaded_name.endswith(".weight_scale_inv"):
+                    # assuming weights are loaded before scales.
+                    weight_name = loaded_name.replace(".weight_scale_inv",
+                                                      ".weight")
+
+                    loaded_weight = weights_dequant_cpu(
+                        fp8_weights[weight_name], loaded_weight)
+                    loaded_name = weight_name
+                    del fp8_weights[weight_name]
                 # concat mlp.experts weights
                 if "mlp.experts" in loaded_name:
                     if "down_proj" in loaded_name:
@@ -548,3 +581,26 @@ class DeepSeekV3WeightLoader(WeightLoader):
                     )
         # TODO: validate that all of the model_params were accounted for as well.
         nnx.update(model_for_loading, model_params)
+
+
+def weights_dequant_cpu(x: torch.Tensor,
+                        s: torch.Tensor,
+                        block_size: int = 128) -> torch.Tensor:
+    assert x.dim() == 2 and s.dim() == 2, "Both x and s must be 2D tensors"
+    M, N = x.shape
+
+    x = x.to(torch.float32)
+    y = torch.empty_like(x, dtype=torch.get_default_dtype())
+
+    for i in range(0, M, block_size):
+        for j in range(0, N, block_size):
+            row_start = i
+            row_end = min(i + block_size, M)
+            col_start = j
+            col_end = min(j + block_size, N)
+            block = x[row_start:row_end, col_start:col_end]
+            scale = s[i // block_size, j // block_size]
+            y[row_start:row_end, col_start:col_end] = (block * scale).to(
+                torch.get_default_dtype())
+
+    return y

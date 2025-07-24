@@ -24,12 +24,15 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
 
     if os.getenv("NEW_MODEL_DESIGN", False):
-        from tpu_commons.models.jax.recipes.llama3 import Llama3_8B
-        from tpu_commons.models.jax.recipes.llama4 import Llama4Scout
-
-        # from tpu_commons.models.jax.recipes.llama4 import Llama4Scout
-        _MODEL_REGISTRY["Llama3_8B"] = Llama3_8B
-        _MODEL_REGISTRY["Llama4Scout"] = Llama4Scout
+        from tpu_commons.models.jax.recipes.llama3 import LlamaForCausalLM
+        from tpu_commons.models.jax.recipes.deepseek_v3 import DeepSeekV3
+        _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
+        _MODEL_REGISTRY["DeepSeekV3"] = DeepSeekV3
+    else:
+        from tpu_commons.models.jax.llama3 import LlamaForCausalLM
+        from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
+        _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
+        _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
 
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
