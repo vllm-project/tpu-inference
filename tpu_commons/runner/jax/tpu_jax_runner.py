@@ -253,6 +253,8 @@ class TPUModelRunner():
                     f"hbm={utils.hbm_usage_gb(self.devices)}Gb")
 
     def _precompile_backbone(self) -> None:
+        # block table cpu? 
+        # 
         for num_tokens in self.num_tokens_paddings:
             input_ids = np.ones((num_tokens, ), dtype=np.int32)
             positions = np.ones((num_tokens, ), dtype=np.int32)
@@ -576,6 +578,35 @@ class TPUModelRunner():
         self,
         scheduler_output: "VllmSchedulerOutput",
     ) -> tuple[AttentionMetadata, ModelRunnerOutput]:
+        jax.debug.print(
+            "Executing model with scheduler_output total_num_scheduled_tokens {total_num_scheduled_tokens}",total_num_scheduled_tokens=scheduler_output.total_num_scheduled_tokens)
+        
+        jax.debug.print(
+            "Executing model with scheduler_output num_scheduled_tokens {num_scheduled_tokens}",num_scheduled_tokens=scheduler_output.num_scheduled_tokens)
+        
+        
+        jax.debug.print(
+            "Executing model with scheduler_output free_encoder_input_ids {free_encoder_input_ids}",free_encoder_input_ids=scheduler_output.free_encoder_input_ids)
+        
+        jax.debug.print(
+            "Executing model with scheduler_output finished_req_ids {finished_req_ids}",finished_req_ids=scheduler_output.finished_req_ids)
+        
+        for new_req in scheduler_output.scheduled_new_reqs:
+            jax.debug.print(
+                    "Executing model with scheduler_output new_req req_id {req_id}",
+                    req_id=new_req.req_id)
+            for i,block_id in enumerate(new_req.block_ids[0]):
+                jax.debug.print(
+                    "Executing model with scheduler_output req_id block_id index {req_id} {block_id} {index}",
+                    req_id=new_req.req_id, block_id=block_id, index=i)
+        
+        # try:
+        #     jax.debug.print(
+        #         "Executing model with scheduler_output scheduled_new_reqs_0_blockids {scheduled_new_reqs_0_blockids}",scheduled_new_reqs_0_blockids= scheduler_output.scheduled_new_reqs[0].block_ids[0][0])
+        # except IndexError:
+        #     pass
+        
+        # jax.debug.breakpoint()
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
             # Return empty ModelRunnerOutput if there's no work to do.
