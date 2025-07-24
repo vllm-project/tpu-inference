@@ -50,9 +50,6 @@ class HuggingFaceArgNames(enum.Enum):
     NUM_KEY_VALUE_HEADS: str = "num_key_value_heads"
     ATTENION_DROPOUT: str = "attention_dropout"
     ATTENTION_BIAS: str = "attention_bias"
-    
-    ## Llama4 Attention Params
-    USE_QK_NORM: str = "use_qk_norm"
 
     # MLA params
     KV_LORA_RANK: str = "kv_lora_rank"
