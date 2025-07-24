@@ -27,11 +27,6 @@ def apply_rope(
     # Apply scaling if provided
     if rope_scaling:
         timescale = apply_rope_scaling(timescale, rope_scaling)
-    jax.debug.print(
-        "Rope inv_freq_llama:\n{val}",
-        val=timescale[...,
-                      jnp.concatenate([jnp.arange(5),
-                                       jnp.arange(-1, -6, -1)])])
 
     # Prepare for rotation by calculating sin and cos values
     # `sinusoid_inp` gets shape (batch, seq_len, head_dim/2)

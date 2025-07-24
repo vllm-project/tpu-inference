@@ -267,30 +267,7 @@ class Llama4Scout(Model):
     ) -> Tuple[List[KVCacheType], jax.Array, jax.Array]:
         is_prefill = False
         x = self.embedder.encode(input_ids)
-        jax.debug.print(
-            "Embedder output = {val}",
-            val=x[jnp.array([0, 3])[:, None],
-                  jnp.concat([jnp.
-                              arange(5), jnp.arange(-1, -6, -1)])])
-        # def loop_body(i, val):
-        #     jax.debug.print("**********Transformer layer: {val}**********", val=i)
-        #     # kv_cache = kv_caches[i]
-        #     x, kv_caches = val
-        #     kv_cache = jax.tree_util.tree_map(lambda x: x[i], kv_caches)
-        #     new_kv_cache, x = self.layers[i](x, is_prefill, kv_cache,
-        #                             attention_metadata)
-        #     # kv_caches[i] = new_kv_cache
-        #     updated_kv_caches = jax.tree_util.tree_map(
-        #         lambda cache, update: cache.at[i].set(update),
-        #         kv_caches,
-        #         new_kv_cache
-        #     )
-        #     return(updated_kv_caches, x)
-        # kv_caches, x = jax.lax.fori_loop(0, len(self.layers), loop_body, (x, kv_caches))
-        jax.debug.print("Input IDs:\n{val}", val=input_ids)
         for (i, block) in enumerate(self.layers):
-            jax.debug.print("**********Transformer layer: {val}**********",
-                            val=i)
             kv_cache = kv_caches[i]
             new_kv_cache, x = block(x, is_prefill, kv_cache,
                                     attention_metadata)
@@ -298,25 +275,12 @@ class Llama4Scout(Model):
             kv_caches[i] = new_kv_cache
 
         final_activation = self.final_norm(x)
-        jax.debug.print(
-            "Final activation = {val}",
-            val=final_activation[
-                jnp.array([0, 3])[:, None],
-                jnp.concat([jnp.
-                            arange(5), jnp.arange(-1, -6, -1)])])
 
         return kv_caches, final_activation
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        jax.debug.print("hidden_states inputs to lm_head shape:\n{val}", val=hidden_states.shape)
-        jax.debug.print("hidden_states inputs to lm_head:\n{val}", val=hidden_states[:4, jnp.concat([jnp.arange(5), jnp.arange(-1, -6, -1)])])
-        jax.debug.print("lm head shape:\n{val}", val=self.lm_head.input_embedding_table_DV.value.shape)
-        jax.debug.print("lm head params:\n{val}", val=self.lm_head.input_embedding_table_DV.value[jnp.concat([jnp.arange(5), jnp.arange(-1, -6, -1)]), jnp.concat([jnp.arange(5), jnp.arange(-1, -6, -1)])])
-        logits = jnp.dot(hidden_states, self.lm_head.input_embedding_table_DV.value)
-        jax.debug.print(
-            "LM head output = {val}",
-            val=logits[:4, jnp.concatenate([jnp.arange(5),
-                                          jnp.arange(-1, -6, -1)])])
+        logits = jnp.dot(hidden_states,
+                         self.lm_head.input_embedding_table_DV.value)
         return logits
         return self.lm_head.decode(hidden_states)
 

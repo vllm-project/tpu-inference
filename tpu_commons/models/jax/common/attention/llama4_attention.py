@@ -95,17 +95,12 @@ class Llama4Attention(Attention):
         with jax.named_scope("q_proj"):
             q_TNH = jnp.einsum('TD,DNH -> TNH', x_q_TD,
                                self.kernel_q_proj_DNH.value)
-            jax.debug.print("q_TNH:\n{val}", val=q_TNH[:3, :5, :5])
             if use_attention_rope:
                 q_TNH = apply_rope(q_TNH, md.input_positions, H, rope_theta,
                                    rope_scaling)
-                jax.debug.print("q_TNH after rope:\n{val}",
-                                val=q_TNH[:3, :5, :5])
                 # Apply normaliation after RoPE
                 if self.cfg.use_qk_norm:
                     q_TNH = l2_norm(q_TNH)
-                    jax.debug.print("q_TNH after L@ Norm:\n{val}",
-                                    val=q_TNH[:3, :5, :5])
             else:
                 if self.cfg.temperature_tuning:
                     attn_scales = (jnp.log(
@@ -114,8 +109,6 @@ class Llama4Attention(Attention):
                             self.cfg.temperature_tuning_floor_scale) + 1.0) *
                                    self.cfg.temperature_tuning_scale + 1.0)
                     q_TNH = q_TNH * attn_scales[:, None, None]
-                    jax.debug.print("q_TNH after temperature tuning:\n{val}",
-                                    val=q_TNH[:3, :5, :5])
 
             q_TNH = nnx.with_sharding_constraint(q_TNH,
                                                  self.query_tnh[op_mode])
@@ -153,9 +146,4 @@ class Llama4Attention(Attention):
                               self.kernel_o_proj_NHD.value)
             o_TD = nnx.with_sharding_constraint(
                 o_TD, self.activation_attention_out_td[op_mode])
-            jax.debug.print(
-                "o_TD:\n{val}",
-                val=o_TD[jnp.array([0, 3])[:, None],
-                         jnp.concat([jnp.arange(5),
-                                     jnp.arange(-1, -6, -1)])])
         return new_kv_cache, o_TD

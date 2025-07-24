@@ -198,7 +198,6 @@ class MoE(nnx.Module):
                                              dtype=self.cfg.dtype)
         full_weights_TE = jnp.sum(one_hot_indices_TXE * weights_TX[..., None],
                                   axis=1)
-        jax.debug.print("router scores = {val}", val=full_weights_TE[0:4, :])
         if self.cfg.apply_expert_weight_before_computation:
             with jax.named_scope("pre_computing_weight"):
                 # need optimization for the out-product
