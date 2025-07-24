@@ -23,7 +23,7 @@ DEFAULT_SAMPLING_PARAMS = dict(
         "top_k",
         "top_p",
     ],
-    meta_fields=["do_sampling"],
+    meta_fields=["do_sampling", "logprobs"],
 )
 @dataclass
 class TPUSupportedSamplingMetadata:
@@ -31,6 +31,7 @@ class TPUSupportedSamplingMetadata:
     top_k: Optional[jnp.ndarray] = None
     top_p: Optional[jnp.ndarray] = None
     do_sampling: bool = False
+    logprobs: bool = False
 
     @classmethod
     def from_input_batch(
@@ -39,9 +40,9 @@ class TPUSupportedSamplingMetadata:
         input_batch: InputBatch,
         padded_num_reqs: int,
     ) -> "TPUSupportedSamplingMetadata":
+        needs_logprobs = input_batch.max_num_logprobs > 0 if input_batch.max_num_logprobs else False
         if input_batch.all_greedy:
-            return cls(do_sampling=False)
-
+            return cls(do_sampling=False, logprobs=needs_logprobs)
         num_reqs = input_batch.num_reqs
 
         def fill_slice(cpu_torch_tensor: torch.Tensor,
@@ -67,4 +68,5 @@ class TPUSupportedSamplingMetadata:
             top_p=_device_array(top_p_tensor[:padded_num_reqs]),
             top_k=_device_array(top_k_tensor[:padded_num_reqs]),
             do_sampling=not input_batch.all_greedy,
+            logprobs=needs_logprobs,
         )

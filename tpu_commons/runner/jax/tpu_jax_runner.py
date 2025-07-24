@@ -29,7 +29,8 @@ from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.common.sharding import Sharding
 from tpu_commons.models.jax.layers.misc import shard_put
-from tpu_commons.models.jax.layers.sampling import sample
+from tpu_commons.models.jax.layers.sampling import (compute_logprobs,
+                                                    gather_logprobs, sample)
 from tpu_commons.models.jax.model_loader import get_model
 from tpu_commons.models.jax.sampling_metadata import \
     TPUSupportedSamplingMetadata
@@ -357,6 +358,28 @@ class TPUModelRunner():
                 logger.info("Compilation finished in %.2f [secs].",
                             end - start)
 
+    def _precompile_gather_logprobs(self) -> None:
+        logger.info("Compiling gather_logprobs with different input shapes.")
+        hsize = self.model_config.get_vocab_size()
+        for num_reqs in self.num_reqs_paddings:
+            logits = jnp.ones((num_reqs, hsize), dtype=jnp.bfloat16)
+            logits, = self._device_array((logits, ))
+            logger.info(f"Precompile gather_logprobs --> num_reqs={num_reqs}")
+            start = time.perf_counter()
+            token_ids = jnp.ones((num_reqs, ), dtype=jnp.int32)
+            token_ids, = self._device_array((token_ids, ))
+            result = self._compute_and_gather_logprobs(
+                logits, token_ids, self.model_config.max_logprobs)
+            result.logprob_token_ids.block_until_ready()
+            end = time.perf_counter()
+            logger.info("Compilation finished in %.2f [secs].", end - start)
+
+    @staticmethod
+    @functools.partial(jax.jit, static_argnames=("max_logprobs", ))
+    def _compute_and_gather_logprobs(logits, next_tokens, max_logprobs):
+        logprobs = compute_logprobs(logits)
+        return gather_logprobs(logprobs, next_tokens, max_logprobs)
+
     def capture_model(self) -> None:
         if os.getenv("SKIP_JAX_PRECOMPILE", False):
             return
@@ -366,6 +389,7 @@ class TPUModelRunner():
         self._precompile_select_hidden_states()
         self._precompile_compute_logits()
         self._precompile_sampling()
+        self._precompile_gather_logprobs()
 
     @staticmethod
     @functools.partial(jax.jit)
@@ -590,12 +614,18 @@ class TPUModelRunner():
             hidden_states = self.select_hidden_states_fn(
                 hidden_states, inputs[4])
             logits = self.compute_logits_fn(self.state, hidden_states)
+            tpu_sampling_metadata = inputs[3]
             next_tokens = sample(
                 self.rng_params_for_sampling,
                 self.mesh,
                 logits,
-                inputs[3],
+                tpu_sampling_metadata,
             )
+            if tpu_sampling_metadata.logprobs:
+                logprobs = self._compute_and_gather_logprobs(
+                    logits, next_tokens, self.model_config.max_logprobs)
+            else:
+                logprobs = None
 
         num_reqs = self.input_batch.num_reqs
 
@@ -644,12 +674,17 @@ class TPUModelRunner():
             req_state.output_token_ids.append(token_id)
             self.input_batch.num_tokens[i] += 1
 
+        if logprobs is not None:
+            logprobs_lists = logprobs.tolists()
+        else:
+            logprobs_lists = None
+
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=valid_sampled_token_ids,
             spec_token_ids=None,
-            logprobs=None,
+            logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             pooler_output=[],
         )
