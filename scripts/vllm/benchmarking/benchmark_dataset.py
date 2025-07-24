@@ -288,7 +288,7 @@ class MMLUDataset(BenchmarkDataset):
             #     skip_min_output_len_check=output_len is not None,
             # ):
             #     continue
-            if input_len <= prompt_len:
+            if input_len is not None and input_len <= prompt_len:
                 raise ValueError(
                     f"prompt is too short: prompt_len is {prompt_len} but input_len is {input_len}"
                 )
@@ -359,7 +359,7 @@ class MLPerfDataset(BenchmarkDataset):
                 completion_ids) if output_len is None else output_len
             # NOTE (jacobplatin): I don't believe that we filter the MLPerf dataset
             # at all, but it could be done here
-            if input_len <= prompt_len:
+            if input_len is not None and input_len <= prompt_len:
                 raise ValueError(
                     f"prompt is too short: prompt_len is {prompt_len} but input_len is {input_len}"
                 )

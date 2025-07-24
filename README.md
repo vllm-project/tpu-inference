@@ -144,12 +144,6 @@ MODEL_IMPL_TYPE=flax_nnx
 MODEL_IMPL_TYPE=vllm
 ```
 
-To enable profiling:
-
-```
-VLLM_TORCH_PROFILER_DIR=$PWD
-```
-
 To run JAX path without precompiling the model:
 
 ```
@@ -167,6 +161,45 @@ To enable experimental scheduler:
 ```
 EXP_SCHEDULER=1
 ```
+
+### Profiling
+
+There are two ways to profile your workload:
+
+#### Using `VLLM_TORCH_PROFILER_DIR`
+If you set the following environment variable:
+
+```
+VLLM_TORCH_PROFILER_DIR=<DESIRED PROFILING OUTPUT DIR>
+```
+
+vLLM will profile your entire workload, which can work well for toy workloads (like `examples/offline_inference.py`).
+
+#### Using `USE_JAX_PROFILER_SERVER`
+If you set the following environment variable:
+
+```
+USE_JAX_PROFILER_SERVER=True
+```
+
+you can instead manually decide when to capture a profile and for how long, which can helpful if your workload (e.g. E2E benchmarking) is
+large and taking a profile of the entire workload (i.e. using the above method) will generate a massive tracing file.
+
+You can additionally set the desired profiling port (default is `9999`):
+
+```
+JAX_PROFILER_SERVER_PORT=XXXX
+```
+
+In order to use this approach, you can do the following:
+
+1. Run your typical `vllm serve` or `offline_inference` command (making sure to set `USE_JAX_PROFILER_SERVER=True`)
+2. Run your benchmarking command (`python benchmark_serving.py...`)
+3. Once the warmup has completed and your benchmark is running, start a new tensorboard instance with your `logdir` set to the desired output location of your profiles (e.g. `tensorboard --logdir=profiles/llama3-mmlu/`)
+4. Open the tensorboard instance and navigate to the `profile` page (e.g. `http://localhost:6006/#profile`)
+5. Click `Capture Profile` and, in the `Profile Service URL(s) or TPU name` box, enter `localhost:XXXX` where `XXXX` is your `JAX_PROFILER_SERVER_PORT` (default is `9999`)
+
+6. Enter the desired amount of time (in ms) you'd like to capture the profile for and then click `Capture`.   If everything goes smoothly, you should see a success message, and your `logdir` should be populated.
 
 ## Develop on a CPU VM and run docker on a TPU VM
 
