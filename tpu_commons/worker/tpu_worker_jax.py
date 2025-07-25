@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import copy
 import os
 from typing import Callable, Dict, Optional, Tuple, Union
 
@@ -9,13 +8,12 @@ import jaxtyping
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
-                                          get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
+from vllm.v1.outputs import ModelRunnerOutput
 
 from tpu_commons import utils
 from tpu_commons.di.abstracts import (AbstractKVCacheConfig,
@@ -88,7 +86,6 @@ class TPUWorker(AbstractTpuWorker):
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
     def init_device(self):
-        ensure_kv_transfer_initialized(self.vllm_config)
         if not self.devices:
             try:
                 device_indexes = self.vllm_config.additional_config[
@@ -101,6 +98,8 @@ class TPUWorker(AbstractTpuWorker):
                     f"devices={self.devices} | "
                     f"hbm={utils.hbm_usage_gb(self.devices)}Gb")
 
+        # Need to call connector's init after jax.devices.
+        ensure_kv_transfer_initialized(self.vllm_config)
         self.model_runner = TPUModelRunner(self.vllm_config, self.devices)
 
     def determine_available_memory(self) -> int:
@@ -127,20 +126,8 @@ class TPUWorker(AbstractTpuWorker):
         vllm_scheduler_output = adapted_scheduler_output.vllm_scheduler_output
         output = self.model_runner.execute_model(vllm_scheduler_output)
 
+        # With a connector, the scheduler expects output from all workers
         if has_kv_transfer_group():
-            finished_sending, finished_recving = (
-                get_kv_transfer_group().get_finished(
-                    scheduler_output.finished_req_ids))
-            if finished_sending or finished_recving:
-                if output is EMPTY_MODEL_RUNNER_OUTPUT:
-                    output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
-                output.finished_sending = finished_sending
-                output.finished_recving = finished_recving
-
-            # Clear KVConnector state for this step.
-            get_kv_transfer_group().clear_connector_metadata()
-
-            # with a connector, the scheduler expects output from all workers
             return output
 
         return output if self.is_driver_worker else None

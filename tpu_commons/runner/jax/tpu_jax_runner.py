@@ -16,7 +16,6 @@ from jax.sharding import NamedSharding, PartitionSpec
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
-from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils import cdiv
@@ -25,6 +24,8 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.request import Request
+from vllm.v1.worker.kv_connector_model_runner_mixin import \
+    KVConnectorModelRunnerMixin
 
 from tpu_commons import utils as common_utils
 from tpu_commons.logger import init_logger
@@ -56,7 +57,7 @@ DUMMY_METADATA = AttentionMetadata(
 )
 
 
-class TPUModelRunner():
+class TPUModelRunner(KVConnectorModelRunnerMixin):
 
     def __init__(
         self,
@@ -654,7 +655,9 @@ class TPUModelRunner():
     ) -> tuple[AttentionMetadata, ModelRunnerOutput]:
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
-            self.maybe_setup_kv_connector(scheduler_output)
+            if has_kv_transfer_group():
+                return self.kv_connector_no_forward(scheduler_output,
+                                                    self.vllm_config)
 
             # Return empty ModelRunnerOutput if there's no work to do.
             # TODO(fhzhang): We rely on empty cycles to remove requests in input batch. Fix it to reduce overhead.
@@ -674,6 +677,8 @@ class TPUModelRunner():
             self.kv_caches, hidden_states = self.model_fn(
                 self.state, *inputs[:3])
             self.maybe_wait_for_kv_save()
+            finished_sending, finished_recving = (
+                self.get_finished_kv_transfers(scheduler_output))
 
             hidden_states = self.select_hidden_states_fn(
                 hidden_states, inputs[4])
@@ -762,6 +767,8 @@ class TPUModelRunner():
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             pooler_output=[],
+            finished_sending=finished_sending,
+            finished_recving=finished_recving,
         )
         return inputs[2], model_runner_output
 
@@ -836,28 +843,6 @@ class TPUModelRunner():
              self.structured_decode_arange))
 
         return require_structured_out_cpu, grammar_bitmask_cpu, structured_decode_arange
-
-    # TODO(xiang): check this after implementing TPU connector
-    @staticmethod
-    def maybe_setup_kv_connector(scheduler_output: "VllmSchedulerOutput"):
-        # Update KVConnector with the KVConnector metadata forward().
-        if has_kv_transfer_group():
-            kv_connector = get_kv_transfer_group()
-            assert isinstance(kv_connector, KVConnectorBase_V1)
-            assert scheduler_output.kv_connector_metadata is not None
-            kv_connector.bind_connector_metadata(
-                scheduler_output.kv_connector_metadata)
-
-            # Background KV cache transfers happen here.
-            # These transfers are designed to be async and the requests
-            # involved may be disjoint from the running requests.
-            # Do this here to save a collective_rpc.
-            kv_connector.start_load_kv()
-
-    @staticmethod
-    def maybe_wait_for_kv_save() -> None:
-        if has_kv_transfer_group():
-            get_kv_transfer_group().wait_for_save()
 
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
