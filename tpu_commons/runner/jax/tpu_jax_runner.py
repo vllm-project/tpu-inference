@@ -10,20 +10,10 @@ import jax
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
-import vllm.envs as envs
 from flax import nnx
 from jax.sharding import NamedSharding, PartitionSpec
-from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer import (get_kv_transfer_group,
-                                          has_kv_transfer_group)
-from vllm.sequence import IntermediateTensors
-from vllm.utils import cdiv
-from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheSpec)
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
-from vllm.v1.request import Request
 
+import vllm.envs as envs
 from tpu_commons import utils_jax as utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
@@ -43,6 +33,16 @@ from tpu_commons.runner.utils import (ForbidCompile, LatencyTracker,
                                       get_padded_num_reqs_with_upper_limit,
                                       get_padded_token_len, get_req_paddings,
                                       get_token_paddings)
+from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer import (get_kv_transfer_group,
+                                          has_kv_transfer_group)
+from vllm.sequence import IntermediateTensors
+from vllm.utils import cdiv
+from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
+                                        KVCacheSpec)
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
+from vllm.v1.request import Request
 
 logger = init_logger(__name__)
 
@@ -177,7 +177,19 @@ class TPUModelRunner():
 
         self.temperatures_cpu = np.zeros(self.max_num_tokens, dtype=np.float32)
         self.top_ps_cpu = np.zeros(self.max_num_tokens, dtype=np.float32)
-        self.top_ks_cpu = np.zeros(self.max_num_tokens, dtype=np.float32)
+        self.top_ks_cpu = np.zeros(self.max_num_tokens, dtype=np.int32)
+
+        # tensors for structured decoding
+        self.vocab_size = self.model_config.get_vocab_size()
+        self.grammar_bitmask_cpu = np.zeros(
+            (self.max_num_reqs, cdiv(self.vocab_size, 32)),
+            dtype=np.int32,
+        )
+        self.require_structured_out_cpu = np.zeros(
+            (self.max_num_reqs, 1),
+            dtype=np.bool_,
+        )
+        self.structured_decode_arange = np.arange(0, 32, dtype=np.int32)
 
     @functools.partial(jax.jit, static_argnums=(0, ))
     def select_hidden_states_fn(self, hidden_states, indices_do_sample):
@@ -390,6 +402,31 @@ class TPUModelRunner():
         self._precompile_compute_logits()
         self._precompile_sampling()
         self._precompile_gather_logprobs()
+        self._precompile_structured_decoding()
+
+    def _precompile_structured_decoding(self) -> None:
+        logger.info(
+            "Compiling structured_decoding with different input shapes.")
+        start = time.perf_counter()
+        for num_reqs in self.num_reqs_paddings:
+            dummy_logits = jnp.zeros((num_reqs, self.vocab_size),
+                                     dtype=jnp.bfloat16)
+            dummy_require_struct_decoding = self.require_structured_out_cpu[:
+                                                                            num_reqs]
+            dummy_grammar_bitmask = self.grammar_bitmask_cpu[:num_reqs]
+
+            (dummy_logits, dummy_require_struct_decoding,
+             dummy_grammar_bitmask, arange) = self._device_array(
+                 (dummy_logits, dummy_require_struct_decoding,
+                  dummy_grammar_bitmask, self.structured_decode_arange))
+
+            self.structured_decode_fn(dummy_require_struct_decoding,
+                                      dummy_grammar_bitmask, dummy_logits,
+                                      arange)
+            logger.info("  -- num_seqs: %d", num_reqs)
+
+        end = time.perf_counter()
+        logger.info("Compilation finished in %.2f [secs].", end - start)
 
     @staticmethod
     @functools.partial(jax.jit)
@@ -599,9 +636,9 @@ class TPUModelRunner():
             # Return empty ModelRunnerOutput if there's no work to do.
             # TODO(fhzhang): We rely on empty cycles to remove requests in input batch. Fix it to reduce overhead.
             logger.debug(f"Nothing scheduled: {scheduler_output}!")
-            if len(scheduler_output.finished_req_ids) == 0:
-                raise Exception(
-                    "Should not schedule a request that does nothing!")
+            # if len(scheduler_output.finished_req_ids) == 0:
+            # raise Exception(
+            #     "Should not schedule a request that does nothing!")
             return DUMMY_METADATA, EMPTY_MODEL_RUNNER_OUTPUT,
 
         inputs = self._prepare_inputs(scheduler_output)
@@ -614,6 +651,17 @@ class TPUModelRunner():
             hidden_states = self.select_hidden_states_fn(
                 hidden_states, inputs[4])
             logits = self.compute_logits_fn(self.state, hidden_states)
+            if scheduler_output.grammar_bitmask is not None:
+                require_struct_decoding, grammar_bitmask_padded, arange = \
+                    self.prepare_structured_decoding_input(
+                        logits, scheduler_output
+                    )
+                logits = self.structured_decode_fn(
+                    require_struct_decoding,
+                    grammar_bitmask_padded,
+                    logits,
+                    arange,
+                )
             tpu_sampling_metadata = inputs[3]
             next_tokens = sample(
                 self.rng_params_for_sampling,
@@ -689,6 +737,78 @@ class TPUModelRunner():
             pooler_output=[],
         )
         return inputs[2], model_runner_output
+
+    @functools.partial(jax.jit, static_argnums=(0, ))
+    def structured_decode_fn(self, require_struct_decoding: jax.Array,
+                             grammar_bitmask: jax.Array, logits: jax.Array,
+                             arange: jax.Array) -> jax.Array:
+        return jax.lax.cond(
+            jnp.any(require_struct_decoding),
+            lambda: self._apply_grammar_bitmask_kernel(
+                logits, grammar_bitmask, require_struct_decoding, arange),
+            lambda: logits)
+
+    @functools.partial(jax.jit, static_argnums=(0, ))
+    def _apply_grammar_bitmask_kernel(self, logits: jax.Array,
+                                      grammar_bitmask: jax.Array,
+                                      require_struct_decoding: jax.Array,
+                                      arange: jax.Array) -> jax.Array:
+
+        # Unpack the bitmask for the entire batch at once.
+        # grammar_bitmask: (B, N) where B=num_reqs, N=cdiv(vocab_size, 32)
+        # arange: (32,)
+        # (B, N, 1) and (1, 1, 32) broadcast to (B, N, 32)
+        unpacked_bitmask = jnp.right_shift(grammar_bitmask[:, :, None],
+                                           arange[None, None, :]) & 1 == 0
+
+        # Reshape to (B, vocab_size) and apply to logits.
+        # (B, N * 32) -> (B, vocab_size)
+        unpacked_bitmask = unpacked_bitmask.reshape(logits.shape[0],
+                                                    -1)[:, :self.vocab_size]
+
+        masked_logits = jnp.where(unpacked_bitmask, -jnp.inf, logits)
+
+        return jnp.where(require_struct_decoding, masked_logits, logits)
+
+    def prepare_structured_decoding_input(
+        self, logits: jax.Array, scheduler_output: "VllmSchedulerOutput"
+    ) -> Tuple[jax.Array, jax.Array, jax.Array]:
+        grammar_bitmask = scheduler_output.grammar_bitmask
+        assert grammar_bitmask is not None
+        num_reqs, _ = logits.shape
+
+        # Reset pre-allocated tensors
+        self.grammar_bitmask_cpu.fill(0)
+        self.require_structured_out_cpu.fill(0)
+
+        # We receive the structured output bitmask from the scheduler, but the
+        # indices of the requests in the batch may not match the indices of
+        # the bitmask since the scheduler doesn't know how the tpu runner is
+        # ordering the requests in the batch. We need to match the order of
+        # bitmask with the order of requests
+        struct_out_indices: list[int] = []
+        mask_indices: list[int] = []
+        for req_id in self.input_batch.req_ids:
+            mask_index = scheduler_output.structured_output_request_ids.get(
+                req_id)
+            if mask_index is None:
+                continue
+            batch_index = self.input_batch.req_id_to_index[req_id]
+            struct_out_indices.append(batch_index)
+            mask_indices.append(mask_index)
+        self.grammar_bitmask_cpu[struct_out_indices] = grammar_bitmask[
+            mask_indices]
+        # It's not guaranteed that all requests in this batch require
+        # structured output, so create a bool tensor to represent
+        # the requests that need structured output.
+        self.require_structured_out_cpu[struct_out_indices] = True
+
+        require_structured_out_cpu, grammar_bitmask_cpu, structured_decode_arange = self._device_array(
+            (self.require_structured_out_cpu[:num_reqs],
+             self.grammar_bitmask_cpu[:num_reqs],
+             self.structured_decode_arange))
+
+        return require_structured_out_cpu, grammar_bitmask_cpu, structured_decode_arange
 
     # TODO(xiang): check this after implementing TPU connector
     @staticmethod
