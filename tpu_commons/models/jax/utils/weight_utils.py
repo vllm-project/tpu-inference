@@ -72,15 +72,12 @@ class WeightLoader(abc.ABC):
         self.setup()
 
     def setup(self):
-        if self.vllm_config.additional_config.get("model_cache_dir", None):
-            model_name_or_path = self.vllm_config.additional_config[
-                "model_cache_dir"]
-        else:
-            model_name_or_path = self.vllm_config.model_config.model
+        model_name_or_path = self.vllm_config.model_config.model
         self.names_and_weights_generator = hf_model_weights_iterator(
             model_name_or_path=model_name_or_path,
             framework=self.framework,
             filter_regex=self.filter_regex)
+        self.is_verbose = getattr(self.vllm_config.additional_config, "is_verbose", False)
 
     def set_transpose_param_map(self,
                                 transpose_param_dict: Mapping[str,
@@ -113,9 +110,19 @@ class WeightLoader(abc.ABC):
         return param_tensor  # Base case / no-op
 
     abc.abstractmethod
-
-    def load_weights(self, model_for_loading: nnx.Module):
+    def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):
         raise NotImplementedError
+
+    @classmethod
+    def print_param_info(param: nnx.Param, name: str):
+        logger.warning(f"Global shape for {name}: {param.value.shape}"
+                    )
+        logger.warning(f"Sharding for {name}: {param.sharding}"
+                    )
+
+        logger.warning(
+            f"Shape of {name} on a single device: {param.value.addressable_shards[0].data.shape}"
+        )
 
 
 # TODO(xiang): deprecate this, use the multi-thread one instead.
@@ -164,7 +171,6 @@ def get_model_weights_files(model_name_or_path: str) -> Tuple[str, List[str]]:
     """Download and return all local model weights files."""
     weights_files = []
     weights_location = "local"
-    logger.info(f"model_name_or_path = {model_name_or_path}")
     if os.path.isdir(model_name_or_path):
         logger.info(f"Loading weights locally from: {model_name_or_path}")
         weights_files = glob.glob(
@@ -208,7 +214,7 @@ def get_model_weights_files(model_name_or_path: str) -> Tuple[str, List[str]]:
             "Weights files are not downloaded to local disk at once due to insufficient disk space. "
             "They will be downloaded on the fly during loading.")
 
-    # # Sort to ensure the order of files is consistent.
+    # Sort to ensure the order of files is consistent.
     weights_files.sort()
 
     return weights_location, weights_files

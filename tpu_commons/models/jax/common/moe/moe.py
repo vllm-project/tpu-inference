@@ -84,7 +84,7 @@ class Router(nnx.Module):
                                       self.kernel_DE.value)
         weights_TX, selected_experts_TX = jax.lax.top_k(
             router_logits_TE, num_experts_per_tok)
-        if self.cfg.router_act != "sigmoid":
+        if self.cfg.router_act != "sigmoid": # sigmoid does not accept axis argument.
             normalized_weights_TX = router_act(weights_TX.astype(
                 self.cfg.dtype),
                                                axis=-1)
@@ -198,14 +198,12 @@ class MoE(nnx.Module):
                                              dtype=self.cfg.dtype)
         full_weights_TE = jnp.sum(one_hot_indices_TXE * weights_TX[..., None],
                                   axis=1)
+        
+        # Some models use the routing scores to weight the data instead of 
+        # weighting the expert outputs.
         if self.cfg.apply_expert_weight_before_computation:
             with jax.named_scope("pre_computing_weight"):
-                # need optimization for the out-product
-
-                x_TED = jnp.repeat(x_TD[:, None, :], num_experts, 1)
-                full_weights_TED = full_weights_TE[..., None]
-            # TODO: need fix the mod_fwd call for pre_weighting
-            return self._moe_fwd_reapply_expert_weight(x_TED, full_weights_TED,
+                return self._moe_fwd_preapply_router_weights(x_TD, full_weights_TE,
                                                        op_mode)
         else:
             return self._moe_fwd(x_TD, full_weights_TE, op_mode)
@@ -240,21 +238,27 @@ class MoE(nnx.Module):
             dtype=self.cfg.dtype,
             sharding=self.efd_sharding)
 
-    def _moe_fwd_reapply_expert_weight(self, x_TED: jax.Array, weights_TED,
+    def _moe_fwd_preapply_router_weights(self, x_TD: jax.Array, weights_TE,
                                        op_mode):
-        """Performs the forward pass of the MoE experts with expert weights pre-applied.
+        """Performs the forward pass of the MoE experts with router weights pre-applied to the inputs.
 
         Args:
-            x_TED: Input array for the experts, shape (sequence_length, num_experts, d_model).
-            weights_TED: Expert weights, shape (sequence_length, num_experts).
+            x_TD: Input array for the experts, shape (sequence_length, hidden_size).
+            weights_TE: Router weights, shape (sequence_length, num_experts).
             op_mode: The operation mode ('prefill' or 'generate') to determine sharding.
 
         Returns:
-            Output array of shape (batch_size, sequence_length, d_model).
+            Output array of shape (sequence_length, d_model).
         """
+        # Data needs to be replicated since it will be weighted by the router
+        # scores before being passed to each expert.
+        num_experts = weights_TE.shape[-1]
+        x_TED = jnp.repeat(x_TD[:, None, :], num_experts, 1)
+        weights_TED = weights_TE[..., None]
         x_TED = jnp.asarray(x_TED, self.cfg.dtype)
         with jax.named_scope("activation_expert_weighting"):
             x_TED = x_TED * weights_TED
+
         x_TED = nnx.with_sharding_constraint(x_TED,
                                              self.activation_ffw_ted[op_mode])
         act = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_ACT.value)
@@ -277,12 +281,12 @@ class MoE(nnx.Module):
         """Performs the basic forward pass of the MoE experts without dropping or megablocks.
 
         Args:
-            x: Input array for the experts, shape (sequence_length, d_model) or (sequence_length, num_experts_per_tok, d_model) if pre-weighted.
+            x: Input array for the experts, shape (sequence_length, d_model).
             weights: Weights for combining expert outputs, shape (sequence_length, num_experts).
             op_mode: The operation mode ('prefill' or 'generate') to determine sharding.
 
         Returns:
-            Output array of shape (batch_size, sequence_length, d_model).
+            Output array of shape (sequence_length, d_model).
         """
         x = jnp.asarray(x, self.cfg.dtype)
         x_TD = nnx.with_sharding_constraint(x, self.activation_ffw_td[op_mode])

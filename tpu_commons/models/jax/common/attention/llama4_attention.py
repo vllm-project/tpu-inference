@@ -17,7 +17,7 @@ logger = init_logger(__name__)
 
 class L2Norm(nnx.Module):
     """
-  Implementation of L2Norm in JAX (taken from MaxText repo - maxtext/MaxText/layers/attentions.py).
+  Implementation of L2 Norm in JAX (taken from MaxText repo - maxtext/MaxText/layers/attentions.py).
 
   Attributes:
     eps: float, epsilon used for numerical stability (default value should be ok for most cases).
@@ -39,7 +39,7 @@ Llama4AttentionConfig = make_dataclass(
      (HuggingFaceArgNames.TEMPERATURE_TUNING_FLOOR_SCALE.value, float)],
     bases=(AttentionConfig, ),
     kw_only=True)
-Llama4AttentionConfig.__doc__ = f"""Llama4-specific attention layer which performs layer norm to the Query and Keys after RoPE.
+Llama4AttentionConfig.__doc__ = f"""Llama4-specific attention layer which performs layer norm on the Query and Keys after RoPE.
 Additional Args:
   {HuggingFaceArgNames.USE_QK_NORM.value}: bool whether to use Llama4 normalization of query & keys
   {HuggingFaceArgNames.TEMPERATURE_TUNING.value}: bool whether to use temperature tuning
@@ -63,9 +63,11 @@ class Llama4Attention(Attention):
         """Performs the forward pass of the attention module.
 
         This method computes the attention output by projecting the input `x`
-        to queries, keys, and values, applying RoPE, performing scaled
-        dot-product attention, and projecting the result back to the model
-        dimension. It updates and utilizes a KV cache.
+        to queries, keys, and values, applying RoPE and L2Norm if specified,
+        performing scaled dot-product attention, and projecting the results
+        back to the model dimension. 
+        If no RoPE (NoPE) is specified, one can also perform temperature tuning
+        which is useful to combat dilution of attention scores in long-context attention.
 
         Args:
             x: The input tensor of shape `(seq_len, d_model)`.
@@ -91,13 +93,14 @@ class Llama4Attention(Attention):
         rope_theta = getattr(self.cfg, HuggingFaceArgNames.ROPE_THETA.value)
         H = getattr(self.cfg, HuggingFaceArgNames.HEAD_DIM.value)
         l2_norm = L2Norm()
-        # logger.warning(f"Using RoPE?? {use_attention_rope}")
+
         with jax.named_scope("q_proj"):
             q_TNH = jnp.einsum('TD,DNH -> TNH', x_q_TD,
                                self.kernel_q_proj_DNH.value)
             if use_attention_rope:
                 q_TNH = apply_rope(q_TNH, md.input_positions, H, rope_theta,
                                    rope_scaling)
+                
                 # Apply normaliation after RoPE
                 if self.cfg.use_qk_norm:
                     q_TNH = l2_norm(q_TNH)
@@ -118,6 +121,7 @@ class Llama4Attention(Attention):
             if use_attention_rope:
                 k_SKH = apply_rope(k_SKH, md.input_positions, H, rope_theta,
                                    rope_scaling)
+                
                 # Apply normaliation after RoPE
                 if self.cfg.use_qk_norm:
                     k_SKH = l2_norm(k_SKH)

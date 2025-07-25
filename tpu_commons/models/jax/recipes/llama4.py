@@ -15,7 +15,7 @@ import tpu_commons.models.jax.common.sharding as sharding
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.common.attention.attention import AttentionMetadata
 from tpu_commons.models.jax.common.attention.llama4_attention import \
-    Llama4AttentionConfig
+    Llama4Attention, Llama4AttentionConfig
 from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.constants import RouterType
 from tpu_commons.models.jax.common.kv_cache import KVCacheType
@@ -34,19 +34,6 @@ from tpu_commons.models.jax.utils.weight_utils import WeightLoader, get_param
 logger = init_logger(__name__)
 pp = pprint.PrettyPrinter(depth=6)
 string_buffer = io.StringIO()
-
-
-def print_param_info(param: nnx.Param, name: str):
-    logger.warning(f"Global shape for {name}: {param.value.shape}"
-                   )  # Note: sharding is a PartitionSpec
-    logger.warning(f"Sharding for {name}: {param.sharding}"
-                   )  # Note: sharding is a PartitionSpec
-
-    # Print tensor shape for a single device
-    # buffers = [shard.data for shard in my_array.addressable_shards]
-    logger.warning(
-        f"Shape of {name} on a single device: {param.value.addressable_shards[0].data.shape}"
-    )
 
 
 @dataclass
@@ -131,7 +118,7 @@ class Llama4ServingConfig(Config):
 
 
 @dataclass(frozen=True)
-class Llama4Config(RecipeConfig):
+class Llama4RecipeConfig(RecipeConfig):
     model: Llama4ModelConfig = field(default_factory=Llama4ModelConfig)
     sharding: ShardingConfig = field(
         default_factory=ShardingConfig,
@@ -142,10 +129,16 @@ class Llama4Config(RecipeConfig):
 
 class Llama4Scout(Model):
 
-    def __init__(self, vllm_config: VllmConfig, rng: PRNGKey, mesh: Mesh):
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 rng: PRNGKey,
+                 mesh: Mesh,
+                 param_factory: ParamFactory | None = None):
         self.vllm_config = vllm_config
         self.rng = nnx.Rngs(rng)
         self.mesh = mesh
+        self.param_factory = param_factory
+        self.is_verbose = getattr(self.vllm_config.additional_config, "is_verbose", False)
         try:
             strategy_dict = self.vllm_config.additional_config["sharding"][
                 "sharding_strategy"]
@@ -155,14 +148,12 @@ class Llama4Scout(Model):
                                  mesh=self.mesh,
                                  default_rules_cls=Llama4ShardingRulesConfig,
                                  vllm_config=self.vllm_config)
-        self.use_random_init = self.vllm_config.additional_config.get(
-            "random_weights", False)
-        self.cfg = Llama4Config(
+        self.cfg = Llama4RecipeConfig(
             model=Llama4ModelConfig(vllm_config=self.vllm_config),
             sharding=self.sharding.sharding_cfg,
             serving=Llama4ServingConfig(vllm_config=self.vllm_config))
+        
         logger.info(f"Using the following config:\n{self.cfg}")
-        # TODO: write the shardings to a JSON in the respective experiment dir.
         logger.info(
             f"Using the following sharding overrides:\n{self.sharding}")
         self.mesh = self.sharding.mesh
@@ -171,13 +162,14 @@ class Llama4Scout(Model):
         self._init_layers()
 
     def _init_layers(self):
-        param_factory = ParamFactory(
-            kernel_initializer=nnx.initializers.xavier_normal(),
-            scale_initializer=nnx.initializers.ones,
-            random_init=self.use_random_init)
+        if not self.param_factory:
+            self.param_factory = ParamFactory(
+                kernel_initializer=nnx.initializers.xavier_normal(),
+                scale_initializer=nnx.initializers.ones,
+                random_init=self.use_random_init)
         self.embedder = Embedder(cfg=self.cfg.model.emb,
                                  mesh=self.mesh,
-                                 param_factory=param_factory,
+                                 param_factory=self.param_factory,
                                  sharding_cfg=self.cfg.sharding)
         self.embedder.generate_kernel(self.rng)
 
@@ -202,9 +194,9 @@ class Llama4Scout(Model):
             block = SharedExpertsTransformerBlock(
                 cfg=block_cfg,
                 block_type=block_type,
-                attention_type="llama4",
+                attention_cls=Llama4Attention,
                 use_attention_rope=use_attention_rope,
-                param_factory=param_factory,
+                param_factory=self.param_factory,
                 mesh=self.mesh,
                 sharding_cfg=self.cfg.sharding)
             self.layers.append(block)
@@ -215,7 +207,7 @@ class Llama4Scout(Model):
         self.final_norm = RMSNorm(
             dims=self.cfg.model.hidden_size,
             mesh=self.mesh,
-            param_factory=param_factory,
+            param_factory=self.param_factory,
             sharding_cfg=self.cfg.sharding,
             epsilon=self.cfg.model.layers.rms_norm_eps,
             with_scale=True,
@@ -225,10 +217,11 @@ class Llama4Scout(Model):
 
         self.lm_head = Embedder(cfg=self.cfg.model.emb,
                                 mesh=self.mesh,
-                                param_factory=param_factory,
+                                param_factory=self.param_factory,
                                 sharding_cfg=self.cfg.sharding)
         self.lm_head.generate_kernel(self.rng)
-        self._print_model_architecture()
+        if self.is_verbose:
+            self._print_model_architecture()
 
     def _print_model_architecture(self):
         num_display_layers = max(self.cfg.model.interleave_moe_layer_step,
@@ -246,17 +239,13 @@ class Llama4Scout(Model):
         logger.info("\n### LM Head ###")
         nnx.display(self.lm_head)
 
-    def load_weights(self, rng: PRNGKey, cache_dir: Optional[str] = None):
-        try:
-            use_random_weights = self.vllm_config.additional_config[
-                "random_weights"]
-            logger.warning(
-                "Using randomly initialized weights instead of loading parameter weights."
-            )
-            return
-        except KeyError:
-            use_random_weights = False
-        self.weight_loader.load_weights(self)
+
+    def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):
+        self.rng = nnx.Rngs(rng)
+        weight_loader = Llama4WeightLoader(vllm_config=self.vllm_config,
+                                           model_config=self.cfg.model)
+        weight_loader.load_weights(self)
+
 
     def __call__(
         self,
@@ -282,7 +271,6 @@ class Llama4Scout(Model):
         logits = jnp.dot(hidden_states,
                          self.lm_head.input_embedding_table_DV.value)
         return logits
-        return self.lm_head.decode(hidden_states)
 
 
 class Llama4WeightLoader(WeightLoader):
@@ -370,105 +358,63 @@ class Llama4WeightLoader(WeightLoader):
                 loaded_key, loaded_key)
         return mapped_key
 
-    def load_weights(self, model_for_loading: nnx.Module):
+    def load_weights(self, model_for_loading: nnx.Module, is_verbose: bool = False):
         model_params = nnx.state(model_for_loading)
-        # names_and_weights = [f"name: {name}; shape = {weight.shape}" for (name, weight) in  self.names_and_weights_generator]
-        # logger.info(f"Number of loaded weights: {len(names_and_weights)}")
-        # logger.info(f"Loaded weights are the following:\n{pp.pformat(names_and_weights)}")
-        logger.warning(
-            f"loaded_to_stand/ardized_keys: {self.loaded_to_standardized_keys}"
-        )
-        cumulative_global_memory = 0
-        cumulative_local_memory = 0
+
+        def _map_llama4_gate_up_proj(loaded_name: str,
+                                      loaded_weight: jax.Array):
+            """HF's gate_up_proj is a fused tensor of gate and up projections. It needs to be split."""
+            # gate_proj is first & up_proj is second
+            split_weights = jnp.split(loaded_weight, 2, axis=-1) 
+
+            for split_type in ["gate", "up"]:
+                split_loaded_name = loaded_name.replace(
+                    "gate_up_proj", f"{split_type}_proj")
+                if split_type == "gate":
+                    mapped_name = "layers.*.moe.kernel_gating_EDF"
+                    loaded_weight = split_weights[0]
+                else:
+                    mapped_name = "layers.*.moe.kernel_up_proj_EDF"
+                    loaded_weight = split_weights[1]
+                    
+                layer_num = re.search(r"layers\.(\d+)",
+                                        split_loaded_name).group(1)
+                mapped_name = re.sub(r"layers\.\*",
+                                            f"layers.{layer_num}",
+                                            mapped_name)
+                mapped_model_weight = get_param(model_params,
+                                                mapped_name)
+                if loaded_name.endswith(".bias"):
+                    loaded_weight = self.reshape_params(
+                        loaded_name, loaded_weight, "bias")
+                else:
+                    loaded_weight = self.reshape_params(
+                        loaded_name, loaded_weight, "weight")
+                    loaded_weight = self.transpose_params(
+                        loaded_name, loaded_weight)
+                if mapped_model_weight.value.shape != loaded_weight.shape:
+                    raise ValueError(
+                        f"Loaded shape for {split_loaded_name}: {loaded_weight.shape} "
+                        f"does not match model shape for {mapped_name}: {mapped_model_weight.value.shape}!"
+                    )
+                mapped_model_weight.value = shard_put(
+                    loaded_weight,
+                    mapped_model_weight.sharding.spec,
+                    mesh=model_for_loading.mesh)
+                logger.info(
+                    f"{split_loaded_name}: {loaded_weight.shape}  -->  {mapped_name}: {mapped_model_weight.value.shape}"
+                )
+                if is_verbose:
+                    WeightLoader.print_param_info(mapped_model_weight, mapped_name)
+                            
         with jax.default_device(jax.devices("cpu")[0]):
             for loaded_name, loaded_weight in self.names_and_weights_generator:
-                old_param_name = loaded_name
-                # if loaded_name.endswith(".weight"):
-                #     loaded_name = loaded_name.removesuffix(".weight")
-                logger.info(
-                    f"Loaded parameter {loaded_name}: {loaded_weight.shape}")
                 if "gate_up_proj" in loaded_name:
-                    # HF's gate_up_proj is a fused tensor of gate and up projections.
-                    # It needs to be split.
-                    gate_w, up_w = jnp.split(loaded_weight, 2, axis=-1)
-
-                    # Handle gate weights
-                    gate_loaded_name = loaded_name.replace(
-                        "gate_up_proj", "gate_proj")
-                    gate_mapped_name = "layers.*.moe.kernel_gating_EDF"
-                    layer_num = re.search(r"layers\.(\d+)",
-                                          gate_loaded_name).group(1)
-                    gate_mapped_name = re.sub(r"layers\.\*",
-                                              f"layers.{layer_num}",
-                                              gate_mapped_name)
-                    gate_model_weight = get_param(model_params,
-                                                  gate_mapped_name)
-                    # gate_w = gate_w.transpose((0, 2, 1))
-                    if gate_model_weight.value.shape != gate_w.shape:
-                        raise ValueError(
-                            f"Loaded shape for {gate_loaded_name}: {gate_w.shape} "
-                            f"does not match model shape for {gate_mapped_name}: {gate_model_weight.value.shape}!"
-                        )
-                    gate_model_weight.value = shard_put(
-                        gate_w,
-                        gate_model_weight.sharding.spec,
-                        mesh=model_for_loading.mesh)
-                    gate_model_weight.value.block_until_ready()
-                    logger.info(
-                        f"{gate_loaded_name}: {loaded_weight.shape}  -->  {gate_mapped_name}: {gate_model_weight.value.shape}"
-                    )
-                    del gate_w
-                    print_param_info(gate_model_weight, "gate_proj")
-                    cumulative_global_memory += gate_model_weight.value.nbytes / 1e9
-                    cumulative_local_memory += gate_model_weight.value.addressable_shards[
-                        0].data.nbytes / 1e9
-                    logger.info(
-                        f"Cumulative global memory: {cumulative_global_memory} GB"
-                    )
-                    logger.info(
-                        f"Cumulative local memory: {cumulative_local_memory} GB"
-                    )
-
-                    # Handle up weights
-                    up_loaded_name = loaded_name.replace(
-                        "gate_up_proj", "up_proj")
-                    up_mapped_name = "layers.*.moe.kernel_up_proj_EDF"
-                    up_mapped_name = re.sub(r"layers\.\*",
-                                            f"layers.{layer_num}",
-                                            up_mapped_name)
-                    up_model_weight = get_param(model_params, up_mapped_name)
-                    # up_w = up_w.transpose((0, 2, 1))
-                    if up_model_weight.value.shape != up_w.shape:
-                        raise ValueError(
-                            f"Loaded shape for {up_loaded_name}: {up_w.shape} "
-                            f"does not match model shape for {up_mapped_name}: {up_model_weight.value.shape}!"
-                        )
-                    up_model_weight.value = shard_put(
-                        up_w,
-                        up_model_weight.sharding.spec,
-                        mesh=model_for_loading.mesh)
-                    up_model_weight.value.block_until_ready()
-                    del up_w
-                    print_param_info(up_model_weight, "up_proj")
-                    cumulative_global_memory += up_model_weight.value.nbytes / 1e9
-                    cumulative_local_memory += up_model_weight.value.addressable_shards[
-                        0].data.nbytes / 1e9
-                    logger.info(
-                        f"{up_loaded_name}: {loaded_weight.shape}  -->  {up_mapped_name}: {up_model_weight.value.shape}"
-                    )
-                    logger.info(
-                        f"Cumulative global memory: {cumulative_global_memory} GB"
-                    )
-                    logger.info(
-                        f"Cumulative local memory: {cumulative_local_memory} GB"
-                    )
+                    _map_llama4_gate_up_proj(loaded_name, loaded_weight)
                     continue
-
                 mapped_name = self.map_loaded_to_standardized_name(loaded_name)
                 model_weight = get_param(model_params, mapped_name)
-                logger.info(
-                    f"{old_param_name}: {loaded_weight.shape}  -->  {mapped_name}: {model_weight.value.shape}"
-                )
+                
                 if loaded_name.endswith(".bias"):
                     loaded_weight = self.reshape_params(
                         loaded_name, loaded_weight, "bias")
@@ -482,19 +428,11 @@ class Llama4WeightLoader(WeightLoader):
                         f"Loaded shape for {loaded_name}: {loaded_weight.shape} "
                         f"does not match model shape for {mapped_name}: {model_weight.value.shape}!"
                     )
-                # logger.info(f"Transformed parameter {loaded_name} to {mapped_name}: {loaded_weight.shape} --> {model_weight.value.shape}")
+                logger.info(f"Transformed parameter {loaded_name} to {mapped_name}: {loaded_weight.shape} --> {model_weight.value.shape}")
                 model_weight.value = shard_put(loaded_weight,
                                                model_weight.sharding.spec,
                                                mesh=model_for_loading.mesh)
-                model_weight.value.block_until_ready()
-                del loaded_weight
-                print_param_info(model_weight, loaded_name)
-                cumulative_global_memory += model_weight.value.nbytes / 1e9
-                cumulative_local_memory += model_weight.value.addressable_shards[
-                    0].data.nbytes / 1e9
-                logger.info(
-                    f"Cumulative global memory: {cumulative_global_memory} GB")
-                logger.info(
-                    f"Cumulative local memory: {cumulative_local_memory} GB")
-        # TODO: validate that all of the model_params were accounted for as well.
+                if is_verbose:
+                    WeightLoader.print_param_info(model_weight, loaded_name)
+
         nnx.update(model_for_loading, model_params)

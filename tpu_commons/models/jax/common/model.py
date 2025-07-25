@@ -1,6 +1,6 @@
 import abc
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import jax
 from flax import nnx
@@ -10,7 +10,8 @@ from vllm.config import VllmConfig
 
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.common.attention.attention import AttentionMetadata
-from tpu_commons.models.jax.common.base import Config
+from tpu_commons.models.jax.common.base import (Config,
+                                                ParamFactory)
 from tpu_commons.models.jax.common.kv_cache import KVCacheType
 from tpu_commons.models.jax.common.layers import EmbedderConfig
 from tpu_commons.models.jax.common.transformer_block import \
@@ -34,26 +35,34 @@ class Model(nnx.Module, abc.ABC):
 
     @abc.abstractmethod
     def __call__(self,
-                 is_prefill: bool,
-                 do_sampling: bool,
                  kv_caches: List[KVCacheType],
                  input_ids: jax.Array,
                  attention_metadata: AttentionMetadata,
-                 temperatures: jax.Array = None,
-                 top_ps: jax.Array = None,
-                 top_ks: jax.Array = None,
-                 *args,
-                 **kwargs) -> Tuple[List[KVCacheType], jax.Array, jax.Array]:
+                 *args) -> Tuple[List[KVCacheType], jax.Array, jax.Array]:
         raise NotImplementedError
 
-    def load_weights(self, rng_key: jax.Array):
-        try:
-            use_random_weights = self.vllm_config.additional_config[
-                "random_weights"]
-            logger.warning(
-                "Using randomly initialized weights instead of loading parameter weights."
-            )
-            return
-        except KeyError:
-            use_random_weights = False
-        self.weight_loader.load_weights(self)
+    @abc.abstractmethod
+    def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):
+        raise NotImplementedError
+
+    @classmethod
+    def create_model_with_random_weights(cls, vllm_config: VllmConfig,
+                                         rng: jax.Array, mesh: Mesh):
+        """to create a model with random weights."""
+        logger.info("Initializing model with random weights.")
+        param_factory = ParamFactory(
+            kernel_initializer=nnx.initializers.xavier_normal(),
+            scale_initializer=nnx.initializers.ones,
+            random_init=True)
+        return cls(vllm_config, rng, mesh, param_factory)
+
+    @classmethod
+    def create_model_for_checkpoint_loading(cls, vllm_config: VllmConfig,
+                                            rng: jax.Array, mesh: Mesh):
+        """to create a model with abstract shapes for checkpoint loading."""
+        logger.info("Initializing abstract model for checkpoint loading.")
+        param_factory = ParamFactory(
+            kernel_initializer=nnx.initializers.xavier_normal(),
+            scale_initializer=nnx.initializers.ones,
+            random_init=False)
+        return cls(vllm_config, rng, mesh, param_factory)

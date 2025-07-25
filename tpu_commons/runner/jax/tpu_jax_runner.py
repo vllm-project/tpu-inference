@@ -949,7 +949,6 @@ class TPUModelRunner():
         padded_num_reqs = runner_utils.get_padded_num_reqs_with_upper_limit(
             num_reqs, self.max_num_reqs)
         logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
-        logger.warning(f"logits_indices = {logits_indices}")
         num_seqs = np.array([num_reqs])
 
         # Put to device

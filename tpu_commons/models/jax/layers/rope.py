@@ -29,27 +29,21 @@ def apply_rope(
         timescale = apply_rope_scaling(timescale, rope_scaling)
 
     # Prepare for rotation by calculating sin and cos values
-    # `sinusoid_inp` gets shape (batch, seq_len, head_dim/2)
+    # `sinusoid_inp` gets shape (batch * seq_len, head_dim/2)
     sinusoid_inp = positions[..., jnp.newaxis] * timescale[jnp.newaxis, :]
-    # Broadcast over the 'heads' dimension, assuming shape (batch, heads, seq, dim)
+    
+    # Broadcast over the 'heads' dimension, assuming shape (batch*seq, heads, head_dim)
     sinusoid_inp = sinusoid_inp[:, jnp.newaxis, ...]
     sin = jnp.sin(sinusoid_inp)
     cos = jnp.cos(sinusoid_inp)
 
-    # Handle potentially padded inputs
-    padded_head_dim = inputs.shape[-1]
-
-    # Slice the part of the input that will be rotated
-    rotary_inputs = inputs[..., :head_dim]
-
     # Reshape to group adjacent features for rotation, matching new_apply_rope
+    rotary_inputs = inputs[..., :head_dim] # Take just the non-padded amount.
     reshaped_inputs = rotary_inputs.reshape(*rotary_inputs.shape[:-1], -1, 2)
-
-    # Split into pairs for rotation
+    
+    # Apply the rotation
     first_half = reshaped_inputs[..., 0]
     second_half = reshaped_inputs[..., 1]
-
-    # Apply the rotation
     first_part = first_half * cos - second_half * sin
     second_part = second_half * cos + first_half * sin
 
@@ -57,10 +51,10 @@ def apply_rope(
     out_stacked = jnp.stack([first_part, second_part], axis=-1)
     out = out_stacked.reshape(rotary_inputs.shape)
 
-    # If the original input was padded, pad the output with zeros to match
+    # If the original input was padded, pad the output with zeros to match.
+    padded_head_dim = inputs.shape[-1]
     if padded_head_dim > head_dim:
         pad_width = padded_head_dim - head_dim
-        # Create a padding configuration that only pads the final dimension
         pad_config = [(0, 0)] * (out.ndim - 1) + [(0, pad_width)]
         out = jnp.pad(out, pad_config)
 
@@ -123,7 +117,6 @@ def apply_longrope(
 
 def apply_rope_scaling(freqs: jax.Array, rope_scaling: Dict[str,
                                                             Any]) -> jax.Array:
-    # Seems to match: https://github.com/huggingface/transformers/blob/v4.53.2/src/transformers/modeling_rope_utils.py#L385
     # Values obtained from grid search
     scale_factor = rope_scaling.get("scale_factor", 8.0)
     low_freq_factor = rope_scaling.get("low_freq_factor", 1.0)
