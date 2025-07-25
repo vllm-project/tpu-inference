@@ -181,7 +181,7 @@ class TestLlamaForCausalLM:
         model = LlamaForCausalLM.create_model_with_random_weights(
             vllm_config=mock_vllm_config_8b, rng=rng, mesh=mesh)
 
-        embedding_weight = model.embedder.input_embedding_table_DV.value
+        embedding_weight = model.embedder.input_embedding_table_VD.value
         attention_q_kernel = model.layers[0].attn.kernel_q_proj_DNH.value
         final_norm_scale = model.final_norm.scale.value
 
@@ -235,7 +235,7 @@ class TestLlama3WeightLoader:
         ("model.layers.15.self_attn.q_proj",
          "layers.15.attn.kernel_q_proj_DNH"),
         ("model.layers.0.mlp.down_proj", "layers.0.mlp.kernel_down_proj_FD"),
-        ("model.embed_tokens", "embedder.input_embedding_table_DV"),
+        ("model.embed_tokens", "embedder.input_embedding_table_VD"),
         ("model.norm", "final_norm.scale"),
         ("lm_head", "lm_head.input_embedding_table_DV"),
         ("unmapped.key.name", "unmapped.key.name"),
@@ -251,8 +251,7 @@ class TestLlama3WeightLoader:
         vllm_config = MockVllmConfig("llama3-8b-small-test",
                                      random_weights=False)
 
-        # Create a model instance but override its config to use the small one
-        # and then initialize its layers for the test.
+        # Create a model instance but override its config for the test.
         with patch(
                 "tpu_commons.models.jax.recipes.llama3.LlamaForCausalLM._init_layers",
                 return_value=None):
@@ -265,27 +264,32 @@ class TestLlama3WeightLoader:
 
         loader = Llama3WeightLoader(vllm_config=vllm_config,
                                     model_config=small_model_config)
-        # vocab_size=128, hidden_size=32
+
+        # Original weight shape is (vocab_size, hidden_size)
+        original_weight = jnp.ones((128, 32))
         dummy_weights = [
-            ("model.embed_tokens.weight", jnp.ones((128, 32))),
+            ("model.embed_tokens.weight", original_weight),
         ]
         loader.names_and_weights_generator = dummy_weights
 
-        # Mock get_param to return a mock param with the correct shape for the model
-        mock_param = MockParam(shape=(32, 128))
+        # Mock get_param to return a mock param with the target shape (hidden_size, vocab_size)
+        mock_param = MockParam(shape=(128, 32))
 
         with patch("tpu_commons.models.jax.recipes.llama3.get_param", return_value=mock_param), \
-             patch("tpu_commons.models.jax.recipes.llama3.shard_put", return_value=jnp.ones(mock_param.value.shape)) as mock_shard_put, \
-             patch("flax.nnx.update") as mock_update:
+            patch("tpu_commons.models.jax.recipes.llama3.shard_put", return_value=jnp.ones(mock_param.value.shape)) as mock_shard_put, \
+            patch("flax.nnx.update") as mock_update:
 
+            # This will now pass after the code fix
             loader.load_weights(model)
 
-            # Assert that shard_put was called with the transposed weight
+            # Assert that shard_put was called with the correctly transposed weight
             mock_shard_put.assert_called_once()
-            transposed_weight = dummy_weights[0][1].T
-            # Check shape of the array passed to shard_put
-            assert mock_shard_put.call_args[0][
-                0].shape == transposed_weight.shape
+
+            # Get the actual array passed to shard_put
+            called_with_weight = mock_shard_put.call_args[0][0]
+
+            # Check if the shape of the array passed to shard_put matches the model's expected shape.
+            assert called_with_weight.shape == mock_param.value.shape
 
             # Assert that the model state was updated
             mock_update.assert_called_once()
