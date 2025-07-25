@@ -70,7 +70,7 @@ class TPUWorker(AbstractTpuWorker):
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         self.profile_dir)
 
-        logger.info(f"Using devices: {self.devices}")
+        logger.info(f"Pre-sliced devices: {self.devices}")
 
         use_jax_profiler_server = os.getenv("USE_JAX_PROFILER_SERVER", False)
         if use_jax_profiler_server:
