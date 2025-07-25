@@ -107,10 +107,7 @@ class VllmModelWrapper():
 
         lora_manager = None
         if vllm_config_for_load.lora_config is not None:
-            # xw32: before load_lora_model, `model` has type Qwen2ForCausalLM. It's the same after loading the model.
-            print(
-                f'xw32 vllm_model_wrapper.load_weights {vllm_model=}, {vllm_config_for_load.model_config=}'
-            )
+            # replace the layer with LoRA layers.
             lora_manager, vllm_model = load_lora_model(
                 vllm_model,
                 vllm_config_for_load.model_config,
@@ -162,7 +159,8 @@ class VllmModelWrapper():
                         "inputs_embeds": None,
                     },
                     tie_weights=False,
-                    strict=True)
+                    strict=True,
+                )
                 vllm_model_wrapper_context = get_vllm_model_wrapper_context()
                 new_kv_caches = vllm_model_wrapper_context.kv_caches
             # Wrap the hidden_states from torch land into a JaxValue for the jax

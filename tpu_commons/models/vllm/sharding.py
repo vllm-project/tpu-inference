@@ -100,9 +100,9 @@ def _extract_all_params_buffers(m: torch.nn.Module):
     params = {}
     buffers = {}
 
-    for name, param in m.named_parameters():
+    for name, param in m.named_parameters(remove_duplicate=False):
         params[name] = param
-    for name, buf in m.named_buffers():
+    for name, buf in m.named_buffers(remove_duplicate=False):
         buffers[name] = buf
 
     return params, buffers
