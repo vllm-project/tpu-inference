@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import gc
 import tempfile
 
 import jax
@@ -35,6 +36,11 @@ REPLACED_MODULE_NAMES = {
     "MergedColumnParallelLinear",
 }
 
+JAX_REPLACED_MODULE_NAMES = {
+    "VllmAttention", "QKVParallelLinear", "MergedColumnParallelLinear",
+    "FusedMoE"
+}
+
 SINGLE_CHIP_TEST_MODELS = {
     "Qwen/Qwen2-1.5B-Instruct",
 }
@@ -48,7 +54,45 @@ MULTI_CHIP_TEST_MODELS = {
     "Qwen/Qwen2-1.5B-Instruct",
     "meta-llama/Llama-3.1-8B-Instruct",
 ])
+def test_vllm_model_loader(model):
+    breakpoint()
+    vllm_config = _setup_environment(model)
+    # Workaround since it's converted in platforms/tpu_jax.py
+    vllm_config.model_config.dtype = torch.bfloat16
+
+    from tpu_commons.models.vllm.vllm_model_wrapper import VllmModelWrapper
+
+    devices = jax.devices()
+    axis_names = ("data", "model")
+    mesh_shape = (1, len(devices))
+    mesh = jax.make_mesh(mesh_shape, axis_names)
+
+    rng = jax.random.key(123)
+    model = VllmModelWrapper(
+        vllm_config=vllm_config,
+        rng=rng,
+        mesh=mesh,
+    )
+    # Partition happens during weight loading.
+    _ = model.load_weights()
+
+    if mesh is not None:
+        for _, module in model.model.named_modules():
+            fqn = module.__class__.__qualname__
+            assert fqn not in JAX_REPLACED_MODULE_NAMES, \
+                f"Module {fqn} should be replaced by JAX version, " \
+                "please check the TPU backend configuration."
+    del model
+    gc.collect()
+    print(jax.live_arrays())
+
+
+@pytest.mark.parametrize("model", [
+    "Qwen/Qwen2-1.5B-Instruct",
+    "meta-llama/Llama-3.1-8B-Instruct",
+])
 def test_tpu_model_loader(model):
+    breakpoint()
     vllm_config = _setup_environment(model)
     # Workaround since it's converted in platforms/tpu_jax.py
     vllm_config.model_config.dtype = torch.bfloat16
@@ -62,8 +106,11 @@ def test_tpu_model_loader(model):
                               mesh=mesh)
 
     if mesh is not None:
-        for name, module in model.named_modules():
+        for _, module in model.named_modules():
             fqn = module.__class__.__qualname__
             assert fqn not in REPLACED_MODULE_NAMES, \
                 f"Module {fqn} should be replaced by JAX version, " \
                 "please check the TPU backend configuration."
+    del model
+    gc.collect()
+    print(jax.live_arrays())
