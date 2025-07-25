@@ -525,6 +525,11 @@ class DeepSeekV3WeightLoader(WeightLoader):
         fp8_weights = {}
         with jax.default_device(jax.devices("cpu")[0]):
             for loaded_name, loaded_weight in self.names_and_weights_generator:
+                # Skip if the model has fewer layers than original.
+                if re.search(r"layers\.(\d+)", loaded_name):
+                    layer_num = re.search(r"layers\.(\d+)", loaded_name).group(1)
+                    if int(layer_num) >= self.model_config.num_layers:
+                        continue
                 # TODO: load scale as well.
                 if 'layers.61' in loaded_name:
                     # skip loading MTP module.
