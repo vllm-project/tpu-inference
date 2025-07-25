@@ -60,20 +60,24 @@ class KVCacheUpdateTest(jtu.JaxTestCase):
         combined_kv_head_num=[2, 16],
         head_dim=[128, 256],
         num_slices_per_block=[4, 8],
+        dynamic_validate_inputs=[False, True],
     )
     def test_basic(self, page_size: int, combined_kv_head_num: int,
-                   head_dim: int, num_slices_per_block: int):
+                   head_dim: int, num_slices_per_block: int,
+                   dynamic_validate_inputs: bool):
         new_kv, slot_mapping, kv_cache, num_slices = self._generate_data(
             page_size, combined_kv_head_num, head_dim, num_slices_per_block)
         old_kv_cache_copy = kv_cache.copy()
 
-        updated_kv_cache = kv_cache_update(
-            new_kv,
-            slot_mapping,
-            kv_cache,
-            num_slices,
-            page_size=page_size,
-            num_slices_per_block=num_slices_per_block)
+        with jax.disable_jit(disable=dynamic_validate_inputs):
+            updated_kv_cache = kv_cache_update(
+                new_kv,
+                slot_mapping,
+                kv_cache,
+                num_slices,
+                page_size=page_size,
+                num_slices_per_block=num_slices_per_block,
+                dynamic_validate_inputs=dynamic_validate_inputs)
         updated_kv_cache_ref = kv_cache_update_ref(new_kv,
                                                    np.asarray(slot_mapping),
                                                    old_kv_cache_copy)

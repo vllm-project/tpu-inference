@@ -67,6 +67,23 @@ def _kv_cache_update_kernel(
         async_copy.wait()
 
 
+def _dynamic_validate_inputs(slices, new_token_num, kv_cache_token_num,
+                             page_size):
+    for i in range(slices.shape[1]):
+        kv_cache_start = slices[0, i]
+        new_kv_start = slices[1, i]
+        slice_len = slices[2, i]
+        if kv_cache_start >= kv_cache_token_num:
+            raise ValueError(
+                f"{kv_cache_start=} must be less than {kv_cache_token_num=}")
+        if new_kv_start >= new_token_num:
+            raise ValueError(
+                f"{new_kv_start=} must be less than {new_token_num=}")
+        if slice_len > page_size:
+            raise ValueError(
+                f"{slice_len=} must be less or equal to {page_size=}")
+
+
 def _kv_cache_update(
     new_kv: jax.Array,  # [total_num_token, num_combined_kv_heads, head_dim]
     slices: jax.Array,  # [3, slices], list of (kv_cache_start, new_kv_start,
@@ -77,14 +94,16 @@ def _kv_cache_update(
     num_slices: jax.Array,  # [1]
     page_size: int,
     num_slices_per_block: int,
+    dynamic_validate_inputs: bool,
 ):
     assert slices.shape[1] % num_slices_per_block == 0
-    _, num_combined_kv_heads, head_dim = new_kv.shape
+    new_token_num, num_combined_kv_heads, head_dim = new_kv.shape
     assert kv_cache.shape[1] == num_combined_kv_heads
     assert kv_cache.shape[2] == head_dim
     assert head_dim % 128 == 0
-    # TODO: Add dynamic check to make sure that the all the slice lengths are
-    # smaller or equal to page_size
+    if dynamic_validate_inputs is True:
+        _dynamic_validate_inputs(slices, new_token_num, kv_cache.shape[0],
+                                 page_size)
 
     in_specs = [
         pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY),
@@ -129,23 +148,24 @@ def _kv_cache_update(
     donate_argnames="kv_cache",
 )
 def kv_cache_update(
-        new_kv: jax.
-    Array,  # [total_num_token, num_combined_kv_heads, head_dim]
-        slices: jax.
+    new_kv: jax.Array,  # [total_num_token, num_combined_kv_heads, head_dim]
+    slices: jax.
     Array,  # [3, slices], list of (kv_cache_start, new_kv_start, slice_len)
-        kv_cache: jax.
+    kv_cache: jax.
     Array,  # [total_num_pages * page_size, num_combined_kv_heads, head_dim]
-        num_slices: jax.Array,  # [1]
-        *,
-        page_size: int = 32,
-        num_slices_per_block: int = 8,
-        mesh: Mesh | None = None,
-        kv_cache_pspec: P
+    num_slices: jax.Array,  # [1]
+    *,
+    page_size: int = 32,
+    num_slices_per_block: int = 8,
+    mesh: Mesh | None = None,
+    kv_cache_pspec: P
     | None = None,  # Only sharding along head_dim is supported
+    dynamic_validate_inputs: bool = False,
 ):
     if mesh is None:
         return _kv_cache_update(new_kv, slices, kv_cache, num_slices,
-                                page_size, num_slices_per_block)
+                                page_size, num_slices_per_block,
+                                dynamic_validate_inputs)
 
     if kv_cache_pspec is None:
         raise ValueError(
@@ -158,6 +178,7 @@ def kv_cache_update(
             _kv_cache_update,
             page_size=page_size,
             num_slices_per_block=num_slices_per_block,
+            dynamic_validate_inputs=dynamic_validate_inputs,
         ),
         mesh=mesh,
         in_specs=in_specs,
