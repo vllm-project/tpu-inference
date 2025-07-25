@@ -73,15 +73,23 @@ def _dynamic_validate_inputs(slices, new_token_num, kv_cache_token_num,
         kv_cache_start = slices[0, i]
         new_kv_start = slices[1, i]
         slice_len = slices[2, i]
-        if kv_cache_start >= kv_cache_token_num:
+        if not 0 <= kv_cache_start < kv_cache_token_num:
             raise ValueError(
-                f"{kv_cache_start=} must be less than {kv_cache_token_num=}")
-        if new_kv_start >= new_token_num:
+                f"{kv_cache_start=} must be less than {kv_cache_token_num=} and greater than or equal to 0"
+            )
+        if not 0 <= new_kv_start < new_token_num:
             raise ValueError(
-                f"{new_kv_start=} must be less than {new_token_num=}")
-        if slice_len > page_size:
+                f"{new_kv_start=} must be less than {new_token_num=} and greater than or equal to 0"
+            )
+        if not 0 <= slice_len <= page_size:
             raise ValueError(
-                f"{slice_len=} must be less or equal to {page_size=}")
+                f"{slice_len=} must be less or equal to {page_size=} and greater than or equal to 0"
+            )
+        if slice_len > 0 and kv_cache_start // page_size != (
+                kv_cache_start + slice_len - 1) // page_size:
+            raise ValueError(
+                f"Each slice must reside in the same page, but got {kv_cache_start=} and {slice_len=}"
+            )
 
 
 def _kv_cache_update(
