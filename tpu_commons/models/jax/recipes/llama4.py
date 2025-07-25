@@ -75,6 +75,7 @@ class Llama4ModelConfig(ModelConfig):
                         "high_freq_factor": 1.0,
                         "original_max_position_embeddings": 8192
                     },
+                    rope_type="interleaved",
                     temperature_tuning=True,
                     temperature_tuning_scale=0.1,
                     temperature_tuning_floor_scale=8192,

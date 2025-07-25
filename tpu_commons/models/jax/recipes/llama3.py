@@ -68,6 +68,7 @@ class Llama3ModelConfig():
                     num_key_value_heads=self.num_key_value_heads,
                     head_dim=self.head_dim,
                     rope_theta=self.rope_theta,
+                    rope_type="split",
                     rope_scaling={},
                     dtype=self.dtype,
                     vllm_config=self.vllm_config),
@@ -205,9 +206,7 @@ class LlamaForCausalLM(Model):
     def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):
         self.rng = nnx.Rngs(rng)
         weight_loader = Llama3WeightLoader(vllm_config=self.vllm_config,
-                                           model_config=self.cfg.model,
-                                           cache_dir=cache_dir,
-                                           sharding_cfg=self.cfg.sharding)
+                                           model_config=self.cfg.model)
         weight_loader.load_weights(self)
 
     def __call__(

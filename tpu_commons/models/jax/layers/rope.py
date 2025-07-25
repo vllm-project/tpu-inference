@@ -9,6 +9,7 @@ def apply_rope(
     inputs: jax.Array,
     positions: jax.Array,
     head_dim: int,
+    rope_type: str = "split",
     rope_theta: float = 10000,
     rope_scaling: Dict[str, Any] = None,
 ) -> jax.Array:
@@ -16,9 +17,12 @@ def apply_rope(
     Applies Rotary Positional Embedding using the sine and cosine strategy.
 
     This implementation assumes the input tensor has a shape that might include
-    padding on the last dimension (head_dim). The RoPE is applied only to the
-    first `head_dim` features, and the result is padded back to the original
-    dimension if necessary.
+    padding on the last dimension (head_dim).
+    RoPE is applied only to the first `head_dim` features, and the result is
+    padded back to the original dimension if necessary.
+    If rope_type is "split", then the input pairs for rotation are taken one from the
+    first and one from the second half of the head_dim. If it is "interleaved" then
+    adjacent values are used as inputs for rotation.
     """
     # Calculate inverse frequencies (timescale)
     fraction = 2 * jnp.arange(0, head_dim // 2) / head_dim
@@ -37,19 +41,27 @@ def apply_rope(
     sin = jnp.sin(sinusoid_inp)
     cos = jnp.cos(sinusoid_inp)
 
-    # Reshape to group adjacent features for rotation, matching new_apply_rope
-    rotary_inputs = inputs[..., :head_dim] # Take just the non-padded amount.
-    reshaped_inputs = rotary_inputs.reshape(*rotary_inputs.shape[:-1], -1, 2)
-    
-    # Apply the rotation
-    first_half = reshaped_inputs[..., 0]
-    second_half = reshaped_inputs[..., 1]
+    if rope_type == "interleaved":
+        # Reshape to group adjacent features for rotation, matching new_apply_rope
+        rotary_inputs = inputs[..., :head_dim] # Take just the non-padded amount.
+        reshaped_inputs = rotary_inputs.reshape(*rotary_inputs.shape[:-1], -1, 2)
+        
+        # Apply the rotation
+        first_half = reshaped_inputs[..., 0]
+        second_half = reshaped_inputs[..., 1]
+    else:
+        first_half = inputs[..., :head_dim // 2]
+        second_half = inputs[..., head_dim // 2:head_dim]
+
     first_part = first_half * cos - second_half * sin
     second_part = second_half * cos + first_half * sin
 
     # Combine the rotated parts and reshape back
-    out_stacked = jnp.stack([first_part, second_part], axis=-1)
-    out = out_stacked.reshape(rotary_inputs.shape)
+    if rope_type == "interleaved":
+        out_stacked = jnp.stack([first_part, second_part], axis=-1)
+        out = out_stacked.reshape(rotary_inputs.shape)
+    else:
+        out = jnp.concatenate([first_part, second_part], axis=-1)
 
     # If the original input was padded, pad the output with zeros to match.
     padded_head_dim = inputs.shape[-1]
