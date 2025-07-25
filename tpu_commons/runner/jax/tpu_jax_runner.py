@@ -10,20 +10,10 @@ import jax
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
-import vllm.envs as envs
 from flax import nnx
 from jax.sharding import NamedSharding, PartitionSpec
-from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer import (get_kv_transfer_group,
-                                          has_kv_transfer_group)
-from vllm.sequence import IntermediateTensors
-from vllm.utils import cdiv
-from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheSpec)
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
-from vllm.v1.request import Request
 
+import vllm.envs as envs
 from tpu_commons import utils_jax as utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
@@ -43,6 +33,16 @@ from tpu_commons.runner.utils import (ForbidCompile, LatencyTracker,
                                       get_padded_num_reqs_with_upper_limit,
                                       get_padded_token_len, get_req_paddings,
                                       get_token_paddings)
+from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer import (get_kv_transfer_group,
+                                          has_kv_transfer_group)
+from vllm.sequence import IntermediateTensors
+from vllm.utils import cdiv
+from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
+                                        KVCacheSpec)
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
+from vllm.v1.request import Request
 
 logger = init_logger(__name__)
 
@@ -599,9 +599,13 @@ class TPUModelRunner():
             # Return empty ModelRunnerOutput if there's no work to do.
             # TODO(fhzhang): We rely on empty cycles to remove requests in input batch. Fix it to reduce overhead.
             logger.debug(f"Nothing scheduled: {scheduler_output}!")
+            # NOTE(pooyam): There is no guarantee that scheduler is not sending empty output: https://github.com/vllm-project/vllm/blob/7cfea0df390c154c1026f77d3682e2733ca4aca8/vllm/v1/engine/core.py#L275
+            # Why they are not preventing that is not clear to me.
             if len(scheduler_output.finished_req_ids) == 0:
-                raise Exception(
+                logger.warning(
                     "Should not schedule a request that does nothing!")
+                # raise Exception(
+                #     "Should not schedule a request that does nothing!")
             return DUMMY_METADATA, EMPTY_MODEL_RUNNER_OUTPUT,
 
         inputs = self._prepare_inputs(scheduler_output)
