@@ -438,7 +438,7 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
                 )
                 vllm_request.num_computed_tokens = prompt_tokens
                 new_block_ids = kv_cache_manager.get_block_ids(req_id)
-                assert(len(new_block_ids) == math.ceil(prompt_tokens / self.vllm_config.cache_config.block_size)
+                assert(len(new_block_ids[0]) == math.ceil(prompt_tokens / self.vllm_config.cache_config.block_size))
 
                 with LatencyTracker(f"KVCacheInsert-{len(new_block_ids[0])}"):
                     decode_engine.model_executor.driver_worker.model_runner.insert_request_with_kv_cache(
