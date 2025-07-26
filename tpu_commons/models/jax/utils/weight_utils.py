@@ -209,6 +209,20 @@ def get_num_q_heads_by_tp(num_q_heads: int, num_kv_heads: int,
     return q_repeats * num_q_heads
 
 
+def get_param(params: nnx.State, path: str) -> nnx.State:
+    keys = path.split(".")
+    plevel = params
+    for key in keys:
+        if key.isdigit():
+            plevel = plevel[int(key)]
+        else:
+            if key in plevel:
+                plevel = plevel[key]
+            else:
+                raise ValueError(f"{path} is not a valid param path")
+    return plevel
+
+
 def get_param_and_sharding(params: nnx.State, shardings: Any,
                            path: str) -> nnx.State:
     keys = path.split(".")
