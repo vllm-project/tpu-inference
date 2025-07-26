@@ -124,11 +124,9 @@ def _ragged_paged_attention(
 ) -> Array:
 
     assert use_kernel, "use_kernel must be True for torchax path."
-    from torch_xla.experimental.pallas_kernels.ragged_paged_attention_v2 import \
-        ragged_paged_attention as ragged_paged_attention_kernel  # noqa: E501
 
-    # from tpu_commons.kernels.ragged_paged_attention.kernel import \
-    #     ragged_paged_attention as ragged_paged_attention_kernel
+    from tpu_commons.kernels.ragged_paged_attention.kernel import \
+        ragged_paged_attention as ragged_paged_attention_kernel
 
     def call_kernel(q, kv_pages, kv_lens, page_indices, cu_q_lens, num_seqs):
         """Calls the ragged paged attention kernel."""
