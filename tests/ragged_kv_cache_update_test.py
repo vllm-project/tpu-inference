@@ -121,3 +121,121 @@ class KVCacheUpdateTest(jtu.JaxTestCase):
                             updated_kv_cache_ref,
                             atol=1e-4,
                             rtol=1e-4)
+
+    def test_invalid_inputs(self):
+        # Test all the cases when the inputs are invalid in the `_dynamic_validate_inputs` method
+        page_size = 32
+        combined_kv_head_num = 2
+        head_dim = 128
+        num_slices_per_block = 4
+
+        new_kv, slot_mapping, kv_cache, num_slices = self._generate_data(
+            page_size, combined_kv_head_num, head_dim, num_slices_per_block)
+
+        with jax.disable_jit():
+            # Case 1: new_kv_start < 0
+            invalid_slot_mapping = slot_mapping.at[1, 0].set(-1)
+            with self.assertRaisesRegex(
+                    ValueError, "new_kv_start=-1 must be greater than"):
+                kv_cache_update(new_kv,
+                                invalid_slot_mapping,
+                                kv_cache,
+                                num_slices,
+                                page_size=page_size,
+                                dynamic_validate_inputs=True)
+
+            # Case 2: kv_cache_start < 0
+            invalid_slot_mapping = slot_mapping.at[0, 0].set(-1)
+            with self.assertRaisesRegex(
+                    ValueError, "kv_cache_start=-1 must be greater than"):
+                kv_cache_update(new_kv,
+                                invalid_slot_mapping,
+                                kv_cache,
+                                num_slices,
+                                page_size=page_size,
+                                dynamic_validate_inputs=True)
+
+            # Case 3: slice_len <= 0
+            invalid_slot_mapping = slot_mapping.at[2, 0].set(0)
+            with self.assertRaisesRegex(
+                    ValueError, "slice_len=0 must be less or equal to"):
+                kv_cache_update(new_kv,
+                                invalid_slot_mapping,
+                                kv_cache,
+                                num_slices,
+                                page_size=page_size,
+                                dynamic_validate_inputs=True)
+
+            # Case 4: slice_len > page_size
+            invalid_slot_mapping = slot_mapping.at[2, 0].set(page_size + 1)
+            with self.assertRaisesRegex(
+                    ValueError,
+                    f"slice_len={page_size + 1} must be less or equal to"):
+                kv_cache_update(new_kv,
+                                invalid_slot_mapping,
+                                kv_cache,
+                                num_slices,
+                                page_size=page_size,
+                                dynamic_validate_inputs=True)
+
+            # Case 5: new_kv_start + slice_len > new_token_num
+            invalid_slot_mapping = slot_mapping.at[1, 0].set(new_kv.shape[0])
+            with self.assertRaisesRegex(
+                    ValueError,
+                    "new_kv_start=128 \+ slice_len=7 must be less or equal to new_token_num=128"
+            ):
+                kv_cache_update(new_kv,
+                                invalid_slot_mapping,
+                                kv_cache,
+                                num_slices,
+                                page_size=page_size,
+                                dynamic_validate_inputs=True)
+
+            # Case 6: kv_cache_start + slice_len > kv_cache_token_num
+            invalid_slot_mapping = slot_mapping.at[0, 0].set(kv_cache.shape[0])
+            with self.assertRaisesRegex(
+                    ValueError,
+                    "kv_cache_start=640 \+ slice_len=7 must be less or equal to kv_cache_token_num=640"
+            ):
+                kv_cache_update(new_kv,
+                                invalid_slot_mapping,
+                                kv_cache,
+                                num_slices,
+                                page_size=page_size,
+                                dynamic_validate_inputs=True)
+
+            # Case 7: Each slice must reside in the same page
+            invalid_slot_mapping = slot_mapping.at[0, 0].set(page_size - 1)
+            invalid_slot_mapping = invalid_slot_mapping.at[2, 0].set(page_size)
+            with self.assertRaisesRegex(
+                    ValueError, "Each slice must reside in the same page"):
+                kv_cache_update(new_kv,
+                                invalid_slot_mapping,
+                                kv_cache,
+                                num_slices,
+                                page_size=page_size,
+                                dynamic_validate_inputs=True)
+
+            # Case 8: new_kv slices are not continuous
+            invalid_slot_mapping = slot_mapping.at[1,
+                                                   1].set(slot_mapping[1, 1] +
+                                                          1)
+            with self.assertRaisesRegex(ValueError, "is expeced to equal to"):
+                kv_cache_update(new_kv,
+                                invalid_slot_mapping,
+                                kv_cache,
+                                num_slices,
+                                page_size=page_size,
+                                dynamic_validate_inputs=True)
+
+            # Case 9: Overlap among the kv cache slices
+            invalid_slot_mapping = slot_mapping.at[0, 4].set(slot_mapping[0,
+                                                                          3])
+            with self.assertRaisesRegex(
+                    ValueError, "Overlap detected in kv_cache intervals"):
+                kv_cache_update(new_kv,
+                                invalid_slot_mapping,
+                                kv_cache,
+                                num_slices,
+                                page_size=page_size,
+                                dynamic_validate_inputs=True)

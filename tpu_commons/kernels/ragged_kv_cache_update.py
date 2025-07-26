@@ -74,12 +74,13 @@ def _kv_cache_update_kernel(
 
 def _dynamic_validate_inputs(slices, new_token_num, kv_cache_token_num,
                              page_size, num_slices):
-    # NOTE: The padding part is unnecessary to check because kv_cache_start,  new_kv_start,
+    slices = slices.tolist()
+    # NOTE: The padding part is unnecessary to check because kv_cache_start, new_kv_start,
     # slice_len will be set to 0 in the kernel implementation.
     for i in range(num_slices[0]):
-        kv_cache_start = slices[0, i]
-        new_kv_start = slices[1, i]
-        slice_len = slices[2, i]
+        kv_cache_start = slices[0][i]
+        new_kv_start = slices[1][i]
+        slice_len = slices[2][i]
         if new_kv_start < 0:
             raise ValueError(
                 f"{new_kv_start=} must be greater than or equal to 0")
@@ -102,6 +103,29 @@ def _dynamic_validate_inputs(slices, new_token_num, kv_cache_token_num,
                                            1) // page_size:
             raise ValueError(
                 f"Each slice must reside in the same page, but got {kv_cache_start=} and {slice_len=}"
+            )
+
+    new_kv_intervals = []
+    kv_cache_intervals = []
+    for i in range(num_slices[0]):
+        new_kv_intervals.append((slices[1][i], slices[1][i] + slices[2][i]))
+        kv_cache_intervals.append((slices[0][i], slices[0][i] + slices[2][i]))
+
+    new_kv_intervals.sort()
+    kv_cache_intervals.sort()
+
+    # The new_kv slices should be continuous
+    for i in range(len(new_kv_intervals) - 1):
+        if new_kv_intervals[i][1] != new_kv_intervals[i + 1][0]:
+            raise ValueError(
+                f"{new_kv_intervals[i][1]=} is expeced to equal to {new_kv_intervals[i + 1][0]}"
+            )
+
+    # There should be no overlap among the kv cache slices
+    for i in range(len(kv_cache_intervals) - 1):
+        if kv_cache_intervals[i][1] > kv_cache_intervals[i + 1][0]:
+            raise ValueError(
+                f"Overlap detected in kv_cache intervals: {kv_cache_intervals[i]} and {kv_cache_intervals[i+1]}"
             )
 
 
