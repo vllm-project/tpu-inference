@@ -20,8 +20,7 @@ class RecipeConfig():
             for f in fields(dc_object):
                 if f.repr:
                     value = getattr(dc_object, f.name)
-                    if hasattr(value, '__dataclass_fields__'
-                               ):  # Check if it's a dataclass
+                    if hasattr(value, '__dataclass_fields__'):
                         d[f.name] = get_serializable_dict(value)
                     else:
                         d[f.name] = value
