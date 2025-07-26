@@ -3,6 +3,7 @@
 import abc
 import functools
 import glob
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -13,12 +14,12 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh
+from jax.sharding import PartitionSpec as P
 from safetensors import safe_open
 from vllm.config import VllmConfig
 
 from tpu_commons import utils_jax as utils
 from tpu_commons.logger import init_logger
-from tpu_commons.models.jax.layers.misc import shard_put
 from tpu_commons.models.jax.utils import file_utils
 
 logger = init_logger(__name__)
@@ -208,18 +209,30 @@ def get_num_q_heads_by_tp(num_q_heads: int, num_kv_heads: int,
     return q_repeats * num_q_heads
 
 
-def get_param(params: nnx.State, path: str) -> nnx.State:
+def get_param_and_sharding(params: nnx.State, shardings: Any,
+                           path: str) -> nnx.State:
     keys = path.split(".")
-    current_level = params
+    plevel = params
+    slevel = shardings
     for key in keys:
         if key.isdigit():
-            current_level = current_level[int(key)]
+            plevel = plevel[int(key)]
+            slevel = slevel[int(key)]
         else:
-            if key in current_level:
-                current_level = current_level[key]
+            if key in plevel:
+                plevel = plevel[key]
+                slevel = slevel[key]
             else:
                 raise ValueError(f"{path} is not a valid param path")
-    return current_level
+    return plevel, slevel.value
+
+
+def shard_put(x: jax.Array, sharding: P, mesh: jax.sharding.Mesh) -> jax.Array:
+    # Single device sharding requires this special handling
+    # to avoid the recursive jit error.
+    if math.prod(mesh.axis_sizes) == 1:
+        return jax.device_put(x, mesh.devices.flatten()[0])
+    return jax.device_put(x, sharding)
 
 
 def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
@@ -276,6 +289,7 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
     }
 
     params = nnx.state(model)
+    shardings = nnx.get_named_sharding(params, mesh)
     for hf_key, hf_weight in hf_model_weights_iterator(model_path,
                                                        framework="flax"):
 
@@ -286,11 +300,12 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
         if "layer" in hf_key:
             layer_num = re.search(r"layers\.(\d+)", hf_key).group(1)
             layer_key = re.sub(r"layers\.\d+", "layers.*", hf_key)
-            model_key, model_sharding = mappings[layer_key]
+            model_key = mappings[layer_key]
             model_key = re.sub(r"layers\.\*", f"layers.{layer_num}", model_key)
         else:
-            model_key, model_sharding = mappings[hf_key]
-        model_weight = get_param(params, model_key)
+            model_key = mappings[hf_key]
+        model_weight, model_sharding = get_param_and_sharding(
+            params, shardings, model_key)
 
         logger.debug(
             "before transform | "

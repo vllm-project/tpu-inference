@@ -292,29 +292,28 @@ class LlamaForCausalLM(nnx.Module):
         self.rng = nnx.Rngs(rng_key)
 
         # Key: path to a HF layer weight
-        # Value: a tuple of (path to a nnx layer weight, nnx weight sharding)
+        # Value: path to a nnx layer weight
         mappings = {
-            "lm_head": ("lm_head", (None, "model")),
-            "model.embed_tokens": ("embed.embedding", ("model", None)),
+            "lm_head": "lm_head",
+            "model.embed_tokens": "embed.embedding",
             "model.layers.*.input_layernorm":
-            ("model.layers.*.input_layernorm.scale", (None, )),
+            "model.layers.*.input_layernorm.scale",
             "model.layers.*.mlp.down_proj":
-            ("model.layers.*.mlp.down_proj.kernel", ("model", None)),
+            "model.layers.*.mlp.down_proj.kernel",
             "model.layers.*.mlp.gate_proj":
-            ("model.layers.*.mlp.gate_proj.kernel", (None, "model")),
-            "model.layers.*.mlp.up_proj": ("model.layers.*.mlp.up_proj.kernel",
-                                           (None, "model")),
+            "model.layers.*.mlp.gate_proj.kernel",
+            "model.layers.*.mlp.up_proj": "model.layers.*.mlp.up_proj.kernel",
             "model.layers.*.post_attention_layernorm":
-            ("model.layers.*.post_attention_layernorm.scale", (None, )),
+            "model.layers.*.post_attention_layernorm.scale",
             "model.layers.*.self_attn.k_proj":
-            ("model.layers.*.self_attn.k_proj.kernel", (None, "model", None)),
+            "model.layers.*.self_attn.k_proj.kernel",
             "model.layers.*.self_attn.o_proj":
-            ("model.layers.*.self_attn.o_proj.kernel", ("model", None, None)),
+            "model.layers.*.self_attn.o_proj.kernel",
             "model.layers.*.self_attn.q_proj":
-            ("model.layers.*.self_attn.q_proj.kernel", (None, "model", None)),
+            "model.layers.*.self_attn.q_proj.kernel",
             "model.layers.*.self_attn.v_proj":
-            ("model.layers.*.self_attn.v_proj.kernel", (None, "model", None)),
-            "model.norm": ("model.norm.scale", (None, )),
+            "model.layers.*.self_attn.v_proj.kernel",
+            "model.norm": "model.norm.scale",
         }
         load_hf_weights(vllm_config=self.vllm_config,
                         model=self,
