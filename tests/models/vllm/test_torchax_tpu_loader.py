@@ -57,7 +57,6 @@ MULTI_CHIP_TEST_MODELS = {
     "meta-llama/Llama-3.1-8B-Instruct",
 ])
 def test_vllm_model_loader(model):
-    # breakpoint()
     vllm_config = _setup_environment(model)
     # Workaround since it's converted in platforms/tpu_jax.py
     vllm_config.model_config.dtype = torch.bfloat16
