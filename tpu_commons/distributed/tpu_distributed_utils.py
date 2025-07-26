@@ -47,7 +47,8 @@ def create_torchax_kv_cache(shape, dtype, mesh,
 def create_torchax_tensor_with_partition_spec(
         weight_t: torch.Tensor,
         mesh: Optional[Mesh] = None,
-        partition_spec: Optional[tuple] = None) -> torch.Tensor:
+        partition_spec: Optional[tuple] = None,
+        is_async: bool = True) -> torch.Tensor:
     # Validate that if mesh is None, sharding must also be None
     if mesh is None and (partition_spec is not None and partition_spec != ()):
         raise ValueError(
@@ -69,6 +70,8 @@ def create_torchax_tensor_with_partition_spec(
         device = NamedSharding(mesh, P(*partition_spec))
 
     jax_t = jax.device_put(jax_t, device)
+    if not is_async:
+        jax_t.block_until_ready()
 
     torchax_t = torchax.tensor.Tensor(jax_t, torchax.default_env())
     return torchax_t
@@ -96,26 +99,26 @@ class XlaQKVParallelLinear(nn.Module):
 
     def _shard_weight(self, mesh: Mesh):
         self.q_weight = Parameter(create_torchax_tensor_with_partition_spec(
-            self.q_weight, mesh, ('x', None)),
+            self.q_weight, mesh, ('x', None), is_async=False),
                                   requires_grad=False)
         self.k_weight = Parameter(create_torchax_tensor_with_partition_spec(
-            self.k_weight, mesh, ('x', None)),
+            self.k_weight, mesh, ('x', None), is_async=False),
                                   requires_grad=False)
         self.v_weight = Parameter(create_torchax_tensor_with_partition_spec(
-            self.v_weight, mesh, ('x', None)),
+            self.v_weight, mesh, ('x', None), is_async=False),
                                   requires_grad=False)
 
         if self.q_bias is not None:
             assert self.k_bias is not None and self.v_bias is not None, \
                 "QKVParallelLinear should have q, k, and v biases together."
             self.q_bias = Parameter(create_torchax_tensor_with_partition_spec(
-                self.q_bias, mesh, ('x', )),
+                self.q_bias, mesh, ('x', ), is_async=False),
                                     requires_grad=False)
             self.k_bias = Parameter(create_torchax_tensor_with_partition_spec(
-                self.k_bias, mesh, ('x', )),
+                self.k_bias, mesh, ('x', ), is_async=False),
                                     requires_grad=False)
             self.v_bias = Parameter(create_torchax_tensor_with_partition_spec(
-                self.v_bias, mesh, ('x', )),
+                self.v_bias, mesh, ('x', ), is_async=False),
                                     requires_grad=False)
 
     def _load_weights_from_qkv_linear(self, qkv_linear: nn.Module):
@@ -202,8 +205,9 @@ class XlaMergedColumnParallelLinear(nn.Module):
         for i in range(self.n_linear_layers):
             weight = getattr(self, f"weight_{i}")
             sharded_weight = Parameter(
-                create_torchax_tensor_with_partition_spec(
-                    weight, mesh, ('x', None)),
+                create_torchax_tensor_with_partition_spec(weight,
+                                                          mesh, ('x', None),
+                                                          is_async=False),
                 requires_grad=weight.requires_grad)
             setattr(self, f"weight_{i}", sharded_weight)
 
@@ -211,8 +215,9 @@ class XlaMergedColumnParallelLinear(nn.Module):
             for i, _ in enumerate(self.output_sizes):
                 bias = getattr(self, f"bias_{i}")
                 sharded_bias = Parameter(
-                    create_torchax_tensor_with_partition_spec(
-                        bias, mesh, ('x', )),
+                    create_torchax_tensor_with_partition_spec(bias,
+                                                              mesh, ('x', ),
+                                                              is_async=False),
                     requires_grad=bias.requires_grad)
                 setattr(self, f"bias_{i}", sharded_bias)
 
