@@ -43,7 +43,7 @@ pre-commit run --all-files
 Run `Llama 3.1 8B` offline inference on 4 TPU chips:
 
 ```
-python tpu_commons/examples/offline_inference.py \
+HF_TOKEN=<huggingface_token> python tpu_commons/examples/offline_inference.py \
     --model=meta-llama/Llama-3.1-8B \
     --tensor_parallel_size=4 \
     --task=generate \
@@ -55,8 +55,7 @@ python tpu_commons/examples/offline_inference.py \
 Run `Llama 3.1 8B Instruct` offline inference on 4 TPU chips in disaggregated mode:
 
 ```
-PREFILL_SLICES=2 \
-DECODE_SLICES=2 \
+PREFILL_SLICES=2 DECODE_SLICES=2 HF_TOKEN=<huggingface_token> \
 python tpu_commons/examples/offline_inference.py \
     --task=generate \
     --model=meta-llama/Meta-Llama-3-8B-Instruct \
@@ -99,7 +98,11 @@ sudo bash ~/tpu_commons/scripts/multihost/run_cluster.sh \
 1. On the head node, use `docker exec -it node /bin/bash` to enter the container. And then execute:
 
 ```
-python /workspace/tpu_commons/examples/offline_inference.py  --model=meta-llama/Llama-3.1-70B  --tensor_parallel_size=16  --task=generate  --max_model_len=1024
+HF_TOKEN=<huggingface_token> python /workspace/tpu_commons/examples/offline_inference.py \
+    --model=meta-llama/Llama-3.1-70B  \
+    --tensor_parallel_size=16  \
+    --task=generate  \
+    --max_model_len=1024
 ```
 
 ### Run vLLM Pytorch models on the JAX path
@@ -108,6 +111,7 @@ Run the vLLM's implementation of `Llama 3.1 8B`, which is in Pytorch. It is the 
 
 ```
 export MODEL_IMPL_TYPE=vllm
+export HF_TOKEN=<huggingface_token>
 python tpu_commons/examples/offline_inference.py \
     --model=meta-llama/Llama-3.1-8B \
     --tensor_parallel_size=4 \
@@ -119,6 +123,7 @@ Run the vLLM Pytorch `Qwen3-30B-A3B` MoE model, use `--enable-expert-parallel` f
 
 ```
 export MODEL_IMPL_TYPE=vllm
+export HF_TOKEN=<huggingface_token>
 python vllm/examples/offline_inference/basic/generate.py \
     --model=Qwen/Qwen3-30B-A3B \
     --tensor_parallel_size=4 \
@@ -144,29 +149,50 @@ MODEL_IMPL_TYPE=flax_nnx
 MODEL_IMPL_TYPE=vllm
 ```
 
-To enable profiling:
-
-```
-VLLM_TORCH_PROFILER_DIR=$PWD
-```
-
 To run JAX path without precompiling the model:
 
 ```
 SKIP_JAX_PRECOMPILE=1
 ```
 
-To run JAX path without loading real model weights:
+### Profiling
+
+There are two ways to profile your workload:
+
+#### Using `VLLM_TORCH_PROFILER_DIR`
+If you set the following environment variable:
 
 ```
-JAX_RANDOM_WEIGHTS=1
+VLLM_TORCH_PROFILER_DIR=<DESIRED PROFILING OUTPUT DIR>
 ```
 
-To enable experimental scheduler:
+vLLM will profile your entire workload, which can work well for toy workloads (like `examples/offline_inference.py`).
+
+#### Using `USE_JAX_PROFILER_SERVER`
+If you set the following environment variable:
 
 ```
-EXP_SCHEDULER=1
+USE_JAX_PROFILER_SERVER=True
 ```
+
+you can instead manually decide when to capture a profile and for how long, which can helpful if your workload (e.g. E2E benchmarking) is
+large and taking a profile of the entire workload (i.e. using the above method) will generate a massive tracing file.
+
+You can additionally set the desired profiling port (default is `9999`):
+
+```
+JAX_PROFILER_SERVER_PORT=XXXX
+```
+
+In order to use this approach, you can do the following:
+
+1. Run your typical `vllm serve` or `offline_inference` command (making sure to set `USE_JAX_PROFILER_SERVER=True`)
+2. Run your benchmarking command (`python benchmark_serving.py...`)
+3. Once the warmup has completed and your benchmark is running, start a new tensorboard instance with your `logdir` set to the desired output location of your profiles (e.g. `tensorboard --logdir=profiles/llama3-mmlu/`)
+4. Open the tensorboard instance and navigate to the `profile` page (e.g. `http://localhost:6006/#profile`)
+5. Click `Capture Profile` and, in the `Profile Service URL(s) or TPU name` box, enter `localhost:XXXX` where `XXXX` is your `JAX_PROFILER_SERVER_PORT` (default is `9999`)
+
+6. Enter the desired amount of time (in ms) you'd like to capture the profile for and then click `Capture`.   If everything goes smoothly, you should see a success message, and your `logdir` should be populated.
 
 ## Develop on a CPU VM and run docker on a TPU VM
 

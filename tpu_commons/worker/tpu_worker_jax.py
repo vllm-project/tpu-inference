@@ -72,6 +72,15 @@ class TPUWorker(AbstractTpuWorker):
 
         logger.info(f"Using devices: {self.devices}")
 
+        use_jax_profiler_server = os.getenv("USE_JAX_PROFILER_SERVER", False)
+        if use_jax_profiler_server:
+            jax_profiler_server_port = int(
+                os.getenv("JAX_PROFILER_SERVER_PORT", 9999))
+            logger.info(
+                f"Starting JAX profiler server on port {jax_profiler_server_port}"
+            )
+            jax.profiler.start_server(jax_profiler_server_port)
+
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
