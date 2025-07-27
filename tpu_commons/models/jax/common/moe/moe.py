@@ -87,7 +87,8 @@ class Router(nnx.Module):
             self.cfg, HuggingFaceArgNames.NUM_EXPERTS_PER_TOKEN)
         router_logits_TE = jnp.einsum('TD,DE -> TE', x_TD,
                                       self.kernel_DE.value)
-        activated_gating_TF = nnx.softmax(router_logits_TE.astype(self.cfg.dtype),
+        activated_gating_TF = nnx.softmax(router_logits_TE.astype(
+            self.cfg.dtype),
                                           axis=-1)
         weights_TX, selected_experts_TX = jax.lax.top_k(
             activated_gating_TF, num_experts_per_tok)
