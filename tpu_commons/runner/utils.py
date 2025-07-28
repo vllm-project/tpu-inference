@@ -12,7 +12,7 @@ import jax.numpy as jnp
 from jax._src.interpreters import pxla
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
-from tpu_commons import utils_jax as utils
+from tpu_commons import utils
 from tpu_commons.logger import init_logger
 
 DEFAULT_KV_CACHE_DTYPE = jnp.bfloat16

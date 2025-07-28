@@ -7,7 +7,7 @@ from jax.sharding import Mesh
 from transformers import Qwen2Config, modeling_flax_utils
 from vllm.config import VllmConfig
 
-from tpu_commons import utils_jax as utils
+from tpu_commons import utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_interface import attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata

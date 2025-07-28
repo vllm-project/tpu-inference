@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+import os
 from typing import Any, List, Tuple
 
 from tpu_commons.core import PATHWAYS_ENABLED
 from tpu_commons.logger import init_logger
-import os
 
 GBYTES = 1024 * 1024 * 1024
 
@@ -40,13 +40,15 @@ def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
             try:
                 hbm_used = device.memory_stats()["bytes_in_use"]
                 hbm_limit = device.memory_stats()["bytes_limit"]
-                logger.info("Get memory stats for device %s. Assuming all devices have the same usage.",
-                            device)
+                logger.info(
+                    "Get memory stats for device %s. Assuming all devices have the same usage.",
+                    device)
                 usage.extend([(hbm_used, hbm_limit)] * len(devices))
                 break
             except Exception as e:
                 logger.warning(
-                    "Failed to get memory stats for device %s: %s. ", device, e)
+                    "Failed to get memory stats for device %s: %s. ", device,
+                    e)
     elif PATHWAYS_ENABLED:
         # The Pathways backend doesn't support memory_stats().
         # TODO(fhzhang): find the proper way to support this.

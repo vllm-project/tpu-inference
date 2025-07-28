@@ -18,7 +18,7 @@ from jax.sharding import PartitionSpec as P
 from safetensors import safe_open
 from vllm.config import VllmConfig
 
-from tpu_commons import utils_jax as utils
+from tpu_commons import utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.utils import file_utils
 
