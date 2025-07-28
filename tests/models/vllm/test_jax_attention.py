@@ -10,7 +10,7 @@ from vllm.attention import Attention as VllmAttention
 from vllm.config import set_current_vllm_config
 from vllm.engine.arg_utils import EngineArgs
 
-from tpu_commons import utils_jax as utils
+from tpu_commons import utils
 from tpu_commons.kernels.ragged_paged_attention.kernel import \
     ref_ragged_paged_attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata

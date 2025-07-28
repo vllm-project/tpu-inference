@@ -16,7 +16,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 
-from tpu_commons import utils_jax as utils
+from tpu_commons import utils
 from tpu_commons.di.abstracts import (AbstractKVCacheConfig,
                                       AbstractLoRARequest,
                                       AbstractSchedulerOutput)
