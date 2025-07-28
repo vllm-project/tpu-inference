@@ -9,9 +9,9 @@ import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from jaxtyping import Array, Float, Int
+from jaxtyping import Float, Int
+
 from tpu_commons.models.jax.common.base import Config
-from tpu_commons.models.jax.common.sharding import ShardingConfig
 
 iota = jax.lax.broadcasted_iota
 
@@ -139,7 +139,6 @@ class KVCache(nnx.Module):
     #     self._initialize_caches()
 
     def _initialize_caches(self, ):
-
         """Creates and initializes the key and value cache tensors.
 
         Initializes the cache tensors as nnx.Variables with zeros, placing them
@@ -172,8 +171,8 @@ class KVCache(nnx.Module):
             "keyvalue_prefill_mode_cache_bskh",
         ]
         for attr_name in mode_dependent_attrs:
-            prefill_sharding_config = getattr(
-                self.sharding_cfg.prefill_rules, attr_name)
+            prefill_sharding_config = getattr(self.sharding_cfg.prefill_rules,
+                                              attr_name)
             generate_sharding_config = getattr(
                 self.sharding_cfg.generate_rules, attr_name)
 

@@ -276,6 +276,148 @@ class TestTPUJaxRunner(unittest.TestCase):
         supported_tasks = self.runner.get_supported_tasks()
         assert supported_tasks == ("generate", )
 
+    def test_structured_decoding(self):
+        # 1. ===== Setup =====
+        # Configure runner for the test
+        self.runner.model_config.get_vocab_size = MagicMock(return_value=64)
+        self.runner._init_inputs()  # re-initialize with new vocab size
+
+        # Mock _device_array to avoid JAX sharding issues with MagicMock mesh
+        def mock_device_array(*args, sharding=None, **kwargs):
+            # Simply return the first argument (the array) without any sharding
+            if len(args) == 1 and isinstance(args[0], tuple):
+                return args[0]  # Return tuple as is
+            elif len(args) == 1:
+                return args[0]  # Return single array as is
+            else:
+                return args  # Return all arguments as tuple
+
+        self.runner._device_array = mock_device_array
+
+        # Create a mock for sampling_params to avoid TypeErrors in add_request
+        mock_sampling_params = MagicMock()
+        mock_sampling_params.sampling_type = SamplingType.GREEDY
+        mock_sampling_params.temperature = 0.0
+        mock_sampling_params.top_p = 1.0
+        mock_sampling_params.top_k = -1
+        mock_sampling_params.min_tokens = 0
+        mock_sampling_params.logprobs = None
+        mock_sampling_params.logit_bias = None
+        mock_sampling_params.allowed_token_ids = set()
+        mock_sampling_params.bad_words_token_ids = None
+        mock_sampling_params.all_stop_token_ids = set()
+
+        # Add requests to the input batch
+        req1 = CachedRequestState(
+            req_id="req-1",
+            prompt_token_ids=[1],
+            output_token_ids=[],
+            sampling_params=mock_sampling_params,
+            block_ids=([1], ),
+            num_computed_tokens=1,
+            lora_request=None,
+            mm_inputs=[],
+            mm_hashes=[],
+            mm_positions=[],
+            pooling_params=None,
+            generator=None,
+        )
+        req2 = CachedRequestState(
+            req_id="req-2",
+            prompt_token_ids=[2],
+            output_token_ids=[],
+            sampling_params=mock_sampling_params,
+            block_ids=([2], ),
+            num_computed_tokens=1,
+            lora_request=None,
+            mm_inputs=[],
+            mm_hashes=[],
+            mm_positions=[],
+            pooling_params=None,
+            generator=None,
+        )
+        req3 = CachedRequestState(
+            req_id="req-3",
+            prompt_token_ids=[3],
+            output_token_ids=[],
+            sampling_params=mock_sampling_params,
+            block_ids=([3], ),
+            num_computed_tokens=1,
+            lora_request=None,
+            mm_inputs=[],
+            mm_hashes=[],
+            mm_positions=[],
+            pooling_params=None,
+            generator=None,
+        )
+        self.runner.input_batch.add_request(req1)  # index 0
+        self.runner.input_batch.add_request(req2)  # index 1
+        self.runner.input_batch.add_request(req3)  # index 2
+        num_reqs = 3
+
+        # Mock scheduler output for structured decoding
+        # req-1 and req-3 require structured decoding
+        mock_scheduler_output = MagicMock()
+        mock_scheduler_output.structured_output_request_ids = {
+            "req-1": 0,  # maps req_id to index in grammar_bitmask
+            "req-3": 1,
+        }
+        # Bitmask: vocab_size=64, so 2 int32s per request
+        # Mask for req-1: allow tokens 0-31
+        mask1 = np.array([-1, 0], dtype=np.int32)
+        # Mask for req-3: allow tokens 32-63
+        mask2 = np.array([0, -1], dtype=np.int32)
+        mock_scheduler_output.grammar_bitmask = np.array([mask1, mask2])
+
+        # Mock logits
+        logits_shape = (num_reqs, self.runner.vocab_size)
+        mock_logits_device = jnp.ones(logits_shape, dtype=jnp.bfloat16)
+
+        # 2. ===== Test prepare_structured_decoding_input =====
+        (require_struct_decoding, grammar_bitmask,
+         arange) = self.runner.prepare_structured_decoding_input(
+             mock_logits_device, mock_scheduler_output)
+
+        # Assertions for prepare_structured_decoding_input
+        # require_structured_out_cpu should be [True, False, True]
+        # because req-1 is at batch index 0, req-2 at 1, req-3 at 2
+        expected_require_struct = np.array([[True], [False], [True]],
+                                           dtype=np.bool_)
+        np.testing.assert_array_equal(np.array(require_struct_decoding),
+                                      expected_require_struct)
+
+        # grammar_bitmask_cpu should have mask1 at index 0, mask2 at index 2
+        expected_grammar_bitmask = np.zeros_like(
+            self.runner.grammar_bitmask_cpu[:num_reqs])
+        expected_grammar_bitmask[0] = mask1
+        expected_grammar_bitmask[2] = mask2
+        np.testing.assert_array_equal(np.array(grammar_bitmask),
+                                      expected_grammar_bitmask)
+
+        np.testing.assert_array_equal(np.array(arange),
+                                      np.arange(0, 32, dtype=np.int32))
+
+        # 3. ===== Test structured_decode_fn =====
+        # This function is jitted, so we call it with the device arrays
+        modified_logits = self.runner.structured_decode_fn(
+            require_struct_decoding, grammar_bitmask, mock_logits_device,
+            arange)
+
+        modified_logits_cpu = np.array(modified_logits)
+
+        # Assertions for structured_decode_fn
+        # Logits for req-1 (index 0) should be masked for tokens 32-63
+        self.assertTrue(np.all(modified_logits_cpu[0, :32] == 1.0))
+        self.assertTrue(np.all(modified_logits_cpu[0, 32:] == -np.inf))
+
+        # Logits for req-2 (index 1) should be unchanged
+        np.testing.assert_array_equal(modified_logits_cpu[1],
+                                      np.ones(self.runner.vocab_size))
+
+        # Logits for req-3 (index 2) should be masked for tokens 0-31
+        self.assertTrue(np.all(modified_logits_cpu[2, :32] == -np.inf))
+        self.assertTrue(np.all(modified_logits_cpu[2, 32:] == 1.0))
+
 
 if __name__ == '__main__':
     unittest.main()

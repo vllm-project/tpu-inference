@@ -7,6 +7,7 @@ import threading
 import time
 import traceback
 import signal
+import math
 from typing import Any, Callable, Optional, TypeVar, Union
 
 import jax
@@ -423,14 +424,21 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
                 # Insert the request to the decoder.
                 req_id = prefill_output["req_id"]
                 vllm_request = self._requests[req_id]
+                # Caching num_computed_tokens. The tokens in kv manager allocate blocks 
+                # is computed as num_computed_tokens + num_new_tokens, so without caching
+                # the token number would double. 
+                prompt_tokens = vllm_request.num_computed_tokens
+                vllm_request.num_computed_tokens = 0
                 kv_cache = prefill_output["cache"]
 
                 kv_cache_manager = decode_engine.scheduler.kv_cache_manager
                 kv_cache_manager.allocate_slots(
                     vllm_request,
-                    vllm_request.num_computed_tokens,
+                    prompt_tokens,
                 )
+                vllm_request.num_computed_tokens = prompt_tokens
                 new_block_ids = kv_cache_manager.get_block_ids(req_id)
+                assert(len(new_block_ids[0]) == math.ceil(prompt_tokens / self.vllm_config.cache_config.block_size))
 
                 with LatencyTracker(f"KVCacheInsert-{len(new_block_ids[0])}"):
                     decode_engine.model_executor.driver_worker.model_runner.insert_request_with_kv_cache(
@@ -445,7 +453,9 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
             scheduler_output = decode_engine.scheduler.schedule()
 
             logger.debug(
-                f"decode-{idx}: scheduler_output - {scheduler_output}")
+                f'''decode-{idx}: scheduler_output - 
+                {scheduler_output.scheduled_cached_reqs.num_computed_tokens}, 
+                new block ids - {scheduler_output.scheduled_cached_reqs.new_block_ids}''')
 
             with LatencyTracker(f"decode-{idx}"):
                 model_output = decode_engine.execute_model(scheduler_output)

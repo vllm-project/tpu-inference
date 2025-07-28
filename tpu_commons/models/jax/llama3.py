@@ -31,6 +31,7 @@ class LlamaMLP(nnx.Module):
             intermediate_size,
             use_bias=False,
             param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
             rngs=rng,
         )
         self.up_proj = nnx.Linear(
@@ -38,6 +39,7 @@ class LlamaMLP(nnx.Module):
             intermediate_size,
             use_bias=False,
             param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
             rngs=rng,
         )
         self.down_proj = nnx.Linear(
@@ -45,6 +47,7 @@ class LlamaMLP(nnx.Module):
             hidden_size,
             use_bias=False,
             param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
         )
         self.act_fn = modeling_flax_utils.ACT2FN[act]
@@ -80,24 +83,28 @@ class LlamaAttention(nnx.Module):
             "TD,DNH->TNH",
             (self.hidden_size, self.num_heads, self.head_dim),
             param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             rngs=rng,
         )
         self.k_proj = nnx.Einsum(
             "TD,DKH->TKH",
             (self.hidden_size, self.num_kv_heads, self.head_dim),
             param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             rngs=rng,
         )
         self.v_proj = nnx.Einsum(
             "TD,DKH->TKH",
             (self.hidden_size, self.num_kv_heads, self.head_dim),
             param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             rngs=rng,
         )
         self.o_proj = nnx.Einsum(
             "TNH,NHD->TD",
             (self.num_heads, self.head_dim, self.hidden_size),
             param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
             rngs=rng,
         )
 
@@ -108,20 +115,16 @@ class LlamaAttention(nnx.Module):
         attention_metadata: AttentionMetadata,
     ) -> Tuple[jax.Array, jax.Array]:
         md = attention_metadata
-
         # q: (T, N, H)
         q = self.q_proj(x)
         q = apply_rope(q, md.input_positions, self.head_dim, self.rope_theta,
                        self.rope_scaling)
-
         # k: (T, K, H)
         k = self.k_proj(x)
         k = apply_rope(k, md.input_positions, self.head_dim, self.rope_theta,
                        self.rope_scaling)
-
-        # k: (T, K, H)
+        # v: (T, K, H)
         v = self.v_proj(x)
-
         # o: (T, N, H)
         new_kv_cache, outputs = attention(
             kv_cache,
@@ -132,7 +135,6 @@ class LlamaAttention(nnx.Module):
             self.mesh,
             self.head_dim,
         )
-
         # (T, D)
         o = self.o_proj(outputs)
         return new_kv_cache, o
@@ -149,6 +151,7 @@ class LlamaDecoderLayer(nnx.Module):
             hidden_size,
             epsilon=rms_norm_eps,
             param_dtype=dtype,
+            scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
         )
         self.self_attn = LlamaAttention(config=config,
@@ -159,6 +162,7 @@ class LlamaDecoderLayer(nnx.Module):
             hidden_size,
             epsilon=rms_norm_eps,
             param_dtype=dtype,
+            scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
         )
         self.mlp = LlamaMLP(
@@ -173,7 +177,6 @@ class LlamaDecoderLayer(nnx.Module):
         x: jax.Array,
         attention_metadata: AttentionMetadata,
     ) -> Tuple[jax.Array, jax.Array]:
-        # Self attention.
         hidden_states = self.input_layernorm(x)
         kv_cache, attn_output = self.self_attn(
             kv_cache,
@@ -182,7 +185,6 @@ class LlamaDecoderLayer(nnx.Module):
         )
         attn_output += x
 
-        # MLP.
         residual = attn_output
         attn_output = self.post_attention_layernorm(attn_output)
         outputs = self.mlp(attn_output)
@@ -212,6 +214,7 @@ class LlamaModel(nnx.Module):
             hidden_size,
             epsilon=rms_norm_eps,
             param_dtype=dtype,
+            scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
         )
 
@@ -250,6 +253,7 @@ class LlamaForCausalLM(nnx.Module):
             num_embeddings=vocab_size,
             features=hidden_size,
             param_dtype=dtype,
+            embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=self.rng,
         )
         self.model = LlamaModel(
@@ -260,7 +264,9 @@ class LlamaForCausalLM(nnx.Module):
 
         # TODO(xiang): Llama3.2 does not use lm_head
         self.lm_head = nnx.Param(
-            init_fn(self.rng.params(), (hidden_size, vocab_size), dtype), )
+            init_fn(self.rng.params(), (hidden_size, vocab_size), dtype),
+            sharding=(None, "model"),
+        )
 
     def __call__(
         self,
@@ -269,18 +275,12 @@ class LlamaForCausalLM(nnx.Module):
         attention_metadata: AttentionMetadata,
         *args,
     ) -> Tuple[List[jax.Array], jax.Array]:
-        # input_ids: (T,)
-
-        # x: (T, D)
         x = self.embed(input_ids)
-
-        # (T, D)
         kv_caches, x = self.model(
             kv_caches,
             x,
             attention_metadata,
         )
-
         return kv_caches, x
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
@@ -292,29 +292,28 @@ class LlamaForCausalLM(nnx.Module):
         self.rng = nnx.Rngs(rng_key)
 
         # Key: path to a HF layer weight
-        # Value: a tuple of (path to a nnx layer weight, nnx weight sharding)
+        # Value: path to a nnx layer weight
         mappings = {
-            "lm_head": ("lm_head", (None, "model")),
-            "model.embed_tokens": ("embed.embedding", ("model", None)),
+            "lm_head": "lm_head",
+            "model.embed_tokens": "embed.embedding",
             "model.layers.*.input_layernorm":
-            ("model.layers.*.input_layernorm.scale", (None, )),
+            "model.layers.*.input_layernorm.scale",
             "model.layers.*.mlp.down_proj":
-            ("model.layers.*.mlp.down_proj.kernel", ("model", None)),
+            "model.layers.*.mlp.down_proj.kernel",
             "model.layers.*.mlp.gate_proj":
-            ("model.layers.*.mlp.gate_proj.kernel", (None, "model")),
-            "model.layers.*.mlp.up_proj": ("model.layers.*.mlp.up_proj.kernel",
-                                           (None, "model")),
+            "model.layers.*.mlp.gate_proj.kernel",
+            "model.layers.*.mlp.up_proj": "model.layers.*.mlp.up_proj.kernel",
             "model.layers.*.post_attention_layernorm":
-            ("model.layers.*.post_attention_layernorm.scale", (None, )),
+            "model.layers.*.post_attention_layernorm.scale",
             "model.layers.*.self_attn.k_proj":
-            ("model.layers.*.self_attn.k_proj.kernel", (None, "model", None)),
+            "model.layers.*.self_attn.k_proj.kernel",
             "model.layers.*.self_attn.o_proj":
-            ("model.layers.*.self_attn.o_proj.kernel", ("model", None, None)),
+            "model.layers.*.self_attn.o_proj.kernel",
             "model.layers.*.self_attn.q_proj":
-            ("model.layers.*.self_attn.q_proj.kernel", (None, "model", None)),
+            "model.layers.*.self_attn.q_proj.kernel",
             "model.layers.*.self_attn.v_proj":
-            ("model.layers.*.self_attn.v_proj.kernel", (None, "model", None)),
-            "model.norm": ("model.norm.scale", (None, )),
+            "model.layers.*.self_attn.v_proj.kernel",
+            "model.norm": "model.norm.scale",
         }
         load_hf_weights(vllm_config=self.vllm_config,
                         model=self,
