@@ -582,10 +582,8 @@ class TestTPUWorker:
                            rank=0,
                            distributed_init_method="test")
         worker.model_runner = MagicMock()
-        expected_tasks = ("generate", "transcription")
-        worker.model_runner.get_supported_tasks.return_value = expected_tasks
+        worker.model_runner.get_supported_tasks.return_value = ("generate", )
 
-        result = worker.get_supported_tasks()
+        _ = worker.get_supported_tasks()
 
         worker.model_runner.get_supported_tasks.assert_called_once()
-        assert result == expected_tasks

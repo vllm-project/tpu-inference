@@ -17,6 +17,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.sequence import IntermediateTensors
+from vllm.tasks import SupportedTask
 from vllm.utils import cdiv
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
@@ -75,7 +76,6 @@ class TPUModelRunner():
         self.parallel_config = vllm_config.parallel_config
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
-        self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
         self.device_config = vllm_config.device_config
         self._verify_chunked_prefill_config()
@@ -194,6 +194,9 @@ class TPUModelRunner():
 
         logger.info(f"Init model | "
                     f"hbm={utils.hbm_usage_gb(self.devices)}Gb")
+
+    def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+        return ("generate", )
 
     def get_kv_cache_spec(self):
         # TODO(xiang): this hack tricks engine core to init successfully

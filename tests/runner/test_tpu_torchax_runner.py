@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copied from https://github.com/vllm-project/vllm/blob/main/tests/v1/tpu/worker/test_tpu_model_runner.py
-from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -554,47 +553,7 @@ def test_init_kv_cache_with_kv_sharing_valid():
     assert kv_cache_config.kv_cache_groups[0].layer_names[1] == layer_1
 
 
-@pytest.mark.parametrize("is_text_generation_model", [True, False])
-@pytest.mark.parametrize("supports_transcription", [True, False])
-@pytest.mark.parametrize("model_supports_transcription_only", [True, False])
-def test_get_supported_tasks_generate_runner(
-        model_runner, is_text_generation_model, supports_transcription,
-        model_supports_transcription_only):
+def test_get_supported_tasks_runner(model_runner):
     """Test get_supported_tasks for generate runner type."""
-    model_runner.model_config.runner_type = "generate"
-
-    with patch('tpu_commons.runner.tpu_torchax_runner.is_text_generation_model', return_value=is_text_generation_model), \
-        patch('tpu_commons.runner.tpu_torchax_runner.supports_transcription', return_value=supports_transcription), \
-         patch.object(model_runner, 'get_model') as mock_get_model:
-        mock_model = MagicMock()
-        mock_get_model.return_value = mock_model
-        mock_model.supports_transcription_only = model_supports_transcription_only
-        tasks = model_runner.get_supported_tasks()
-        if supports_transcription:
-            if model_supports_transcription_only:
-                assert tasks == ("transcription", )
-                return
-            else:
-                assert "transcription" in tasks
-
-        if is_text_generation_model:
-            assert "generate" in tasks
-
-        if not is_text_generation_model and not supports_transcription:
-            assert tasks == ()
-
-
-@pytest.mark.parametrize("is_pooling_model", [True, False])
-def test_get_supported_tasks_pooling_runner(model_runner, is_pooling_model):
-    """Test get_supported_tasks for pooling runner type."""
-    model_runner.model_config.runner_type = "pooling"
-
-    with patch('tpu_commons.runner.tpu_torchax_runner.is_pooling_model', return_value=is_pooling_model), \
-         patch.object(model_runner, 'get_model') as mock_get_model:
-        mock_model = MagicMock()
-        mock_get_model.return_value = mock_model
-        tasks = model_runner.get_supported_tasks()
-        if is_pooling_model:
-            assert tasks == ("embed", )
-        else:
-            assert tasks == ()
+    supported_tasks = model_runner.get_supported_tasks()
+    assert supported_tasks == ("generate", )

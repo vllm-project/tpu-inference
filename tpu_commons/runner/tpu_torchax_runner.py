@@ -364,39 +364,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
     def get_model(self) -> nn.Module:
         return self.model
 
-    def get_supported_generation_tasks(self) -> list[GenerationTask]:
-        model = self.get_model()
-        supported_tasks = list[GenerationTask]()
-
-        if is_text_generation_model(model):
-            supported_tasks.append("generate")
-
-        if supports_transcription(model):
-            if model.supports_transcription_only:
-                return ["transcription"]
-
-            supported_tasks.append("transcription")
-
-        return supported_tasks
-
-    def get_supported_pooling_tasks(self) -> list[PoolingTask]:
-        model = self.get_model()
-        supported_tasks = list[PoolingTask]()
-
-        if is_pooling_model(model):
-            supported_tasks.append("embed")
-
-        return supported_tasks
-
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
-        tasks = list[SupportedTask]()
-
-        if self.model_config.runner_type == "generate":
-            tasks.extend(self.get_supported_generation_tasks())
-        if self.model_config.runner_type == "pooling":
-            tasks.extend(self.get_supported_pooling_tasks())
-
-        return tuple(tasks)
+        return ("generate", )
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
