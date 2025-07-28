@@ -54,15 +54,14 @@ def get_padded_num_reqs_with_upper_limit(x: int, upper_limit: int) -> int:
 
 
 def get_req_paddings(min_req_size: int, max_req_size: int) -> list[int]:
-    logger.info("Preparing request paddings:")
     # assert min_req_size is power of 2
     assert (min_req_size & (min_req_size - 1) == 0) and min_req_size > 0
     paddings: list = []
     num = max(MIN_NUM_SEQS, min_req_size)
     while num <= max_req_size and (len(paddings) == 0 or paddings[-1] != num):
         paddings.append(num)
-        logger.info("    %d", num)
         num = get_padded_num_reqs_with_upper_limit(num + 1, max_req_size)
+    logger.info(f"Prepared request paddings: {paddings}")
     return paddings
 
 
@@ -83,25 +82,20 @@ def get_token_paddings(min_token_size: int, max_token_size: int,
     num = min_token_size
 
     if padding_gap == 0:
-        logger.info("Using exponential token paddings:")
         while True:
-            logger.info("    %d", num)
             paddings.append(num)
             if num >= max_token_size:
                 break
             num *= 2
     else:
-        logger.info("Using incremental token paddings:")
         while num <= padding_gap:
-            logger.info("    %d", num)
             paddings.append(num)
             num *= 2
         num //= 2
         while num < max_token_size:
             num += padding_gap
-            logger.info("    %d", num)
             paddings.append(num)
-
+    logger.info(f"Prepared token paddings: {paddings}")
     return paddings
 
 
