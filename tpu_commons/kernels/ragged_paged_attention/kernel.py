@@ -498,7 +498,10 @@ def ragged_paged_attention_kernel(
             einsum = functools.partial(jnp.einsum,
                                        preferred_element_type=jnp.float32)
             if k_scale is not None:
-                k = qarray.QArray(k, k_scale, zero_point=None, qtype=k.dtype)
+                k = qarray.QArray(k,
+                                  k_scale.reshape(1, 1),
+                                  zero_point=None,
+                                  qtype=k.dtype)
                 einsum = qwix_einsum
             qk = (einsum("nd,md->nm", q, k) * sm_scale)
             store_start = jnp.maximum(q_start - q_len_start, 0)
@@ -526,7 +529,10 @@ def ragged_paged_attention_kernel(
             m_curr = jnp.max(qk, axis=1, keepdims=True)
             s_curr = jnp.exp(qk - m_curr)
             if k_scale is not None:
-                v = qarray.QArray(v, v_scale, zero_point=None, qtype=v.dtype)
+                v = qarray.QArray(v,
+                                  v_scale.reshape(1, 1),
+                                  zero_point=None,
+                                  qtype=v.dtype)
                 qkv = qwix_einsum("nm,md->nd", s_curr, v)
             else:
                 qkv = jnp.dot(s_curr, v, preferred_element_type=jnp.float32)
