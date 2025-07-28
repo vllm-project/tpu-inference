@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-import gc
 import tempfile
 
 import jax
@@ -88,9 +87,6 @@ def test_vllm_model_loader(model):
     for v in params.values():
         v.delete()
 
-    del model
-    gc.collect()
-
 
 @pytest.mark.parametrize("model", [
     "Qwen/Qwen2-1.5B-Instruct",
@@ -122,6 +118,3 @@ def test_tpu_model_loader(model):
     for v in params_buffers.values():
         if isinstance(v, torchax.tensor.Tensor):
             v._elem.delete()
-
-    del model
-    gc.collect()
