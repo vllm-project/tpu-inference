@@ -91,7 +91,7 @@ class Llama4Attention(Attention):
         rope_scaling = getattr(self.cfg,
                                HuggingFaceArgNames.ROPE_SCALING.value)
         rope_theta = getattr(self.cfg, HuggingFaceArgNames.ROPE_THETA.value)
-        rope_type = self.cfg.rope_type
+        rope_input_ordering = self.cfg.rope_input_ordering
         H = getattr(self.cfg, HuggingFaceArgNames.HEAD_DIM.value)
         l2_norm = L2Norm()
 
@@ -99,8 +99,8 @@ class Llama4Attention(Attention):
             q_TNH = jnp.einsum('TD,DNH -> TNH', x_q_TD,
                                self.kernel_q_proj_DNH.value)
             if use_attention_rope:
-                q_TNH = apply_rope(q_TNH, md.input_positions, H, rope_type, rope_theta,
-                                   rope_scaling)
+                q_TNH = apply_rope(q_TNH, md.input_positions, H, rope_theta,
+                                   rope_scaling, rope_input_ordering)
                 
                 # Apply normaliation after RoPE
                 if self.cfg.use_qk_norm:
@@ -120,8 +120,8 @@ class Llama4Attention(Attention):
             k_SKH = jnp.einsum('SD,DKH -> SKH', x_SD,
                                self.kernel_k_proj_DKH.value)
             if use_attention_rope:
-                k_SKH = apply_rope(k_SKH, md.input_positions, H, rope_type, rope_theta,
-                                   rope_scaling)
+                k_SKH = apply_rope(k_SKH, md.input_positions, H, rope_theta,
+                                   rope_scaling, rope_input_ordering)
                 
                 # Apply normaliation after RoPE
                 if self.cfg.use_qk_norm:

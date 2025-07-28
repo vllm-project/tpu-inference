@@ -68,7 +68,7 @@ class Llama3ModelConfig():
                     num_key_value_heads=self.num_key_value_heads,
                     head_dim=self.head_dim,
                     rope_theta=self.rope_theta,
-                    rope_type="split",
+                    rope_input_ordering="split",
                     rope_scaling={},
                     dtype=self.dtype,
                     vllm_config=self.vllm_config),
@@ -159,8 +159,6 @@ class LlamaForCausalLM(Model):
         logger.info(
             f"Using the following sharding overrides:\n{self.sharding}")
         self.mesh = self.sharding.mesh
-        self.weight_loader = Llama3WeightLoader(vllm_config=self.vllm_config,
-                                                model_config=self.cfg.model)
         self._init_layers()
 
     def _init_layers(self):

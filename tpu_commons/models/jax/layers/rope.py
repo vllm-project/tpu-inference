@@ -9,9 +9,9 @@ def apply_rope(
     inputs: jax.Array,
     positions: jax.Array,
     head_dim: int,
-    rope_type: str = "split",
     rope_theta: float = 10000,
     rope_scaling: Dict[str, Any] = None,
+    rope_input_ordering: str = "split",
 ) -> jax.Array:
     """
     Applies Rotary Positional Embedding using the sine and cosine strategy.
@@ -20,7 +20,7 @@ def apply_rope(
     padding on the last dimension (head_dim).
     RoPE is applied only to the first `head_dim` features, and the result is
     padded back to the original dimension if necessary.
-    If rope_type is "split", then the input pairs for rotation are taken one from the
+    If rope_input_ordering is "split", then the input pairs for rotation are taken one from the
     first and one from the second half of the head_dim. If it is "interleaved" then
     adjacent values are used as inputs for rotation.
     """
@@ -41,7 +41,7 @@ def apply_rope(
     sin = jnp.sin(sinusoid_inp)
     cos = jnp.cos(sinusoid_inp)
 
-    if rope_type == "interleaved":
+    if rope_input_ordering == "interleaved":
         # Reshape to group adjacent features for rotation, matching new_apply_rope
         rotary_inputs = inputs[..., :head_dim] # Take just the non-padded amount.
         reshaped_inputs = rotary_inputs.reshape(*rotary_inputs.shape[:-1], -1, 2)
@@ -57,7 +57,7 @@ def apply_rope(
     second_part = second_half * cos + first_half * sin
 
     # Combine the rotated parts and reshape back
-    if rope_type == "interleaved":
+    if rope_input_ordering == "interleaved":
         out_stacked = jnp.stack([first_part, second_part], axis=-1)
         out = out_stacked.reshape(rotary_inputs.shape)
     else:

@@ -75,7 +75,7 @@ class Llama4ModelConfig(ModelConfig):
                         "high_freq_factor": 1.0,
                         "original_max_position_embeddings": 8192
                     },
-                    rope_type="interleaved",
+                    rope_input_ordering="interleaved",
                     temperature_tuning=True,
                     temperature_tuning_scale=0.1,
                     temperature_tuning_floor_scale=8192,
@@ -158,8 +158,6 @@ class Llama4Scout(Model):
         logger.info(
             f"Using the following sharding overrides:\n{self.sharding}")
         self.mesh = self.sharding.mesh
-        self.weight_loader = Llama4WeightLoader(vllm_config=self.vllm_config,
-                                                model_config=self.cfg.model)
         self._init_layers()
 
     def _init_layers(self):

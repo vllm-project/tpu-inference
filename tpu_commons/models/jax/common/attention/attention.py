@@ -29,7 +29,7 @@ AttentionConfig = make_dataclass(
      (HuggingFaceArgNames.HEAD_DIM.value, int),
      (HuggingFaceArgNames.ROPE_SCALING.value, Dict[str, Any]),
      (HuggingFaceArgNames.ROPE_THETA.value, float),
-     ("dtype", DTypeLike), ("rope_type", str, "split"),
+     ("dtype", DTypeLike), ("rope_input_ordering", str, "split"),
      (HuggingFaceArgNames.ATTENTION_CHUNK_SIZE.value, int, None),
      ("vllm_config", VllmConfig, field(repr=False, default=None))],
     bases=(Config, ))
@@ -43,7 +43,7 @@ AttentionConfig.__doc__ = f"""Configuration for the Attention module.
         {HuggingFaceArgNames.ROPE_THETA.value}: The base period for Rotary Position Embeddings.
         {HuggingFaceArgNames.ATTENTION_CHUNK_SIZE.value}: The chunk size for sliding window attention.
          dtype: The data type for computations (default: jnp.float32).
-         "rope_type": Whether the inputs to rotate should be adjacent, interleaved dimensions or first and second half of the dimensions.
+         "rope_input_ordering": Whether the inputs to rotate should be adjacent, interleaved dimensions or first and second half of the dimensions.
          vllm_config: The VLLM config containing any overrides to apply.
     """
 
@@ -167,22 +167,22 @@ class Attention(nnx.Module):
         rope_scaling = getattr(self.cfg,
                                HuggingFaceArgNames.ROPE_SCALING.value)
         rope_theta = getattr(self.cfg, HuggingFaceArgNames.ROPE_THETA.value)
-        rope_type = self.cfg.rope_type
+        rope_input_ordering = self.cfg.rope_input_ordering
         H = getattr(self.cfg, HuggingFaceArgNames.HEAD_DIM.value)
         with jax.named_scope("q_proj"):
             q_TNH = jnp.einsum('TD,DNH -> TNH', x_q_TD,
                                self.kernel_q_proj_DNH.value)
             if use_attention_rope:
-                q_TNH = apply_rope(q_TNH, md.input_positions, H, rope_type, rope_theta,
-                                   rope_scaling)
+                q_TNH = apply_rope(q_TNH, md.input_positions, H, rope_theta,
+                                   rope_scaling, rope_input_ordering)
             q_TNH = nnx.with_sharding_constraint(q_TNH,
                                                  self.query_tnh[op_mode])
         with jax.named_scope("k_proj"):
             k_SKH = jnp.einsum('SD,DKH -> SKH', x_SD,
                                self.kernel_k_proj_DKH.value)
             if use_attention_rope:
-                k_SKH = apply_rope(k_SKH, md.input_positions, H, rope_type, rope_theta,
-                                   rope_scaling)
+                k_SKH = apply_rope(k_SKH, md.input_positions, H, rope_theta,
+                                   rope_scaling, rope_input_ordering)
             k_SKH = nnx.with_sharding_constraint(k_SKH,
                                                  self.keyvalue_skh[op_mode])
 

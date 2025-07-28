@@ -46,7 +46,6 @@ class TestTransformerBlock(unittest.TestCase):
         transformer_config = TransformerBlockConfig(
             attention=attention_config,
             dense_ffw=dense_ffw_config,
-            block_type="dense",
             rms_norm_eps=1e-6,
             vllm_config=None,
         )
