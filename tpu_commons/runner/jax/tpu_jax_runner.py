@@ -10,11 +10,22 @@ import jax
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
+import vllm.envs as envs
 from flax import nnx
 from jax.sharding import NamedSharding, PartitionSpec
+from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer import (get_kv_transfer_group,
+                                          has_kv_transfer_group)
+from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
+from vllm.sequence import IntermediateTensors
+from vllm.utils import cdiv
+from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
+                                        KVCacheSpec)
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
+from vllm.v1.request import Request
 
-import vllm.envs as envs
-from tpu_commons import utils_jax as utils
+from tpu_commons import utils_jax as common_utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.common.sharding import Sharding
@@ -26,23 +37,9 @@ from tpu_commons.models.jax.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_commons.models.jax.utils.weight_utils import \
     transfer_state_with_mappings
+from tpu_commons.runner import utils as runner_utils
 from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
                                                     InputBatch)
-from tpu_commons.runner.utils import (ForbidCompile, LatencyTracker,
-                                      create_kv_caches,
-                                      get_padded_num_reqs_with_upper_limit,
-                                      get_padded_token_len, get_req_paddings,
-                                      get_token_paddings)
-from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer import (get_kv_transfer_group,
-                                          has_kv_transfer_group)
-from vllm.sequence import IntermediateTensors
-from vllm.utils import cdiv
-from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheSpec)
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
-from vllm.v1.request import Request
 
 logger = init_logger(__name__)
 
@@ -87,7 +84,7 @@ class TPUModelRunner():
         self._init_mesh()
         self._init_inputs()
 
-        self.maybe_forbid_compile = ForbidCompile(
+        self.maybe_forbid_compile = runner_utils.ForbidCompile(
         ) if envs.VLLM_XLA_CHECK_RECOMPILATION else nullcontext()
         logger.info("TPUModelRunner created!")
 
@@ -141,7 +138,7 @@ class TPUModelRunner():
         # to avoid dynamic shapes. Also, avoid suboptimal alignment.
         self.max_num_reqs = max(scheduler_config.max_num_seqs, MIN_NUM_SEQS)
         # [16, 32, 64, 128, 256, 512, 1024, 2048]
-        self.num_tokens_paddings = get_token_paddings(
+        self.num_tokens_paddings = runner_utils.get_token_paddings(
             min_token_size=16,
             max_token_size=scheduler_config.max_num_batched_tokens,
             padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
@@ -172,7 +169,7 @@ class TPUModelRunner():
         # Used to initialize positions / context_lens / seq_lens
         # Keep in int64 to avoid overflow with long context
         self.arange_cpu = np.arange(self.max_num_tokens, dtype=np.int64)
-        self.num_reqs_paddings = get_req_paddings(
+        self.num_reqs_paddings = runner_utils.get_req_paddings(
             min_req_size=MIN_NUM_SEQS, max_req_size=self.max_num_reqs)
 
         self.temperatures_cpu = np.zeros(self.max_num_tokens, dtype=np.float32)
@@ -205,7 +202,7 @@ class TPUModelRunner():
             jax.random.key(self.model_config.seed)).params()
 
         logger.info(f"Init model | "
-                    f"hbm={utils.hbm_usage_gb(self.devices)}Gb")
+                    f"hbm={common_utils.hbm_usage_gb(self.devices)}Gb")
 
     def get_kv_cache_spec(self):
         # TODO(xiang): this hack tricks engine core to init successfully
@@ -216,12 +213,12 @@ class TPUModelRunner():
         parallel_config = self.vllm_config.parallel_config
 
         # Pad num_kv_heads to multiple of TP size.
-        num_kv_heads = utils.get_padded_num_heads(
+        num_kv_heads = common_utils.get_padded_num_heads(
             model_config.get_total_num_kv_heads(), self.mesh.shape["model"])
 
         # Pad head_dim to multiple of 128.
         head_size = model_config.get_head_size()
-        head_size = utils.get_padded_head_dim(head_size)
+        head_size = common_utils.get_padded_head_dim(head_size)
 
         for i in range(model_config.get_num_layers(parallel_config)):
             kv_cache_spec[f"layers.{i}"] = FullAttentionSpec(
@@ -247,7 +244,7 @@ class TPUModelRunner():
         layer_names = kv_cache_groups[0].layer_names
 
         # NOTE: we'll multiply the num_kv_heads by 2 in the function
-        self.kv_caches = create_kv_caches(
+        self.kv_caches = runner_utils.create_kv_caches(
             num_blocks=kv_cache_config.num_blocks,
             block_size=kv_cache_spec.block_size,
             num_kv_heads=kv_cache_spec.num_kv_heads,
@@ -256,6 +253,9 @@ class TPUModelRunner():
             layer_names=layer_names,
             devices=self.devices,
         )
+
+        if has_kv_transfer_group():
+            get_kv_transfer_group().register_kv_caches(self.kv_caches)
 
         logger.info(jax.lib.xla_bridge.get_backend().platform_version)
 
@@ -503,7 +503,7 @@ class TPUModelRunner():
         indices_to_gather_jnp = jnp.array(all_indices_to_gather,
                                           dtype=jnp.int32)
 
-        with LatencyTracker("BatchedGatherKVSlices-for-blocks"):
+        with runner_utils.LatencyTracker("BatchedGatherKVSlices-for-blocks"):
             batched_kv_cache_per_layer = self._jitted_gather_kv_cache(
                 self.kv_caches, indices_to_gather_jnp)
 
@@ -583,7 +583,8 @@ class TPUModelRunner():
 
         # Call the JIT-compiled function to perform the scatter operation
         # for all layers in a single, fused kernel.
-        with LatencyTracker(f"JittedInsertKVCache-b{padded_num_blocks}"):
+        with runner_utils.LatencyTracker(
+                f"JittedInsertKVCache-b{padded_num_blocks}"):
             self.kv_caches = self._jitted_insert_kv_cache(
                 self.block_size,
                 self.kv_caches,
@@ -820,6 +821,7 @@ class TPUModelRunner():
         # Update KVConnector with the KVConnector metadata forward().
         if has_kv_transfer_group():
             kv_connector = get_kv_transfer_group()
+            assert isinstance(kv_connector, KVConnectorBase_V1)
             assert scheduler_output.kv_connector_metadata is not None
             kv_connector.bind_connector_metadata(
                 scheduler_output.kv_connector_metadata)
@@ -897,7 +899,7 @@ class TPUModelRunner():
             num_scheduled_tokens_per_req)
 
         # Do the padding and copy the tensors to the TPU.
-        padded_total_num_scheduled_tokens = get_padded_token_len(
+        padded_total_num_scheduled_tokens = runner_utils.get_padded_token_len(
             self.num_tokens_paddings, total_num_scheduled_tokens)
         # Zero out to avoid spurious values from prev iteration (last cp chunk)
         self.input_ids_cpu[
@@ -922,7 +924,7 @@ class TPUModelRunner():
             self.input_batch.block_table[0].get_cpu_tensor()[:num_reqs])
         query_start_loc = self.query_start_loc_cpu[:self.max_num_reqs + 1]
         seq_lens = self.seq_lens_cpu[:self.max_num_reqs]
-        padded_num_reqs = get_padded_num_reqs_with_upper_limit(
+        padded_num_reqs = runner_utils.get_padded_num_reqs_with_upper_limit(
             num_reqs, self.max_num_reqs)
         logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
         num_seqs = np.array([num_reqs])
