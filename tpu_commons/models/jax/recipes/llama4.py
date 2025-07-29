@@ -14,8 +14,8 @@ from vllm.config import VllmConfig
 import tpu_commons.models.jax.common.sharding as sharding
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.common.attention.attention import AttentionMetadata
-from tpu_commons.models.jax.common.attention.llama4_attention import \
-    Llama4Attention, Llama4AttentionConfig
+from tpu_commons.models.jax.common.attention.llama4_attention import (
+    Llama4Attention, Llama4AttentionConfig)
 from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.constants import RouterType
 from tpu_commons.models.jax.common.kv_cache import KVCacheType
@@ -48,8 +48,8 @@ class Llama4ModelConfig(ModelConfig):
     interleave_moe_layer_step: int = 1  # All layers are MoE for Scout
     intermediate_size_moe: int = 8192
     num_local_experts: int = 16
-    hidden_act = "silu"
-    no_rope_layer_interval = 4
+    hidden_act: str = "silu"
+    no_rope_layer_interval: int = 4
 
     def __post_init__(self):
         # Initialize defaults:
@@ -139,7 +139,8 @@ class Llama4Scout(Model):
         self.rng = nnx.Rngs(rng)
         self.mesh = mesh
         self.param_factory = param_factory
-        self.is_verbose = getattr(self.vllm_config.additional_config, "is_verbose", False)
+        self.is_verbose = getattr(self.vllm_config.additional_config,
+                                  "is_verbose", False)
         try:
             strategy_dict = self.vllm_config.additional_config["sharding"][
                 "sharding_strategy"]
@@ -153,7 +154,7 @@ class Llama4Scout(Model):
             model=Llama4ModelConfig(vllm_config=self.vllm_config),
             sharding=self.sharding.sharding_cfg,
             serving=Llama4ServingConfig(vllm_config=self.vllm_config))
-        
+
         logger.info(f"Using the following config:\n{self.cfg}")
         logger.info(
             f"Using the following sharding overrides:\n{self.sharding}")
@@ -165,7 +166,7 @@ class Llama4Scout(Model):
             self.param_factory = ParamFactory(
                 kernel_initializer=nnx.initializers.xavier_normal(),
                 scale_initializer=nnx.initializers.ones,
-                random_init=self.use_random_init)
+                random_init=False)
         self.embedder = Embedder(cfg=self.cfg.model.emb,
                                  mesh=self.mesh,
                                  param_factory=self.param_factory,
@@ -238,13 +239,11 @@ class Llama4Scout(Model):
         logger.info("\n### LM Head ###")
         nnx.display(self.lm_head)
 
-
     def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):
         self.rng = nnx.Rngs(rng)
         weight_loader = Llama4WeightLoader(vllm_config=self.vllm_config,
                                            model_config=self.cfg.model)
         weight_loader.load_weights(self)
-
 
     def __call__(
         self,
@@ -357,63 +356,62 @@ class Llama4WeightLoader(WeightLoader):
                 loaded_key, loaded_key)
         return mapped_key
 
-    def load_weights(self, model_for_loading: nnx.Module, is_verbose: bool = False):
-        model_params = nnx.state(model_for_loading)
+    def _map_llama4_gate_up_proj(self, model_for_loading: nnx.Module,
+                                 model_params: nnx.State, loaded_name: str,
+                                 loaded_weight: jax.Array):
+        """HF's gate_up_proj is a fused tensor of gate and up projections. It needs to be split."""
+        # gate_proj is first & up_proj is second
+        split_weights = jnp.split(loaded_weight, 2, axis=-1)
 
-        def _map_llama4_gate_up_proj(loaded_name: str,
-                                      loaded_weight: jax.Array):
-            """HF's gate_up_proj is a fused tensor of gate and up projections. It needs to be split."""
-            # gate_proj is first & up_proj is second
-            split_weights = jnp.split(loaded_weight, 2, axis=-1) 
+        for split_type in ["gate", "up"]:
+            split_loaded_name = loaded_name.replace("gate_up_proj",
+                                                    f"{split_type}_proj")
+            if split_type == "gate":
+                mapped_name = "layers.*.moe.kernel_gating_EDF"
+                loaded_weight = split_weights[0]
+            else:
+                mapped_name = "layers.*.moe.kernel_up_proj_EDF"
+                loaded_weight = split_weights[1]
 
-            for split_type in ["gate", "up"]:
-                split_loaded_name = loaded_name.replace(
-                    "gate_up_proj", f"{split_type}_proj")
-                if split_type == "gate":
-                    mapped_name = "layers.*.moe.kernel_gating_EDF"
-                    loaded_weight = split_weights[0]
-                else:
-                    mapped_name = "layers.*.moe.kernel_up_proj_EDF"
-                    loaded_weight = split_weights[1]
-                    
-                layer_num = re.search(r"layers\.(\d+)",
-                                        split_loaded_name).group(1)
-                mapped_name = re.sub(r"layers\.\*",
-                                            f"layers.{layer_num}",
-                                            mapped_name)
-                mapped_model_weight = get_param(model_params,
-                                                mapped_name)
-                if loaded_name.endswith(".bias"):
-                    loaded_weight = self.reshape_params(
-                        loaded_name, loaded_weight, "bias")
-                else:
-                    loaded_weight = self.reshape_params(
-                        loaded_name, loaded_weight, "weight")
-                    loaded_weight = self.transpose_params(
-                        loaded_name, loaded_weight)
-                if mapped_model_weight.value.shape != loaded_weight.shape:
-                    raise ValueError(
-                        f"Loaded shape for {split_loaded_name}: {loaded_weight.shape} "
-                        f"does not match model shape for {mapped_name}: {mapped_model_weight.value.shape}!"
-                    )
-                mapped_model_weight.value = shard_put(
-                    loaded_weight,
-                    mapped_model_weight.sharding.spec,
-                    mesh=model_for_loading.mesh)
-                logger.info(
-                    f"{split_loaded_name}: {loaded_weight.shape}  -->  {mapped_name}: {mapped_model_weight.value.shape}"
+            layer_num = re.search(r"layers\.(\d+)", split_loaded_name).group(1)
+            mapped_name = re.sub(r"layers\.\*", f"layers.{layer_num}",
+                                 mapped_name)
+            mapped_model_weight = get_param(model_params, mapped_name)
+            if loaded_name.endswith(".bias"):
+                loaded_weight = self.reshape_params(loaded_name, loaded_weight,
+                                                    "bias")
+            else:
+                loaded_weight = self.reshape_params(loaded_name, loaded_weight,
+                                                    "weight")
+                loaded_weight = self.transpose_params(loaded_name,
+                                                      loaded_weight)
+            if mapped_model_weight.value.shape != loaded_weight.shape:
+                raise ValueError(
+                    f"Loaded shape for {split_loaded_name}: {loaded_weight.shape} "
+                    f"does not match model shape for {mapped_name}: {mapped_model_weight.value.shape}!"
                 )
-                if is_verbose:
-                    WeightLoader.print_param_info(mapped_model_weight, mapped_name)
-                            
+            mapped_model_weight.value = shard_put(
+                loaded_weight,
+                mapped_model_weight.sharding.spec,
+                mesh=model_for_loading.mesh)
+            logger.info(
+                f"{split_loaded_name}: {loaded_weight.shape}  -->  {mapped_name}: {mapped_model_weight.value.shape}"
+            )
+            if self.is_verbose:
+                WeightLoader.print_param_info(mapped_model_weight, mapped_name)
+
+    def load_weights(self, model_for_loading: nnx.Module):
+        model_params = nnx.state(model_for_loading)
         with jax.default_device(jax.devices("cpu")[0]):
             for loaded_name, loaded_weight in self.names_and_weights_generator:
                 if "gate_up_proj" in loaded_name:
-                    _map_llama4_gate_up_proj(loaded_name, loaded_weight)
+                    self._map_llama4_gate_up_proj(model_for_loading,
+                                                  model_params, loaded_name,
+                                                  loaded_weight)
                     continue
                 mapped_name = self.map_loaded_to_standardized_name(loaded_name)
                 model_weight = get_param(model_params, mapped_name)
-                
+
                 if loaded_name.endswith(".bias"):
                     loaded_weight = self.reshape_params(
                         loaded_name, loaded_weight, "bias")
@@ -427,11 +425,13 @@ class Llama4WeightLoader(WeightLoader):
                         f"Loaded shape for {loaded_name}: {loaded_weight.shape} "
                         f"does not match model shape for {mapped_name}: {model_weight.value.shape}!"
                     )
-                logger.info(f"Transformed parameter {loaded_name} to {mapped_name}: {loaded_weight.shape} --> {model_weight.value.shape}")
+                logger.info(
+                    f"Transformed parameter {loaded_name} to {mapped_name}: {loaded_weight.shape} --> {model_weight.value.shape}"
+                )
                 model_weight.value = shard_put(loaded_weight,
                                                model_weight.sharding.spec,
                                                mesh=model_for_loading.mesh)
-                if is_verbose:
+                if self.is_verbose:
                     WeightLoader.print_param_info(model_weight, loaded_name)
 
         nnx.update(model_for_loading, model_params)

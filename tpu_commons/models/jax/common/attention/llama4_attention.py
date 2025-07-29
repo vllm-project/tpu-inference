@@ -65,7 +65,7 @@ class Llama4Attention(Attention):
         This method computes the attention output by projecting the input `x`
         to queries, keys, and values, applying RoPE and L2Norm if specified,
         performing scaled dot-product attention, and projecting the results
-        back to the model dimension. 
+        back to the model dimension.
         If no RoPE (NoPE) is specified, one can also perform temperature tuning
         which is useful to combat dilution of attention scores in long-context attention.
 
@@ -101,18 +101,13 @@ class Llama4Attention(Attention):
             if use_attention_rope:
                 q_TNH = apply_rope(q_TNH, md.input_positions, H, rope_theta,
                                    rope_scaling, rope_input_ordering)
-                
+
                 # Apply normaliation after RoPE
                 if self.cfg.use_qk_norm:
                     q_TNH = l2_norm(q_TNH)
             else:
                 if self.cfg.temperature_tuning:
-                    attn_scales = (jnp.log(
-                        jnp.floor(
-                            (md.input_positions.astype(self.cfg.dtype) + 1.0) /
-                            self.cfg.temperature_tuning_floor_scale) + 1.0) *
-                                   self.cfg.temperature_tuning_scale + 1.0)
-                    q_TNH = q_TNH * attn_scales[:, None, None]
+                    q_TNH = self.apply_temperature_tuning(md, q_TNH)
 
             q_TNH = nnx.with_sharding_constraint(q_TNH,
                                                  self.query_tnh[op_mode])
@@ -122,7 +117,7 @@ class Llama4Attention(Attention):
             if use_attention_rope:
                 k_SKH = apply_rope(k_SKH, md.input_positions, H, rope_theta,
                                    rope_scaling, rope_input_ordering)
-                
+
                 # Apply normaliation after RoPE
                 if self.cfg.use_qk_norm:
                     k_SKH = l2_norm(k_SKH)
@@ -152,3 +147,12 @@ class Llama4Attention(Attention):
             o_TD = nnx.with_sharding_constraint(
                 o_TD, self.activation_attention_out_td[op_mode])
         return new_kv_cache, o_TD
+
+    def apply_temperature_tuning(self, md: AttentionMetadata,
+                                 input_arr_TNH: jax.Array) -> jax.Array:
+        """Applies temperature tuning to the input array of shape (T, N, H)."""
+        attn_scales = (jnp.log(
+            jnp.floor((md.input_positions.astype(self.cfg.dtype) + 1.0) /
+                      self.cfg.temperature_tuning_floor_scale) + 1.0) *
+                       self.cfg.temperature_tuning_scale + 1.0)
+        return input_arr_TNH * attn_scales[:, None, None]
