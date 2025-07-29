@@ -220,7 +220,7 @@ for model_name in $model_list; do
     echo "Running benchmark for model: $model_name"
     echo "--------------------------------------------------"
 
-    if [ "$NEW_MODEL_DESIGN" = "True" ] && [ "$model_name" == "Qwen/Qwen2.5-1.5B-Instruct" ] || [ "$model_name" == "Qwen/Qwen2.5-0.5B-Instruct" ]; then
+    if [ "$NEW_MODEL_DESIGN" = "True" ] && { [ "$model_name" == "Qwen/Qwen2.5-1.5B-Instruct" ] || [ "$model_name" == "Qwen/Qwen2.5-0.5B-Instruct" ];}; then
        echo "Skipping $model_name for NEW_MODEL_DESIGN: True"
         continue
     fi
@@ -231,7 +231,7 @@ for model_name in $model_list; do
     fi
 
     # TODO (jacobplatin): remove when Qwen2.5 uses new model implementation
-    if [ "$QUANTIZATION" = "True" ] && [ "$model_name" == "Qwen/Qwen2.5-1.5B-Instruct" ] || [ "$model_name" == "Qwen/Qwen2.5-0.5B-Instruct" ]; then
+    if [ "$QUANTIZATION" = "True" ] && { [ "$model_name" == "Qwen/Qwen2.5-1.5B-Instruct" ] || [ "$model_name" == "Qwen/Qwen2.5-0.5B-Instruct" ];}; then
        echo "Skipping $model_name for QUANTIZATION: True"
         continue
     fi
