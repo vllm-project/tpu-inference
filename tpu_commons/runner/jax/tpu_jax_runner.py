@@ -103,23 +103,42 @@ class TPUModelRunner():
         self.rng_key = jax.random.key(self.model_config.seed)
 
     def _init_mesh(self) -> None:
+        try:
+            # TODO: Update override steps.
+            sharding_strategy = \
+                self.vllm_config.additional_config["sharding"]["sharding_strategy"]
+        except KeyError:
+            logger.warning(
+                f"No sharding strategy passed! Using default of full model parallelism={len(self.devices)}"
+            )
+            sharding_strategy = {"tensor_parallelism": len(self.devices)}
+
         if os.getenv("NEW_MODEL_DESIGN", False):
-            try:
-                # TODO: Update override steps.
-                sharding_strategy = \
-                    self.vllm_config.additional_config["sharding"]["sharding_strategy"]
-            except KeyError:
-                logger.warning(
-                    f"No sharding strategy passed! Using default of full model parallelism={len(self.devices)}"
-                )
-                sharding_strategy = {"tensor_parallelism": len(self.devices)}
             sharding = Sharding(strategy_dict=sharding_strategy,
                                 vllm_config=self.vllm_config,
                                 devices=self.devices)
             self.mesh = sharding.mesh
         else:
+            try:
+                dp = sharding_strategy["data_parallelism"]
+            except KeyError:
+                logger.warning(
+                    "No data parallelism passed! Using default value of 1")
+                dp = 1
+
+            try:
+                tp = sharding_strategy["tensor_parallelism"]
+            except KeyError:
+                logger.warning(
+                    f"No tensor parallelism passed! Using default value of {len(self.devices)}"
+                )
+                tp = len(self.devices)
+
+            tp = sharding_strategy["tensor_parallelism"]
+
             axis_names = ("data", "model")
-            mesh_shape = (1, len(self.devices))
+            mesh_shape = (dp, tp)
+
             self.mesh = jax.make_mesh(mesh_shape,
                                       axis_names,
                                       devices=self.devices)
