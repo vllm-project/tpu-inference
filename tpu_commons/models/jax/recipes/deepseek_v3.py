@@ -95,7 +95,9 @@ class DeepseekV3ModelConfig(ModelConfig):
                     },
                     q_lora_rank=1536,
                     kv_lora_rank=512,
-                    qk_nope_head_dim=128,
+                    # qk_nope_head_dim=128,
+                    # TODO: remove this hack.
+                    qk_nope_head_dim=64,
                     qk_rope_head_dim=64,
                     v_head_dim=128,
                     rms_norm_eps=self.rms_norm_eps,
