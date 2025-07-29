@@ -3,13 +3,13 @@ from unittest.mock import MagicMock, patch
 
 import jax.numpy as jnp
 import numpy as np
-
-from tpu_commons.runner.jax.input_batch_jax import CachedRequestState
-from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, VllmConfig)
 from vllm.sampling_params import SamplingType
 from vllm.v1.request import Request
+
+from tpu_commons.runner.jax.input_batch_jax import CachedRequestState
+from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
 
 
 class TestTPUJaxRunner(unittest.TestCase):
@@ -47,7 +47,6 @@ class TestTPUJaxRunner(unittest.TestCase):
                 scheduler_config=scheduler_config,
                 parallel_config=parallel_config,
                 speculative_config=None,
-                prompt_adapter_config=None,
                 observability_config=None,
                 additional_config={},
             )
@@ -271,6 +270,11 @@ class TestTPUJaxRunner(unittest.TestCase):
                                             mode='constant')
             np.testing.assert_array_equal(updated_block_content,
                                           expected_padded_slice)
+
+    def test_get_supported_tasks_runner(self):
+        """Test get_supported_tasks for generate runner type."""
+        supported_tasks = self.runner.get_supported_tasks()
+        assert supported_tasks == ("generate", )
 
     def test_structured_decoding(self):
         # 1. ===== Setup =====

@@ -425,3 +425,17 @@ class TestTPUWorker:
         # This method calls two different runner methods
         worker.model_runner.capture_model.assert_called_once()
         worker.model_runner._init_random.assert_called_once()
+
+    def test_get_supported_tasks(self, mock_host_interface, mock_vllm_config):
+        """Test get_supported_tasks passthrough to model runner."""
+        worker = TPUWorker(host_interface=mock_host_interface,
+                           vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test")
+        worker.model_runner = MagicMock()
+        worker.model_runner.get_supported_tasks.return_value = ("generate", )
+
+        _ = worker.get_supported_tasks()
+
+        worker.model_runner.get_supported_tasks.assert_called_once()
