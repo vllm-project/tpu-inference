@@ -52,9 +52,16 @@ def print_param_info(param: nnx.Param, name: str):
 
 @dataclass
 class DeepseekV3ModelConfig(ModelConfig):
+    vocab_size: int = 129280
     hidden_size: int = 7168
     dtype: jnp.dtype = jnp.bfloat16
-    num_layers: int = 61
+    # The original number is 61, reduce for test purpose.
+    num_layers: int = 3
+    num_attention_heads: int = 128
+    num_key_value_heads: int = 128
+    ffw_intermediate_size: int = 18432
+    moe_intermediate_size: int = 2048
+    num_local_experts: int = 256
     emb: EmbedderConfig = None
     layers: TransformerBlockConfig = None
     vllm_config: VllmConfig = field(repr=False, default=None)
@@ -65,55 +72,56 @@ class DeepseekV3ModelConfig(ModelConfig):
 
     def __post_init__(self):
         if not self.emb:
-            self.emb = EmbedderConfig(vocab_size=129280,
+            self.emb = EmbedderConfig(vocab_size=self.vocab_size,
                                       hidden_size=self.hidden_size,
                                       dtype=jnp.bfloat16,
                                       normalize_embeddings=False)
         if not self.layers:
             self.layers = SharedExpertsTransformerBlockConfig(
                 shared_experts=1,
-                attention=MLAConfig(hidden_size=self.hidden_size,
-                                    num_attention_heads=128,
-                                    num_key_value_heads=128,
-                                    rope_theta=10000,
-                                    rope_scaling={
-                                        "beta_fast": 32,
-                                        "beta_slow": 1,
-                                        "factor": 40,
-                                        "mscale": 1.0,
-                                        "mscale_all_dim": 1.0,
-                                        "original_max_position_embeddings":
-                                        4096,
-                                        "type": "yarn"
-                                    },
-                                    q_lora_rank=1536,
-                                    kv_lora_rank=512,
-                                    qk_nope_head_dim=128,
-                                    qk_rope_head_dim=64,
-                                    v_head_dim=128,
-                                    rms_norm_eps=self.rms_norm_eps,
-                                    dtype=self.dtype,
-                                    vllm_config=self.vllm_config),
-                dense_ffw=DenseFFWConfig(hidden_size=self.hidden_size,
-                                         intermediate_size=18432,
-                                         hidden_act=self.hidden_act,
-                                         dtype=self.dtype,
-                                         vllm_config=self.vllm_config),
+                attention=MLAConfig(
+                    hidden_size=self.hidden_size,
+                    num_attention_heads=self.num_attention_heads,
+                    num_key_value_heads=self.num_key_value_heads,
+                    rope_theta=10000,
+                    rope_scaling={
+                        "beta_fast": 32,
+                        "beta_slow": 1,
+                        "factor": 40,
+                        "mscale": 1.0,
+                        "mscale_all_dim": 1.0,
+                        "original_max_position_embeddings": 4096,
+                        "type": "yarn"
+                    },
+                    q_lora_rank=1536,
+                    kv_lora_rank=512,
+                    qk_nope_head_dim=128,
+                    qk_rope_head_dim=64,
+                    v_head_dim=128,
+                    rms_norm_eps=self.rms_norm_eps,
+                    dtype=self.dtype,
+                    vllm_config=self.vllm_config),
+                dense_ffw=DenseFFWConfig(
+                    hidden_size=self.hidden_size,
+                    intermediate_size=self.ffw_intermediate_size,
+                    hidden_act=self.hidden_act,
+                    dtype=self.dtype,
+                    vllm_config=self.vllm_config),
                 dense_ffw_for_shared_moe=DenseFFWConfig(
                     hidden_size=self.hidden_size,
-                    intermediate_size=2048,
+                    intermediate_size=self.moe_intermediate_size,
                     hidden_act=self.hidden_act,
                     dtype=self.dtype,
                     vllm_config=self.vllm_config),
                 moe=MoEConfig(hidden_size=self.hidden_size,
-                              intermediate_size_moe=2048,
+                              intermediate_size_moe=self.moe_intermediate_size,
                               dtype=self.dtype,
-                              num_local_experts=256,
+                              num_local_experts=self.num_local_experts,
                               hidden_act=self.hidden_act,
                               apply_expert_weight_before_computation=False,
                               router=DeepSeekV3RoutingConfig(
                                   hidden_size=self.hidden_size,
-                                  n_routed_experts=256,
+                                  n_routed_experts=self.num_local_experts,
                                   num_experts_per_token=8,
                                   n_group=8,
                                   routed_scaling_factor=2.5,
@@ -293,12 +301,13 @@ class DeepSeekV3(Model):
             scale_initializer=nnx.initializers.ones,
             random_init=False)
         return cls(vllm_config, rng, mesh, param_factory)
-    
+
     # For compatibility with flax.
     def apply(self, variables, *args, **kwargs):
         return self.__call__(*args, **kwargs)
-    
+
     def load_weights(self, rng: PRNGKey, cache_dir: Optional[str] = None):
+        self.rng = nnx.Rngs(rng)
         try:
             use_random_weights = self.vllm_config.additional_config[
                 "random_weights"]
@@ -527,12 +536,14 @@ class DeepSeekV3WeightLoader(WeightLoader):
             for loaded_name, loaded_weight in self.names_and_weights_generator:
                 # Skip if the model has fewer layers than original.
                 if re.search(r"layers\.(\d+)", loaded_name):
-                    layer_num = re.search(r"layers\.(\d+)", loaded_name).group(1)
+                    layer_num = re.search(r"layers\.(\d+)",
+                                          loaded_name).group(1)
                     if int(layer_num) >= self.model_config.num_layers:
+                        del loaded_weight
                         continue
-                # TODO: load scale as well.
                 if 'layers.61' in loaded_name:
                     # skip loading MTP module.
+                    del loaded_weight
                     continue
                 if loaded_weight.dtype == torch.float8_e4m3fn:
                     fp8_weights[loaded_name] = loaded_weight
@@ -584,6 +595,11 @@ class DeepSeekV3WeightLoader(WeightLoader):
                     logger.info(
                         f"Cumulative local memory: {cumulative_local_memory} GB"
                     )
+
+        del mlp_experts_gate_proj_weights
+        del mlp_experts_up_proj_weights
+        del mlp_experts_down_proj_weights
+        del fp8_weights
         # TODO: validate that all of the model_params were accounted for as well.
         nnx.update(model_for_loading, model_params)
 

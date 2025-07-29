@@ -24,8 +24,8 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
 
     if os.getenv("NEW_MODEL_DESIGN", False):
-        from tpu_commons.models.jax.recipes.llama3 import LlamaForCausalLM
         from tpu_commons.models.jax.recipes.deepseek_v3 import DeepSeekV3
+        from tpu_commons.models.jax.recipes.llama3 import LlamaForCausalLM
         _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
         _MODEL_REGISTRY["DeepSeekV3"] = DeepSeekV3
     else:
