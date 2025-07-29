@@ -10,13 +10,15 @@ generation. Supported dataset types include:
     - MLPerfDataset
 """
 
+import json
 import logging
 import os
 import random
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Optional, Union
+from typing import Any, List, Optional, Union
 
+import numpy as np
 import pandas as pd
 from transformers import PreTrainedTokenizerBase
 from vllm.lora.request import LoRARequest
@@ -46,6 +48,25 @@ class SampleRequest:
 # -----------------------------------------------------------------------------
 # Benchmark Dataset Base Class
 # -----------------------------------------------------------------------------
+
+
+def prompt_statistics_info(data: List[SampleRequest]):
+    # Convert the list to a NumPy array for efficient calculations
+    prompt_lens = [data[i].prompt_len for i in range(len(data))]
+    arr = np.array(prompt_lens)
+
+    # Calculate stats using NumPy functions
+    print("Input length distribution:")
+    print(f"Mean:             {np.mean(arr):.2f}")
+    print(f"Median:           {np.median(arr):.2f}")
+    print(f"Standard Dev:     {np.std(arr):.2f}")
+    print(f"Variance:         {np.var(arr):.2f}")
+    print(f"Min:              {np.min(arr)}")
+    print(f"Max:              {np.max(arr)}")
+    print(f"Sum:              {np.sum(arr)}")
+    print(f"25th Percentile:  {np.percentile(arr, 25):.2f}")
+    print(f"75th Percentile:  {np.percentile(arr, 75):.2f}")
+    print(len(arr), "samples")
 
 
 class BenchmarkDataset(ABC):
@@ -300,6 +321,7 @@ class MMLUDataset(BenchmarkDataset):
                     completion=completion,
                 ))
         self.maybe_oversample_requests(samples, num_requests)
+        prompt_statistics_info(samples)
         return samples
 
 
@@ -371,4 +393,62 @@ class MLPerfDataset(BenchmarkDataset):
                     completion=completion,
                 ))
         self.maybe_oversample_requests(samples, num_requests)
+        prompt_statistics_info(samples)
+        return samples
+
+
+# -----------------------------------------------------------------------------
+# Math500 Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class Math500Dataset(BenchmarkDataset):
+    """
+    Implements the Math500 dataset.
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.load_data()
+
+    def load_data(self) -> None:
+        with open(self.dataset_path, "r", encoding="utf-8") as f:
+            dataset = json.load(f)
+        # (data["solution"])
+        self.data = [(data["problem"], data["answer"]) for data in dataset]
+        print(f"Loaded {len(self.data)} data from math500 dataset")
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        input_len: Optional[int] = None,
+        output_len: Optional[int] = None,
+        **kwargs,
+    ) -> list:
+        samples: list = []
+        for prompt, completion in self.data:
+            if len(samples) >= num_requests:
+                break
+
+            prompt_ids = tokenizer(prompt).input_ids
+            completion_ids = tokenizer(completion).input_ids
+            prompt_len = len(prompt_ids)
+            new_output_len = len(
+                completion_ids) if output_len is None else output_len
+            # NOTE (jacobplatin): I don't believe that we filter the MLPerf dataset
+            # at all, but it could be done here
+            if input_len is not None and input_len <= prompt_len:
+                raise ValueError(
+                    f"prompt is too short: prompt_len is {prompt_len} but input_len is {input_len}"
+                )
+            samples.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len or new_output_len,
+                    completion=completion,
+                ))
+        self.maybe_oversample_requests(samples, num_requests)
+        prompt_statistics_info(samples)
         return samples
