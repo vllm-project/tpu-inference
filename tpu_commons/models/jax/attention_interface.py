@@ -116,6 +116,7 @@ def update_kv_cache(k: jax.Array, v: jax.Array, kv_cache: jax.Array,
                                num_slices,
                                page_size=S,
                                mesh=mesh,
-                               kv_cache_pspec=P(None, "model", None))
+                               kv_cache_pspec=P("data", "model", None))
+    jax.block_until_ready(kv_cache)
     kv_cache = kv_cache.reshape(L, S, K_2, H)
     return kv_cache

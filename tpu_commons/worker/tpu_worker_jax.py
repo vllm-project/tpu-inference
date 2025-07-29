@@ -89,14 +89,16 @@ class TPUWorker(AbstractTpuWorker):
 
     def init_device(self):
         ensure_kv_transfer_initialized(self.vllm_config)
+        print("wenxin init_device self.devices", self.devices)
         if not self.devices:
-            try:
-                device_indexes = self.vllm_config.additional_config[
-                    "sharding"]["sharding_strategy"]["device_indexes"]
-                self.devices = [jax.devices()[i] for i in device_indexes]
-            except KeyError:
-                tp = self.parallel_config.tensor_parallel_size
-                self.devices = jax.devices()[:tp]
+            # try:
+            #     device_indexes = self.vllm_config.additional_config[
+            #         "sharding"]["sharding_strategy"]["device_indexes"]
+            #     self.devices = [jax.devices()[i] for i in device_indexes]
+            # except KeyError:
+            #     tp = self.parallel_config.tensor_parallel_size
+            #     self.devices = jax.devices()[:tp]
+            self.devices = jax.devices()
         logger.info(f"Init devices | "
                     f"devices={self.devices} | "
                     f"hbm={utils.hbm_usage_gb(self.devices)}Gb")

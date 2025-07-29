@@ -225,7 +225,7 @@ def create_kv_caches(
     )
 
     # Shard the num_kv_heads dim along the 'model' axis.
-    sharding = NamedSharding(mesh, PartitionSpec(None, None, "model"))
+    sharding = NamedSharding(mesh, PartitionSpec("data", None, "model"))
 
     def _allocate() -> jax.Array:
         return jnp.empty(

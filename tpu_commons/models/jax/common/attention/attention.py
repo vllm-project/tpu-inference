@@ -198,6 +198,13 @@ class Attention(nnx.Module):
                                self.kernel_v_proj_DKH.value)
 
         with jax.named_scope("attn_op"):
+            try:
+                print("wenxin q_TNH", q_TNH.shape, q_TNH.sharding)
+                print("wenxin k_SKH", k_SKH.shape, k_SKH.sharding)
+                print("wenxin v_SKH", v_SKH.shape, v_SKH.sharding)
+                print("wenxin kv_cache", kv_cache[0].shape, kv_cache[1].shape)
+            except:
+                pass
             new_kv_cache, outputs_TNH = self.attention(
                 is_prefill,
                 kv_cache,
@@ -251,9 +258,14 @@ class Attention(nnx.Module):
                   `(seq, num_q_heads, head_dim)`.
         """
         md = attention_metadata
+        print("1. kv_cache", kv_cache.shape, kv_cache.sharding)
+        print("1. md.slot_mapping", md.slot_mapping.shape)
+        print("1. kv_cache", kv_cache[0][0][0])
+
         kv_cache = update_kv_cache(k_SKH, v_SKH, kv_cache, md.slot_mapping,
                                    md.num_slices, mesh)
-
+        print("wenxin after update_kv_cache kv_cache", kv_cache.shape, kv_cache.sharding)
+        print("kv_cache", kv_cache[0][0][0])
         H = q_TNH.shape[-1]
         #TODO: we use generate_rules as the default sharding for ragged_paged_attention,
         # but it could be configurable based on the op_mode.

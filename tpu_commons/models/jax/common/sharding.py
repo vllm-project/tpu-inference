@@ -337,7 +337,7 @@ class Sharding:
         prefill_rules.query_tnh = (DATA_AXIS_NAME, ATTN_HEAD_AXIS_NAME, None)
         prefill_rules.keyvalue_skh = (DATA_AXIS_NAME, ATTN_HEAD_AXIS_NAME,
                                       None)
-        prefill_rules.keyvalue_cache_lskh = (None, None, ATTN_HEAD_AXIS_NAME,
+        prefill_rules.keyvalue_cache_lskh = (DATA_AXIS_NAME, None, ATTN_HEAD_AXIS_NAME,
                                              None)
 
         # Populate Generate (Decode) Config
@@ -355,7 +355,7 @@ class Sharding:
         generate_rules.keyvalue_skh = (DATA_AXIS_NAME, ATTN_HEAD_AXIS_NAME,
                                        None)
         # The KV Cache is of shape (L, S, 2 * K, H), we shard on the head dim, but need to optimize on 2*K dim
-        generate_rules.keyvalue_cache_lskh = (None, None, ATTN_HEAD_AXIS_NAME,
+        generate_rules.keyvalue_cache_lskh = (DATA_AXIS_NAME, None, ATTN_HEAD_AXIS_NAME,
                                               None)
         generate_rules.attn_q_weight_dnh = (None, ATTN_HEAD_AXIS_NAME,
                                             ATTN_TENSOR_AXIS_NAME)

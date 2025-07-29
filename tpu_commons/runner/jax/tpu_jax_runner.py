@@ -10,6 +10,7 @@ import jax
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
+from tpu_commons.kernels.ragged_kv_cache_update import _dynamic_validate_inputs
 import vllm.envs as envs
 from flax import nnx
 from jax.sharding import NamedSharding, PartitionSpec
@@ -86,6 +87,11 @@ class TPUModelRunner():
         ) if envs.VLLM_XLA_CHECK_RECOMPILATION else nullcontext()
         logger.info("TPUModelRunner created!")
 
+        self.data_parallel_sharding = NamedSharding(self.mesh, PartitionSpec("data"))
+        self.slot_mapping_metadata_sharding = NamedSharding(
+                self.mesh, PartitionSpec(None, "data")
+            )
+
     def _verify_chunked_prefill_config(self):
         if (self.scheduler_config.max_num_batched_tokens
                 < self.scheduler_config.max_num_seqs):
@@ -149,6 +155,8 @@ class TPUModelRunner():
 
         self.sliding_window = model_config.get_sliding_window()
         self.block_size = cache_config.block_size
+        print("wenxin _init_inputs self.block_size", self.block_size)
+        print("scheduler_config.max_num_batched_tokens", scheduler_config.max_num_batched_tokens)
         self.max_model_len = model_config.max_model_len
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
         # InputBatch needs to work with sampling tensors greater than padding
@@ -162,10 +170,14 @@ class TPUModelRunner():
         # In case `max_num_tokens < max(num_tokens_paddings)` use the actual
         # padded max value to pre-allocate data structures and pre-compile.
         self.max_num_tokens = self.num_tokens_paddings[-1]
+        print("self.max_num_tokens", self.max_num_tokens)
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
         self.encoder_cache: dict[str, dict[int, jax.Array]] = {}
+        print("wenxin _init_inputs self.max_num_reqs", self.max_num_reqs)
+        print("wenxin _init_inputs self.max_model_len", self.max_model_len)
+        print("wenxin _init_inputs self.max_num_tokens", self.max_num_tokens)
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
@@ -262,7 +274,8 @@ class TPUModelRunner():
 
         kv_cache_spec = kv_cache_groups[0].kv_cache_spec
         layer_names = kv_cache_groups[0].layer_names
-
+        kv_cache_config.num_blocks = (kv_cache_config.num_blocks//2)*2
+        kv_cache_config.num_blocks = 512
         # NOTE: we'll multiply the num_kv_heads by 2 in the function
         self.kv_caches = runner_utils.create_kv_caches(
             num_blocks=kv_cache_config.num_blocks,
@@ -292,13 +305,21 @@ class TPUModelRunner():
             query_start_loc = np.ones((self.max_num_reqs + 1, ),
                                       dtype=np.int32)
             num_seqs = np.array([self.max_num_reqs], dtype=np.int32)
-            num_slices = np.array([1], dtype=np.int32)
-
-            (input_ids, positions, slot_mapping_metadata, num_slices,
-             block_tables, query_start_loc, seq_lens,
-             num_seqs) = self._device_array(
-                 (input_ids, positions, slot_mapping_metadata, num_slices,
-                  block_tables, query_start_loc, seq_lens, num_seqs))
+            num_slices = np.array([1], dtype=np.int32)            
+            
+            # Arrays that need data parallel sharding: input_ids, positions, slot_mapping_metadata, block_tables
+            input_ids = self._device_array(input_ids, sharding=self.data_parallel_sharding)
+            positions = self._device_array(positions, sharding=self.data_parallel_sharding)
+            
+            slot_mapping_metadata = self._device_array(slot_mapping_metadata, sharding=self.slot_mapping_metadata_sharding)
+            block_tables = self._device_array(block_tables, sharding=self.data_parallel_sharding)
+            
+            # Arrays that don't need specific sharding (use default)
+            num_slices = self._device_array(num_slices)
+            query_start_loc = self._device_array(query_start_loc)
+            seq_lens = self._device_array(seq_lens)
+            num_seqs = self._device_array(num_seqs)
+            
             logger.info(f"Precompile backbone --> num_tokens={num_tokens}")
             inputs = (
                 self.kv_caches,
@@ -331,8 +352,8 @@ class TPUModelRunner():
                 hidden_states = jnp.ones((num_tokens, hsize),
                                          dtype=jnp.bfloat16)
                 indices_do_sample = jnp.ones((num_reqs, ), dtype=jnp.int32)
-                hidden_states, indices_do_sample = self._device_array(
-                    (hidden_states, indices_do_sample))
+                hidden_states = self._device_array(hidden_states, sharding=self.data_parallel_sharding)
+                indices_do_sample = self._device_array(indices_do_sample)
                 start = time.perf_counter()
                 logger.info(
                     f"Precompile select_hidden_states --> num_tokens={num_tokens} | "
@@ -349,7 +370,7 @@ class TPUModelRunner():
         hsize = self.model_config.get_hidden_size()
         for num_reqs in self.num_reqs_paddings:
             hidden_states = jnp.ones((num_reqs, hsize), dtype=jnp.bfloat16)
-            hidden_states = self._device_array(hidden_states)
+            hidden_states = self._device_array(hidden_states, sharding=self.data_parallel_sharding)
             logger.info(f"Precompile compute_logits --> num_reqs={num_reqs}")
             start = time.perf_counter()
             result = self.compute_logits_fn(self.state, hidden_states)
@@ -363,7 +384,7 @@ class TPUModelRunner():
         for num_reqs in self.num_reqs_paddings:
             logits = jnp.ones((num_reqs, hsize), dtype=jnp.bfloat16)
             # logits is expected to be sharded along hsize dim.
-            sharding = NamedSharding(self.mesh, PartitionSpec(None, "model"))
+            sharding = NamedSharding(self.mesh, PartitionSpec("data", "model"))
             logits = self._device_array(logits, sharding=sharding)
             logger.info(f"Precompile sampling --> num_reqs={num_reqs}")
             start = time.perf_counter()
@@ -372,8 +393,9 @@ class TPUModelRunner():
                     temperature = np.full((num_reqs, ), 0.7, dtype=np.float32)
                     top_k = np.full((num_reqs, ), 20, dtype=np.int32)
                     top_p = np.full((num_reqs, ), 0.8, dtype=np.float32)
-                    (temperature, top_k, top_p) = self._device_array(
-                        (temperature, top_k, top_p))
+                    temperature = self._device_array(temperature)
+                    top_k = self._device_array(top_k)
+                    top_p = self._device_array(top_p)
                 else:
                     temperature = None
                     top_k = None
@@ -397,11 +419,11 @@ class TPUModelRunner():
         hsize = self.model_config.get_vocab_size()
         for num_reqs in self.num_reqs_paddings:
             logits = jnp.ones((num_reqs, hsize), dtype=jnp.bfloat16)
-            logits, = self._device_array((logits, ))
+            logits = self._device_array(logits, sharding=self.data_parallel_sharding)
             logger.info(f"Precompile gather_logprobs --> num_reqs={num_reqs}")
             start = time.perf_counter()
             token_ids = jnp.ones((num_reqs, ), dtype=jnp.int32)
-            token_ids, = self._device_array((token_ids, ))
+            token_ids = self._device_array(token_ids, sharding=self.data_parallel_sharding)
             result = self._compute_and_gather_logprobs(
                 logits, token_ids, self.model_config.max_logprobs)
             result.logprob_token_ids.block_until_ready()
@@ -437,10 +459,10 @@ class TPUModelRunner():
                                                                             num_reqs]
             dummy_grammar_bitmask = self.grammar_bitmask_cpu[:num_reqs]
 
-            (dummy_logits, dummy_require_struct_decoding,
-             dummy_grammar_bitmask, arange) = self._device_array(
-                 (dummy_logits, dummy_require_struct_decoding,
-                  dummy_grammar_bitmask, self.structured_decode_arange))
+            dummy_logits = self._device_array(dummy_logits, sharding=self.data_parallel_sharding)
+            dummy_require_struct_decoding = self._device_array(dummy_require_struct_decoding)
+            dummy_grammar_bitmask = self._device_array(dummy_grammar_bitmask)
+            arange = self._device_array(self.structured_decode_arange)
 
             self.structured_decode_fn(dummy_require_struct_decoding,
                                       dummy_grammar_bitmask, dummy_logits,
@@ -646,12 +668,14 @@ class TPUModelRunner():
         scheduler_output: "VllmSchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> ModelRunnerOutput:
+        # with jax.disable_jit():
         return self._execute_model(scheduler_output)[1]
 
     def _execute_model(
         self,
         scheduler_output: "VllmSchedulerOutput",
     ) -> tuple[AttentionMetadata, ModelRunnerOutput]:
+        print()
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
             self.maybe_setup_kv_connector(scheduler_output)
@@ -669,6 +693,17 @@ class TPUModelRunner():
             return DUMMY_METADATA, EMPTY_MODEL_RUNNER_OUTPUT,
 
         inputs = self._prepare_inputs(scheduler_output)
+        print("here")
+        _dynamic_validate_inputs(inputs[2].slot_mapping, inputs[1].shape[0], inputs[0][0].shape[0],
+                                 self.block_size, inputs[2].num_slices)
+        # breakpoint()
+        print("wenxin _execute_model inputs input ids", inputs[1].shape)
+        try:
+            print("sharding input[0]", inputs[0][0].sharding)
+            print("sharding input[1]", inputs[1].sharding)
+        except Exception as e:
+            pass
+
         with self.maybe_forbid_compile:
             self.maybe_setup_kv_connector(scheduler_output)
             self.kv_caches, hidden_states = self.model_fn(
@@ -703,6 +738,7 @@ class TPUModelRunner():
                 logprobs = None
 
         num_reqs = self.input_batch.num_reqs
+        print("wenxin _execute_model num_reqs", num_reqs)
 
         # Update the cache state concurrently. Code above will not block until
         # we use `selected_token_ids`. Add mark_step if post-processing changes
@@ -731,11 +767,12 @@ class TPUModelRunner():
             req_id is not None for req_id in
             self.input_batch.req_ids[:num_reqs]), "req_ids contains None"
         req_ids = cast(list[str], self.input_batch.req_ids[:num_reqs])
-
+        print("wenxin _execute_model req_ids", req_ids)
         prompt_logprobs_dict = {}
         for req_id in self.input_batch.req_ids[:num_reqs]:
             prompt_logprobs_dict[req_id] = None
 
+        print("wenxin _execute_model next_tokens", next_tokens.shape, next_tokens.sharding, next_tokens.device)
         next_tokens = np.asarray(jax.device_get(next_tokens))
         selected_token_ids = np.expand_dims(next_tokens[:num_reqs], 1)
         valid_sampled_token_ids = selected_token_ids.tolist()
@@ -830,10 +867,10 @@ class TPUModelRunner():
         # the requests that need structured output.
         self.require_structured_out_cpu[struct_out_indices] = True
 
-        require_structured_out_cpu, grammar_bitmask_cpu, structured_decode_arange = self._device_array(
-            (self.require_structured_out_cpu[:num_reqs],
-             self.grammar_bitmask_cpu[:num_reqs],
-             self.structured_decode_arange))
+        # wenxin: figure out if dp sharding is needed for these arrays
+        require_structured_out_cpu = self._device_array(self.require_structured_out_cpu[:num_reqs])
+        grammar_bitmask_cpu = self._device_array(self.grammar_bitmask_cpu[:num_reqs])
+        structured_decode_arange = self._device_array(self.structured_decode_arange)
 
         return require_structured_out_cpu, grammar_bitmask_cpu, structured_decode_arange
 
@@ -864,7 +901,9 @@ class TPUModelRunner():
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
-
+        print("wenxin _prepare_inputs num_reqs", num_reqs)
+        preferred_device = scheduler_output.preferred_device
+        print("wenxin _prepare_inputs preferred_device", preferred_device)
         # Get the number of scheduled tokens for each request.
         num_scheduled_tokens_per_req = []
         max_num_scheduled_tokens_all_reqs = 0
@@ -902,7 +941,7 @@ class TPUModelRunner():
         # where M is the max_model_len.
         token_indices = (positions_np +
                          req_indices * self.input_batch.token_ids_cpu.shape[1])
-
+        print("wenxin _prepare_inputs token_indices", token_indices)
         # NOTE(woosuk): We use torch.index_select instead of np.take here
         # because torch.index_select is much faster than np.take for large
         # tensors.
@@ -941,9 +980,11 @@ class TPUModelRunner():
             [[0, padded_num_slices - len(slot_mapping_metadata)], [0, 0]],
             constant_values=0)
         slot_mapping_metadata = np.transpose(slot_mapping_metadata)
+        print("wenxin _prepare_inputs slot_mapping_metadata", slot_mapping_metadata)
         block_tables = self.block_table_cpu[:self.max_num_reqs]
         block_tables[:num_reqs, :self.max_num_blocks_per_req] = (
             self.input_batch.block_table[0].get_cpu_tensor()[:num_reqs])
+        print("block_tables", block_tables)
         query_start_loc = self.query_start_loc_cpu[:self.max_num_reqs + 1]
         seq_lens = self.seq_lens_cpu[:self.max_num_reqs]
         padded_num_reqs = runner_utils.get_padded_num_reqs_with_upper_limit(
@@ -954,12 +995,19 @@ class TPUModelRunner():
         # Put to device
         sampling_metadata = TPUSupportedSamplingMetadata.\
             from_input_batch(self.mesh, self.input_batch, padded_num_reqs)
-        (input_ids, positions, slot_mapping_metadata, num_slices, block_tables,
-         query_start_loc, seq_lens, num_seqs,
-         logits_indices) = self._device_array(
-             (input_ids, positions, slot_mapping_metadata, num_slices,
-              block_tables, query_start_loc, seq_lens, num_seqs,
-              logits_indices))
+                
+        # Arrays that need data parallel sharding: input_ids, positions, slot_mapping_metadata, block_tables
+        input_ids = self._device_array(input_ids, sharding=self.data_parallel_sharding)
+        positions = self._device_array(positions, sharding=self.data_parallel_sharding)
+        slot_mapping_metadata = self._device_array(slot_mapping_metadata, sharding=self.slot_mapping_metadata_sharding)
+        block_tables = self._device_array(block_tables, sharding=self.data_parallel_sharding)
+
+        # Arrays that don't need specific sharding (use default)
+        num_slices = self._device_array(num_slices)
+        query_start_loc = self._device_array(query_start_loc)
+        seq_lens = self._device_array(seq_lens)
+        num_seqs = self._device_array(num_seqs)
+        logits_indices = self._device_array(logits_indices)
 
         return (
             self.kv_caches,
@@ -1039,7 +1087,7 @@ class TPUModelRunner():
         new_kv_start_indices = cu_slices_lens[:-1]
         slot_mapping_metadata = np.stack(
             [kv_cache_start_indices, new_kv_start_indices, slice_lens], axis=1)
-        return slot_mapping_metadata
+        return slot_mapping_metadata #(3, 256)
 
     def _device_array(self, *args, sharding=None, **kwargs) -> jax.Array:
         if sharding is None:

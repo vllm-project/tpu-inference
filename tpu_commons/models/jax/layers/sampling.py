@@ -40,6 +40,8 @@ def sample(
 
     # (batch_size,)
     next_tokens = jax.random.categorical(rng, logits)
+    # Ensure next_tokens is unsharded before returning
+    next_tokens = jax.lax.with_sharding_constraint(next_tokens, NamedSharding(mesh, P(None)))
     return next_tokens
 
 

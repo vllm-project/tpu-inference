@@ -37,6 +37,9 @@ def _kv_cache_update_kernel(
     async_copies = []
     block_idx = pl.program_id(0)
     num_slices_per_block = scratch.shape[0]
+    # jax.debug.print("block_idx {}", block_idx)
+    # jax.debug.print("slices_ref {}", slices_ref)
+    # jax.debug.print("num_slices_ref {}", num_slices_ref[0])
 
     # Copy from new_kv_hbm_ref to scratch
     for i in range(num_slices_per_block):
@@ -145,6 +148,13 @@ def _kv_cache_update(
     dynamic_validate_inputs: bool,
     vmem_limit_bytes: int = 40 * 1024 * 1024,
 ):
+    print("2. new_kv", new_kv.shape)
+    print("2. kv_cache", kv_cache.shape)
+    print("2. slices", slices.shape)
+    print("2. new kv", new_kv[0][0][0])
+    print("2. num_slices", num_slices)
+    print("2. num_slices_per_block", num_slices_per_block)
+
     new_token_num, num_combined_kv_heads, head_dim = new_kv.shape
     assert kv_cache.shape[1] == num_combined_kv_heads
     assert kv_cache.shape[2] == head_dim
@@ -249,6 +259,8 @@ def kv_cache_update(
     mesh: Mesh | None = None,
     kv_cache_pspec: P
     | None = None,  # Only sharding along head_dim is supported
+    slices_spec: P | None = None,  # Only sharding along head_dim is supported
+    num_slices_pspec: P | None = None,  # Only sharding along
     dynamic_validate_inputs: bool = False,
     vmem_limit_bytes: int = 40 * 1024 * 1024,
 ):
@@ -268,8 +280,8 @@ def kv_cache_update(
     if kv_cache_pspec is None:
         raise ValueError(
             "kv_cache_pspec must be provided when mesh is specified")
-
-    in_specs = (kv_cache_pspec, P(), kv_cache_pspec, P())
+    
+    in_specs = (kv_cache_pspec, slices_spec, kv_cache_pspec, num_slices_pspec)
     out_specs = kv_cache_pspec
     shard_map_wrapped = jax.shard_map(
         functools.partial(
