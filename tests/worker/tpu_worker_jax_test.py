@@ -37,11 +37,14 @@ def mock_vllm_config():
     mock_parallel_conf = MagicMock()
     mock_parallel_conf.tensor_parallel_size = 2
 
+    mock_additional_config = {}
+
     # Create the main config mock and attach the others without a top-level spec
     config = MagicMock()
     config.model_config = mock_model_conf
     config.cache_config = mock_cache_conf
     config.parallel_config = mock_parallel_conf
+    config.additional_config = mock_additional_config
 
     return config
 
