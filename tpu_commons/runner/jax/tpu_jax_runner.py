@@ -717,6 +717,41 @@ class TPUModelRunner():
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
 
+        num_prefill_tokens = 0
+        num_decode_tokens = 0
+
+        # Get the number of scheduled tokens for each request.
+        num_scheduled_tokens_per_req_list = []
+        # Get the number of tokens already processed for each request.
+        num_computed_tokens_per_req = self.input_batch.num_computed_tokens_cpu[:
+                                                                               num_reqs]
+
+        for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+            assert req_id is not None
+
+            # This is the number of tokens to process in the current step for this request
+            num_scheduled_for_req = scheduler_output.num_scheduled_tokens[
+                req_id]
+            num_scheduled_tokens_per_req_list.append(num_scheduled_for_req)
+
+            # This is the number of tokens already processed for this request (before this step)
+            num_already_computed = num_computed_tokens_per_req[i]
+
+            if num_already_computed == 0:
+                # Prefill
+                num_prefill_tokens += num_scheduled_for_req
+            # This means the request is ongoing
+            else:
+                if num_scheduled_for_req > 1:
+                    # It's a multi-token request, so it's chunked prefill
+                    num_prefill_tokens += num_scheduled_for_req
+                else:
+                    # It's a single token for an ongoing request, so it's decode
+                    num_decode_tokens += 1
+
+        assert total_num_scheduled_tokens == (num_prefill_tokens +
+                                              num_decode_tokens)
+
         # Get the number of scheduled tokens for each request.
         num_scheduled_tokens_per_req = []
         max_num_scheduled_tokens_all_reqs = 0
@@ -775,12 +810,19 @@ class TPUModelRunner():
         # Do the padding and copy the tensors to the TPU.
         padded_total_num_scheduled_tokens = get_padded_token_len(
             self.num_tokens_paddings, total_num_scheduled_tokens)
+
         # Zero out to avoid spurious values from prev iteration (last cp chunk)
         self.input_ids_cpu[
             total_num_scheduled_tokens:padded_total_num_scheduled_tokens] = 0
 
         # Inputs
         input_ids = self.input_ids_cpu[:padded_total_num_scheduled_tokens]
+        logger.info(
+            f"\nBatch composition: Total tokens={total_num_scheduled_tokens}, "
+            f"\nPrefill tokens={num_prefill_tokens}, "
+            f"\nDecode tokens={num_decode_tokens} "
+            f"\n(padded_total_num_scheduled_tokens {padded_total_num_scheduled_tokens})"
+            f"\n(num reqs {num_reqs})")
         positions = self.positions_cpu[:padded_total_num_scheduled_tokens]
         slot_mapping_metadata = self._get_slot_mapping_metadata(
             num_reqs, num_scheduled_tokens_per_req)

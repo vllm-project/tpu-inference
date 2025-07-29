@@ -75,10 +75,10 @@ def adapt_scheduler_output_if_needed(
     If it's already an AbstractSchedulerOutput, it's passed through.
     """
     if isinstance(scheduler_output, VllmSchedulerOutput):
-        logger.warning(
-            "Received raw VllmSchedulerOutput. Performing temporary, on-the-fly "
-            "adaptation. This is a compatibility feature and should be removed "
-            "once the vLLM engine is updated to provide an adapted object.")
+        # logger.warning(
+        #     "Received raw VllmSchedulerOutput. Performing temporary, on-the-fly "
+        #     "adaptation. This is a compatibility feature and should be removed "
+        #     "once the vLLM engine is updated to provide an adapted object.")
         return VllmSchedulerOutputAdapter(scheduler_output)
 
     if isinstance(scheduler_output, AbstractSchedulerOutput):

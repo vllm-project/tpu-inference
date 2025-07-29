@@ -241,6 +241,7 @@ class LlamaForCausalLM(Model):
         *args,
     ) -> Tuple[List[KVCacheType], jax.Array]:
         is_prefill = False
+        logger.info(f"input_ids in llama3: {input_ids.shape}")
         x = self.embedder.encode(input_ids)
         for (i, layer) in enumerate(self.layers):
             kv_cache = kv_caches[i]
