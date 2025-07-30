@@ -6,9 +6,18 @@ from typing import Callable, Dict, Optional, Tuple, Union
 
 import jax
 import jaxtyping
-
 import vllm.envs as envs
-from tpu_commons import utils_jax as utils
+from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
+                                          get_kv_transfer_group,
+                                          has_kv_transfer_group)
+from vllm.lora.request import LoRARequest
+from vllm.tasks import SupportedTask
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
+
+from tpu_commons import utils
 from tpu_commons.di.abstracts import (AbstractKVCacheConfig,
                                       AbstractLoRARequest,
                                       AbstractSchedulerOutput)
@@ -19,11 +28,6 @@ from tpu_commons.worker._temporary_vllm_compat import (
     adapt_kv_cache_config_if_needed, adapt_lora_request_if_needed,
     adapt_scheduler_output_if_needed)
 from tpu_commons.worker.base import AbstractTpuWorker
-from vllm.config import VllmConfig
-from vllm.lora.request import LoRARequest
-from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
-from vllm.v1.outputs import ModelRunnerOutput
 
 logger = init_logger(__name__)
 
@@ -86,11 +90,17 @@ class TPUWorker(AbstractTpuWorker):
     def init_device(self):
         ensure_kv_transfer_initialized(self.vllm_config)
         if not self.devices:
-            tp = self.parallel_config.tensor_parallel_size
-            self.devices = jax.devices()[:tp]
-        logger.warning(f"Init devices | "
-                       f"devices={self.devices} | "
-                       f"hbm={utils.hbm_usage_gb(self.devices)}Gb")
+            try:
+                device_indexes = self.vllm_config.additional_config[
+                    "sharding"]["sharding_strategy"]["device_indexes"]
+                self.devices = [jax.devices()[i] for i in device_indexes]
+            except KeyError:
+                tp = self.parallel_config.tensor_parallel_size
+                self.devices = jax.devices()[:tp]
+        logger.info(f"Init devices | "
+                    f"devices={self.devices} | "
+                    f"hbm={utils.hbm_usage_gb(self.devices)}Gb")
+
         self.model_runner = TPUModelRunner(self.vllm_config, self.devices)
 
     def determine_available_memory(self) -> int:

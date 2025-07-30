@@ -49,9 +49,6 @@ def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
                 logger.info(
                     "Get memory stats for device %s. Assuming all devices have the same usage.",
                     device)
-                logger.info(
-                    "Get memory stats for device %s. Assuming all devices have the same usage.",
-                    device)
                 usage.extend([(hbm_used, hbm_limit)] * len(devices))
                 break
             except Exception as e:
