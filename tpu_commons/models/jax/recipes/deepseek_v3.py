@@ -55,20 +55,29 @@ class DeepseekV3ModelConfig(ModelConfig):
     vocab_size: int = 129280
     hidden_size: int = 7168
     dtype: jnp.dtype = jnp.bfloat16
-    # The original number is 61, reduce for test purpose.
+    # TODO: revert to original size after test.
+    # num_layers: int = 61
     num_layers: int = 3
     num_attention_heads: int = 128
     num_key_value_heads: int = 128
     ffw_intermediate_size: int = 18432
     moe_intermediate_size: int = 2048
-    num_local_experts: int = 256
+    # TODO: revert to original size after test.
+    # num_local_experts: int = 256
+    # num_experts_per_token: int = 8
+    # n_group: int = 8
+    num_local_experts: int = 8
+    num_experts_per_token: int = 8
+    n_group: int = 4
     emb: EmbedderConfig = None
     layers: TransformerBlockConfig = None
     vllm_config: VllmConfig = field(repr=False, default=None)
     interleave_moe_layer_step: int = 1  # Deepseek V3 has moe_layer_freq=1 in hf config.
     hidden_act: str = "silu"
     rms_norm_eps: float = 1e-06
-    first_k_dense_replace: int = 3  # replace the first few MOE layers to dense layer.
+    # TODO: revert to original size after test.
+    # first_k_dense_replace: int = 3
+    first_k_dense_replace: int = 2  # replace the first few MOE layers to dense layer.
 
     def __post_init__(self):
         if not self.emb:
@@ -124,8 +133,8 @@ class DeepseekV3ModelConfig(ModelConfig):
                               router=DeepSeekV3RoutingConfig(
                                   hidden_size=self.hidden_size,
                                   n_routed_experts=self.num_local_experts,
-                                  num_experts_per_token=8,
-                                  n_group=8,
+                                  num_experts_per_token=self.num_experts_per_token,
+                                  n_group=self.n_group,
                                   routed_scaling_factor=2.5,
                                   topk_group=4,
                                   norm_topk_prob=True,

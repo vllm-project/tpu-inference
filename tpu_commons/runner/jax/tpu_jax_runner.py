@@ -225,7 +225,8 @@ class TPUModelRunner():
                 "supported yet.")
 
         kv_cache_spec = kv_cache_groups[0].kv_cache_spec
-        layer_names = kv_cache_groups[0].layer_names
+        # TODO: remove this after test.
+        layer_names = kv_cache_groups[0].layer_names[:3]
         cache_dtype = jnp.bfloat16
         # TODO(xiang): fix this together with get_kv_cache_spec
         # cache_dtype = kv_cache_spec.dtype
