@@ -5,13 +5,16 @@ from typing import TYPE_CHECKING, Optional, Tuple, Union, cast
 
 import jax
 import jax.numpy as jnp
-from tpu_info import device
-
 import vllm.envs as envs
-from tpu_commons.logger import init_logger
+from torchax.ops.mappings import j2t_dtype
+from tpu_info import device
 from vllm.inputs import ProcessorInputs, PromptType
 from vllm.platforms.interface import Platform, PlatformEnum, _Backend
 from vllm.sampling_params import SamplingParams, SamplingType
+
+from tpu_commons.logger import init_logger
+from tpu_commons.models.jax.utils.quantization.quantization_utils import (
+    parse_qwix_config_to_rules, quantization_config_file_path_to_dict)
 
 if TYPE_CHECKING:
     from vllm.config import BlockSize, ModelConfig, VllmConfig
