@@ -98,12 +98,11 @@ class RMSNorm(nnx.Module):
         return normed_x.astype(self.dtype)
 
     def generate_kernel(self, rngs: nnx.Rngs):
-        with jax.named_scope("rms_norm_kernel_init"):
-            self.scale = self.param_factory.create_scale_param(
-                rngs,
-                shape=(self.dims, ),
-                sharding=self.scale_sharding,
-                dtype=self.dtype)
+        self.scale = self.param_factory.create_scale_param(
+            rngs,
+            shape=(self.dims, ),
+            sharding=self.scale_sharding,
+            dtype=self.dtype)
 
     def create_sharding(self):
         """Creates and sets sharding attributes for weights and activations."""
@@ -206,24 +205,22 @@ class DenseFFW(nnx.Module):
     def generate_kernel(self, rngs: nnx.Rngs):
         D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
         F = getattr(self.cfg, HuggingFaceArgNames.INTERMEDIATE_SIZE.value)
-        with jax.named_scope("ffw_gating_kernel_init"):
-            self.kernel_gating_DF = self.param_factory.create_kernel_param(
-                rngs,
-                shape=(D, F),
-                dtype=self.cfg.dtype,
-                sharding=self.df_sharding)
-        with jax.named_scope("ffw_up_proj_kernel_init"):
-            self.kernel_up_proj_DF = self.param_factory.create_kernel_param(
-                rngs,
-                shape=(D, F),
-                dtype=self.cfg.dtype,
-                sharding=self.df_sharding)
-        with jax.named_scope("ffw_down_proj_kernel_init"):
-            self.kernel_down_proj_FD = self.param_factory.create_kernel_param(
-                rngs,
-                shape=(F, D),
-                dtype=self.cfg.dtype,
-                sharding=self.fd_sharding)
+
+        self.kernel_gating_DF = self.param_factory.create_kernel_param(
+            rngs,
+            shape=(D, F),
+            dtype=self.cfg.dtype,
+            sharding=self.df_sharding)
+        self.kernel_up_proj_DF = self.param_factory.create_kernel_param(
+            rngs,
+            shape=(D, F),
+            dtype=self.cfg.dtype,
+            sharding=self.df_sharding)
+        self.kernel_down_proj_FD = self.param_factory.create_kernel_param(
+            rngs,
+            shape=(F, D),
+            dtype=self.cfg.dtype,
+            sharding=self.fd_sharding)
 
     def create_sharding(self):
         """Creates and sets sharding attributes for weights and activations."""
@@ -314,14 +311,13 @@ class Embedder(nnx.Module):
             return self.encode(x)
 
     def generate_kernel(self, rngs: nnx.Rngs):
-        with jax.named_scope("embedding_kernel_init"):
-            V = getattr(self.cfg, HuggingFaceArgNames.VOCAB_SIZE.value)
-            D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
-            self.input_embedding_table_VD = self.param_factory.create_kernel_param(
-                rngs,
-                shape=(V, D),
-                sharding=self.vd_sharding,
-                dtype=self.cfg.dtype)
+        V = getattr(self.cfg, HuggingFaceArgNames.VOCAB_SIZE.value)
+        D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
+        self.input_embedding_table_VD = self.param_factory.create_kernel_param(
+            rngs,
+            shape=(V, D),
+            sharding=self.vd_sharding,
+            dtype=self.cfg.dtype)
 
     def decode(self, x: Float) -> Float:
         """Projects hidden states to vocabulary logits.
@@ -380,15 +376,14 @@ class LMhead(Embedder):
     """
 
     def generate_kernel(self, rngs: nnx.Rngs):
-        with jax.named_scope("lmhead_kernel_init"):
-            V = getattr(self.cfg, HuggingFaceArgNames.VOCAB_SIZE.value)
-            D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
+        V = getattr(self.cfg, HuggingFaceArgNames.VOCAB_SIZE.value)
+        D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
 
-            self.input_embedding_table_DV = self.param_factory.create_kernel_param(
-                rngs,
-                shape=(D, V),
-                sharding=self.dv_sharding,
-                dtype=self.cfg.dtype)
+        self.input_embedding_table_DV = self.param_factory.create_kernel_param(
+            rngs,
+            shape=(D, V),
+            sharding=self.dv_sharding,
+            dtype=self.cfg.dtype)
 
     def __call__(self, x):
         """Dispatches to decode method.

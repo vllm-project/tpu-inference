@@ -234,6 +234,7 @@ class LlamaForCausalLM(Model):
                                            sharding_cfg=self.cfg.sharding)
         weight_loader.load_weights(self)
 
+
     def __call__(
         self,
         kv_caches: List[jax.Array],
@@ -244,13 +245,19 @@ class LlamaForCausalLM(Model):
         is_prefill = False
         with jax.named_scope("llama_embed_input"): #Embedding
             x = self.embedder.encode(input_ids)
-        
+            
         with jax.named_scope("llama_model_transformer_blocks"):
             for (i, layer) in enumerate(self.layers):
-                kv_cache = kv_caches[i]
-                with jax.named_scope(f'layer_{i}'):
+                kv_cache = kv_caches[i] 
+
+                if i == 0: #Leaving out layer_0 for clearer xprof reading
                     new_kv_cache, x = layer(x, is_prefill, kv_cache,
                                             attention_metadata)
+                else:
+                    with jax.named_scope(f'layer_{i}'): 
+                                new_kv_cache, x = layer(x, is_prefill, kv_cache,
+                                                    attention_metadata)
+
                 kv_caches[i] = new_kv_cache
 
         with jax.named_scope("llama_final_norm"): #Norm after last transformer block
