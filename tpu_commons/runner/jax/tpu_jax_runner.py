@@ -364,7 +364,9 @@ class TPUModelRunner():
         hsize = self.model_config.get_vocab_size()
         for num_reqs in self.num_reqs_paddings:
             logits = jnp.ones((num_reqs, hsize), dtype=jnp.bfloat16)
-            logits = self._device_array(logits)
+            # logits is expected to be sharded along hsize dim.
+            sharding = NamedSharding(self.mesh, PartitionSpec(None, "model"))
+            logits = self._device_array(logits, sharding=sharding)
             logger.info(f"Precompile sampling --> num_reqs={num_reqs}")
             start = time.perf_counter()
             for do_sampling in (True, False):
