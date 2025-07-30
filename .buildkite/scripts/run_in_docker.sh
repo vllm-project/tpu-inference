@@ -44,6 +44,7 @@ docker system prune -a -f --filter "until=3h"
 docker build -f docker/Dockerfile -t "vllm-tpu:${BUILDKITE_COMMIT}" .
 
 exec docker run \
+  --no-cache \
   --privileged \
   --net host \
   --shm-size=16G \
