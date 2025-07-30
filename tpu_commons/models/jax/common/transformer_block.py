@@ -102,24 +102,24 @@ class TransformerBlock(nnx.Module):
     ) -> Tuple[KVCache, jax.Array]:
         op_mode = "prefill" if is_prefill else "generate"
         # Attn Block
-        attn_residual = x
-        x = self.pre_attention_norm(x)
-        new_cache, attn_output = self.attn(x, is_prefill, kv_cache,
+        attn_residual_TD = x
+        x_TD = self.pre_attention_norm(x)
+        new_cache, attn_output_TD = self.attn(x_TD, is_prefill, kv_cache,
                                            attention_metadata,
                                            self.use_attention_rope)
-        attn_output += attn_residual
+        attn_output_TD += attn_residual_TD
 
         # FFW Block
-        ffw_residual = attn_output
-        normed_ffw_input = self.pre_mlp_norm(attn_output)
+        ffw_residual_TD = attn_output_TD
+        normed_ffw_input_TD = self.pre_mlp_norm(attn_output_TD)
         if self.block_type == "moe":
-            logits = self.moe(normed_ffw_input, op_mode)
+            logits_TD = self.moe(normed_ffw_input_TD, op_mode)
         elif self.block_type == "dense":
-            logits = self.mlp(normed_ffw_input, op_mode)
+            logits_TD = self.mlp(normed_ffw_input_TD, op_mode)
         else:
             raise ValueError(f"Invalid block type: {self.block_type}")
-        logits += ffw_residual
-        return new_cache, logits
+        logits_TD += ffw_residual_TD
+        return new_cache, logits_TD
 
     def generate_kernel(self, rngs: nnx.Rngs):
         self.attn.generate_kernel(rngs)
@@ -168,28 +168,28 @@ class SharedExpertsTransformerBlock(TransformerBlock):
     def __call__(self, x, is_prefill, kv_cache, attention_metadata):
         op_mode = "prefill" if is_prefill else "generate"
         # Attn Block
-        attn_residual = x
-        x = self.pre_attention_norm(x)
-        new_cache, attn_output = self.attn(x, is_prefill, kv_cache,
+        attn_residual_TD = x
+        x_TD = self.pre_attention_norm(x)
+        new_cache, attn_output_TD = self.attn(x_TD, is_prefill, kv_cache,
                                            attention_metadata,
                                            self.use_attention_rope)
-        attn_output += attn_residual
+        attn_output_TD += attn_residual_TD
 
         # FFW Block
-        ffw_residual = attn_output
-        normed_ffw_input = self.pre_mlp_norm(attn_output)
+        ffw_residual_TD = attn_output_TD
+        normed_ffw_input_TD = self.pre_mlp_norm(attn_output_TD)
         if self.block_type == "moe":
-            logits = self.moe(normed_ffw_input, op_mode)
+            logits_TD = self.moe(normed_ffw_input_TD, op_mode)
             # Add the shared expert outputs to the MoE outputs.
-            shared_expert_output = self.shared_experts(normed_ffw_input,
+            shared_expert_output_TD = self.shared_experts(normed_ffw_input_TD,
                                                        op_mode)
-            logits += shared_expert_output
+            logits_TD += shared_expert_output_TD
         elif self.block_type == "dense":
-            logits = self.mlp(normed_ffw_input, op_mode)
+            logits_TD = self.mlp(normed_ffw_input_TD, op_mode)
         else:
             raise ValueError(f"Invalid block type: {self.block_type}")
-        logits += ffw_residual
-        return new_cache, logits
+        logits_TD += ffw_residual_TD
+        return new_cache, logits_TD
 
     def generate_kernel(self, rngs: nnx.Rngs):
         super().generate_kernel(rngs)

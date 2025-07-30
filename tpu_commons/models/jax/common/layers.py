@@ -89,18 +89,18 @@ class RMSNorm(nnx.Module):
         x_TD = nnx.with_sharding_constraint(x, self.activation_ffw_td[op_mode])
 
         with jax.named_scope("rms_norm_variance"):
-            var = jnp.mean(jnp.square(x_TD), axis=-1, keepdims=True)
+            var_T1 = jnp.mean(jnp.square(x_TD), axis=-1, keepdims=True)
         with jax.named_scope("rms_norm_rsqrt"):
-            normed_x = x_TD * jax.lax.rsqrt(var + self.epsilon)
+            normed_x_TD = x_TD * jax.lax.rsqrt(var_T1 + self.epsilon)
 
         with jax.named_scope("rms_norm_scale_apply"):
-            normed_x *= self.scale.value
-        normed_x = nnx.with_sharding_constraint(
-            normed_x, self.activation_ffw_td[op_mode])
-        return normed_x.astype(self.dtype)
+            normed_x_TD *= self.scale_D.value
+        normed_x_TD = nnx.with_sharding_constraint(
+            normed_x_TD, self.activation_ffw_td[op_mode])
+        return normed_x_TD.astype(self.dtype)
 
     def generate_kernel(self, rngs: nnx.Rngs):
-        self.scale = self.param_factory.create_scale_param(
+        self.scale_D = self.param_factory.create_scale_param(
             rngs,
             shape=(self.dims, ),
             sharding=self.scale_sharding,
@@ -337,7 +337,7 @@ class Embedder(nnx.Module):
 
         with jax.named_scope("embedder_decode_projection"):
             logits_TV = jnp.einsum('VD,TD -> TV',
-                                self.input_embedding_table_VD.value, x_TD)
+                                   self.input_embedding_table_VD.value, x_TD)
         return logits_TV
 
     def encode(self, x: Int) -> Float:
@@ -351,7 +351,9 @@ class Embedder(nnx.Module):
             `(batch, sequence, d_model)`.
         """
         with jax.named_scope("embedder_encode_lookup"):
-            embedding_TD = jnp.take(self.input_embedding_table_VD.value, x, axis=0)
+            embedding_TD = jnp.take(self.input_embedding_table_VD.value,
+                                    x,
+                                    axis=0)
 
         D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
         if self.cfg.normalize_embeddings:
@@ -417,7 +419,7 @@ class LMhead(Embedder):
 
         with jax.named_scope("lmhead_decode_projection"):
             logits_TV = jnp.einsum('DV,TD -> TV',
-                                self.input_embedding_table_DV.value, x_TD)
+                                   self.input_embedding_table_DV.value, x_TD)
         return logits_TV
 
     def create_sharding(self):
