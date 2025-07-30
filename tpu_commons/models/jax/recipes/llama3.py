@@ -250,7 +250,11 @@ class LlamaForCausalLM(Model):
             for (i, layer) in enumerate(self.layers):
                 kv_cache = kv_caches[i] 
 
-                if i == 0: #Leaving out layer_0 for clearer xprof reading
+                # The first layer is unscoped to avoid JAX tracing issues.
+                # JAX's profiler may incorrectly apply the scope name from the first
+                # layer's kernel compilation to all subsequent layers. Skipping the
+                # first layer ensures distinct scope names for the remaining layers.
+                if i == 0: 
                     new_kv_cache, x = layer(x, is_prefill, kv_cache,
                                             attention_metadata)
                 else:
