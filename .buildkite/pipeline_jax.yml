@@ -5,6 +5,8 @@ steps:
    - label: "E2E MLPerf tests for JAX models"
      key: test_0
      soft_fail: true
+     env:
+       VLLM_XLA_CHECK_RECOMPILATION: "1"
      agents:
        queue: tpu_v6e_queue
      commands:
@@ -15,6 +17,7 @@ steps:
      soft_fail: true
      env:
        MODEL_IMPL_TYPE: "vllm"
+       VLLM_XLA_CHECK_RECOMPILATION: "1"
      agents:
        queue: tpu_v6e_queue
      commands:
