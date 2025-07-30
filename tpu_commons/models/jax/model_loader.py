@@ -97,7 +97,7 @@ def _get_nnx_model(
     if os.getenv("JAX_RANDOM_WEIGHTS", False):
         if os.getenv("NEW_MODEL_DESIGN", False):
 
-            @nnx.jit
+            @nnx.jit(donate_argnums=(0, ))
             def create_sharded_model(model):
                 state = nnx.state(model)
                 nnx.update(model, state)
