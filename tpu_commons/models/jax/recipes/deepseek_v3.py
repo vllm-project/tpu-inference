@@ -104,9 +104,9 @@ class DeepseekV3ModelConfig(ModelConfig):
                     },
                     q_lora_rank=1536,
                     kv_lora_rank=512,
-                    # qk_nope_head_dim=128,
+                    qk_nope_head_dim=128,
                     # TODO: remove this hack.
-                    qk_nope_head_dim=64,
+                    # qk_nope_head_dim=64,
                     qk_rope_head_dim=64,
                     v_head_dim=128,
                     rms_norm_eps=self.rms_norm_eps,
@@ -155,7 +155,9 @@ class DeepSeekV3ShardingRulesConfig(ShardingRulesConfig):
     attn_mla_kva_weight_da: tuple = (None, None)
     # MLA KV up projection weight: (KVLoRA, NumHeads, QKNopeHeadDim + VHeadDim)
     attn_mla_kvb_weight_anh: tuple = (None, None, None)
-
+    attn_v2_o: tuple = (ATTN_HEAD_AXIS_NAME, None, None, None, ATTN_TENSOR_AXIS_NAME)
+    query_ragged_v2: tuple = (ATTN_HEAD_AXIS_NAME, None, None, None, ATTN_TENSOR_AXIS_NAME)
+    kv_cache_ragged_v2: tuple = (None, None, ATTN_HEAD_AXIS_NAME, None, ATTN_TENSOR_AXIS_NAME)
 
 @dataclass
 class DeepSeekV3PrefillShardingRulesConfig(DeepSeekV3ShardingRulesConfig):
