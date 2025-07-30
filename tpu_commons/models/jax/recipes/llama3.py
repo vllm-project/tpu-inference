@@ -206,6 +206,7 @@ class LlamaForCausalLM(Model):
                                            model_config=self.cfg.model)
         weight_loader.load_weights(self)
 
+
     def __call__(
         self,
         kv_caches: List[jax.Array],
@@ -214,21 +215,36 @@ class LlamaForCausalLM(Model):
         *args,
     ) -> Tuple[List[KVCacheType], jax.Array]:
         is_prefill = False
-        x = self.embedder.encode(input_ids)
-        for (i, layer) in enumerate(self.layers):
-            kv_cache = kv_caches[i]
-            with jax.named_scope(f'layer_{i}'):
-                new_kv_cache, x = layer(x, is_prefill, kv_cache,
-                                        attention_metadata)
-            kv_caches[i] = new_kv_cache
+        with jax.named_scope("llama_embed_input"): #Embedding
+            x = self.embedder.encode(input_ids)
+            
+        with jax.named_scope("llama_model_transformer_blocks"):
+            for (i, layer) in enumerate(self.layers):
+                kv_cache = kv_caches[i] 
 
-        final_activation = self.final_norm(x)
+                # The first layer is unscoped to avoid JAX tracing issues.
+                # JAX's profiler may incorrectly apply the scope name from the first
+                # layer's kernel compilation to all subsequent layers. Skipping the
+                # first layer ensures distinct scope names for the remaining layers.
+                if i == 0: 
+                    new_kv_cache, x = layer(x, is_prefill, kv_cache,
+                                            attention_metadata)
+                else:
+                    with jax.named_scope(f'layer_{i}'): 
+                                new_kv_cache, x = layer(x, is_prefill, kv_cache,
+                                                    attention_metadata)
+
+                kv_caches[i] = new_kv_cache
+
+        with jax.named_scope("llama_final_norm"): #Norm after last transformer block
+            final_activation = self.final_norm(x)
 
         return kv_caches, final_activation
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        logits = jnp.dot(hidden_states,
-                         self.lm_head.input_embedding_table_DV.value)
+        with jax.named_scope("llama_lm_head_projection"): #LM head projection to produce logits
+            logits = jnp.dot(hidden_states,
+                            self.lm_head.input_embedding_table_DV.value)
 
         return logits
 
