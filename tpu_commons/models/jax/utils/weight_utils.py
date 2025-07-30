@@ -3,22 +3,24 @@
 import abc
 import functools
 import glob
+import math
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, Generator, Mapping, Optional, Tuple
+from typing import Any, Dict, Generator, List, Mapping, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh
+from jax.sharding import PartitionSpec as P
 from safetensors import safe_open
 from vllm.config import VllmConfig
 
-from tpu_commons import utils_jax as utils
+from tpu_commons import utils
 from tpu_commons.logger import init_logger
-from tpu_commons.models.jax.layers.misc import shard_put
 from tpu_commons.models.jax.utils import file_utils
 
 logger = init_logger(__name__)
@@ -112,10 +114,49 @@ class WeightLoader(abc.ABC):
         raise NotImplementedError
 
 
+# TODO(xiang): deprecate this, use the multi-thread one instead.
 def hf_model_weights_iterator(
     model_name_or_path: str,
     framework: str,
 ) -> Generator[tuple, Any, None]:
+    """The old single-thread model weights loader, will be deprecated."""
+    weights_location, weights_files = get_model_weights_files(
+        model_name_or_path)
+    for weights_file in weights_files:
+        for name, weight_tensor in model_weights_generator(
+                model_name_or_path, weights_location, weights_file, framework):
+            yield name, weight_tensor
+
+
+def model_weights_generator(
+    model_name_or_path: str,
+    weights_location: str,
+    weights_file: str,
+    framework: str,
+) -> Generator[tuple, Any, None]:
+    """A generator that loads model weights from a single weights file."""
+    logger.info(f"Loading weights from {weights_file}")
+    if weights_location == "gcs":
+        weights_file = file_utils.download_model_weights_from_gcs(
+            model_name_or_path, os.path.basename(weights_file))[0]
+    elif weights_location == "hf":
+        weights_file = file_utils.download_model_weights_from_hf(
+            model_name_or_path, os.path.basename(weights_file))[0]
+    # NOTE(xiang): We enforce loading tensors on CPU here.
+    # Because otherwise the tensor will be loaded on TPU:0 by default,
+    # although the tensor would eventually be sharded across multiple TPUs,
+    # it would lead to OOM on TPU:0 for large models.
+    with jax.default_device(jax.devices("cpu")[0]):
+        with safe_open(weights_file, framework=framework) as f:
+            for name in f.keys():
+                weight_tensor = f.get_tensor(name)
+                yield name, weight_tensor
+    if weights_location != "local":
+        file_utils.delete_file(weights_file)
+
+
+def get_model_weights_files(model_name_or_path: str) -> Tuple[str, List[str]]:
+    """Download and return all local model weights files."""
     weights_files = []
     weights_location = "local"
     if os.path.isdir(model_name_or_path):
@@ -163,25 +204,7 @@ def hf_model_weights_iterator(
     # Sort to ensure the order of files is consistent.
     weights_files.sort()
 
-    for st_file in weights_files:
-        logger.info(f"Loading weights from {st_file}")
-        if weights_location == "gcs":
-            st_file = file_utils.download_model_weights_from_gcs(
-                model_name_or_path, os.path.basename(st_file))[0]
-        elif weights_location == "hf":
-            st_file = file_utils.download_model_weights_from_hf(
-                model_name_or_path, os.path.basename(st_file))[0]
-        # NOTE: We enforce loading tensors on CPU here.
-        # Because otherwise the tensor will be loaded on TPU:0 by default,
-        # although the tensor would eventually be sharded across multiple TPUs,
-        # it would lead to OOM on TPU:0 for large models.
-        with jax.default_device(jax.devices("cpu")[0]):
-            with safe_open(st_file, framework=framework) as f:
-                for name in f.keys():
-                    weight_tensor = f.get_tensor(name)
-                    yield name, weight_tensor
-        if weights_location != "local":
-            file_utils.delete_file(st_file)
+    return weights_location, weights_files
 
 
 def get_num_kv_heads_by_tp(num_kv_heads: int, tp_size: int) -> int:
@@ -210,20 +233,48 @@ def get_num_q_heads_by_tp(num_q_heads: int, num_kv_heads: int,
 
 def get_param(params: nnx.State, path: str) -> nnx.State:
     keys = path.split(".")
-    current_level = params
+    plevel = params
     for key in keys:
         if key.isdigit():
-            current_level = current_level[int(key)]
+            plevel = plevel[int(key)]
         else:
-            if key in current_level:
-                current_level = current_level[key]
+            if key in plevel:
+                plevel = plevel[key]
             else:
                 raise ValueError(f"{path} is not a valid param path")
-    return current_level
+    return plevel
 
 
-def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
-                    mesh: Mesh):
+def get_param_and_sharding(params: nnx.State, shardings: Any,
+                           path: str) -> nnx.State:
+    keys = path.split(".")
+    plevel = params
+    slevel = shardings
+    for key in keys:
+        if key.isdigit():
+            plevel = plevel[int(key)]
+            slevel = slevel[int(key)]
+        else:
+            if key in plevel:
+                plevel = plevel[key]
+                slevel = slevel[key]
+            else:
+                raise ValueError(f"{path} is not a valid param path")
+    return plevel, slevel.value
+
+
+def shard_put(x: jax.Array, sharding: P, mesh: jax.sharding.Mesh) -> jax.Array:
+    # Single device sharding requires this special handling
+    # to avoid the recursive jit error.
+    if math.prod(mesh.axis_sizes) == 1:
+        return jax.device_put(x, mesh.devices.flatten()[0])
+    return jax.device_put(x, sharding)
+
+
+def load_hf_weights_on_thread(vllm_config, params: nnx.State,
+                              mappings: Dict[str, str], mesh: Mesh,
+                              weights_location: str, weights_file: str):
+    """Load weights from one model weights file to the model, run on single thread."""
     sharding_size = mesh.shape["model"]
     shard = functools.partial(shard_put, mesh=mesh)
 
@@ -275,10 +326,11 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
         "v_proj.bias": (0, sharding_size // num_kv_heads),
     }
 
-    params = nnx.state(model)
-    for hf_key, hf_weight in hf_model_weights_iterator(model_path,
-                                                       framework="flax"):
-
+    shardings = nnx.get_named_sharding(params, mesh)
+    for hf_key, hf_weight in model_weights_generator(model_path,
+                                                     weights_location,
+                                                     weights_file,
+                                                     framework="flax"):
         if hf_key.endswith(".weight"):
             hf_key = hf_key.removesuffix(".weight")
 
@@ -286,11 +338,12 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
         if "layer" in hf_key:
             layer_num = re.search(r"layers\.(\d+)", hf_key).group(1)
             layer_key = re.sub(r"layers\.\d+", "layers.*", hf_key)
-            model_key, model_sharding = mappings[layer_key]
+            model_key = mappings[layer_key]
             model_key = re.sub(r"layers\.\*", f"layers.{layer_num}", model_key)
         else:
-            model_key, model_sharding = mappings[hf_key]
-        model_weight = get_param(params, model_key)
+            model_key = mappings[hf_key]
+        model_weight, model_sharding = get_param_and_sharding(
+            params, shardings, model_key)
 
         logger.debug(
             "before transform | "
@@ -350,6 +403,22 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
         # Update the model weight
         model_weight.value = shard(hf_weight, model_sharding)
 
+
+def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
+                    mesh: Mesh):
+    """Load weights from all model weights files to the model, run in multi threads."""
+    model_path = vllm_config.model_config.model
+    weights_location, weights_files = get_model_weights_files(model_path)
+    params = nnx.state(model)
+    max_workers = min(64, len(weights_files))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(load_hf_weights_on_thread, vllm_config, params,
+                            mappings, mesh, weights_location, weights_file)
+            for weights_file in weights_files
+        ]
+        for future in futures:
+            future.result()
     nnx.update(model, params)
 
 

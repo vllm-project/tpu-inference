@@ -6,7 +6,6 @@ import torch
 import torch.nn as nn
 import torchax
 from jax.sharding import Mesh
-from torchax import jax_device
 from vllm.config import ModelConfig, VllmConfig
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.utils import (
@@ -72,8 +71,7 @@ class TPUModelLoader(DefaultModelLoader):
             shard_model(model, mesh)
         else:
             with torchax.default_env():
-                with jax_device('tpu'):
-                    model = model.to('jax')
+                model = model.to('jax')
         counter_after_partition = time.perf_counter()
         logger.info("Partition model took %.2f seconds",
                     counter_after_partition - counter_before_partition)

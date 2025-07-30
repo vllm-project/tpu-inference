@@ -13,12 +13,15 @@ from vllm.attention import Attention as VllmAttention
 from vllm.config import ParallelConfig
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 
 from tpu_commons.logger import init_logger
 from tpu_commons.models.vllm.jax_attention import JaxAttention
 from tpu_commons.models.vllm.jax_fused_moe import JaxFusedMoE
+from tpu_commons.models.vllm.jax_merged_column_parallel_linear import \
+    JaxMergedColumnParallelLinear
 from tpu_commons.models.vllm.jax_qkv_parallel_linear import \
     JaxQKVParallelLinear
 
@@ -36,6 +39,13 @@ def shard_qkv_parallel_linear(layer: torch.nn.Module, mesh: Mesh,
                               vllm_parallel_config: ParallelConfig):
     assert isinstance(layer, QKVParallelLinear)
     jax_layer = JaxQKVParallelLinear(layer, mesh)
+    return jax_layer
+
+
+def shard_merged_column_parallel_linear(layer: torch.nn.Module, mesh: Mesh,
+                                        vllm_parallel_config: ParallelConfig):
+    assert isinstance(layer, MergedColumnParallelLinear)
+    jax_layer = JaxMergedColumnParallelLinear(layer, mesh)
     return jax_layer
 
 
@@ -67,6 +77,7 @@ def shard_fused_moe(layer: torch.nn.Module, mesh: Mesh,
 MODULE_TYPE_TO_WRAPPING_FUNC = {
     VllmAttention: shard_attention,
     QKVParallelLinear: shard_qkv_parallel_linear,
+    MergedColumnParallelLinear: shard_merged_column_parallel_linear,
     ColumnParallelLinear: shard_column_parallel_linear,
     RowParallelLinear: shard_row_parallel_linear,
     FusedMoE: shard_fused_moe,

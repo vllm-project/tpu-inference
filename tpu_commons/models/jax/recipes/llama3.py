@@ -18,7 +18,8 @@ from tpu_commons.models.jax.common.attention.attention import (
 from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.kv_cache import KVCacheType
 from tpu_commons.models.jax.common.layers import (DenseFFWConfig, Embedder,
-                                                  EmbedderConfig, RMSNorm)
+                                                  EmbedderConfig, LMhead,
+                                                  RMSNorm)
 from tpu_commons.models.jax.common.model import Model
 from tpu_commons.models.jax.common.sharding import (Sharding, ShardingConfig,
                                                     ShardingRulesConfig)
@@ -193,10 +194,10 @@ class LlamaForCausalLM(Model):
         )
         self.final_norm.generate_kernel(self.rng)
 
-        self.lm_head = Embedder(cfg=self.cfg.model.emb,
-                                mesh=self.mesh,
-                                param_factory=self.param_factory,
-                                sharding_cfg=self.cfg.sharding)
+        self.lm_head = LMhead(cfg=self.cfg.model.emb,
+                              mesh=self.mesh,
+                              param_factory=self.param_factory,
+                              sharding_cfg=self.cfg.sharding)
         self.lm_head.generate_kernel(self.rng)
 
     @classmethod
@@ -278,7 +279,6 @@ class Llama3WeightLoader(WeightLoader):
     def setup(self):
         super().setup()
         self.set_transpose_param_map({
-            "embed_tokens": (1, 0),
             "lm_head": (1, 0),
             "gate_proj": (1, 0),
             "up_proj": (1, 0),
@@ -311,7 +311,7 @@ class Llama3WeightLoader(WeightLoader):
         # Set the mappings from loaded parameter keys to standardized names.
         self.set_loaded_to_standardized_keys({
             "model.embed_tokens":
-            "embedder.input_embedding_table_DV",
+            "embedder.input_embedding_table_VD",
             "model.layers.*.input_layernorm":
             "layers.*.pre_attention_norm.scale",
             "model.layers.*.mlp.down_proj":

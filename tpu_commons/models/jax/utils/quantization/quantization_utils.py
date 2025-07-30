@@ -10,7 +10,7 @@ import yaml
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
-from tpu_commons import utils_jax as utils
+from tpu_commons import utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.runner.utils import create_kv_caches

@@ -14,7 +14,6 @@ RUN apt-get update && apt-get install -y \
 # Build vLLM
 WORKDIR /workspace/vllm
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-ARG VLLM_COMMIT_SHA=0f199f197b4e7a835ccc5b4d15363f8faa7824c8
 RUN git clone $VLLM_REPO /workspace/vllm
 RUN git reset --hard $VLLM_COMMIT_SHA
 RUN pip install -r requirements/tpu.txt
