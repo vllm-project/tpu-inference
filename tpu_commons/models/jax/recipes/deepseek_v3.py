@@ -104,9 +104,9 @@ class DeepseekV3ModelConfig(ModelConfig):
                     },
                     q_lora_rank=1536,
                     kv_lora_rank=512,
-                    # qk_nope_head_dim=128,
+                    qk_nope_head_dim=128,
                     # TODO: remove this hack.
-                    qk_nope_head_dim=64,
+                    # qk_nope_head_dim=64,
                     qk_rope_head_dim=64,
                     v_head_dim=128,
                     rms_norm_eps=self.rms_norm_eps,
@@ -155,7 +155,12 @@ class DeepSeekV3ShardingRulesConfig(ShardingRulesConfig):
     attn_mla_kva_weight_da: tuple = (None, None)
     # MLA KV up projection weight: (KVLoRA, NumHeads, QKNopeHeadDim + VHeadDim)
     attn_mla_kvb_weight_anh: tuple = (None, None, None)
-
+    # Attention V3 output: (actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim)
+    attn_o_ktnph: tuple = (ATTN_HEAD_AXIS_NAME, None, None, None, ATTN_TENSOR_AXIS_NAME)
+    # Attention V3 query: (actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim)
+    query_ktnph: tuple = (ATTN_HEAD_AXIS_NAME, None, None, None, ATTN_TENSOR_AXIS_NAME)
+    # Attention V3 kv_cache: (total_num_pages, page_size, num_kv_heads_x2 // kv_packing, kv_packing, head_dim)
+    keyvalue_cache_nbkph: tuple = (None, None, ATTN_HEAD_AXIS_NAME, None, ATTN_TENSOR_AXIS_NAME)
 
 @dataclass
 class DeepSeekV3PrefillShardingRulesConfig(DeepSeekV3ShardingRulesConfig):
@@ -556,6 +561,11 @@ class DeepSeekV3WeightLoader(WeightLoader):
                     # skip loading MTP module.
                     del loaded_weight
                     continue
+                if re.search(r"experts\.(\d+)", loaded_name):
+                    expert_num = re.search(r"experts\.(\d+)", loaded_name).group(1)
+                    if int(expert_num) >= self.model_config.num_local_experts:
+                        del loaded_weight
+                        continue
                 if loaded_weight.dtype == torch.float8_e4m3fn:
                     fp8_weights[loaded_name] = loaded_weight
                     continue

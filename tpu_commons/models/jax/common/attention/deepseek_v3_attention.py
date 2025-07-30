@@ -106,6 +106,18 @@ class MLA(Attention):
 
         self.create_sharding()
 
+        self.rope = DeepseekScalingRotaryEmbedding(
+            self.qk_rope_head_dim,
+            self.rope_theta,
+            self.rope_scaling["original_max_position_embeddings"],
+            self.rope_scaling["factor"],
+            self.dtype,
+            beta_fast=self.rope_scaling["beta_fast"],
+            beta_slow=self.rope_scaling["beta_slow"],
+            mscale=self.rope_scaling["mscale"],
+            mscale_all_dim=self.rope_scaling["mscale_all_dim"],
+        )
+
     def generate_kernel(self, rngs: nnx.Rngs):
         """Initializes the weight kernels."""
 
@@ -155,17 +167,6 @@ class MLA(Attention):
             dtype=self.dtype,
         )
         self.kv_rms_norm.generate_kernel(rngs)
-        self.rope = DeepseekScalingRotaryEmbedding(
-            self.qk_rope_head_dim,
-            self.rope_theta,
-            self.rope_scaling["original_max_position_embeddings"],
-            self.rope_scaling["factor"],
-            self.dtype,
-            beta_fast=self.rope_scaling["beta_fast"],
-            beta_slow=self.rope_scaling["beta_slow"],
-            mscale=self.rope_scaling["mscale"],
-            mscale_all_dim=self.rope_scaling["mscale_all_dim"],
-        )
 
     def __call__(
         self,
@@ -257,7 +258,7 @@ class MLA(Attention):
                                     (0, multiple_of_128 - self.qk_head_dim)))
             v_SNH = jnp.pad(v_SNH, ((0, 0), (0, 0),
                                     (0, multiple_of_128 - self.v_head_dim)))
-            new_kv_cache, outputs_TNH = self.attention(
+            new_kv_cache, outputs_TNH = self.attention_v3(
                 is_prefill,
                 kv_cache,
                 q_TNH,
