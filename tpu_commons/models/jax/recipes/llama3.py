@@ -16,7 +16,7 @@ from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.common.attention.attention import (
     AttentionConfig, AttentionMetadata)
 from tpu_commons.models.jax.common.base import Config, ParamFactory
-from tpu_commons.models.jax.common.kv_cache import KVCacheType
+from tpu_commons.models.jax.common.constants import KVCacheType
 from tpu_commons.models.jax.common.layers import (DenseFFWConfig, Embedder,
                                                   EmbedderConfig, LMhead,
                                                   RMSNorm)
@@ -235,8 +235,7 @@ class LlamaForCausalLM(Model):
 
 class Llama3WeightLoader(WeightLoader):
 
-    def __init__(self,
-                 vllm_config: VllmConfig,
+    def __init__(self, vllm_config: VllmConfig,
                  model_config: Llama3ModelConfig):
         super().__init__(vllm_config=vllm_config,
                          model_config=model_config,

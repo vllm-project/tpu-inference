@@ -10,9 +10,8 @@ from vllm.config import VllmConfig
 
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.common.attention.attention import AttentionMetadata
-from tpu_commons.models.jax.common.base import (Config,
-                                                ParamFactory)
-from tpu_commons.models.jax.common.kv_cache import KVCacheType
+from tpu_commons.models.jax.common.base import Config, ParamFactory
+from tpu_commons.models.jax.common.constants import KVCacheType
 from tpu_commons.models.jax.common.layers import EmbedderConfig
 from tpu_commons.models.jax.common.transformer_block import \
     TransformerBlockConfig
@@ -34,9 +33,7 @@ class Model(nnx.Module, abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def __call__(self,
-                 kv_caches: List[KVCacheType],
-                 input_ids: jax.Array,
+    def __call__(self, kv_caches: List[KVCacheType], input_ids: jax.Array,
                  attention_metadata: AttentionMetadata,
                  *args) -> Tuple[List[KVCacheType], jax.Array, jax.Array]:
         raise NotImplementedError
