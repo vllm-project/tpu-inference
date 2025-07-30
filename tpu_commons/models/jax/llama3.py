@@ -69,7 +69,6 @@ class LlamaAttention(nnx.Module):
         self.num_kv_heads = config.num_key_value_heads
         self.rope_theta = config.rope_theta
         self.rope_scaling = getattr(config, "rope_scaling", None)
-        self.rope_input_ordering = "split"
         self.head_dim = config.head_dim
 
         sharding_size = mesh.shape["model"]

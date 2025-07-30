@@ -68,7 +68,6 @@ class Llama3ModelConfig():
                     num_key_value_heads=self.num_key_value_heads,
                     head_dim=self.head_dim,
                     rope_theta=self.rope_theta,
-                    rope_input_ordering="split",
                     rope_scaling={},
                     dtype=self.dtype,
                     vllm_config=self.vllm_config),

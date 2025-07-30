@@ -360,9 +360,9 @@ class Sharding:
         generate_rules.attn_o_weight_nhd = (ATTN_HEAD_AXIS_NAME, None,
                                             ATTN_TENSOR_AXIS_NAME)
         generate_rules.activation_ffw_td = (DATA_AXIS_NAME,
-                                            MLP_TENSOR_AXIS_NAME)
+                                            None)
         generate_rules.activation_ffw_ted = (DATA_AXIS_NAME, EXPERT_AXIS_NAME,
-                                              MOE_TENSOR_AXIS_NAME)
+                                              None)
         generate_rules.ffw_hidden_tf = (DATA_AXIS_NAME, MLP_TENSOR_AXIS_NAME)
         # FFW weights are typically sharded along the hidden dimension (F).
         generate_rules.ffw_weight_df = (None, MLP_TENSOR_AXIS_NAME)

@@ -150,9 +150,10 @@ class Attention(nnx.Module):
 
         Args:
             x: The input tensor of shape `(seq_len, d_model)`.
-            op_mode: The operational mode, either 'prefill' or 'generate'.
+            is_prefill: Whether the operation mode is prefill (otherwise it is generate).
             kv_cache: The key-value cache for storing past attention states.
             attention_metadata: Metadata for attention, such as input positions.
+            use_attention_rope: Whether to use RoPE.
 
         Returns:
             A tuple containing:

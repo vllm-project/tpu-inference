@@ -122,15 +122,13 @@ def _get_nnx_model(
     else:
         # We first create an abstract model without allocating any weights,
         # then fill in its weigths during load_weights from HF.
-        # This shows 3 advantages than the normal way:
+        # This shows 2 advantages than the normal way:
         # 1. The model weights will only be allocated once. Otherwise the normal way
         #    will random-init the model weights first, then load the real weights.
         #    The two pass weights allocation causes model loading slow.
         # 2. The model loading won't be OOM. Otherwise the normal way will hold
         #    a full model weights after random-init, then duplicate a layer during
         #    the load_weights. This would be easy to OOM if the layer is super large.
-        # 3. The model architecture definition won't need to worry labout the sharding.
-        #    The sharding definition is taken over by the load_weights instead.
         if os.getenv("NEW_MODEL_DESIGN", False):
             model = model_class.create_model_for_checkpoint_loading(
                 vllm_config, rng, mesh)

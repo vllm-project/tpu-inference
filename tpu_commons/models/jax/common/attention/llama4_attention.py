@@ -71,7 +71,7 @@ class Llama4Attention(Attention):
 
         Args:
             x: The input tensor of shape `(seq_len, d_model)`.
-            op_mode: The operational mode, either 'prefill' or 'generate'.
+            is_prefill: Whether the operation mode is prefill (otherwise it is generate).
             kv_cache: The key-value cache for storing past attention states.
             attention_metadata: Metadata for attention, such as input positions.
             use_attention_rope: Whether to use RoPE.
@@ -150,7 +150,11 @@ class Llama4Attention(Attention):
 
     def apply_temperature_tuning(self, md: AttentionMetadata,
                                  input_arr_TNH: jax.Array) -> jax.Array:
-        """Applies temperature tuning to the input array of shape (T, N, H)."""
+        """Applies temperature tuning to the input array of shape (T, N, H).
+        Args:
+            md: AttentionMetadata object containing the input positions.
+            input_arr_TNH: Input array of shape (T, N, H) which will have scaled temperatures applied.
+        """
         attn_scales = (jnp.log(
             jnp.floor((md.input_positions.astype(self.cfg.dtype) + 1.0) /
                       self.cfg.temperature_tuning_floor_scale) + 1.0) *
