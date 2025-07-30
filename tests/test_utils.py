@@ -63,9 +63,9 @@ def test_hbm_usage_bytes_ray_backend():
     assert usage == expected_usage
 
 
-@patch("tpu_commons.utils.PATHWAYS_ENABLED", False)
+@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
 def test_hbm_usage_bytes_pathways_disabled():
-    """Tests hbm_usage_bytes when PATHWAYS_ENABLED is False."""
+    """Tests hbm_usage_bytes when VLLM_TPU_USING_PATHWAYS is False."""
     mock_device1 = MagicMock()
     mock_device1.memory_stats.return_value = {
         "bytes_in_use": 100 * GBYTES,
@@ -85,22 +85,44 @@ def test_hbm_usage_bytes_pathways_disabled():
     assert usage == expected_usage
 
 
-@patch("tpu_commons.utils.PATHWAYS_ENABLED", True)
-def test_hbm_usage_bytes_pathways_enabled():
-    """Tests hbm_usage_bytes when PATHWAYS_ENABLED is True."""
-    # When PATHWAYS_ENABLED is True, memory_stats() is not called.
-    # The function returns a hardcoded value.
-    devices = [MagicMock(), MagicMock()]  # Devices are not used in this path
+@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", True)
+@patch("jax.live_arrays")
+def test_hbm_usage_bytes_pathways_enabled(mock_live_arrays):
+    """Tests hbm_usage_bytes when VLLM_TPU_USING_PATHWAYS is True."""
+    # Create mock devices
+    mock_device1 = MagicMock()
+    mock_device2 = MagicMock()
+    devices = [mock_device1, mock_device2]
+
+    # Create mock arrays with sharding
+    mock_array1 = MagicMock()
+    mock_array1.dtype.itemsize = 4  # float32
+    mock_array1.size = 1000  # 1000 elements
+    mock_array1.sharding.device_set = {mock_device1, mock_device2
+                                       }  # Sharded across 2 devices
+
+    mock_array2 = MagicMock()
+    mock_array2.dtype.itemsize = 2  # float16
+    mock_array2.size = 500  # 500 elements
+    mock_array2.sharding.device_set = {mock_device1}  # Only on device1
+
+    mock_live_arrays.return_value = [mock_array1, mock_array2]
+
     usage = hbm_usage_bytes(devices)
 
-    # The hardcoded values from the source
-    expected_usage = [(32384, 33550237184), (32384, 33550237184)]
+    # Expected calculations:
+    # Array1: 4 bytes * 1000 elements / 2 devices = 2000 bytes per device
+    # Array2: 2 bytes * 500 elements / 1 device = 1000 bytes on device1 only
+    # Device1: 2000 + 1000 = 3000 bytes
+    # Device2: 2000 + 0 = 2000 bytes
+    # hbm_limit = 33550237184 (hardcoded in the function)
+    expected_usage = [(3000, 33550237184), (2000, 33550237184)]
     assert usage == expected_usage
 
 
-@patch("tpu_commons.utils.PATHWAYS_ENABLED", False)
+@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
 def test_hbm_usage_gb_pathways_disabled():
-    """Tests hbm_usage_gb when PATHWAYS_ENABLED is False."""
+    """Tests hbm_usage_gb when VLLM_TPU_USING_PATHWAYS is False."""
     mock_device1 = MagicMock()
     mock_device1.memory_stats.return_value = {
         "bytes_in_use": 100 * GBYTES,
@@ -119,16 +141,21 @@ def test_hbm_usage_gb_pathways_disabled():
     assert usage == expected_usage
 
 
-@patch("tpu_commons.utils.PATHWAYS_ENABLED", True)
-def test_hbm_usage_gb_pathways_enabled():
-    """Tests hbm_usage_gb when PATHWAYS_ENABLED is True."""
-    devices = [MagicMock()]
-    usage = hbm_usage_gb(devices)
+@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", True)
+@patch("jax.live_arrays")
+def test_hbm_usage_bytes_pathways_no_arrays(mock_live_arrays):
+    """Tests hbm_usage_bytes when VLLM_TPU_USING_PATHWAYS is True but no live arrays."""
+    mock_device1 = MagicMock()
+    mock_device2 = MagicMock()
+    devices = [mock_device1, mock_device2]
 
-    # Hardcoded values: (32384, 33550237184)
-    # 32384 / GBYTES = 0.00003016
-    # 33550237184 / GBYTES = 31.25
-    expected_usage = [(0.0, 31.25)]  # Rounded to 2 decimal places
+    # No live arrays
+    mock_live_arrays.return_value = []
+
+    usage = hbm_usage_bytes(devices)
+
+    # No arrays means no memory usage
+    expected_usage = [(0, 33550237184), (0, 33550237184)]
     assert usage == expected_usage
 
 

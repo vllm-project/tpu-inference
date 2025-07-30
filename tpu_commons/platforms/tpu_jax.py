@@ -3,6 +3,7 @@
 import os
 from typing import TYPE_CHECKING, Optional, Tuple, Union, cast
 
+import jax
 import jax.numpy as jnp
 import vllm.envs as envs
 from torchax.ops.mappings import j2t_dtype
@@ -67,8 +68,15 @@ class TpuPlatform(Platform):
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
-        chip_type, _ = device.get_local_chips()
-        return f"TPU {chip_type.name}"
+        try:
+            if envs.VLLM_TPU_USING_PATHWAYS:
+                return jax.local_devices()[0].device_kind
+            else:
+                chip_type, _ = device.get_local_chips()
+                return f"TPU {chip_type.name}"
+        except Exception as e:
+            logger.warning(f"Error getting device name: {e}")
+            return 'TPU'
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
@@ -102,6 +110,11 @@ class TpuPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         if not envs.VLLM_USE_V1:
             raise RuntimeError("VLLM_USE_V1=1 must be set for JAX backend.")
+
+        if envs.VLLM_TPU_USING_PATHWAYS:
+            assert not envs.VLLM_ENABLE_V1_MULTIPROCESSING, (
+                "VLLM_ENABLE_V1_MULTIPROCESSING must be 0 when using Pathways(JAX_PLATFORMS=proxy)"
+            )
 
         from vllm.config import CompilationLevel
 
