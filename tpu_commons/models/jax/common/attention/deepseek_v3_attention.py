@@ -219,11 +219,11 @@ class MLA(Attention):
             kv_SA = kv_SA[..., :self.kv_lora_rank]
             kv_SA = self.kv_rms_norm(kv_SA)
             # KV up projection.
-            kv_nope = jnp.einsum("SA,ANH -> SNH", kv_SA,
-                                 self.kernel_kv_up_proj_ANH.value)
+            kv_nope_SNH = jnp.einsum("SA,ANH -> SNH", kv_SA,
+                                     self.kernel_kv_up_proj_ANH.value)
             # Split the latent kv vector into k nope vector and v vector.
-            k_nope_SNH = kv_nope[..., :self.qk_nope_head_dim]
-            v_SNH = kv_nope[..., self.qk_nope_head_dim:]
+            k_nope_SNH = kv_nope_SNH[..., :self.qk_nope_head_dim]
+            v_SNH = kv_nope_SNH[..., self.qk_nope_head_dim:]
             # Concatenate the key vector.
             k_SNH = jnp.concatenate([k_nope_SNH, k_rope_SNH], axis=-1)
             k_SNH = nnx.with_sharding_constraint(k_SNH,
