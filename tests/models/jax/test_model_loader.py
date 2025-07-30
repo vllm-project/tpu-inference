@@ -65,7 +65,7 @@ def mock_dependencies(request):
     without having the actual dependencies present.
     """
     # Create mock modules for the models
-    mock_llama_module = ModuleType("tpu_commons.models.jax.recipes.llama3")
+    mock_llama_module = ModuleType("tpu_commons.models.jax.llama3")
     setattr(mock_llama_module, "LlamaForCausalLM", MockCausalLM)
 
     mock_qwen2_module = ModuleType("tpu_commons.models.jax.qwen2")
@@ -79,7 +79,7 @@ def mock_dependencies(request):
 
     # Add the mock modules to sys.modules
     original_modules = sys.modules.copy()
-    sys.modules["tpu_commons.models.jax.recipes.llama3"] = mock_llama_module
+    sys.modules["tpu_commons.models.jax.llama3"] = mock_llama_module
     sys.modules["tpu_commons.models.jax.qwen2"] = mock_qwen2_module
     sys.modules["tpu_commons.logger"] = mock_logger_module
 

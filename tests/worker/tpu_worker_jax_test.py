@@ -37,11 +37,14 @@ def mock_vllm_config():
     mock_parallel_conf = MagicMock()
     mock_parallel_conf.tensor_parallel_size = 2
 
+    mock_additional_config = {}
+
     # Create the main config mock and attach the others without a top-level spec
     config = MagicMock()
     config.model_config = mock_model_conf
     config.cache_config = mock_cache_conf
     config.parallel_config = mock_parallel_conf
+    config.additional_config = mock_additional_config
 
     return config
 
@@ -114,10 +117,10 @@ class TestTPUWorker:
     @patch('tpu_commons.worker.tpu_worker_jax.TPUModelRunner')
     @patch('tpu_commons.worker.tpu_worker_jax.utils')
     @patch('tpu_commons.worker.tpu_worker_jax.jax')
-    def test_init_device_with_provided_devices(self, mock_jax, mock_utils,
-                                               mock_runner_cls,
-                                               mock_host_interface,
-                                               mock_vllm_config):
+    @patch('tpu_commons.worker.tpu_worker_jax.ensure_kv_transfer_initialized')
+    def test_init_device_with_provided_devices(
+            self, mock_ensure_kv_transfer_initialized, mock_jax, mock_utils,
+            mock_runner_cls, mock_host_interface, mock_vllm_config):
         """Tests init_device when devices are provided during construction."""
         mock_devices = ['tpu:0', 'tpu:1']
         worker = TPUWorker(host_interface=mock_host_interface,
@@ -136,10 +139,10 @@ class TestTPUWorker:
     @patch('tpu_commons.worker.tpu_worker_jax.TPUModelRunner')
     @patch('tpu_commons.worker.tpu_worker_jax.utils')
     @patch('tpu_commons.worker.tpu_worker_jax.jax')
-    def test_init_device_autodetects_devices(self, mock_jax, mock_utils,
-                                             mock_runner_cls,
-                                             mock_host_interface,
-                                             mock_vllm_config):
+    @patch('tpu_commons.worker.tpu_worker_jax.ensure_kv_transfer_initialized')
+    def test_init_device_autodetects_devices(
+            self, mock_ensure_kv_transfer_initialized, mock_jax, mock_utils,
+            mock_runner_cls, mock_host_interface, mock_vllm_config):
         """Tests init_device when devices are auto-detected via JAX."""
         worker = TPUWorker(
             host_interface=mock_host_interface,
@@ -425,3 +428,17 @@ class TestTPUWorker:
         # This method calls two different runner methods
         worker.model_runner.capture_model.assert_called_once()
         worker.model_runner._init_random.assert_called_once()
+
+    def test_get_supported_tasks(self, mock_host_interface, mock_vllm_config):
+        """Test get_supported_tasks passthrough to model runner."""
+        worker = TPUWorker(host_interface=mock_host_interface,
+                           vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test")
+        worker.model_runner = MagicMock()
+        worker.model_runner.get_supported_tasks.return_value = ("generate", )
+
+        _ = worker.get_supported_tasks()
+
+        worker.model_runner.get_supported_tasks.assert_called_once()

@@ -30,9 +30,10 @@ AttentionConfig = make_dataclass(
      (HuggingFaceArgNames.NUM_ATTENTION_HEADS.value, int),
      (HuggingFaceArgNames.NUM_KEY_VALUE_HEADS.value, int),
      (HuggingFaceArgNames.HEAD_DIM.value, int),
-     (HuggingFaceArgNames.ROPE_THETA.value, float),
      (HuggingFaceArgNames.ROPE_SCALING.value, Dict[str, Any]),
-     ("dtype", DTypeLike),
+     (HuggingFaceArgNames.ROPE_THETA.value, float),
+     ("dtype", DTypeLike), ("rope_input_ordering", str, "split"),
+     (HuggingFaceArgNames.ATTENTION_CHUNK_SIZE.value, int, None),
      ("vllm_config", VllmConfig, field(repr=False, default=None))],
     bases=(Config, ))
 AttentionConfig.__doc__ = f"""Configuration for the Attention module.
@@ -41,9 +42,11 @@ AttentionConfig.__doc__ = f"""Configuration for the Attention module.
         {HuggingFaceArgNames.NUM_ATTENTION_HEADS.value}: The number of query heads.
         {HuggingFaceArgNames.NUM_KEY_VALUE_HEADS.value}: The number of key/value heads.
         {HuggingFaceArgNames.HEAD_DIM.value}: The dimension of each attention head.
-        {HuggingFaceArgNames.ROPE_THETA.value}: The base period for Rotary Position Embeddings.
         {HuggingFaceArgNames.ROPE_SCALING.value}: Optional dictionary of scaling factors for RoPE.
+        {HuggingFaceArgNames.ROPE_THETA.value}: The base period for Rotary Position Embeddings.
+        {HuggingFaceArgNames.ATTENTION_CHUNK_SIZE.value}: The chunk size for sliding window attention.
          dtype: The data type for computations (default: jnp.float32).
+         "rope_input_ordering": Whether the inputs to rotate should be adjacent, interleaved dimensions or first and second half of the dimensions.
          vllm_config: The VLLM config containing any overrides to apply.
     """
 
@@ -139,13 +142,12 @@ class Attention(nnx.Module):
             P(*self.sharding_cfg.generate_rules.keyvalue_cache_lskh)
         }
 
-    def __call__(
-        self,
-        x,
-        is_prefill,
-        kv_cache: KVCache,
-        attention_metadata: AttentionMetadata,
-    ):
+    def __call__(self,
+                 x,
+                 is_prefill,
+                 kv_cache: KVCache,
+                 attention_metadata: AttentionMetadata,
+                 use_attention_rope: bool = True):
         """Performs the forward pass of the attention module.
 
         This method computes the attention output by projecting the input `x`
@@ -155,9 +157,10 @@ class Attention(nnx.Module):
 
         Args:
             x: The input tensor of shape `(seq_len, d_model)`.
-            op_mode: The operational mode, either 'prefill' or 'generate'.
+            is_prefill: Whether the operation mode is prefill (otherwise it is generate).
             kv_cache: The key-value cache for storing past attention states.
             attention_metadata: Metadata for attention, such as input positions.
+            use_attention_rope: Whether to use RoPE.
 
         Returns:
             A tuple containing:
@@ -172,17 +175,24 @@ class Attention(nnx.Module):
         rope_scaling = getattr(self.cfg,
                                HuggingFaceArgNames.ROPE_SCALING.value)
         rope_theta = getattr(self.cfg, HuggingFaceArgNames.ROPE_THETA.value)
+        rope_input_ordering = self.cfg.rope_input_ordering
         H = getattr(self.cfg, HuggingFaceArgNames.HEAD_DIM.value)
         with jax.named_scope("q_proj"):
             q_TNH = jnp.einsum('TD,DNH -> TNH', x_q_TD,
                                self.kernel_q_proj_DNH.value)
-            q_TNH = apply_rope(q_TNH, md.input_positions, H, rope_theta,
-                               rope_scaling)
+            if use_attention_rope:
+                q_TNH = apply_rope(q_TNH, md.input_positions, H, rope_theta,
+                                   rope_scaling, rope_input_ordering)
+            q_TNH = nnx.with_sharding_constraint(q_TNH,
+                                                 self.query_tnh[op_mode])
         with jax.named_scope("k_proj"):
             k_SKH = jnp.einsum('SD,DKH -> SKH', x_SD,
                                self.kernel_k_proj_DKH.value)
-            k_SKH = apply_rope(k_SKH, md.input_positions, H, rope_theta,
-                               rope_scaling)
+            if use_attention_rope:
+                k_SKH = apply_rope(k_SKH, md.input_positions, H, rope_theta,
+                                   rope_scaling, rope_input_ordering)
+            k_SKH = nnx.with_sharding_constraint(k_SKH,
+                                                 self.keyvalue_skh[op_mode])
 
         with jax.named_scope("v_proj"):
             v_SKH = jnp.einsum('SD,DKH -> SKH', x_SD,
@@ -233,6 +243,7 @@ class Attention(nnx.Module):
             attention_metadata: Metadata containing sequence lengths.
             mesh: The JAX device mesh (unused in this specific function but
                 kept for potential future use or API consistency).
+            attention_chunk_size: The chunk size during sliding window attention.
 
         Returns:
             A tuple containing:
@@ -263,12 +274,12 @@ class Attention(nnx.Module):
             return ragged_paged_attention(
                 *args,
                 sm_scale=H**-0.5,
-                sliding_window=None,
                 soft_cap=None,
                 mask_value=None,
                 # NOTE(xiang): v6e chip has 128M VMEM capacity,
                 # set this to 64M to avoid VMEM OOM,
                 # otherwise the default value is 16M.
+                sliding_window=getattr(self.cfg, "attention_chunk_size", None),
                 vmem_limit_bytes=64 * 1024 * 1024,
             )
 

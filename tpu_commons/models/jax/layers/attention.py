@@ -14,7 +14,7 @@ from jax.experimental.pallas.ops.tpu.splash_attention import \
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
-from tpu_commons.utils_jax import get_megacore
+from tpu_commons.utils import get_megacore
 
 MAX_ALLOWED_PAGE_INDICES_N = (
     128 * 1024

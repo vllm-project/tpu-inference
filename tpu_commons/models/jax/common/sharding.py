@@ -55,19 +55,19 @@ class ShardingRulesConfig:
     TODO: update the mesh axis names to be clear and reduce confusion between prefill & generate
     """
 
-    # Activation for attn input: (Sequence, Dim)
+    # Activation for attn input: (Batch * Sequence, Dim)
     activation_attention_td: tuple = (None, None)
-    # Activation for attn out: (Batch, Sequence, Dim)
+    # Activation for attn out: (Batch * Sequence, Dim)
     activation_attention_out_td: tuple = (None, None)
-    # Activation for q projection input: (Batch, Sequence, Dim)
+    # Activation for q projection input: (Batch * Sequence, Dim)
     activation_q_td: tuple = (None, None)
-    # Attention Out activation after projection: (Batch, Sequence, NumHeads, HeadDim)
+    # Attention Out activation after projection: (Batch * Sequence, NumHeads, HeadDim)
     attn_o_tnh: tuple = (None, None, None)
     # Ragged attention v2 Out: (actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim)
     attn_v2_o: tuple = (None, None, None, None, None)
-    # Q vector: (Batch, Sequence, NumHeads, HeadDim)
+    # Q vector: (Batch * Sequence, NumHeads, HeadDim)
     query_tnh: tuple = (None, None, None)
-    # K/V vector: (Batch, Sequence, NumKVHeads, HeadDim)
+    # K/V vector: (Batch * Sequence, NumKVHeads, HeadDim)
     keyvalue_skh: tuple = (None, None, None)
     # query for ragged attention v2 kernel: (actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim)
     query_ragged_v2: tuple = ('model', None, None, None, None)
@@ -83,12 +83,16 @@ class ShardingRulesConfig:
     # Attention Out weight: (NumHeads, HeadDim, Dim)
     attn_o_weight_nhd: tuple = (None, None, None)
 
-    # K/V cache for generation: (NumKVHeads, Batch, Sequence, HeadDim)
+    # K/V cache for generation: (NumKVHeads, Batch * Sequence, HeadDim)
     keyvalue_cache_lskh: tuple = (None, None, None)
 
-    # Activation for ffw input: (Batch, Sequence, Dim)
+    # Activation for ffw input: (Batch * Sequence, Dim)
     activation_ffw_td: tuple = (None, None)
-    # FFW hidden activation: (Batch, Sequence, FfwDim)
+
+    # Activation for ffw input: (Batch * Sequence, Expert, Dim)
+    activation_ffw_ted: tuple = (None, None, None)
+
+    # FFW hidden activation: (Batch * Sequence, FfwDim)
     ffw_hidden_tf: tuple = (None, None)
 
     # FFW up/gate weight: (Dim, FfwDim)
@@ -106,15 +110,16 @@ class ShardingRulesConfig:
 
     # Embedding weight: (VocabSize, Dim)
     emb_weight_vd: tuple = (None, None)
-    # Activation between layers: (Batch, Sequence, Dim)
+    # Activation between layers: (Batch * Sequence, Dim)
     activation_td: tuple = (None, None)
-    # Final activation before logits: (Batch, Sequence, Dim)
+    # Final activation before logits: (Batch * Sequence, Dim)
     prelogit_td: tuple = (None, None)
-    # Logit activation: (Batch, Sequence, VocabSize)
+    # Logit activation: (Batch * Sequence, VocabSize)
     logits_tv: tuple = (None, None)
     # RMS norm scale weight: (Dim,)
     norm_scale: tuple = (None)
     # Vocab projection weight (tied embeddings): (Dim, VocabSize)
+    vocab_vd: tuple = (None, None)
     vocab_dv: tuple = (None, None)
 
 
@@ -360,8 +365,10 @@ class Sharding:
                                             ATTN_TENSOR_AXIS_NAME)
         generate_rules.attn_o_weight_nhd = (ATTN_HEAD_AXIS_NAME, None,
                                             ATTN_TENSOR_AXIS_NAME)
-
-        generate_rules.activation_ffw_td = (DATA_AXIS_NAME, None)
+        generate_rules.activation_ffw_td = (DATA_AXIS_NAME,
+                                            None)
+        generate_rules.activation_ffw_ted = (DATA_AXIS_NAME, EXPERT_AXIS_NAME,
+                                              None)
         generate_rules.ffw_hidden_tf = (DATA_AXIS_NAME, MLP_TENSOR_AXIS_NAME)
         # FFW weights are typically sharded along the hidden dimension (F).
         generate_rules.ffw_weight_df = (None, MLP_TENSOR_AXIS_NAME)
@@ -378,6 +385,7 @@ class Sharding:
         generate_rules.activation_td = (DATA_AXIS_NAME, ATTN_TENSOR_AXIS_NAME)
         generate_rules.prelogit_td = (DATA_AXIS_NAME, ATTN_TENSOR_AXIS_NAME)
         generate_rules.logits_tv = (DATA_AXIS_NAME, MLP_TENSOR_AXIS_NAME)
+        generate_rules.vocab_vd = (VOCAB_AXIS_NAME, None)
         generate_rules.vocab_dv = (None, VOCAB_AXIS_NAME)
 
     def make_sharding_config(

@@ -54,5 +54,7 @@ exec docker run \
   -e VLLM_XLA_CACHE_PATH= \
   -e VLLM_USE_V1=1 \
   -e VLLM_XLA_CHECK_RECOMPILATION=1 \
+  ${QUANTIZATION:+-e QUANTIZATION="$QUANTIZATION"} \
+  ${NEW_MODEL_DESIGN:+-e NEW_MODEL_DESIGN="$NEW_MODEL_DESIGN"} \
   "vllm-tpu:${BUILDKITE_COMMIT}" \
   "$@" # Pass all script arguments as the command to run in the container

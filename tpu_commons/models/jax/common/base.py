@@ -167,3 +167,6 @@ class ParamFactory:
     def create_scale_param(self, *args, **kwargs) -> nnx.Param:
         """Creates a scale/gain parameter using the scale_initializer."""
         return self._create_param(self.scale_initializer, *args, **kwargs)
+
+
+# TODO: Add an AdditionalConfig class that documents which parameters can be passed and what they do.

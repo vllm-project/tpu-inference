@@ -16,6 +16,7 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.tasks import SupportedTask
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.model_executor import set_random_seed
@@ -72,7 +73,6 @@ class TPUWorker(AbstractTpuWorker):
         self.scheduler_config = vllm_config.scheduler_config
         self.device_config = vllm_config.device_config
         self.speculative_config = vllm_config.speculative_config
-        self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
 
         self.parallel_config.rank = rank
@@ -243,6 +243,9 @@ class TPUWorker(AbstractTpuWorker):
 
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
+
+    def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+        return self.model_runner.get_supported_tasks()
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         # NOTE: This method intentionally returns a concrete vLLM type, which

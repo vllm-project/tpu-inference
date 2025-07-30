@@ -24,6 +24,9 @@ from tpu_commons.models.torchax.torchax_wrapper import (
 from tpu_commons.distributed.tpu_distributed_utils import (
     create_torchax_kv_cache, create_torchax_tensor_with_partition_spec)
 
+from vllm.model_executor.models.interfaces import supports_transcription
+from vllm.model_executor.models.interfaces_base import (
+    is_pooling_model, is_text_generation_model)
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
@@ -33,7 +36,7 @@ from tpu_commons.logger import init_logger
 from tpu_commons.runner.utils import (get_padded_num_reqs_with_upper_limit,
                                       get_padded_token_len, get_req_paddings,
                                       get_token_paddings, MIN_NUM_SEQS)
-from vllm.lora.layers import BaseLayerWithLoRA
+from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.model_executor.model_loader import get_model_loader
 
 from tpu_commons.models.torchax.tpu import TPUModelLoader
@@ -118,7 +121,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self.original_parallel_config = original_parallel_config
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
-        self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
         self.device_config = vllm_config.device_config
 
@@ -361,6 +363,9 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
     def get_model(self) -> nn.Module:
         return self.model
+
+    def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+        return ("generate", )
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """

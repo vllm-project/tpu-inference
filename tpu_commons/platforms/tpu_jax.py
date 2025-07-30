@@ -3,6 +3,7 @@
 import os
 from typing import TYPE_CHECKING, Optional, Tuple, Union, cast
 
+import jax
 import jax.numpy as jnp
 import vllm.envs as envs
 from torchax.ops.mappings import j2t_dtype
@@ -12,6 +13,8 @@ from vllm.platforms.interface import Platform, PlatformEnum, _Backend
 from vllm.sampling_params import SamplingParams, SamplingType
 
 from tpu_commons.logger import init_logger
+from tpu_commons.models.jax.utils.quantization.quantization_utils import (
+    parse_qwix_config_to_rules, quantization_config_file_path_to_dict)
 
 if TYPE_CHECKING:
     from vllm.config import BlockSize, ModelConfig, VllmConfig
@@ -65,8 +68,15 @@ class TpuPlatform(Platform):
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
-        chip_type, _ = device.get_local_chips()
-        return f"TPU {chip_type.name}"
+        try:
+            if envs.VLLM_TPU_USING_PATHWAYS:
+                return jax.local_devices()[0].device_kind
+            else:
+                chip_type, _ = device.get_local_chips()
+                return f"TPU {chip_type.name}"
+        except Exception as e:
+            logger.warning(f"Error getting device name: {e}")
+            return 'TPU'
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
@@ -100,6 +110,11 @@ class TpuPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         if not envs.VLLM_USE_V1:
             raise RuntimeError("VLLM_USE_V1=1 must be set for JAX backend.")
+
+        if envs.VLLM_TPU_USING_PATHWAYS:
+            assert not envs.VLLM_ENABLE_V1_MULTIPROCESSING, (
+                "VLLM_ENABLE_V1_MULTIPROCESSING must be 0 when using Pathways(JAX_PLATFORMS=proxy)"
+            )
 
         from vllm.config import CompilationLevel
 
@@ -152,13 +167,6 @@ class TpuPlatform(Platform):
                 )
                 cache_config.block_size = min_page_size  # type: ignore[assignment]
 
-        if os.getenv("EXP_SCHEDULER") is not None:
-            from tpu_commons.core.experimental_scheduler_config import \
-                ExperimentalSchedulerConfig
-            experimental_scheduler_config = ExperimentalSchedulerConfig.initialize_from_config(
-                vllm_config.scheduler_config, {})
-            vllm_config.scheduler_config = experimental_scheduler_config
-
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
         parallel_config.worker_cls = \
@@ -189,6 +197,20 @@ class TpuPlatform(Platform):
             " without setting `--disable_chunked_mm_input`. " \
             "Forcing --disable_chunked_mm_input.")
             scheduler_config.disable_chunked_mm_input = True
+
+        # Validate additional config
+        if additional_config := vllm_config.additional_config:
+            # Try loading/parsing the quantization config so that we can fail fast
+            if quantization_file_name := additional_config.get("quantization"):
+                try:
+                    quantization_dict = quantization_config_file_path_to_dict(
+                        quantization_file_name)
+                    parse_qwix_config_to_rules(
+                        quantization_dict["qwix"]["rules"])
+                except Exception as e:
+                    raise ValueError(
+                        f"Invalid quantization config; please see README for details on quantization config: {e}"
+                    )
 
     @classmethod
     def is_pin_memory_available(cls):

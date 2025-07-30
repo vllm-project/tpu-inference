@@ -12,11 +12,12 @@ from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
                                           get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.lora.request import LoRARequest
+from vllm.tasks import SupportedTask
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 
-from tpu_commons import utils_jax as utils
+from tpu_commons import utils
 from tpu_commons.di.abstracts import (AbstractKVCacheConfig,
                                       AbstractLoRARequest,
                                       AbstractSchedulerOutput)
@@ -70,7 +71,16 @@ class TPUWorker(AbstractTpuWorker):
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         self.profile_dir)
 
-        logger.info(f"Using devices: {self.devices}")
+        logger.info(f"Pre-sliced devices by engine: {self.devices}")
+
+        use_jax_profiler_server = os.getenv("USE_JAX_PROFILER_SERVER", False)
+        if use_jax_profiler_server:
+            jax_profiler_server_port = int(
+                os.getenv("JAX_PROFILER_SERVER_PORT", 9999))
+            logger.info(
+                f"Starting JAX profiler server on port {jax_profiler_server_port}"
+            )
+            jax.profiler.start_server(jax_profiler_server_port)
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
@@ -80,11 +90,16 @@ class TPUWorker(AbstractTpuWorker):
     def init_device(self):
         ensure_kv_transfer_initialized(self.vllm_config)
         if not self.devices:
-            tp = self.parallel_config.tensor_parallel_size
-            self.devices = jax.devices()[:tp]
-        logger.warning(f"Init devices | "
-                       f"devices={self.devices} | "
-                       f"hbm={utils.hbm_usage_gb(self.devices)}Gb")
+            try:
+                device_indexes = self.vllm_config.additional_config[
+                    "sharding"]["sharding_strategy"]["device_indexes"]
+                self.devices = [jax.devices()[i] for i in device_indexes]
+            except KeyError:
+                tp = self.parallel_config.tensor_parallel_size
+                self.devices = jax.devices()[:tp]
+        logger.info(f"Init devices | "
+                    f"devices={self.devices} | "
+                    f"hbm={utils.hbm_usage_gb(self.devices)}Gb")
 
         self.model_runner = TPUModelRunner(self.vllm_config, self.devices)
 
@@ -112,7 +127,6 @@ class TPUWorker(AbstractTpuWorker):
         vllm_scheduler_output = adapted_scheduler_output.vllm_scheduler_output
         output = self.model_runner.execute_model(vllm_scheduler_output)
 
-        assert isinstance(output, ModelRunnerOutput)
         if has_kv_transfer_group():
             finished_sending, finished_recving = (
                 get_kv_transfer_group().get_finished(
@@ -164,6 +178,9 @@ class TPUWorker(AbstractTpuWorker):
 
     def get_model(self):
         return self.model_runner.get_model()
+
+    def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+        return self.model_runner.get_supported_tasks()
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         # NOTE: This method intentionally returns a concrete vLLM type, which

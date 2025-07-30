@@ -10,9 +10,9 @@ from vllm.config import VllmConfig
 
 from tpu_commons.models.jax.common.attention.attention import (
     Attention, AttentionConfig, AttentionMetadata, KVCache)
-# from tpu_commons.models.jax.common.attention.llama4_attention import \
-#     Llama4Attention
 from tpu_commons.models.jax.common.attention.deepseek_v3_attention import MLA
+from tpu_commons.models.jax.common.attention.llama4_attention import \
+    Llama4Attention
 from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
 from tpu_commons.models.jax.common.layers import (DenseFFW, DenseFFWConfig,
@@ -20,17 +20,11 @@ from tpu_commons.models.jax.common.layers import (DenseFFW, DenseFFWConfig,
 from tpu_commons.models.jax.common.moe.moe import MoE, MoEConfig
 from tpu_commons.models.jax.common.sharding import ShardingConfig
 
-ATTENTION_BLOCK_REGISTR = {
-    "default": Attention,
-    #    "llama4": Llama4Attention,
-    "mla": MLA
-}
-
 TransformerBlockConfig = make_dataclass(
     "TransformerBlockConfig",
     [("attention", AttentionConfig), ("dense_ffw", DenseFFWConfig),
      (HuggingFaceArgNames.RMS_NORM_EPS.value, float),
-     ("moe", MoEConfig, field(default=None)), ("block_type", str, "default"),
+     ("moe", MoEConfig, field(default=None)),
      ("vllm_config", VllmConfig, field(repr=False, default=None))],
     bases=(Config, ))
 TransformerBlockConfig.__doc__ = f"""light weighted transformer config, which includes config for all sub-modules
@@ -38,7 +32,6 @@ TransformerBlockConfig.__doc__ = f"""light weighted transformer config, which in
     Args:
         attention: AttentionConfig config used to specify attention layer parameters.
         dense_ffw: DenseFFWConfig config used to specify feed-forward layer parameters.
-        block_type: str The type of transformer block (currently support ["moe", "dense"]).
         {HuggingFaceArgNames.RMS_NORM_EPS.value}: float The epsilon value for RMSNorm.
         vllm_config: VllmConfig The VLLM config containing any overrides to apply.
         """
@@ -54,7 +47,8 @@ class TransformerBlock(nnx.Module):
     param_factory: ParamFactory
     mesh: Mesh
     sharding_cfg: ShardingConfig
-    attention_type: str = "default"
+    attention_cls: type[Attention] = Attention
+    use_attention_rope: bool = True
     quant: Any | None = None
 
     def _create_module(self, module_cls: Type[nnx.Module], cfg: Any,
@@ -74,11 +68,10 @@ class TransformerBlock(nnx.Module):
         rmsnorm_epsilon = getattr(self.cfg,
                                   HuggingFaceArgNames.RMS_NORM_EPS.value)
         try:
-            attn_block = ATTENTION_BLOCK_REGISTR[self.attention_type]
-        except KeyError:
-            raise ValueError(f"Invalid attention type: {self.attention_type}")
+            self.attn = self._create_module(self.attention_cls, cfg=self.cfg.attention)
+        except NameError:
+            raise NameError(f"Invalid attention class type: {self.attention_cls}")
 
-        self.attn = self._create_module(attn_block, cfg=self.cfg.attention)
 
         if self.block_type == "moe":
             self.moe = self._create_module(MoE, cfg=self.cfg.moe)
@@ -113,7 +106,8 @@ class TransformerBlock(nnx.Module):
         attn_residual = x
         x = self.pre_attention_norm(x)
         new_cache, attn_output = self.attn(x, is_prefill, kv_cache,
-                                           attention_metadata)
+                                           attention_metadata,
+                                           self.use_attention_rope)
         attn_output += attn_residual
 
         # FFW Block
@@ -138,7 +132,7 @@ class TransformerBlock(nnx.Module):
         self.pre_mlp_norm.generate_kernel(rngs)
 
 
-# Provide a variante that allows mixing and matching Dense & MoE layers.
+# Provide a variant that allows mixing and matching Dense & MoE layers.
 SharedExpertsTransformerBlockConfig = make_dataclass(
     "SharedExpertsTransformerBlockConfig",
     [(HuggingFaceArgNames.SHARED_EXPERTS.value, int),
@@ -162,7 +156,7 @@ class SharedExpertsTransformerBlock(TransformerBlock):
 
     def __post_init__(self):
         super().__post_init__()
-        # Create a modified config for the shared expert (which is a dense FFW layer)
+        # Create a modified config for the shared expert layer (which is a dense FFW layer)
         shared_experts = getattr(self.cfg,
                                  HuggingFaceArgNames.SHARED_EXPERTS.value)
         moe_intermediate_size = getattr(
@@ -172,7 +166,7 @@ class SharedExpertsTransformerBlock(TransformerBlock):
         ) if self.cfg.dense_ffw_for_shared_moe is None else self.cfg.dense_ffw_for_shared_moe
         setattr(shared_experts_cfg,
                 HuggingFaceArgNames.INTERMEDIATE_SIZE.value,
-                shared_experts * moe_intermediate_size)
+                shared_experts * moe_intermediate_size) # intermediate_size = #shared_experts * intermediate_size_moe
         self.shared_experts = self._create_module(DenseFFW,
                                                   cfg=shared_experts_cfg)
 
@@ -182,7 +176,8 @@ class SharedExpertsTransformerBlock(TransformerBlock):
         attn_residual = x
         x = self.pre_attention_norm(x)
         new_cache, attn_output = self.attn(x, is_prefill, kv_cache,
-                                           attention_metadata)
+                                           attention_metadata,
+                                           self.use_attention_rope)
         attn_output += attn_residual
 
         # FFW Block
