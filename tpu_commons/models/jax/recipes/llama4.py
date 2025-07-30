@@ -20,7 +20,8 @@ from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.constants import RouterType
 from tpu_commons.models.jax.common.kv_cache import KVCacheType
 from tpu_commons.models.jax.common.layers import (DenseFFWConfig, Embedder,
-                                                  EmbedderConfig, RMSNorm)
+                                                  EmbedderConfig, RMSNorm,
+                                                  LMhead)
 from tpu_commons.models.jax.common.model import Model, ModelConfig
 from tpu_commons.models.jax.common.moe.moe import MoEConfig, RouterConfig
 from tpu_commons.models.jax.common.sharding import (Sharding, ShardingConfig,
@@ -128,7 +129,7 @@ class Llama4RecipeConfig(RecipeConfig):
     serving: Llama4ServingConfig = field(default_factory=Llama4ServingConfig)
 
 
-class Llama4Scout(Model):
+class Llama4ForCausalLM(Model):
 
     def __init__(self,
                  vllm_config: VllmConfig,
@@ -215,7 +216,7 @@ class Llama4Scout(Model):
         )
         self.final_norm.generate_kernel(self.rng)
 
-        self.lm_head = Embedder(cfg=self.cfg.model.emb,
+        self.lm_head = LMhead(cfg=self.cfg.model.emb,
                                 mesh=self.mesh,
                                 param_factory=self.param_factory,
                                 sharding_cfg=self.cfg.sharding)
@@ -291,7 +292,6 @@ class Llama4WeightLoader(WeightLoader):
             "shared_expert.gate_proj": (1, 0),
             "shared_expert.up_proj": (1, 0),
             "o_proj": (1, 2, 0),
-            "embed_tokens": (1, 0),
             "lm_head": (1, 0),
         })
         hidden_size = self.model_config.hidden_size
@@ -311,7 +311,7 @@ class Llama4WeightLoader(WeightLoader):
         # Set the mappings from loaded parameter keys to standardized names.
         self.set_loaded_to_standardized_keys({
             "language_model.model.embed_tokens.weight":
-            "embedder.input_embedding_table_DV",
+            "embedder.input_embedding_table_VD",
             "language_model.lm_head.weight":
             "lm_head.input_embedding_table_DV",
             "language_model.model.norm.weight":

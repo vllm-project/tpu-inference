@@ -72,9 +72,9 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
 
     if os.getenv("NEW_MODEL_DESIGN", False):
         from tpu_commons.models.jax.recipes.llama3 import LlamaForCausalLM
-        from tpu_commons.models.jax.recipes.llama4 import Llama4Scout
+        from tpu_commons.models.jax.recipes.llama4 import Llama4ForCausalLM
         _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
-        _MODEL_REGISTRY["Llama4Scout"] = Llama4Scout
+        _MODEL_REGISTRY["Llama4ForCausalLM"] = Llama4ForCausalLM
     else:
         from tpu_commons.models.jax.llama3 import LlamaForCausalLM
         from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
