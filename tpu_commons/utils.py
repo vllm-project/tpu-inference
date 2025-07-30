@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+import logging
 import os
+import time
 from collections import defaultdict
 from typing import Any, List, Tuple
 
@@ -99,3 +101,18 @@ def get_padded_num_heads(num_heads: int, sharding_size: int) -> int:
         assert sharding_size % num_heads == 0
         num_heads = sharding_size
     return num_heads
+
+
+class RateLimitFilter(logging.Filter):
+
+    def __init__(self, name='', interval=60):
+        super().__init__(name)
+        self.interval = interval
+        self.last_logged = 0
+
+    def filter(self, record):
+        now = time.monotonic()
+        if now - self.last_logged >= self.interval:
+            self.last_logged = now
+            return True
+        return False

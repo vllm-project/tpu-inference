@@ -57,6 +57,7 @@ from vllm.lora.request import LoRARequest as VllmLoRARequest
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig as VllmKVCacheConfig
 
+from tpu_commons import utils
 from tpu_commons.adapters.vllm_adapters import (VllmKVCacheConfigAdapter,
                                                 VllmLoRARequestAdapter,
                                                 VllmSchedulerOutputAdapter)
@@ -65,6 +66,8 @@ from tpu_commons.di.abstracts import (AbstractKVCacheConfig,
                                       AbstractSchedulerOutput)
 
 logger = logging.getLogger(__name__)
+rate_limit_filter = utils.RateLimitFilter(interval=60)
+logger.addFilter(rate_limit_filter)
 
 
 def adapt_scheduler_output_if_needed(
