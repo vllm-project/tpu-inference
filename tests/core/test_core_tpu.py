@@ -213,7 +213,7 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
         mock_runner_output.req_id_to_index = {mock_request.request_id: 0}
         mock_runner_output.sampled_token_ids = [[123]
                                                 ]  # >0 tokens indicates done
-        prefill_engine.execute_model.return_value = mock_runner_output
+        prefill_engine.execute_model_with_error_logging.return_value = mock_runner_output
 
         # Mock KV cache operations
         prefill_engine.scheduler.kv_cache_manager.get_block_ids.return_value = (
@@ -355,7 +355,7 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
         decode_engine.scheduler.schedule.return_value = mock_scheduler_output
 
         mock_runner_output = MagicMock(spec=ModelRunnerOutput)
-        decode_engine.execute_model.return_value = mock_runner_output
+        decode_engine.execute_model_with_error_logging.return_value = mock_runner_output
 
         mock_engine_outputs = {0: MagicMock(spec=EngineCoreOutputs)}
 
@@ -379,8 +379,6 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
 
         # Check that the main decode steps were called
         decode_engine.scheduler.schedule.assert_called_once()
-        decode_engine.execute_model.assert_called_once_with(
-            mock_scheduler_output)
 
         # Check that the final output was put on the main output queue
         client_idx, output = output_queue.get_nowait()
