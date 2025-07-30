@@ -41,10 +41,9 @@ docker system prune -a -f --filter "until=3h"
 
 # (TODO): Consider creating a remote registry to cache and share between agents.
 # Subsequent builds on the same host should be cached.
-docker build -f docker/Dockerfile -t "vllm-tpu:${BUILDKITE_COMMIT}" .
+docker build --no-cache -f docker/Dockerfile -t "vllm-tpu:${BUILDKITE_COMMIT}" .
 
 exec docker run \
-  --no-cache \
   --privileged \
   --net host \
   --shm-size=16G \
