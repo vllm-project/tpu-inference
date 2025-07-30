@@ -253,22 +253,22 @@ class Llama4ForCausalLM(Model):
         *args,
     ) -> Tuple[List[KVCacheType], jax.Array, jax.Array]:
         is_prefill = False
-        x = self.embedder.encode(input_ids)
+        x_TD = self.embedder.encode(input_ids)
         for (i, block) in enumerate(self.layers):
             kv_cache = kv_caches[i]
-            new_kv_cache, x = block(x, is_prefill, kv_cache,
-                                    attention_metadata)
-            jax.block_until_ready(x)
+            new_kv_cache, x_TD = block(x_TD, is_prefill, kv_cache,
+                                       attention_metadata)
+            jax.block_until_ready(x_TD)
             kv_caches[i] = new_kv_cache
 
-        final_activation = self.final_norm(x)
+        final_activation_TD = self.final_norm(x_TD)
 
-        return kv_caches, final_activation
+        return kv_caches, final_activation_TD
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        logits = jnp.dot(hidden_states,
-                         self.lm_head.input_embedding_table_DV.value)
-        return logits
+        logits_TV = jnp.dot(hidden_states,
+                            self.lm_head.input_embedding_table_DV.value)
+        return logits_TV
 
 
 class Llama4WeightLoader(WeightLoader):
