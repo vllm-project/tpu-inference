@@ -17,11 +17,10 @@ from tpu_commons.models.jax.common.attention.attention import AttentionMetadata
 from tpu_commons.models.jax.common.attention.llama4_attention import (
     Llama4Attention, Llama4AttentionConfig)
 from tpu_commons.models.jax.common.base import Config, ParamFactory
-from tpu_commons.models.jax.common.constants import RouterType
-from tpu_commons.models.jax.common.kv_cache import KVCacheType
+from tpu_commons.models.jax.common.constants import KVCacheType, RouterType
 from tpu_commons.models.jax.common.layers import (DenseFFWConfig, Embedder,
-                                                  EmbedderConfig, RMSNorm,
-                                                  LMhead)
+                                                  EmbedderConfig, LMhead,
+                                                  RMSNorm)
 from tpu_commons.models.jax.common.model import Model, ModelConfig
 from tpu_commons.models.jax.common.moe.moe import MoEConfig, RouterConfig
 from tpu_commons.models.jax.common.sharding import (Sharding, ShardingConfig,
@@ -217,9 +216,9 @@ class Llama4ForCausalLM(Model):
         self.final_norm.generate_kernel(self.rng)
 
         self.lm_head = LMhead(cfg=self.cfg.model.emb,
-                                mesh=self.mesh,
-                                param_factory=self.param_factory,
-                                sharding_cfg=self.cfg.sharding)
+                              mesh=self.mesh,
+                              param_factory=self.param_factory,
+                              sharding_cfg=self.cfg.sharding)
         self.lm_head.generate_kernel(self.rng)
         if self.is_verbose:
             self._print_model_architecture()

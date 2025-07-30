@@ -1,4 +1,7 @@
 import enum
+from typing import Tuple, TypeAlias
+
+import jax
 """
 Current Used Abbreviation for Tensor Dimensions:
 B: Batch size
@@ -16,6 +19,8 @@ X: Number of activated experts per token in MoE
 G: Number of groups in Grouped-Query Attention
 E: Total number of experts in MoE
 """
+
+KVCacheType: TypeAlias = Tuple[jax.Array, jax.Array]
 
 
 class RouterType(enum.Enum):
