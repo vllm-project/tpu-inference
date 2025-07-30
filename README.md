@@ -239,7 +239,7 @@ tpu-info
 Run the test:
 
 ```
-pytest -v ./tests/ragged_paged_attention_test.py
+pytest -v tests/kernels
 ```
 
 ## How to run an End-To-End (E2E) benchmarking run?
