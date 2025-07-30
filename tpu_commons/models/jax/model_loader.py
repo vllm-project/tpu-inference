@@ -72,7 +72,9 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
 
     if os.getenv("NEW_MODEL_DESIGN", False):
         from tpu_commons.models.jax.recipes.llama3 import LlamaForCausalLM
+        from tpu_commons.models.jax.recipes.llama4 import Llama4ForCausalLM
         _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
+        _MODEL_REGISTRY["Llama4ForCausalLM"] = Llama4ForCausalLM
     else:
         from tpu_commons.models.jax.llama3 import LlamaForCausalLM
         from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
@@ -95,21 +97,10 @@ def _get_nnx_model(
     mesh: Mesh,
 ) -> nnx.Module:
     if os.getenv("JAX_RANDOM_WEIGHTS", False):
-        if os.getenv("NEW_MODEL_DESIGN", False):
-
-            @nnx.jit(donate_argnums=(0, ))
-            def create_sharded_model(model):
-                state = nnx.state(model)
-                nnx.update(model, state)
-                model = _apply_qwix_quantization(vllm_config, model, rng, mesh)
-                return model
-
-            with mesh:
-                model = model_class.create_model_with_random_weights(
-                    vllm_config, rng, mesh)
-                jit_model = create_sharded_model(model)
-        else:
-
+        # Create a sharded model with random inited weights.
+        if not os.getenv("NEW_MODEL_DESIGN", False):
+            # TODO: currently Qwen2ForCausalLM is using legacy model implementation
+            # will merge the random init logic when all model are migrated to new model implementation
             @nnx.jit
             def create_sharded_model():
                 model = model_class(vllm_config, rng, mesh)
@@ -122,6 +113,12 @@ def _get_nnx_model(
 
             with mesh:
                 jit_model = create_sharded_model()
+        else:
+
+            with mesh:
+                model = model_class.create_model_with_random_weights(
+                    vllm_config, rng, mesh)
+                jit_model = _apply_qwix_quantization(vllm_config, model, rng, mesh)
     else:
         # We first create an abstract model without allocating any weights,
         # then fill in its weigths during load_weights from HF.
@@ -133,9 +130,8 @@ def _get_nnx_model(
         #    a full model weights after random-init, then duplicate a layer during
         #    the load_weights. This would be easy to OOM if the layer is super large.
         if os.getenv("NEW_MODEL_DESIGN", False):
-            model = nnx.eval_shape(
-                lambda: model_class.create_model_for_checkpoint_loading(
-                    vllm_config, rng, mesh))
+            model = model_class.create_model_for_checkpoint_loading(
+                vllm_config, rng, mesh)
         else:
             model = nnx.eval_shape(lambda: model_class(vllm_config, rng, mesh))
         model.load_weights(rng)
@@ -151,7 +147,6 @@ def _get_nnx_model(
 
         with mesh:
             jit_model = create_jit_model(model)
-
     return jit_model
 
 

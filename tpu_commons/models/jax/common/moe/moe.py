@@ -20,29 +20,23 @@ modeling_flax_utils = FlaxUtils()
 RouterConfig = make_dataclass(
     "RouterConfig",
     [(HuggingFaceArgNames.HIDDEN_SIZE.value, int),
-     (HuggingFaceArgNames.INTERMEDIATE_SIZE_MOE.value, int),
-     (HuggingFaceArgNames.INTERMEDIATE_SIZE.value, int),
      (HuggingFaceArgNames.NUM_LOCAL_EXPERTS.value, int),
      (HuggingFaceArgNames.NUM_EXPERTS_PER_TOKEN.value, int),
-     ("router_type", RouterType), (HuggingFaceArgNames.HIDDEN_ACT.value, str),
-     ("expert_capacity", int), ("routed_bias", bool),
-     ("routed_scaling_factor", float), ("dtype", DTypeLike),
-     ("vllm_config", VllmConfig, field(repr=False, default=None))],
+     ("router_type", RouterType), ("expert_capacity", int),
+     ("dtype", DTypeLike),
+     ("vllm_config", VllmConfig, field(repr=False, default=None)),
+     ("router_act", str, "softmax")],
     bases=(Config, ))
 RouterConfig.__doc__ = f"""Configuration for the Router module.
 
      Attributes:
         {HuggingFaceArgNames.HIDDEN_SIZE.value}: The dimension of the model.
-        {HuggingFaceArgNames.INTERMEDIATE_SIZE_MOE.value}: The hidden size of the expert.
-        {HuggingFaceArgNames.INTERMEDIATE_SIZE.value}: The hidden size of MLP layers.
         {HuggingFaceArgNames.NUM_LOCAL_EXPERTS.value}: The total number of experts.
         {HuggingFaceArgNames.NUM_EXPERTS_PER_TOKEN.value}: The number of experts each token is routed to.
          router_type: The type of router to use (e.g., 'top_k').
-        {HuggingFaceArgNames.HIDDEN_ACT.value}: The activation function to use.
+         router_act: The activation function to use for normalizing router scores.
          expert_capacity: The maximum number of tokens an expert can process. Defaults to -1 (no capacity limit).
-         routed_bias: Whether to use a bias in the router. Defaults to False. # DeepSeek related. Could be removed
-         routed_scaling_factor: Scaling factor for routed weights. Defaults to 1.0.
-        dtype: The data type to use for computations. Defaults to jnp.float32.
+        dtype: The data type to use for computations.
         vllm_config: The VLLM config containing any overrides to apply."""
 
 
@@ -83,17 +77,20 @@ class Router(nnx.Module):
         """
         x = jnp.asarray(x, self.cfg.dtype)
         x_TD = nnx.with_sharding_constraint(x, self.activation_ffw_td[op_mode])
+        router_act = modeling_flax_utils.ACT2FN[self.cfg.router_act]
         num_experts_per_tok = getattr(
-            self.cfg, HuggingFaceArgNames.NUM_EXPERTS_PER_TOKEN)
+            self.cfg, HuggingFaceArgNames.NUM_EXPERTS_PER_TOKEN.value)
         router_logits_TE = jnp.einsum('TD,DE -> TE', x_TD,
                                       self.kernel_DE.value)
-        activated_gating_TF = nnx.softmax(router_logits_TE.astype(
-            self.cfg.dtype),
-                                          axis=-1)
         weights_TX, selected_experts_TX = jax.lax.top_k(
-            activated_gating_TF, num_experts_per_tok)
-        normalized_weights_TX = nnx.softmax(weights_TX.astype(self.cfg.dtype),
-                                            axis=-1)
+            router_logits_TE, num_experts_per_tok)
+        if self.cfg.router_act != "sigmoid": # sigmoid does not accept axis argument.
+            normalized_weights_TX = router_act(weights_TX.astype(
+                self.cfg.dtype),
+                                               axis=-1)
+        else:
+            normalized_weights_TX = router_act(
+                weights_TX.astype(self.cfg.dtype))
         return normalized_weights_TX, selected_experts_TX
 
     def generate_kernel(self, rngs: nnx.Rngs):
@@ -138,6 +135,7 @@ MoEConfig = make_dataclass(
      (HuggingFaceArgNames.NUM_LOCAL_EXPERTS.value, int),
      (HuggingFaceArgNames.HIDDEN_ACT.value, int),
      ("apply_expert_weight_before_computation", bool),
+     ("router", RouterConfig), ("dtype", DTypeLike),
      ("vllm_config", VllmConfig, field(repr=False, default=None))],
     bases=(Config, ))
 MoEConfig.__doc__ = f"""Configuration for the Mixture-of-Experts (MoE) layer.
@@ -148,6 +146,8 @@ MoEConfig.__doc__ = f"""Configuration for the Mixture-of-Experts (MoE) layer.
         {HuggingFaceArgNames.NUM_LOCAL_EXPERTS.value}: The total number of experts.
         {HuggingFaceArgNames.HIDDEN_ACT.value}: The activation function to use within the experts.
         apply_expert_weight_before_computation: Whether to apply expert weights before computation. Defaults to False.
+        router: The config for the Router module.
+        dtype: The data type to use for computations.
         vllm_config: The VLLM config containing any overrides to apply."""
 
 
@@ -168,12 +168,14 @@ class MoE(nnx.Module):
     cfg: MoEConfig
     mesh: Mesh
     param_factory: ParamFactory
-    router: Router
     sharding_cfg: ShardingConfig
     quant: Any | None = None
 
     def __post_init__(self):
         """Initializes the MoE module by creating sharding configurations and generating expert kernels."""
+        self.router = Router(self.cfg.router, self.mesh, self.param_factory,
+                             self.sharding_cfg)
+        self.router.create_sharding()
         self.create_sharding()
 
     def __call__(self, x: Float, op_mode):
@@ -195,20 +197,23 @@ class MoE(nnx.Module):
                                              num_classes=num_experts,
                                              dtype=self.cfg.dtype)
         full_weights_TE = jnp.sum(one_hot_indices_TXE * weights_TX[..., None],
-                                  axis=2)
-
+                                  axis=1)
+        
+        # Some models use the routing scores to weight the data instead of 
+        # weighting the expert outputs.
         if self.cfg.apply_expert_weight_before_computation:
             with jax.named_scope("pre_computing_weight"):
-                # need optimization for the out-product
-                weighted_x_TXD = jnp.einsum('TD,TX->TXD', x_TD, weights_TX)
-            # TODO: need fix the mod_fwd call for pre_weighting
-            return self._moe_fwd(weighted_x_TXD,
-                                 jnp.ones_like(full_weights_TE), op_mode)
+                return self._moe_fwd_preapply_router_weights(x_TD, full_weights_TE,
+                                                       op_mode)
         else:
             return self._moe_fwd(x_TD, full_weights_TE, op_mode)
 
     def generate_kernel(self, rngs: nnx.Rngs):
-        """Generates the kernels (weights) for the gating, up-projection, and down-projection layers of each expert."""
+        """Generates the kernels (weights) for the router and experts (gating, up-projection, and down-projection layers)."""
+
+        # Generate router kernels
+        self.router.generate_kernel(rngs)
+
         num_experts = getattr(self.cfg,
                               HuggingFaceArgNames.NUM_LOCAL_EXPERTS.value)
         D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
@@ -233,16 +238,55 @@ class MoE(nnx.Module):
             dtype=self.cfg.dtype,
             sharding=self.efd_sharding)
 
+    def _moe_fwd_preapply_router_weights(self, x_TD: jax.Array, weights_TE,
+                                       op_mode):
+        """Performs the forward pass of the MoE experts with router weights pre-applied to the inputs.
+
+        Args:
+            x_TD: Input array for the experts, shape (sequence_length, hidden_size).
+            weights_TE: Router weights, shape (sequence_length, num_experts).
+            op_mode: The operation mode ('prefill' or 'generate') to determine sharding.
+
+        Returns:
+            Output array of shape (sequence_length, d_model).
+        """
+        # Data needs to be replicated since it will be weighted by the router
+        # scores before being passed to each expert.
+        num_experts = weights_TE.shape[-1]
+        x_TED = jnp.repeat(x_TD[:, None, :], num_experts, 1)
+        weights_TED = weights_TE[..., None]
+        x_TED = jnp.asarray(x_TED, self.cfg.dtype)
+        with jax.named_scope("activation_expert_weighting"):
+            x_TED = x_TED * weights_TED
+
+        x_TED = nnx.with_sharding_constraint(x_TED,
+                                             self.activation_ffw_ted[op_mode])
+        act = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_ACT.value)
+        with jax.named_scope("gating"):
+            gating_TEF = jnp.einsum('TED,EDF -> TEF', x_TED,
+                                    self.kernel_gating_EDF.value)
+            activated_gating_TEF = modeling_flax_utils.ACT2FN[act](gating_TEF)
+        with jax.named_scope("up_projection"):
+            up_proj_TEF = jnp.einsum('TED,EDF -> TEF', x_TED,
+                                     self.kernel_up_proj_EDF.value)
+        fuse_TEF = activated_gating_TEF * up_proj_TEF
+        with jax.named_scope("down_projection"):
+            down_proj_TED = jnp.einsum('TEF,EFD -> TED', fuse_TEF,
+                                       self.kernel_down_proj_EFD.value)
+        with jax.named_scope("sum"):
+            output_TD = down_proj_TED.sum(axis=1)
+        return output_TD.astype(self.cfg.dtype)
+
     def _moe_fwd(self, x: Float, weights, op_mode):
         """Performs the basic forward pass of the MoE experts without dropping or megablocks.
 
         Args:
-            x: Input array for the experts, shape (sequence_length, d_model) or (sequence_length, num_experts_per_tok, d_model) if pre-weighted.
+            x: Input array for the experts, shape (sequence_length, d_model).
             weights: Weights for combining expert outputs, shape (sequence_length, num_experts).
             op_mode: The operation mode ('prefill' or 'generate') to determine sharding.
 
         Returns:
-            Output array of shape (batch_size, sequence_length, d_model).
+            Output array of shape (sequence_length, d_model).
         """
         x = jnp.asarray(x, self.cfg.dtype)
         x_TD = nnx.with_sharding_constraint(x, self.activation_ffw_td[op_mode])
@@ -270,7 +314,9 @@ class MoE(nnx.Module):
         """Creates sharding configurations for activations and expert kernels."""
         mode_dependent_attrs = [
             "activation_ffw_td",
+            "activation_ffw_ted",
         ]
+
         for attr_name in mode_dependent_attrs:
             prefill_sharding_config = getattr(self.sharding_cfg.prefill_rules,
                                               attr_name)

@@ -38,6 +38,9 @@ class HuggingFaceArgNames(enum.Enum):
     ROPE_THETA: str = "rope_theta"
     VOCAB_SIZE: str = "vocab_size"
 
+    # Block parameters
+    SHARED_EXPERTS: str = "shared_experts"
+
     # FFW params
     INTERMEDIATE_SIZE: str = "intermediate_size"
 
@@ -45,8 +48,15 @@ class HuggingFaceArgNames(enum.Enum):
     HEAD_DIM: str = "head_dim"
     NUM_ATTENTION_HEADS: str = "num_attention_heads"
     NUM_KEY_VALUE_HEADS: str = "num_key_value_heads"
-    ATTENION_DROPOUT: str = "attention_dropout"
+    ATTENTION_DROPOUT: str = "attention_dropout"
     ATTENTION_BIAS: str = "attention_bias"
+    ATTENTION_CHUNK_SIZE: str = "attention_chunk_size"
+
+    ## Llama4 Attention Params
+    USE_QK_NORM: str = "use_qk_norm"
+    TEMPERATURE_TUNING: str = "temperature_tuning"
+    TEMPERATURE_TUNING_SCALE: str = "temperature_tuning_scale"
+    TEMPERATURE_TUNING_FLOOR_SCALE: str = "temperature_tuning_floor_scale"
 
     # MLA params
     KV_LORA_RANK: str = "kv_lora_rank"

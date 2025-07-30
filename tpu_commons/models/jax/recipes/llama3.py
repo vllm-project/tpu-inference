@@ -78,7 +78,6 @@ class Llama3ModelConfig():
                     dtype=self.dtype,
                     vllm_config=self.vllm_config),
                 rms_norm_eps=self.rms_norm_eps,
-                block_type="dense",
                 vllm_config=self.vllm_config)
 
 
@@ -156,7 +155,8 @@ class LlamaForCausalLM(Model):
             serving=Llama3ServingConfig(vllm_config=self.vllm_config))
 
         logger.info(f"Using the following config:\n{self.cfg}")
-        logger.info(f"Using the following shardings:\n{self.sharding}")
+        logger.info(
+            f"Using the following sharding overrides:\n{self.sharding}")
         self.mesh = self.sharding.mesh
         self._init_layers()
 
@@ -200,38 +200,10 @@ class LlamaForCausalLM(Model):
                               sharding_cfg=self.cfg.sharding)
         self.lm_head.generate_kernel(self.rng)
 
-    @classmethod
-    def create_model_with_random_weights(cls, vllm_config: VllmConfig,
-                                         rng: jax.Array, mesh: Mesh):
-        """to create a model with random weights."""
-        logger.info("Initializing model with random weights.")
-        param_factory = ParamFactory(
-            kernel_initializer=nnx.initializers.xavier_normal(),
-            scale_initializer=nnx.initializers.ones,
-            random_init=True)
-        return cls(vllm_config, rng, mesh, param_factory)
-
-    @classmethod
-    def create_model_for_checkpoint_loading(cls, vllm_config: VllmConfig,
-                                            rng: jax.Array, mesh: Mesh):
-        """to create a model with abstract shapes for checkpoint loading."""
-        logger.info("Initializing abstract model for checkpoint loading.")
-        param_factory = ParamFactory(
-            kernel_initializer=nnx.initializers.xavier_normal(),
-            scale_initializer=nnx.initializers.ones,
-            random_init=False)
-        return cls(vllm_config, rng, mesh, param_factory)
-
-    # For compatibility with flax.
-    def apply(self, variables, *args, **kwargs):
-        return self.__call__(*args, **kwargs)
-
     def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):
         self.rng = nnx.Rngs(rng)
         weight_loader = Llama3WeightLoader(vllm_config=self.vllm_config,
-                                           model_config=self.cfg.model,
-                                           cache_dir=cache_dir,
-                                           sharding_cfg=self.cfg.sharding)
+                                           model_config=self.cfg.model)
         weight_loader.load_weights(self)
 
     def __call__(
@@ -265,14 +237,10 @@ class Llama3WeightLoader(WeightLoader):
 
     def __init__(self,
                  vllm_config: VllmConfig,
-                 model_config: Llama3ModelConfig,
-                 cache_dir: Optional[str] = None,
-                 sharding_cfg: Optional[ShardingConfig] = None):
+                 model_config: Llama3ModelConfig):
         super().__init__(vllm_config=vllm_config,
                          model_config=model_config,
-                         framework="flax",
-                         cache_dir=cache_dir,
-                         sharding_cfg=sharding_cfg)
+                         framework="flax")
         self.setup()
 
     def setup(self):
