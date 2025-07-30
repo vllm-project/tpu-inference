@@ -91,25 +91,25 @@ class DeepSeekV3Router(nnx.Module):
             The topk indices of the scores. Shape (sequence, num_experts_per_tok).
         """
 
-        scores = scores + self.bias_E
+        scores_TE = scores + self.bias_E
         if self.n_groups > 1:
             experts_per_group = self.num_experts // self.n_groups
-            group_scores = jnp.reshape(scores,
-                                       (-1, self.n_groups, experts_per_group))
-            group_scores = jax.lax.top_k(group_scores, k=2)[0]
-            group_scores = jnp.sum(group_scores, axis=-1)
-            indices = jax.lax.top_k(group_scores, k=self.topk_groups)[1]
+            group_scores_TG_EdivG = jnp.reshape(
+                scores_TE, (-1, self.n_groups, experts_per_group))
+            group_scores_TG2 = jax.lax.top_k(group_scores_TG_EdivG, k=2)[0]
+            group_scores_TG = jnp.sum(group_scores_TG2, axis=-1)
+            indices = jax.lax.top_k(group_scores_TG, k=self.topk_groups)[1]
 
-            mask = jnp.any(jnp.arange(self.n_groups)[:,
-                                                     None] == indices[...,
-                                                                      None, :],
-                           axis=-1)
-            mask = jnp.repeat(mask, scores.shape[-1] // mask.shape[-1], -1)
-            scores = jnp.where(mask, scores, 0.0)
+            mask_TG = jnp.any(jnp.arange(
+                self.n_groups)[:, None] == indices[..., None, :],
+                              axis=-1)
+            mask_TE = jnp.repeat(mask_TG,
+                                 scores_TE.shape[-1] // mask_TG.shape[-1], -1)
+            scores_TE = jnp.where(mask_TE, scores_TE, 0.0)
 
-        indices = jax.lax.top_k(scores, k=self.num_experts_per_tok)[1]
+        indices_TX = jax.lax.top_k(scores_TE, k=self.num_experts_per_tok)[1]
 
-        return indices
+        return indices_TX
 
     def __call__(self, x: Float, op_mode: str) -> Tuple[Float, Float]:
         """Routes tokens to top k experts.
@@ -129,18 +129,18 @@ class DeepSeekV3Router(nnx.Module):
         scores_te = jnp.einsum("TD,DE -> TE", x_td, self.kernel_DE.value)
         scores_te = nnx.sigmoid(scores_te)
 
-        original_scores = scores_te
-        topk_indices_tk = self.get_topk_indices(scores_te)
-        weights_tk = jnp.take_along_axis(original_scores,
-                                         topk_indices_tk,
+        original_scores_te = scores_te
+        topk_indices_tx = self.get_topk_indices(scores_te)
+        weights_tx = jnp.take_along_axis(original_scores_te,
+                                         topk_indices_tx,
                                          axis=-1)
 
         if self.norm_topk_prob:
-            weights_tk /= jnp.sum(weights_tk, axis=-1)[..., None] + 1e-20
+            weights_tx /= jnp.sum(weights_tx, axis=-1)[..., None] + 1e-20
 
-        weights_tk *= self.routed_scaling_factor
+        weights_tx *= self.routed_scaling_factor
 
-        return weights_tk, topk_indices_tk
+        return weights_tx, topk_indices_tx
 
     def generate_kernel(self, rngs: nnx.Rngs):
         """Generates the router kernel (weights and bias) for routing."""
