@@ -601,7 +601,7 @@ class TPUModelRunner():
         # in the cache.
         max_num_blocks = self.vllm_config.cache_config.num_gpu_blocks
         assert max_num_blocks is not None and max_num_blocks != 0
-        block_numbers.extend([max_num_blocks + 1] * padding_size)
+        block_numbers.extend([0] * padding_size)
 
         padded_block_numbers = jnp.array(block_numbers, dtype=jnp.int32)
 
