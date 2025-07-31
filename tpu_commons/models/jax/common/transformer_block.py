@@ -10,8 +10,6 @@ from vllm.config import VllmConfig
 
 from tpu_commons.models.jax.common.attention.attention import (
     Attention, AttentionConfig, AttentionMetadata, KVCache)
-from tpu_commons.models.jax.common.attention.llama4_attention import \
-    Llama4Attention
 from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
 from tpu_commons.models.jax.common.layers import (DenseFFW, DenseFFWConfig,
@@ -67,10 +65,11 @@ class TransformerBlock(nnx.Module):
         rmsnorm_epsilon = getattr(self.cfg,
                                   HuggingFaceArgNames.RMS_NORM_EPS.value)
         try:
-            self.attn = self._create_module(self.attention_cls, cfg=self.cfg.attention)
+            self.attn = self._create_module(self.attention_cls,
+                                            cfg=self.cfg.attention)
         except NameError:
-            raise NameError(f"Invalid attention class type: {self.attention_cls}")
-
+            raise NameError(
+                f"Invalid attention class type: {self.attention_cls}")
 
         if self.block_type == "moe":
             self.moe = self._create_module(MoE, cfg=self.cfg.moe)
@@ -105,8 +104,8 @@ class TransformerBlock(nnx.Module):
         attn_residual_TD = x
         x_TD = self.pre_attention_norm(x)
         new_cache, attn_output_TD = self.attn(x_TD, is_prefill, kv_cache,
-                                           attention_metadata,
-                                           self.use_attention_rope)
+                                              attention_metadata,
+                                              self.use_attention_rope)
         attn_output_TD += attn_residual_TD
 
         # FFW Block
@@ -159,9 +158,10 @@ class SharedExpertsTransformerBlock(TransformerBlock):
         moe_intermediate_size = getattr(
             self.cfg.moe, HuggingFaceArgNames.INTERMEDIATE_SIZE_MOE.value)
         shared_experts_cfg = deepcopy(self.cfg.dense_ffw)
-        setattr(shared_experts_cfg,
-                HuggingFaceArgNames.INTERMEDIATE_SIZE.value,
-                shared_experts * moe_intermediate_size) # intermediate_size = #shared_experts * intermediate_size_moe
+        setattr(
+            shared_experts_cfg, HuggingFaceArgNames.INTERMEDIATE_SIZE.value,
+            shared_experts * moe_intermediate_size
+        )  # intermediate_size = #shared_experts * intermediate_size_moe
         self.shared_experts = self._create_module(DenseFFW,
                                                   cfg=shared_experts_cfg)
 
@@ -171,8 +171,8 @@ class SharedExpertsTransformerBlock(TransformerBlock):
         attn_residual_TD = x
         x_TD = self.pre_attention_norm(x)
         new_cache, attn_output_TD = self.attn(x_TD, is_prefill, kv_cache,
-                                           attention_metadata,
-                                           self.use_attention_rope)
+                                              attention_metadata,
+                                              self.use_attention_rope)
         attn_output_TD += attn_residual_TD
 
         # FFW Block
@@ -181,8 +181,8 @@ class SharedExpertsTransformerBlock(TransformerBlock):
         if self.block_type == "moe":
             logits_TD = self.moe(normed_ffw_input_TD, op_mode)
             # Add the shared expert outputs to the MoE outputs.
-            shared_expert_output_TD = self.shared_experts(normed_ffw_input_TD,
-                                                       op_mode)
+            shared_expert_output_TD = self.shared_experts(
+                normed_ffw_input_TD, op_mode)
             logits_TD += shared_expert_output_TD
         elif self.block_type == "dense":
             logits_TD = self.mlp(normed_ffw_input_TD, op_mode)
