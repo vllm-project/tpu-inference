@@ -2,6 +2,7 @@ import jax
 import pytest
 import torch
 import torchax
+import utils as test_utils
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.interop import torch_view
 from torchax.ops.mappings import j2t, t2j
@@ -24,14 +25,8 @@ def setup_torchax():
     torchax.disable_globally()
 
 
-def _get_spmd_mesh():
-    axis_names = ("data", "model")
-    mesh_shape = (1, len(jax.devices()))
-    return jax.make_mesh(mesh_shape, axis_names, devices=jax.devices())
-
-
 @pytest.mark.parametrize("use_ep", [True, False])
-@pytest.mark.parametrize("mesh", [_get_spmd_mesh()])
+@pytest.mark.parametrize("mesh", [test_utils.get_spmd_mesh()])
 @pytest.mark.parametrize("num_tokens", [8])
 @pytest.mark.parametrize("intermediate_size", [1024, 2048])
 @pytest.mark.parametrize("hidden_size", [128, 512])
