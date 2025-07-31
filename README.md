@@ -61,35 +61,20 @@ python tpu_commons/examples/offline_inference.py \
 
 Run `Llama 3.1 70B Instruct` offline inference on 4 hosts (v6e-16) in interleaved mode:
 
-1. Designate one machine as the head node and execute:
+1. Deploy Ray cluster and containers:
 
 ```
-sudo bash ~/tpu_commons/scripts/multihost/run_cluster.sh \
-    <docker_image> \
-    <head_node_ip> \
-    --head \
-    <path_to_hf_cache> \
-    -e HF_TOKEN=<your_hf_token> \
-    -e TPU_BACKEND_TYPE=jax \
-    -e TPU_MULTIHOST_BACKEND=ray
-    -e JAX_PLATFORMS=''
+~/tpu_commons/scripts/multihost/deploy_cluster.sh \
+    -s ~/tpu_commons/scripts/multihost/run_cluster.sh \
+    -d "<your_docker_image>" \
+    -c "<path_on_remote_hosts_for_hf_cache>" \
+    -t "<your_hugging_face_token>" \
+    -H "<head_node_public_ip>" \
+    -i "<head_node_private_ip>" \
+    -W "<worker1_public_ip>,<worker2_public_ip>,<etc...>"
 ```
 
-1. On every worker machine, execute:
-
-```
-sudo bash ~/tpu_commons/scripts/multihost/run_cluster.sh \
-    <docker_image> \
-    <head_node_ip> \
-    --worker \
-    <path_to_hf_cache> \
-    -e HF_TOKEN=<your_hf_token> \
-    -e TPU_BACKEND_TYPE=jax \
-    -e TPU_MULTIHOST_BACKEND=ray
-    -e JAX_PLATFORMS=''
-```
-
-1. On the head node, use `docker exec -it node /bin/bash` to enter the container. And then execute:
+2. On the head node, use `sudo docker exec -it node /bin/bash` to enter the container. And then execute:
 
 ```
 HF_TOKEN=<huggingface_token> python /workspace/tpu_commons/examples/offline_inference.py \
