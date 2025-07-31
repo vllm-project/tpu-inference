@@ -45,28 +45,26 @@ class SampleRequest:
     completion: Optional[str] = None
 
 
+def sampled_dataset_statistics_info(data: List[SampleRequest]):
+    """
+    Print statistics about the sampled dataset.
+
+    Args:
+        data (List[SampleRequest]): A list of SampleRequest objects representing the sampled dataset.
+    """
+    prompt_lens = np.array([data[i].prompt_len for i in range(len(data))])
+    output_lens = np.array(
+        [data[i].expected_output_len for i in range(len(data))])
+
+    print("Input length distribution:")
+    print(f"Number of samples: {len(prompt_lens)}")
+    print(f"Mean input tokens per request: {np.mean(prompt_lens):.2f}")
+    print(f"Mean output tokens per request: {np.mean(output_lens):.2f}")
+
+
 # -----------------------------------------------------------------------------
 # Benchmark Dataset Base Class
 # -----------------------------------------------------------------------------
-
-
-def prompt_statistics_info(data: List[SampleRequest]):
-    # Convert the list to a NumPy array for efficient calculations
-    prompt_lens = [data[i].prompt_len for i in range(len(data))]
-    arr = np.array(prompt_lens)
-
-    # Calculate stats using NumPy functions
-    print("Input length distribution:")
-    print(f"Mean:             {np.mean(arr):.2f}")
-    print(f"Median:           {np.median(arr):.2f}")
-    print(f"Standard Dev:     {np.std(arr):.2f}")
-    print(f"Variance:         {np.var(arr):.2f}")
-    print(f"Min:              {np.min(arr)}")
-    print(f"Max:              {np.max(arr)}")
-    print(f"Sum:              {np.sum(arr)}")
-    print(f"25th Percentile:  {np.percentile(arr, 25):.2f}")
-    print(f"75th Percentile:  {np.percentile(arr, 75):.2f}")
-    print(len(arr), "samples")
 
 
 class BenchmarkDataset(ABC):
@@ -321,7 +319,7 @@ class MMLUDataset(BenchmarkDataset):
                     completion=completion,
                 ))
         self.maybe_oversample_requests(samples, num_requests)
-        prompt_statistics_info(samples)
+        sampled_dataset_statistics_info(samples)
         return samples
 
 
@@ -393,7 +391,7 @@ class MLPerfDataset(BenchmarkDataset):
                     completion=completion,
                 ))
         self.maybe_oversample_requests(samples, num_requests)
-        prompt_statistics_info(samples)
+        sampled_dataset_statistics_info(samples)
         return samples
 
 
@@ -414,7 +412,8 @@ class Math500Dataset(BenchmarkDataset):
     def load_data(self) -> None:
         with open(self.dataset_path, "r", encoding="utf-8") as f:
             dataset = json.load(f)
-        # (data["solution"])
+        # NOTE: each "data" entry also has a "solution" key that we don't
+        # seem to use (in JetStream)
         self.data = [(data["problem"], data["answer"]) for data in dataset]
         print(f"Loaded {len(self.data)} data from math500 dataset")
 
@@ -436,8 +435,6 @@ class Math500Dataset(BenchmarkDataset):
             prompt_len = len(prompt_ids)
             new_output_len = len(
                 completion_ids) if output_len is None else output_len
-            # NOTE (jacobplatin): I don't believe that we filter the MLPerf dataset
-            # at all, but it could be done here
             if input_len is not None and input_len <= prompt_len:
                 raise ValueError(
                     f"prompt is too short: prompt_len is {prompt_len} but input_len is {input_len}"
@@ -446,9 +443,10 @@ class Math500Dataset(BenchmarkDataset):
                 SampleRequest(
                     prompt=prompt,
                     prompt_len=prompt_len,
-                    expected_output_len=output_len or new_output_len,
+                    expected_output_len=output_len - prompt_len
+                    or new_output_len,
                     completion=completion,
                 ))
         self.maybe_oversample_requests(samples, num_requests)
-        prompt_statistics_info(samples)
+        sampled_dataset_statistics_info(samples)
         return samples
