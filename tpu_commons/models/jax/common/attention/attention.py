@@ -329,16 +329,17 @@ class Attention(nnx.Module):
         q_transformed, actual_num_q_heads_per_kv_head, actual_head_dim = prepare_inputs(q_TNH, self.K)
         kv_packing = get_dtype_packing(kv_cache.dtype)
         L, S, K_2, H = kv_cache.shape
-        num_kv_heads_x2_padded = align_to(K_2, kv_packing)
-        if K_2 != num_kv_heads_x2_padded:
-            kv_cache_padded = jnp.pad(
-                kv_cache,
-                ((0, 0), (0, 0), (0, num_kv_heads_x2_padded - K_2), (0, 0)),
-                constant_values=0)
-        else:
-            kv_cache_padded = kv_cache
-        kv_cache_transformed = kv_cache_padded.reshape(
-            L, S, num_kv_heads_x2_padded // kv_packing, kv_packing, H)
+        # TODO: move this padding outside execution so that it won't trigger all-gather.
+        # num_kv_heads_x2_padded = align_to(K_2, kv_packing)
+        # if K_2 != num_kv_heads_x2_padded:
+        #     kv_cache_padded = jnp.pad(
+        #         kv_cache,
+        #         ((0, 0), (0, 0), (0, num_kv_heads_x2_padded - K_2), (0, 0)),
+        #         constant_values=0)
+        # else:
+        #     kv_cache_padded = kv_cache
+        kv_cache_transformed = kv_cache.reshape(
+            L, S, K_2 // kv_packing, kv_packing, H)
         page_indices_flat = md.block_tables.flatten()
         
         # TODO: update this once attention_metadata has distribution info.
