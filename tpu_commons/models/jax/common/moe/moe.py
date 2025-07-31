@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field, make_dataclass
-from typing import Any
+from typing import Any, Union
 
 import jax
 import jax.numpy as jnp
@@ -13,6 +13,8 @@ from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.constants import (HuggingFaceArgNames,
                                                      RouterType)
 from tpu_commons.models.jax.common.layers import FlaxUtils
+from tpu_commons.models.jax.common.moe.deepseek_moe import (
+    DeepSeekV3Router, DeepSeekV3RoutingConfig)
 from tpu_commons.models.jax.common.sharding import ShardingConfig
 
 modeling_flax_utils = FlaxUtils()
@@ -84,7 +86,7 @@ class Router(nnx.Module):
                                       self.kernel_DE.value)
         weights_TX, selected_experts_TX = jax.lax.top_k(
             router_logits_TE, num_experts_per_tok)
-        if self.cfg.router_act != "sigmoid": # sigmoid does not accept axis argument.
+        if self.cfg.router_act != "sigmoid":  # sigmoid does not accept axis argument.
             normalized_weights_TX = router_act(weights_TX.astype(
                 self.cfg.dtype),
                                                axis=-1)
@@ -135,7 +137,8 @@ MoEConfig = make_dataclass(
      (HuggingFaceArgNames.NUM_LOCAL_EXPERTS.value, int),
      (HuggingFaceArgNames.HIDDEN_ACT.value, int),
      ("apply_expert_weight_before_computation", bool),
-     ("router", RouterConfig), ("dtype", DTypeLike),
+     ("router", Union[RouterConfig, DeepSeekV3RoutingConfig]),
+     ("dtype", DTypeLike),
      ("vllm_config", VllmConfig, field(repr=False, default=None))],
     bases=(Config, ))
 MoEConfig.__doc__ = f"""Configuration for the Mixture-of-Experts (MoE) layer.
@@ -173,8 +176,15 @@ class MoE(nnx.Module):
 
     def __post_init__(self):
         """Initializes the MoE module by creating sharding configurations and generating expert kernels."""
-        self.router = Router(self.cfg.router, self.mesh, self.param_factory,
-                             self.sharding_cfg)
+        router_cls = None
+        if isinstance(self.cfg.router, RouterConfig):
+            router_cls = Router
+        elif isinstance(self.cfg.router, DeepSeekV3RoutingConfig):
+            router_cls = DeepSeekV3Router
+        else:
+            raise NotImplementedError
+        self.router = router_cls(self.cfg.router, self.mesh,
+                                 self.param_factory, self.sharding_cfg)
         self.router.create_sharding()
         self.create_sharding()
 
@@ -198,13 +208,13 @@ class MoE(nnx.Module):
                                              dtype=self.cfg.dtype)
         full_weights_TE = jnp.sum(one_hot_indices_TXE * weights_TX[..., None],
                                   axis=1)
-        
-        # Some models use the routing scores to weight the data instead of 
+
+        # Some models use the routing scores to weight the data instead of
         # weighting the expert outputs.
         if self.cfg.apply_expert_weight_before_computation:
             with jax.named_scope("pre_computing_weight"):
-                return self._moe_fwd_preapply_router_weights(x_TD, full_weights_TE,
-                                                       op_mode)
+                return self._moe_fwd_preapply_router_weights(
+                    x_TD, full_weights_TE, op_mode)
         else:
             return self._moe_fwd(x_TD, full_weights_TE, op_mode)
 
@@ -239,7 +249,7 @@ class MoE(nnx.Module):
             sharding=self.efd_sharding)
 
     def _moe_fwd_preapply_router_weights(self, x_TD: jax.Array, weights_TE,
-                                       op_mode):
+                                         op_mode):
         """Performs the forward pass of the MoE experts with router weights pre-applied to the inputs.
 
         Args:

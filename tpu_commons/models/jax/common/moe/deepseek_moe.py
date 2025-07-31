@@ -22,7 +22,7 @@ DeepSeekV3RoutingConfig = make_dataclass(
         (HuggingFaceArgNames.NUM_GROUPS.value, int),
         (HuggingFaceArgNames.ROUTED_SCALING_FACTOR.value, float),
         (HuggingFaceArgNames.TOPK_GROUP.value, int),
-        (HuggingFaceArgNames.NORM_TOPK_PROB.value, float),
+        (HuggingFaceArgNames.NORM_TOPK_PROB.value, bool),
         ("dtype", DTypeLike),
         ("vllm_config", VllmConfig, field(repr=False, default=None)),
     ],
@@ -155,7 +155,7 @@ class DeepSeekV3Router(nnx.Module):
             rngs,
             shape=(E, ),
             dtype=self.cfg.dtype,
-            sharding=None,  # TODO: check if this is correct
+            sharding=self.e_sharding,
         )
 
     def create_sharding(self):
@@ -180,5 +180,8 @@ class DeepSeekV3Router(nnx.Module):
         # static sharding for kernel/weights
         self.ed_sharding = NamedSharding(
             self.mesh, P(*self.sharding_cfg.generate_rules.moe_router_de))
+
+        self.e_sharding = NamedSharding(
+            self.mesh, P(*self.sharding_cfg.generate_rules.moe_router_bias_e))
 
         return
