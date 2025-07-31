@@ -94,13 +94,13 @@ class RMSNorm(nnx.Module):
             normed_x_TD = x_TD * jax.lax.rsqrt(var_T1 + self.epsilon)
 
         with jax.named_scope("rms_norm_scale_apply"):
-            normed_x_TD *= self.scale_D.value
+            normed_x_TD *= self.scale.value
         normed_x_TD = nnx.with_sharding_constraint(
             normed_x_TD, self.activation_ffw_td[op_mode])
         return normed_x_TD.astype(self.dtype)
 
     def generate_kernel(self, rngs: nnx.Rngs):
-        self.scale_D = self.param_factory.create_scale_param(
+        self.scale = self.param_factory.create_scale_param(
             rngs,
             shape=(self.dims, ),
             sharding=self.scale_sharding,
