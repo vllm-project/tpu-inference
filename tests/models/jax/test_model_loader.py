@@ -1,6 +1,7 @@
+import os
 import sys
 from types import ModuleType
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import jax
 import jax.numpy as jnp
@@ -172,3 +173,26 @@ def test_get_vllm_model(mesh):
 
     assert callable(model_fn)
     assert callable(compute_logits_fn)
+
+
+@pytest.mark.parametrize("set_in_config", [True, False])
+def test_get_vllm_model_random_weights(mesh, set_in_config):
+    rng = jax.random.PRNGKey(42)
+
+    engine_args = EngineArgs(model="Qwen/Qwen2-1.5B-Instruct")
+    vllm_config = engine_args.create_engine_config()
+    vllm_config.model_config.dtype = torch.bfloat16
+    if set_in_config:
+        vllm_config.load_config.load_format = "dummy"
+    else:
+        os.environ["JAX_RANDOM_WEIGHTS"] = "True"
+
+    with patch(
+            "vllm.model_executor.model_loader.dummy_loader.DummyModelLoader.load_weights"
+    ) as mock_load:
+        model_fn, compute_logits_fn, _ = model_loader.get_vllm_model(
+            vllm_config, rng, mesh)
+
+    assert callable(model_fn)
+    assert callable(compute_logits_fn)
+    mock_load.assert_called()
