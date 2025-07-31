@@ -96,13 +96,13 @@ class TransformerBlock(nnx.Module):
         )
 
     def __call__(
-            self, x: jax.Array, is_prefill: bool, kv_cache: KVCache,
+            self, x_TD: jax.Array, is_prefill: bool, kv_cache: KVCache,
             attention_metadata: AttentionMetadata
     ) -> Tuple[KVCache, jax.Array]:
         op_mode = "prefill" if is_prefill else "generate"
         # Attn Block
-        attn_residual_TD = x
-        x_TD = self.pre_attention_norm(x)
+        attn_residual_TD = x_TD
+        x_TD = self.pre_attention_norm(x_TD)
         new_cache, attn_output_TD = self.attn(x_TD, is_prefill, kv_cache,
                                               attention_metadata,
                                               self.use_attention_rope)
@@ -165,11 +165,11 @@ class SharedExpertsTransformerBlock(TransformerBlock):
         self.shared_experts = self._create_module(DenseFFW,
                                                   cfg=shared_experts_cfg)
 
-    def __call__(self, x, is_prefill, kv_cache, attention_metadata):
+    def __call__(self, x_TD, is_prefill, kv_cache, attention_metadata):
         op_mode = "prefill" if is_prefill else "generate"
         # Attn Block
-        attn_residual_TD = x
-        x_TD = self.pre_attention_norm(x)
+        attn_residual_TD = x_TD
+        x_TD = self.pre_attention_norm(x_TD)
         new_cache, attn_output_TD = self.attn(x_TD, is_prefill, kv_cache,
                                               attention_metadata,
                                               self.use_attention_rope)

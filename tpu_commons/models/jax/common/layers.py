@@ -76,17 +76,18 @@ class RMSNorm(nnx.Module):
         """Initializes the scale parameter."""
         self.create_sharding()
 
-    def __call__(self, x: Float, op_mode='generate') -> Float:
+    def __call__(self, x_TD: Float, op_mode='generate') -> Float:
         """Applies RMS Normalization to the input tensor.
 
         Args:
-            x: The input tensor. The normalization is applied over the last dimension.
+            x_TD: The input tensor. The normalization is applied over the last dimension.
 
         Returns:
             The normalized tensor with the same shape as the input.
         """
-        x = jnp.asarray(x, self.dtype)
-        x_TD = nnx.with_sharding_constraint(x, self.activation_ffw_td[op_mode])
+        x_TD = jnp.asarray(x_TD, self.dtype)
+        x_TD = nnx.with_sharding_constraint(x_TD,
+                                            self.activation_ffw_td[op_mode])
 
         with jax.named_scope("rms_norm_variance"):
             var_T1 = jnp.mean(jnp.square(x_TD), axis=-1, keepdims=True)
@@ -321,30 +322,30 @@ class Embedder(nnx.Module):
             sharding=self.vd_sharding,
             dtype=self.cfg.dtype)
 
-    def decode(self, x: Float) -> Float:
+    def decode(self, x_TD: Float) -> Float:
         """Projects hidden states to vocabulary logits.
 
         Args:
-            x: The input tensor of hidden states from the model backbone, with
+            x_TD: The input tensor of hidden states from the model backbone, with
                 shape `(sequence, d_model)`.
 
         Returns:
             The output logits over the vocabulary, with shape
             `(sequence, vocab_size)`.
         """
-        x = jnp.asarray(x, self.cfg.dtype)
-        x_TD = nnx.with_sharding_constraint(x, self.prelogit_td)
+        x_TD = jnp.asarray(x_TD, self.cfg.dtype)
+        x_TD = nnx.with_sharding_constraint(x_TD, self.prelogit_td)
 
         with jax.named_scope("embedder_decode_projection"):
             logits_TV = jnp.einsum('VD,TD -> TV',
                                    self.input_embedding_table_VD.value, x_TD)
         return logits_TV
 
-    def encode(self, x: Int) -> Float:
+    def encode(self, x_T: Int) -> Float:
         """Converts integer token IDs to dense embedding vectors.
 
         Args:
-            x: The input tensor of token IDs, with shape `(sequence, )`.
+            x_T: The input tensor of token IDs, with shape `(sequence, )`.
 
         Returns:
             The corresponding embedding vectors, with shape
@@ -352,7 +353,7 @@ class Embedder(nnx.Module):
         """
         with jax.named_scope("embedder_encode_lookup"):
             embedding_TD = jnp.take(self.input_embedding_table_VD.value,
-                                    x,
+                                    x_T,
                                     axis=0)
 
         D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
@@ -403,19 +404,19 @@ class LMhead(Embedder):
         """
         return self.decode(x)
 
-    def decode(self, x: Float) -> Float:
+    def decode(self, x_TD: Float) -> Float:
         """Projects hidden states to vocabulary logits.
 
         Args:
-            x: The input tensor of hidden states from the model backbone, with
+            x_TD: The input tensor of hidden states from the model backbone, with
                 shape `(sequence, d_model)`.
 
         Returns:
             The output logits over the vocabulary, with shape
             `(sequence, vocab_size)`.
         """
-        x = jnp.asarray(x, self.cfg.dtype)
-        x_TD = nnx.with_sharding_constraint(x, self.prelogit_td)
+        x_TD = jnp.asarray(x_TD, self.cfg.dtype)
+        x_TD = nnx.with_sharding_constraint(x_TD, self.prelogit_td)
 
         with jax.named_scope("lmhead_decode_projection"):
             logits_TV = jnp.einsum('DV,TD -> TV',

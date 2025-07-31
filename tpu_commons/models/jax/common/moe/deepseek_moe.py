@@ -81,22 +81,22 @@ class DeepSeekV3Router(nnx.Module):
 
         self.create_sharding()
 
-    def get_topk_indices(self, scores: Float) -> Float:
+    def get_topk_indices(self, scores_TE: Float) -> Float:
         """Get the topk indices of the scores.
 
         Args:
-            scores: The scores to get the topk indices of. Shape (sequence, num_experts).
+            scores_TE: The scores to get the topk indices of. Shape (sequence, num_experts).
 
         Returns:
             The topk indices of the scores. Shape (sequence, num_experts_per_tok).
         """
 
-        scores_TE = scores + self.bias_E
+        scores_TE = scores_TE + self.bias_E
         if self.n_groups > 1:
             experts_per_group = self.num_experts // self.n_groups
-            group_scores_TG_EdivG = jnp.reshape(
+            group_scores_TGM = jnp.reshape(
                 scores_TE, (-1, self.n_groups, experts_per_group))
-            group_scores_TG2 = jax.lax.top_k(group_scores_TG_EdivG, k=2)[0]
+            group_scores_TG2 = jax.lax.top_k(group_scores_TGM, k=2)[0]
             group_scores_TG = jnp.sum(group_scores_TG2, axis=-1)
             indices = jax.lax.top_k(group_scores_TG, k=self.topk_groups)[1]
 
@@ -111,11 +111,11 @@ class DeepSeekV3Router(nnx.Module):
 
         return indices_TX
 
-    def __call__(self, x: Float, op_mode: str) -> Tuple[Float, Float]:
+    def __call__(self, x_TD: Float, op_mode: str) -> Tuple[Float, Float]:
         """Routes tokens to top k experts.
 
         Args:
-            x: Input array of shape (sequence, d_model).
+            x_TD: Input array of shape (sequence, d_model).
             op_mode: The operation mode ('prefill' or 'generate') to determine sharding.
 
         Returns:
@@ -123,8 +123,9 @@ class DeepSeekV3Router(nnx.Module):
                 - weights: Normalized weights for selected experts, shape (sequence, num_experts_per_tok).
                 - indices: Indices of selected experts, shape (sequence, num_experts_per_tok).
         """
-        x = jnp.asarray(x, self.dtype)
-        x_TD = nnx.with_sharding_constraint(x, self.activation_ffw_td[op_mode])
+        x_TD = jnp.asarray(x_TD, self.dtype)
+        x_TD = nnx.with_sharding_constraint(x_TD,
+                                            self.activation_ffw_td[op_mode])
 
         scores_TE = jnp.einsum("TD,DE -> TE", x_TD, self.kernel_DE.value)
         scores_TE = nnx.sigmoid(scores_TE)
