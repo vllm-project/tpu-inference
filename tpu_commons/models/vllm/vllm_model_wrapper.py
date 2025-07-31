@@ -1,6 +1,8 @@
 import copy
 import functools
+import os
 import tempfile
+from contextlib import nullcontext
 from typing import Any, List, Optional, Tuple
 from unittest.mock import patch
 
@@ -18,10 +20,13 @@ from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.sequence import IntermediateTensors
 
+from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.vllm.sharding import shard_model_to_tpu
 from tpu_commons.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
+
+logger = init_logger(__name__)
 
 
 class _VllmRunner(torch.nn.Module):
@@ -100,9 +105,24 @@ class VllmModelWrapper:
         assert self.vllm_config.model_config.dtype in TORCH_DTYPE_TO_JAX, "The model_config.dtype must be a PyTorch dtype."
         vllm_config_for_load.device_config.device = "cpu"
 
-        # Load the vLLM model and wrap it into a new model whose forward
-        # function calculates the hidden_state and logits in one go.
-        vllm_model = vllm_get_model(vllm_config=vllm_config_for_load)
+        if os.getenv("JAX_RANDOM_WEIGHTS", False):
+            vllm_config_for_load.load_config.load_format = "dummy"
+            use_random_weights = True
+        else:
+            use_random_weights = (
+                vllm_config_for_load.load_config.load_format == "dummy")
+        if use_random_weights:
+            logger.info(
+                "Initializing vLLM model with random weights, weight loading skipped."
+            )
+        # The DummyModelLoader in vLLM calls torch._sync for torch_xla path when it detects the tpu platform, but we don't need it and it causes crash without proper setup.
+        load_context = patch(
+            "torch._sync",
+            return_value=None) if use_random_weights else nullcontext()
+
+        # Load the vLLM model and wrap it into a new model whose forward function can calculate the hidden_state and logits.
+        with load_context:
+            vllm_model = vllm_get_model(vllm_config=vllm_config_for_load)
         self.model = _VllmRunner(vllm_model)
 
         # jax.config.update("jax_explain_cache_misses", True)
