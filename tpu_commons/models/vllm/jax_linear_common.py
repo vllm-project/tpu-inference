@@ -29,7 +29,7 @@ def forward_w8a8_int8(x: jax.Array, w: jax.Array, b: jax.Array, w_s: jax.Array,
     _quantized_matmul_kernel = functools.partial(quantized_matmul_kernel,
                                                  quantize_activation=True)
 
-    def _w8q8_int8_quant_matmul_col(x, w, w_s):
+    def _w8a8_int8_quant_matmul_col(x, w, w_s):
         x = jax.lax.with_sharding_constraint(x, NamedSharding(mesh, P()))
         output = shard_map(_quantized_matmul_kernel,
                            mesh=mesh,
@@ -41,7 +41,7 @@ def forward_w8a8_int8(x: jax.Array, w: jax.Array, b: jax.Array, w_s: jax.Array,
                                                       NamedSharding(mesh, P()))
         return output
 
-    def _w8q8_int8_quant_matmul_row(x, w, w_s):
+    def _w8a8_int8_quant_matmul_row(x, w, w_s):
         x = jax.lax.with_sharding_constraint(
             x, NamedSharding(mesh, P(None, 'model')))
         output = shard_map(_quantized_matmul_kernel,
@@ -58,9 +58,9 @@ def forward_w8a8_int8(x: jax.Array, w: jax.Array, b: jax.Array, w_s: jax.Array,
         return output
 
     if parallel_type == ParallelType.COL_PARALLEL:
-        output = _w8q8_int8_quant_matmul_col(x, w, w_s)
+        output = _w8a8_int8_quant_matmul_col(x, w, w_s)
     elif parallel_type == ParallelType.ROW_PARALLEL:
-        output = _w8q8_int8_quant_matmul_row(x, w, w_s)
+        output = _w8a8_int8_quant_matmul_row(x, w, w_s)
 
     if b is not None:
         output = output + b
