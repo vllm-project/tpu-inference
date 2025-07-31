@@ -124,23 +124,23 @@ class DeepSeekV3Router(nnx.Module):
                 - indices: Indices of selected experts, shape (sequence, num_experts_per_tok).
         """
         x = jnp.asarray(x, self.dtype)
-        x_td = nnx.with_sharding_constraint(x, self.activation_ffw_td[op_mode])
+        x_TD = nnx.with_sharding_constraint(x, self.activation_ffw_td[op_mode])
 
-        scores_te = jnp.einsum("TD,DE -> TE", x_td, self.kernel_DE.value)
-        scores_te = nnx.sigmoid(scores_te)
+        scores_TE = jnp.einsum("TD,DE -> TE", x_TD, self.kernel_DE.value)
+        scores_TE = nnx.sigmoid(scores_TE)
 
-        original_scores_te = scores_te
-        topk_indices_tx = self.get_topk_indices(scores_te)
-        weights_tx = jnp.take_along_axis(original_scores_te,
-                                         topk_indices_tx,
+        original_scores_TE = scores_TE
+        topk_indices_TX = self.get_topk_indices(scores_TE)
+        weights_TX = jnp.take_along_axis(original_scores_TE,
+                                         topk_indices_TX,
                                          axis=-1)
 
         if self.norm_topk_prob:
-            weights_tx /= jnp.sum(weights_tx, axis=-1)[..., None] + 1e-20
+            weights_TX /= jnp.sum(weights_TX, axis=-1)[..., None] + 1e-20
 
-        weights_tx *= self.routed_scaling_factor
+        weights_TX *= self.routed_scaling_factor
 
-        return weights_tx, topk_indices_tx
+        return weights_TX, topk_indices_TX
 
     def generate_kernel(self, rngs: nnx.Rngs):
         """Generates the router kernel (weights and bias) for routing."""
