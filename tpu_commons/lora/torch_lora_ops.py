@@ -29,20 +29,30 @@ def bgmv_torch(inputs, loras, idxs):
     # loras_b_weights: [num_loras, lora_rank, hidden_size]
     # idxs: [num_tokens]
     # print(f'{idxs.device=}, isinstance(idxs, torchax.tensor.Tensor)')  # should be 'jax'
-    # idxs = idxs.to(torch.long)
-    # return torch.einsum(
-    #     "td,tX,Xld->tl",
-    #     inputs,
-    #     torch.nn.functional.one_hot(idxs, loras.shape[0]),
-    #     loras,
-    # )  # [num_tokens, lora_rank]
-    # xw32q: when is len(loras.shape)==4 and when it is not?
+
     if len(loras.shape) == 4:
         loras = loras.squeeze(axis=1)
-    selected_loras = loras[idxs]
-    selected_loras = create_torchax_tensor_with_partition_spec(selected_loras)
-    print(f'xw32 bgmv_torch: {type(inputs)=}, {type(selected_loras)=}')
-    return torch.einsum('td,tld->tl', inputs, selected_loras)
+    loras = create_torchax_tensor_with_partition_spec(loras)
+    idxs = create_torchax_tensor_with_partition_spec(idxs)
+    print(
+        f'xw32 bgmv_torch: {type(inputs)=}, {type(loras)=}, {type(idxs)=}, {inputs.dtype=}'
+    )
+    return torch.einsum(
+        "td,tX,Xld->tl",
+        inputs,
+        torch.nn.functional.one_hot(idxs.long(), loras.shape[0]),
+        # torchax.interop.call_jax(jax.nn.one_hot, idxs, loras.shape[0], dtype=inputs.dtype),
+        loras,
+    )  # [num_tokens, lora_rank]
+    # xw32q: when is len(loras.shape)==4 and when it is not?
+
+    # # ref impl
+    # if len(loras.shape) == 4:
+    #     loras = loras.squeeze(axis=1)
+    # selected_loras = loras[idxs]
+    # selected_loras = create_torchax_tensor_with_partition_spec(selected_loras)
+    # print(f'xw32 bgmv_torch: {type(inputs)=}, {type(selected_loras)=}')
+    # return torch.einsum('td,tld->tl', inputs, selected_loras)
 
 
 def bgmv_expand(

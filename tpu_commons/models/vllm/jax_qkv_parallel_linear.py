@@ -20,6 +20,11 @@ class JaxQKVParallelLinear(torch.nn.Module):
         self.skip_bias_add = qkv_linear.skip_bias_add
         self.return_bias = qkv_linear.return_bias
 
+        self.bias = qkv_linear.bias
+        self.quant_method = qkv_linear.quant_method
+        self.weight = qkv_linear.weight
+        self.gather_output = qkv_linear.gather_output
+
         self.q_weight: Parameter
         self.k_weight: Parameter
         self.v_weight: Parameter

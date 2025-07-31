@@ -22,6 +22,7 @@ from tpu_commons.lora.torch_lora_ops import (bgmv_expand, bgmv_expand_slice,
                                              bgmv_shrink)
 
 
+# Need to create a separate torch_punica_tpu.py and torch_lora_ops.py because the ones in vLLM uses torch_xla stuff (custom ops) which couldn't work in tpu_commons.
 class PunicaWrapperTPU(PunicaWrapperBase):
     """
     PunicaWrapperTPU is designed to manage and provide metadata for the punica
