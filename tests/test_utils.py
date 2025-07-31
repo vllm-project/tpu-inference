@@ -5,9 +5,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 # Import the functions to be tested
-from tpu_commons.utils_jax import (GBYTES, enable_megacore, get_megacore,
-                                   get_num_kv_heads_by_tp, get_padded_head_dim,
-                                   hbm_usage_bytes, hbm_usage_gb)
+from tpu_commons.utils import (GBYTES, enable_megacore, get_megacore,
+                               get_num_kv_heads_by_tp, get_padded_head_dim,
+                               hbm_usage_bytes, hbm_usage_gb)
 
 
 def test_enable_and_get_megacore():
@@ -63,7 +63,7 @@ def test_hbm_usage_bytes_ray_backend():
     assert usage == expected_usage
 
 
-@patch("tpu_commons.utils_jax.PATHWAYS_ENABLED", False)
+@patch("tpu_commons.utils.PATHWAYS_ENABLED", False)
 def test_hbm_usage_bytes_pathways_disabled():
     """Tests hbm_usage_bytes when PATHWAYS_ENABLED is False."""
     mock_device1 = MagicMock()
@@ -85,7 +85,7 @@ def test_hbm_usage_bytes_pathways_disabled():
     assert usage == expected_usage
 
 
-@patch("tpu_commons.utils_jax.PATHWAYS_ENABLED", True)
+@patch("tpu_commons.utils.PATHWAYS_ENABLED", True)
 def test_hbm_usage_bytes_pathways_enabled():
     """Tests hbm_usage_bytes when PATHWAYS_ENABLED is True."""
     # When PATHWAYS_ENABLED is True, memory_stats() is not called.
@@ -98,7 +98,7 @@ def test_hbm_usage_bytes_pathways_enabled():
     assert usage == expected_usage
 
 
-@patch("tpu_commons.utils_jax.PATHWAYS_ENABLED", False)
+@patch("tpu_commons.utils.PATHWAYS_ENABLED", False)
 def test_hbm_usage_gb_pathways_disabled():
     """Tests hbm_usage_gb when PATHWAYS_ENABLED is False."""
     mock_device1 = MagicMock()
@@ -119,7 +119,7 @@ def test_hbm_usage_gb_pathways_disabled():
     assert usage == expected_usage
 
 
-@patch("tpu_commons.utils_jax.PATHWAYS_ENABLED", True)
+@patch("tpu_commons.utils.PATHWAYS_ENABLED", True)
 def test_hbm_usage_gb_pathways_enabled():
     """Tests hbm_usage_gb when PATHWAYS_ENABLED is True."""
     devices = [MagicMock()]

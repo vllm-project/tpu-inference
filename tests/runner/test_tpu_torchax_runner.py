@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copied from https://github.com/vllm-project/vllm/blob/main/tests/v1/tpu/worker/test_tpu_model_runner.py
+
 import pytest
 import torch
 import torchax
@@ -550,3 +551,9 @@ def test_init_kv_cache_with_kv_sharing_valid():
     assert len(kv_cache_config.kv_cache_groups[0].layer_names) == 2
     assert kv_cache_config.kv_cache_groups[0].layer_names[0] == layer_0
     assert kv_cache_config.kv_cache_groups[0].layer_names[1] == layer_1
+
+
+def test_get_supported_tasks_runner(model_runner):
+    """Test get_supported_tasks for generate runner type."""
+    supported_tasks = model_runner.get_supported_tasks()
+    assert supported_tasks == ("generate", )

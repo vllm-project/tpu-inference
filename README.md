@@ -11,12 +11,6 @@ The code is **not feature-complete** and **may not be stable**.
 
 Follow this [guide](https://docs.vllm.ai/en/latest/getting_started/installation/google_tpu.html#set-up-using-python) to install vLLM from source.
 
-**NOTE**: Right after `git clone` vLLM repo and before running any `pip install` commands, run the following command to pin the version:
-
-```
-git checkout 0f199f197b4e7a835ccc5b4d15363f8faa7824c8
-```
-
 ### Install `tpu_commons`:
 
 ```
@@ -268,7 +262,7 @@ tpu-info
 Run the test:
 
 ```
-pytest -v ./tests/ragged_paged_attention_test.py
+pytest -v tests/kernels
 ```
 
 ## How to run an End-To-End (E2E) benchmarking run?

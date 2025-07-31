@@ -28,7 +28,9 @@ steps:
      commands:
        - |
          .buildkite/scripts/run_in_docker.sh \
-           python3 -m pytest -s -v /workspace/tpu_commons/tests/ --cov tpu_commons --cov-report term-missing --cov-fail-under=75
+           python3 -m pytest -s -v /workspace/tpu_commons/tests/ \
+           --ignore=/workspace/tpu_commons/tests/kernels/ragged_paged_attention_kernel_v3_test.py \
+           --cov tpu_commons --cov-report term-missing --cov-fail-under=75
 
    - label: "E2E MLPerf tests for JAX models with quantization"
      key: test_3

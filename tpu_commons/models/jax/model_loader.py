@@ -94,36 +94,64 @@ def _get_nnx_model(
     rng: jax.Array,
     mesh: Mesh,
 ) -> nnx.Module:
-    # We first create an abstract model without allocating any weights,
-    # then fill in its weigths during load_weights from HF.
-    # This shows 3 advantages than the normal way:
-    # 1. The model weights will only be allocated once. Otherwise the normal way
-    #    will random-init the model weights first, then load the real weights.
-    #    The two pass weights allocation causes model loading slow.
-    # 2. The model loading won't be OOM. Otherwise the normal way will hold
-    #    a full model weights after random-init, then duplicate a layer during
-    #    the load_weights. This would be easy to OOM if the layer is super large.
-    # 3. The model architecture definition won't need to worry about the sharding.
-    #    The sharding definition is taken over by the load_weights instead.
-    if os.getenv("NEW_MODEL_DESIGN", False):
-        model = nnx.eval_shape(
-            lambda: model_class.create_model_for_checkpoint_loading(
-                vllm_config, rng, mesh))
-    else:
-        model = nnx.eval_shape(lambda: model_class(vllm_config, rng, mesh))
-    model.load_weights(rng)
-    # Although the created model can already work, we still need to jit
-    # the model creation again, otherwise the model forward will have
-    # non-trivial overhead in PjitFunction.
-    @nnx.jit(donate_argnums=(0, ))
-    def create_jit_model(model):
-        state = nnx.state(model)
-        nnx.update(model, state)
-        model = _apply_qwix_quantization(vllm_config, model, rng, mesh)
-        return model
+    if os.getenv("JAX_RANDOM_WEIGHTS", False):
+        if os.getenv("NEW_MODEL_DESIGN", False):
 
-    with mesh:
-        jit_model = create_jit_model(model)
+            @nnx.jit(donate_argnums=(0, ))
+            def create_sharded_model(model):
+                state = nnx.state(model)
+                nnx.update(model, state)
+                model = _apply_qwix_quantization(vllm_config, model, rng, mesh)
+                return model
+
+            with mesh:
+                model = model_class.create_model_with_random_weights(
+                    vllm_config, rng, mesh)
+                jit_model = create_sharded_model(model)
+        else:
+
+            @nnx.jit
+            def create_sharded_model():
+                model = model_class(vllm_config, rng, mesh)
+                state = nnx.state(model)
+                pspecs = nnx.get_partition_spec(state)
+                sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
+                nnx.update(model, sharded_state)
+                # NOTE: we don't support quantization for the old Qwen2ForCausalLM implementation
+                return model
+
+            with mesh:
+                jit_model = create_sharded_model()
+    else:
+        # We first create an abstract model without allocating any weights,
+        # then fill in its weigths during load_weights from HF.
+        # This shows 2 advantages than the normal way:
+        # 1. The model weights will only be allocated once. Otherwise the normal way
+        #    will random-init the model weights first, then load the real weights.
+        #    The two pass weights allocation causes model loading slow.
+        # 2. The model loading won't be OOM. Otherwise the normal way will hold
+        #    a full model weights after random-init, then duplicate a layer during
+        #    the load_weights. This would be easy to OOM if the layer is super large.
+        if os.getenv("NEW_MODEL_DESIGN", False):
+            model = nnx.eval_shape(
+                lambda: model_class.create_model_for_checkpoint_loading(
+                    vllm_config, rng, mesh))
+        else:
+            model = nnx.eval_shape(lambda: model_class(vllm_config, rng, mesh))
+        model.load_weights(rng)
+        # Although the created model can already work, we still need to jit
+        # the model creation again, otherwise the model forward will have
+        # non-trivial overhead in PjitFunction.
+        @nnx.jit(donate_argnums=(0, ))
+        def create_jit_model(model):
+            state = nnx.state(model)
+            nnx.update(model, state)
+            model = _apply_qwix_quantization(vllm_config, model, rng, mesh)
+            return model
+
+        with mesh:
+            jit_model = create_jit_model(model)
+
     return jit_model
 
 

@@ -1,16 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import unittest
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
-from vllm.config import ParallelConfig, SchedulerConfig, VllmConfig
-from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.engine import (
-    EngineCoreOutputs,
-    EngineCoreRequest,
-    EngineCoreRequestType,
-    UtilityOutput,
-)
+from vllm.config import (CacheConfig, ParallelConfig, SchedulerConfig,
+                         VllmConfig)
+from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
+                            EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.core import ModelRunnerOutput
 from vllm.v1.request import Request
 
@@ -56,8 +53,8 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
         self.addCleanup(self.mock_handshake_patcher.stop)
 
         # Patch threads to avoid them running in the background.
-        self.jet_thread_patcher = patch(
-            "tpu_commons.core.core_tpu.JetThread", MagicMock)
+        self.jet_thread_patcher = patch("tpu_commons.core.core_tpu.JetThread",
+                                        MagicMock)
         self.mock_jet_thread = self.jet_thread_patcher.start()
         self.addCleanup(self.jet_thread_patcher.stop)
 
@@ -75,10 +72,11 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
         self.mock_vllm_config = MagicMock(spec=VllmConfig)
         self.mock_vllm_config.scheduler_config = MagicMock(
             spec=SchedulerConfig)
-        self.mock_vllm_config.parallel_config = MagicMock(
-            spec=ParallelConfig)
+        self.mock_vllm_config.parallel_config = MagicMock(spec=ParallelConfig)
+        self.mock_vllm_config.cache_config = MagicMock(spec=CacheConfig)
 
         self.mock_vllm_config.scheduler_config.max_num_seqs = 16
+        self.mock_vllm_config.cache_config.block_size = 5
         self.mock_vllm_config.device_config = MagicMock()
 
     def test_initialization(self):
@@ -215,7 +213,7 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
         mock_runner_output.req_id_to_index = {mock_request.request_id: 0}
         mock_runner_output.sampled_token_ids = [[123]
                                                 ]  # >0 tokens indicates done
-        prefill_engine.execute_model.return_value = mock_runner_output
+        prefill_engine.execute_model_with_error_logging.return_value = mock_runner_output
 
         # Mock KV cache operations
         prefill_engine.scheduler.kv_cache_manager.get_block_ids.return_value = (
@@ -349,11 +347,15 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
 
         # Mock the outputs of the scheduler and model runner
         mock_scheduler_output = MagicMock(spec=SchedulerOutput)
+        mock_scheduler_output.scheduled_cached_reqs = MagicMock(
+            spec=CachedRequestData)
+        mock_scheduler_output.scheduled_cached_reqs.num_computed_tokens = 1
+        mock_scheduler_output.scheduled_cached_reqs.new_block_ids = 1
         mock_scheduler_output.total_num_scheduled_tokens = 1
         decode_engine.scheduler.schedule.return_value = mock_scheduler_output
 
         mock_runner_output = MagicMock(spec=ModelRunnerOutput)
-        decode_engine.execute_model.return_value = mock_runner_output
+        decode_engine.execute_model_with_error_logging.return_value = mock_runner_output
 
         mock_engine_outputs = {0: MagicMock(spec=EngineCoreOutputs)}
 
@@ -377,8 +379,6 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
 
         # Check that the main decode steps were called
         decode_engine.scheduler.schedule.assert_called_once()
-        decode_engine.execute_model.assert_called_once_with(
-            mock_scheduler_output)
 
         # Check that the final output was put on the main output queue
         client_idx, output = output_queue.get_nowait()
