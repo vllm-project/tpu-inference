@@ -229,7 +229,10 @@ class LlamaForCausalLM(Model):
                 new_kv_cache, x = layer(x, is_prefill, kv_cache,
                                         attention_metadata)
             kv_caches[i] = new_kv_cache
-
+        # import pdb
+        # pdb.set_trace()
+        # jax.debug.print("Final activation shape: {sh}", sh= x.shape)
+        # Final layer norm
         final_activation = self.final_norm(x)
 
         return kv_caches, final_activation

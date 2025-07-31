@@ -90,7 +90,8 @@ class Config:
             return overrides_dict
 
         ordered_override_types = [
-            "additional_config", "hf_overrides", "override_generation_config"
+            "additional_config", "override_generation_config"
+            # "hf_overrides", "override_generation_config"
         ]
 
         overrides_dict = _get_overrides_dict(self)

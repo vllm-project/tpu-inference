@@ -190,6 +190,8 @@ def dynamic_validate_inputs(
     max_num_batched_tokens = q.shape[0]
     page_size = kv_pages.shape[1]
     max_num_seqs, pages_per_seq = page_indices.shape
+    # import pdb
+    # pdb.set_trace()
     if num_seqs[0] > max_num_seqs:
         raise ValueError(
             f"{num_seqs[0]=} must be less or equal to {max_num_seqs=}")

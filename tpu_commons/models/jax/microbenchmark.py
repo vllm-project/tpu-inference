@@ -19,7 +19,7 @@ from tpu_commons.models.jax.common.sharding import Sharding
 from tpu_commons.models.jax.recipes.llama3 import LlamaForCausalLM
 from tpu_commons.runner.jax.tpu_jax_runner import \
     NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK
-
+from tpu_commons.models.jax.model_loader import get_model
 vllm_logger = logging.getLogger("vllm")
 original_level = vllm_logger.level
 import warnings
@@ -341,7 +341,7 @@ class InputCreator:
                 #seq_lens=np.ones((seq_lens, ), dtype=np.int32),
                 seq_lens=seq_lens,
                 query_start_loc=prefill_query_start_offsets,
-                num_seqs=np.array(num_prefill_seqs, dtype=jnp.int32),
+                num_seqs=np.array([1], dtype=jnp.int32),
                 num_slices=np.array([1], dtype=np.int32)),
                 # kv_cache_write_indices=kv_cache_write_indices,
                 # num_prefill_seqs=num_prefill_seqs,
@@ -375,12 +375,14 @@ class InputCreator:
 class Benchmarker:
 
     def __init__(self, vllm_config: VllmConfig, model: Any,
-                 mesh: jax.sharding.Mesh, sampler: Sampler, rng: nnx.Rngs):
+                 mesh: jax.sharding.Mesh, sampler: Sampler, rng: nnx.Rngs, model_cfg_model, state):
         self.vllm_config = vllm_config
         self.model = model
         self.mesh = mesh
         self.sampler = sampler
         self.rng = rng
+        self.model_cfg_model = model_cfg_model
+        self.state = state
 
     def benchmark(self, phase: str):
         if phase == "prefill":
@@ -392,21 +394,30 @@ class Benchmarker:
                 max_prefill_len=additional_config["max_prefill_len"],
                 max_seq_len=additional_config["max_seq_len"],
                 sampler=self.sampler,
-                num_kv_heads=self.model.cfg.model.layers.attention.
+                num_kv_heads=self.model_cfg_model.layers.attention.
                 num_key_value_heads,
-                head_dim=self.model.cfg.model.layers.attention.head_dim,
-                num_layers=self.model.cfg.model.num_layers,
-                vocab_size=self.model.cfg.model.emb.vocab_size)
+                head_dim=self.model_cfg_model.layers.attention.head_dim,
+                num_layers=self.model_cfg_model.num_layers,
+                vocab_size=self.model_cfg_model.emb.vocab_size)
+            
             input_creator = InputCreator(input_args=input_args,
                                          sharding=None,
                                          mesh=self.mesh,
                                          rng=self.rng)
             model_input = input_creator.create_prefill_input()
             # TODO: add tracing
-            self.model(kv_caches=model_input.kv_caches, 
-                       input_ids=model_input.input_ids, 
-                       attention_metadata=model_input.attention_metadata)
-
+            inputs = (
+                model_input.kv_caches,
+                model_input.input_ids,
+                model_input.attention_metadata,
+            )
+            jax.profiler.start_trace("/tmp/profile-data")
+            kv_caches, act = self.model(self.state, *inputs[:3])
+            act.block_until_ready()
+            # _, act = self.model(kv_caches=model_input.kv_caches, 
+            #            input_ids=model_input.input_ids, 
+            #            attention_metadata=model_input.attention_metadata)
+            jax.profiler.stop_trace()
 
 def main():
     argparser = ArgumentParser()
@@ -432,9 +443,14 @@ def main():
     vllm_config.additional_config.update(
         arg_dict)  # add all of the cmd-line args to additional_config
     mesh = _init_mesh(vllm_config)
-    model = LlamaForCausalLM(vllm_config, rng.params(), mesh)
-    model.load_weights(jax.random.PRNGKey(42))# Load the model weights
-    benchmarker = Benchmarker(vllm_config, model, mesh, sampler, rng)
+    model_fn, compute_logits_fn, state, model_cfg_model = get_model(
+            vllm_config,
+            rng.params(),
+            mesh,
+        )
+    # model = LlamaForCausalLM(vllm_config, rng.params(), mesh)
+    # model.load_weights(jax.random.PRNGKey(42))# Load the model weights
+    benchmarker = Benchmarker(vllm_config, model_fn, mesh, sampler, rng,model_cfg_model, state)
 
     for _ in range(args.prefill_steps):
         benchmarker.benchmark("prefill")

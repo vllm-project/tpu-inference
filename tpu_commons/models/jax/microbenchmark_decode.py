@@ -14,9 +14,11 @@ import numpy as np
 
 from tpu_commons.kernels.ragged_paged_attention.kernel import cdiv
 from tpu_commons.logger import init_logger
+from tpu_commons import utils_jax as utils
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.common.sharding import Sharding
 from tpu_commons.models.jax.recipes.llama3 import LlamaForCausalLM
+from tpu_commons.models.jax.model_loader import get_model
 from tpu_commons.runner.jax.tpu_jax_runner import \
     NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK
 
@@ -24,14 +26,14 @@ vllm_logger = logging.getLogger("vllm")
 original_level = vllm_logger.level
 import warnings
 
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore")
+# with warnings.catch_warnings():
+#     warnings.simplefilter("ignore")
 
-    # Set the vLLM logger to ERROR to suppress its messages
-    vllm_logger.setLevel(logging.ERROR)
+#     # Set the vLLM logger to ERROR to suppress its messages
+#     vllm_logger.setLevel(logging.ERROR)
 
-    # Import the class; all warnings will be suppressed
-    from vllm.config import ModelConfig
+#     # Import the class; all warnings will be suppressed
+#     from vllm.config import ModelConfig
 
 vllm_logger.setLevel(logging.WARNING)
 
@@ -39,6 +41,21 @@ logger = init_logger(__name__)
 
 power_of_two = np.pow(2, np.arange(18))  # up to 128k seq lens
 
+@dataclass
+class ModelConfig():
+    max_model_len: int = 2048
+    max_prefill_len: int = 1024
+    prefill_batch_size: int = 1
+    decode_batch_size: int = 1
+    block_size: int = 16
+    num_layers: int = 32
+    num_kv_heads: int = 32
+    head_dim: int = 128
+    vocab_size: int = 32000
+    model: str = "llama3"
+    hf_config: str = ""
+    architectures: List[str] = field(default_factory=list)
+    override_generation_config: dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class VllmConfig():
@@ -103,20 +120,6 @@ def _get_padded_num_kv_cache_update_slices(num_tokens: int, max_num_reqs: int,
     ) // NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK * \
         NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK
     return padded_num_slices
-
-
-def _get_config_arg_or_default(config, query_keys: List[str] | str,
-                               default: Any):
-    try:
-        if isinstance(query_keys, str):
-            return config[query_keys]
-        elif isinstance(query_keys, list):
-            results = config[query_keys[0]]
-            for key in query_keys[1:]:
-                results = results[key]
-            return results
-    except KeyError:
-        return default
 
 
 def _init_mesh(vllm_config: VllmConfig):
@@ -213,7 +216,7 @@ class InputCreator:
         slice_ends = []
         batch_size = self.input_args.batch_size
         for (seq_len, phase_type) in zip(seq_lens, phase_types):
-            breakpoint()
+            # breakpoint()
             # slice_start is the start index of the current request
             # slice_end is the last index of the currnet request
             if phase_type == "prefill":
@@ -237,7 +240,7 @@ class InputCreator:
             [[0, self.input_args.block_size]], dtype=np.int32),
                                         total_block_len,
                                         axis=0)
-        breakpoint()
+        # breakpoint()
         block_lens_cumsum = np.zeros(len(block_lens) + 1, dtype=np.int32)
         np.cumsum(block_lens, out=block_lens_cumsum[1:])
 
@@ -298,7 +301,7 @@ class InputCreator:
         input_positions = np.concatenate(
             [np.arange(seq_len, dtype=np.int32) for seq_len in seq_lens],
             out=padded_input_positions)  # Pad to nearest power of 2
-        breakpoint()
+        # breakpoint()
         kv_cache_write_indices = self._mock_kv_write_indices(
             seq_lens, [mode] * len(seq_lens))
         # Padd the kv_cache_write_indices (used to avoid recompilation)
@@ -379,7 +382,7 @@ class InputCreator:
         input_positions = np.concatenate(
             [np.arange(seq_len, dtype=np.int32) for seq_len in seq_lens],
             out=padded_input_positions)  # Pad to nearest power of 2
-        breakpoint()
+        # breakpoint()
         kv_cache_write_indices = self._mock_kv_write_indices(
             seq_lens, [mode] * len(seq_lens))
         # Padd the kv_cache_write_indices (used to avoid recompilation)
@@ -409,7 +412,7 @@ class InputCreator:
              sharding=sharding)
 
         ########### TODO: May need to add sampling component (which would incur extra latency)
-        breakpoint()
+        # breakpoint()
         return ModelInputs(
             is_prefill=True,
             do_sampling=False,
@@ -419,53 +422,26 @@ class InputCreator:
                 input_positions=input_positions,
                 slot_mapping=kv_cache_write_indices,
                 block_tables=self.block_table,
-                #seq_lens=np.ones((seq_lens, ), dtype=np.int32),
                 seq_lens=seq_lens,
                 query_start_loc=prefill_query_start_offsets,
-                num_seqs=np.array(num_prefill_seqs, dtype=jnp.int32),
+                num_seqs=np.array([1], dtype=jnp.int32),
                 num_slices=np.array([1], dtype=np.int32)),
-                # kv_cache_write_indices=kv_cache_write_indices,
-                # num_prefill_seqs=num_prefill_seqs,
-                # prefill_query_start_offsets=prefill_query_start_offsets,
-                # num_decode_seqs=num_decode_seqs,
-                # chunked_prefill_enabled=chunked_prefill_enabled),
             temperatures=None,
             top_ps=None,
             top_ks=None)
     
     
-    
-    
-    
-    # TODO:
-    def decode_input(self,
-                     previous_input: AttentionMetadata) -> AttentionMetadata:
-        if not self.input_args.sampler:
-            seq_lens = self.input_args.batch_size * [
-                self.input_args.max_prefill_len
-            ]
-        else:
-            raise NotImplementedError
-        total_tokens = sum(seq_lens)
-        input_ids = jax.random.randint(self.rng.params(),
-                                       shape=(self.input_args.batch_size),
-                                       minval=0,
-                                       maxval=self.input_args.vocab_size - 1)
-        num_prefill_seqs = 0
-        num_decode_seqs = len(self.input_args.batch_size)
-        input_positions = jnp.concatenate(
-            [jnp.array([seq_len], dtype=jnp.int32) for seq_len in seq_lens])
-
-
 class Benchmarker:
 
     def __init__(self, vllm_config: VllmConfig, model: Any,
-                 mesh: jax.sharding.Mesh, sampler: Sampler, rng: nnx.Rngs):
+                 mesh: jax.sharding.Mesh, sampler: Sampler, rng: nnx.Rngs, model_cfg_model, state):
         self.vllm_config = vllm_config
         self.model = model
         self.mesh = mesh
         self.sampler = sampler
         self.rng = rng
+        self.model_cfg_model = model_cfg_model
+        self.state = state
 
     def benchmark(self, phase: str):
         if phase == "decode":
@@ -477,11 +453,11 @@ class Benchmarker:
                 max_prefill_len=additional_config["max_prefill_len"],
                 max_seq_len=additional_config["max_seq_len"],
                 sampler=self.sampler,
-                num_kv_heads=self.model.cfg.model.layers.attention.
+                num_kv_heads=self.model_cfg_model.layers.attention.
                 num_key_value_heads,
-                head_dim=self.model.cfg.model.layers.attention.head_dim,
-                num_layers=self.model.cfg.model.num_layers,
-                vocab_size=self.model.cfg.model.emb.vocab_size)
+                head_dim=self.model_cfg_model.layers.attention.head_dim,
+                num_layers=self.model_cfg_model.num_layers,
+                vocab_size=self.model_cfg_model.emb.vocab_size)
             input_creator = InputCreator(input_args=input_args,
                                          sharding=None,
                                          mesh=self.mesh,
@@ -489,10 +465,30 @@ class Benchmarker:
             model_input = input_creator.create_decode_input()
             # TODO: add tracing
             
-            self.model(kv_caches=model_input.kv_caches, 
-                       input_ids=model_input.input_ids, 
-                       attention_metadata=model_input.attention_metadata)
+            # import pdb
+            # pdb.set_trace()
+            inputs = (
+                model_input.kv_caches,
+                model_input.input_ids,
+                model_input.attention_metadata,
+            )
+            
+            # dump attention_metadata
+            # with jax.disable_jit():
+            _, final_activation_0 = self.model(self.state, *inputs[:3])
+            final_activation_0.block_until_ready()
 
+            jax.profiler.start_trace("/tmp/profile-data")
+            
+            model_input_1 = input_creator.create_decode_input()
+            inputs_1 = (
+                model_input_1.kv_caches,
+                model_input_1.input_ids,
+                model_input_1.attention_metadata,
+            )
+            _, final_activation = self.model(self.state, *inputs_1[:3])
+            final_activation.block_until_ready()
+            jax.profiler.stop_trace()
 
 def main():
     argparser = ArgumentParser()
@@ -518,9 +514,15 @@ def main():
     vllm_config.additional_config.update(
         arg_dict)  # add all of the cmd-line args to additional_config
     mesh = _init_mesh(vllm_config)
-    model = LlamaForCausalLM(vllm_config, rng.params(), mesh)
-    model.load_weights(jax.random.PRNGKey(42))# Load the model weights
-    benchmarker = Benchmarker(vllm_config, model, mesh, sampler, rng)
+    model_fn, compute_logits_fn, state, model_cfg_model = get_model(
+            vllm_config,
+            rng.params(),
+            mesh,
+        )
+    logger.info(f"Init model | "
+                    f"hbm={utils.hbm_usage_gb(jax.devices())}Gb")
+
+    benchmarker = Benchmarker(vllm_config, model_fn, mesh, sampler, rng, model_cfg_model, state)
 
     for _ in range(args.prefill_steps):
         benchmarker.benchmark("decode")

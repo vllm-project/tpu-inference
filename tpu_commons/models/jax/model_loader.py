@@ -23,7 +23,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
     _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
 
-    architectures = getattr(config, "architectures", [])
+    architectures = getattr(config, "architectures", ["LlamaForCausalLM"])
     for arch in architectures:
         if arch in _MODEL_REGISTRY:
             return _MODEL_REGISTRY[arch]
@@ -68,15 +68,15 @@ def _get_nnx_model(
         # Although the created model can already work, we still need to jit
         # the model creation again, otherwise the model forward will have
         # non-trivial overhead in PjitFunction.
-        @nnx.jit(donate_argnums=(0, ))
-        def create_jit_model(model):
-            state = nnx.state(model)
-            nnx.update(model, state)
-            return model
+        # @nnx.jit(donate_argnums=(0, ))
+        # def create_jit_model(model):
+        #     state = nnx.state(model)
+        #     nnx.update(model, state)
+        #     return model
 
-        with mesh:
-            jit_model = create_jit_model(model)
-    return jit_model
+        # with mesh:
+        #     jit_model = create_jit_model(model)
+    return model
 
 
 def get_flax_model(
@@ -85,7 +85,17 @@ def get_flax_model(
     mesh: Mesh,
 ) -> nnx.Module:
     model_class = _get_model_architecture(vllm_config.model_config.hf_config)
-    jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh)
+    model = _get_nnx_model(model_class, vllm_config, rng, mesh)
+    model_cfg = model.cfg.model
+    @nnx.jit(donate_argnums=(0, ))
+    def create_jit_model(model):
+        state = nnx.state(model)
+        nnx.update(model, state)
+        return model
+
+    with mesh:
+        jit_model = create_jit_model(model)
+    
     kv_cache_sharding = NamedSharding(mesh, PartitionSpec(None, None, "model"))
     hidden_states_sharding = NamedSharding(mesh, PartitionSpec(None,
                                                                None))  # (T, D)
@@ -118,7 +128,7 @@ def get_flax_model(
 
     model_fn = functools.partial(run_model, graphdef)
     compute_logits_fn = functools.partial(run_compute_logits, graphdef)
-    return model_fn, compute_logits_fn, state
+    return model_fn, compute_logits_fn, state, model_cfg
 
 
 def get_vllm_model(
