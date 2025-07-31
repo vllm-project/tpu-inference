@@ -72,7 +72,8 @@ def test_jax_row_parallel_linear(bias, mesh):
     input_tensor = input_tensor.to('cpu')
     output = row_linear(input_tensor).to(dtype)
 
-    with jax.default_device(jax.devices("tpu")[0]), torchax.default_env():
+    # Set jax default device to workaround a layout bug in JAX 0.7.0 and earlier
+    with torchax.default_env(), jax.default_device(jax.devices("tpu")[0]):
         jax_row_linear = JaxRowParallelLinear(row_linear, mesh=mesh)
         jax_input_tensor = torch_view(t2j(input_tensor, use_dlpack=False))
         jax_input_tensor.apply_jax_(jax.device_put,
@@ -121,7 +122,8 @@ def test_jax_row_parallel_linear_w8a8_int8(bias, mesh):
             new=test_utils.quantized_matmul_ref):
         output = row_linear(input_tensor).to(dtype)
 
-    with jax.default_device(jax.devices("tpu")[0]), torchax.default_env():
+    # Set jax default device to workaround a layout bug in JAX 0.7.0 and earlier
+    with torchax.default_env(), jax.default_device(jax.devices("tpu")[0]):
         jax_row_linear = JaxRowParallelLinear(row_linear, mesh=mesh)
         jax_input_tensor = torch_view(t2j(input_tensor, use_dlpack=False))
         jax_input_tensor.apply_jax_(jax.device_put,
