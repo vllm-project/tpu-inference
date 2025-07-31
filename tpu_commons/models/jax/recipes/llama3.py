@@ -244,8 +244,8 @@ class LlamaForCausalLM(Model):
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         with jax.named_scope("llama_lm_head_projection"
                              ):  #LM head projection to produce logits
-            logits = jnp.dot(hidden_states,
-                             self.lm_head.input_embedding_table_DV.value)
+            logits_TV = jnp.dot(hidden_states,
+                                self.lm_head.input_embedding_table_DV.value)
 
         return logits_TV
 
