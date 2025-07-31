@@ -11,10 +11,6 @@ from tpu_commons.kernels.ragged_paged_attention.kernel import \
     ragged_paged_attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 
-# TODO(xiang): put this in attention metadata
-# Block size used for kv cache updating kernel
-NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK = 8
-
 
 def sharded_ragged_paged_attention(sm_scale: float,
                                    mesh: Mesh,
@@ -114,14 +110,12 @@ def update_kv_cache(k: jax.Array, v: jax.Array, kv_cache: jax.Array,
     kv = jnp.concat([k, v], axis=-1).reshape(T, K_2, H)
 
     kv_cache = kv_cache.reshape(-1, K_2, H)
-    kv_cache = kv_cache_update(
-        kv,
-        slices,
-        kv_cache,
-        num_slices,
-        page_size=S,
-        num_slices_per_block=NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK,
-        mesh=mesh,
-        kv_cache_pspec=P(None, "model", None))
+    kv_cache = kv_cache_update(kv,
+                               slices,
+                               kv_cache,
+                               num_slices,
+                               page_size=S,
+                               mesh=mesh,
+                               kv_cache_pspec=P(None, "model", None))
     kv_cache = kv_cache.reshape(L, S, K_2, H)
     return kv_cache

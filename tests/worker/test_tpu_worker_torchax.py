@@ -261,8 +261,7 @@ class TestTPUWorker:
         else:
             mock_report_usage_stats.assert_not_called()
 
-    @patch('tpu_commons.worker.tpu_worker_torchax.TPU_HEAD_SIZE_ALIGNMENT',
-           128)
+    @patch('tpu_commons.utils.TPU_HEAD_SIZE_ALIGNMENT', 128)
     @patch('tpu_commons.worker.tpu_worker_torchax.jax')
     @patch('tpu_commons.worker.tpu_worker_torchax.logger')
     @pytest.mark.parametrize(
