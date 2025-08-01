@@ -12,6 +12,9 @@ from vllm.config import VllmConfig
 
 from tpu_commons.kernels.ragged_paged_attention.kernel import \
     ragged_paged_attention
+from tpu_commons.kernels.ragged_paged_attention.v3.kernel import ragged_paged_attention as ragged_paged_attention_v3
+from tpu_commons.kernels.ragged_paged_attention.v3.kernel import (prepare_inputs, prepare_outputs)
+from tpu_commons.kernels.ragged_paged_attention.v3.util import (align_to, get_dtype_packing)
 from tpu_commons.models.jax.attention_interface import update_kv_cache
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.common.base import Config, ParamFactory
@@ -292,4 +295,85 @@ class Attention(nnx.Module):
                 md.num_seqs,
             )
 
+        return kv_cache, output_TNH
+    
+    def attention_v3(
+        self,
+        is_prefill: bool,
+        kv_cache: KVCache,
+        q_TNH: jax.Array,
+        k_SKH: jax.Array,
+        v_SKH: jax.Array,
+        attention_metadata: AttentionMetadata,
+        mesh: Mesh,
+    ) -> Tuple[KVCache, jax.Array]:
+        """Performs scaled dot-product attention and updates the KV cache.
+
+        This function handles the core attention logic, which varies between
+        prefill and generation modes. In prefill, it computes self-attention
+        over the input sequence with a causal mask. In generation, it attends
+        to the full history of keys and values stored in the cache.
+
+        Args:
+            is_prefill: A boolean indicating if the mode is 'prefill'.
+            kv_cache: The key-value cache to be updated and used.
+            q_TNH: Query tensor of shape `(query_seq, num_attention_heads, head_dim)`.
+            k_SKH: Key tensor of shape `(kv_seq, num_key_value_heads, head_dim)`.
+            v_SKH: Value tensor of shape `(kv_seq, num_key_value_heads, head_dim)`.
+            attention_metadata: Metadata containing sequence lengths.
+            mesh: The JAX device mesh (unused in this specific function but
+                kept for potential future use or API consistency).
+
+        Returns:
+            A tuple containing:
+                - The updated KV cache.
+                - The attention output tensor of shape
+                  `(seq, num_q_heads, head_dim)`.
+        """
+        md = attention_metadata
+        kv_cache = update_kv_cache(k_SKH, v_SKH, kv_cache, md.slot_mapping,
+                                   md.num_slices, mesh)
+        q_transformed, actual_num_q_heads_per_kv_head, actual_head_dim = prepare_inputs(q_TNH, self.K)
+        kv_packing = get_dtype_packing(kv_cache.dtype)  # 2 for bf16, 4 for fp8.
+        L, S, K_2, H = kv_cache.shape
+        kv_cache_transformed = kv_cache.reshape(
+            L, S, K_2 // kv_packing, kv_packing, H)
+        page_indices_flat = md.block_tables.flatten()
+        
+        # TODO: update this once attention_metadata has distribution info.
+        # Currently put all requests into prefill mode.
+        distribution = jnp.array([0, md.num_seqs[0], md.num_seqs[0]], dtype=jnp.int32)
+        in_specs = (
+            P(*self.sharding_cfg.generate_rules.query_ktnph),  # q_transformed
+            P(*self.sharding_cfg.generate_rules.keyvalue_cache_nbkph),  # kv_cache_transformed
+            P(),  # md.seq_lens: Replicated
+            P(),  # page_indices_flat: Replicated
+            P(),  # query_start_loc: Replicated
+            P(),  # distribution: Replicated
+        )
+        out_specs = P(*self.sharding_cfg.generate_rules.attn_o_ktnph) #output_transformed
+        def _ragged_paged_attention(*args):
+            return ragged_paged_attention_v3(
+                *args,
+                sm_scale=q_TNH.shape[-1]**-0.5,
+                sliding_window=None,
+                soft_cap=None,
+                vmem_limit_bytes=64 * 1024 * 1024,
+            )
+    
+        output_transformed = jax.jit(shard_map.shard_map(
+                _ragged_paged_attention,
+                mesh=mesh,
+                in_specs=in_specs,
+                out_specs=out_specs,
+                check_rep=False,
+            ))(
+                q_transformed,
+                kv_cache_transformed,
+                md.seq_lens,
+                page_indices_flat,
+                md.query_start_loc,
+                distribution,
+            )
+        output_TNH = prepare_outputs(output_transformed, actual_num_q_heads_per_kv_head, actual_head_dim)
         return kv_cache, output_TNH

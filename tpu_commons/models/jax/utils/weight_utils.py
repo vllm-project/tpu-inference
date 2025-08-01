@@ -178,6 +178,8 @@ class WeightLoader(abc.ABC):
 
         # Sort to ensure the order of files is consistent.
         weights_files.sort()
+        # for test purpose, only load weights files for the first 4 layers and lm_head.
+        weights_files = weights_files[:4] +[weights_files[-4]]
 
         for st_file in weights_files:
             logger.info(f"Loading weights from {st_file}")
