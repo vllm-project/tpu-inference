@@ -275,6 +275,33 @@ def load_hf_weights_on_thread(vllm_config, params: nnx.State,
         "o_proj": (1, 2, 0),
     }
 
+    # # get vision config
+    if model_config.is_multimodal_model:
+        vision_config = hf_config.vision_config
+        vision_head_dim = vision_config.hidden_size // vision_config.num_heads
+        # TODO: Wenlong: Do not consider padding for now
+        # # Pad head_dim for kernel performance.
+        # head_dim_original = model_config.get_head_size()
+        # head_dim = utils.get_padded_head_dim(head_dim_original)
+        # head_dim_pad = head_dim - head_dim_original
+
+        # reshape_keys.update({
+        #     "attn.proj": (vision_config.hidden_size, vision_config.num_heads,
+        #                   vision_head_dim),
+        #     "attn.qkv": (vision_config.hidden_size, 3, vision_config.num_heads,
+        #                  vision_head_dim),
+        # })
+        # bias_reshape_keys.update({
+        #     "attn.qkv.bias": (3, vision_config.num_heads, vision_head_dim),
+        # })
+        transpose_keys.update({
+            # "attn.proj": (1, 2, 0),
+            "attn.proj":(1,0),
+            "attn.qkv": (1,0),
+            "visual.merger.mlp": (1, 0),
+            "visual.patch_embed.proj": (2, 3, 4, 1, 0),
+        })
+
     # key: (padding_dim, padding_size)
     pad_keys = {
         "q_proj": (1, sharding_size // num_heads),
@@ -300,6 +327,11 @@ def load_hf_weights_on_thread(vllm_config, params: nnx.State,
             layer_key = re.sub(r"layers\.\d+", "layers.*", hf_key)
             model_key = mappings[layer_key]
             model_key = re.sub(r"layers\.\*", f"layers.{layer_num}", model_key)
+        elif "blocks" in hf_key:
+            layer_num = re.search(r"blocks\.(\d+)", hf_key).group(1)
+            layer_key = re.sub(r"blocks\.\d+", "blocks.*", hf_key)
+            model_key, model_sharding = mappings[layer_key]
+            model_key = re.sub(r"blocks\.\*", f"blocks.{layer_num}", model_key)
         else:
             model_key = mappings[hf_key]
         model_weight, model_sharding = get_param_and_sharding(

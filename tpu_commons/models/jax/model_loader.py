@@ -80,8 +80,12 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     else:
         from tpu_commons.models.jax.llama3 import LlamaForCausalLM
         from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
+        from tpu_commons.models.jax.qwen2_5_vl import \
+        Qwen2_5_VLForConditionalGeneration
         _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
         _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
+        _MODEL_REGISTRY[
+        "Qwen2_5_VLForConditionalGeneration"] = Qwen2_5_VLForConditionalGeneration
 
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
@@ -190,9 +194,19 @@ def get_flax_model(
         model = nnx.merge(graphdef, state)
         return model.compute_logits(*args)
 
+    @functools.partial(jax.jit,
+                       out_shardings=(logits_sharding),
+                       static_argnames=['image_grid_thw'])
+    def run_get_multimodal_embeddings(graphdef, state, image_grid_thw,
+                                      **kwargs):
+        model = nnx.merge(graphdef, state)
+        return model.get_multimodal_embeddings(image_grid_thw, **kwargs)
+
     model_fn = functools.partial(run_model, graphdef)
     compute_logits_fn = functools.partial(run_compute_logits, graphdef)
-    return model_fn, compute_logits_fn, state
+    get_multimodal_embeddings_fn = functools.partial(
+        run_get_multimodal_embeddings, graphdef)
+    return model_fn, compute_logits_fn, get_multimodal_embeddings_fn, state
 
 
 def get_vllm_model(

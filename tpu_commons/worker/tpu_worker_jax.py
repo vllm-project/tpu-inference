@@ -5,6 +5,7 @@ from typing import Callable, Dict, Optional, Tuple, Union
 
 import jax
 import jaxtyping
+import jax.numpy as jnp
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
@@ -29,6 +30,12 @@ from tpu_commons.worker.base import AbstractTpuWorker
 
 logger = init_logger(__name__)
 
+_DTYPE: dict[str, jnp.dtype] = {
+    "bfloat16": jnp.bfloat16,
+    "float": jnp.float32,
+    "float32": jnp.float32,
+}
+
 
 class TPUWorker(AbstractTpuWorker):
 
@@ -41,6 +48,17 @@ class TPUWorker(AbstractTpuWorker):
                  devices=None,
                  host_interface: Optional[HostInterface] = None):
         super().__init__(host_interface)
+
+        # NOTE(wenlong): because sometimes mm needs to use torch for preprocessing
+        if not isinstance(vllm_config.model_config.dtype, str):
+            logger.warning(
+                "The model dtype is not properly set for JAX backend. "
+                "Overwriting it to jnp.bfloat16")
+            vllm_config.model_config.dtype = jnp.bfloat16
+        else:
+            vllm_config.model_config.dtype = _DTYPE.get(
+                vllm_config.model_config.dtype, jnp.bfloat16)
+
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.parallel_config = vllm_config.parallel_config

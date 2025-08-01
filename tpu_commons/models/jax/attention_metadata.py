@@ -8,6 +8,7 @@ import jax
     jax.tree_util.register_dataclass,
     data_fields=[
         "input_positions",
+        "input_mrope_positions",
         "slot_mapping",
         "block_tables",
         "seq_lens",
@@ -36,3 +37,5 @@ class AttentionMetadata(object):
     num_slices: jax.Array = None
     # (3,)
     request_distribution: jax.Array = None
+    # (padded_total_num_scheduled_tokens,)
+    input_mrope_positions: jax.Array = None
