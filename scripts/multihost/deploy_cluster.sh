@@ -50,7 +50,7 @@ HF_TOKEN=""
 HEAD_SSH_IP=""
 HEAD_INTERNAL_IP=""
 WORKER_SSH_IP_STRING=""
-SSH_USER="ranlihao_google_com"
+SSH_USER=""
 
 while getopts ":s:d:c:t:H:i:W:" opt; do
   case ${opt} in
