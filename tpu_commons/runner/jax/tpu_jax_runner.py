@@ -47,8 +47,6 @@ logger = init_logger(__name__)
 INVALID_TOKEN_ID = -1
 # Smallest output size
 MIN_NUM_SEQS = 8
-# Block size used for kv cache updating kernel
-NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK = 8
 
 DUMMY_METADATA = AttentionMetadata(
     input_positions=[],
@@ -1192,8 +1190,4 @@ def _get_padded_num_kv_cache_update_slices(num_tokens: int, max_num_reqs: int,
     recompilation."""
     padded_num_slices = 2 * max_num_reqs + num_tokens // page_size
     padded_num_slices = min(padded_num_slices, num_tokens)
-    padded_num_slices = (
-        padded_num_slices + NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK - 1
-    ) // NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK * \
-        NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK
     return padded_num_slices

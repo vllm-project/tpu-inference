@@ -21,7 +21,6 @@ from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.model_executor import set_random_seed
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
-from vllm.v1.attention.backends.pallas import TPU_HEAD_SIZE_ALIGNMENT
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
@@ -40,6 +39,7 @@ from tpu_commons.worker.base import AbstractTpuWorker
 from tpu_commons.worker._temporary_vllm_compat import (
     adapt_kv_cache_config_if_needed, adapt_scheduler_output_if_needed,
     adapt_lora_request_if_needed)
+from tpu_commons.utils import TPU_HEAD_SIZE_ALIGNMENT
 
 logger = init_logger(__name__)
 
