@@ -3,8 +3,9 @@ import jax.numpy as jnp
 import pytest
 import torch
 import torchax
+import utils as test_utils
 from jax.sharding import NamedSharding, PartitionSpec
-from torchax.interop import jax_view, torch_view
+from torchax.interop import torch_view
 from torchax.ops.mappings import j2t, t2j, t2j_dtype
 from vllm.attention import Attention as VllmAttention
 from vllm.config import set_current_vllm_config
@@ -19,20 +20,6 @@ from tpu_commons.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 
 P = PartitionSpec
-
-
-@pytest.fixture(scope="module", autouse=True)
-def setup_torchax():
-    """Enable torchax globally before all tests, disable after all tests."""
-    torchax.enable_globally()
-    yield
-    torchax.disable_globally()
-
-
-def _get_spmd_mesh():
-    axis_names = ("data", "model")
-    mesh_shape = (1, len(jax.devices()))
-    return jax.make_mesh(mesh_shape, axis_names, devices=jax.devices())
 
 
 def generate_attention_metadata(num_tokens, mesh) -> AttentionMetadata:
@@ -103,7 +90,7 @@ def generate_kv_caches(num_kv_heads, head_size, mesh, dtype):
     return [sharded_allocate()]
 
 
-@pytest.mark.parametrize("mesh", [_get_spmd_mesh()])
+@pytest.mark.parametrize("mesh", [test_utils.get_spmd_mesh()])
 @pytest.mark.parametrize("num_heads", [8, 32])
 @pytest.mark.parametrize("head_size", [96, 128])
 @pytest.mark.parametrize("num_kv_heads", [8])
@@ -127,7 +114,6 @@ def test_jax_attention(mesh, num_heads, head_size, num_kv_heads, num_tokens):
             num_kv_heads=num_kv_heads,
             prefix="test_jax_attention.layer.0",
         )
-    jax_attention = JaxAttention(attention, mesh=mesh)
 
     scale = float(1.0 / (head_size**0.5))
     qkv = torch.empty(num_tokens,
@@ -137,36 +123,40 @@ def test_jax_attention(mesh, num_heads, head_size, num_kv_heads, num_tokens):
     qkv.uniform_(-scale, scale)
     q, k, v = qkv.split([num_heads, num_kv_heads, num_kv_heads], dim=1)
 
-    q = torch_view(t2j(q))
-    q.apply_jax_(jax.device_put, NamedSharding(mesh, P(None, None)))
-    k = torch_view(t2j(k))
-    k.apply_jax_(jax.device_put, NamedSharding(mesh, P(None, None)))
-    v = torch_view(t2j(v))
-    v.apply_jax_(jax.device_put, NamedSharding(mesh, P(None, None)))
+    # reshape q,k,v into vLLM convention
+    vllm_q = q.view(num_tokens, num_heads * head_size)
+    vllm_k = k.view(num_tokens, num_kv_heads * head_size)
+    vllm_v = v.view(num_tokens, num_kv_heads * head_size)
+
+    # Set jax default device to workaround a layout bug in JAX 0.7.0 and earlier
+    with torchax.default_env(), jax.default_device(jax.devices("tpu")[0]):
+        jax_attention = JaxAttention(attention, mesh=mesh)
+        vllm_q = torch_view(t2j(vllm_q))
+        vllm_q.apply_jax_(jax.device_put, NamedSharding(mesh, P()))
+        vllm_k = torch_view(t2j(vllm_k))
+        vllm_k.apply_jax_(jax.device_put, NamedSharding(mesh, P()))
+        vllm_v = torch_view(t2j(vllm_v))
+        vllm_v.apply_jax_(jax.device_put, NamedSharding(mesh, P()))
+        q = t2j(q)
+        q = jax.device_put(q, NamedSharding(mesh, P()))
 
     md = generate_attention_metadata(num_tokens, mesh)
     kv_caches = generate_kv_caches(num_kv_heads, head_size, mesh, dtype)
 
-    with set_vllm_model_wrapper_context(
+    with torchax.default_env(), set_vllm_model_wrapper_context(
             kv_caches=kv_caches,
             attention_metadata=md,
     ):
-        # reshape q,k,v into vLLM convention
-        vllm_q = q.view(num_tokens, num_heads * head_size)
-        vllm_k = k.view(num_tokens, num_kv_heads * head_size)
-        vllm_v = v.view(num_tokens, num_kv_heads * head_size)
-
         jax_output = jax_attention(vllm_q, vllm_k, vllm_v)
 
         # reshape from vLLM convention
         jax_output = jax_output.view(num_tokens, num_heads, head_size)
+        # j2t() doens't support bfloat16, so we cast it into float32 as an intermedate step.
+        jax_output = j2t(jax_output.to(torch.float32)).to(dtype)
 
         # the above jax_attetion call also updates the kv cache
         vllm_model_wrapper_context = get_vllm_model_wrapper_context()
         kv_cache = vllm_model_wrapper_context.kv_caches[0]
-
-    # j2t() doens't support bfloat16, so we cast it into float32 as an intermedate step.
-    jax_output = j2t(jax_output.to(torch.float32)).to(dtype)
 
     if head_size % 128 != 0:
         padded_head_size = utils.get_padded_head_dim(head_size)
@@ -175,7 +165,7 @@ def test_jax_attention(mesh, num_heads, head_size, num_kv_heads, num_tokens):
                     pad_width=pad_width,
                     mode='constant',
                     constant_values=0.0)
-    ref_output = ref_ragged_paged_attention(jax_view(q),
+    ref_output = ref_ragged_paged_attention(q,
                                             kv_cache,
                                             md.seq_lens,
                                             md.block_tables,

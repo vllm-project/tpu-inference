@@ -929,6 +929,11 @@ class TPUModelRunner():
         self.input_ids_cpu[
             total_num_scheduled_tokens:padded_total_num_scheduled_tokens] = 0
 
+        logger.debug(
+            runner_utils.log_batch_computation_stats(
+                total_num_scheduled_tokens, num_reqs,
+                padded_total_num_scheduled_tokens, scheduler_output))
+
         # Inputs
         input_ids = self.input_ids_cpu[:padded_total_num_scheduled_tokens]
         positions = self.positions_cpu[:padded_total_num_scheduled_tokens]

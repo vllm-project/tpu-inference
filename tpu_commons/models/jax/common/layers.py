@@ -21,6 +21,8 @@ class FlaxUtils:
         'silu': nnx.silu,
         'gelu': nnx.gelu,
         'relu': nnx.relu,
+        'sigmoid': nnx.sigmoid,
+        'softmax': nnx.softmax
     }
 
 
@@ -86,10 +88,13 @@ class RMSNorm(nnx.Module):
         x = jnp.asarray(x, self.dtype)
         x_TD = nnx.with_sharding_constraint(x, self.activation_ffw_td[op_mode])
 
-        var = jnp.mean(jnp.square(x_TD), axis=-1, keepdims=True)
-        normed_x = x_TD * jax.lax.rsqrt(var + self.epsilon)
+        with jax.named_scope("rms_norm_variance"):
+            var = jnp.mean(jnp.square(x_TD), axis=-1, keepdims=True)
+        with jax.named_scope("rms_norm_rsqrt"):
+            normed_x = x_TD * jax.lax.rsqrt(var + self.epsilon)
 
-        normed_x *= self.scale.value
+        with jax.named_scope("rms_norm_scale_apply"):
+            normed_x *= self.scale.value
         normed_x = nnx.with_sharding_constraint(
             normed_x, self.activation_ffw_td[op_mode])
         return normed_x.astype(self.dtype)
@@ -202,6 +207,7 @@ class DenseFFW(nnx.Module):
     def generate_kernel(self, rngs: nnx.Rngs):
         D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
         F = getattr(self.cfg, HuggingFaceArgNames.INTERMEDIATE_SIZE.value)
+
         self.kernel_gating_DF = self.param_factory.create_kernel_param(
             rngs,
             shape=(D, F),
@@ -307,7 +313,6 @@ class Embedder(nnx.Module):
             return self.encode(x)
 
     def generate_kernel(self, rngs: nnx.Rngs):
-
         V = getattr(self.cfg, HuggingFaceArgNames.VOCAB_SIZE.value)
         D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
         self.input_embedding_table_VD = self.param_factory.create_kernel_param(
@@ -330,8 +335,9 @@ class Embedder(nnx.Module):
         x = jnp.asarray(x, self.cfg.dtype)
         x_TD = nnx.with_sharding_constraint(x, self.prelogit_td)
 
-        logits_TV = jnp.einsum('VD,TD -> TV',
-                               self.input_embedding_table_VD.value, x_TD)
+        with jax.named_scope("embedder_decode_projection"):
+            logits_TV = jnp.einsum('VD,TD -> TV',
+                                self.input_embedding_table_VD.value, x_TD)
         return logits_TV
 
     def encode(self, x: Int) -> Float:
@@ -344,11 +350,13 @@ class Embedder(nnx.Module):
             The corresponding embedding vectors, with shape
             `(batch, sequence, d_model)`.
         """
-        embedding_TD = jnp.take(self.input_embedding_table_VD.value, x, axis=0)
+        with jax.named_scope("embedder_encode_lookup"):
+            embedding_TD = jnp.take(self.input_embedding_table_VD.value, x, axis=0)
 
         D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
         if self.cfg.normalize_embeddings:
-            embedding_TD *= jnp.sqrt(D).astype(self.cfg.dtype)
+            with jax.named_scope("embedder_normalize_embeddings"):
+                embedding_TD *= jnp.sqrt(D).astype(self.cfg.dtype)
         return embedding_TD
 
     def create_sharding(self):
@@ -370,7 +378,6 @@ class LMhead(Embedder):
     """
 
     def generate_kernel(self, rngs: nnx.Rngs):
-
         V = getattr(self.cfg, HuggingFaceArgNames.VOCAB_SIZE.value)
         D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
 
@@ -408,8 +415,9 @@ class LMhead(Embedder):
         x = jnp.asarray(x, self.cfg.dtype)
         x_TD = nnx.with_sharding_constraint(x, self.prelogit_td)
 
-        logits_TV = jnp.einsum('DV,TD -> TV',
-                               self.input_embedding_table_DV.value, x_TD)
+        with jax.named_scope("lmhead_decode_projection"):
+            logits_TV = jnp.einsum('DV,TD -> TV',
+                                self.input_embedding_table_DV.value, x_TD)
         return logits_TV
 
     def create_sharding(self):

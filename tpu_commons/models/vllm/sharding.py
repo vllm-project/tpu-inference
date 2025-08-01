@@ -12,6 +12,8 @@ from torchax.ops.mappings import t2j
 from vllm.attention import Attention as VllmAttention
 from vllm.config import ParallelConfig
 from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.linear import \
+    UnquantizedLinearMethod  # yapf: disable
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
@@ -24,6 +26,8 @@ from tpu_commons.models.vllm.jax_merged_column_parallel_linear import \
     JaxMergedColumnParallelLinear
 from tpu_commons.models.vllm.jax_qkv_parallel_linear import \
     JaxQKVParallelLinear
+from tpu_commons.models.vllm.jax_row_parallel_linear import \
+    JaxRowParallelLinear
 
 P = PartitionSpec
 
@@ -52,7 +56,11 @@ def shard_merged_column_parallel_linear(layer: torch.nn.Module, mesh: Mesh,
 def shard_column_parallel_linear(layer: torch.nn.Module, mesh: Mesh,
                                  vllm_parallel_config: ParallelConfig):
     assert isinstance(layer, ColumnParallelLinear)
-    w = Parameter(torch_view(t2j(layer.weight)))
+    if not isinstance(layer.quant_method, UnquantizedLinearMethod):
+        raise ValueError(
+            "tpu_commons torchax ColumnParallelLinear doesn't support quantization"
+        )
+    w = Parameter(torch_view(t2j(layer.weight)), requires_grad=False)
     layer.weight = w.apply_jax_(jax.device_put,
                                 NamedSharding(mesh, P('model', None)))
     return layer
@@ -61,10 +69,8 @@ def shard_column_parallel_linear(layer: torch.nn.Module, mesh: Mesh,
 def shard_row_parallel_linear(layer: torch.nn.Module, mesh: Mesh,
                               vllm_parallel_config: ParallelConfig):
     assert isinstance(layer, RowParallelLinear)
-    w = Parameter(torch_view(t2j(layer.weight)))
-    layer.weight = w.apply_jax_(jax.device_put,
-                                NamedSharding(mesh, P(None, 'model')))
-    return layer
+    jax_layer = JaxRowParallelLinear(layer, mesh)
+    return jax_layer
 
 
 def shard_fused_moe(layer: torch.nn.Module, mesh: Mesh,
