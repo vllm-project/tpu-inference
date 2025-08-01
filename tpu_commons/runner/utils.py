@@ -11,6 +11,7 @@ import jax
 import jax.numpy as jnp
 from jax._src.interpreters import pxla
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
 from tpu_commons import utils
 from tpu_commons.logger import init_logger
@@ -243,3 +244,49 @@ def create_kv_caches(
                 f"dtype={cache_dtype} | "
                 f"hbm={utils.hbm_usage_gb(devices)}Gb")
     return kv_caches
+
+
+def log_batch_computation_stats(self, total_num_scheduled_tokens: int,
+                                num_reqs: int,
+                                padded_total_num_scheduled_tokens: int,
+                                scheduler_output: "VllmSchedulerOutput"):
+    """
+
+    """
+    num_prefill_tokens = 0
+    num_decode_tokens = 0
+
+    # Get the number of scheduled tokens for each request.
+    num_scheduled_tokens_per_req_list = []
+    # Get the number of tokens already processed for each request.
+    num_computed_tokens_per_req = self.input_batch.num_computed_tokens_cpu[:
+                                                                           num_reqs]
+
+    for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+        assert req_id is not None
+
+        # This is the number of tokens to process in the current step for this request
+        num_scheduled_for_req = scheduler_output.num_scheduled_tokens[req_id]
+        num_scheduled_tokens_per_req_list.append(num_scheduled_for_req)
+
+        # This is the number of tokens already processed for this request (before this step)
+        num_already_computed = num_computed_tokens_per_req[i]
+
+        if num_already_computed == 0:
+            # Prefill
+            num_prefill_tokens += num_scheduled_for_req
+        # This means the request is ongoing
+        else:
+            if num_scheduled_for_req > 1:
+                # It's a multi-token request, so it's chunked prefill
+                num_prefill_tokens += num_scheduled_for_req
+            else:
+                # It's a single token for an ongoing request, so it's decode
+                num_decode_tokens += 1
+
+    logger.info(
+        f"\nBatch composition: Total tokens={total_num_scheduled_tokens}, "
+        f"\nPrefill tokens={num_prefill_tokens}, "
+        f"\nDecode tokens={num_decode_tokens} "
+        f"\n(padded_total_num_scheduled_tokens {padded_total_num_scheduled_tokens})"
+        f"\n(num reqs {num_reqs})")

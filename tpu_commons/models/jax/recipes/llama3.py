@@ -16,7 +16,7 @@ from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.common.attention.attention import (
     AttentionConfig, AttentionMetadata)
 from tpu_commons.models.jax.common.base import Config, ParamFactory
-from tpu_commons.models.jax.common.kv_cache import KVCacheType
+from tpu_commons.models.jax.common.constants import KVCacheType
 from tpu_commons.models.jax.common.layers import (DenseFFWConfig, Embedder,
                                                   EmbedderConfig, LMhead,
                                                   RMSNorm)
@@ -78,7 +78,6 @@ class Llama3ModelConfig():
                     dtype=self.dtype,
                     vllm_config=self.vllm_config),
                 rms_norm_eps=self.rms_norm_eps,
-                block_type="dense",
                 vllm_config=self.vllm_config)
 
 
@@ -156,7 +155,8 @@ class LlamaForCausalLM(Model):
             serving=Llama3ServingConfig(vllm_config=self.vllm_config))
 
         logger.info(f"Using the following config:\n{self.cfg}")
-        logger.info(f"Using the following shardings:\n{self.sharding}")
+        logger.info(
+            f"Using the following sharding overrides:\n{self.sharding}")
         self.mesh = self.sharding.mesh
         self._init_layers()
 
@@ -200,38 +200,10 @@ class LlamaForCausalLM(Model):
                               sharding_cfg=self.cfg.sharding)
         self.lm_head.generate_kernel(self.rng)
 
-    @classmethod
-    def create_model_with_random_weights(cls, vllm_config: VllmConfig,
-                                         rng: jax.Array, mesh: Mesh):
-        """to create a model with random weights."""
-        logger.info("Initializing model with random weights.")
-        param_factory = ParamFactory(
-            kernel_initializer=nnx.initializers.xavier_normal(),
-            scale_initializer=nnx.initializers.ones,
-            random_init=True)
-        return cls(vllm_config, rng, mesh, param_factory)
-
-    @classmethod
-    def create_model_for_checkpoint_loading(cls, vllm_config: VllmConfig,
-                                            rng: jax.Array, mesh: Mesh):
-        """to create a model with abstract shapes for checkpoint loading."""
-        logger.info("Initializing abstract model for checkpoint loading.")
-        param_factory = ParamFactory(
-            kernel_initializer=nnx.initializers.xavier_normal(),
-            scale_initializer=nnx.initializers.ones,
-            random_init=False)
-        return cls(vllm_config, rng, mesh, param_factory)
-
-    # For compatibility with flax.
-    def apply(self, variables, *args, **kwargs):
-        return self.__call__(*args, **kwargs)
-
     def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):
         self.rng = nnx.Rngs(rng)
         weight_loader = Llama3WeightLoader(vllm_config=self.vllm_config,
-                                           model_config=self.cfg.model,
-                                           cache_dir=cache_dir,
-                                           sharding_cfg=self.cfg.sharding)
+                                           model_config=self.cfg.model)
         weight_loader.load_weights(self)
 
     def __call__(
@@ -242,38 +214,49 @@ class LlamaForCausalLM(Model):
         *args,
     ) -> Tuple[List[KVCacheType], jax.Array]:
         is_prefill = False
-        logger.info(f"input_ids in llama3: {input_ids.shape}")
-        x = self.embedder.encode(input_ids)
-        for (i, layer) in enumerate(self.layers):
-            kv_cache = kv_caches[i]
-            with jax.named_scope(f'layer_{i}'):
-                new_kv_cache, x = layer(x, is_prefill, kv_cache,
-                                        attention_metadata)
-            kv_caches[i] = new_kv_cache
+        with jax.named_scope("llama_embed_input"):  #Embedding
+            x = self.embedder.encode(input_ids)
 
-        final_activation = self.final_norm(x)
+        with jax.named_scope("llama_model_transformer_blocks"):
+            for (i, layer) in enumerate(self.layers):
+                kv_cache = kv_caches[i]
+
+                # The first layer is unscoped to avoid JAX tracing issues.
+                # JAX's profiler may incorrectly apply the scope name from the first
+                # layer's kernel compilation to all subsequent layers. Skipping the
+                # first layer ensures distinct scope names for the remaining layers.
+                if i == 0:
+                    new_kv_cache, x = layer(x, is_prefill, kv_cache,
+                                            attention_metadata)
+                else:
+                    with jax.named_scope(f'layer_{i}'):
+                        new_kv_cache, x = layer(x, is_prefill, kv_cache,
+                                                attention_metadata)
+
+                kv_caches[i] = new_kv_cache
+
+        with jax.named_scope(
+                "llama_final_norm"):  #Norm after last transformer block
+            final_activation = self.final_norm(x)
 
         return kv_caches, final_activation
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        logits = jnp.dot(hidden_states,
-                         self.lm_head.input_embedding_table_DV.value)
+        with jax.named_scope("llama_lm_head_projection"
+                             ):  #LM head projection to produce logits
+            logits = jnp.dot(hidden_states,
+                             self.lm_head.input_embedding_table_DV.value)
 
         return logits
 
 
 class Llama3WeightLoader(WeightLoader):
 
-    def __init__(self,
-                 vllm_config: VllmConfig,
-                 model_config: Llama3ModelConfig,
-                 cache_dir: Optional[str] = None,
-                 sharding_cfg: Optional[ShardingConfig] = None):
+    def __init__(self, vllm_config: VllmConfig,
+                 model_config: Llama3ModelConfig):
         super().__init__(vllm_config=vllm_config,
                          model_config=model_config,
-                         framework="flax",
-                         cache_dir=cache_dir,
-                         sharding_cfg=sharding_cfg)
+                         framework="flax")
         self.setup()
 
     def setup(self):
