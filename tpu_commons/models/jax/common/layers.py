@@ -176,11 +176,11 @@ class DenseFFW(nnx.Module):
         """Initializes the weight kernels for the feed-forward layer."""
         self.create_sharding()
 
-    def __call__(self, x, op_mode):
+    def __call__(self, x_TD, op_mode):
         """Performs the forward pass of the FFW layer.
 
         Args:
-            x: The input tensor of shape either `(sequence, d_model)`
+            x_TD: The input tensor of shape either `(sequence, d_model)`
             op_mode: The operational mode ('prefill' or 'generate'), used for
                 selecting sharding annotations.
 
@@ -188,8 +188,9 @@ class DenseFFW(nnx.Module):
             The output tensor of shape `(batch, sequence, d_model)`.
         """
         # TODO consider to create factories for einsum(?)
-        x = jnp.asarray(x, self.cfg.dtype)
-        x_TD = nnx.with_sharding_constraint(x, self.activation_ffw_td[op_mode])
+        x_TD = jnp.asarray(x_TD, self.cfg.dtype)
+        x_TD = nnx.with_sharding_constraint(x_TD,
+                                            self.activation_ffw_td[op_mode])
         act = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_ACT.value)
         with jax.named_scope("wi_0"):
             gating_TF = jnp.einsum('TD,DF -> TF', x_TD,

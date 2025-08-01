@@ -63,11 +63,11 @@ class Router(nnx.Module):
         """Initializes the Router module by creating sharding configurations and generating the router kernel."""
         self.create_sharding()
 
-    def __call__(self, x: Float, op_mode):
+    def __call__(self, x_TD: Float, op_mode):
         """Routes tokens to experts.
 
         Args:
-            x: Input array of shape (sequence_length, d_model).
+            x_TD: Input array of shape (sequence_length, d_model).
             op_mode: The operation mode ('prefill' or 'generate') to determine sharding.
 
         Returns:
@@ -75,8 +75,9 @@ class Router(nnx.Module):
                 - normalized_weights_TX: Normalized weights for selected experts, shape (sequence_length, num_experts_per_tok).
                 - selected_experts_TX: Indices of selected experts, shape (sequence_length, num_experts_per_tok).
         """
-        x = jnp.asarray(x, self.cfg.dtype)
-        x_TD = nnx.with_sharding_constraint(x, self.activation_ffw_td[op_mode])
+        x_TD = jnp.asarray(x_TD, self.cfg.dtype)
+        x_TD = nnx.with_sharding_constraint(x_TD,
+                                            self.activation_ffw_td[op_mode])
         router_act = modeling_flax_utils.ACT2FN[self.cfg.router_act]
         num_experts_per_tok = getattr(
             self.cfg, HuggingFaceArgNames.NUM_EXPERTS_PER_TOKEN.value)
@@ -84,7 +85,7 @@ class Router(nnx.Module):
                                       self.kernel_DE.value)
         weights_TX, selected_experts_TX = jax.lax.top_k(
             router_logits_TE, num_experts_per_tok)
-        if self.cfg.router_act != "sigmoid": # sigmoid does not accept axis argument.
+        if self.cfg.router_act != "sigmoid":  # sigmoid does not accept axis argument.
             normalized_weights_TX = router_act(weights_TX.astype(
                 self.cfg.dtype),
                                                axis=-1)
@@ -178,18 +179,19 @@ class MoE(nnx.Module):
         self.router.create_sharding()
         self.create_sharding()
 
-    def __call__(self, x: Float, op_mode):
+    def __call__(self, x_TD: Float, op_mode):
         """Performs the forward pass of the MoE layer.
 
         Args:
-            x: Input array of shape (sequence_length, d_model).
+            x_TD: Input array of shape (sequence_length, d_model).
             op_mode: The operation mode ('prefill' or 'generate') to determine sharding.
 
         Returns:
             Output array of shape (sequence_length, d_model) after passing through MoE.
         """
-        x = jnp.asarray(x, self.cfg.dtype)
-        x_TD = nnx.with_sharding_constraint(x, self.activation_ffw_td[op_mode])
+        x_TD = jnp.asarray(x_TD, self.cfg.dtype)
+        x_TD = nnx.with_sharding_constraint(x_TD,
+                                            self.activation_ffw_td[op_mode])
         weights_TX, indices_TX = self.router(x_TD, op_mode)
         num_experts = getattr(self.cfg,
                               HuggingFaceArgNames.NUM_LOCAL_EXPERTS.value)
@@ -198,13 +200,13 @@ class MoE(nnx.Module):
                                              dtype=self.cfg.dtype)
         full_weights_TE = jnp.sum(one_hot_indices_TXE * weights_TX[..., None],
                                   axis=1)
-        
-        # Some models use the routing scores to weight the data instead of 
+
+        # Some models use the routing scores to weight the data instead of
         # weighting the expert outputs.
         if self.cfg.apply_expert_weight_before_computation:
             with jax.named_scope("pre_computing_weight"):
-                return self._moe_fwd_preapply_router_weights(x_TD, full_weights_TE,
-                                                       op_mode)
+                return self._moe_fwd_preapply_router_weights(
+                    x_TD, full_weights_TE, op_mode)
         else:
             return self._moe_fwd(x_TD, full_weights_TE, op_mode)
 
@@ -239,7 +241,7 @@ class MoE(nnx.Module):
             sharding=self.efd_sharding)
 
     def _moe_fwd_preapply_router_weights(self, x_TD: jax.Array, weights_TE,
-                                       op_mode):
+                                         op_mode):
         """Performs the forward pass of the MoE experts with router weights pre-applied to the inputs.
 
         Args:
@@ -277,19 +279,20 @@ class MoE(nnx.Module):
             output_TD = down_proj_TED.sum(axis=1)
         return output_TD.astype(self.cfg.dtype)
 
-    def _moe_fwd(self, x: Float, weights, op_mode):
+    def _moe_fwd(self, x_TD: Float, weights, op_mode):
         """Performs the basic forward pass of the MoE experts without dropping or megablocks.
 
         Args:
-            x: Input array for the experts, shape (sequence_length, d_model).
+            x_TD: Input array for the experts, shape (sequence_length, d_model).
             weights: Weights for combining expert outputs, shape (sequence_length, num_experts).
             op_mode: The operation mode ('prefill' or 'generate') to determine sharding.
 
         Returns:
             Output array of shape (sequence_length, d_model).
         """
-        x = jnp.asarray(x, self.cfg.dtype)
-        x_TD = nnx.with_sharding_constraint(x, self.activation_ffw_td[op_mode])
+        x_TD = jnp.asarray(x_TD, self.cfg.dtype)
+        x_TD = nnx.with_sharding_constraint(x_TD,
+                                            self.activation_ffw_td[op_mode])
         act = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_ACT.value)
         with jax.named_scope("gating"):
             gating_TEF = jnp.einsum('TD,EDF -> TEF', x_TD,
