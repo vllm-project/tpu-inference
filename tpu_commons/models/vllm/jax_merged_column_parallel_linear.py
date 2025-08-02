@@ -11,9 +11,10 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import \
     CompressedTensorsW8A8Int8
 
-from tpu_commons.models.vllm.jax_linear_common import (ParallelType,
-                                                       forward_unqunatized,
-                                                       forward_w8a8_int8)
+from tpu_commons.models.vllm.jax_linear_common import (
+    ParallelType, forward_unqunatized, forward_w8a8_int8,
+    reorder_concatenated_tensor_for_sharding,
+    slice_sharded_tensor_for_concatenation)
 
 P = PartitionSpec
 
@@ -33,6 +34,7 @@ class JaxMergedColumnParallelLinear(torch.nn.Module):
         self.has_bias = merged_col_parallel_linear.bias is not None
         self.skip_bias_add = merged_col_parallel_linear.skip_bias_add
         self.return_bias = merged_col_parallel_linear.return_bias
+        self.output_sizes = merged_col_parallel_linear.output_sizes
         assert merged_col_parallel_linear.tp_size == 1, (
             "TP > 1 is only supported under SPMD.")
 
@@ -48,97 +50,84 @@ class JaxMergedColumnParallelLinear(torch.nn.Module):
             self._shard_weight(mesh)
 
     def _shard_weight(self, mesh: Mesh):
-        # Shard all weights in the weight_list
-        for i in range(self.n_linear_layers):
-            weight = getattr(self, f"weight_{i}")
-            weight.apply_jax_(jax.device_put,
-                              NamedSharding(mesh, P('model', None)))
-            setattr(self, f"weight_{i}", weight)
+        self.weight.apply_jax_(jax.device_put,
+                               NamedSharding(mesh, P('model', None)))
 
-        if self.has_bias:
-            for i, _ in enumerate(self.output_sizes):
-                bias = getattr(self, f"bias_{i}")
-                bias.apply_jax_(jax.device_put,
-                                NamedSharding(mesh, P('model', )))
-                setattr(self, f"bias_{i}", bias)
+        if self.bias is not None:
+            self.bias.apply_jax_(jax.device_put,
+                                 NamedSharding(mesh, P('model')))
 
         if self.w8q8_int8_quant:
-            for i, _ in enumerate(self.output_sizes):
-                weight_scale = getattr(self, f"weight_scale_{i}")
-                weight_scale.apply_jax_(jax.device_put,
-                                        NamedSharding(mesh, P('model')))
-                setattr(self, f"weight_scale_{i}", weight_scale)
+            self.weight_scale.apply_jax_(jax.device_put,
+                                         NamedSharding(mesh, P('model')))
 
     def _load_weights_from_merged_linear(
             self, merged_col_parallel_linear: torch.nn.Module):
-        output_sizes = merged_col_parallel_linear.output_sizes
-        concat_weight = torch_view(
-            t2j(merged_col_parallel_linear.weight.data, use_dlpack=False))
-        concat_bias = None
+        n_shards = self.mesh.shape['model']
+        for _, output_size in enumerate(self.output_sizes):
+            assert output_size % n_shards == 0, "Each output size in MergedColumnParallelLinear must be a  multiple of num chips in the 'model' axis."
+
+        concat_weight = t2j(merged_col_parallel_linear.weight.data,
+                            use_dlpack=False)
+        weight = reorder_concatenated_tensor_for_sharding(
+            concat_weight, self.output_sizes, n_shards)
+        weight = Parameter(torch_view(weight), requires_grad=False)
+        self.register_parameter("weight", weight)
+
         if self.has_bias:
-            concat_bias = torch_view(
-                t2j(merged_col_parallel_linear.bias.data, use_dlpack=False))
+            concat_bias = t2j(merged_col_parallel_linear.bias.data,
+                              use_dlpack=False)
+            bias = reorder_concatenated_tensor_for_sharding(
+                concat_bias, self.output_sizes, n_shards)
+            bias = Parameter(torch_view(bias), requires_grad=False)
+            self.register_parameter("bias", bias)
+        else:
+            self.register_parameter("bias", None)
+
         if self.w8q8_int8_quant:
-            concat_weight_scale = torch_view(
-                t2j(merged_col_parallel_linear.weight_scale.data,
-                    use_dlpack=False))
-        start_offset = 0
-        for i, size in enumerate(output_sizes):
-            weight = Parameter(concat_weight[start_offset:start_offset +
-                                             size].detach(),
-                               requires_grad=False)
-            setattr(self, f"weight_{i}", weight)
-
-            if concat_bias is not None:
-                bias = Parameter(concat_bias[start_offset:start_offset +
-                                             size].detach(),
-                                 requires_grad=False)
-                setattr(self, f"bias_{i}", bias)
-            else:
-                setattr(self, f"bias_{i}", None)
-
-            if self.w8q8_int8_quant:
-                assert weight.jax().dtype == jnp.int8
-                weight_scale = Parameter(
-                    concat_weight_scale[start_offset:start_offset +
-                                        size].detach(),
-                    requires_grad=False)
-                setattr(self, f"weight_scale_{i}", weight_scale)
-            else:
-                setattr(self, f"weight_scale_{i}", None)
-
-            start_offset += size
+            assert self.weight.jax().dtype == jnp.int8
+            concat_weight_scale = t2j(
+                merged_col_parallel_linear.weight_scale.data, use_dlpack=False)
+            weight_scale = reorder_concatenated_tensor_for_sharding(
+                concat_weight_scale, self.output_sizes, n_shards)
+            weight_scale = Parameter(torch_view(weight_scale),
+                                     requires_grad=False)
+            self.register_parameter("weight_scale", weight_scale)
+        else:
+            self.register_parameter("weight_scale", None)
 
     def forward(self, input):
         x = input.jax()
-        # Apply linear transformations for each weight/bias pair
-        outputs = []
-        for i, _ in enumerate(self.output_sizes):
-            weight = getattr(self, f"weight_{i}").jax()
-            bias = getattr(self, f"bias_{i}")
-            bias = None if (self.skip_bias_add or bias is None) else bias.jax()
-            if self.w8q8_int8_quant:
-                weight_scale = getattr(self, f"weight_scale_{i}").jax()
-                output = torch_view(
-                    forward_w8a8_int8(x, weight, bias, weight_scale, self.mesh,
-                                      self.gather_output,
-                                      ParallelType.COL_PARALLEL))
-            else:
-                output = torch_view(forward_unqunatized(x, weight, bias))
-            outputs.append(output)
+        weight = self.weight.jax()
+        bias = None if (self.skip_bias_add
+                        or self.bias is None) else self.bias.jax()
+        if self.w8q8_int8_quant:
+            weight_scale = self.weight_scale.jax(
+            ) if self.w8q8_int8_quant else None
+            output = forward_w8a8_int8(x, weight, bias, weight_scale,
+                                       self.mesh, False,
+                                       ParallelType.COL_PARALLEL)
+        else:
+            output = forward_unqunatized(x, weight, bias)
 
-        # Concatenate all outputs
-        merged_output = torch.cat(outputs, dim=-1)
+        n_shards = self.mesh.shape['model']
+        split_outputs = slice_sharded_tensor_for_concatenation(
+            output, self.output_sizes, n_shards, self.mesh)
+        if self.gather_output:
+            split_outputs = [
+                jax.lax.with_sharding_constraint(t,
+                                                 NamedSharding(self.mesh, P()))
+                for t in split_outputs
+            ]
+        output = torch_view(jnp.concatenate(split_outputs, axis=-1))
 
-        # Handle bias return if needed
-        if self.return_bias:
+        if not self.return_bias:
+            return output
+
+        if self.skip_bias_add or self.bias is None:
             output_bias = None
-            if self.bias_0 is not None:
-                output_bias = torch.cat([
-                    getattr(self, f"bias_{i}")
-                    for i, _ in enumerate(self.output_sizes)
-                ],
-                                        dim=-1)
-            return merged_output, output_bias
-
-        return merged_output
+        else:
+            split_biases = slice_sharded_tensor_for_concatenation(
+                self.bias, self.output_sizes, n_shards, self.mesh)
+            output_bias = torch_view(jnp.concatenate(split_biases, axis=-1))
+        return output, output_bias

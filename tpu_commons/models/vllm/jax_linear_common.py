@@ -65,3 +65,75 @@ def forward_w8a8_int8(x: jax.Array, w: jax.Array, b: jax.Array, w_s: jax.Array,
     if b is not None:
         output = output + b
     return output
+
+
+def reorder_concatenated_tensor_for_sharding(concatenated_tensor: jax.Array,
+                                             split_sizes: list[int],
+                                             n_shards: int):
+    """
+    Reorder a replicated concatenated tensor such that when sharded on multiple chips, each shard is a concatenation of the shards of the individual tensors.
+
+    Args:
+        concatenated_tensor: the tensor, concatenated on the 0-th dim.
+        split_sizes: each individual tensor's size on the 0-th dim.
+        n_shards: num of shards.
+    """
+
+    # Split the concatenated tensor into individual tensors.
+    split_tensors = []
+    start_offset = 0
+    for i, split_size in enumerate(split_sizes):
+        split_tensor = concatenated_tensor[start_offset:start_offset +
+                                           split_size]
+        split_tensors.append(split_tensor)
+        start_offset += split_size
+
+    # For each shard, collect the portion of each split tensor that should be on this shard.
+    reordered_tensor_shards = []
+    for j in range(n_shards):
+        split_tensors_for_this_shard = []
+        for i, split_size in enumerate(split_sizes):
+            sz = split_size // n_shards  # size of this split tensor per shard
+            split_tensor = split_tensors[i]
+            t = split_tensor[j * sz:(j + 1) * sz]
+            split_tensors_for_this_shard.append(t)
+        tensor_shard = jnp.concatenate(split_tensors_for_this_shard)
+        reordered_tensor_shards.append(tensor_shard)
+
+    reordered_tensor = jnp.concatenate(reordered_tensor_shards)
+    return reordered_tensor
+
+
+def slice_sharded_tensor_for_concatenation(sharded_tensor: jax.Array,
+                                           split_sizes: list[int],
+                                           n_shards: int, mesh: Mesh):
+    """
+    Slice the input tensor which is sharded on multiple chips into individual tensors with the same sharding.
+
+    Args:
+        sharded_tensor: the input tensor, sharded on the last dim.
+        split_sizes: each individual tensor's size on the last dim.
+        n_shards: num of shards.
+    """
+
+    def _get_slice_on_shard(tensor_shard, start_offset, end_offset):
+        return tensor_shard[:, start_offset:end_offset]
+
+    split_tensors = []
+    start_offset = 0
+    for i, split_size in enumerate(split_sizes):
+        sz = split_size // n_shards  # size of this split tensor per shard
+        end_offset = start_offset + sz
+        _get_slice_on_shard_bound = functools.partial(
+            _get_slice_on_shard,
+            start_offset=start_offset,
+            end_offset=end_offset)
+        start_offset = end_offset
+        split_tensor = shard_map(_get_slice_on_shard_bound,
+                                 mesh=mesh,
+                                 in_specs=(P(None, 'model')),
+                                 out_specs=(P(None, 'model')),
+                                 check_rep=False)(sharded_tensor)
+        split_tensors.append(split_tensor)
+
+    return split_tensors
