@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 import functools
 import itertools
+import math
 import os
 import queue
+import signal
 import threading
 import time
 import traceback
-import signal
-import math
 from typing import Any, Callable, Optional, TypeVar, Union
 
 import jax
@@ -17,7 +17,6 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.core import EngineCore as vLLMEngineCore
 from vllm.v1.engine.core import EngineCoreProc as vLLMEngineCoreProc
-from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
 
 from tpu_commons.core import disagg_executor, disagg_utils
@@ -54,10 +53,14 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
         vllm_config: VllmConfig,
         local_client: bool,
         handshake_address: str,
-        executor_class: type[Executor],
         log_stats: bool,
         engine_index: int = 0,
+        **kwargs,
     ):
+        if 'dp_rank' in kwargs or 'local_dp_rank' in kwargs:
+            logger.debug(
+                "Ignoring data parallelism arguments for non-DP disaggregated engine."
+            )
         # We don't invoke super class's ctor as we are not really the
         # engine core to be executed, instead we create other instance of
         # engine cores and let them do the work.
@@ -160,9 +163,12 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
 
-        with self._perform_handshakes(handshake_address, identity,
-                                      local_client, vllm_config,
-                                      client_handshake_address=None) as addresses:
+        with self._perform_handshakes(
+                handshake_address,
+                identity,
+                local_client,
+                vllm_config,
+                client_handshake_address=None) as addresses:
             self.client_count = len(addresses.outputs)
 
             # Set up data parallel environment.
@@ -178,16 +184,35 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
         # and to overlap some serialization/deserialization with the
         # model forward pass.
         # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
-        threading.Thread(target=self.process_input_sockets,
-                         args=(addresses.inputs, addresses.coordinator_input,
-                               identity),
-                         daemon=True).start()
+        ready_event = threading.Event()
+        input_thread = threading.Thread(target=self.process_input_sockets,
+                                        args=(addresses.inputs,
+                                              addresses.coordinator_input,
+                                              identity, ready_event),
+                                        daemon=True)
+        input_thread.start()
+
         self.output_thread = threading.Thread(
             target=self.process_output_sockets,
             args=(addresses.outputs, addresses.coordinator_output,
                   self.engine_index),
             daemon=True)
         self.output_thread.start()
+
+        self.output_thread = threading.Thread(
+            target=self.process_output_sockets,
+            args=(addresses.outputs, addresses.coordinator_output,
+                  self.engine_index),
+            daemon=True)
+        self.output_thread.start()
+
+        # Don't complete handshake until DP coordinator ready message is
+        # received.
+        while not ready_event.wait(timeout=10):
+            if not input_thread.is_alive():
+                raise RuntimeError("Input socket thread died during startup")
+            if addresses.coordinator_input is not None:
+                logger.info("Waiting for READY message from DP Coordinator...")
 
     @staticmethod
     def _create_engine_cores(
@@ -293,8 +318,7 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
             with LatencyTracker(f"prefill-{idx}"):
                 model_output = prefill_engine.execute_model_with_error_logging(
                     prefill_engine.model_executor.execute_model,
-                    scheduler_output
-                )
+                    scheduler_output)
 
             if scheduler_output.total_num_scheduled_tokens > 0:
                 logger.debug(f"Prefill result: {model_output}")
@@ -427,9 +451,9 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
                 # Insert the request to the decoder.
                 req_id = prefill_output["req_id"]
                 vllm_request = self._requests[req_id]
-                # Caching num_computed_tokens. The tokens in kv manager allocate blocks 
+                # Caching num_computed_tokens. The tokens in kv manager allocate blocks
                 # is computed as num_computed_tokens + num_new_tokens, so without caching
-                # the token number would double. 
+                # the token number would double.
                 prompt_tokens = vllm_request.num_computed_tokens
                 vllm_request.num_computed_tokens = 0
                 kv_cache = prefill_output["cache"]
@@ -441,7 +465,8 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
                 )
                 vllm_request.num_computed_tokens = prompt_tokens
                 new_block_ids = kv_cache_manager.get_block_ids(req_id)
-                assert(len(new_block_ids[0]) == math.ceil(prompt_tokens / self.vllm_config.cache_config.block_size))
+                assert (len(new_block_ids[0]) == math.ceil(
+                    prompt_tokens / self.vllm_config.cache_config.block_size))
 
                 with LatencyTracker(f"KVCacheInsert-{len(new_block_ids[0])}"):
                     decode_engine.model_executor.driver_worker.model_runner.insert_request_with_kv_cache(
@@ -455,16 +480,15 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
 
             scheduler_output = decode_engine.scheduler.schedule()
 
-            logger.info(
-                f'''decode-{idx}: scheduler_output - 
-                {scheduler_output.scheduled_cached_reqs.num_computed_tokens}, 
-                new block ids - {scheduler_output.scheduled_cached_reqs.new_block_ids}''')
+            logger.info(f'''decode-{idx}: scheduler_output -
+                {scheduler_output.scheduled_cached_reqs.num_computed_tokens},
+                new block ids - {scheduler_output.scheduled_cached_reqs.new_block_ids}'''
+                        )
 
             with LatencyTracker(f"decode-{idx}"):
                 model_output = decode_engine.execute_model_with_error_logging(
                     decode_engine.model_executor.execute_model,
-                    scheduler_output
-                )
+                    scheduler_output)
             if scheduler_output.total_num_scheduled_tokens > 0:
                 logger.debug(f"Decode result: {model_output}")
 
