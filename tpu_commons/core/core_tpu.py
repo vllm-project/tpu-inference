@@ -199,13 +199,6 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
             daemon=True)
         self.output_thread.start()
 
-        self.output_thread = threading.Thread(
-            target=self.process_output_sockets,
-            args=(addresses.outputs, addresses.coordinator_output,
-                  self.engine_index),
-            daemon=True)
-        self.output_thread.start()
-
         # Don't complete handshake until DP coordinator ready message is
         # received.
         while not ready_event.wait(timeout=10):
