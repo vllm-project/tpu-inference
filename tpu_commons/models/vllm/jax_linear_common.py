@@ -117,7 +117,10 @@ def slice_sharded_tensor_for_concatenation(sharded_tensor: jax.Array,
     """
 
     def _get_slice_on_shard(tensor_shard, start_offset, end_offset):
-        return tensor_shard[:, start_offset:end_offset]
+        return tensor_shard[..., start_offset:end_offset]
+
+    sharding_spec = P(*((None, ) * (sharded_tensor.ndim - 1) +
+                        ('model', )))  # Shard on the last dim.
 
     split_tensors = []
     start_offset = 0
@@ -131,8 +134,8 @@ def slice_sharded_tensor_for_concatenation(sharded_tensor: jax.Array,
         start_offset = end_offset
         split_tensor = shard_map(_get_slice_on_shard_bound,
                                  mesh=mesh,
-                                 in_specs=(P(None, 'model')),
-                                 out_specs=(P(None, 'model')),
+                                 in_specs=(sharding_spec),
+                                 out_specs=(sharding_spec),
                                  check_rep=False)(sharded_tensor)
         split_tensors.append(split_tensor)
 
