@@ -282,11 +282,21 @@ class Qwen2ForCausalLM(nnx.Module):
     def __call__(
         self,
         kv_caches: List[jax.Array],
-        input_ids: jax.Array,
+        input_ids: Optional[jax.Array],
         attention_metadata: AttentionMetadata,
+        inputs_embeds: Optional[jax.Array] = None,
         *args,
     ) -> Tuple[List[jax.Array], jax.Array, jax.Array]:
-        x = self.embed(input_ids)
+        # input_ids: (T,)
+
+        # x: (T, D)
+        if inputs_embeds is not None:
+            x = inputs_embeds
+        else:
+            x = self.embed(input_ids)
+
+
+        # (T, D)
         kv_caches, x = self.model(
             kv_caches,
             x,

@@ -945,13 +945,32 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
 
     def get_input_embeddings(self, input_ids: jax.Array,
                              multimodal_embeddings: Optional[MultiModalEmbeddings]) -> jax.Array:
+        
+        # jax.debug.print("[DEBUG] mm embedings: " \
+        # "multimodal_embeddings: {x}, shape: {shape}, dtype: {dtype}",
+        # x=multimodal_embeddings[0],
+        # shape=multimodal_embeddings[0].shape,
+        # dtype=multimodal_embeddings[0].dtype,)
+
         inputs_embeds = self.language_model.embed(input_ids)
+
+        # jax.debug.print("[DEBUG] text imbeddings: " \
+        # "inputs_embeds: {x}, shape: {shape}, dtype: {dtype}",
+        # x=inputs_embeds,
+        # shape=inputs_embeds.shape,
+        # dtype=inputs_embeds.dtype,)
 
         if multimodal_embeddings is not None \
             and len(multimodal_embeddings) != 0:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings,
                 [self.config.image_token_id, self.config.video_token_id])
+            
+        # jax.debug.print("[DEBUG] all embeddings before causalLM: " \
+        # "inputs_embeds: {x}, shape: {shape}, dtype: {dtype}",
+        # x=inputs_embeds,
+        # shape=inputs_embeds.shape,
+        # dtype=inputs_embeds.dtype,)
         return inputs_embeds
         
 
@@ -963,12 +982,13 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         inputs_embeds: Optional[jax.Array] = None,
         *args,
     ) -> tuple[list[jax.Array], jax.Array]:
-        if inputs_embeds is None:
-            inputs_embeds = self.language_model.embed(input_ids)
-        kv_caches, x = self.language_model.model(
-            kv_caches,
-            inputs_embeds,
-            attention_metadata,
+        # The logic of choosing between input_ids and inputs_embeds is
+        # handled inside self.language_model.__call__
+        kv_caches, x = self.language_model(
+            kv_caches=kv_caches,
+            input_ids=input_ids,
+            attention_metadata=attention_metadata,
+            inputs_embeds=inputs_embeds,
         )
         return kv_caches, x
 

@@ -762,10 +762,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                     if key == 'image_grid_thw':
                         # change it to tuple of tuples to make it hashable for JIT
                         # Shape: (num_images, 3)
-                        print("Here!")
+                        # image_grid_thw = tuple(
+                        #     tuple(row)
+                        #     for row in batched_mm_inputs[key][0].tolist())
+                        
+                        # Shape: (B, N, 3) -> (B*N, 3) -> tuple of tuples
+                        grid_thw_tensor = batched_mm_inputs[key]
+                        grid_thw_reshaped = grid_thw_tensor.reshape(-1, 3)
                         image_grid_thw = tuple(
                             tuple(row)
-                            for row in batched_mm_inputs[key][0].tolist())
+                            for row in grid_thw_reshaped.tolist()
+                        )
 
                         # batched_mm_inputs[key] = image_grid_thw
 
@@ -944,6 +951,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                 inputs_embeds,
             )
             self.maybe_wait_for_kv_save()
+
             hidden_states = self.select_hidden_states_fn(
                 hidden_states, logits_indices)
             logits = self.compute_logits_fn(self.state, hidden_states)
@@ -1368,6 +1376,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             self.requests[req_id] = CachedRequestState(**data_items,
                                                        output_token_ids=[])
             
+            # NOTE(wenlong): We need to explicitly set this 
+            # because asdict will convert List[PlaceholderRange] to list[dict]
             self.requests[req_id].mm_positions = new_req_data.mm_positions
 
 
