@@ -502,7 +502,7 @@ class Qwen2_5_VisionTransformer(nnx.Module):
         self.merger = Qwen2_5_VisionPatchMerger(
             d_model=vision_config.out_hidden_size,
             context_dim=vision_config.hidden_size,
-            norm_layer=partial(nnx.RMSNorm, epsilon=hf_config.rms_norm_eps),
+            norm_layer=partial(nnx.RMSNorm, epsilon=norm_eps),
             spatial_merge_size=vision_config.spatial_merge_size,
             dtype=dtype,
             rngs=rngs)
@@ -629,13 +629,6 @@ class Qwen2_5_VisionTransformer(nnx.Module):
         # )
         # jax.effects_barrier()
         hidden_states = self.patch_embed(x)
-        # jax.debug.print("[DEBUG] right after patch embed:" \
-        # "hidden_states: {x}, shape: {shape}, dtype: {dtype}",
-        #     x=hidden_states,
-        #     shape=hidden_states.shape,
-        #     dtype=hidden_states.dtype,
-        # )
-        # jax.effects_barrier()
 
         # num of patches
         seq_len = x.shape[0]
@@ -753,29 +746,17 @@ class Qwen2_5_VisionTransformer(nnx.Module):
                                     use_fullattn=False)
 
 
-        jax.debug.print("[VisionTransformer] after all blocks: " \
-        "hidden_states: {x}, shape: {shape}, dtype: {dtype}",
-            x=hidden_states,
-            shape=hidden_states.shape,
-            dtype=hidden_states.dtype,
-        )
+        
 
         # # For Qwen2.5-VL-3B, float16 will overflow at last block
         # # for long visual tokens sequences.
         # if hidden_states.dtype == jnp.float16:
         #     hidden_states = self.cast_overflow_tensors(hidden_states)
 
-        # # adapter
-        # hidden_states = self.merger(hidden_states)
-        # reverse_indices = jnp.argsort(window_index)
-        # hidden_states = hidden_states[reverse_indices, :]
-
-        # x = self.patch_embed(x)
-        # # ... simplified ...
-        # for blk in self.blocks:
-        #     # A proper implementation needs cu_seqlens and rotary_pos_emb
-        #     x = blk(x, None, None)
-        # x = self.merger(x)
+        # adapter
+        hidden_states = self.merger(hidden_states)
+        reverse_indices = jnp.argsort(window_index)
+        hidden_states = hidden_states[reverse_indices, :]
         return hidden_states
 
 
@@ -911,18 +892,16 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             # jax.effects_barrier()
             image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
 
-        # image_embeds = jnp.ones((2, 2, 2))
 
-        # # Split concatenated embeddings for each image item.
-        # merge_size = self.visual.config.spatial_merge_size
-        # sizes = jnp.prod(grid_thw, axis=-1) // merge_size // merge_size
+        # Split concatenated embeddings for each image item.
+        merge_size = self.visual.config.spatial_merge_size
+        sizes = jnp.prod(jnp.array(grid_thw), axis=-1) // merge_size // merge_size
 
         # if sizes.shape[0] <= 1:
         #     return (image_embeds, )
 
-        # split_indices = jnp.cumsum(sizes)[:-1]
-        # return tuple(jnp.split(image_embeds, split_indices))
-        return tuple()
+        split_indices = jnp.cumsum(sizes)[:-1]
+        return tuple(jnp.split(image_embeds, split_indices))
 
     def get_multimodal_embeddings(self, image_grid_thw: tuple[tuple[int, int,
                                                                     int], ...],
@@ -956,8 +935,10 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             #     video_embeddings = self._process_video_input(multimodal_input)
             #     multimodal_embeddings += video_embeddings
 
-        jax.debug.print("multimodal_embeddings: {multimodal_embeddings}",
-                        multimodal_embeddings=multimodal_embeddings)
+        jax.debug.print("multimodal_embeddings: {x}, shape: {shape}, dtype: {dtype}",
+                        x=multimodal_embeddings[0],
+                        shape=multimodal_embeddings[0].shape,
+                        dtype=multimodal_embeddings[0].dtype)
 
         return multimodal_embeddings
 
