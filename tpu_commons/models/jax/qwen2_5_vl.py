@@ -1,10 +1,11 @@
-from functools import partial
-from typing import Callable, Literal, Optional, TypedDict, Union, NamedTuple
 import math
+from functools import partial
+from typing import Callable, Literal, NamedTuple, Optional, TypedDict, Union
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
+from jax.experimental.pallas.ops.tpu.flash_attention import flash_attention
 from jax.sharding import Mesh
 from transformers import modeling_flax_utils
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
@@ -14,14 +15,9 @@ from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 
 from tpu_commons import utils_jax as utils
 from tpu_commons.logger import init_logger
-
-from tpu_commons.models.jax.attention_interface import attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.models.jax.layers.rope import apply_rope
 from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
 from tpu_commons.models.jax.utils.weight_utils import load_hf_weights
-
-from jax.experimental.pallas.ops.tpu.flash_attention import flash_attention
 
 logger = init_logger(__name__)
 
@@ -35,8 +31,9 @@ init_fn = nnx.initializers.uniform()
 
 DEFAULT_BLOCK_K_MAJOR = 128
 
+
 class SegmentIds(NamedTuple):
-  """SegmentIds for Q and KV sequences.
+    """SegmentIds for Q and KV sequences.
 
   SegmentIds are used to generate segment mask, which prevents attention between
   different segments in the input sequence. Each array is a list of ids
@@ -48,8 +45,9 @@ class SegmentIds(NamedTuple):
     kv: segment ids along the KV sequence.
   """
 
-  q: jax.Array  # [batch_size, q_seq_len]
-  kv: jax.Array  # [batch_size, kv_seq_len]
+    q: jax.Array  # [batch_size, q_seq_len]
+    kv: jax.Array  # [batch_size, kv_seq_len]
+
 
 class Qwen2_5_VLImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
@@ -137,7 +135,7 @@ def apply_rotary_pos_emb_vision(x: jax.Array,
 
     _, _, _, H = x.shape
     half_dim = H // 2
-    
+
     # [B, T, N, H//2]
     x_real = x[..., :half_dim]
     x_imag = x[..., half_dim:]
@@ -160,8 +158,8 @@ def apply_rotary_pos_emb_vision(x: jax.Array,
     return x_rotated
 
 
-def generate_window_segment_ids(cu_seqlens: jax.Array) -> SegmentIds:
-    """Generates segment IDs for windowed attention.
+def generate_window_segment_ids(cu_seqlens: jax.Array, seq_len: int, padded_seq_len: int) -> SegmentIds:
+    """Generates segment IDs for windowed attention
 
     Args:
         cu_seqlens: A 1D array of cumulative sequence lengths for each window.
@@ -170,16 +168,24 @@ def generate_window_segment_ids(cu_seqlens: jax.Array) -> SegmentIds:
     Returns:
         A SegmentIds object for flash_attention.
     """
-    total_tokens = cu_seqlens[-1].item()
-    indices = jnp.arange(total_tokens, dtype=jnp.int32)
-    # For each token, find which window it belongs to.
-    # jnp.searchsorted finds the index where the token index would be inserted
-    # in cu_seqlens to maintain order. 'right' side means it will find the
-    # index of the *end* of the window.
-    segment_ids_val = jnp.searchsorted(cu_seqlens, indices, side='right') - 1
-    # The shape should be (B, T), and B=1 here.
-    segment_ids_val = segment_ids_val.reshape(1, -1)
-    return SegmentIds(q=segment_ids_val, kv=segment_ids_val)
+    # # The searchsorted implementation is not JIT-friendly as it requires a
+    # # concrete value for `jnp.arange`. A more JIT-friendly way to generate
+    # # segment IDs is to use `jnp.repeat`.
+    # window_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+    # num_windows = window_lengths.shape[0]
+    # segment_ids_val = jnp.repeat(jnp.arange(num_windows, dtype=jnp.int32),
+    #                              repeats=window_lengths)
+    # # The shape should be (B, T), and B=1 here.
+    # segment_ids_val = segment_ids_val.reshape(1, -1)
+    indices = jnp.arange(seq_len)
+    segment_ids = jnp.searchsorted(cu_seqlens[1:], indices,side='right') + 1
+    padding_segment_ids = jnp.zeros(padded_seq_len - seq_len)
+    segment_ids = jnp.concatenate([segment_ids, padding_segment_ids])
+    # segment_ids = jnp.tile(segment_ids[None, :], (1,1))
+    segment_ids = segment_ids.reshape(1, -1)
+
+    return SegmentIds(q=segment_ids, kv=segment_ids)
+
 
 class Qwen2_5_VisionAttention(nnx.Module):
 
@@ -223,14 +229,13 @@ class Qwen2_5_VisionAttention(nnx.Module):
 
     # def generate_window_segment_ids(
     #         window_index: list
-    # ) -> 
+    # ) ->
 
     def __call__(
         self,
         x: jax.Array,
         rotary_pos_emb: jax.Array,
         cu_window_seqlens: Optional[jax.Array] = None,
-        window_index: Optional[jax.Array] = None,
         use_fullattn: bool = True,
     ) -> jax.Array:
         T, B, D = x.shape
@@ -239,7 +244,7 @@ class Qwen2_5_VisionAttention(nnx.Module):
         qkv = self.qkv_proj(x)
 
         # Split into Q, K, V.
-        # NOTE: simplified from vLLM's split_qkv, 
+        # NOTE: simplified from vLLM's split_qkv,
         # may need to revisit for tp>1
         # [T, B, 3 * D] -> 3 *[T, B, D]
         q, k, v = jnp.split(qkv, 3, axis=-1)
@@ -249,72 +254,71 @@ class Qwen2_5_VisionAttention(nnx.Module):
         k = k.reshape(T, B, self.num_heads, self.head_dim)
         v = v.reshape(T, B, self.num_heads, self.head_dim)
 
+        # segment_ids = None
+        # if use_fullattn:
+        #     jax.debug.print("Use full attention! ")
+        # else:
+        #     jax.debug.print("Use window attention! ")
+        #     # The input hidden_states are already window-shuffled.
 
-        segment_ids=None
-        if use_fullattn:
-            jax.debug.print("Use full attention! ")
-        else:
-            jax.debug.print("Use window attention! ")
-            if window_index is None:
-                raise ValueError("window_index is None")
-            q = q[window_index]
-            k = k[window_index]
-            v = v[window_index]
-            rotary_pos_emb = rotary_pos_emb[window_index]
-            segment_ids = generate_window_segment_ids(cu_window_seqlens)
-        
-        
         # [T, B, N, H] -> [B, T, N, H]
-        q = jnp.transpose(q, (1, 0, 2, 3)) 
-        k = jnp.transpose(k, (1, 0, 2, 3)) 
-        v = jnp.transpose(v, (1, 0, 2, 3)) 
-        
+        q = jnp.transpose(q, (1, 0, 2, 3))
+        k = jnp.transpose(k, (1, 0, 2, 3))
+        v = jnp.transpose(v, (1, 0, 2, 3))
 
         # rotary_pos_emb shape: (T, H)
         q = apply_rotary_pos_emb_vision(q, rotary_pos_emb)
         k = apply_rotary_pos_emb_vision(k, rotary_pos_emb)
 
-        # NOTE: an extra transpose because we need to 
-        # align the correctness with vLLM's design. 
+        # NOTE: an extra transpose because we need to
+        # align the correctness with vLLM's design.
         # Could remove one once implemented.
         # [B, T, N, H] -> [B, N, T, H]
-        q = jnp.transpose(q, (0, 2, 1, 3)) 
-        k = jnp.transpose(k, (0, 2, 1, 3)) 
-        v = jnp.transpose(v, (0, 2, 1, 3)) 
+        q = jnp.transpose(q, (0, 2, 1, 3))
+        k = jnp.transpose(k, (0, 2, 1, 3))
+        v = jnp.transpose(v, (0, 2, 1, 3))
 
         # Pad the sequence length to be a multiple of 128 for flash_attention
         block_k_major = DEFAULT_BLOCK_K_MAJOR
-
-        padded_T = (T + block_k_major - 1) // block_k_major * block_k_major
-        pad_width = ((0, 0), (0, 0), (0, padded_T - T), (0, 0))
+        T_attn = q.shape[2]
+        padded_T = (T_attn + block_k_major - 1) // block_k_major * block_k_major
+        pad_width = ((0, 0), (0, 0), (0, padded_T - T_attn), (0, 0))
 
         q = jnp.pad(q, pad_width, 'constant')
         k = jnp.pad(k, pad_width, 'constant')
         v = jnp.pad(v, pad_width, 'constant')
 
-        segment_ids_val = (jnp.arange(padded_T) >= T).astype(jnp.int32).reshape(B, -1)
-        segment_ids = SegmentIds(q=segment_ids_val, kv=segment_ids_val)
-
-        output = flash_attention(q, k, v, 
-                            segment_ids=segment_ids,
-                            sm_scale=1.0/math.sqrt(self.head_dim),
-                            causal=False
-                           )
-        
-        # Unpad the output
-        output = output[:, :, :T, :]
-
+        segment_ids = None
         if use_fullattn:
-            # [B, N, T, H] -> [T, B, N, H] -> [T, B, D]
-            output = jnp.transpose(output, (2, 0, 1, 3))
+            segment_ids_val = (jnp.arange(padded_T)
+                           >= T_attn).astype(jnp.int32).reshape(B, -1)
+            segment_ids = SegmentIds(q=segment_ids_val, kv=segment_ids_val)
         else:
-            restore_index = jnp.argsort(window_index)
-            output_2d = output.reshape(-1,self.num_heads * self.head_dim)
-            output_restored = output_2d[restore_index]
-            output = output_restored.reshape(T, B, self.num_heads, self.head_dim)
-        
-        output = output.reshape(T,B,D)
-        
+            segment_ids = generate_window_segment_ids(cu_window_seqlens, T_attn, padded_T)
+
+        # jax.debug.print("[VisionAttention] after o_proj: " \
+        # "output: {x}, shape: {shape}, dtype: {dtype}",
+        #     x=output,
+        #     shape=output.shape,
+        #     dtype=output.dtype,
+        # )
+        # jax.debug.print("[VisionAttention] segment_ids: {x}", x=segment_ids)
+
+        output = flash_attention(q,
+                                 k,
+                                 v,
+                                 segment_ids=segment_ids,
+                                 sm_scale=1.0 / math.sqrt(self.head_dim),
+                                 causal=False)
+
+        # Unpad the output
+        output = output[:, :, :T_attn, :]
+
+        # [B, N, T, H] -> [T, B, N, H]
+        output = jnp.transpose(output, (2, 0, 1, 3))
+
+        output = output.reshape(T, B, D)
+
         output = self.proj(output)
 
         # jax.debug.print("[VisionAttention] after o_proj: " \
@@ -345,25 +349,19 @@ class Qwen2_5_VisionBlock(nnx.Module):
                                      dtype=dtype,
                                      rngs=rngs)
 
-    def __call__(self, x: jax.Array,
+    def __call__(self,
+                 x: jax.Array,
                  rotary_pos_emb: jax.Array,
                  cu_window_seqlens: Optional[jax.Array] = None,
-                 window_index: Optional[jax.Array] = None,
                  use_fullattn: bool = True) -> jax.Array:
-        
+
         # y = self.norm1(x)
         # z = self.attn(y, rotary_pos_emb)
 
-        x = x + self.attn(self.norm1(x), rotary_pos_emb, cu_window_seqlens, 
-                          window_index, use_fullattn)
+        x = x + self.attn(self.norm1(x), rotary_pos_emb, cu_window_seqlens, use_fullattn)
         x = x + self.mlp(self.norm2(x))
 
-        jax.debug.print("[VisionBlock] after mlp: " \
-        "x: {x}, shape: {shape}, dtype: {dtype}",
-            x=x,
-            shape=x.shape,
-            dtype=x.dtype,
-        )
+        
         return x
 
 
@@ -530,8 +528,8 @@ class Qwen2_5_VisionTransformer(nnx.Module):
         max_size = max(h, w)
         rotary_pos_emb_full = self.rotary_pos_emb(max_size)
 
-        
-        rotary_pos_emb = rotary_pos_emb_full[pos_ids].reshape(pos_ids.shape[0], -1)
+        rotary_pos_emb = rotary_pos_emb_full[pos_ids].reshape(
+            pos_ids.shape[0], -1)
         rotary_pos_emb = rotary_pos_emb.reshape(
             rotary_pos_emb.shape[0] // self.spatial_merge_unit,
             self.spatial_merge_unit, -1)
@@ -567,7 +565,8 @@ class Qwen2_5_VisionTransformer(nnx.Module):
         # The number of valid indices is static because grid_t, grid_h, grid_w
         # are static.
         num_valid_indices = grid_t * llm_grid_h * llm_grid_w
-        valid_indices = jnp.nonzero(index_padded != -100, size=num_valid_indices)[0]
+        valid_indices = jnp.nonzero(index_padded != -100,
+                                    size=num_valid_indices)[0]
         index_new = index_padded[valid_indices]
         cu_seqlens_tmp = jnp.cumsum(seqlens) * self.spatial_merge_unit
         cu_seqlens_tmp = cu_seqlens_tmp.astype(jnp.int32)
@@ -585,11 +584,10 @@ class Qwen2_5_VisionTransformer(nnx.Module):
 
         rotary_pos_emb_thw = self.rotary_pos_emb_thw(t, h, w)
 
-        
         rotary_pos_emb_thw = rotary_pos_emb_thw[window_index_thw, :, :]
-        rotary_pos_emb_thw = rotary_pos_emb_thw.reshape(-1, rotary_pos_emb_thw.shape[-1])
-        cu_seqlens_thw = jnp.full(t, h*w, dtype=jnp.int32)
-
+        rotary_pos_emb_thw = rotary_pos_emb_thw.reshape(
+            -1, rotary_pos_emb_thw.shape[-1])
+        cu_seqlens_thw = jnp.full(t, h * w, dtype=jnp.int32)
 
         # jax.debug.print(
         #     "cu_seqlens_thw: {x}, shape: {shape}, dtype: {dtype}",
@@ -600,7 +598,7 @@ class Qwen2_5_VisionTransformer(nnx.Module):
 
         return (rotary_pos_emb_thw, window_index_thw, cu_seqlens_window_thw,
                 cu_seqlens_thw)
-    
+
     def compute_attn_mask_seqlen(
         self,
         cu_seqlens: jax.Array,
@@ -697,7 +695,6 @@ class Qwen2_5_VisionTransformer(nnx.Module):
 
         hidden_states = jnp.expand_dims(hidden_states, axis=1)
 
-
         # jax.debug.print(
         #     "[DEBUG] right before transformer blocks: " \
         #     "hidden_states: {x}, shape: {shape}, dtype: {dtype}",
@@ -746,18 +743,22 @@ class Qwen2_5_VisionTransformer(nnx.Module):
             #     seqlens=seqlens_now,
             # )
             if layer_num in self.fullatt_block_indexes:
-                hidden_states = blk(
-                    hidden_states,
-                    rotary_pos_emb=rotary_pos_emb,
-                    use_fullattn=True
-                    )
-            else:
-                hidden_states = blk(hidden_states, 
+                hidden_states = blk(hidden_states,
                                     rotary_pos_emb=rotary_pos_emb,
-                                    window_index=window_index,
-                                    cu_window_seqlens=cu_window_seqlens,
                                     use_fullattn=True)
-            break
+            else:
+                hidden_states = blk(hidden_states,
+                                    rotary_pos_emb=rotary_pos_emb,
+                                    cu_window_seqlens=cu_window_seqlens,
+                                    use_fullattn=False)
+
+
+        jax.debug.print("[VisionTransformer] after all blocks: " \
+        "hidden_states: {x}, shape: {shape}, dtype: {dtype}",
+            x=hidden_states,
+            shape=hidden_states.shape,
+            dtype=hidden_states.dtype,
+        )
 
         # # For Qwen2.5-VL-3B, float16 will overflow at last block
         # # for long visual tokens sequences.
