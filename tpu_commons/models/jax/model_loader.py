@@ -194,6 +194,7 @@ def get_flax_model(
         model = nnx.merge(graphdef, state)
         return model.compute_logits(*args)
 
+    # Multi-modal support
     @functools.partial(jax.jit,
                        out_shardings=(logits_sharding),
                        static_argnames=['image_grid_thw'])
@@ -201,12 +202,21 @@ def get_flax_model(
                                       **kwargs):
         model = nnx.merge(graphdef, state)
         return model.get_multimodal_embeddings(image_grid_thw, **kwargs)
+    
+    @functools.partial(
+            jax.jit,
+            out_shardings=(logits_sharding),)
+    def run_get_input_embeddings(graphdef, state, *args, **kwargs):
+        model = nnx.merge(graphdef, state)
+        return model.get_input_embeddings(*args, **kwargs)
 
     model_fn = functools.partial(run_model, graphdef)
     compute_logits_fn = functools.partial(run_compute_logits, graphdef)
     get_multimodal_embeddings_fn = functools.partial(
         run_get_multimodal_embeddings, graphdef)
-    return model_fn, compute_logits_fn, get_multimodal_embeddings_fn, state
+    get_input_embeddings_fn = functools.partial(
+        run_get_input_embeddings, graphdef)
+    return model_fn, compute_logits_fn, get_multimodal_embeddings_fn, get_input_embeddings_fn, state
 
 
 def get_vllm_model(

@@ -11,7 +11,8 @@ from transformers import modeling_flax_utils
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig)
 from vllm.config import VllmConfig
-from vllm.model_executor.models.interfaces import MultiModalEmbeddings
+# from vllm.model_executor.models.interfaces import MultiModalEmbeddings
+from tpu_commons.models.jax.utils.multi_modal_utils import MultiModalEmbeddings, merge_multimodal_embeddings
 
 from tpu_commons import utils_jax as utils
 from tpu_commons.logger import init_logger
@@ -935,21 +936,24 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             #     video_embeddings = self._process_video_input(multimodal_input)
             #     multimodal_embeddings += video_embeddings
 
-        jax.debug.print("multimodal_embeddings: {x}, shape: {shape}, dtype: {dtype}",
-                        x=multimodal_embeddings[0],
-                        shape=multimodal_embeddings[0].shape,
-                        dtype=multimodal_embeddings[0].dtype)
+        # jax.debug.print("multimodal_embeddings: {x}, shape: {shape}, dtype: {dtype}",
+        #                 x=multimodal_embeddings[0],
+        #                 shape=multimodal_embeddings[0].shape,
+        #                 dtype=multimodal_embeddings[0].dtype)
 
         return multimodal_embeddings
 
     def get_input_embeddings(self, input_ids: jax.Array,
-                             multimodal_embeddings: jax.Array) -> jax.Array:
+                             multimodal_embeddings: Optional[MultiModalEmbeddings]) -> jax.Array:
         inputs_embeds = self.language_model.embed(input_ids)
-        # Placeholder for multimodal merge logic
-        # A real implementation would need a JAX version of
-        # merge_multimodal_embeddings.
-        # For now, we assume the runner handles this.
+
+        if multimodal_embeddings is not None \
+            and len(multimodal_embeddings) != 0:
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, multimodal_embeddings,
+                [self.config.image_token_id, self.config.video_token_id])
         return inputs_embeds
+        
 
     def __call__(
         self,
@@ -959,6 +963,8 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         inputs_embeds: Optional[jax.Array] = None,
         *args,
     ) -> tuple[list[jax.Array], jax.Array]:
+        if inputs_embeds is None:
+            inputs_embeds = self.language_model.embed(input_ids)
         kv_caches, x = self.language_model.model(
             kv_caches,
             inputs_embeds,

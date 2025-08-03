@@ -41,6 +41,8 @@ from vllm.v1.worker.utils import (gather_mm_placeholders,
                                   scatter_mm_placeholders)
 
 from tpu_commons import utils as common_utils
+from tpu_commons.models.jax.utils.multi_modal_utils import sanity_check_mm_encoder_outputs
+from tpu_commons import utils_jax as utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.common.sharding import build_mesh
@@ -239,7 +241,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         return hidden_states[indices_do_sample]
 
     def load_model(self):
-        self.model_fn, self.compute_logits_fn, self.get_multimodal_embeddings_fn, self.state = get_model(
+        self.model_fn, self.compute_logits_fn, self.get_multimodal_embeddings_fn, self.get_input_embeddings_fn, self.state = get_model(
             self.vllm_config,
             self.rng_key,
             self.mesh,
@@ -788,12 +790,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             curr_group_outputs = self.get_multimodal_embeddings_fn(
                 self.state, image_grid_thw, **batched_mm_inputs)
 
-            # sanity_check_mm_encoder_outputs(
-            #     curr_group_outputs,
-            #     expected_num_items=len(grouped_mm_inputs),
-            # )
+            sanity_check_mm_encoder_outputs(
+                curr_group_outputs,
+                expected_num_items=len(grouped_mm_inputs),
+            )
 
-            time.sleep(10) 
             for output in curr_group_outputs:
                 encoder_outputs.append(output)
 
@@ -859,7 +860,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
     def _get_model_inputs(self, input_ids: jax.Array,
                           mm_embeds: list[jax.Array]):
         if self.is_multimodal_model:
-            inputs_embeds = self.model.get_input_embeddings(
+            inputs_embeds = self.get_input_embeddings_fn(self.state,
                 input_ids=input_ids,
                 multimodal_embeddings=mm_embeds,
             )
@@ -921,7 +922,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
 
         input_ids, inputs_embeds = self._get_model_inputs(input_ids, mm_embeds)
 
+        # TODO: Disable this for now
+        if self.is_multimodal_model:
+            self.maybe_forbid_compile = nullcontext()
+
         # TODO: make _get_model_inputs within this context
+        # NOTE: right now, mm model will use embeddings as the input,
+        # but text-only model will use input_ids
         with self.maybe_forbid_compile:
 
             with set_forward_context(
@@ -934,8 +941,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                 kv_caches,
                 input_ids,
                 attn_metadata,
-                inputs_embeds=inputs_embeds,)
-
+                inputs_embeds,
+            )
             self.maybe_wait_for_kv_save()
             hidden_states = self.select_hidden_states_fn(
                 hidden_states, logits_indices)
@@ -1360,6 +1367,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
 
             self.requests[req_id] = CachedRequestState(**data_items,
                                                        output_token_ids=[])
+            
+            self.requests[req_id].mm_positions = new_req_data.mm_positions
+
 
             # multi-modal related
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
