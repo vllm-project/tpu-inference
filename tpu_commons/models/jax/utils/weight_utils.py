@@ -277,25 +277,8 @@ def load_hf_weights_on_thread(vllm_config, params: nnx.State,
 
     # # get vision config
     if model_config.is_multimodal_model:
-        vision_config = hf_config.vision_config
-        vision_head_dim = vision_config.hidden_size // vision_config.num_heads
         # TODO: Wenlong: Do not consider padding for now
-        # # Pad head_dim for kernel performance.
-        # head_dim_original = model_config.get_head_size()
-        # head_dim = utils.get_padded_head_dim(head_dim_original)
-        # head_dim_pad = head_dim - head_dim_original
-
-        # reshape_keys.update({
-        #     "attn.proj": (vision_config.hidden_size, vision_config.num_heads,
-        #                   vision_head_dim),
-        #     "attn.qkv": (vision_config.hidden_size, 3, vision_config.num_heads,
-        #                  vision_head_dim),
-        # })
-        # bias_reshape_keys.update({
-        #     "attn.qkv.bias": (3, vision_config.num_heads, vision_head_dim),
-        # })
         transpose_keys.update({
-            # "attn.proj": (1, 2, 0),
             "attn.proj":(1,0),
             "attn.qkv": (1,0),
             "visual.merger.mlp": (1, 0),

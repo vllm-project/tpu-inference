@@ -761,11 +761,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                 if isinstance(value, torch.Tensor):
                     if key == 'image_grid_thw':
                         # change it to tuple of tuples to make it hashable for JIT
-                        # Shape: (num_images, 3)
-                        # image_grid_thw = tuple(
-                        #     tuple(row)
-                        #     for row in batched_mm_inputs[key][0].tolist())
-                        
+
                         # Shape: (B, N, 3) -> (B*N, 3) -> tuple of tuples
                         grid_thw_tensor = batched_mm_inputs[key]
                         grid_thw_reshaped = grid_thw_tensor.reshape(-1, 3)
@@ -774,7 +770,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                             for row in grid_thw_reshaped.tolist()
                         )
 
-                        # batched_mm_inputs[key] = image_grid_thw
 
 
                         continue
@@ -785,7 +780,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                     else:
                         batched_mm_inputs[key] = value.numpy()
             batched_mm_inputs.pop('image_grid_thw')
-            # batched_mm_inputs = self._device_array(batched_mm_inputs)
 
             # Run the encoder.
             # `curr_group_outputs` is either of the following:
@@ -886,8 +880,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         self,
         scheduler_output: "VllmSchedulerOutput",
     ) -> tuple[AttentionMetadata, ModelRunnerOutput]:
-        # print("[DEBUG] Entering execute_model")
-        # print(f"scheduler_output: {scheduler_output}")
 
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
@@ -907,17 +899,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                 #     "Should not schedule a request that does nothing!")
             return DUMMY_METADATA, EMPTY_MODEL_RUNNER_OUTPUT,
 
-        # print("[DEBUG] After _update_states()")
-        # print(f"scheduler_output: {scheduler_output}")
-        # print(f"self.requests: {self.requests}")
 
-        # inputs = self._prepare_inputs(scheduler_output)
         (kv_caches, input_ids, attn_metadata, sampling_metadata,
          logits_indices) = self._prepare_inputs(scheduler_output)
-
-        # print("[DEBUG] After _prepare_inputs()")
-        # print(f"scheduler_output: {scheduler_output}")
-        # print(f"self.requests: {self.requests}")
 
         # multi-modal support
         if self.is_multimodal_model:

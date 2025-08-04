@@ -25,12 +25,6 @@ logger = init_logger(__name__)
 
 init_fn = nnx.initializers.uniform()
 
-# # TODO: it works for the example, should read from config
-# MAX_GRID_T = 2
-# MAX_GRID_H = 128
-# MAX_GRID_W = 128
-# MAX_PATCHES = MAX_GRID_T * MAX_GRID_H * MAX_GRID_W
-
 DEFAULT_BLOCK_K_MAJOR = 128
 
 
@@ -134,7 +128,6 @@ def apply_rotary_pos_emb_vision(x: jax.Array,
                                 rotary_pos_emb: jax.Array) -> jax.Array:
     # x: [B, T, N, H]
     # rotary_pos_emb: [T, H//2]
-
     _, _, _, H = x.shape
     half_dim = H // 2
 
@@ -170,20 +163,10 @@ def generate_window_segment_ids(cu_seqlens: jax.Array, seq_len: int, padded_seq_
     Returns:
         A SegmentIds object for flash_attention.
     """
-    # # The searchsorted implementation is not JIT-friendly as it requires a
-    # # concrete value for `jnp.arange`. A more JIT-friendly way to generate
-    # # segment IDs is to use `jnp.repeat`.
-    # window_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
-    # num_windows = window_lengths.shape[0]
-    # segment_ids_val = jnp.repeat(jnp.arange(num_windows, dtype=jnp.int32),
-    #                              repeats=window_lengths)
-    # # The shape should be (B, T), and B=1 here.
-    # segment_ids_val = segment_ids_val.reshape(1, -1)
     indices = jnp.arange(seq_len)
     segment_ids = jnp.searchsorted(cu_seqlens[1:], indices,side='right') + 1
     padding_segment_ids = jnp.zeros(padded_seq_len - seq_len)
     segment_ids = jnp.concatenate([segment_ids, padding_segment_ids])
-    # segment_ids = jnp.tile(segment_ids[None, :], (1,1))
     segment_ids = segment_ids.reshape(1, -1)
 
     return SegmentIds(q=segment_ids, kv=segment_ids)
@@ -229,9 +212,6 @@ class Qwen2_5_VisionAttention(nnx.Module):
             rngs=rngs,
         )
 
-    # def generate_window_segment_ids(
-    #         window_index: list
-    # ) ->
 
     def __call__(
         self,
@@ -256,13 +236,6 @@ class Qwen2_5_VisionAttention(nnx.Module):
         k = k.reshape(T, B, self.num_heads, self.head_dim)
         v = v.reshape(T, B, self.num_heads, self.head_dim)
 
-        # segment_ids = None
-        # if use_fullattn:
-        #     jax.debug.print("Use full attention! ")
-        # else:
-        #     jax.debug.print("Use window attention! ")
-        #     # The input hidden_states are already window-shuffled.
-
         # [T, B, N, H] -> [B, T, N, H]
         q = jnp.transpose(q, (1, 0, 2, 3))
         k = jnp.transpose(k, (1, 0, 2, 3))
@@ -274,7 +247,7 @@ class Qwen2_5_VisionAttention(nnx.Module):
 
         # NOTE: an extra transpose because we need to
         # align the correctness with vLLM's design.
-        # Could remove one once implemented.
+        # Might be able to remove one once implemented.
         # [B, T, N, H] -> [B, N, T, H]
         q = jnp.transpose(q, (0, 2, 1, 3))
         k = jnp.transpose(k, (0, 2, 1, 3))
@@ -298,14 +271,6 @@ class Qwen2_5_VisionAttention(nnx.Module):
         else:
             segment_ids = generate_window_segment_ids(cu_window_seqlens, T_attn, padded_T)
 
-        # jax.debug.print("[VisionAttention] after o_proj: " \
-        # "output: {x}, shape: {shape}, dtype: {dtype}",
-        #     x=output,
-        #     shape=output.shape,
-        #     dtype=output.dtype,
-        # )
-        # jax.debug.print("[VisionAttention] segment_ids: {x}", x=segment_ids)
-
         output = flash_attention(q,
                                  k,
                                  v,
@@ -322,13 +287,6 @@ class Qwen2_5_VisionAttention(nnx.Module):
         output = output.reshape(T, B, D)
 
         output = self.proj(output)
-
-        # jax.debug.print("[VisionAttention] after o_proj: " \
-        # "output: {x}, shape: {shape}, dtype: {dtype}",
-        #     x=output,
-        #     shape=output.shape,
-        #     dtype=output.dtype,
-        # )
 
         return output
 
@@ -357,12 +315,8 @@ class Qwen2_5_VisionBlock(nnx.Module):
                  cu_window_seqlens: Optional[jax.Array] = None,
                  use_fullattn: bool = True) -> jax.Array:
 
-        # y = self.norm1(x)
-        # z = self.attn(y, rotary_pos_emb)
-
         x = x + self.attn(self.norm1(x), rotary_pos_emb, cu_window_seqlens, use_fullattn)
         x = x + self.mlp(self.norm2(x))
-
         
         return x
 
@@ -396,8 +350,6 @@ class Qwen2_5_VisionPatchEmbed(nnx.Module):
         C = dim // (self.temporal_patch_size * self.patch_size *
                     self.patch_size)
         # Reshape to (L, T, H, W, C) for Conv3D with channels_last
-        # x = x.reshape(L, self.temporal_patch_size, self.patch_size,
-        #               self.patch_size, -1)
         x = x.reshape(L, C, self.temporal_patch_size, self.patch_size,
                       self.patch_size)
         # L,T,H,W,C
@@ -438,7 +390,6 @@ class Qwen2_5_VisionPatchMerger(nnx.Module):
 
 
 class Qwen2_5_VisionRotaryEmbedding(nnx.Module):
-    # This is a simplified version. A full implementation would handle caching.
     def __init__(self, dim: int, theta: float = 10000.0):
         self.dim = dim
         self.theta = theta
@@ -455,7 +406,6 @@ class Qwen2_5_VisionTransformer(nnx.Module):
 
     def __init__(
             self,
-            #  vision_config: Qwen2_5_VLVisionConfig,
             vllm_config: VllmConfig,
             rngs: nnx.Rngs,
             mesh: Mesh,
@@ -471,7 +421,6 @@ class Qwen2_5_VisionTransformer(nnx.Module):
         patch_size = vision_config.patch_size
         temporal_patch_size = vision_config.temporal_patch_size
         in_channels = vision_config.in_channels
-        # depth = vision_config.depth
         self.hidden_size = vision_config.hidden_size
         self.num_heads = vision_config.num_heads
 
@@ -508,7 +457,6 @@ class Qwen2_5_VisionTransformer(nnx.Module):
             spatial_merge_size=vision_config.spatial_merge_size,
             dtype=dtype,
             rngs=rngs)
-        # self.dtype = self.patch_embed.proj.weight.dtype
 
     def rotary_pos_emb_thw(self, t, h, w):
         hpos_ids, wpos_ids = jnp.indices((h, w))
@@ -591,13 +539,6 @@ class Qwen2_5_VisionTransformer(nnx.Module):
             -1, rotary_pos_emb_thw.shape[-1])
         cu_seqlens_thw = jnp.full(t, h * w, dtype=jnp.int32)
 
-        # jax.debug.print(
-        #     "cu_seqlens_thw: {x}, shape: {shape}, dtype: {dtype}",
-        #     x=cu_seqlens_thw,
-        #     shape=cu_seqlens_thw.shape,
-        #     dtype=cu_seqlens_thw.dtype,
-        # )
-
         return (rotary_pos_emb_thw, window_index_thw, cu_seqlens_window_thw,
                 cu_seqlens_thw)
 
@@ -621,15 +562,6 @@ class Qwen2_5_VisionTransformer(nnx.Module):
         # """Shape: `(num_images, 3)`
         # This should be in `(grid_t, grid_h, grid_w)` format.
         # """
-
-        # jax.debug.print("[DEBUG] right before patch embed:")
-        # jax.debug.print(
-        #     "hidden_states: {x}, shape: {shape}, dtype: {dtype}",
-        #     x=x,
-        #     shape=x.shape,
-        #     dtype=x.dtype,
-        # )
-        # jax.effects_barrier()
         hidden_states = self.patch_embed(x)
 
         # num of patches
@@ -667,21 +599,11 @@ class Qwen2_5_VisionTransformer(nnx.Module):
 
             rotary_pos_emb.append(rotary_pos_emb_thw)
 
-            # cu_seqlens.append(cu_seqlens_thw)
+
 
         rotary_pos_emb = jnp.concatenate(rotary_pos_emb, axis=0)
         window_index = jnp.concatenate(window_index, axis=0)
         cu_window_seqlens = jnp.concatenate(cu_window_seqlens, axis=0)
-        # cu_seqlens = jnp.concatenate(cu_seqlens, axis=0)
-        # cu_seqlens = jnp.cumsum(cu_seqlens, axis=0).astype(jnp.int32)
-        # cu_seqlens = jnp.pad(cu_seqlens, (1, 0), constant_value=0)
-
-        # transformers
-        # pre-compute seqlens for window/full attn to reduce cuMemcpy operations
-        # max_seqlen_full, seqlens_full = self.compute_attn_mask_seqlen(
-        #     cu_seqlens)
-        # max_seqlen_window, seqlens_window = self.compute_attn_mask_seqlen(
-        #     cu_window_seqlens)
 
         hidden_states = hidden_states.reshape(
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
@@ -690,53 +612,8 @@ class Qwen2_5_VisionTransformer(nnx.Module):
 
         hidden_states = jnp.expand_dims(hidden_states, axis=1)
 
-        # jax.debug.print(
-        #     "[DEBUG] right before transformer blocks: " \
-        #     "hidden_states: {x}, shape: {shape}, dtype: {dtype}",
-        #     x=hidden_states,
-        #     shape=hidden_states.shape,
-        #     dtype=hidden_states.dtype,
-        # )
-        # jax.debug.print(
-        #     "[DEBUG] right before transformer blocks: " \
-        #     "rotary_pos_emb: {x}, shape: {shape}, dtype: {dtype}",
-        #     x=rotary_pos_emb,
-        #     shape=rotary_pos_emb.shape,
-        #     dtype=rotary_pos_emb.dtype,
-        # )
-        # jax.effects_barrier()
-        # jax.debug.print(
-        #     "[DEBUG] right before transformer blocks: " \
-        #     "cu_seqlens: {x}, shape: {shape}, dtype: {dtype}",
-        #     x=cu_seqlens,
-        #     shape=cu_seqlens.shape,
-        #     dtype=cu_seqlens.dtype,
-        # )
-        # jax.debug.print(
-        #     "[DEBUG] right before transformer blocks: " \
-        #     "cu_window_seqlens: {x}, shape: {shape}, dtype: {dtype}",
-        #     x=cu_window_seqlens,
-        #     shape=cu_window_seqlens.shape,
-        #     dtype=cu_window_seqlens.dtype,
-        # )
 
         for layer_num, blk in enumerate(self.blocks):
-            # if layer_num in self.fullatt_block_indexes:
-            #     cu_seqlens_now = cu_seqlens
-            #     max_seqlen_now = max_seqlen_full
-            #     seqlens_now = seqlens_full
-            # else:
-            #     cu_seqlens_now = cu_window_seqlens
-            #     max_seqlen_now = max_seqlen_window
-            #     seqlens_now = seqlens_window
-
-            # hidden_states = blk(
-            #     hidden_states,
-            #     cu_seqlens=cu_seqlens_now,
-            #     rotary_pos_emb=rotary_pos_emb,
-            #     max_seqlen=max_seqlen_now,
-            #     seqlens=seqlens_now,
-            # )
             if layer_num in self.fullatt_block_indexes:
                 hidden_states = blk(hidden_states,
                                     rotary_pos_emb=rotary_pos_emb,
@@ -747,13 +624,6 @@ class Qwen2_5_VisionTransformer(nnx.Module):
                                     cu_window_seqlens=cu_window_seqlens,
                                     use_fullattn=False)
 
-
-        
-
-        # # For Qwen2.5-VL-3B, float16 will overflow at last block
-        # # for long visual tokens sequences.
-        # if hidden_states.dtype == jnp.float16:
-        #     hidden_states = self.cast_overflow_tensors(hidden_states)
 
         # adapter
         hidden_states = self.merger(hidden_states)
@@ -766,8 +636,6 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
 
     def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,
                  mesh: Mesh) -> None:
-        # model_config = vllm_config.model_config
-        # hf_config = model_config.hf_config
         config: Qwen2_5_VLConfig = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
@@ -871,27 +739,12 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             self, image_input: Qwen2_5_VLImageInputs) -> tuple[jax.Array, ...]:
 
         grid_thw = image_input["image_grid_thw"]
-        # assert grid_thw.ndim == 2
-        # grid_thw = image_grid_thw
 
         if image_input["type"] == "image_embeds":
             image_embeds = image_input["image_embeds"].astype(
                 self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"]
-            # jax.debug.print("[DEBUG] right before VIT:")
-            # jax.debug.print(
-            #     "pixel_values: {pixel_values}, shape: {shape}, dtype: {dtype}",
-            #     pixel_values=pixel_values,
-            #     shape=pixel_values.shape,
-            #     dtype=pixel_values.dtype,
-            # )
-            # jax.debug.print(
-            #     "grid_thw: {grid_thw}, shape: {shape}, dtype: {dtype}",
-            #     grid_thw=grid_thw,
-            #     shape=grid_thw.shape,
-            #     dtype=grid_thw.dtype)
-            # jax.effects_barrier()
             image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
 
 
@@ -911,19 +764,11 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
     def get_multimodal_embeddings(self, image_grid_thw: tuple[tuple[int, int,
                                                                     int], ...],
                                   **kwargs: object) -> MultiModalEmbeddings:
-        # Simplified version
-        # image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
-        # jax.debug.print("get_multimodal_embeddings kwargs: {kwargs}",
-        #                 kwargs=kwargs)
-        # logger.info(f"form logger: get_multimodal_embeddings {kwargs}")
 
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(
             image_grid_thw, **kwargs)
         if not mm_input_by_modality:
             return []
-
-        # jax.debug.print("mm_input_by_modality: {mm_input_by_modality}",
-        #                 mm_input_by_modality=mm_input_by_modality)
 
         # The result multimodal_embeddings is tuple of tensors, with each
         # tensor correspoending to a multimodal data item (image or video).
@@ -940,41 +785,22 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             #     video_embeddings = self._process_video_input(multimodal_input)
             #     multimodal_embeddings += video_embeddings
 
-        # jax.debug.print("multimodal_embeddings: {x}, shape: {shape}, dtype: {dtype}",
-        #                 x=multimodal_embeddings[0],
-        #                 shape=multimodal_embeddings[0].shape,
-        #                 dtype=multimodal_embeddings[0].dtype)
 
         return multimodal_embeddings
 
     def get_input_embeddings(self, input_ids: jax.Array,
                              multimodal_embeddings: Optional[MultiModalEmbeddings]) -> jax.Array:
         
-        # jax.debug.print("[DEBUG] mm embedings: " \
-        # "multimodal_embeddings: {x}, shape: {shape}, dtype: {dtype}",
-        # x=multimodal_embeddings[0],
-        # shape=multimodal_embeddings[0].shape,
-        # dtype=multimodal_embeddings[0].dtype,)
 
         inputs_embeds = self.language_model.embed(input_ids)
 
-        # jax.debug.print("[DEBUG] text imbeddings: " \
-        # "inputs_embeds: {x}, shape: {shape}, dtype: {dtype}",
-        # x=inputs_embeds,
-        # shape=inputs_embeds.shape,
-        # dtype=inputs_embeds.dtype,)
 
         if multimodal_embeddings is not None \
             and len(multimodal_embeddings) != 0:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings,
                 [self.config.image_token_id, self.config.video_token_id])
-            
-        # jax.debug.print("[DEBUG] all embeddings before causalLM: " \
-        # "inputs_embeds: {x}, shape: {shape}, dtype: {dtype}",
-        # x=inputs_embeds,
-        # shape=inputs_embeds.shape,
-        # dtype=inputs_embeds.dtype,)
+
         return inputs_embeds
         
 
