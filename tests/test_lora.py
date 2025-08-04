@@ -1,6 +1,5 @@
 # https://github.com/vllm-project/vllm/blob/ed10f3cea199a7a1f3532fbe367f5c5479a6cae9/tests/tpu/lora/test_lora.py
 import pytest
-
 import vllm
 from vllm.lora.request import LoRARequest
 
@@ -14,6 +13,7 @@ from vllm.lora.request import LoRARequest
 # where all the inputs are "What is 1+1? \n" and all the outputs are "x". We run
 # 100 training iterations with a training batch size of 100.
 
+
 @pytest.fixture(scope="function", autouse=True)
 def use_v1_only(monkeypatch: pytest.MonkeyPatch):
     """
@@ -26,6 +26,7 @@ def use_v1_only(monkeypatch: pytest.MonkeyPatch):
         # m.setenv("TPU_BACKEND_TYPE", "jax")
         yield
 
+
 def setup_vllm(num_loras: int) -> vllm.LLM:
     return vllm.LLM(model="Qwen/Qwen2.5-3B-Instruct",
                     num_scheduler_steps=1,
@@ -35,6 +36,7 @@ def setup_vllm(num_loras: int) -> vllm.LLM:
                     enable_lora=True,
                     max_loras=num_loras,
                     max_lora_rank=8)
+
 
 def test_single_lora():
     """
@@ -60,11 +62,12 @@ def test_single_lora():
     assert answer.isdigit()
     assert int(answer) == 1
 
+
 def test_lora_hotswapping():
     """
     This test ensures we can run multiple LoRA adapters on the TPU backend, even
     if we only have space to store 1.
-    
+
     We run "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_x_adapter" which
     will force Qwen2.5-3B-Instruct to claim 1+1=x, for a range of x.
     """
@@ -88,14 +91,14 @@ def test_lora_hotswapping():
         answer = output.strip()[0]
 
         assert answer.isdigit()
-        assert int(answer) == i + 1
+        assert int(answer) == i + 1, f"Expected {i + 1}, got {answer}"
 
 
 def test_multi_lora():
     """
     This test ensures we can run multiple LoRA adapters on the TPU backend, when
     we have enough space to store all of them.
-    
+
     We run "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_x_adapter" which
     will force Qwen2.5-3B-Instruct to claim 1+1=x, for a range of x.
     """
@@ -119,4 +122,6 @@ def test_multi_lora():
         answer = output.strip()[0]
 
         assert answer.isdigit()
-        assert int(output.strip()[0]) == i + 1
+        assert int(
+            output.strip()
+            [0]) == i + 1, f"Expected {i + 1}, got {int(output.strip()[0])}"
