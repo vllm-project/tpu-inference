@@ -13,7 +13,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import \
     CompressedTensorsW8A8Int8
 
 from tpu_commons.models.vllm.jax_linear_common import (
-    ParallelType, forward_unqunatized, forward_w8a8_int8,
+    forward_unqunatized, forward_w8a8_int8_col_parallel,
     reorder_concatenated_tensor_for_sharding,
     slice_sharded_tensor_for_concatenation)
 
@@ -105,9 +105,8 @@ class JaxMergedColumnParallelLinearCore(torch.nn.Module):
             if self.w8q8_int8_quant:
                 weight_scale = self.weight_scale.jax(
                 ) if self.w8q8_int8_quant else None
-                output = forward_w8a8_int8(x, weight, bias, weight_scale,
-                                           self.mesh, False,
-                                           ParallelType.COL_PARALLEL)
+                output = forward_w8a8_int8_col_parallel(
+                    x, weight, bias, weight_scale, self.mesh)
             else:
                 output = forward_unqunatized(x, weight, bias)
 

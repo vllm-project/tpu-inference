@@ -13,9 +13,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import \
     CompressedTensorsW8A8Int8
 
-from tpu_commons.models.vllm.jax_linear_common import (ParallelType,
-                                                       forward_unqunatized,
-                                                       forward_w8a8_int8)
+from tpu_commons.models.vllm.jax_linear_common import (
+    forward_unqunatized, forward_w8a8_int8_row_parallel)
 
 P = PartitionSpec
 
@@ -86,12 +85,12 @@ class JaxRowParallelLinear(torch.nn.Module):
                         or self.bias is None) else self.bias.jax()
         if self.w8q8_int8_quant:
             weight_scale = self.weight_scale.jax()
-            output = torch_view(
-                forward_w8a8_int8(x, weight, bias, weight_scale, self.mesh,
-                                  self.reduce_results,
-                                  ParallelType.ROW_PARALLEL))
+            output = forward_w8a8_int8_row_parallel(x, weight, bias,
+                                                    weight_scale, self.mesh,
+                                                    self.reduce_results)
         else:
-            output = torch_view(forward_unqunatized(x, weight, bias))
+            output = forward_unqunatized(x, weight, bias)
+        output = torch_view(output)
 
         if not self.return_bias:
             return output
