@@ -79,20 +79,21 @@ class JaxRowParallelLinear(torch.nn.Module):
             self.register_parameter("weight_scale", None)
 
     def forward(self, input: torch.Tensor):
-        x = input.jax()
-        weight = self.weight.jax()
-        bias = None if (self.skip_bias_add
-                        or self.bias is None) else self.bias.jax()
-        if self.w8q8_int8_quant:
-            weight_scale = self.weight_scale.jax()
-            output = forward_w8a8_int8_row_parallel(x, weight, bias,
-                                                    weight_scale, self.mesh,
-                                                    self.reduce_results)
-        else:
-            output = forward_unqunatized(x, weight, bias)
-        output = torch_view(output)
+        with jax.named_scope("JaxRowParallelLinear"):
+            x = input.jax()
+            weight = self.weight.jax()
+            bias = None if (self.skip_bias_add
+                            or self.bias is None) else self.bias.jax()
+            if self.w8q8_int8_quant:
+                weight_scale = self.weight_scale.jax()
+                output = forward_w8a8_int8_row_parallel(
+                    x, weight, bias, weight_scale, self.mesh,
+                    self.reduce_results)
+            else:
+                output = forward_unqunatized(x, weight, bias)
+            output = torch_view(output)
 
-        if not self.return_bias:
-            return output
-        output_bias = self.bias if self.skip_bias_add else None
-        return output, output_bias
+            if not self.return_bias:
+                return output
+            output_bias = self.bias if self.skip_bias_add else None
+            return output, output_bias
