@@ -263,7 +263,7 @@ class TPUModelRunner():
                 "supported yet.")
 
         kv_cache_spec = kv_cache_groups[0].kv_cache_spec
-        layer_names = kv_cache_groups[0].layer_names[:4]
+        layer_names = kv_cache_groups[0].layer_names
 
         # NOTE: we'll multiply the num_kv_heads by 2 in the function
         self.kv_caches = runner_utils.create_kv_caches(

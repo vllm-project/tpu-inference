@@ -13,8 +13,8 @@ from vllm.config import VllmConfig
 
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.common.attention.attention import AttentionMetadata
-from tpu_commons.models.jax.common.attention.deepseek_v3_attention import \
-    MLAConfig, MLA
+from tpu_commons.models.jax.common.attention.deepseek_v3_attention import (
+    MLA, MLAConfig)
 from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.constants import KVCacheType
 from tpu_commons.models.jax.common.layers import (DenseFFWConfig, Embedder,
@@ -55,9 +55,7 @@ class DeepseekV3ModelConfig(ModelConfig):
     vocab_size: int = 129280
     hidden_size: int = 7168
     dtype: jnp.dtype = jnp.bfloat16
-    # TODO: revert to original size after test.
-    # num_layers: int = 61
-    num_layers: int = 4
+    num_layers: int = 61
     num_attention_heads: int = 128
     num_key_value_heads: int = 128
     ffw_intermediate_size: int = 18432
@@ -110,23 +108,24 @@ class DeepseekV3ModelConfig(ModelConfig):
                     hidden_act=self.hidden_act,
                     dtype=self.dtype,
                     vllm_config=self.vllm_config),
-                moe=MoEConfig(hidden_size=self.hidden_size,
-                              intermediate_size_moe=self.moe_intermediate_size,
-                              dtype=self.dtype,
-                              num_local_experts=self.num_local_experts,
-                              hidden_act=self.hidden_act,
-                              apply_expert_weight_before_computation=False,
-                              router=DeepSeekV3RoutingConfig(
-                                  hidden_size=self.hidden_size,
-                                  n_routed_experts=self.num_local_experts,
-                                  num_experts_per_token=self.num_experts_per_token,
-                                  n_group=self.n_group,
-                                  routed_scaling_factor=2.5,
-                                  topk_group=4,
-                                  norm_topk_prob=True,
-                                  dtype=self.dtype,
-                                  vllm_config=self.vllm_config),
-                              vllm_config=self.vllm_config),
+                moe=MoEConfig(
+                    hidden_size=self.hidden_size,
+                    intermediate_size_moe=self.moe_intermediate_size,
+                    dtype=self.dtype,
+                    num_local_experts=self.num_local_experts,
+                    hidden_act=self.hidden_act,
+                    apply_expert_weight_before_computation=False,
+                    router=DeepSeekV3RoutingConfig(
+                        hidden_size=self.hidden_size,
+                        n_routed_experts=self.num_local_experts,
+                        num_experts_per_token=self.num_experts_per_token,
+                        n_group=self.n_group,
+                        routed_scaling_factor=2.5,
+                        topk_group=4,
+                        norm_topk_prob=True,
+                        dtype=self.dtype,
+                        vllm_config=self.vllm_config),
+                    vllm_config=self.vllm_config),
                 rms_norm_eps=self.rms_norm_eps,
                 vllm_config=self.vllm_config)
 
@@ -142,11 +141,15 @@ class DeepSeekV3ShardingRulesConfig(ShardingRulesConfig):
     # MLA KV up projection weight: (KVLoRA, NumHeads, QKNopeHeadDim + VHeadDim)
     attn_mla_kvb_weight_anh: tuple = (None, None, None)
     # Attention V3 output: (actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim)
-    attn_o_ktnph: tuple = (ATTN_HEAD_AXIS_NAME, None, None, None, ATTN_TENSOR_AXIS_NAME)
+    attn_o_ktnph: tuple = (ATTN_HEAD_AXIS_NAME, None, None, None,
+                           ATTN_TENSOR_AXIS_NAME)
     # Attention V3 query: (actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim)
-    query_ktnph: tuple = (ATTN_HEAD_AXIS_NAME, None, None, None, ATTN_TENSOR_AXIS_NAME)
+    query_ktnph: tuple = (ATTN_HEAD_AXIS_NAME, None, None, None,
+                          ATTN_TENSOR_AXIS_NAME)
     # Attention V3 kv_cache: (total_num_pages, page_size, num_kv_heads_x2 // kv_packing, kv_packing, head_dim)
-    keyvalue_cache_nbkph: tuple = (None, None, ATTN_HEAD_AXIS_NAME, None, ATTN_TENSOR_AXIS_NAME)
+    keyvalue_cache_nbkph: tuple = (None, None, ATTN_HEAD_AXIS_NAME, None,
+                                   ATTN_TENSOR_AXIS_NAME)
+
 
 @dataclass
 class DeepSeekV3PrefillShardingRulesConfig(DeepSeekV3ShardingRulesConfig):
@@ -546,7 +549,8 @@ class DeepSeekV3WeightLoader(WeightLoader):
                     del loaded_weight
                     continue
                 if re.search(r"experts\.(\d+)", loaded_name):
-                    expert_num = re.search(r"experts\.(\d+)", loaded_name).group(1)
+                    expert_num = re.search(r"experts\.(\d+)",
+                                           loaded_name).group(1)
                     if int(expert_num) >= self.model_config.num_local_experts:
                         del loaded_weight
                         continue
