@@ -11,7 +11,6 @@ Example Command:
 python examples/multi_modal_inference.py \
   --model Qwen/Qwen2.5-VL-3B-Instruct \
   --tensor-parallel-size 1 \
-  --max-model-len 2048 \
   --num-prompts 1
 """
 
