@@ -72,7 +72,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
 
     if os.getenv("NEW_MODEL_DESIGN", False):
         from tpu_commons.models.jax.recipes.deepseek_v3 import DeepSeekV3
-        from tpu_commons.models.jax.recipes.llama3 import LlamaForCausalLM
+        from experimental.llama3_jax_stashed import LlamaForCausalLM
         from tpu_commons.models.jax.recipes.llama4 import Llama4ForCausalLM
         _MODEL_REGISTRY["DeepSeekV3"] = DeepSeekV3
         _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
@@ -120,7 +120,8 @@ def _get_nnx_model(
             with mesh:
                 model = model_class.create_model_with_random_weights(
                     vllm_config, rng, mesh)
-                jit_model = _apply_qwix_quantization(vllm_config, model, rng, mesh)
+                jit_model = _apply_qwix_quantization(vllm_config, model, rng,
+                                                     mesh)
     else:
         # We first create an abstract model without allocating any weights,
         # then fill in its weigths during load_weights from HF.
