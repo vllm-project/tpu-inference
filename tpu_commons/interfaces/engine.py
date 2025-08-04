@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from vllm.v1.outputs import ModelRunnerOutput
 
 
-class IEngineProcess(Protocol):
+class IEngineProc(Protocol):
     """
     A high-level interface for any process that can be launched by vLLM.
     It defines the single entry point for starting the process's main loop.
@@ -40,10 +40,10 @@ class IEngineProcess(Protocol):
         pass
 
 
-class IDisaggEngineCoreProc(IEngineProcess):
+class IDisaggEngineCoreProc(IEngineProc):
     """
     An interface for the disaggregated engine process. It inherits the common
-    IEngineProcess contract.
+    IEngineProc contract.
     """
     pass
 
