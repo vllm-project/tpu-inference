@@ -200,12 +200,15 @@ def parse_args():
         default=1,
         help="Tensor parallelism degree",
     )
+
+    # TODO: Currently it needs much more space for intermidiate tensors
     parser.add_argument(
         "--gpu-memory-utilization",
         type=float,
-        default=0.9,
+        default=0.5, 
         help="GPU memory utilization",
     )
+
     parser.add_argument(
         "--max-model-len",
         type=int,
