@@ -10,16 +10,13 @@ from torchax.interop import call_jax
 from tpu_commons.distributed.tpu_distributed_utils import \
     create_torchax_tensor_with_partition_spec
 
-# import torch_xla.core.xla_builder as xb
-
-# from torch_xla.experimental.custom_kernel import XLA_LIB, jax_import_guard
-
 
 @jax.jit
-def bgmv_jax(inputs, loras, idxs):
-    # inputs: [num_tokens, hidden_size]
-    # loras_b_weights: [num_loras, lora_rank, hidden_size]
-    # idxs: [num_tokens]
+def bgmv_jax(
+        inputs,  # [num_tokens, hidden_size]
+        loras,  # [num_loras, lora_rank, hidden_size]
+        idxs,  # [num_tokens]
+):
     return jnp.einsum(
         "td,tX,Xld->tl",
         inputs,
@@ -28,11 +25,11 @@ def bgmv_jax(inputs, loras, idxs):
     )
 
 
-def bgmv_torch(inputs, loras, idxs):
-    # inputs: [num_tokens, hidden_size]
-    # loras_b_weights: [num_loras, lora_rank, hidden_size]
-    # idxs: [num_tokens]
-
+def bgmv_torch(
+        inputs,  # [num_tokens, hidden_size]
+        loras,  # [num_loras, lora_rank, hidden_size]
+        idxs,  # [num_tokens]
+):  # [num_tokens, lora_rank]
     # TODO(xiowei): use this more natural impl once we upgrade torchax so
     # that we can use https://github.com/pytorch/xla/pull/9523.
     # if len(loras.shape) == 4:
@@ -43,23 +40,20 @@ def bgmv_torch(inputs, loras, idxs):
     #     "td,tX,Xld->tl",
     #     inputs,
     #     torch.nn.functional.one_hot(idxs.long(), loras.shape[0]),
-    #     # torchax.interop.call_jax(jax.nn.one_hot, idxs, loras.shape[0], dtype=inputs.dtype),
     #     loras,
     # )  # [num_tokens, lora_rank]
-    # xw32q: when is len(loras.shape)==4 and when it is not?
+    # # naive ref impl.
+    # if len(loras.shape) == 4:
+    #     loras = loras.squeeze(axis=1)
+    # selected_loras = loras[idxs]
+    # selected_loras = create_torchax_tensor_with_partition_spec(selected_loras)
+    # return torch.einsum('td,tld->tl', inputs, selected_loras)
 
     if len(loras.shape) == 4:
         loras = loras.squeeze(axis=1)
     loras = create_torchax_tensor_with_partition_spec(loras)
     idxs = create_torchax_tensor_with_partition_spec(idxs)
     return call_jax(bgmv_jax, inputs, loras, idxs)
-
-    # naive impl.
-    if len(loras.shape) == 4:
-        loras = loras.squeeze(axis=1)
-    selected_loras = loras[idxs]
-    selected_loras = create_torchax_tensor_with_partition_spec(selected_loras)
-    return torch.einsum('td,tld->tl', inputs, selected_loras)
 
 
 def bgmv_expand(
@@ -85,7 +79,7 @@ def bgmv_expand(
             tensor.
     """
 
-    # xw32q: when is it used?
+    raise NotImplementedError("Not used for now")
     outputs = bgmv_torch(inputs, lora_b_weights, lora_indices_tensor)
 
     limit = output_tensor.shape[0]
@@ -118,9 +112,6 @@ def bgmv_shrink(
             indicating which LoRA matrix to use for each token.
         scaling (float, optional): Scalar multiplier applied to the output.
     """
-    # xw32q: when is it used? in qwen2.py.forward -> BaseLinearLayerWithLoRA.apply ->add_lora_linear -> add_shrink -> shrink -> bgmv_shrink.
-    # Shouldn't lora_b_weights be named to lora_a_weights since it's shrink?
-    # xw32q: what are input shapes?
     return scaling * bgmv_torch(inputs, lora_b_weights, lora_indices_tensor)
 
 
@@ -148,8 +139,6 @@ def bgmv_expand_slice(
         add_inputs (bool): Whether or not to add the input tensor to the output
             tensor.
     """
-    # xw32q: when is it used? By punica_tpu.expand_slice. inputs.shape=[8192, 8], lora_b_weights.shape=[1, 1, 2048, 8], lora_indices_tensor.shape=[8192].
-    # xw32q: How is it different from bgmv_expand? This function has 2 extra parameters: slice_offset and slice_size.
     outputs = bgmv_torch(inputs, lora_b_weights, lora_indices_tensor)
 
     outputs = F.pad(

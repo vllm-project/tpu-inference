@@ -31,8 +31,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
 
     def __init__(self, max_num_batched_tokens: int, max_batches: int,
                  device: Union[torch.device, str], **kwargs):
-        # xw32q: when is it called and who is the caller? At load_model created by punica_selector.get_punica_wrapper()
-        print('xw32 torch_punica_tpu.PunicaWrappterTPU.__init__')
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches,
                                    device)
 
@@ -46,7 +44,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             dtype=torch.int32)
 
     def _get_token_lora_indices(self, x: torch.Tensor) -> torch.IntTensor:
-        # what's x.shape? [8192, 2048]
         return torch.narrow(self._token_lora_indices, 0, 0, x.size(0))
 
     @property
@@ -55,11 +52,9 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         This property provides access to the indices used for lora embeddings,
         specifically for VocabParallelEmbeddingWithLoRA.
         """
-        # xw32q: when is it used? I don't see it used though.
         raise NotImplementedError(
-            "torch_punica_tpu.PunicaWrapperTPU.embeddings_indices is not implemented yet."
+            "torch_punica_tpu.PunicaWrapperTPU.embeddings_indices shouldn't be used by now."
         )
-        print('xw32 torch_punica_tpu.PunicaWrappterTPU.embeddings_indices')
         return self._embeddings_indices[:]
 
     @property
@@ -67,11 +62,9 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         """
         This property provides access to padded sampler indices.
         """
-        # xw32q: when is it used?
         raise NotImplementedError(
-            "torch_punica_tpu.PunicaWrapperTPU.sampler_indices_padded is not implemented yet."
+            "torch_punica_tpu.PunicaWrapperTPU.sampler_indices_padded shouldn't be used by now."
         )
-        print('xw32 torch_punica_tpu.PunicaWrappterTPU.sampler_indices_padded')
         return self._sampler_indices_padded[:]
 
     def shrink(
@@ -80,27 +73,19 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         w_t_all: torch.Tensor,
         scale: float,
     ):
-        # xw32q: when is it used? By punica_tpu.add_shrink
-        # xw32q: what are input shapes? [8192, 2048]=[num_tokens, hidden_size]. w_t_all.shape=[1, 1, 8, 2048]=[num_loras, 1, lora_rank, hidden_size]. 1st dim will be squeezed in `bgmv_xla`.
-        print('xw32 torch_punica_tpu.PunicaWrappterTPU.shrink')
         return bgmv_shrink(x, w_t_all, self._get_token_lora_indices(x), scale)
 
     def expand(self, y: torch.Tensor, x: torch.Tensor, w_t_all: torch.Tensor,
                add_inputs: bool):
-        # xw32q: when is it used?
-        # xw32q: what are input shapes?
-        print('xw32 torch_punica_tpu.PunicaWrappterTPU.expand')
         raise NotImplementedError(
-            "torch_punica_tpu.PunicaWrapperTPU.expand is not implemented yet.")
+            "torch_punica_tpu.PunicaWrapperTPU.expand shouldn't be used by now."
+        )
         return bgmv_expand(x, w_t_all, y, self._get_token_lora_indices(x),
                            add_inputs)
 
     def expand_slice(self, y: torch.Tensor, x: torch.Tensor,
                      w_t_all: torch.Tensor, y_offset: int, y_slice_size: int,
                      add_inputs: bool) -> torch.Tensor:
-        # xw32q: when is it used? punica_tpu.add_lora_linear -> punica_tpu.add_expand -> punica_tpu.expand_slice
-        # xw32q: what are input shapes? x.shape=[8192, 8], w_t_all.shape=[1, 1, 2048, 8], y.shape=[8192, 2560], self._get_token_lora_indices(x)=[8192], y_offset=0, y_slice_size=2048
-        print('xw32 torch_punica_tpu.PunicaWrappterTPU.expand_slice')
         return bgmv_expand_slice(x, w_t_all, y,
                                  self._get_token_lora_indices(x), y_offset,
                                  y_slice_size, add_inputs)
@@ -121,10 +106,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             lora_a_stacked (tuple[torch.Tensor, ...]): lora_a's weights
             scale (float): Scaling factor for the operation
         """
-        # xw32q: when is it used? By above punica_tpu.add_lora_linear
-        # xw32q: what are input shapes? [8192, 2048], device is xla.
-        print('xw32 torch_punica_tpu.PunicaWrappterTPU.add_shrink')
-        # torch.ops.xla.dynamo_set_buffer_donor_(y, True)
         x = x.view(-1, x.shape[-1])
 
         for slice_idx in range(len(lora_a_stacked)):
@@ -161,9 +142,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             output_slices (tuple[int, ...]): Every slice's size
             add_inputs (bool):  Defaults to True.
         """
-        # xw32q: when is it used? By qwen qkv proj -> layers.forward -> punica_tpu.add_lora_linear
-        # xw32q: what are input shapes? x.shape=[3, 8192, 8], y.shape=[8192, 2560], lora_b_stacked is a tuple. lora_b_stacked[0].shape=torch.Size([1, 1, 2048, 8]), len(output_slices)=3, output_slices=(2048, 256, 256)
-        print('xw32 torch_punica_tpu.PunicaWrappterTPU.add_expand')
         y_org = y
         y = y.view(-1, y.shape[-1])
         offset_left = 0
@@ -200,12 +178,10 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             add_inputs (bool): Default to True.
         """
         raise NotImplementedError(
-            "torch_punica_tpu.PunicaWrapperTPU.add_lora_embedding is not implemented yet."
+            "torch_punica_tpu.PunicaWrapperTPU.add_lora_embedding shouldn't be used by now."
         )
-        # xw32q: when is it used?
 
         # Embedding layer only needs the expand op
-        print('xw32 torch_punica_tpu.PunicaWrappterTPU.add_lora_embedding')
         return self.expand(y, x, lora_b_stacked, add_inputs)
 
     def add_lora_linear(self,
@@ -241,13 +217,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             output_slices (tuple[int, ...]): Every slice's size.
             buffer (Optional[tuple[torch.Tensor, ...]]): Defaults to None.
         """
-        # xw32q: when is it used? By qwen2 -> layers.apply (qkv proj)
-        # at least for the test test_single_lora, add_lora_linear is the only function called which calls
-        #   - add_shrink
-        #      - shrink
-        #   - add_expand
-        #      - expand_slice
-        print('xw32 torch_punica_tpu.PunicaWrappterTPU.add_lora_linear')
 
         assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
         if lora_bias_stacked is not None:
@@ -296,11 +265,9 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             scale (float): Scaling factor.
             buffer (Optional[torch.Tensor]):Default to None.
         """
-        # xw32q: when is it used?
         raise NotImplementedError(
-            "torch_punica_tpu.PunicaWrapperTPU.add_lora_logits is not implemented yet."
+            "torch_punica_tpu.PunicaWrapperTPU.add_lora_logits shouldn't be used by now."
         )
-        print('xw32 torch_punica_tpu.PunicaWrappterTPU.add_lora_logits')
         y_org = y
         y = y.view(-1, y.shape[-1])
         x = x.view(-1, x.shape[-1])
@@ -330,8 +297,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             output_slices:     n-1 element tuple of (slice_size...),
                             where n is number of slices
         """
-        # xw32q: when is it used?
-        # xw32q: what are input shapes?
         org_output = output
         output = output.view(-1, output.shape[-1])
         indices = indices.view(-1)
@@ -362,11 +327,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         vocab_size: int,
         extra_vocab_size: int,
     ):
-        # xw32q: when is it used? By _set_active_loras -> set_active_adapters -> set_adapter_mapping
-        print('xw32 torch_punica_tpu.PunicaWrappterTPU._update_base_metadata')
-        # Make sure we don't accidentally collect outside operations
-        # xm.mark_step()
-
         # Pad the prompt mapping to avoid running into recompiles on the TPU
         # TODO: Should this happen inside mapping internally? If so how can we
         # avoid having backend specific LoRAMapping classes?
@@ -403,10 +363,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
 
     def _update_prefill_metadata(self,
                                  token_lora_tensor: torch.Tensor) -> None:
-        # xw32q: when is it used? maybe_selecte_dummy_loras -> _set_active_loras -> set_active_adapters -> set_adapter_mapping.
-        # xw32q: what are input shapes?
-        print(
-            'xw32 torch_punica_tpu.PunicaWrappterTPU._update_prefill_metadata')
         self.batch_size = 1
         self._lora_indices_per_batch[:self.
                                      batch_size] = token_lora_tensor[:self.
@@ -414,9 +370,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
 
     def _pad_prompt_mapping(
             self, prompt_mapping: tuple[int, ...]) -> tuple[int, ...]:
-        # xw32q: when is it used? By maybe_selecte_dummy_loras -> _set_active_loras -> set_active_adapters -> set_adapter_mapping.
-        # xw32q: what are input shapes?
-        print('xw32 torch_punica_tpu.PunicaWrappterTPU._pad_prompt_mapping')
         num_reqs = len(prompt_mapping)
 
         # From vllm/v1/worker/tpu_model_runner:51, but need to avoid a circular
@@ -430,7 +383,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         return tuple(list(prompt_mapping) + padding)
 
     def _pad_to_shape(self, src, target_shape, dims=1):
-        # xw32q: when is it used? By punica_tpu._update_base_metadata
         if dims == 1:
             pad_len = target_shape[0] - src.shape[0]
             return F.pad(src, (0, pad_len), value=0).to(torch.int32)

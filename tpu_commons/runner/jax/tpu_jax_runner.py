@@ -79,8 +79,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self.devices = devices
         self.dtype = self.model_config.dtype
 
-        # xw32q: where is vocab_size used? In vllm, it's used in structured decoding and sample_from_logits. Since they don't exist in tpu_commons, maybe we don't need it.
-        # What is lora_config.lora_extra_vocab_size? "Maximum size of extra vocabulary that can be present in a LoRA adapter" per https://github.com/vanbasten23/vllm/blob/7f4a8b6705622fde952a2e633e86716f902d6e1b/vllm/config.py#L3040
+        # vocab_size is currently used in structured decoding and sample_from_logits.
+        # lora_config.lora_extra_vocab_size is the "Maximum size of extra vocabulary that can be present in a LoRA adapter" per https://github.com/vanbasten23/vllm/blob/7f4a8b6705622fde952a2e633e86716f902d6e1b/vllm/config.py#L3040
         self.vocab_size = self.model_config.get_vocab_size()
         if self.lora_config is not None:
             self.vocab_size += self.lora_config.lora_extra_vocab_size
@@ -223,7 +223,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             self.mesh,
         )
         self.lora_manager = lora_manager
-        logger.info("xw32 tpu_jax_runner.load_model got a lora_manager.")
         self.rng_params_for_sampling = nnx.Rngs(
             jax.random.key(self.model_config.seed)).params()
 

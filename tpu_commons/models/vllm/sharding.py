@@ -152,8 +152,6 @@ def shard_model_to_tpu(model: torch.nn.Module, mesh: Mesh,
                                         NamedSharding(mesh, P()))
 
     with jax.default_device(jax.devices("cpu")[0]), torchax.default_env():
-        # if vllm_parallel_config.world_size > 1:
-        #     shard_parallel_layers_to_tpu(model, mesh, vllm_parallel_config)
         shard_parallel_layers_to_tpu(model, mesh, vllm_parallel_config)
 
         # For other weight tensors, replicate them on all the TPU chips.

@@ -30,9 +30,6 @@ from tpu_commons.models.vllm.sharding import shard_model_to_tpu
 from tpu_commons.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 
-# from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
-
-#xw32q: what's the value __name__ below?
 logger = init_logger(__name__)
 
 
@@ -78,7 +75,7 @@ class _VllmRunner(torch.nn.Module):
                                               sampling_metadata=None)
 
 
-class VllmModelWrapper():
+class VllmModelWrapper:
     """ Wraps a vLLM Pytorch model and let it run on the JAX engine. """
 
     rng: PRNGKey
@@ -141,7 +138,6 @@ class VllmModelWrapper():
                 vllm_config_for_load.lora_config,
                 device="cpu")
 
-            # xw32q: what's the type of the model before and after self.load_lora_model?
             replace_set_lora(vllm_model)
 
         self.model = _VllmRunner(vllm_model)
@@ -269,7 +265,6 @@ def replace_set_lora(model):
     def _tpu_reset_lora(self, index: int):
         self._original_reset_lora(index)
 
-    # xw32q: what does this function do?
     for _, module in model.named_modules():
         if isinstance(module, BaseLayerWithLoRA):
             module._original_set_lora = module.set_lora

@@ -207,7 +207,6 @@ def get_vllm_model(
         mesh=mesh,
     )
     params, lora_manager = model.load_weights()
-    # TODO(xw32) continue from here to return a Lora manager.
 
     jit_model = model.jit_step_func()
     compute_logits_fn = model.jit_compute_logits_func()
