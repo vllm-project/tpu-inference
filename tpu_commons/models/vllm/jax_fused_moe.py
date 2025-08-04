@@ -81,11 +81,12 @@ def _get_tiling_size_for_gmm_kernel(m: int, k: int, n: int,
 
 
 def tensor_sharded_gmm(
-    lhs: jax.Array,
-    rhs: jax.Array,
-    group_sizes: jax.Array,
-    transpose_rhs: bool,
-    mesh: Mesh,
+        lhs: jax.Array,
+        rhs: jax.Array,
+        group_sizes: jax.Array,
+        transpose_rhs: bool,
+        mesh: Mesh,
+        lhs_partition_spec: PartitionSpec = P(),
 ) -> jax.Array:
     # adapted from https://github.com/pytorch/xla/blob/1d409399474197c484894be90b75d9855393dda5/torch_xla/experimental/custom_kernel.py#L1401
     m, k, g = lhs.shape[0], lhs.shape[1], rhs.shape[0]
@@ -103,7 +104,7 @@ def tensor_sharded_gmm(
     return shard_map(
         _gmm,
         mesh=mesh,
-        in_specs=(P(), P(None, 'model', None), P()),
+        in_specs=(lhs_partition_spec, P(None, 'model', None), P()),
         out_specs=(P(None, 'model')),
         check_rep=False,
     )(lhs, rhs, group_sizes)
@@ -319,7 +320,8 @@ def jax_fused_moe_func(
                                w2,
                                group_sizes,
                                transpose_rhs=True,
-                               mesh=mesh)
+                               mesh=mesh,
+                               lhs_partition_spec=P(None, 'model'))
 
     x = x[topk_argsort_revert_indices].reshape(-1, topk, hidden_size)
     x = x * jnp.expand_dims(topk_weights, axis=-1)
