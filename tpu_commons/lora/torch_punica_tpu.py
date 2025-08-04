@@ -14,7 +14,6 @@ from vllm.lora.punica_wrapper.utils import convert_mapping
 if TYPE_CHECKING:
     # avoid circuit import
     from vllm.lora.layers import LoRAMapping
-    from vllm.lora.models import LongContextLoRAContext
 
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
@@ -362,7 +361,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         max_loras: int,
         vocab_size: int,
         extra_vocab_size: int,
-        long_lora_context: Optional["LongContextLoRAContext"] = None,
     ):
         # xw32q: when is it used? By _set_active_loras -> set_active_adapters -> set_adapter_mapping
         print('xw32 torch_punica_tpu.PunicaWrappterTPU._update_base_metadata')
@@ -380,7 +378,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             sampler_indices,
             sampler_indices_padded,
             embeddings_indices,
-            long_lora_offsets_tensor,
             indices_len,
         ) = convert_mapping(
             mapping,
@@ -389,7 +386,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             vocab_size,
             extra_vocab_size,
             "cpu",
-            long_lora_context,
         )
         self._token_lora_indices = self._pad_to_shape(
             base_indices, self._token_lora_indices.shape,
@@ -403,15 +399,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         self._embeddings_indices = self._pad_to_shape(
             embeddings_indices, self._embeddings_indices.shape,
             dims=2).to(self.device)
-        if long_lora_offsets_tensor is not None:
-            self._long_lora_indices = self._pad_to_shape(
-                long_lora_offsets_tensor,
-                self._long_lora_indices.shape,
-                dims=1).to(self.device)
-        else:
-            zeroed = torch.zeros_like(self._long_lora_indices.cpu(),
-                                      dtype=torch.int32)
-            self._long_lora_indices = zeroed.to(self.device)
         self.indices_len[:] = indices_len
 
     def _update_prefill_metadata(self,

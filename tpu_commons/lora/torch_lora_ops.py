@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import jax
+import jax.numpy as jnp
 import torch
 import torch.nn.functional as F
+from torchax.interop import call_jax
 
 from tpu_commons.distributed.tpu_distributed_utils import \
     create_torchax_tensor_with_partition_spec
@@ -11,48 +14,52 @@ from tpu_commons.distributed.tpu_distributed_utils import \
 
 # from torch_xla.experimental.custom_kernel import XLA_LIB, jax_import_guard
 
-# @jax.jit
-# def bgmv_jax(inputs, loras, idxs):
-#     # inputs: [num_tokens, hidden_size]
-#     # loras_b_weights: [num_loras, lora_rank, hidden_size]
-#     # idxs: [num_tokens]
-#     return jnp.einsum(
-#         "td,tX,Xld->tl",
-#         inputs,
-#         jax.nn.one_hot(idxs, loras.shape[0], dtype=inputs.dtype),
-#         loras,
-#     )
+
+@jax.jit
+def bgmv_jax(inputs, loras, idxs):
+    # inputs: [num_tokens, hidden_size]
+    # loras_b_weights: [num_loras, lora_rank, hidden_size]
+    # idxs: [num_tokens]
+    return jnp.einsum(
+        "td,tX,Xld->tl",
+        inputs,
+        jax.nn.one_hot(idxs, loras.shape[0], dtype=inputs.dtype),
+        loras,
+    )
 
 
 def bgmv_torch(inputs, loras, idxs):
     # inputs: [num_tokens, hidden_size]
     # loras_b_weights: [num_loras, lora_rank, hidden_size]
     # idxs: [num_tokens]
-    # print(f'{idxs.device=}, isinstance(idxs, torchax.tensor.Tensor)')  # should be 'jax'
+
+    # TODO(xiowei): use this more natural impl once we upgrade torchax so
+    # that we can use https://github.com/pytorch/xla/pull/9523.
+    # if len(loras.shape) == 4:
+    #     loras = loras.squeeze(axis=1)
+    # loras = create_torchax_tensor_with_partition_spec(loras)
+    # idxs = create_torchax_tensor_with_partition_spec(idxs)
+    # return torch.einsum(
+    #     "td,tX,Xld->tl",
+    #     inputs,
+    #     torch.nn.functional.one_hot(idxs.long(), loras.shape[0]),
+    #     # torchax.interop.call_jax(jax.nn.one_hot, idxs, loras.shape[0], dtype=inputs.dtype),
+    #     loras,
+    # )  # [num_tokens, lora_rank]
+    # xw32q: when is len(loras.shape)==4 and when it is not?
 
     if len(loras.shape) == 4:
         loras = loras.squeeze(axis=1)
     loras = create_torchax_tensor_with_partition_spec(loras)
     idxs = create_torchax_tensor_with_partition_spec(idxs)
-    print(
-        f'xw32 bgmv_torch: {type(inputs)=}, {type(loras)=}, {type(idxs)=}, {inputs.dtype=}'
-    )
-    return torch.einsum(
-        "td,tX,Xld->tl",
-        inputs,
-        torch.nn.functional.one_hot(idxs.long(), loras.shape[0]),
-        # torchax.interop.call_jax(jax.nn.one_hot, idxs, loras.shape[0], dtype=inputs.dtype),
-        loras,
-    )  # [num_tokens, lora_rank]
-    # xw32q: when is len(loras.shape)==4 and when it is not?
+    return call_jax(bgmv_jax, inputs, loras, idxs)
 
-    # # ref impl
-    # if len(loras.shape) == 4:
-    #     loras = loras.squeeze(axis=1)
-    # selected_loras = loras[idxs]
-    # selected_loras = create_torchax_tensor_with_partition_spec(selected_loras)
-    # print(f'xw32 bgmv_torch: {type(inputs)=}, {type(selected_loras)=}')
-    # return torch.einsum('td,tld->tl', inputs, selected_loras)
+    # naive impl.
+    if len(loras.shape) == 4:
+        loras = loras.squeeze(axis=1)
+    selected_loras = loras[idxs]
+    selected_loras = create_torchax_tensor_with_partition_spec(selected_loras)
+    return torch.einsum('td,tld->tl', inputs, selected_loras)
 
 
 def bgmv_expand(

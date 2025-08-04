@@ -13,17 +13,9 @@ import torchax
 from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
-
-<<<<<<< HEAD
-from torchax.ops.mappings import j2t_dtype
+from torchax.ops.mappings import TORCH_DTYPE_TO_JAX
 from vllm.config import (LoRAConfig, ModelConfig, SchedulerConfig, VllmConfig,
                          set_current_vllm_config)
-
-=======
-from torchax.ops.mappings import TORCH_DTYPE_TO_JAX
-from vllm.config import VllmConfig, set_current_vllm_config
-
->>>>>>> main
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.lora.layers import BaseLayerWithLoRA
@@ -38,12 +30,9 @@ from tpu_commons.models.vllm.sharding import shard_model_to_tpu
 from tpu_commons.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 
-<<<<<<< HEAD
 # from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 #xw32q: what's the value __name__ below?
-=======
->>>>>>> main
 logger = init_logger(__name__)
 
 
