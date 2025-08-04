@@ -2,6 +2,7 @@
 
 import pprint
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
@@ -28,7 +29,10 @@ from tpu_commons.models.jax.common.transformer_block import (
 from tpu_commons.models.jax.layers.misc import shard_put
 from tpu_commons.models.jax.recipes.recipe import RecipeConfig
 from tpu_commons.models.jax.utils.weight_utils import (ParameterType,
-                                                       WeightLoader, get_param)
+                                                       WeightLoader,
+                                                       get_model_weights_files,
+                                                       get_param,
+                                                       model_weights_generator)
 
 logger = init_logger(__name__)
 pp = pprint.PrettyPrinter(depth=6)
@@ -206,7 +210,6 @@ class LlamaForCausalLM(Model):
                                            model_config=self.cfg.model)
         weight_loader.load_weights(self)
 
-
     def __call__(
         self,
         kv_caches: List[jax.Array],
@@ -215,36 +218,38 @@ class LlamaForCausalLM(Model):
         *args,
     ) -> Tuple[List[KVCacheType], jax.Array]:
         is_prefill = False
-        with jax.named_scope("llama_embed_input"): #Embedding
+        with jax.named_scope("llama_embed_input"):  #Embedding
             x = self.embedder.encode(input_ids)
-            
+
         with jax.named_scope("llama_model_transformer_blocks"):
             for (i, layer) in enumerate(self.layers):
-                kv_cache = kv_caches[i] 
+                kv_cache = kv_caches[i]
 
                 # The first layer is unscoped to avoid JAX tracing issues.
                 # JAX's profiler may incorrectly apply the scope name from the first
                 # layer's kernel compilation to all subsequent layers. Skipping the
                 # first layer ensures distinct scope names for the remaining layers.
-                if i == 0: 
+                if i == 0:
                     new_kv_cache, x = layer(x, is_prefill, kv_cache,
                                             attention_metadata)
                 else:
-                    with jax.named_scope(f'layer_{i}'): 
-                                new_kv_cache, x = layer(x, is_prefill, kv_cache,
-                                                    attention_metadata)
+                    with jax.named_scope(f'layer_{i}'):
+                        new_kv_cache, x = layer(x, is_prefill, kv_cache,
+                                                attention_metadata)
 
                 kv_caches[i] = new_kv_cache
 
-        with jax.named_scope("llama_final_norm"): #Norm after last transformer block
+        with jax.named_scope(
+                "llama_final_norm"):  #Norm after last transformer block
             final_activation = self.final_norm(x)
 
         return kv_caches, final_activation
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        with jax.named_scope("llama_lm_head_projection"): #LM head projection to produce logits
+        with jax.named_scope("llama_lm_head_projection"
+                             ):  #LM head projection to produce logits
             logits = jnp.dot(hidden_states,
-                            self.lm_head.input_embedding_table_DV.value)
+                             self.lm_head.input_embedding_table_DV.value)
 
         return logits
 
@@ -333,9 +338,14 @@ class Llama3WeightLoader(WeightLoader):
 
         return self.loaded_to_standardized_keys.get(loaded_key, loaded_key)
 
-    def load_weights(self, model_for_loading: nnx.Module):
-        model_params = nnx.state(model_for_loading)
-        for loaded_name, loaded_weight in self.names_and_weights_generator:
+    def load_weights_single_thread(self, model_params, model_path,
+                                   weights_location, weights_file, mesh):
+        for loaded_name, loaded_weight in model_weights_generator(
+                model_path,
+                weights_location,
+                weights_file,
+                framework="flax",
+                filter_regex=self.filter_regex):
             old_param_name = loaded_name
             if loaded_name.endswith(".weight"):
                 loaded_name = loaded_name.removesuffix(".weight")
@@ -366,6 +376,22 @@ class Llama3WeightLoader(WeightLoader):
                 )
             model_weight.value = shard_put(loaded_weight,
                                            model_weight.sharding.spec,
-                                           mesh=model_for_loading.mesh)
+                                           mesh=mesh)
+
+    def load_weights(self, model_for_loading: nnx.Module):
+        model_params = nnx.state(model_for_loading)
+        model_path = self.vllm_config.model_config.model
+        weights_location, weights_files = get_model_weights_files(model_path)
+        max_workers = min(64, len(weights_files))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(self.load_weights_single_thread, model_params,
+                                model_path, weights_location, weights_file,
+                                model_for_loading.mesh)
+                for weights_file in weights_files
+            ]
+            for future in futures:
+                future.result()
+
         # TODO: validate that all of the model_params were accounted for as well.
         nnx.update(model_for_loading, model_params)

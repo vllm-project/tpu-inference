@@ -77,7 +77,8 @@ class WeightLoader(abc.ABC):
             model_name_or_path=model_name_or_path,
             framework=self.framework,
             filter_regex=self.filter_regex)
-        self.is_verbose = getattr(self.vllm_config.additional_config, "is_verbose", False)
+        self.is_verbose = getattr(self.vllm_config.additional_config,
+                                  "is_verbose", False)
 
     def set_transpose_param_map(self,
                                 transpose_param_dict: Mapping[str,
@@ -110,15 +111,14 @@ class WeightLoader(abc.ABC):
         return param_tensor  # Base case / no-op
 
     abc.abstractmethod
+
     def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):
         raise NotImplementedError
 
     @classmethod
     def print_param_info(param: nnx.Param, name: str):
-        logger.warning(f"Global shape for {name}: {param.value.shape}"
-                    )
-        logger.warning(f"Sharding for {name}: {param.sharding}"
-                    )
+        logger.warning(f"Global shape for {name}: {param.value.shape}")
+        logger.warning(f"Sharding for {name}: {param.sharding}")
 
         logger.warning(
             f"Shape of {name} on a single device: {param.value.addressable_shards[0].data.shape}"
@@ -131,77 +131,10 @@ class WeightLoader(abc.ABC):
         framework: str,
         filter_regex: Optional[str] = None,
     ) -> Generator[tuple, Any, None]:
-        weights_files = []
-        weights_location = "local"
-        if os.path.isdir(model_name_or_path):
-            logger.info(f"Loading weights locally from: {model_name_or_path}")
-            weights_files = glob.glob(
-                os.path.join(model_name_or_path, HF_WEIGHTS_FORMAT))
-        elif file_utils.is_gcs_path(model_name_or_path):
-            local_free_disk_size = file_utils.get_free_disk_size()
-            model_size = file_utils.get_gcs_model_weights_size(
-                model_name_or_path, HF_WEIGHTS_FORMAT)
-            if model_size < local_free_disk_size * FULL_DOWNLOAD_DISK_RATIO:
-                logger.info(f"Downloading weights from GCS {model_name_or_path}")
-                weights_files = file_utils.download_model_weights_from_gcs(
-                    model_name_or_path, HF_WEIGHTS_FORMAT)
-            else:
-                weights_files = file_utils.list_gcs_dir(model_name_or_path,
-                                                        HF_WEIGHTS_FORMAT)
-                weights_location = "gcs"
-        elif file_utils.is_hf_repo(model_name_or_path):
-            local_free_disk_size = file_utils.get_free_disk_size()
-            model_size = file_utils.get_hf_model_weights_size(
-                model_name_or_path, HF_WEIGHTS_FORMAT)
-            if model_size < local_free_disk_size * FULL_DOWNLOAD_DISK_RATIO:
-                logger.info(f"Downloading weights from HF {model_name_or_path}")
-                weights_files = file_utils.download_model_weights_from_hf(
-                    model_name_or_path, HF_WEIGHTS_FORMAT)
-            else:
-                weights_files = file_utils.list_hf_repo(model_name_or_path,
-                                                        HF_WEIGHTS_FORMAT)
-                weights_location = "hf"
-        else:
-            raise ValueError(
-                f"{model_name_or_path} must be a local path, or a gcs path, or a HF model id."
-            )
-
-        if len(weights_files) == 0:
-            raise RuntimeError(
-                f"Cannot find any {HF_WEIGHTS_FORMAT} files in {model_name_or_path}."
-            )
-
-        if weights_location != "local":
-            logger.warning(
-                "Weights files are not downloaded to local disk at once due to insufficient disk space. "
-                "They will be downloaded on the fly during loading.")
-
-        # Sort to ensure the order of files is consistent.
-        weights_files.sort()
-
+        weights_location, weights_files = get_model_weights_files(
+            model_name_or_path)
         for st_file in weights_files:
-            logger.info(f"Loading weights from {st_file}")
-            if weights_location == "gcs":
-                st_file = file_utils.download_model_weights_from_gcs(
-                    model_name_or_path, os.path.basename(st_file))[0]
-            elif weights_location == "hf":
-                st_file = file_utils.download_model_weights_from_hf(
-                    model_name_or_path, os.path.basename(st_file))[0]
-            # NOTE: We enforce loading tensors on CPU here.
-            # Because otherwise the tensor will be loaded on TPU:0 by default,
-            # although the tensor would eventually be sharded across multiple TPUs,
-            # it would lead to OOM on TPU:0 for large models.
-            with jax.default_device(jax.devices("cpu")[0]):
-                with safe_open(st_file, framework=framework) as f:
-                    for name in f.keys():
-                        if filter_regex is not None and not re.match(
-                                filter_regex, name):
-                            continue
-                        weight_tensor = f.get_tensor(name)
-                        yield name, weight_tensor
-            if weights_location != "local":
-                file_utils.delete_file(st_file)
-
+            yield st_file, weights_location
 
 
 # TODO(xiang): deprecate this, use the multi-thread one instead.
@@ -220,11 +153,11 @@ def hf_model_weights_iterator(
 
 
 def model_weights_generator(
-    model_name_or_path: str,
-    weights_location: str,
-    weights_file: str,
-    framework: str,
-) -> Generator[tuple, Any, None]:
+        model_name_or_path: str,
+        weights_location: str,
+        weights_file: str,
+        framework: str,
+        filter_regex: str = None) -> Generator[tuple, Any, None]:
     """A generator that loads model weights from a single weights file."""
     logger.info(f"Loading weights from {weights_file}")
     if weights_location == "gcs":
@@ -240,6 +173,9 @@ def model_weights_generator(
     with jax.default_device(jax.devices("cpu")[0]):
         with safe_open(weights_file, framework=framework) as f:
             for name in f.keys():
+                if filter_regex is not None and not re.match(
+                        filter_regex, name):
+                    continue
                 weight_tensor = f.get_tensor(name)
                 yield name, weight_tensor
     if weights_location != "local":
