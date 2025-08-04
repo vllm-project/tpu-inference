@@ -550,6 +550,7 @@ def main(args: argparse.Namespace):
                             mmlu_method=args.mmlu_method).sample(
                                 tokenizer=tokenizer,
                                 num_requests=args.num_prompts,
+                                input_len=args.mmlu_input_len,
                                 output_len=args.mmlu_output_len,
                             ),
         "mlperf":
@@ -557,6 +558,7 @@ def main(args: argparse.Namespace):
                                 dataset_path=args.dataset_path).sample(
                                     tokenizer=tokenizer,
                                     num_requests=args.num_prompts,
+                                    input_len=args.mlperf_input_len,
                                     output_len=args.mlperf_output_len,
                                 ),
     }
@@ -784,6 +786,12 @@ if __name__ == "__main__":
 
     mmlu_group = parser.add_argument_group("mmlu dataset options")
     mmlu_group.add_argument(
+        "--mmlu-input-len",
+        type=int,
+        default=None,
+        help="Input prompt length for each request",
+    )
+    mmlu_group.add_argument(
         "--mmlu-output-len",
         type=int,
         default=None,
@@ -805,6 +813,12 @@ if __name__ == "__main__":
     )
 
     mlperf_group = parser.add_argument_group("mlperf dataset options")
+    mlperf_group.add_argument(
+        "--mlperf-input-len",
+        type=int,
+        default=None,
+        help="Input prompt length for each request",
+    )
     mlperf_group.add_argument(
         "--mlperf-output-len",
         type=int,

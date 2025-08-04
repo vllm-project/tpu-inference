@@ -21,6 +21,8 @@ class FlaxUtils:
         'silu': nnx.silu,
         'gelu': nnx.gelu,
         'relu': nnx.relu,
+        'sigmoid': nnx.sigmoid,
+        'softmax': nnx.softmax
     }
 
 
@@ -74,25 +76,29 @@ class RMSNorm(nnx.Module):
         """Initializes the scale parameter."""
         self.create_sharding()
 
-    def __call__(self, x: Float, op_mode='generate') -> Float:
+    def __call__(self, x_TD: Float, op_mode='generate') -> Float:
         """Applies RMS Normalization to the input tensor.
 
         Args:
-            x: The input tensor. The normalization is applied over the last dimension.
+            x_TD: The input tensor. The normalization is applied over the last dimension.
 
         Returns:
             The normalized tensor with the same shape as the input.
         """
-        x = jnp.asarray(x, self.dtype)
-        x_TD = nnx.with_sharding_constraint(x, self.activation_ffw_td[op_mode])
+        x_TD = jnp.asarray(x_TD, self.dtype)
+        x_TD = nnx.with_sharding_constraint(x_TD,
+                                            self.activation_ffw_td[op_mode])
 
-        var = jnp.mean(jnp.square(x_TD), axis=-1, keepdims=True)
-        normed_x = x_TD * jax.lax.rsqrt(var + self.epsilon)
+        with jax.named_scope("rms_norm_variance"):
+            var_T1 = jnp.mean(jnp.square(x_TD), axis=-1, keepdims=True)
+        with jax.named_scope("rms_norm_rsqrt"):
+            normed_x_TD = x_TD * jax.lax.rsqrt(var_T1 + self.epsilon)
 
-        normed_x *= self.scale.value
-        normed_x = nnx.with_sharding_constraint(
-            normed_x, self.activation_ffw_td[op_mode])
-        return normed_x.astype(self.dtype)
+        with jax.named_scope("rms_norm_scale_apply"):
+            normed_x_TD *= self.scale.value
+        normed_x_TD = nnx.with_sharding_constraint(
+            normed_x_TD, self.activation_ffw_td[op_mode])
+        return normed_x_TD.astype(self.dtype)
 
     def generate_kernel(self, rngs: nnx.Rngs):
         self.scale = self.param_factory.create_scale_param(
@@ -170,11 +176,11 @@ class DenseFFW(nnx.Module):
         """Initializes the weight kernels for the feed-forward layer."""
         self.create_sharding()
 
-    def __call__(self, x, op_mode):
+    def __call__(self, x_TD, op_mode):
         """Performs the forward pass of the FFW layer.
 
         Args:
-            x: The input tensor of shape either `(sequence, d_model)`
+            x_TD: The input tensor of shape either `(sequence, d_model)`
             op_mode: The operational mode ('prefill' or 'generate'), used for
                 selecting sharding annotations.
 
@@ -182,8 +188,9 @@ class DenseFFW(nnx.Module):
             The output tensor of shape `(batch, sequence, d_model)`.
         """
         # TODO consider to create factories for einsum(?)
-        x = jnp.asarray(x, self.cfg.dtype)
-        x_TD = nnx.with_sharding_constraint(x, self.activation_ffw_td[op_mode])
+        x_TD = jnp.asarray(x_TD, self.cfg.dtype)
+        x_TD = nnx.with_sharding_constraint(x_TD,
+                                            self.activation_ffw_td[op_mode])
         act = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_ACT.value)
         with jax.named_scope("wi_0"):
             gating_TF = jnp.einsum('TD,DF -> TF', x_TD,
@@ -202,6 +209,7 @@ class DenseFFW(nnx.Module):
     def generate_kernel(self, rngs: nnx.Rngs):
         D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
         F = getattr(self.cfg, HuggingFaceArgNames.INTERMEDIATE_SIZE.value)
+
         self.kernel_gating_DF = self.param_factory.create_kernel_param(
             rngs,
             shape=(D, F),
@@ -307,50 +315,114 @@ class Embedder(nnx.Module):
             return self.encode(x)
 
     def generate_kernel(self, rngs: nnx.Rngs):
-
         V = getattr(self.cfg, HuggingFaceArgNames.VOCAB_SIZE.value)
         D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
+        self.input_embedding_table_VD = self.param_factory.create_kernel_param(
+            rngs,
+            shape=(V, D),
+            sharding=self.vd_sharding,
+            dtype=self.cfg.dtype)
+
+    def decode(self, x_TD: Float) -> Float:
+        """Projects hidden states to vocabulary logits.
+
+        Args:
+            x_TD: The input tensor of hidden states from the model backbone, with
+                shape `(sequence, d_model)`.
+
+        Returns:
+            The output logits over the vocabulary, with shape
+            `(sequence, vocab_size)`.
+        """
+        x_TD = jnp.asarray(x_TD, self.cfg.dtype)
+        x_TD = nnx.with_sharding_constraint(x_TD, self.prelogit_td)
+
+        with jax.named_scope("embedder_decode_projection"):
+            logits_TV = jnp.einsum('VD,TD -> TV',
+                                   self.input_embedding_table_VD.value, x_TD)
+        return logits_TV
+
+    def encode(self, x_T: Int) -> Float:
+        """Converts integer token IDs to dense embedding vectors.
+
+        Args:
+            x_T: The input tensor of token IDs, with shape `(sequence, )`.
+
+        Returns:
+            The corresponding embedding vectors, with shape
+            `(batch, sequence, d_model)`.
+        """
+        with jax.named_scope("embedder_encode_lookup"):
+            embedding_TD = jnp.take(self.input_embedding_table_VD.value,
+                                    x_T,
+                                    axis=0)
+
+        D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
+        if self.cfg.normalize_embeddings:
+            with jax.named_scope("embedder_normalize_embeddings"):
+                embedding_TD *= jnp.sqrt(D).astype(self.cfg.dtype)
+        return embedding_TD
+
+    def create_sharding(self):
+        """Creates and sets sharding attributes for weights and activations."""
+        self.prelogit_td = NamedSharding(
+            self.mesh, P(*self.sharding_cfg.generate_rules.prelogit_td))
+        self.vd_sharding = NamedSharding(
+            self.mesh, P(*self.sharding_cfg.generate_rules.vocab_vd))
+
+
+@dataclass
+class LMhead(Embedder):
+    """
+    An Embedder that uses a (D, V) shaped embedding table, inheriting from
+    the base Embedder class.
+
+    This implementation overrides the kernel generation, encoding, and decoding
+    methods to work with the transposed embedding matrix layout.
+    """
+
+    def generate_kernel(self, rngs: nnx.Rngs):
+        V = getattr(self.cfg, HuggingFaceArgNames.VOCAB_SIZE.value)
+        D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
+
         self.input_embedding_table_DV = self.param_factory.create_kernel_param(
             rngs,
             shape=(D, V),
             sharding=self.dv_sharding,
             dtype=self.cfg.dtype)
 
-    def decode(self, x: Float) -> Float:
+    def __call__(self, x):
+        """Dispatches to decode method.
+
+        Args:
+            x: The input tensor. Either token IDs for encoding or hidden states
+                for decoding.
+            decode: A boolean flag. If False (default), performs encoding. If
+                True, performs decoding.
+
+        Returns:
+            Either embedding vectors or logit scores.
+        """
+        return self.decode(x)
+
+    def decode(self, x_TD: Float) -> Float:
         """Projects hidden states to vocabulary logits.
 
         Args:
-            x: The input tensor of hidden states from the model backbone, with
+            x_TD: The input tensor of hidden states from the model backbone, with
                 shape `(sequence, d_model)`.
 
         Returns:
             The output logits over the vocabulary, with shape
-            `(batch, sequence, vocab_size)`.
+            `(sequence, vocab_size)`.
         """
-        x = jnp.asarray(x, self.cfg.dtype)
-        x_TD = nnx.with_sharding_constraint(x, self.prelogit_td)
+        x_TD = jnp.asarray(x_TD, self.cfg.dtype)
+        x_TD = nnx.with_sharding_constraint(x_TD, self.prelogit_td)
 
-        logits_TV = jnp.einsum('TD,DV -> TV', x_TD,
-                               self.input_embedding_table_DV.value)
+        with jax.named_scope("lmhead_decode_projection"):
+            logits_TV = jnp.einsum('DV,TD -> TV',
+                                   self.input_embedding_table_DV.value, x_TD)
         return logits_TV
-
-    def encode(self, x: Int) -> Float:
-        """Converts integer token IDs to dense embedding vectors.
-
-        Args:
-            x: The input tensor of token IDs, with shape `(sequence, )`.
-
-        Returns:
-            The corresponding embedding vectors, with shape
-            `(batch, sequence, d_model)`.
-        """
-        embedding_DT = jnp.take(self.input_embedding_table_DV.value, x, axis=1)
-        embedding_TD = embedding_DT.T
-
-        D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
-        if self.cfg.normalize_embeddings:
-            embedding_TD *= jnp.sqrt(D).astype(self.cfg.dtype)
-        return embedding_TD
 
     def create_sharding(self):
         """Creates and sets sharding attributes for weights and activations."""

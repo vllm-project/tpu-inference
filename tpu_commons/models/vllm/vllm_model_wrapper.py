@@ -1,7 +1,10 @@
 import copy
 import functools
+import os
 import tempfile
+from contextlib import nullcontext
 from typing import Any, List, Optional, Tuple
+from unittest.mock import patch
 
 import jax
 import torch
@@ -10,9 +13,17 @@ import torchax
 from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
+
+<<<<<<< HEAD
 from torchax.ops.mappings import j2t_dtype
 from vllm.config import (LoRAConfig, ModelConfig, SchedulerConfig, VllmConfig,
                          set_current_vllm_config)
+
+=======
+from torchax.ops.mappings import TORCH_DTYPE_TO_JAX
+from vllm.config import VllmConfig, set_current_vllm_config
+
+>>>>>>> main
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.lora.layers import BaseLayerWithLoRA
@@ -27,9 +38,12 @@ from tpu_commons.models.vllm.sharding import shard_model_to_tpu
 from tpu_commons.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 
+<<<<<<< HEAD
 # from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 #xw32q: what's the value __name__ below?
+=======
+>>>>>>> main
 logger = init_logger(__name__)
 
 
@@ -40,15 +54,24 @@ class _VllmRunner(torch.nn.Module):
         self.vllm_model = vllm_model
 
     def forward(self, **kwargs) -> torch.Tensor:
-        if "hidden_state" in kwargs:
-            return self.compute_logits(kwargs["hidden_state"])
-        else:
-            return self.compute_hidden_state(
-                kwargs["input_ids"],
-                kwargs["positions"],
-                kwargs["intermediate_tensors"],
-                kwargs["inputs_embeds"],
-            )
+        # We don't support multimodal input in Gemma3, but we need patch it to
+        # None to workaround vLLM Gemma3 model bug that
+        # `get_multimodal_embeddings` returns empty list but it's caller checks
+        # for None.
+        with patch(
+                "vllm.model_executor.models.gemma3_mm."
+                "Gemma3ForConditionalGeneration."
+                "get_multimodal_embeddings",
+                return_value=None):
+            if "hidden_state" in kwargs:
+                return self.compute_logits(kwargs["hidden_state"])
+            else:
+                return self.compute_hidden_state(
+                    kwargs["input_ids"],
+                    kwargs["positions"],
+                    kwargs["intermediate_tensors"],
+                    kwargs["inputs_embeds"],
+                )
 
     def compute_hidden_state(
         self,
@@ -97,13 +120,27 @@ class VllmModelWrapper():
 
         # Set up to load the model into CPU first.
         vllm_config_for_load = copy.deepcopy(self.vllm_config)
-        vllm_config_for_load.model_config.dtype = j2t_dtype(
-            self.vllm_config.model_config.dtype.dtype)
+        assert self.vllm_config.model_config.dtype in TORCH_DTYPE_TO_JAX, "The model_config.dtype must be a PyTorch dtype."
         vllm_config_for_load.device_config.device = "cpu"
 
-        # Load the vLLM model and wrap it into a new model whose forward
-        # function calculates the hidden_state and logits in one go.
-        vllm_model = vllm_get_model(vllm_config=vllm_config_for_load)
+        if os.getenv("JAX_RANDOM_WEIGHTS", False):
+            vllm_config_for_load.load_config.load_format = "dummy"
+            use_random_weights = True
+        else:
+            use_random_weights = (
+                vllm_config_for_load.load_config.load_format == "dummy")
+        if use_random_weights:
+            logger.info(
+                "Initializing vLLM model with random weights, weight loading skipped."
+            )
+        # The DummyModelLoader in vLLM calls torch._sync for torch_xla path when it detects the tpu platform, but we don't need it and it causes crash without proper setup.
+        load_context = patch(
+            "torch._sync",
+            return_value=None) if use_random_weights else nullcontext()
+
+        # Load the vLLM model and wrap it into a new model whose forward function can calculate the hidden_state and logits.
+        with load_context:
+            vllm_model = vllm_get_model(vllm_config=vllm_config_for_load)
 
         lora_manager = None
         if vllm_config_for_load.lora_config is not None:

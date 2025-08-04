@@ -4,10 +4,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 # Dependencies that will be mocked
+from vllm.lora.request import LoRARequest
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
 
 # Import the abstract classes and interfaces for mocking
 from tpu_commons.di.abstracts import (AbstractKVCacheConfig,
+                                      AbstractLoRARequest,
                                       AbstractSchedulerOutput)
 from tpu_commons.di.interfaces import HostInterface
 # The class we are testing
@@ -258,8 +261,7 @@ class TestTPUWorker:
         else:
             mock_report_usage_stats.assert_not_called()
 
-    @patch('tpu_commons.worker.tpu_worker_torchax.TPU_HEAD_SIZE_ALIGNMENT',
-           128)
+    @patch('tpu_commons.utils.TPU_HEAD_SIZE_ALIGNMENT', 128)
     @patch('tpu_commons.worker.tpu_worker_torchax.jax')
     @patch('tpu_commons.worker.tpu_worker_torchax.logger')
     @pytest.mark.parametrize(
@@ -390,6 +392,50 @@ class TestTPUWorker:
             "concrete_vllm_object")
         assert result is None
 
+    @patch(
+        'tpu_commons.worker.tpu_worker_torchax.adapt_lora_request_if_needed')
+    def test_add_lora(self, mock_adapter_fn, mock_host_interface,
+                      mock_vllm_config):
+        """Tests the pass-through for add_lora."""
+        worker = TPUWorker(host_interface=mock_host_interface,
+                           vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test")
+        mock_lora_request = MagicMock(spec=AbstractLoRARequest)
+
+        # The adapter function returns the adapted input
+        mock_adapter_fn.return_value = mock_lora_request
+        # The adapter has the vllm object
+        mock_lora_request.vllm_lora_request = "concrete_vllm_object"
+
+        with pytest.raises(
+                NotImplementedError,
+                match="LoRA is not supported by the torchax worker yet."):
+            worker.add_lora(mock_lora_request)
+
+    @patch(
+        'tpu_commons.worker.tpu_worker_torchax.adapt_lora_request_if_needed')
+    def test_add_lora_lora_request(self, mock_adapter_fn, mock_host_interface,
+                                   mock_vllm_config):
+        """Tests the pass-through for add_lora."""
+        worker = TPUWorker(host_interface=mock_host_interface,
+                           vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test")
+        mock_lora_request = MagicMock(spec=LoRARequest)
+
+        # The adapter function returns the adapted input
+        mock_adapter_fn.return_value = mock_lora_request
+        # The adapter has the vllm object
+        mock_lora_request.vllm_lora_request = "concrete_vllm_object"
+
+        with pytest.raises(
+                NotImplementedError,
+                match="LoRA is not supported by the torchax worker yet."):
+            worker.add_lora(mock_lora_request)
+
     #
     # --- Profiling and Health Check Tests ---
     #
@@ -449,6 +495,7 @@ class TestTPUWorker:
             ("load_model", "load_model", []),
             ("get_model", "get_model", []),
             ("get_kv_cache_spec", "get_kv_cache_spec", []),
+            ("get_supported_tasks", "get_supported_tasks", []),
         ])
     def test_runner_passthrough_methods(self, worker_method_name,
                                         runner_method_name, method_args,
@@ -488,6 +535,29 @@ class TestTPUWorker:
         worker.model_runner.initialize_kv_cache.assert_called_once_with(
             "concrete_vllm_object")
 
+    @patch(
+        'tpu_commons.worker.tpu_worker_torchax.adapt_kv_cache_config_if_needed'
+    )
+    def test_initialize_from_config_kv_cache_config(self, mock_adapter_fn,
+                                                    mock_host_interface,
+                                                    mock_vllm_config):
+        """Tests the special case pass-through for initialize_from_config."""
+        worker = TPUWorker(host_interface=mock_host_interface,
+                           vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test")
+        worker.model_runner = MagicMock()
+        mock_input_config = MagicMock(spec=KVCacheConfig)
+        mock_adapter_fn.return_value = mock_input_config
+        mock_input_config.vllm_kv_cache_config = "concrete_vllm_object"
+
+        worker.initialize_from_config(mock_input_config)
+
+        mock_adapter_fn.assert_called_once_with(mock_input_config)
+        worker.model_runner.initialize_kv_cache.assert_called_once_with(
+            "concrete_vllm_object")
+
     def test_compile_or_warm_up_model(self, mock_host_interface,
                                       mock_vllm_config):
         """Tests the special case pass-through for model compilation/warmup."""
@@ -502,3 +572,17 @@ class TestTPUWorker:
 
         # This method calls two different runner methods
         worker.model_runner.capture_model.assert_called_once()
+
+    def test_get_supported_tasks(self, mock_host_interface, mock_vllm_config):
+        """Test get_supported_tasks passthrough to model runner."""
+        worker = TPUWorker(host_interface=mock_host_interface,
+                           vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test")
+        worker.model_runner = MagicMock()
+        worker.model_runner.get_supported_tasks.return_value = ("generate", )
+
+        _ = worker.get_supported_tasks()
+
+        worker.model_runner.get_supported_tasks.assert_called_once()

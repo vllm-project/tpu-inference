@@ -16,17 +16,20 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.tasks import SupportedTask
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.model_executor import set_random_seed
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
-from vllm.v1.attention.backends.pallas import TPU_HEAD_SIZE_ALIGNMENT
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
 
+from vllm.lora.request import LoRARequest
+
 from tpu_commons.di.abstracts import (AbstractKVCacheConfig,
+                                      AbstractLoRARequest,
                                       AbstractSchedulerOutput)
 from tpu_commons.di.interfaces import HostInterface
 from tpu_commons.logger import init_logger
@@ -34,7 +37,9 @@ from tpu_commons.models.torchax.torchax_wrapper import with_torchax_global
 from tpu_commons.runner.tpu_torchax_runner import TPUModelRunner
 from tpu_commons.worker.base import AbstractTpuWorker
 from tpu_commons.worker._temporary_vllm_compat import (
-    adapt_kv_cache_config_if_needed, adapt_scheduler_output_if_needed)
+    adapt_kv_cache_config_if_needed, adapt_scheduler_output_if_needed,
+    adapt_lora_request_if_needed)
+from tpu_commons.utils import TPU_HEAD_SIZE_ALIGNMENT
 
 logger = init_logger(__name__)
 
@@ -68,7 +73,6 @@ class TPUWorker(AbstractTpuWorker):
         self.scheduler_config = vllm_config.scheduler_config
         self.device_config = vllm_config.device_config
         self.speculative_config = vllm_config.speculative_config
-        self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
 
         self.parallel_config.rank = rank
@@ -204,6 +208,19 @@ class TPUWorker(AbstractTpuWorker):
         output = self.model_runner.execute_model(vllm_scheduler_output)
         return output if self.is_driver_worker else None
 
+    def add_lora(
+        self,
+        lora_request: Union[AbstractLoRARequest, LoRARequest],
+    ) -> bool:
+        # Adapt the input if necessary (temporary compatibility layer)
+        adapted_lora_request = adapt_lora_request_if_needed(lora_request)
+
+        # Unwrap the adapter to get the concrete vLLM object
+        vllm_lora_request = adapted_lora_request.vllm_lora_request
+
+        raise NotImplementedError(
+            "LoRA is not supported by the torchax worker yet.")
+
     def profile(self, is_start: bool = True):
         if self.rank < 1:
             if self.profile_dir is None:
@@ -226,6 +243,9 @@ class TPUWorker(AbstractTpuWorker):
 
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
+
+    def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+        return self.model_runner.get_supported_tasks()
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         # NOTE: This method intentionally returns a concrete vLLM type, which
@@ -275,5 +295,5 @@ class TPUWorker(AbstractTpuWorker):
             backend="gloo",
         )
         ensure_model_parallel_initialized(
-            parallel_config.tensor_parallel_size,
-            parallel_config.pipeline_parallel_size)
+            self.parallel_config.tensor_parallel_size,
+            self.parallel_config.pipeline_parallel_size)

@@ -24,6 +24,9 @@ from tpu_commons.models.torchax.torchax_wrapper import (
 from tpu_commons.distributed.tpu_distributed_utils import (
     create_torchax_kv_cache, create_torchax_tensor_with_partition_spec)
 
+from vllm.model_executor.models.interfaces import supports_transcription
+from vllm.model_executor.models.interfaces_base import (
+    is_pooling_model, is_text_generation_model)
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
@@ -33,7 +36,7 @@ from tpu_commons.logger import init_logger
 from tpu_commons.runner.utils import (get_padded_num_reqs_with_upper_limit,
                                       get_padded_token_len, get_req_paddings,
                                       get_token_paddings, MIN_NUM_SEQS)
-from vllm.lora.layers import BaseLayerWithLoRA
+from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.model_executor.model_loader import get_model_loader
 
 from tpu_commons.models.torchax.tpu import TPUModelLoader
@@ -43,8 +46,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv,
                         is_pin_memory_available)
 
 from tpu_commons.attention.backends.pallas_torchax import (
-    PallasAttentionBackend, PallasMetadata,
-    NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK)
+    PallasAttentionBackend, PallasMetadata)
 
 from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
                                         KVCacheConfig, KVCacheSpec,
@@ -118,7 +120,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self.original_parallel_config = original_parallel_config
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
-        self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
         self.device_config = vllm_config.device_config
 
@@ -361,6 +362,9 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
     def get_model(self) -> nn.Module:
         return self.model
+
+    def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+        return ("generate", )
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
@@ -612,17 +616,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         logits_indices = create_torchax_tensor_with_partition_spec(
             logits_indices, self.mesh).jax()
 
-        if self.lora_config is not None:
-            # We need to respect padding when activating LoRA adapters
-            padded_num_scheduled_tokens_per_req = np.copy(
-                num_scheduled_tokens_per_req
-            )  # Copying to avoid accidental state corruption bugs
-            padded_num_scheduled_tokens_per_req[-1] += \
-                padded_total_num_scheduled_tokens - total_num_scheduled_tokens
-
-            self.set_active_loras(self.input_batch,
-                                  padded_num_scheduled_tokens_per_req)
-
         layer_names = get_layers_from_vllm_config(self.vllm_config,
                                                   Attention).keys()
         per_layer_attn_metadata = {
@@ -630,31 +623,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             for layer_name in layer_names
         }
         return per_layer_attn_metadata, logits_indices, padded_num_reqs
-
-    def _scatter_placeholders(
-        self,
-        embeds: torch.Tensor,
-        is_embed: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        if is_embed is None:
-            return embeds
-
-        placeholders = embeds.new_full(
-            (is_embed.shape[0], embeds.shape[-1]),
-            fill_value=torch.nan,
-        )
-        placeholders[is_embed] = embeds
-        return placeholders
-
-    def _gather_placeholders(
-        self,
-        placeholders: torch.Tensor,
-        is_embed: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        if is_embed is None:
-            return placeholders
-
-        return placeholders[is_embed]
 
     def _get_model_inputs(self, input_ids: torch.Tensor,
                           mm_embeds: list[torch.Tensor]):
@@ -1139,8 +1107,4 @@ def _get_padded_num_kv_cache_update_slices(num_tokens: int, max_num_reqs: int,
     recompilation."""
     padded_num_slices = 2 * max_num_reqs + num_tokens // page_size
     padded_num_slices = min(padded_num_slices, num_tokens)
-    padded_num_slices = (
-        padded_num_slices + NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK - 1
-    ) // NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK * \
-        NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK
     return padded_num_slices

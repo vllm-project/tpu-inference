@@ -75,10 +75,10 @@ def adapt_scheduler_output_if_needed(
     If it's already an AbstractSchedulerOutput, it's passed through.
     """
     if isinstance(scheduler_output, VllmSchedulerOutput):
-        logger.warning(
-            "Received raw VllmSchedulerOutput. Performing temporary, on-the-fly "
-            "adaptation. This is a compatibility feature and should be removed "
-            "once the vLLM engine is updated to provide an adapted object.")
+        # logger.warning(
+        #     "Received raw VllmSchedulerOutput. Performing temporary, on-the-fly "
+        #     "adaptation. This is a compatibility feature and should be removed "
+        #     "once the vLLM engine is updated to provide an adapted object.")
         return VllmSchedulerOutputAdapter(scheduler_output)
 
     if isinstance(scheduler_output, AbstractSchedulerOutput):
@@ -96,10 +96,10 @@ def adapt_kv_cache_config_if_needed(
     If it's already an AbstractKVCacheConfig, it's passed through.
     """
     if isinstance(kv_cache_config, VllmKVCacheConfig):
-        logger.warning(
-            "Received raw VllmKVCacheConfig. Performing temporary, on-the-fly "
-            "adaptation. This is a compatibility feature and should be removed "
-            "once the vLLM engine is updated to provide an adapted object.")
+        # logger.warning(
+        #     "Received raw VllmKVCacheConfig. Performing temporary, on-the-fly "
+        #     "adaptation. This is a compatibility feature and should be removed "
+        #     "once the vLLM engine is updated to provide an adapted object.")
         return VllmKVCacheConfigAdapter(kv_cache_config)
 
     if isinstance(kv_cache_config, AbstractKVCacheConfig):
@@ -117,10 +117,10 @@ def adapt_lora_request_if_needed(
     If it's already an AbstractLoRARequest, it's passed through.
     """
     if isinstance(lora_request, VllmLoRARequest):
-        logger.warning(
-            "Received raw VllmLoRARequest. Performing temporary, on-the-fly "
-            "adaptation. This is a compatibility feature and should be removed "
-            "once the vLLM engine is updated to provide an adapted object.")
+        # logger.warning(
+        #     "Received raw VllmLoRARequest. Performing temporary, on-the-fly "
+        #     "adaptation. This is a compatibility feature and should be removed "
+        #     "once the vLLM engine is updated to provide an adapted object.")
         return VllmLoRARequestAdapter(lora_request)
 
     if isinstance(lora_request, AbstractLoRARequest):

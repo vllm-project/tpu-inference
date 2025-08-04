@@ -10,7 +10,7 @@
 # you specify the --dataset-name, --dataset-path, and --root-dir flags
 
 # Example default usage: bash tests/e2e/benchmarking/mlperf.sh -r /local/root_dir
-# Example local docker + JAX TPU usage: TPU_BACKEND_TYPE=jax NEW_MODEL_DESIGN=True BUILDKITE_COMMIT=3c545c0c3 .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
+# Example local docker + JAX TPU usage: BUILDKITE_COMMIT=0f199f1 .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
 
 # Logs the vLLM server output to a file
 LOG_FILE="server.log"
@@ -29,14 +29,15 @@ TARGET_THROUGHPUT="1500"
 model_list="Qwen/Qwen2.5-1.5B-Instruct Qwen/Qwen2.5-0.5B-Instruct meta-llama/Llama-3.1-8B-Instruct"
 
 extra_serve_args=()
-if [ "$NEW_MODEL_DESIGN" = "True" ]; then
-    echo "NEW_MODEL_DESIGN is True. Running with the new model list and custom hf_overrides."
-    model_list="meta-llama/Llama-3.1-8B-Instruct"
-    extra_serve_args+=("--hf_overrides")
-    extra_serve_args+=('{"architectures": ["Llama3"]}')
+if [ "$QUANTIZATION" = "True" ]; then
+    echo "QUANTIZATION is True. Running with quantization."
+    extra_serve_args+=("--additional_config")
+    extra_serve_args+=('{"quantization": "int8_default.yaml"}')
 else
-    echo "NEW_MODEL_DESIGN is not set to True. Running with default settings."
+    echo "QUANTIZATION is False. Running without quantization."
 fi
+
+echo extra_serve_args: "${extra_serve_args[@]}"
 
 root_dir=/workspace
 dataset_name=mlperf
@@ -128,6 +129,8 @@ cp -r "$root_dir"/tpu_commons/scripts/vllm/benchmarking/*.py "$root_dir"/vllm/be
 cleanUp() {
     echo "Stopping the vLLM server and cleaning up log files..."
     pkill -f "vllm serve $1"
+    # Kill all processes related to vllm.
+    pgrep -f -i vllm | xargs -r kill -9
 
     # Clean up log files. Use -f to avoid errors if files don't exist.
     rm -f "$LOG_FILE"
@@ -217,8 +220,19 @@ for model_name in $model_list; do
     echo "Running benchmark for model: $model_name"
     echo "--------------------------------------------------"
 
+    if [ "$NEW_MODEL_DESIGN" = "True" ] && { [ "$model_name" == "Qwen/Qwen2.5-1.5B-Instruct" ] || [ "$model_name" == "Qwen/Qwen2.5-0.5B-Instruct" ];}; then
+       echo "Skipping $model_name for NEW_MODEL_DESIGN: True"
+        continue
+    fi
+
     if [ "$MODEL_IMPL_TYPE" == "vllm" ] && [ "$model_name" == "Qwen/Qwen2.5-0.5B-Instruct" ]; then
         echo "Skipping $model_name for MODEL_IMPL_TYPE: vllm"
+        continue
+    fi
+
+    # TODO (jacobplatin): remove when Qwen2.5 uses new model implementation
+    if [ "$QUANTIZATION" = "True" ] && { [ "$model_name" == "Qwen/Qwen2.5-1.5B-Instruct" ] || [ "$model_name" == "Qwen/Qwen2.5-0.5B-Instruct" ];}; then
+       echo "Skipping $model_name for QUANTIZATION: True"
         continue
     fi
 

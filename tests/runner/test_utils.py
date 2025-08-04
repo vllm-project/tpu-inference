@@ -1,15 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
+import io
+import logging
 import time
+from unittest.mock import MagicMock, patch
 
 import jax
 import jax.numpy as jnp
 import pytest
 from jax._src.interpreters import pxla
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 from tpu_commons.runner.utils import (ForbidCompile, LatencyTracker,
-                                      determine_do_sampling,
+                                      create_kv_caches, determine_do_sampling,
                                       get_padded_num_reqs_with_upper_limit,
-                                      pad_to_multiple)
+                                      get_padded_token_len, get_req_paddings,
+                                      get_token_paddings, pad_to_multiple)
 
 
 def test_determine_do_sampling():
@@ -56,17 +61,84 @@ def test_get_padded_num_reqs_with_upper_limit():
     assert get_padded_num_reqs_with_upper_limit(1, 128) == 8
 
 
+def test_get_paddings():
+    # Bucketed padding
+    min_token_size, max_token_size, padding_gap = 16, 512, 64
+    expected_paddings = [16, 32, 64, 128, 192, 256, 320, 384, 448, 512]
+    actual_paddings = get_token_paddings(min_token_size, max_token_size,
+                                         padding_gap)
+
+    # Bucketed padding with max_token_size not a power of two.
+    max_token_size = 317
+    expected_paddings = [16, 32, 64, 128, 192, 256, 320]
+    actual_paddings = get_token_paddings(min_token_size, max_token_size,
+                                         padding_gap)
+    assert actual_paddings == expected_paddings
+
+    # Exponential padding.
+    max_token_size, padding_gap = 1024, 0
+    expected_paddings = [16, 32, 64, 128, 256, 512, 1024]
+    actual_paddings = get_token_paddings(min_token_size, max_token_size,
+                                         padding_gap)
+    assert actual_paddings == expected_paddings
+    # Exponential padding with max_token_size not a power of two.
+    max_token_size = 317
+    expected_paddings = [16, 32, 64, 128, 256, 512]
+    actual_paddings = get_token_paddings(min_token_size, max_token_size,
+                                         padding_gap)
+    assert actual_paddings == expected_paddings
+
+
+def test_get_padded_token_len():
+    min_token_size, max_token_size, padding_gap = 16, 512, 64
+    paddings = get_token_paddings(min_token_size, max_token_size, padding_gap)
+    assert get_padded_token_len(paddings, 1) == 16
+    assert get_padded_token_len(paddings, 16) == 16
+    assert get_padded_token_len(paddings, 20) == 32
+    assert get_padded_token_len(paddings, 300) == 320
+    assert get_padded_token_len(paddings, 512) == 512
+
+
+def test_get_req_paddings():
+    assert get_req_paddings(1, 32) == [8, 16, 32]
+    assert get_req_paddings(8, 32) == [8, 16, 32]
+    assert get_req_paddings(8, 36) == [8, 16, 32, 36]
+
+
 def test_latency_tracker(caplog):
     """Tests the LatencyTracker context manager."""
-    caplog.set_level("DEBUG")
-    sleep_duration = 0.01
-    with LatencyTracker("test_op") as tracker:
-        time.sleep(sleep_duration)
+    logger_name = "vllm.tpu_commons.runner.utils"
+    logger = logging.getLogger(logger_name)
 
-    elapsed = tracker.end_time - tracker.start_time
-    assert elapsed >= sleep_duration
-    assert "Latency for 'test_op'" in caplog.text
-    assert f"{elapsed:.3f} seconds" in caplog.text
+    original_level = logger.level
+    original_propagate = logger.propagate
+
+    # Create an in-memory stream to capture log output
+    log_capture_string = io.StringIO()
+    # Create a handler that writes to our in-memory stream
+    capture_handler = logging.StreamHandler(log_capture_string)
+
+    try:
+        logger.setLevel(logging.DEBUG)
+        logger.propagate = False
+        logger.addHandler(capture_handler)
+
+        sleep_duration = 0.01
+        with LatencyTracker("test_op") as tracker:
+            time.sleep(sleep_duration)
+
+        elapsed = tracker.end_time - tracker.start_time
+        assert elapsed >= sleep_duration
+        log_contents = log_capture_string.getvalue()
+
+        assert "Latency for 'test_op'" in log_contents
+        assert f"{elapsed:.3f} seconds" in log_contents
+
+    finally:
+        # --- IMPORTANT: Clean up and restore the logger's original state ---
+        logger.setLevel(original_level)
+        logger.propagate = original_propagate
+        logger.removeHandler(capture_handler)
 
 
 # Define a fixture to clear the JAX cache before each test
@@ -167,3 +239,52 @@ def test_forbid_compile_raises_on_new_shape(jitted_function, jnp_array_input,
     with pytest.raises(RuntimeError, match=expected_error_message):
         with ForbidCompile(message=expected_error_message):
             jitted_function(jnp_array_input_new)
+
+
+@pytest.fixture
+def mesh():
+    devices = jax.devices()
+    return Mesh(devices, axis_names=("model", ))
+
+
+def test_create_kv_caches(mesh: Mesh):
+    """
+    Tests that `create_kv_caches` correctly allocates and shards the KV caches
+    for all specified layers.
+    """
+    num_blocks = 64
+    block_size = 16
+    num_kv_heads = 8
+    head_size = 128
+    layer_names = ["decoder.0", "decoder.1", "decoder.2"]  # Test with 3 layers
+    devices = jax.devices()
+
+    expected_shape = (num_blocks, block_size, num_kv_heads * 2, head_size)
+    expected_sharding = NamedSharding(mesh, PartitionSpec(None, None, "model"))
+    expected_dtype = jnp.bfloat16
+
+    with patch("tpu_commons.logger.init_logger",
+               return_value=MagicMock()), patch(
+                   "tpu_commons.runner.utils.utils.hbm_usage_gb",
+                   return_value=[(0.0, 0.0), (0.0, 0.0)]):
+        kv_caches = create_kv_caches(
+            num_blocks=num_blocks,
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            mesh=mesh,
+            layer_names=layer_names,
+            devices=devices,
+        )
+
+        assert isinstance(kv_caches, list)
+        assert len(kv_caches) == len(layer_names)
+
+        for cache_array in kv_caches:
+            assert isinstance(cache_array, jax.Array)
+            assert cache_array.shape == expected_shape
+            assert cache_array.dtype == expected_dtype
+            assert cache_array.sharding == expected_sharding
+
+        # Ensure that separate array objects were created for each layer
+        assert kv_caches[0] is not kv_caches[1]

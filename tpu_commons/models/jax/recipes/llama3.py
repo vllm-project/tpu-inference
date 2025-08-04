@@ -8,7 +8,6 @@ from typing import List, Optional, Tuple
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from flax.typing import PRNGKey
 from jax.sharding import Mesh
 from vllm.config import VllmConfig
 
@@ -17,9 +16,10 @@ from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.common.attention.attention import (
     AttentionConfig, AttentionMetadata)
 from tpu_commons.models.jax.common.base import Config, ParamFactory
-from tpu_commons.models.jax.common.kv_cache import KVCacheType
+from tpu_commons.models.jax.common.constants import KVCacheType
 from tpu_commons.models.jax.common.layers import (DenseFFWConfig, Embedder,
-                                                  EmbedderConfig, RMSNorm)
+                                                  EmbedderConfig, LMhead,
+                                                  RMSNorm)
 from tpu_commons.models.jax.common.model import Model
 from tpu_commons.models.jax.common.sharding import (Sharding, ShardingConfig,
                                                     ShardingRulesConfig)
@@ -78,7 +78,6 @@ class Llama3ModelConfig():
                     dtype=self.dtype,
                     vllm_config=self.vllm_config),
                 rms_norm_eps=self.rms_norm_eps,
-                block_type="dense",
                 vllm_config=self.vllm_config)
 
 
@@ -102,24 +101,29 @@ class Llama3RecipeConfig(RecipeConfig):
     serving: Llama3ServingConfig = field(default_factory=Llama3ServingConfig)
 
 
-class Llama3(Model):
+class LlamaForCausalLM(Model):
 
-    def __init__(self, vllm_config: VllmConfig, rng: PRNGKey, mesh: Mesh):
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 rng: jax.Array,
+                 mesh: Mesh,
+                 param_factory: ParamFactory | None = None):
         self.vllm_config = vllm_config
         self.rng = nnx.Rngs(rng)
         self.mesh = mesh
+        self.param_factory = param_factory
         try:
             strategy_dict = self.vllm_config.additional_config["sharding"][
                 "sharding_strategy"]
         except (KeyError, TypeError):
-            strategy_dict = {"tensor_parallelism": 4, "expert_parallelism": 2}
+            strategy_dict = {"tensor_parallelism": 1}
+        #TODO: after all models are migrated to the new sharding,
+        # we need to only create sharding obj in TPU runner
         self.sharding = Sharding(strategy_dict=strategy_dict,
                                  mesh=self.mesh,
                                  default_rules_cls=Llama3ShardingRulesConfig,
                                  vllm_config=self.vllm_config)
-        self.use_random_init = self.vllm_config.additional_config.get(
-            "random_weights", False)
-        # TODO: support to loading from HF checkpoints.
+
         model_name = self.vllm_config.model_config.model.lower()
         if "70b" in model_name:
             logger.info("Initializing Llama3 70B model variant.")
@@ -151,25 +155,27 @@ class Llama3(Model):
             serving=Llama3ServingConfig(vllm_config=self.vllm_config))
 
         logger.info(f"Using the following config:\n{self.cfg}")
-        logger.info(f"Using the following shardings:\n{self.sharding}")
+        logger.info(
+            f"Using the following sharding overrides:\n{self.sharding}")
         self.mesh = self.sharding.mesh
         self._init_layers()
 
     def _init_layers(self):
-        param_factory = ParamFactory(
-            kernel_initializer=nnx.initializers.xavier_normal(),
-            scale_initializer=nnx.initializers.ones,
-            random_init=self.use_random_init)
+        if not self.param_factory:
+            self.param_factory = ParamFactory(
+                kernel_initializer=nnx.initializers.xavier_normal(),
+                scale_initializer=nnx.initializers.ones,
+                random_init=False)
         self.embedder = Embedder(cfg=self.cfg.model.emb,
                                  mesh=self.mesh,
-                                 param_factory=param_factory,
+                                 param_factory=self.param_factory,
                                  sharding_cfg=self.cfg.sharding)
         self.embedder.generate_kernel(self.rng)
 
         self.layers = [
             TransformerBlock(cfg=self.cfg.model.layers,
                              block_type="dense",
-                             param_factory=param_factory,
+                             param_factory=self.param_factory,
                              mesh=self.mesh,
                              sharding_cfg=self.cfg.sharding)
             for i in range(self.cfg.model.num_layers)
@@ -180,7 +186,7 @@ class Llama3(Model):
         self.final_norm = RMSNorm(
             dims=self.cfg.model.hidden_size,
             mesh=self.mesh,
-            param_factory=param_factory,
+            param_factory=self.param_factory,
             sharding_cfg=self.cfg.sharding,
             epsilon=self.cfg.model.layers.rms_norm_eps,
             with_scale=True,
@@ -188,28 +194,17 @@ class Llama3(Model):
         )
         self.final_norm.generate_kernel(self.rng)
 
-        self.lm_head = Embedder(cfg=self.cfg.model.emb,
-                                mesh=self.mesh,
-                                param_factory=param_factory,
-                                sharding_cfg=self.cfg.sharding)
+        self.lm_head = LMhead(cfg=self.cfg.model.emb,
+                              mesh=self.mesh,
+                              param_factory=self.param_factory,
+                              sharding_cfg=self.cfg.sharding)
         self.lm_head.generate_kernel(self.rng)
 
-    # For compatibility with flax.
-    def apply(self, variables, *args, **kwargs):
-        return self.__call__(*args, **kwargs)
-
-    def load_weights(self, rng: PRNGKey, cache_dir: Optional[str] = None):
-        if self.use_random_init:
-            #TODO: Support loading random weights, either here or in tpu_runner
-            logger.warning(
-                "Model name or path not provided - randomly initializing the weights."
-            )
-        else:
-            weight_loader = Llama3WeightLoader(vllm_config=self.vllm_config,
-                                               model_config=self.cfg.model,
-                                               cache_dir=cache_dir,
-                                               sharding_cfg=self.cfg.sharding)
-            weight_loader.load_weights(self)
+    def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):
+        self.rng = nnx.Rngs(rng)
+        weight_loader = Llama3WeightLoader(vllm_config=self.vllm_config,
+                                           model_config=self.cfg.model)
+        weight_loader.load_weights(self)
 
     def __call__(
         self,
@@ -219,40 +214,54 @@ class Llama3(Model):
         *args,
     ) -> Tuple[List[KVCacheType], jax.Array]:
         is_prefill = False
-        x = self.embedder.encode(input_ids)
-        for (i, layer) in enumerate(self.layers):
-            kv_cache = kv_caches[i]
-            with jax.named_scope(f'layer_{i}'):
-                new_kv_cache, x = layer(x, is_prefill, kv_cache,
-                                        attention_metadata)
-            kv_caches[i] = new_kv_cache
+        with jax.named_scope("llama_embed_input"):  #Embedding
+            x_TD = self.embedder.encode(input_ids)
 
-        final_activation = self.final_norm(x)
+        with jax.named_scope("llama_model_transformer_blocks"):
+            for (i, layer) in enumerate(self.layers):
+                kv_cache = kv_caches[i]
 
-        return kv_caches, final_activation
+                # The first layer is unscoped to avoid JAX tracing issues.
+                # JAX's profiler may incorrectly apply the scope name from the first
+                # layer's kernel compilation to all subsequent layers. Skipping the
+                # first layer ensures distinct scope names for the remaining layers.
+                if i == 0:
+                    new_kv_cache, x_TD = layer(x_TD, is_prefill, kv_cache,
+                                               attention_metadata)
+                else:
+                    with jax.named_scope(f'layer_{i}'):
+                        new_kv_cache, x_TD = layer(x_TD, is_prefill, kv_cache,
+                                                   attention_metadata)
+
+                kv_caches[i] = new_kv_cache
+
+        with jax.named_scope(
+                "llama_final_norm"):  #Norm after last transformer block
+            final_activation_TD = self.final_norm(x_TD)
+
+        return kv_caches, final_activation_TD
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        return self.lm_head.decode(hidden_states)
+        with jax.named_scope("llama_lm_head_projection"
+                             ):  #LM head projection to produce logits
+            logits_TV = jnp.dot(hidden_states,
+                                self.lm_head.input_embedding_table_DV.value)
+
+        return logits_TV
 
 
 class Llama3WeightLoader(WeightLoader):
 
-    def __init__(self,
-                 vllm_config: VllmConfig,
-                 model_config: Llama3ModelConfig,
-                 cache_dir: Optional[str] = None,
-                 sharding_cfg: Optional[ShardingConfig] = None):
+    def __init__(self, vllm_config: VllmConfig,
+                 model_config: Llama3ModelConfig):
         super().__init__(vllm_config=vllm_config,
                          model_config=model_config,
-                         framework="flax",
-                         cache_dir=cache_dir,
-                         sharding_cfg=sharding_cfg)
+                         framework="flax")
         self.setup()
 
     def setup(self):
         super().setup()
         self.set_transpose_param_map({
-            "embed_tokens": (1, 0),
             "lm_head": (1, 0),
             "gate_proj": (1, 0),
             "up_proj": (1, 0),
@@ -285,7 +294,7 @@ class Llama3WeightLoader(WeightLoader):
         # Set the mappings from loaded parameter keys to standardized names.
         self.set_loaded_to_standardized_keys({
             "model.embed_tokens":
-            "embedder.input_embedding_table_DV",
+            "embedder.input_embedding_table_VD",
             "model.layers.*.input_layernorm":
             "layers.*.pre_attention_norm.scale",
             "model.layers.*.mlp.down_proj":

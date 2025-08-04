@@ -18,19 +18,19 @@ class RotaryEmbedding:
         self.dtype = dtype
 
     def _compute_inv_freq(self):
-        fractions = jnp.arange(0, self.rotary_dim, 2,
-                               dtype=jnp.float32) / self.rotary_dim
-        inv_freq = 1.0 / (self.rope_theta**fractions)
-        return inv_freq
+        fractions_H = jnp.arange(0, self.rotary_dim, 2,
+                                 dtype=jnp.float32) / self.rotary_dim
+        inv_freq_H = 1.0 / (self.rope_theta**fractions_H)
+        return inv_freq_H
 
     def _compute_sin_cos(self):
-        inv_freq = self._compute_inv_freq()
+        inv_freq_H = self._compute_inv_freq()
         t = jnp.arange(self.original_max_position_embeddings,
                        dtype=jnp.float32)
 
         freqs = jnp.einsum("...T,k->...Tk",
                            t,
-                           inv_freq,
+                           inv_freq_H,
                            precision=jax.lax.Precision.HIGHEST)
         sin, cos = jnp.sin(freqs), jnp.cos(freqs)
         cache = jnp.concatenate((cos, sin), axis=-1)
@@ -38,17 +38,17 @@ class RotaryEmbedding:
 
     def apply_rope(self, positions: jax.Array, x_TNH: jax.Array):
         assert x_TNH.ndim == 3
-        cos_sin = self.sin_cos_cache[positions]
+        cos_sin_TH = self.sin_cos_cache[positions]
         # cos, sin: (T, H/2)
-        cos, sin = jnp.split(cos_sin, 2, axis=-1)
-        assert sin.ndim == 2 and cos.ndim == 2
+        cos_TH, sin_TH = jnp.split(cos_sin_TH, 2, axis=-1)
+        assert sin_TH.ndim == 2 and cos_TH.ndim == 2
         # cos, sin: (T, 1, H/2)
-        cos, sin = cos[:, None, :], sin[:, None, :]
+        cos_T1H, sin_T1H = cos_TH[:, None, :], sin_TH[:, None, :]
         # first_half, second_half: (T, N, H/2)
-        first_half, second_half = jnp.split(x_TNH, 2, axis=-1)
+        first_half_TNH, second_half_TNH = jnp.split(x_TNH, 2, axis=-1)
         combined = jnp.concatenate([
-            first_half * cos - second_half * sin,
-            second_half * cos + first_half * sin
+            first_half_TNH * cos_T1H - second_half_TNH * sin_T1H,
+            second_half_TNH * cos_T1H + first_half_TNH * sin_T1H
         ],
                                    axis=-1)
         return combined.astype(self.dtype)
@@ -100,28 +100,31 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         return inv_freq
 
     def _compute_sin_cos(self):
-        inv_freq = self._compute_inv_freq()
+        inv_freq_H = self._compute_inv_freq()
         t = jnp.arange(self.original_max_position_embeddings *
                        self.scaling_factor,
                        dtype=jnp.float32)
-        freqs = jnp.einsum("...T,k->...Tk", t, inv_freq)
+        freqs = jnp.einsum("...T,k->...Tk", t, inv_freq_H)
         sin, cos = jnp.sin(freqs) * self.mscale, jnp.cos(freqs) * self.mscale
         cache = jnp.concatenate((cos, sin), axis=-1)
         return cache
 
     def apply_rope(self, positions: jax.Array, x_TNH: jax.Array):
         assert x_TNH.ndim == 3
-        cos_sin = self.sin_cos_cache[positions]
+        cos_sin_TH = self.sin_cos_cache[positions]
         # cos, sin: (T, H/2)
-        cos, sin = jnp.split(cos_sin, 2, axis=-1)
-        assert sin.ndim == 2 and cos.ndim == 2
+        cos_TH, sin_TH = jnp.split(cos_sin_TH, 2, axis=-1)
+        assert sin_TH.ndim == 2 and cos_TH.ndim == 2
         # cos, sin: (T, 1, H/2)
-        cos, sin = cos[:, None, :], sin[:, None, :]
+        cos_T1H, sin_T1H = cos_TH[:, None, :], sin_TH[:, None, :]
         # even, odd: (T, N, H/2)
-        even, odd = x_TNH[..., ::2], x_TNH[..., 1::2]
-        combined = jnp.stack([even * cos - odd * sin, odd * cos + even * sin],
-                             axis=-1).reshape(x_TNH.shape)
-        return combined.astype(self.dtype)
+        even_TNH, odd_TNH = x_TNH[..., ::2], x_TNH[..., 1::2]
+        combined_TNH = jnp.stack([
+            even_TNH * cos_T1H - odd_TNH * sin_T1H,
+            odd_TNH * cos_T1H + even_TNH * sin_T1H
+        ],
+                                 axis=-1).reshape(x_TNH.shape)
+        return combined_TNH.astype(self.dtype)
 
 
 # Calculates the temperature scaling factor for YaRN to adjust

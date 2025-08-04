@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional
 
 import torch
 from jax.tree_util import register_pytree_node_class
@@ -17,13 +17,9 @@ from tpu_commons.logger import init_logger
 # Register custom op dispatcher.
 from tpu_commons.models.torchax.torchax_wrapper import (kv_cache_update,
                                                         ragged_paged_attention)
+from tpu_commons.utils import TPU_HEAD_SIZE_ALIGNMENT
 
 logger = init_logger(__name__)
-
-# TPU requires the head size to be a multiple of 128.
-TPU_HEAD_SIZE_ALIGNMENT = 128
-# Block size used for kv cache updating kernel
-NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK = 8
 
 
 class PallasAttentionBackend(AttentionBackend):
@@ -132,7 +128,6 @@ class PallasAttentionBackendImpl(AttentionImpl):
         alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[int] = None,
@@ -142,9 +137,6 @@ class PallasAttentionBackendImpl(AttentionImpl):
             logger.warning_once(
                 "Using irope in Pallas is not supported yet, it will fall back "
                 "to global attention for long context.")
-        if blocksparse_params is not None:
-            raise ValueError("Paged attention Pallas kernel does "
-                             "not support block-sparse attention.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -237,7 +229,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
             # these can be manually adjusted for debugging if necessary.
             num_kv_pages_per_block=None,
             num_queries_per_block=None,
-            vmem_limit_bytes=None,
+            vmem_limit_bytes=100 * 1024 * 1024,
             use_kernel=True,
             sm_scale=self.scale,
             sliding_window=self.sliding_window,
@@ -274,14 +266,12 @@ def write_to_kv_cache(key: torch.Tensor, value: torch.Tensor,
                                                   head_size)
 
     kv_cache = kv_cache.reshape(-1, num_combined_kv_heads, head_size)
-    kv_cache = call_jax(
-        kv_cache_update,
-        kv,
-        slot_mapping,
-        kv_cache,
-        num_slices,
-        page_size=block_size,
-        num_slices_per_block=NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK)
+    kv_cache = call_jax(kv_cache_update,
+                        kv,
+                        slot_mapping,
+                        kv_cache,
+                        num_slices,
+                        page_size=block_size)
     kv_cache = kv_cache.reshape(num_blocks, block_size, num_combined_kv_heads,
                                 head_size)
     return kv_cache

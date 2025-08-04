@@ -5,11 +5,17 @@ Implements a few utility functions for the various runners.
 import bisect
 import functools
 import time
-from typing import Optional
+from typing import Any, List, Optional
 
+import jax
+import jax.numpy as jnp
 from jax._src.interpreters import pxla
-from vllm.logger import init_logger
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
+from tpu_commons import utils
+from tpu_commons.logger import init_logger
+
+DEFAULT_KV_CACHE_DTYPE = jnp.bfloat16
 MIN_NUM_SEQS = 8
 
 logger = init_logger(__name__)
@@ -48,15 +54,14 @@ def get_padded_num_reqs_with_upper_limit(x: int, upper_limit: int) -> int:
 
 
 def get_req_paddings(min_req_size: int, max_req_size: int) -> list[int]:
-    logger.info("Preparing request paddings:")
     # assert min_req_size is power of 2
     assert (min_req_size & (min_req_size - 1) == 0) and min_req_size > 0
     paddings: list = []
     num = max(MIN_NUM_SEQS, min_req_size)
     while num <= max_req_size and (len(paddings) == 0 or paddings[-1] != num):
         paddings.append(num)
-        logger.info("    %d", num)
         num = get_padded_num_reqs_with_upper_limit(num + 1, max_req_size)
+    logger.info(f"Prepared request paddings: {paddings}")
     return paddings
 
 
@@ -77,25 +82,20 @@ def get_token_paddings(min_token_size: int, max_token_size: int,
     num = min_token_size
 
     if padding_gap == 0:
-        logger.info("Using exponential token paddings:")
         while True:
-            logger.info("    %d", num)
             paddings.append(num)
             if num >= max_token_size:
                 break
             num *= 2
     else:
-        logger.info("Using incremental token paddings:")
         while num <= padding_gap:
-            logger.info("    %d", num)
             paddings.append(num)
             num *= 2
         num //= 2
         while num < max_token_size:
             num += padding_gap
-            logger.info("    %d", num)
             paddings.append(num)
-
+    logger.info(f"Prepared token paddings: {paddings}")
     return paddings
 
 
@@ -184,3 +184,62 @@ class ForbidCompile:
             pxla._cached_lowering_to_hlo = self._original_func
         # Don't suppress any exceptions that occurred inside the 'with' block
         return False
+
+
+def create_kv_caches(
+    num_blocks: int,
+    block_size: int,
+    num_kv_heads: int,
+    head_size: int,
+    mesh: Mesh,
+    layer_names: List[str],
+    devices: List[Any],
+) -> List[jax.Array]:
+    """
+    Creates the KV caches, one per each decoder layer in the model, where the shape of each cache is
+    (num_blocks, block_size, num_kv_heads * 2, head_size).
+
+    Args:
+        num_blocks: The number of blocks in the KV cache.
+        block_size: The size of each block in the KV cache.
+        num_kv_heads: The number of KV heads in the KV cache.
+        head_size: The size of each head in the KV cache.
+        mesh: The mesh to shard the KV caches across.
+        layer_names: The names of the decoder layers in the model.
+        devices: The devices to shard the KV caches across.
+
+    Returns:
+        A list of KV caches, one per each decoder layer in the model.
+
+    """
+    # TODO (jacobplatz): update this for quantized KV cache
+    cache_dtype = DEFAULT_KV_CACHE_DTYPE
+    # TODO(xiang): fix this together with get_kv_cache_spec
+    # cache_dtype = kv_cache_spec.dtype
+
+    cache_shape = (
+        num_blocks,
+        block_size,
+        num_kv_heads * 2,
+        head_size,
+    )
+
+    # Shard the num_kv_heads dim along the 'model' axis.
+    sharding = NamedSharding(mesh, PartitionSpec(None, None, "model"))
+
+    def _allocate() -> jax.Array:
+        return jnp.empty(
+            shape=cache_shape,
+            dtype=cache_dtype,
+        )
+
+    sharded_allocate = jax.jit(_allocate, out_shardings=sharding)
+    kv_caches = []
+    for _ in layer_names:
+        kv_caches.append(sharded_allocate())
+    logger.info(f"Init kv-cache | "
+                f"shape={len(layer_names)} * {cache_shape} | "
+                f"sharding={sharding} | "
+                f"dtype={cache_dtype} | "
+                f"hbm={utils.hbm_usage_gb(devices)}Gb")
+    return kv_caches

@@ -168,8 +168,11 @@ class XlaQKVParallelLinear(nn.Module):
         # The concat and the following split will be no-op, and should be
         # optimized away by the compiler.
         qkv_proj = torch.cat([q_proj, k_proj, v_proj], dim=-1)
-        output_bias = torch.cat([q_bias, k_bias, v_bias], dim=-1) if \
-                            self.skip_bias_add else None
+        if not self.skip_bias_add or self.q_bias is None:
+            output_bias = None
+        else:
+            output_bias = torch.cat([self.q_bias, self.k_bias, self.v_bias],
+                                    dim=-1)
         if not self.return_bias:
             return qkv_proj
         return qkv_proj, output_bias
@@ -239,8 +242,11 @@ class XlaMergedColumnParallelLinear(nn.Module):
         # Apply linear transformations for each weight/bias pair
         outputs = []
         for i, _ in enumerate(self.output_sizes):
-            output = F.linear(input, getattr(self, f"weight_{i}"),
-                              getattr(self, f"bias_{i}"))
+            if self.skip_bias_add:
+                output = F.linear(input, getattr(self, f"weight_{i}"))
+            else:
+                output = F.linear(input, getattr(self, f"weight_{i}"),
+                                  getattr(self, f"bias_{i}"))
             outputs.append(output)
 
         # Concatenate all outputs
@@ -249,7 +255,9 @@ class XlaMergedColumnParallelLinear(nn.Module):
         # Handle bias return if needed
         if self.return_bias:
             output_bias = None
-            if self.bias_0 is not None:
+            if not self.skip_bias_add or self.bias_0 is None:
+                output_bias = None
+            else:
                 output_bias = torch.cat([
                     getattr(self, f"bias_{i}")
                     for i, _ in enumerate(self.output_sizes)
@@ -275,17 +283,10 @@ def partition_row_parallel_linear(layer: torch.nn.Module,
                                   mesh: Mesh) -> torch.nn.Module:
     assert isinstance(layer, RowParallelLinear)
 
-    def shard_output_hook(module, input, output):
-        sharding = NamedSharding(mesh, P('x', None))
-        new_output = output[0].apply_jax(jax.lax.with_sharding_constraint,
-                                         sharding)
-        return (new_output, output[1])
-
     torchax_t = create_torchax_tensor_with_partition_spec(
         layer.weight.data, mesh, (None, 'x'))
     layer.weight = Parameter(torchax_t,
                              requires_grad=layer.weight.requires_grad)
-    # layer.register_forward_hook(shard_output_hook)
     logger.info("Applied row-parallel sharding to %s", layer)
     return layer
 
@@ -378,12 +379,6 @@ def shard_model(model: torch.nn.Module, mesh: Mesh) -> None:
 
         for child_name, child_module in list(module.named_children()):
             _process_module(child_module, child_name, module)
-
-    # for name, tensor in model.named_parameters():
-    #     logger.info("weight %s: %s %s", name, tensor.shape, tensor.dtype)
-
-    # for name, tensor in model.named_buffers():
-    #     logger.info("buffer %s: %s %s", name, tensor.shape, tensor.dtype)
 
     assert mesh is not None, "Mesh must be provided for sharding."
     _process_module(model)

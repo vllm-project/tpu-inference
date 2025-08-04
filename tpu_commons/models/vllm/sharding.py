@@ -12,15 +12,22 @@ from torchax.ops.mappings import t2j
 from vllm.attention import Attention as VllmAttention
 from vllm.config import ParallelConfig
 from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.linear import \
+    UnquantizedLinearMethod  # yapf: disable
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 
 from tpu_commons.logger import init_logger
 from tpu_commons.models.vllm.jax_attention import JaxAttention
 from tpu_commons.models.vllm.jax_fused_moe import JaxFusedMoE
+from tpu_commons.models.vllm.jax_merged_column_parallel_linear import \
+    JaxMergedColumnParallelLinear
 from tpu_commons.models.vllm.jax_qkv_parallel_linear import \
     JaxQKVParallelLinear
+from tpu_commons.models.vllm.jax_row_parallel_linear import \
+    JaxRowParallelLinear
 
 P = PartitionSpec
 
@@ -39,10 +46,21 @@ def shard_qkv_parallel_linear(layer: torch.nn.Module, mesh: Mesh,
     return jax_layer
 
 
+def shard_merged_column_parallel_linear(layer: torch.nn.Module, mesh: Mesh,
+                                        vllm_parallel_config: ParallelConfig):
+    assert isinstance(layer, MergedColumnParallelLinear)
+    jax_layer = JaxMergedColumnParallelLinear(layer, mesh)
+    return jax_layer
+
+
 def shard_column_parallel_linear(layer: torch.nn.Module, mesh: Mesh,
                                  vllm_parallel_config: ParallelConfig):
     assert isinstance(layer, ColumnParallelLinear)
-    w = Parameter(torch_view(t2j(layer.weight)))
+    if not isinstance(layer.quant_method, UnquantizedLinearMethod):
+        raise ValueError(
+            "tpu_commons torchax ColumnParallelLinear doesn't support quantization"
+        )
+    w = Parameter(torch_view(t2j(layer.weight)), requires_grad=False)
     layer.weight = w.apply_jax_(jax.device_put,
                                 NamedSharding(mesh, P('model', None)))
     return layer
@@ -51,10 +69,8 @@ def shard_column_parallel_linear(layer: torch.nn.Module, mesh: Mesh,
 def shard_row_parallel_linear(layer: torch.nn.Module, mesh: Mesh,
                               vllm_parallel_config: ParallelConfig):
     assert isinstance(layer, RowParallelLinear)
-    w = Parameter(torch_view(t2j(layer.weight)))
-    layer.weight = w.apply_jax_(jax.device_put,
-                                NamedSharding(mesh, P(None, 'model')))
-    return layer
+    jax_layer = JaxRowParallelLinear(layer, mesh)
+    return jax_layer
 
 
 def shard_fused_moe(layer: torch.nn.Module, mesh: Mesh,
@@ -67,6 +83,7 @@ def shard_fused_moe(layer: torch.nn.Module, mesh: Mesh,
 MODULE_TYPE_TO_WRAPPING_FUNC = {
     VllmAttention: shard_attention,
     QKVParallelLinear: shard_qkv_parallel_linear,
+    MergedColumnParallelLinear: shard_merged_column_parallel_linear,
     ColumnParallelLinear: shard_column_parallel_linear,
     RowParallelLinear: shard_row_parallel_linear,
     FusedMoE: shard_fused_moe,
@@ -128,8 +145,11 @@ def shard_model_to_tpu(model: torch.nn.Module, mesh: Mesh,
             x, torch.Tensor) and not isinstance(x, torchax.tensor.Tensor)
 
     def _move_to_tpu_replicated(x):
-        return torch_view(t2j(x)).apply_jax_(jax.device_put,
-                                             NamedSharding(mesh, P()))
+        # In certain cases, if t2j puts the tensor on CPU first and then device_put it to TPU, the tensor layout get messed up. To avoid that, we set jax default_device to TPU.
+        with jax.default_device(jax.devices("tpu")[0]):
+            x = t2j(x, use_dlpack=False)
+        return torch_view(x).apply_jax_(jax.device_put,
+                                        NamedSharding(mesh, P()))
 
     with jax.default_device(jax.devices("cpu")[0]), torchax.default_env():
         # if vllm_parallel_config.world_size > 1:
@@ -143,7 +163,9 @@ def shard_model_to_tpu(model: torch.nn.Module, mesh: Mesh,
         for qual_name, x in {**params, **buffers}.items():
             if _is_unmoved_tensor(x):
                 tensor_size = fmt_size(x.nbytes)
-                logger.debug(f"{qual_name=} is not sharded, {tensor_size=}")
+                logger.debug(
+                    f"{qual_name=} is not sharded, {tensor_size=}, {x.shape=}, {x.dtype=}"
+                )
 
         params, buffers = pytree.tree_map_only(_is_unmoved_tensor,
                                                _move_to_tpu_replicated,

@@ -2,6 +2,7 @@ import jax
 import pytest
 import torch
 import torchax
+import utils as test_utils
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.interop import torch_view
 from torchax.ops.mappings import j2t, t2j
@@ -16,22 +17,8 @@ from tpu_commons.models.vllm.jax_fused_moe import JaxFusedMoE
 P = PartitionSpec
 
 
-@pytest.fixture(scope="module", autouse=True)
-def setup_torchax():
-    """Enable torchax globally before all tests, disable after all tests."""
-    torchax.enable_globally()
-    yield
-    torchax.disable_globally()
-
-
-def _get_spmd_mesh():
-    axis_names = ("data", "model")
-    mesh_shape = (1, len(jax.devices()))
-    return jax.make_mesh(mesh_shape, axis_names, devices=jax.devices())
-
-
 @pytest.mark.parametrize("use_ep", [True, False])
-@pytest.mark.parametrize("mesh", [_get_spmd_mesh()])
+@pytest.mark.parametrize("mesh", [test_utils.get_spmd_mesh()])
 @pytest.mark.parametrize("num_tokens", [8])
 @pytest.mark.parametrize("intermediate_size", [1024, 2048])
 @pytest.mark.parametrize("hidden_size", [128, 512])
@@ -82,15 +69,18 @@ def test_jax_fused_moe(use_ep, mesh, num_tokens, intermediate_size,
     vllm_parallel_config = ParallelConfig()
     vllm_parallel_config.enable_expert_parallel = use_ep
 
-    a = torch_view(t2j(a))
-    a.apply_jax_(jax.device_put, NamedSharding(mesh, P(None, None)))
-    score = torch_view(t2j(score))
-    score.apply_jax_(jax.device_put, NamedSharding(mesh, P(None, None)))
+    # Set jax default device to workaround a layout bug in JAX 0.7.0 and earlier
+    with torchax.default_env(), jax.default_device(jax.devices("tpu")[0]):
+        jax_fused_moe = JaxFusedMoE(vllm_fused_moe, mesh, vllm_parallel_config)
+        a = torch_view(t2j(a))
+        a.apply_jax_(jax.device_put, NamedSharding(mesh, P(None, None)))
+        score = torch_view(t2j(score))
+        score.apply_jax_(jax.device_put, NamedSharding(mesh, P(None, None)))
 
-    jax_fused_moe = JaxFusedMoE(vllm_fused_moe, mesh, vllm_parallel_config)
-    jax_output = jax_fused_moe(hidden_states=a, router_logits=score)
-    # j2t() doens't support bfloat16, so we cast it into float32 as an intermedate step.
-    jax_output = j2t(jax_output.to(torch.float32)).to(dtype)
+    with torchax.default_env():
+        jax_output = jax_fused_moe(hidden_states=a, router_logits=score)
+        # j2t() doens't support bfloat16, so we cast it into float32 as an intermedate step.
+        jax_output = j2t(jax_output.to(torch.float32)).to(dtype)
 
     # The error margins are adapted from vllm tests/tpu/test_moe_pallas.py
     torch.testing.assert_close(

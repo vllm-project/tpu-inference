@@ -12,3 +12,5 @@ google-cloud-storage
 jaxtyping
 flax
 torchax==0.0.5
+qwix @ git+https://github.com/google/qwix@main
+pathwaysutils
