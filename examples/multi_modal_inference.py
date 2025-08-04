@@ -258,10 +258,11 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--use-different-prompt-per-request",
-        action="store_true",
-        help="If True, then use different prompt (with the same multi-modal "
-        "data) for each request.",
+        "--use-same-prompt-per-request",
+        action="store_false",
+        dest="use_different_prompt_per_request",
+        help="If set, use the same prompt for all requests. By default, "
+        "different prompts are used for each request.",
     )
     return parser.parse_args()
 
