@@ -72,6 +72,13 @@ def reorder_concatenated_tensor_for_sharding(concatenated_tensor: jax.Array,
                                              n_shards: int):
     """
     Reorder a replicated concatenated tensor such that when sharded on multiple chips, each shard is a concatenation of the shards of the individual tensors.
+    For example, let the concatenated_tensor be:
+        AAAAAAAAAAAABBBBBBBBCCCC
+            12 As     8 Bs  4 Cs
+    and let the split_sizes = [12, 8, 4] and n_shards = 4.
+    The output is:
+        AAABBCAAABBCAAABBCAAABBC
+    In other words, it reorders the input tensor into 4 segements, with each segment corresponding to a shard and being AAABBC.
 
     Args:
         concatenated_tensor: the tensor, concatenated on the 0-th dim.
@@ -108,7 +115,17 @@ def slice_sharded_tensor_for_concatenation(sharded_tensor: jax.Array,
                                            split_sizes: list[int],
                                            n_shards: int, mesh: Mesh):
     """
-    Slice the input tensor which is sharded on multiple chips into individual tensors with the same sharding.
+    Slice the input tensor which is sharded on multiple chips (on the last dim) into individual tensors with the same sharding.
+    For example, let the sharded_tensor be:
+        AAABBC | AAABBC | AAABBC | AAABBC
+        Shard0   Shard1   Shard2   Shard3
+    and let the split_sizes = [12, 8, 4] and n_shards = 4.
+    The output is a list of 3 tensors:
+         AAA   |  AAA   |  AAA   |  AAA
+          BB   |   BB   |   BB   |   BB
+           C   |    C   |    C   |    C
+        Shard0   Shard1   Shard2   Shard3
+    In other words, each individual tensor is a slice of the input tensor with the same sharding.
 
     Args:
         sharded_tensor: the input tensor, sharded on the last dim.
