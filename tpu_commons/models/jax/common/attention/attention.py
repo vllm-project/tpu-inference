@@ -16,8 +16,8 @@ from tpu_commons.kernels.ragged_paged_attention.v3.kernel import (
     prepare_inputs, prepare_outputs)
 from tpu_commons.kernels.ragged_paged_attention.v3.kernel import \
     ragged_paged_attention as ragged_paged_attention_v3
-from tpu_commons.kernels.ragged_paged_attention.v3.util import (
-    get_dtype_packing)
+from tpu_commons.kernels.ragged_paged_attention.v3.util import \
+    get_dtype_packing
 from tpu_commons.models.jax.attention_interface import update_kv_cache
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.common.base import Config, ParamFactory
@@ -345,10 +345,9 @@ class Attention(nnx.Module):
                                                 kv_packing, H)
         page_indices_flat = md.block_tables.flatten()
 
-        # TODO: update this once attention_metadata has distribution info.
-        # Currently put all requests into prefill mode.
-        distribution = jnp.array([0, md.num_seqs[0], md.num_seqs[0]],
-                                 dtype=jnp.int32)
+        num_decode, num_prefill, _ = md.request_distribution
+        distribution = jnp.array(
+            [num_decode, num_decode + num_prefill, md.num_seqs[0]])
         in_specs = (
             P(*self.sharding_cfg.generate_rules.query_ktnph),  # q_transformed
             P(*self.sharding_cfg.generate_rules.keyvalue_cache_nbkph

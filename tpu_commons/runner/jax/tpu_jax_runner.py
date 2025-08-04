@@ -53,6 +53,7 @@ DUMMY_METADATA = AttentionMetadata(
     seq_lens=[],
     block_tables=[],
     slot_mapping=[],
+    request_distribution=[0, 0, 0],
 )
 
 
@@ -293,12 +294,14 @@ class TPUModelRunner():
                                       dtype=np.int32)
             num_seqs = np.array([self.max_num_reqs], dtype=np.int32)
             num_slices = np.array([1], dtype=np.int32)
-
+            request_distribution = np.array([0, self.max_num_reqs, 0],
+                                            dtype=np.int32)
             (input_ids, positions, slot_mapping_metadata, num_slices,
-             block_tables, query_start_loc, seq_lens,
-             num_seqs) = self._device_array(
+             block_tables, query_start_loc, seq_lens, num_seqs,
+             request_distribution) = self._device_array(
                  (input_ids, positions, slot_mapping_metadata, num_slices,
-                  block_tables, query_start_loc, seq_lens, num_seqs))
+                  block_tables, query_start_loc, seq_lens, num_seqs,
+                  request_distribution))
             logger.info(f"Precompile backbone --> num_tokens={num_tokens}")
             inputs = (
                 self.kv_caches,
@@ -311,6 +314,7 @@ class TPUModelRunner():
                     query_start_loc=query_start_loc,
                     num_seqs=num_seqs,
                     num_slices=num_slices,
+                    request_distribution=request_distribution,
                 ),
             )
             start = time.perf_counter()
@@ -950,16 +954,17 @@ class TPUModelRunner():
             num_reqs, self.max_num_reqs)
         logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
         num_seqs = np.array([num_reqs])
+        request_distribution = np.array(self.input_batch.request_distribution)
 
         # Put to device
         sampling_metadata = TPUSupportedSamplingMetadata.\
             from_input_batch(self.mesh, self.input_batch, padded_num_reqs)
         (input_ids, positions, slot_mapping_metadata, num_slices, block_tables,
-         query_start_loc, seq_lens, num_seqs,
-         logits_indices) = self._device_array(
+         query_start_loc, seq_lens, num_seqs, logits_indices,
+         request_distribution) = self._device_array(
              (input_ids, positions, slot_mapping_metadata, num_slices,
               block_tables, query_start_loc, seq_lens, num_seqs,
-              logits_indices))
+              logits_indices, request_distribution))
 
         return (
             self.kv_caches,
@@ -972,6 +977,7 @@ class TPUModelRunner():
                 query_start_loc=query_start_loc,
                 num_seqs=num_seqs,
                 num_slices=num_slices,
+                request_distribution=request_distribution,
             ),
             sampling_metadata,
             logits_indices,
@@ -1161,7 +1167,10 @@ class TPUModelRunner():
         if removed_req_indices:
             self.input_batch.condense(removed_req_indices)
 
-        return len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
+        batch_changed = len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
+        # batch_reordered = self._reorder_batch(scheduler_output)
+        batch_reordered = False
+        return batch_changed or batch_reordered
 
     def _sync_weights(
         self,
@@ -1182,6 +1191,103 @@ class TPUModelRunner():
             mappings=mappings,
             transpose_keys=transpose_keys,
             shard=shard)
+
+    def _reorder_batch(self, scheduler_output: "VllmSchedulerOutput") -> bool:
+        """Reorder the requests in scheduler_output into the order of
+        - prefill: (chunked) prefill requests with same number of tokens
+        - mixed: prefill requests with different number of tokens
+
+        Returns:
+            True if there is an re-ordered request.
+        """
+
+        decodes = []
+        non_decodes = {}  # length: [request index]
+        num_reqs = 0
+        for i, req_id in enumerate(self.input_batch.req_ids):
+            num_reqs += 1
+            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            if num_tokens == 1:
+                decodes.append(i)
+            else:
+                if num_tokens not in non_decodes:
+                    non_decodes[num_tokens] = []
+                non_decodes[num_tokens].append(i)
+        assert num_reqs == self.input_batch.num_reqs
+
+        # find the most frequent prefill length
+        max_prefill_cnt, most_freq_prefill_length = 0, 0
+        for prefill_len in non_decodes.keys():
+            prefill_cnt = len(non_decodes[prefill_len])
+            if prefill_cnt > max_prefill_cnt:
+                max_prefill_cnt = prefill_cnt
+                most_freq_prefill_length = prefill_len
+
+        # Find out requests that need to be swapped.
+        num_decode = len(decodes)
+        num_prefill = max_prefill_cnt
+        num_mixed = num_reqs - num_decode - num_prefill
+        self.input_batch.request_distribution = [
+            num_decode, num_prefill, num_mixed
+        ]
+        decode_in_prefill, prefill_in_decode = [], []
+        prefill_in_mixed, mixed_in_prefill = [], []
+        decode_in_mixed, mixed_in_decode = [], []
+
+        decode_index_set = set(decodes)
+        prefill_index_set = set(non_decodes[most_freq_prefill_length]
+                                ) if max_prefill_cnt != 0 else set()
+        for i in range(num_decode):
+            if i in prefill_index_set:
+                prefill_in_decode.append(i)
+            elif i in decode_index_set:
+                continue
+            else:
+                mixed_in_decode.append(i)
+        for i in range(num_decode, num_decode + num_prefill):
+            if i in prefill_index_set:
+                continue
+            elif i in decode_index_set:
+                decode_in_prefill.append(i)
+            else:
+                mixed_in_prefill.append(i)
+        for i in range(num_decode + num_prefill, num_reqs):
+            if i in prefill_index_set:
+                prefill_in_mixed.append(i)
+            elif i in decode_index_set:
+                decode_in_mixed.append(i)
+            else:
+                continue
+
+        modified_batch = False
+        # 2 way swap
+        while prefill_in_decode and decode_in_prefill:
+            i, j = prefill_in_decode.pop(), decode_in_prefill.pop()
+            self.input_batch.swap_states(i, j)
+            modified_batch = True
+        while prefill_in_mixed and mixed_in_prefill:
+            i, j = prefill_in_mixed.pop(), mixed_in_prefill.pop()
+            self.input_batch.swap_states(i, j)
+            modified_batch = True
+        while decode_in_mixed and mixed_in_decode:
+            i, j = decode_in_mixed.pop(), mixed_in_decode.pop()
+            self.input_batch.swap_states(i, j)
+            modified_batch = True
+
+        # 3 way swap
+        while prefill_in_decode and decode_in_mixed and mixed_in_prefill:
+            i, j, k = prefill_in_decode.pop(), decode_in_mixed.pop(
+            ), mixed_in_prefill.pop()
+            self.input_batch.swap_states(i, j)
+            self.input_batch.swap_states(j, k)
+            modified_batch = True
+        while decode_in_prefill and prefill_in_mixed and mixed_in_decode:
+            i, j, k = decode_in_prefill.pop(), prefill_in_mixed.pop(
+            ), mixed_in_decode.pop()
+            self.input_batch.swap_states(i, j)
+            self.input_batch.swap_states(j, k)
+            modified_batch = True
+        return modified_batch
 
 
 def _get_padded_num_kv_cache_update_slices(num_tokens: int, max_num_reqs: int,
