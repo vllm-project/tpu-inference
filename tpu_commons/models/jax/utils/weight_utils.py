@@ -72,11 +72,6 @@ class WeightLoader(abc.ABC):
         self.setup()
 
     def setup(self):
-        model_name_or_path = self.vllm_config.model_config.model
-        self.names_and_weights_generator = WeightLoader.hf_model_weights_iterator(
-            model_name_or_path=model_name_or_path,
-            framework=self.framework,
-            filter_regex=self.filter_regex)
         self.is_verbose = getattr(self.vllm_config.additional_config,
                                   "is_verbose", False)
 
@@ -123,33 +118,6 @@ class WeightLoader(abc.ABC):
         logger.warning(
             f"Shape of {name} on a single device: {param.value.addressable_shards[0].data.shape}"
         )
-
-    # TODO: Update to use the multithreading approach.
-    @staticmethod
-    def hf_model_weights_iterator(
-        model_name_or_path: str,
-        framework: str,
-        filter_regex: Optional[str] = None,
-    ) -> Generator[tuple, Any, None]:
-        weights_location, weights_files = get_model_weights_files(
-            model_name_or_path)
-        for st_file in weights_files:
-            yield st_file, weights_location
-
-
-# TODO(xiang): deprecate this, use the multi-thread one instead.
-def hf_model_weights_iterator(
-    model_name_or_path: str,
-    framework: str,
-    filter_regex: Optional[str] = None,
-) -> Generator[tuple, Any, None]:
-    """The old single-thread model weights loader, will be deprecated."""
-    weights_location, weights_files = get_model_weights_files(
-        model_name_or_path)
-    for weights_file in weights_files:
-        for name, weight_tensor in model_weights_generator(
-                model_name_or_path, weights_location, weights_file, framework):
-            yield name, weight_tensor
 
 
 def model_weights_generator(
