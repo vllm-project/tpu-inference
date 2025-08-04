@@ -77,7 +77,8 @@ class WeightLoader(abc.ABC):
             model_name_or_path=model_name_or_path,
             framework=self.framework,
             filter_regex=self.filter_regex)
-        self.is_verbose = getattr(self.vllm_config.additional_config, "is_verbose", False)
+        self.is_verbose = getattr(self.vllm_config.additional_config,
+                                  "is_verbose", False)
 
     def set_transpose_param_map(self,
                                 transpose_param_dict: Mapping[str,
@@ -110,15 +111,14 @@ class WeightLoader(abc.ABC):
         return param_tensor  # Base case / no-op
 
     abc.abstractmethod
+
     def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):
         raise NotImplementedError
 
     @classmethod
     def print_param_info(param: nnx.Param, name: str):
-        logger.warning(f"Global shape for {name}: {param.value.shape}"
-                    )
-        logger.warning(f"Sharding for {name}: {param.sharding}"
-                    )
+        logger.warning(f"Global shape for {name}: {param.value.shape}")
+        logger.warning(f"Sharding for {name}: {param.sharding}")
 
         logger.warning(
             f"Shape of {name} on a single device: {param.value.addressable_shards[0].data.shape}"
@@ -142,24 +142,26 @@ class WeightLoader(abc.ABC):
             model_size = file_utils.get_gcs_model_weights_size(
                 model_name_or_path, HF_WEIGHTS_FORMAT)
             if model_size < local_free_disk_size * FULL_DOWNLOAD_DISK_RATIO:
-                logger.info(f"Downloading weights from GCS {model_name_or_path}")
+                logger.info(
+                    f"Downloading weights from GCS {model_name_or_path}")
                 weights_files = file_utils.download_model_weights_from_gcs(
                     model_name_or_path, HF_WEIGHTS_FORMAT)
             else:
-                weights_files = file_utils.list_gcs_dir(model_name_or_path,
-                                                        HF_WEIGHTS_FORMAT)
+                weights_files = file_utils.list_gcs_dir(
+                    model_name_or_path, HF_WEIGHTS_FORMAT)
                 weights_location = "gcs"
         elif file_utils.is_hf_repo(model_name_or_path):
             local_free_disk_size = file_utils.get_free_disk_size()
             model_size = file_utils.get_hf_model_weights_size(
                 model_name_or_path, HF_WEIGHTS_FORMAT)
             if model_size < local_free_disk_size * FULL_DOWNLOAD_DISK_RATIO:
-                logger.info(f"Downloading weights from HF {model_name_or_path}")
+                logger.info(
+                    f"Downloading weights from HF {model_name_or_path}")
                 weights_files = file_utils.download_model_weights_from_hf(
                     model_name_or_path, HF_WEIGHTS_FORMAT)
             else:
-                weights_files = file_utils.list_hf_repo(model_name_or_path,
-                                                        HF_WEIGHTS_FORMAT)
+                weights_files = file_utils.list_hf_repo(
+                    model_name_or_path, HF_WEIGHTS_FORMAT)
                 weights_location = "hf"
         else:
             raise ValueError(
@@ -201,7 +203,6 @@ class WeightLoader(abc.ABC):
                         yield name, weight_tensor
             if weights_location != "local":
                 file_utils.delete_file(st_file)
-
 
 
 # TODO(xiang): deprecate this, use the multi-thread one instead.

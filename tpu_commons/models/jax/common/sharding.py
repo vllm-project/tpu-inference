@@ -63,10 +63,14 @@ class ShardingRulesConfig:
     activation_q_td: tuple = (None, None)
     # Attention Out activation after projection: (Batch * Sequence, NumHeads, HeadDim)
     attn_o_tnh: tuple = (None, None, None)
+    # Ragged attention v3 Out: (actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim)
+    attn_o_ktnph: tuple = (None, None, None, None, None)
     # Q vector: (Batch * Sequence, NumHeads, HeadDim)
     query_tnh: tuple = (None, None, None)
     # K/V vector: (Batch * Sequence, NumKVHeads, HeadDim)
     keyvalue_skh: tuple = (None, None, None)
+    # query for ragged attention v3 kernel: (actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim)
+    query_ktnph: tuple = (None, None, None, None, None)
 
     # Attention Q weight: (Dim, NumHeads, HeadDim)
     attn_q_weight_dnh: tuple = (None, None, None)
@@ -79,6 +83,8 @@ class ShardingRulesConfig:
 
     # K/V cache for generation: (NumKVHeads, Batch * Sequence, HeadDim)
     keyvalue_cache_lskh: tuple = (None, None, None)
+    # K/V cache for ragged attention v3 kernel: (total_num_pages, page_size, num_kv_heads_x2 // kv_packing, kv_packing, head_dim)
+    keyvalue_cache_nbkph: tuple = (None, None, None, None, None)
 
     # Activation for ffw input: (Batch * Sequence, Dim)
     activation_ffw_td: tuple = (None, None)
