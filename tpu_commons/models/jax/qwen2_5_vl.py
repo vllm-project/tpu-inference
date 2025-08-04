@@ -2,6 +2,7 @@ import math
 from functools import partial
 from typing import Callable, Literal, NamedTuple, Optional, TypedDict, Union
 
+import numpy as np
 import jax
 import jax.numpy as jnp
 from flax import nnx
@@ -896,12 +897,15 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
 
         # Split concatenated embeddings for each image item.
         merge_size = self.visual.config.spatial_merge_size
-        sizes = jnp.prod(jnp.array(grid_thw), axis=-1) // merge_size // merge_size
+        sizes = np.prod(np.array(grid_thw, dtype=np.int64),
+                        axis=-1) // merge_size // merge_size
 
-        # if sizes.shape[0] <= 1:
-        #     return (image_embeds, )
+        if sizes.size == 0:
+            return ()
+        if sizes.size == 1:
+            return (image_embeds, )
 
-        split_indices = jnp.cumsum(sizes)[:-1]
+        split_indices = np.cumsum(sizes)[:-1]
         return tuple(jnp.split(image_embeds, split_indices))
 
     def get_multimodal_embeddings(self, image_grid_thw: tuple[tuple[int, int,
