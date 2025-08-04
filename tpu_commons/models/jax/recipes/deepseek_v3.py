@@ -140,6 +140,7 @@ class DeepSeekV3ShardingRulesConfig(ShardingRulesConfig):
     attn_mla_kva_weight_da: tuple = (None, None)
     # MLA KV up projection weight: (KVLoRA, NumHeads, QKNopeHeadDim + VHeadDim)
     attn_mla_kvb_weight_anh: tuple = (None, None, None)
+    # TODO(chenyang) this might not needed after RPA kernel V3 is refactored.
     # Attention V3 output: (actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim)
     attn_o_ktnph: tuple = (ATTN_HEAD_AXIS_NAME, None, None, None,
                            ATTN_TENSOR_AXIS_NAME)
