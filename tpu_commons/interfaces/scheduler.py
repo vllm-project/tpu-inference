@@ -39,12 +39,12 @@ class IScheduler(SchedulerInterface):
 
     @property
     def requests(self) -> Dict[str, Request]:
-        ...
+        pass
 
     @property
     def kv_cache_manager(self) -> KVCacheManager:
-        ...
+        pass
 
     @property
     def encoder_cache_manager(self) -> EncoderCacheManager:
-        ...
+        pass
