@@ -1,43 +1,27 @@
 """
 This module defines the engine interface contracts required by tpu_commons.
-
-Dependency Strategy:
-- It is ACCEPTABLE to depend on abstract interfaces (like IScheduler) from within tpu_commons.
-- It is NOT ideal to depend on concrete data structures or managers from vllm.
-  These create tight coupling. The dependencies marked with TODO will be
-  abstracted away in a future refactoring phase.
 """
 
 from typing import TYPE_CHECKING, Protocol
 
-# TODO(yarongmu-google): Decouple this class.
-# This is a concrete cache class from vllm. In the future, this should be
-# replaced by an abstract interface (e.g., IMirroredProcessingCache).
-from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
-# TODO(yarongmu-google): Decouple this class.
-# This is a concrete manager class from vllm. In the future, this should be
-# replaced by an abstract interface (e.g., IStructuredOutputManager).
-from vllm.v1.structured_output import StructuredOutputManager
-
-# This is an internal interface. Depending on it is correct.
-from tpu_commons.interfaces.scheduler import IScheduler
+# tpu_commons now depends on its own, locally defined interfaces.
+from .cache import IMirroredProcessingCache
+from .outputs import IStructuredOutputManager
+from .scheduler import IScheduler
 
 # This block is only processed by type checkers, not at runtime.
-# This prevents a circular import error.
 if TYPE_CHECKING:
-    # TODO(yarongmu-google): This import points to a concrete vllm class.
-    # It should be replaced with an abstract interface in the future.
-    from vllm.v1.outputs import ModelRunnerOutput
+    from .outputs import IModelRunnerOutput
 
 
 class IEngineProc(Protocol):
     """
-    A high-level interface for any process that can be launched by vLLM.
+    A high-level interface for any process that can be launched by a client.
     It defines the single entry point for starting the process's main loop.
     """
 
     def run_busy_loop(self) -> None:
-        pass
+        ...
 
 
 class IDisaggEngineCoreProc(IEngineProc):
@@ -50,17 +34,17 @@ class IDisaggEngineCoreProc(IEngineProc):
 
 class IEngineCore(Protocol):
     """
-    An interface defining the contract for a vLLM Engine Core building block.
-    This is a direct mirror of the public API of vllm.v1.engine.core.EngineCore
-    that is used by the DisaggEngineCoreProc.
+    An interface defining the contract for an Engine Core building block.
+    This mirrors the public API of a vLLM Engine Core that is used by the
+    DisaggEngineCoreProc.
     """
     scheduler: IScheduler
-    mm_input_cache_server: MirroredProcessingCache
-    structured_output_manager: StructuredOutputManager
+    mm_input_cache_server: IMirroredProcessingCache
+    structured_output_manager: IStructuredOutputManager
 
     def execute_model_with_error_logging(self, *args,
-                                         **kwargs) -> "ModelRunnerOutput":
-        pass
+                                         **kwargs) -> "IModelRunnerOutput":
+        ...
 
     def shutdown(self) -> None:
-        pass
+        ...
