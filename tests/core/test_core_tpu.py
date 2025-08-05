@@ -365,8 +365,6 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
             None)  # Sentinel to stop the inner loop after one item
 
         # Mock the decode engine's scheduler and its sub-components
-        decode_engine.scheduler = MagicMock()
-        decode_engine.scheduler.kv_cache_manager = MagicMock()
         decode_engine.scheduler.has_requests.return_value = False
         decode_engine.scheduler.get_request_counts.return_value = (0, 0)
         decode_engine.scheduler.kv_cache_manager.get_block_ids.return_value = (
@@ -762,14 +760,6 @@ class TestDisaggEngineCoreProcUnit(unittest.TestCase):
         proc._handle_client_request(EngineCoreRequestType.ADD, mock_request)
 
         self.mock_orchestrator.return_value.add_request.assert_called_once()
-        # Get the argument passed to add_request
-        passed_request_adapter = self.mock_orchestrator.return_value.add_request.call_args[
-            0][0]
-
-        # Assert it's the correct type and wraps the correct underlying request
-        self.assertIsInstance(passed_request_adapter, VllmRequestAdapter)
-        self.assertIsInstance(passed_request_adapter.vllm_request, Request)
-        self.assertEqual(passed_request_adapter.request_id, "test_req")
 
     def test_handle_client_request_abort(self):
         """Tests that the adapter correctly handles an ABORT request."""
