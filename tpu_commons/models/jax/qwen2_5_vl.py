@@ -99,6 +99,8 @@ class Qwen2_5_VisionMLP(nnx.Module):
             hidden_features,
             use_bias=True,
             param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
+            bias_init=nnx.with_partitioning(init_fn, ("model", )),
             rngs=rngs,
         )
         self.up_proj = nnx.Linear(
@@ -106,6 +108,8 @@ class Qwen2_5_VisionMLP(nnx.Module):
             hidden_features,
             use_bias=True,
             param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
+            bias_init=nnx.with_partitioning(init_fn, ("model", )),
             rngs=rngs,
         )
         self.down_proj = nnx.Linear(
@@ -113,6 +117,8 @@ class Qwen2_5_VisionMLP(nnx.Module):
             in_features,
             use_bias=True,
             param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
+            bias_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rngs,
         )
         self.act_fn = act_fn
@@ -203,6 +209,8 @@ class Qwen2_5_VisionAttention(nnx.Module):
             3 * self.hidden_size,
             use_bias=True,
             param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
+            bias_init=nnx.with_partitioning(init_fn, ("model", )),
             rngs=rngs,
         )
 
@@ -211,6 +219,8 @@ class Qwen2_5_VisionAttention(nnx.Module):
             self.hidden_size,
             use_bias=True,
             param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
+            bias_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rngs,
         )
 
@@ -300,7 +310,10 @@ class Qwen2_5_VisionBlock(nnx.Module):
                  rngs: nnx.Rngs, mesh: Mesh):
         vision_config = config.vision_config
         dim = vision_config.hidden_size
-        norm_layer = partial(nnx.RMSNorm, epsilon=config.rms_norm_eps)
+        norm_layer = partial(nnx.RMSNorm,
+                             epsilon=config.rms_norm_eps,
+                             scale_init=nnx.with_partitioning(
+                                 init_fn, (None, )))
 
         self.norm1 = norm_layer(dim, dtype=dtype, rngs=rngs)
         self.norm2 = norm_layer(dim, dtype=dtype, rngs=rngs)
@@ -346,6 +359,8 @@ class Qwen2_5_VisionPatchEmbed(nnx.Module):
                              strides=kernel_size,
                              use_bias=False,
                              param_dtype=dtype,
+                             kernel_init=nnx.with_partitioning(
+                                 init_fn, (None, None, None, None, "model")),
                              rngs=rngs)
 
     def __call__(self, x: jax.Array) -> jax.Array:
@@ -371,18 +386,28 @@ class Qwen2_5_VisionPatchMerger(nnx.Module):
     def __init__(self, d_model: int, context_dim: int, norm_layer: Callable,
                  spatial_merge_size: int, dtype: jnp.dtype, rngs: nnx.Rngs):
         self.hidden_size = context_dim * (spatial_merge_size**2)
-        self.ln_q = norm_layer(context_dim, dtype=dtype, rngs=rngs)
-        self.mlp_fc1 = nnx.Linear(self.hidden_size,
-                                  self.hidden_size,
-                                  use_bias=True,
-                                  param_dtype=dtype,
-                                  rngs=rngs)
+        self.ln_q = norm_layer(context_dim,
+                               dtype=dtype,
+                               rngs=rngs,
+                               scale_init=nnx.with_partitioning(
+                                   init_fn, (None, )))
+        self.mlp_fc1 = nnx.Linear(
+            self.hidden_size,
+            self.hidden_size,
+            use_bias=True,
+            param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
+            bias_init=nnx.with_partitioning(init_fn, ("model", )),
+            rngs=rngs)
         self.mlp_act = modeling_flax_utils.ACT2FN["gelu"]
-        self.mlp_fc2 = nnx.Linear(self.hidden_size,
-                                  d_model,
-                                  use_bias=True,
-                                  param_dtype=dtype,
-                                  rngs=rngs)
+        self.mlp_fc2 = nnx.Linear(
+            self.hidden_size,
+            d_model,
+            use_bias=True,
+            param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
+            bias_init=nnx.with_partitioning(init_fn, (None, )),
+            rngs=rngs)
 
     def __call__(self, x: jax.Array) -> jax.Array:
         x = self.ln_q(x)
@@ -828,85 +853,66 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
 
         # Key: path to a HF layer weight
         # Value: a tuple of (path to a nnx layer weight, nnx weight sharding)
+
         mappings = {
-            "model.embed_tokens": ("language_model.embed.embedding", ("model",
-                                                                      None)),
+            "model.embed_tokens": "language_model.embed.embedding",
             "model.layers.*.input_layernorm":
-            ("language_model.model.layers.*.input_layernorm.scale", (None, )),
+            "language_model.model.layers.*.input_layernorm.scale",
             "model.layers.*.mlp.down_proj":
-            ("language_model.model.layers.*.mlp.down_proj.kernel", ("model",
-                                                                    None)),
+            "language_model.model.layers.*.mlp.down_proj.kernel",
             "model.layers.*.mlp.gate_proj":
-            ("language_model.model.layers.*.mlp.gate_proj.kernel", (None,
-                                                                    "model")),
+            "language_model.model.layers.*.mlp.gate_proj.kernel",
             "model.layers.*.mlp.up_proj":
-            ("language_model.model.layers.*.mlp.up_proj.kernel", (None,
-                                                                  "model")),
+            "language_model.model.layers.*.mlp.up_proj.kernel",
             "model.layers.*.post_attention_layernorm":
-            ("language_model.model.layers.*.post_attention_layernorm.scale",
-             (None, )),
+            "language_model.model.layers.*.post_attention_layernorm.scale",
             "model.layers.*.self_attn.k_proj":
-            ("language_model.model.layers.*.self_attn.k_proj.kernel",
-             (None, "model", None)),
+            "language_model.model.layers.*.self_attn.k_proj.kernel",
             "model.layers.*.self_attn.o_proj":
-            ("language_model.model.layers.*.self_attn.o_proj.kernel",
-             ("model", None, None)),
+            "language_model.model.layers.*.self_attn.o_proj.kernel",
             "model.layers.*.self_attn.q_proj":
-            ("language_model.model.layers.*.self_attn.q_proj.kernel",
-             (None, "model", None)),
+            "language_model.model.layers.*.self_attn.q_proj.kernel",
             "model.layers.*.self_attn.v_proj":
-            ("language_model.model.layers.*.self_attn.v_proj.kernel",
-             (None, "model", None)),
+            "language_model.model.layers.*.self_attn.v_proj.kernel",
             "model.layers.*.self_attn.q_proj.bias":
-            ("language_model.model.layers.*.self_attn.q_proj.bias", ("model",
-                                                                     None)),
+            "language_model.model.layers.*.self_attn.q_proj.bias",
             "model.layers.*.self_attn.k_proj.bias":
-            ("language_model.model.layers.*.self_attn.k_proj.bias", ("model",
-                                                                     None)),
+            "language_model.model.layers.*.self_attn.k_proj.bias",
             "model.layers.*.self_attn.v_proj.bias":
-            ("language_model.model.layers.*.self_attn.v_proj.bias", ("model",
-                                                                     None)),
-            "model.norm": ("language_model.model.norm.scale", (None, )),
-            "visual.blocks.*.attn.proj.bias":
-            ("visual.blocks.*.attn.proj.bias", (None, )),
-            "visual.blocks.*.attn.proj": ("visual.blocks.*.attn.proj.kernel",
-                                          ("model", None)),
+            "language_model.model.layers.*.self_attn.v_proj.bias",
+            "model.norm": "language_model.model.norm.scale",
+            "visual.blocks.*.attn.proj.bias": "visual.blocks.*.attn.proj.bias",
+            "visual.blocks.*.attn.proj": "visual.blocks.*.attn.proj.kernel",
             "visual.blocks.*.attn.qkv.bias":
-            ("visual.blocks.*.attn.qkv_proj.bias", ("model", )),
-            "visual.blocks.*.attn.qkv":
-            ("visual.blocks.*.attn.qkv_proj.kernel", (None, "model")),
+            "visual.blocks.*.attn.qkv_proj.bias",
+            "visual.blocks.*.attn.qkv": "visual.blocks.*.attn.qkv_proj.kernel",
             "visual.blocks.*.mlp.down_proj.bias":
-            ("visual.blocks.*.mlp.down_proj.bias", (None, )),
+            "visual.blocks.*.mlp.down_proj.bias",
             "visual.blocks.*.mlp.down_proj":
-            ("visual.blocks.*.mlp.down_proj.kernel", ("model", None)),
+            "visual.blocks.*.mlp.down_proj.kernel",
             "visual.blocks.*.mlp.gate_proj.bias":
-            ("visual.blocks.*.mlp.gate_proj.bias", ("model", )),
+            "visual.blocks.*.mlp.gate_proj.bias",
             "visual.blocks.*.mlp.gate_proj":
-            ("visual.blocks.*.mlp.gate_proj.kernel", (None, "model")),
+            "visual.blocks.*.mlp.gate_proj.kernel",
             "visual.blocks.*.mlp.up_proj.bias":
-            ("visual.blocks.*.mlp.up_proj.bias", ("model", )),
+            "visual.blocks.*.mlp.up_proj.bias",
             "visual.blocks.*.mlp.up_proj":
-            ("visual.blocks.*.mlp.up_proj.kernel", (None, "model")),
-            "visual.blocks.*.norm1": ("visual.blocks.*.norm1.scale", (None, )),
-            "visual.blocks.*.norm2": ("visual.blocks.*.norm2.scale", (None, )),
-            "visual.merger.ln_q": ("visual.merger.ln_q.scale", (None, )),
-            "visual.merger.mlp.0.bias": ("visual.merger.mlp_fc1.bias",
-                                         ("model", )),
-            "visual.merger.mlp.0": ("visual.merger.mlp_fc1.kernel", (None,
-                                                                     "model")),
-            "visual.merger.mlp.2.bias": ("visual.merger.mlp_fc2.bias",
-                                         (None, )),
-            "visual.merger.mlp.2": ("visual.merger.mlp_fc2.kernel", ("model",
-                                                                     None)),
-            "visual.patch_embed.proj": ("visual.patch_embed.proj.kernel",
-                                        (None, None, None, None, "model")),
+            "visual.blocks.*.mlp.up_proj.kernel",
+            "visual.blocks.*.norm1": "visual.blocks.*.norm1.scale",
+            "visual.blocks.*.norm2": "visual.blocks.*.norm2.scale",
+            "visual.merger.ln_q": "visual.merger.ln_q.scale",
+            "visual.merger.mlp.0.bias": "visual.merger.mlp_fc1.bias",
+            "visual.merger.mlp.0": "visual.merger.mlp_fc1.kernel",
+            "visual.merger.mlp.2.bias": "visual.merger.mlp_fc2.bias",
+            "visual.merger.mlp.2": "visual.merger.mlp_fc2.kernel",
+            "visual.patch_embed.proj": "visual.patch_embed.proj.kernel",
         }
 
         # Add lm_head mapping only if it's not tied to embeddings
         hf_config = self.vllm_config.model_config.hf_config
         if not hf_config.tie_word_embeddings:
             mappings.update({
-                "lm_head": ("lm_head", (None, "model")),
+                "lm_head": "lm_head",
             })
 
         load_hf_weights(vllm_config=self.vllm_config,

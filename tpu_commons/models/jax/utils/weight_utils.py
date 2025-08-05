@@ -279,8 +279,8 @@ def load_hf_weights_on_thread(vllm_config, params: nnx.State,
     if model_config.is_multimodal_model:
         # TODO: Wenlong: Do not consider padding for now
         transpose_keys.update({
-            "attn.proj":(1,0),
-            "attn.qkv": (1,0),
+            "attn.proj": (1, 0),
+            "attn.qkv": (1, 0),
             "visual.merger.mlp": (1, 0),
             "visual.patch_embed.proj": (2, 3, 4, 1, 0),
         })
@@ -313,7 +313,7 @@ def load_hf_weights_on_thread(vllm_config, params: nnx.State,
         elif "blocks" in hf_key:
             layer_num = re.search(r"blocks\.(\d+)", hf_key).group(1)
             layer_key = re.sub(r"blocks\.\d+", "blocks.*", hf_key)
-            model_key, model_sharding = mappings[layer_key]
+            model_key = mappings[layer_key]
             model_key = re.sub(r"blocks\.\*", f"blocks.{layer_num}", model_key)
         else:
             model_key = mappings[hf_key]
