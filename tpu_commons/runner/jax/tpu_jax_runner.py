@@ -898,11 +898,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         # multi-modal support
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.
+            # We have the modality embeds at this time.
             self._execute_mm_encoder(scheduler_output)
             mm_embeds = self._gather_mm_embeddings(scheduler_output)
         else:
             mm_embeds = []
 
+        # NOTE(Wenlong): For multi-modal model,
+        # it will embed the text tokens and merge with the existing modality embeds
+        # Later, the multi-modality model will take the embedding as the input.
+        # For text-only model, this does nothing. It will input the input_ids and
+        # leave the mebedding job inside the forward pass
         input_ids, inputs_embeds = self._get_model_inputs(input_ids, mm_embeds)
 
         # TODO: Disable this for now
@@ -919,6 +925,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                     self.vllm_config,
             ), self.maybe_get_kv_connector_output(
                     scheduler_output) as kv_connector_output:
+                # NOTE(Wenlong): It takes both `input_ids` and `inputs_embeds`,
+                # but one of them would be `None`
                 self.kv_caches, hidden_states = self.model_fn(
                 self.state,
                 kv_caches,
