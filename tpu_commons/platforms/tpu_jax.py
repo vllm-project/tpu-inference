@@ -137,6 +137,8 @@ class TpuPlatform(Platform):
 
         # NOTE(xiang): convert dtype to jnp.dtype
         # NOTE(wenlong): skip this logic for mm model preprocessing
+        # For mm model preprocessors, it may need the output dtype to be torch.
+        # In order to avoid a PR to vLLM, we postpone the dtype checking during tpu_worker initialization
         if not vllm_config.scheduler_config.is_multimodal_model:
             if not isinstance(vllm_config.model_config.dtype, str):
                 logger.warning(

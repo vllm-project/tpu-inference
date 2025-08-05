@@ -10,7 +10,6 @@ import jax
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
-import torch
 import vllm.envs as envs
 from flax import nnx
 from jax.sharding import NamedSharding, PartitionSpec
@@ -41,8 +40,6 @@ from vllm.v1.worker.utils import (gather_mm_placeholders,
                                   scatter_mm_placeholders)
 
 from tpu_commons import utils as common_utils
-from tpu_commons.models.jax.utils.multi_modal_utils import sanity_check_mm_encoder_outputs
-from tpu_commons import utils_jax as utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.common.sharding import build_mesh
@@ -52,6 +49,8 @@ from tpu_commons.models.jax.layers.sampling import (compute_logprobs,
 from tpu_commons.models.jax.model_loader import get_model
 from tpu_commons.models.jax.sampling_metadata import \
     TPUSupportedSamplingMetadata
+from tpu_commons.models.jax.utils.multi_modal_utils import \
+    sanity_check_mm_encoder_outputs
 from tpu_commons.models.jax.utils.weight_utils import \
     transfer_state_with_mappings
 from tpu_commons.runner import utils as runner_utils
@@ -256,6 +255,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         return ("generate", )
 
     def get_kv_cache_spec(self):
+        import torch
+
         # TODO(xiang): this hack tricks engine core to init successfully
         block_size = self.vllm_config.cache_config.block_size
         kv_cache_spec: dict[str, KVCacheSpec] = {}
@@ -729,6 +730,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                 mrope_pos_ptr += completion_part_len
 
     def _execute_mm_encoder(self, scheduler_output: "VllmSchedulerOutput"):
+        import torch
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
         if not scheduled_encoder_inputs:
             return
@@ -766,11 +768,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                         grid_thw_tensor = batched_mm_inputs[key]
                         grid_thw_reshaped = grid_thw_tensor.reshape(-1, 3)
                         image_grid_thw = tuple(
-                            tuple(row)
-                            for row in grid_thw_reshaped.tolist()
-                        )
-
-
+                            tuple(row) for row in grid_thw_reshaped.tolist())
 
                         continue
 
@@ -861,7 +859,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
     def _get_model_inputs(self, input_ids: jax.Array,
                           mm_embeds: list[jax.Array]):
         if self.is_multimodal_model:
-            inputs_embeds = self.get_input_embeddings_fn(self.state,
+            inputs_embeds = self.get_input_embeddings_fn(
+                self.state,
                 input_ids=input_ids,
                 multimodal_embeddings=mm_embeds,
             )
@@ -898,7 +897,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                 # raise Exception(
                 #     "Should not schedule a request that does nothing!")
             return DUMMY_METADATA, EMPTY_MODEL_RUNNER_OUTPUT,
-
 
         (kv_caches, input_ids, attn_metadata, sampling_metadata,
          logits_indices) = self._prepare_inputs(scheduler_output)
@@ -1359,11 +1357,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
 
             self.requests[req_id] = CachedRequestState(**data_items,
                                                        output_token_ids=[])
-            
-            # NOTE(wenlong): We need to explicitly set this 
+
+            # NOTE(wenlong): We need to explicitly set this
             # because asdict will convert List[PlaceholderRange] to list[dict]
             self.requests[req_id].mm_positions = new_req_data.mm_positions
-
 
             # multi-modal related
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)

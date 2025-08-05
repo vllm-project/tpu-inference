@@ -14,15 +14,12 @@ python examples/multi_modal_inference.py \
   --num-prompts 1
 """
 
-import random
 from contextlib import contextmanager
 from dataclasses import asdict
 from typing import NamedTuple, Optional
 
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.image import ImageAsset
-from vllm.assets.video import VideoAsset
-from vllm.lora.request import LoRARequest
 from vllm.multimodal.image import convert_image_mode
 from vllm.utils import FlexibleArgumentParser
 
@@ -31,14 +28,9 @@ class ModelRequestData(NamedTuple):
     engine_args: EngineArgs
     prompts: list[str]
     stop_token_ids: Optional[list[int]] = None
-    lora_requests: Optional[list[LoRARequest]] = None
 
 
-# NOTE: The default `max_num_seqs` and `max_model_len` may result in OOM on
-# lower-end GPUs.
-# Unless specified, these settings have been t
-
-
+# Currently Qwen2.5-VL is the only supported multi-modal
 # Qwen2.5-VL
 def run_qwen2_5_vl(questions: list[str], modality: str,
                    args) -> ModelRequestData:
@@ -102,52 +94,22 @@ def get_multi_modal_input(args):
             "questions": img_questions,
         }
 
-    if args.modality == "video":
-        # Input video and question
-        video = VideoAsset(name="baby_reading",
-                           num_frames=args.num_frames).np_ndarrays
-        metadata = VideoAsset(name="baby_reading",
-                              num_frames=args.num_frames).metadata
-        vid_questions = ["Why is this video funny?"]
+    # NOTE: not used for now, saved for future reference
+    # if args.modality == "video":
+    #     # Input video and question
+    #     video = VideoAsset(name="baby_reading",
+    #                        num_frames=args.num_frames).np_ndarrays
+    #     metadata = VideoAsset(name="baby_reading",
+    #                           num_frames=args.num_frames).metadata
+    #     vid_questions = ["Why is this video funny?"]
 
-        return {
-            "data":
-            [(video, metadata)] if args.model_type == "glm4_1v" else video,
-            "questions": vid_questions,
-        }
+    #     return {
+    #         "data": video,
+    #         "questions": vid_questions,
+    #     }
 
     msg = f"Modality {args.modality} is not supported."
     raise ValueError(msg)
-
-
-def apply_image_repeat(image_repeat_prob, num_prompts, data,
-                       prompts: list[str], modality):
-    """Repeats images with provided probability of "image_repeat_prob".
-    Used to simulate hit/miss for the MM preprocessor cache.
-    """
-    assert image_repeat_prob <= 1.0 and image_repeat_prob >= 0
-    no_yes = [0, 1]
-    probs = [1.0 - image_repeat_prob, image_repeat_prob]
-
-    inputs = []
-    cur_image = data
-    for i in range(num_prompts):
-        if image_repeat_prob is not None:
-            res = random.choices(no_yes, probs)[0]
-            if res == 0:
-                # No repeat => Modify one pixel
-                cur_image = cur_image.copy()
-                new_val = (i // 256 // 256, i // 256, i % 256)
-                cur_image.putpixel((0, 0), new_val)
-
-        inputs.append({
-            "prompt": prompts[i % len(prompts)],
-            "multi_modal_data": {
-                modality: cur_image
-            },
-        })
-
-    return inputs
 
 
 @contextmanager
@@ -170,16 +132,8 @@ def parse_args():
         description="Demo on using vLLM for offline inference with "
         "vision language models for text generation")
     parser.add_argument(
-        "--model-type",
-        "-m",
-        type=str,
-        default="qwen2_5_vl",
-        choices=model_example_map.keys(),
-        help='Huggingface "model_type".',
-    )
-    parser.add_argument(
         "--model",
-        "-M",
+        "-m",
         type=str,
         default="Qwen/Qwen2.5-VL-3B-Instruct",
         help="Huggingface model name.",
@@ -210,6 +164,8 @@ def parse_args():
                         type=int,
                         default=4,
                         help="Number of prompts to run.")
+
+    # NOTE: Currently, only image modality is supported
     parser.add_argument(
         "--modality",
         type=str,
@@ -217,27 +173,21 @@ def parse_args():
         choices=["image", "video"],
         help="Modality of the input.",
     )
+
+    # NOTE: For video. Not used for now
     parser.add_argument(
         "--num-frames",
         type=int,
         default=16,
         help="Number of frames to extract from the video.",
     )
+
     parser.add_argument(
         "--seed",
         type=int,
         default=None,
         help="Set the seed when initializing `vllm.LLM`.",
     )
-
-    parser.add_argument(
-        "--image-repeat-prob",
-        type=float,
-        default=None,
-        help=
-        "Simulates the hit-ratio for multi-modal preprocessor cache (if enabled)",
-    )
-
     parser.add_argument(
         "--disable-mm-preprocessor-cache",
         action="store_true",
@@ -261,18 +211,17 @@ def parse_args():
 
 
 def main(args):
-    model = args.model_type
-    if model not in model_example_map:
-        raise ValueError(f"Model type {model} is not supported.")
 
     modality = args.modality
     mm_input = get_multi_modal_input(args)
     data = mm_input["data"]
     questions = mm_input["questions"]
 
-    req_data = model_example_map[model](questions, modality, args)
+    # NOTE: Currently, only Qwen2.5-VL is supported. If later we want to support a model with new chat template, we may need to change this
+    req_data = model_example_map["qwen2_5_vl"](questions, modality, args)
 
     # Disable other modalities to save memory
+    # Initial all modalities to be 0s and add the specifc modality limit later accordingly
     default_limits = {"image": 0, "video": 0, "audio": 0}
     req_data.engine_args.limit_mm_per_prompt = default_limits | dict(
         req_data.engine_args.limit_mm_per_prompt or {})
@@ -289,7 +238,7 @@ def main(args):
 
     # We set temperature to 0.2 so that outputs can be different
     # even when all prompts are identical when running batch inference.
-    sampling_params = SamplingParams(temperature=0,
+    sampling_params = SamplingParams(temperature=0.2,
                                      max_tokens=64,
                                      stop_token_ids=req_data.stop_token_ids)
 
@@ -304,29 +253,18 @@ def main(args):
         }
     else:
         # Batch inference
-        if args.image_repeat_prob is not None:
-            # Repeat images with specified probability of "image_repeat_prob"
-            inputs = apply_image_repeat(args.image_repeat_prob,
-                                        args.num_prompts, data, prompts,
-                                        modality)
-        else:
-            # Use the same image for all prompts
-            inputs = [{
-                "prompt": prompts[i % len(prompts)],
-                "multi_modal_data": {
-                    modality: data
-                },
-            } for i in range(args.num_prompts)]
-
-    # Add LoRA request if applicable
-    lora_request = (req_data.lora_requests *
-                    args.num_prompts if req_data.lora_requests else None)
+        # Use the same image for all prompts
+        inputs = [{
+            "prompt": prompts[i % len(prompts)],
+            "multi_modal_data": {
+                modality: data
+            },
+        } for i in range(args.num_prompts)]
 
     with time_counter(args.time_generate):
         outputs = llm.generate(
             inputs,
             sampling_params=sampling_params,
-            lora_request=lora_request,
         )
 
     print("-" * 50)

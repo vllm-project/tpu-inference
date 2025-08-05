@@ -81,11 +81,11 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
         from tpu_commons.models.jax.llama3 import LlamaForCausalLM
         from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
         from tpu_commons.models.jax.qwen2_5_vl import \
-        Qwen2_5_VLForConditionalGeneration
+            Qwen2_5_VLForConditionalGeneration
         _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
         _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
         _MODEL_REGISTRY[
-        "Qwen2_5_VLForConditionalGeneration"] = Qwen2_5_VLForConditionalGeneration
+            "Qwen2_5_VLForConditionalGeneration"] = Qwen2_5_VLForConditionalGeneration
 
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
@@ -194,7 +194,8 @@ def get_flax_model(
         model = nnx.merge(graphdef, state)
         return model.compute_logits(*args)
 
-    # Multi-modal support
+    # Multi-modal support only
+    # This function calculates the image token's embeddings by VIT
     @functools.partial(jax.jit,
                        out_shardings=(logits_sharding),
                        static_argnames=['image_grid_thw'])
@@ -202,10 +203,12 @@ def get_flax_model(
                                       **kwargs):
         model = nnx.merge(graphdef, state)
         return model.get_multimodal_embeddings(image_grid_thw, **kwargs)
-    
+
+    # This function will calculates the embeddings of input texts and then merge with the image embeddings
     @functools.partial(
-            jax.jit,
-            out_shardings=(logits_sharding),)
+        jax.jit,
+        out_shardings=(logits_sharding),
+    )
     def run_get_input_embeddings(graphdef, state, *args, **kwargs):
         model = nnx.merge(graphdef, state)
         return model.get_input_embeddings(*args, **kwargs)
@@ -214,8 +217,8 @@ def get_flax_model(
     compute_logits_fn = functools.partial(run_compute_logits, graphdef)
     get_multimodal_embeddings_fn = functools.partial(
         run_get_multimodal_embeddings, graphdef)
-    get_input_embeddings_fn = functools.partial(
-        run_get_input_embeddings, graphdef)
+    get_input_embeddings_fn = functools.partial(run_get_input_embeddings,
+                                                graphdef)
     return model_fn, compute_logits_fn, get_multimodal_embeddings_fn, get_input_embeddings_fn, state
 
 
