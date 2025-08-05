@@ -383,11 +383,8 @@ class DeepSeekV3WeightLoader(WeightLoader):
             "o_proj": (hidden_size, attn_heads, v_head_dim)
         }
 
-    def setup(self):
-        super().setup()
-
         # Set the mappings from loaded parameter keys to standardized names.
-        self.set_loaded_to_standardized_keys({
+        self._loaded_to_standardized_keys = {
             # encode & decode
             "model.embed_tokens.weight":
             "embedder.input_embedding_table_VD",
@@ -441,7 +438,10 @@ class DeepSeekV3WeightLoader(WeightLoader):
             "layers.*.shared_experts.kernel_gating_DF",
             "model.layers.*.mlp.shared_experts.up_proj.weight":
             "layers.*.shared_experts.kernel_up_proj_DF",
-        })
+        }
+
+    def setup(self):
+        super().setup()
 
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
         # Find the corresponding model key using the HF key
@@ -453,12 +453,12 @@ class DeepSeekV3WeightLoader(WeightLoader):
             if "experts" in loaded_key and "shared_experts" not in loaded_key:
                 layer_key = re.sub(r"experts\.\d+", "experts.*", layer_key)
             # get standardized key and replace * with layer number.
-            mapped_key = self.loaded_to_standardized_keys.get(
+            mapped_key = self._loaded_to_standardized_keys.get(
                 layer_key, loaded_key)
             mapped_key = re.sub(r"layers\.\*", f"layers.{layer_num}",
                                 mapped_key)
         else:
-            mapped_key = self.loaded_to_standardized_keys.get(
+            mapped_key = self._loaded_to_standardized_keys.get(
                 loaded_key, loaded_key)
         return mapped_key
 
@@ -516,7 +516,8 @@ class DeepSeekV3WeightLoader(WeightLoader):
     def load_weights(self, model_for_loading: nnx.Module):
         model_params = nnx.state(model_for_loading)
         logger.warning(
-            f"loaded_to_standardized_keys: {self.loaded_to_standardized_keys}")
+            f"loaded_to_standardized_keys: {self._loaded_to_standardized_keys}"
+        )
         cumulative_global_memory = 0
         cumulative_local_memory = 0
         mlp_experts_gate_proj_weights = {}

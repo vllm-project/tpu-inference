@@ -303,11 +303,8 @@ class Llama4WeightLoader(WeightLoader):
             "o_proj": (hidden_size, attn_heads, attn_head_dim),
         }
 
-    def setup(self):
-        super().setup()
-
         # Set the mappings from loaded parameter keys to standardized names.
-        self.set_loaded_to_standardized_keys({
+        self._loaded_to_standardized_keys = {
             "language_model.model.embed_tokens.weight":
             "embedder.input_embedding_table_VD",
             "language_model.lm_head.weight":
@@ -338,19 +335,22 @@ class Llama4WeightLoader(WeightLoader):
             "layers.*.shared_experts.kernel_gating_DF",
             "language_model.model.layers.*.feed_forward.shared_expert.up_proj.weight":
             "layers.*.shared_experts.kernel_up_proj_DF",
-        })
+        }
+
+    def setup(self):
+        super().setup()
 
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
         # Find the corresponding model key using the HF key
         if "layer" in loaded_key:
             layer_num = re.search(r"layers\.(\d+)", loaded_key).group(1)
             layer_key = re.sub(r"layers\.\d+", "layers.*", loaded_key)
-            mapped_key = self.loaded_to_standardized_keys.get(
+            mapped_key = self._loaded_to_standardized_keys.get(
                 layer_key, loaded_key)
             mapped_key = re.sub(r"layers\.\*", f"layers.{layer_num}",
                                 mapped_key)
         else:
-            mapped_key = self.loaded_to_standardized_keys.get(
+            mapped_key = self._loaded_to_standardized_keys.get(
                 loaded_key, loaded_key)
         return mapped_key
 

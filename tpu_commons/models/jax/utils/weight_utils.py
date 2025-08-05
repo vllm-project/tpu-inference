@@ -7,7 +7,7 @@ import math
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, Generator, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -65,10 +65,6 @@ class WeightLoader(abc.ABC):
             filter_regex=self.filter_regex)
         self.is_verbose = getattr(self.vllm_config.additional_config,
                                   "is_verbose", False)
-
-    def set_loaded_to_standardized_keys(
-            self, loaded_to_standardized_keys: Mapping[str, str]):
-        self.loaded_to_standardized_keys = loaded_to_standardized_keys
 
     def transpose_params(self, param_key: str, param_tensor: jax.Array,
                          transpose_map):
