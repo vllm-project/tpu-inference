@@ -81,7 +81,7 @@ IFS=',' read -r -a WORKER_SSH_IPS <<< "$WORKER_SSH_IP_STRING"
 ALL_SSH_IPS=("${HEAD_SSH_IP}" "${WORKER_SSH_IPS[@]}")
 
 if [ -z "${SSH_USER}" ]; then
-    read -p "Enter the SSH username for all hosts: " SSH_USER
+    read -pr "Enter the SSH username for all hosts: " SSH_USER
 fi
 
 # --- STEP 1: Pre-Deployment Cleanup ---
@@ -96,12 +96,13 @@ fi
 
 # --- STEP 2: Distribute the script ---
 echo "📦 Distributing '${SCRIPT_PATH}' to all hosts..."
-REMOTE_SCRIPT_DIR="~/tpu_commons/scripts/multihost"
+REMOTE_SCRIPT_DIR="$HOME/tpu_commons/scripts/multihost"
 REMOTE_SCRIPT_PATH="${REMOTE_SCRIPT_DIR}/run_cluster.sh"
 SSH_OPTIONS="-o StrictHostKeyChecking=no -o BatchMode=yes"
 
 for host_ssh_ip in "${ALL_SSH_IPS[@]}"; do
     echo "   -> Copying to ${host_ssh_ip}"
+    # shellcheck disable=SC2086,SC2029
     if ! ssh $SSH_OPTIONS "${SSH_USER}@${host_ssh_ip}" "mkdir -p ${REMOTE_SCRIPT_DIR}" || \
        ! scp $SSH_OPTIONS "${SCRIPT_PATH}" "${SSH_USER}@${host_ssh_ip}:${REMOTE_SCRIPT_PATH}"; then
         echo "❌ Failed to copy script to ${host_ssh_ip}. Aborting."
@@ -118,8 +119,6 @@ echo "Head Node Internal IP: ${HEAD_INTERNAL_IP}"
 echo "Worker Node SSH IPs: ${WORKER_SSH_IPS[*]}"
 echo "---------------------------------"
 
-declare -A PID_TO_IP
-
 # Note the use of HEAD_INTERNAL_IP here. This is passed to the script for Ray.
 BASE_CMD="sudo bash ${REMOTE_SCRIPT_PATH} \
     '${DOCKER_IMAGE}' \
@@ -133,14 +132,16 @@ BASE_CMD="sudo bash ${REMOTE_SCRIPT_PATH} \
 
 # Head Node (connects via SSH IP, runs command with internal IP)
 echo "⚙️  Configuring head node (Connecting to ${HEAD_SSH_IP})..."
+# shellcheck disable=SC2086,SC2029
 HEAD_CMD="${BASE_CMD//%ROLE%/--head}"
+# shellcheck disable=SC2086,SC2029
 ssh $SSH_OPTIONS "${SSH_USER}@${HEAD_SSH_IP}" "${HEAD_CMD}" &
-PID_TO_IP[$!]=$HEAD_SSH_IP
 
 # Worker Nodes (connect via SSH IPs, run command with internal head IP)
 for worker_ssh_ip in "${WORKER_SSH_IPS[@]}"; do
     echo "⚙️  Configuring worker node (Connecting to ${worker_ssh_ip})..."
+    # shellcheck disable=SC2086,SC2029
     WORKER_CMD="${BASE_CMD//%ROLE%/--worker}"
+    # shellcheck disable=SC2086,SC2029
     ssh $SSH_OPTIONS "${SSH_USER}@${worker_ssh_ip}" "${WORKER_CMD}" &
-    PID_TO_IP[$!]=$worker_ssh_ip
 done
