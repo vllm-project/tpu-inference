@@ -205,21 +205,6 @@ class WeightLoader(abc.ABC):
                 file_utils.delete_file(st_file)
 
 
-# TODO(xiang): deprecate this, use the multi-thread one instead.
-def hf_model_weights_iterator(
-    model_name_or_path: str,
-    framework: str,
-    filter_regex: Optional[str] = None,
-) -> Generator[tuple, Any, None]:
-    """The old single-thread model weights loader, will be deprecated."""
-    weights_location, weights_files = get_model_weights_files(
-        model_name_or_path)
-    for weights_file in weights_files:
-        for name, weight_tensor in model_weights_generator(
-                model_name_or_path, weights_location, weights_file, framework):
-            yield name, weight_tensor
-
-
 def model_weights_generator(
     model_name_or_path: str,
     weights_location: str,
