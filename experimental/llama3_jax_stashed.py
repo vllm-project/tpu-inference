@@ -27,8 +27,7 @@ from tpu_commons.models.jax.common.transformer_block import (
     TransformerBlock, TransformerBlockConfig)
 from tpu_commons.models.jax.layers.misc import shard_put
 from tpu_commons.models.jax.recipes.recipe import RecipeConfig
-from tpu_commons.models.jax.utils.weight_utils import (ParameterType,
-                                                       WeightLoader, get_param)
+from tpu_commons.models.jax.utils.weight_utils import WeightLoader, get_param
 
 logger = init_logger(__name__)
 pp = pprint.PrettyPrinter(depth=6)
@@ -258,10 +257,7 @@ class Llama3WeightLoader(WeightLoader):
                          model_config=model_config,
                          framework="flax")
         self.setup()
-
-    def setup(self):
-        super().setup()
-        self.set_transpose_param_map({
+        self._transpose_map = {
             "lm_head": (1, 0),
             "gate_proj": (1, 0),
             "up_proj": (1, 0),
@@ -270,27 +266,26 @@ class Llama3WeightLoader(WeightLoader):
             "k_proj": (2, 0, 1),
             "v_proj": (2, 0, 1),
             "o_proj": (1, 2, 0),
-        })
-        # Set weights reshape map
+        }
         hidden_size = self.model_config.hidden_size
         attn_heads = self.model_config.layers.attention.num_attention_heads
         num_key_value_heads = self.model_config.layers.attention.num_key_value_heads
         attn_head_dim = self.model_config.layers.attention.head_dim
-        self.set_reshape_param_map(
-            {
-                "q_proj": (attn_heads, -1, hidden_size),
-                "k_proj": (num_key_value_heads, -1, hidden_size),
-                "v_proj": (num_key_value_heads, -1, hidden_size),
-                "o_proj": (hidden_size, attn_heads, -1),
-            },
-            param_type=ParameterType.weight)
-        # Set bias reshape map
-        self.set_reshape_param_map(param_reshape_dict={
+        self._weight_shape_map = {
+            "q_proj": (attn_heads, -1, hidden_size),
+            "k_proj": (num_key_value_heads, -1, hidden_size),
+            "v_proj": (num_key_value_heads, -1, hidden_size),
+            "o_proj": (hidden_size, attn_heads, -1),
+        }
+        self._bias_shape_map = {
             "q_proj.bias": (attn_heads, attn_head_dim),
             "k_proj.bias": (num_key_value_heads, attn_head_dim),
             "v_proj.bias": (num_key_value_heads, attn_head_dim)
-        },
-                                   param_type=ParameterType.bias)
+        }
+
+    def setup(self):
+        super().setup()
+
         # Set the mappings from loaded parameter keys to standardized names.
         self.set_loaded_to_standardized_keys({
             "model.embed_tokens":
@@ -354,12 +349,13 @@ class Llama3WeightLoader(WeightLoader):
             )
             if loaded_name.endswith(".bias"):
                 loaded_weight = self.reshape_params(loaded_name, loaded_weight,
-                                                    "bias")
+                                                    self._bias_shape_map)
             else:
                 loaded_weight = self.reshape_params(loaded_name, loaded_weight,
-                                                    "weight")
+                                                    self._weight_shape_map)
                 loaded_weight = self.transpose_params(loaded_name,
-                                                      loaded_weight)
+                                                      loaded_weight,
+                                                      self._transpose_map)
             if model_weight.value.shape != loaded_weight.shape:
                 raise ValueError(
                     f"Loaded shape for {loaded_name}: {loaded_weight.shape} "

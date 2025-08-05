@@ -279,10 +279,7 @@ class Llama4WeightLoader(WeightLoader):
                          framework="flax",
                          filter_regex="language_model")
         self.setup()
-
-    def setup(self):
-        super().setup()
-        self.set_transpose_param_map({
+        self._transpose_map = {
             "q_proj": (2, 0, 1),
             "k_proj": (2, 0, 1),
             "v_proj": (2, 0, 1),
@@ -292,21 +289,22 @@ class Llama4WeightLoader(WeightLoader):
             "shared_expert.up_proj": (1, 0),
             "o_proj": (1, 2, 0),
             "lm_head": (1, 0),
-        })
+        }
         hidden_size = self.model_config.hidden_size
         attn_heads = self.model_config.layers.attention.num_attention_heads
         num_key_value_heads = self.model_config.layers.attention.num_key_value_heads
         attn_head_dim = self.model_config.layers.attention.head_dim
-        self.set_reshape_param_map(
-            {
-                "q_proj": (attn_heads, attn_head_dim, hidden_size),
-                "k_proj": (num_key_value_heads, attn_head_dim, hidden_size),
-                "v_proj": (num_key_value_heads, attn_head_dim, hidden_size),
-                # o_proj is inverted: https://github.com/huggingface/transformers/blob/v4.53.2/src/transformers/models/llama4/modeling_llama4.py#L298
-                "o_proj": (hidden_size, attn_heads, attn_head_dim),
-            },
-            param_type="weight",
-        )
+        self._weight_shape_map = {
+            "q_proj": (attn_heads, attn_head_dim, hidden_size),
+            "k_proj": (num_key_value_heads, attn_head_dim, hidden_size),
+            "v_proj": (num_key_value_heads, attn_head_dim, hidden_size),
+            # o_proj is inverted: https://github.com/huggingface/transformers/blob/v4.53.2/src/transformers/models/llama4/modeling_llama4.py#L298
+            "o_proj": (hidden_size, attn_heads, attn_head_dim),
+        }
+
+    def setup(self):
+        super().setup()
+
         # Set the mappings from loaded parameter keys to standardized names.
         self.set_loaded_to_standardized_keys({
             "language_model.model.embed_tokens.weight":
@@ -376,14 +374,12 @@ class Llama4WeightLoader(WeightLoader):
             mapped_name = re.sub(r"layers\.\*", f"layers.{layer_num}",
                                  mapped_name)
             mapped_model_weight = get_param(model_params, mapped_name)
-            if loaded_name.endswith(".bias"):
+            if not loaded_name.endswith(".bias"):
                 loaded_weight = self.reshape_params(loaded_name, loaded_weight,
-                                                    "bias")
-            else:
-                loaded_weight = self.reshape_params(loaded_name, loaded_weight,
-                                                    "weight")
+                                                    self._weight_shape_map)
                 loaded_weight = self.transpose_params(loaded_name,
-                                                      loaded_weight)
+                                                      loaded_weight,
+                                                      self._transpose_map)
             if mapped_model_weight.value.shape != loaded_weight.shape:
                 raise ValueError(
                     f"Loaded shape for {split_loaded_name}: {loaded_weight.shape} "
@@ -411,14 +407,11 @@ class Llama4WeightLoader(WeightLoader):
                 mapped_name = self.map_loaded_to_standardized_name(loaded_name)
                 model_weight = get_param(model_params, mapped_name)
 
-                if loaded_name.endswith(".bias"):
+                if not loaded_name.endswith(".bias"):
                     loaded_weight = self.reshape_params(
-                        loaded_name, loaded_weight, "bias")
-                else:
-                    loaded_weight = self.reshape_params(
-                        loaded_name, loaded_weight, "weight")
+                        loaded_name, loaded_weight, self._weight_shape_map)
                     loaded_weight = self.transpose_params(
-                        loaded_name, loaded_weight)
+                        loaded_name, loaded_weight, self._transpose_map)
                 if model_weight.value.shape != loaded_weight.shape:
                     raise ValueError(
                         f"Loaded shape for {loaded_name}: {loaded_weight.shape} "
