@@ -1,20 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 import time
+from collections import OrderedDict
 from typing import Optional
 
 import torch
 import torch.nn as nn
 import torchax
 from jax.sharding import Mesh
+from vllm.attention.layer import MultiHeadAttention as VllmMultiHeadAttention
 from vllm.config import ModelConfig, VllmConfig
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.utils import (
     initialize_model, process_weights_after_loading, set_default_torch_dtype)
 
+from tpu_commons.attention.backends.multihead_attn_torchax import \
+    MultiHeadAttention
 from tpu_commons.distributed.tpu_distributed_utils import shard_model
 from tpu_commons.logger import init_logger
 
 logger = init_logger(__name__)
+
+MODULE_TYPE_TO_REPLACING_FUNC = OrderedDict([
+    (VllmMultiHeadAttention, MultiHeadAttention.from_vllm_cls),
+])
 
 
 class TPUModelLoader(DefaultModelLoader):
@@ -67,6 +75,13 @@ class TPUModelLoader(DefaultModelLoader):
 
         counter_before_partition = time.perf_counter()
         model = model.eval()
+
+        if model_config.is_multimodal_model:
+            # NOTE(vladkarp): vllm original MHAttention module calls px\xla kernel in PALLAS_VLLM_V1 mode
+            # we either need to change it in vllm to allow for a custom class delegation just like
+            # it is done in vllm's stadnard Attention module or just replace entire module with our custom version
+            replace_modules(model)
+
         if mesh is not None:
             shard_model(model, mesh)
         else:
@@ -89,3 +104,42 @@ class TPUModelLoader(DefaultModelLoader):
         for _, buffer in model.named_buffers():
             jax_t = buffer.jax()
             assert len(jax_t.global_shards) == num_devices
+
+
+def replace_modules(model: torch.nn.Module) -> None:
+    """
+    Recursively checks a PyTorch model and replaces submodules based on
+    the MODULE_TYPE_TO_REPLACING_FUNC mapping. The replacement is done in-place.
+
+    Args:
+        model: torch.nn.Module to process.
+    """
+
+    def _process_module(module: torch.nn.Module,
+                        name: Optional[str] = None,
+                        parent: Optional[torch.nn.Module] = None):
+        """
+        Recursively traverses the module tree and replaces modules.
+        """
+        for module_type, replacing_func in MODULE_TYPE_TO_REPLACING_FUNC.items(
+        ):
+            if isinstance(module, module_type):
+                logger.info("Found module '%s' of type %s to replace.", name,
+                            module_type)
+                replaced_module = replacing_func(module)
+
+                if replaced_module is not module:
+                    assert parent is not None and name is not None, (
+                        "Top-level module is not expected to be replaced.")
+                    logger.info("Replacing module '%s' with %s", name,
+                                replaced_module)
+                    setattr(parent, name, replaced_module)
+                    # After replacement, we should traverse the new module's children
+                    module = replaced_module
+                break
+
+        for child_name, child_module in list(module.named_children()):
+            _process_module(child_module, child_name, module)
+
+    # Start the process from the top-level module.
+    _process_module(model)
