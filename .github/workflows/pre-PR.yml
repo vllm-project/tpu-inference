@@ -57,11 +57,13 @@ jobs:
 
           if [[ -f "$TEMPLATE_PATH" ]]; then
             TEMPLATE_CONTENT=$(cat "$TEMPLATE_PATH")
-            echo "TEMPLATE_CONTENT<<EOF" >> $GITHUB_ENV
-            echo "$TEMPLATE_CONTENT" >> $GITHUB_ENV
-            echo "EOF" >> $GITHUB_ENV
+            {
+              echo "TEMPLATE_CONTENT<<EOF"
+              echo "$TEMPLATE_CONTENT"
+              echo "EOF"
+            } >> "$GITHUB_ENV"
           else
-            echo "Template file not found at $TEMPLATE_PATH"
+            echo "Template file not found at \"$TEMPLATE_PATH\""
             exit 1
           fi
 
