@@ -14,7 +14,8 @@ import jax
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
-                            EngineCoreRequestType, UtilityOutput)
+                            EngineCoreRequestType, UtilityOutput,
+                            UtilityResult)
 from vllm.v1.engine.core import EngineCore as vLLMEngineCore
 from vllm.v1.engine.core import EngineCoreProc as vLLMEngineCoreProc
 from vllm.v1.request import Request, RequestStatus
@@ -272,8 +273,8 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
             output = UtilityOutput(call_id)
             try:
                 method = getattr(self._prefill_engines[0], method_name)
-                output.result = method(
-                    *self._convert_msgspec_args(method, args))
+                result = method(*self._convert_msgspec_args(method, args))
+                output.result = UtilityResult(result)
             except BaseException as e:
                 logger.exception("Invocation of %s method failed", method_name)
                 output.failure_message = (f"Call to {method_name} method"
