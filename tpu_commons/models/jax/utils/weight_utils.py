@@ -7,8 +7,6 @@ import math
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
-from enum import Enum
 from typing import Any, Dict, Generator, List, Mapping, Optional, Tuple
 
 import jax
@@ -27,17 +25,6 @@ logger = init_logger(__name__)
 
 HF_WEIGHTS_FORMAT = "*.safetensors"
 FULL_DOWNLOAD_DISK_RATIO = 0.9
-
-
-class ParameterType(str, Enum):
-    weight = "weight"
-    bias = "bias"
-
-
-@dataclass
-class TransformationConfig:
-    transpose: Mapping[str, Any] = field(default_factory=dict)
-    reshape: Mapping[str, Any] = field(default_factory=dict)
 
 
 class WeightLoader(abc.ABC):
@@ -68,7 +55,6 @@ class WeightLoader(abc.ABC):
         self.model_config = model_config
         self.framework = framework
         self.filter_regex = filter_regex
-        self.transformation_cfg = TransformationConfig()
         self.setup()
 
     def setup(self):
@@ -80,34 +66,22 @@ class WeightLoader(abc.ABC):
         self.is_verbose = getattr(self.vllm_config.additional_config,
                                   "is_verbose", False)
 
-    def set_transpose_param_map(self,
-                                transpose_param_dict: Mapping[str,
-                                                              Tuple[int]]):
-        self.transformation_cfg.transpose = transpose_param_dict
-
-    def set_reshape_param_map(self, param_reshape_dict: Mapping[str,
-                                                                Tuple[int]],
-                              param_type: str):
-        self.transformation_cfg.reshape[param_type] = param_reshape_dict
-
     def set_loaded_to_standardized_keys(
             self, loaded_to_standardized_keys: Mapping[str, str]):
         self.loaded_to_standardized_keys = loaded_to_standardized_keys
 
-    def transpose_params(self, param_key: str, param_tensor: jax.Array):
-        for key in self.transformation_cfg.transpose:
+    def transpose_params(self, param_key: str, param_tensor: jax.Array,
+                         transpose_map):
+        for key, value in transpose_map.items():
             if key in param_key:
-                return jnp.transpose(param_tensor,
-                                     self.transformation_cfg.transpose[key])
+                return jnp.transpose(param_tensor, value)
         return param_tensor  # Base case / no-op
 
     def reshape_params(self, param_key: str, param_tensor: jax.Array,
-                       param_type: str):
-        for key in self.transformation_cfg.reshape.get(param_type, []):
+                       shape_map):
+        for key, new_shape in shape_map.items():
             if key in param_key:
-                reshape_shape = self.transformation_cfg.reshape[param_type][
-                    key]
-                return jnp.reshape(param_tensor, reshape_shape)
+                return jnp.reshape(param_tensor, new_shape)
         return param_tensor  # Base case / no-op
 
     abc.abstractmethod

@@ -315,14 +315,15 @@ class DeepSeekV3(Model):
     def load_weights(self, rng: PRNGKey, cache_dir: Optional[str] = None):
         self.rng = nnx.Rngs(rng)
         try:
-            use_random_weights = self.vllm_config.additional_config[
-                "random_weights"]
+            # use_random_weights = self.vllm_config.additional_config[
+            #     "random_weights"]
             logger.warning(
                 "Using randomly initialized weights instead of loading parameter weights."
             )
             return
         except KeyError:
-            use_random_weights = False
+            # use_random_weights = False
+            pass
         self.weight_loader.load_weights(self)
 
     def __call__(
@@ -359,9 +360,7 @@ class DeepSeekV3WeightLoader(WeightLoader):
         self.setup()
         self.num_routed_experts = model_config.layers.moe.num_local_experts
 
-    def setup(self):
-        super().setup()
-        self.set_transpose_param_map({
+        self._transpose_map = {
             # dense mlp
             r"mlp\.down_proj": (1, 0),
             r"mlp\.gate_proj": (1, 0),
@@ -380,7 +379,7 @@ class DeepSeekV3WeightLoader(WeightLoader):
             r"mlp\.shared_experts\.down_proj": (1, 0),
             r"mlp\.shared_experts\.gate_proj": (1, 0),
             r"mlp\.shared_experts\.up_proj": (1, 0)
-        })
+        }
         hidden_size = self.model_config.hidden_size
         q_lora_rank = self.model_config.layers.attention.q_lora_rank
         kv_lora_rank = self.model_config.layers.attention.kv_lora_rank
@@ -388,16 +387,17 @@ class DeepSeekV3WeightLoader(WeightLoader):
         qk_nope_head_dim = self.model_config.layers.attention.qk_nope_head_dim
         qk_rope_head_dim = self.model_config.layers.attention.qk_rope_head_dim
         v_head_dim = self.model_config.layers.attention.v_head_dim
-        self.set_reshape_param_map(
-            {
-                "q_b_proj":
-                (attn_heads, qk_nope_head_dim + qk_rope_head_dim, q_lora_rank),
-                "kv_b_proj":
-                (attn_heads, qk_nope_head_dim + v_head_dim, kv_lora_rank),
-                "o_proj": (hidden_size, attn_heads, v_head_dim)
-            },
-            param_type="weight",
-        )
+        self._weight_shape_map = {
+            "q_b_proj":
+            (attn_heads, qk_nope_head_dim + qk_rope_head_dim, q_lora_rank),
+            "kv_b_proj":
+            (attn_heads, qk_nope_head_dim + v_head_dim, kv_lora_rank),
+            "o_proj": (hidden_size, attn_heads, v_head_dim)
+        }
+
+    def setup(self):
+        super().setup()
+
         # Set the mappings from loaded parameter keys to standardized names.
         self.set_loaded_to_standardized_keys({
             # encode & decode
@@ -474,11 +474,10 @@ class DeepSeekV3WeightLoader(WeightLoader):
                 loaded_key, loaded_key)
         return mapped_key
 
-    def transpose_params(self, param_key: str, param_tensor: jax.Array):
-        for key in self.transformation_cfg.transpose:
+    def _transpose_params(self, param_key: str, param_tensor: jax.Array):
+        for key, value in self._transpose_map.items():
             if re.search(key, param_key):
-                return jnp.transpose(param_tensor,
-                                     self.transformation_cfg.transpose[key])
+                return jnp.transpose(param_tensor, value)
         return param_tensor  # Base case / no-op
 
     def _process_moe_weights(self, loaded_name, loaded_weight, weights_dict):
@@ -510,8 +509,8 @@ class DeepSeekV3WeightLoader(WeightLoader):
         weight = weight.to(torch.float32).numpy().astype(cast_type)
 
         # Reshape and transpose weights if necessary.
-        weight = self.reshape_params(name, weight, "weight")
-        weight = self.transpose_params(name, weight)
+        weight = self.reshape_params(name, weight, self._weight_shape_map)
+        weight = self._transpose_params(name, weight)
         if model_weight.value.shape != weight.shape:
             raise ValueError(
                 f"Loaded shape for {name}: {weight.shape} "
