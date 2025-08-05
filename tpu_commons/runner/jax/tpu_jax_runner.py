@@ -91,6 +91,10 @@ class TPUModelRunner():
         self.slot_mapping_metadata_sharding = NamedSharding(
                 self.mesh, PartitionSpec(None, "data")
             )
+        
+        # --- NEW FOR DP ---
+        self.dp_size = self.mesh.shape["data"]
+        # ------------------
 
     def _verify_chunked_prefill_config(self):
         if (self.scheduler_config.max_num_batched_tokens
@@ -894,116 +898,184 @@ class TPUModelRunner():
     def maybe_wait_for_kv_save() -> None:
         if has_kv_transfer_group():
             get_kv_transfer_group().wait_for_save()
-
+    
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
-        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        assert total_num_scheduled_tokens > 0
+        """
+        Prepares and orders input tensors for a JAX model with data parallelism.
+
+        This function reorders and pads the input data to ensure that each
+        data-parallel (DP) rank receives a chunk of data of the same size.
+        This is a crucial step for achieving static compilation and high
+        performance with JAX.
+        """
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
-        preferred_device = scheduler_output.preferred_device
-        print("wenxin _prepare_inputs preferred_device", preferred_device)
-        # Get the number of scheduled tokens for each request.
-        num_scheduled_tokens_per_req = []
-        max_num_scheduled_tokens_all_reqs = 0
+        
+        dp_size = self.dp_size
+        
+        # Group requests by their assigned DP rank
+        reqs_by_dp_rank = [[] for _ in range(dp_size)]
         for req_id in self.input_batch.req_ids[:num_reqs]:
-            assert req_id is not None
-            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            num_scheduled_tokens_per_req.append(num_tokens)
-            max_num_scheduled_tokens_all_reqs = max(
-                max_num_scheduled_tokens_all_reqs, num_tokens)
-        num_scheduled_tokens_per_req = np.array(num_scheduled_tokens_per_req,
-                                                dtype=np.int32)
-        assert max_num_scheduled_tokens_all_reqs > 0
-
-        # Get request indices.
-        # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
-        # For each scheduled token, what are the corresponding req index.
-        req_indices = np.repeat(self.arange_cpu[:num_reqs],
-                                num_scheduled_tokens_per_req)
-
-        # Get batched arange.
-        # E.g., [2, 5, 3] -> [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        # For each scheduled token, what is its position in corresponding req.
-        arange = np.concatenate(
-            [self.arange_cpu[:n] for n in num_scheduled_tokens_per_req])
-
-        # Get positions.
-        positions_np = self.positions_cpu[:total_num_scheduled_tokens]
-        np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
-               arange,
-               out=positions_np)
-
-        # Get token indices.
-        # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
-        # where M is the max_model_len.
-        token_indices = (positions_np +
-                         req_indices * self.input_batch.token_ids_cpu.shape[1])
-        print("wenxin _prepare_inputs token_indices", token_indices)
-        # NOTE(woosuk): We use torch.index_select instead of np.take here
-        # because torch.index_select is much faster than np.take for large
-        # tensors.
-        np.take(self.input_batch.token_ids_cpu.flatten(),
-                token_indices,
-                out=self.input_ids_cpu[:total_num_scheduled_tokens])
-
-        # Prepare the attention metadata.
-        self.query_start_loc_cpu[0] = 0
-        np.cumsum(num_scheduled_tokens_per_req,
-                  out=self.query_start_loc_cpu[1:num_reqs + 1])
-        self.query_start_loc_cpu[num_reqs + 1:] = 1
-
-        self.seq_lens_cpu[:num_reqs] = (
-            self.input_batch.num_computed_tokens_cpu[:num_reqs] +
-            num_scheduled_tokens_per_req)
-
-        # Do the padding and copy the tensors to the TPU.
+            dp_rank = scheduler_output.preferred_device[req_id]
+            reqs_by_dp_rank[dp_rank].append(req_id)
+        
+        # Collect tokens and other data for each DP rank
+        dp_rank_tokens = [[] for _ in range(dp_size)]
+        dp_rank_num_scheduled_tokens = [[] for _ in range(dp_size)]
+        dp_rank_reqs = [[] for _ in range(dp_size)]
+        
+        for dp_rank in range(dp_size):
+            for req_id in reqs_by_dp_rank[dp_rank]:
+                req_index = self.input_batch.req_id_to_index[req_id]
+                num_tokens = scheduler_output.num_scheduled_tokens[req_id]
+                
+                # Get the tokens for this request
+                start_idx = self.input_batch.num_computed_tokens_cpu[req_index]
+                end_idx = start_idx + num_tokens
+                token_ids = self.input_batch.token_ids_cpu[req_index, start_idx:end_idx]
+                
+                dp_rank_tokens[dp_rank].extend(token_ids.tolist())
+                dp_rank_num_scheduled_tokens[dp_rank].append(num_tokens)
+                dp_rank_reqs[dp_rank].append(req_id)
+        print("dp_rank_reqs", dp_rank_reqs)
+        print("dp_rank_tokens", dp_rank_tokens)
+        print("dp_rank_num_scheduled_tokens", dp_rank_num_scheduled_tokens)
+             
+        # Pad all DP ranks to have the same total number of tokens
+        max_tokens_per_rank = max(len(tokens) for tokens in dp_rank_tokens)
+        
+        # Pad to the next pre-compile friendly number
         padded_total_num_scheduled_tokens = runner_utils.get_padded_token_len(
-            self.num_tokens_paddings, total_num_scheduled_tokens)
-        # Zero out to avoid spurious values from prev iteration (last cp chunk)
-        self.input_ids_cpu[
-            total_num_scheduled_tokens:padded_total_num_scheduled_tokens] = 0
+            self.num_tokens_paddings, max_tokens_per_rank
+        )
+        
+        # Build the final concatenated, padded input tensors
+        all_input_ids = []
+        all_positions = []
+        all_query_start_loc = []
+        all_seq_lens = []
+        all_block_tables = []
+        all_logits_indices = []
+        all_num_reqs_per_rank = []
+        
+        # New variable to track the offset for each DP rank's token batch
+        global_token_offset = 0
 
-        # Inputs
-        input_ids = self.input_ids_cpu[:padded_total_num_scheduled_tokens]
-        positions = self.positions_cpu[:padded_total_num_scheduled_tokens]
-        slot_mapping_metadata = self._get_slot_mapping_metadata(
-            num_reqs, num_scheduled_tokens_per_req)
-        num_slices = np.array([slot_mapping_metadata.shape[0]])
-        padded_num_slices = _get_padded_num_kv_cache_update_slices(
-            padded_total_num_scheduled_tokens, self.max_num_reqs,
-            self.block_size)
-        slot_mapping_metadata = np.pad(
-            slot_mapping_metadata,
-            [[0, padded_num_slices - len(slot_mapping_metadata)], [0, 0]],
-            constant_values=0)
-        slot_mapping_metadata = np.transpose(slot_mapping_metadata)
-        print("wenxin _prepare_inputs slot_mapping_metadata", slot_mapping_metadata)
-        block_tables = self.block_table_cpu[:self.max_num_reqs]
-        block_tables[:num_reqs, :self.max_num_blocks_per_req] = (
-            self.input_batch.block_table[0].get_cpu_tensor()[:num_reqs])
-        print("block_tables", block_tables)
-        query_start_loc = self.query_start_loc_cpu[:self.max_num_reqs + 1]
-        seq_lens = self.seq_lens_cpu[:self.max_num_reqs]
-        padded_num_reqs = runner_utils.get_padded_num_reqs_with_upper_limit(
-            num_reqs, self.max_num_reqs)
-        logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
-        num_seqs = np.array([num_reqs])
+        for dp_rank in range(dp_size):
+            input_ids_rank = np.array(dp_rank_tokens[dp_rank], dtype=np.int32)
+            
+            # Create padding for this rank's tokens
+            padding_size = padded_total_num_scheduled_tokens - len(input_ids_rank)
+            padded_input_ids = np.pad(input_ids_rank, (0, padding_size), constant_values=INVALID_TOKEN_ID)
+            print("padded_input_ids", padded_input_ids)
+            # Create the positions tensor
+            query_start_loc_rank = np.cumsum([0] + dp_rank_num_scheduled_tokens[dp_rank]).astype(np.int32)
+            positions_rank = np.zeros(len(input_ids_rank), dtype=np.int32)
+            
+            # The arange needs to be per-request, so we need to loop
+            start = 0
+            for i, num_tokens_in_req in enumerate(dp_rank_num_scheduled_tokens[dp_rank]):
+                req_id = dp_rank_reqs[dp_rank][i]
+                req_state = self.requests[req_id]
+                req_start_pos = self.input_batch.num_computed_tokens_cpu[
+                    self.input_batch.req_id_to_index[req_id]
+                ]
+                
+                positions_rank[start:start+num_tokens_in_req] = (
+                    np.arange(num_tokens_in_req, dtype=np.int32) + req_start_pos
+                )
+                start += num_tokens_in_req
+            
+            padded_positions = np.pad(positions_rank, (0, padding_size), constant_values=0)
+            
+            # Create block tables and seq_lens
+            num_reqs_in_rank = len(dp_rank_reqs[dp_rank])
+            block_tables_rank = np.zeros(
+                (num_reqs_in_rank, self.max_num_blocks_per_req), dtype=np.int32
+            )
+            seq_lens_rank = np.zeros(num_reqs_in_rank, dtype=np.int32)
+            
+            for i, req_id in enumerate(dp_rank_reqs[dp_rank]):
+                req_index = self.input_batch.req_id_to_index[req_id]
+                block_tables_rank[i] = self.input_batch.block_table[0].get_cpu_tensor()[req_index]
+                seq_lens_rank[i] = self.input_batch.num_computed_tokens_cpu[req_index] + dp_rank_num_scheduled_tokens[dp_rank][i]
+                
+            all_input_ids.append(padded_input_ids)
+            all_positions.append(padded_positions)
+
+            # Apply the token offset for this DP rank
+            all_query_start_loc.append(query_start_loc_rank + global_token_offset)
+            
+            all_seq_lens.append(seq_lens_rank)
+            all_block_tables.append(block_tables_rank)
+            all_num_reqs_per_rank.append(num_reqs_in_rank)
+            
+            # Update the global offset for the next DP rank
+            global_token_offset += padded_total_num_scheduled_tokens
+
+        # Concatenate everything for the final input tensors
+        final_input_ids = np.concatenate(all_input_ids)
+        final_positions = np.concatenate(all_positions)
+        print("final_input_ids", final_input_ids)
+        print("final_positions", final_positions)
+        
+        # query_start_loc needs to be a single concatenated array
+        final_query_start_loc = np.concatenate(all_query_start_loc, dtype=np.int32)[:-1]
+        print("final_query_start_loc", final_query_start_loc)
+        final_seq_lens = np.concatenate(all_seq_lens)
+        print("final_seq_lens", final_seq_lens)
+        final_block_tables = np.concatenate(all_block_tables)
+        print("final_block_tables", final_block_tables)
+        
+        # Prepare the attention metadata
+        all_slot_mapping_metadata_unpadded = self._get_slot_mapping_metadata_dp(
+            dp_rank_reqs, dp_rank_num_scheduled_tokens
+        )
+        print("all_slot_mapping_metadata_unpadded", all_slot_mapping_metadata_unpadded)
+        
+        num_slices_per_rank = np.array([metadata.shape[0] for metadata in all_slot_mapping_metadata_unpadded], dtype=np.int32)
+        
+        padded_num_slices_total = _get_padded_num_kv_cache_update_slices(
+            final_input_ids.shape[0], self.max_num_reqs, self.block_size
+        )
+        padded_num_slices_per_rank = padded_num_slices_total // dp_size
+        
+        all_slot_mapping_metadata = []
+        for metadata_rank in all_slot_mapping_metadata_unpadded:
+            padding_size = padded_num_slices_per_rank - metadata_rank.shape[0]
+            padded_metadata_rank = np.pad(
+                metadata_rank,
+                [[0, padding_size], [0, 0]],
+                constant_values=0
+            )
+            all_slot_mapping_metadata.append(padded_metadata_rank)
+
+        slot_mapping_metadata = np.concatenate(all_slot_mapping_metadata, axis=0).T if all_slot_mapping_metadata else np.array([], dtype=np.int32).reshape(3, 0)
+        print("slot_mapping_metadata", slot_mapping_metadata)
+        num_slices = np.pad(num_slices_per_rank, (0, dp_size - len(num_slices_per_rank)), constant_values=0)
+        
+        padded_num_reqs = sum(all_num_reqs_per_rank)
+        logits_indices = final_query_start_loc[1:padded_num_reqs + 1] - 1
+        
+        num_seqs = np.array([padded_num_reqs])
 
         # Put to device
-        sampling_metadata = TPUSupportedSamplingMetadata.\
-            from_input_batch(self.mesh, self.input_batch, padded_num_reqs)
+        sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
+            self.mesh, self.input_batch, padded_num_reqs,
+            # reordered_req_ids=sum(dp_rank_reqs, []),
+            # preferred_device=scheduler_output.preferred_device
+        )
                 
-        # Arrays that need data parallel sharding: input_ids, positions, slot_mapping_metadata, block_tables
-        input_ids = self._device_array(input_ids, sharding=self.data_parallel_sharding)
-        positions = self._device_array(positions, sharding=self.data_parallel_sharding)
+        # Arrays that need data parallel sharding
+        input_ids = self._device_array(final_input_ids, sharding=self.data_parallel_sharding)
+        positions = self._device_array(final_positions, sharding=self.data_parallel_sharding)
         slot_mapping_metadata = self._device_array(slot_mapping_metadata, sharding=self.slot_mapping_metadata_sharding)
-        block_tables = self._device_array(block_tables, sharding=self.data_parallel_sharding)
+        block_tables = self._device_array(final_block_tables, sharding=self.data_parallel_sharding)
 
         # Arrays that don't need specific sharding (use default)
         num_slices = self._device_array(num_slices)
-        query_start_loc = self._device_array(query_start_loc)
-        seq_lens = self._device_array(seq_lens)
+        query_start_loc = self._device_array(final_query_start_loc)
+        seq_lens = self._device_array(final_seq_lens)
         num_seqs = self._device_array(num_seqs)
         logits_indices = self._device_array(logits_indices)
 
@@ -1023,69 +1095,85 @@ class TPUModelRunner():
             logits_indices,
         )
 
-    def _get_slot_mapping_metadata(self, num_reqs,
-                                   num_scheduled_tokens_per_req):
+    def _get_slot_mapping_metadata_dp(
+        self, 
+        dp_rank_reqs: List[List[str]],
+        dp_rank_num_scheduled_tokens: List[List[int]]
+    ):
         """
-        Computes metadata for mapping slots to blocks in the key-value (KV)
-        cache for a batch of requests.
-
-        This function determines, for each request in the batch, how the
-        scheduled tokens are distributed across memory blocks, and generates
-        metadata needed to map slices of tokens to their corresponding positions
-        in the KV cache.
-
-        Args:
-            num_reqs (int): Number of requests in the current batch.
-            num_scheduled_tokens_per_req (int or np.ndarray): Number of tokens
-            to be scheduled for each request.
-
-        Returns:
-            np.ndarray: A 2D array of shape (total_block_len, 3), where each row
-            contains:
-                - kv_cache_start_index (int): The starting index in the KV cache
-                    for the corresponding slice.
-                - new_kv_start_index (int): The starting index in the new KV
-                    cache for the corresponding slice.
-                - slice_len (int): The length of the slice.
+        Generates slot mapping metadata, correctly ordered for a data-parallel
+        sharding scheme. The output is a single, concatenated array.
         """
-        slices_start = self.input_batch.num_computed_tokens_cpu[:num_reqs]
-        slices_end = self.input_batch.num_computed_tokens_cpu[:num_reqs] + \
-            num_scheduled_tokens_per_req
-        local_block_start_idx = slices_start // self.block_size
-        local_block_end_idx = (slices_end - 1) // self.block_size
-        no_repeat_req_indices = self.arange_cpu[:num_reqs]
-        global_block_start_idx = (
-            no_repeat_req_indices * self.max_num_blocks_per_req +
-            local_block_start_idx)
-        block_lens = local_block_end_idx - local_block_start_idx + 1
-        global_block_start_idx = np.repeat(global_block_start_idx, block_lens)
-        slice_arange = np.concatenate(
-            [self.arange_cpu[:n] for n in block_lens])
-        global_block_indices = global_block_start_idx + slice_arange
-        block_table_cpu = self.input_batch.block_table[0].get_cpu_tensor()
-        block_numbers = block_table_cpu.flatten()[global_block_indices]
-        total_block_len = np.sum(block_lens)
-        slot_mapping_slices = np.repeat(np.array([[0, self.block_size]],
-                                                 dtype=np.int32),
-                                        total_block_len,
-                                        axis=0)
-        cu_block_lens = np.zeros(len(block_lens) + 1, dtype=np.int32)
-        np.cumsum(block_lens, out=cu_block_lens[1:])
-        for req_idx in range(num_reqs):
-            slot_mapping_slices[cu_block_lens[req_idx]][
-                0] = slices_start[req_idx] % self.block_size
-            slot_mapping_slices[
-                cu_block_lens[req_idx + 1] -
-                1][1] = (slices_end[req_idx] - 1) % self.block_size + 1
-        slice_lens = slot_mapping_slices[:, 1] - slot_mapping_slices[:, 0]
-        cu_slices_lens = np.zeros(len(slice_lens) + 1, dtype=np.int32)
-        np.cumsum(slice_lens, out=cu_slices_lens[1:])
-        kv_cache_start_indices = slot_mapping_slices[:, 0] + \
-            (block_numbers * self.block_size)
-        new_kv_start_indices = cu_slices_lens[:-1]
-        slot_mapping_metadata = np.stack(
-            [kv_cache_start_indices, new_kv_start_indices, slice_lens], axis=1)
-        return slot_mapping_metadata #(3, 256)
+        all_slot_mapping_metadata = []
+        dp_size = len(dp_rank_reqs)
+        
+        for dp_rank in range(dp_size):
+            num_reqs_per_rank = len(dp_rank_reqs[dp_rank])
+            if num_reqs_per_rank == 0:
+                continue
+            
+            requests_rank = dp_rank_reqs[dp_rank]
+            num_scheduled_tokens_rank = dp_rank_num_scheduled_tokens[dp_rank]
+
+            block_table_cpu = self.input_batch.block_table[0].get_cpu_tensor()
+            
+            # Get the input batch indices for this DP rank's requests
+            req_indices = [self.input_batch.req_id_to_index[req_id] for req_id in requests_rank]
+            
+            # These are the global block indices
+            block_numbers_rank = block_table_cpu[req_indices]
+            
+            slices_start = np.array(
+                [self.input_batch.num_computed_tokens_cpu[i] for i in req_indices],
+                dtype=np.int32
+            )
+            slices_end = slices_start + np.array(num_scheduled_tokens_rank, dtype=np.int32)
+            
+            local_block_start_idx = slices_start // self.block_size
+            local_block_end_idx = (slices_end - 1) // self.block_size
+            block_lens = local_block_end_idx - local_block_start_idx + 1
+
+            # FIX: Correctly build the flat_block_numbers list by iterating through each request
+            flat_block_numbers = []
+            for i in range(num_reqs_per_rank):
+                req_block_indices = np.arange(local_block_start_idx[i], local_block_end_idx[i] + 1)
+                if req_block_indices.size > 0:
+                    flat_block_numbers.append(block_numbers_rank[i][req_block_indices])
+            
+            flat_block_numbers = np.concatenate(flat_block_numbers) if flat_block_numbers else np.array([], dtype=np.int32)
+
+            slot_mapping_slices = []
+            
+            # Reconstruct the slices based on the new DP order
+            for i in range(num_reqs_per_rank):
+                start_slice_len = self.block_size - (slices_start[i] % self.block_size)
+                end_slice_len = (slices_end[i] - 1) % self.block_size + 1
+                
+                if block_lens[i] == 1:
+                    slot_mapping_slices.append([slices_start[i] % self.block_size, end_slice_len])
+                else:
+                    slot_mapping_slices.append([slices_start[i] % self.block_size, self.block_size])
+                    for _ in range(block_lens[i] - 2):
+                        slot_mapping_slices.append([0, self.block_size])
+                    slot_mapping_slices.append([0, end_slice_len])
+                    
+            slot_mapping_slices = np.array(slot_mapping_slices, dtype=np.int32)
+            
+            slice_lens = slot_mapping_slices[:, 1] - slot_mapping_slices[:, 0]
+            cu_slices_lens = np.cumsum(slice_lens).astype(np.int32)
+            
+            # kv_cache_start_indices uses the global block numbers
+            kv_cache_start_indices = slot_mapping_slices[:, 0] + (flat_block_numbers * self.block_size)
+            
+            # new_kv_start_indices are local to this DP rank's token batch
+            new_kv_start_indices = np.concatenate(([0], cu_slices_lens[:-1]))
+
+            metadata_rank = np.stack(
+                [kv_cache_start_indices, new_kv_start_indices, slice_lens], axis=1
+            )
+            all_slot_mapping_metadata.append(metadata_rank)
+
+        return all_slot_mapping_metadata
 
     def _device_array(self, *args, sharding=None, **kwargs) -> jax.Array:
         if sharding is None:
