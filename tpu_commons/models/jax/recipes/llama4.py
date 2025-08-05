@@ -29,7 +29,8 @@ from tpu_commons.models.jax.common.transformer_block import (
     SharedExpertsTransformerBlock, SharedExpertsTransformerBlockConfig)
 from tpu_commons.models.jax.layers.misc import shard_put
 from tpu_commons.models.jax.recipes.recipe import RecipeConfig
-from tpu_commons.models.jax.utils.weight_utils import WeightLoader, get_param
+from tpu_commons.models.jax.utils.weight_utils import (WeightLoader, get_param,
+                                                       print_param_info)
 
 logger = init_logger(__name__)
 pp = pprint.PrettyPrinter(depth=6)
@@ -393,7 +394,7 @@ class Llama4WeightLoader(WeightLoader):
                 f"{split_loaded_name}: {loaded_weight.shape}  -->  {mapped_name}: {mapped_model_weight.value.shape}"
             )
             if self.is_verbose:
-                WeightLoader.print_param_info(mapped_model_weight, mapped_name)
+                print_param_info(mapped_model_weight, mapped_name)
 
     def load_weights(self, model_for_loading: nnx.Module):
         model_params = nnx.state(model_for_loading)
@@ -424,6 +425,6 @@ class Llama4WeightLoader(WeightLoader):
                                                model_weight.sharding.spec,
                                                mesh=model_for_loading.mesh)
                 if self.is_verbose:
-                    WeightLoader.print_param_info(model_weight, loaded_name)
+                    print_param_info(model_weight, loaded_name)
 
         nnx.update(model_for_loading, model_params)
