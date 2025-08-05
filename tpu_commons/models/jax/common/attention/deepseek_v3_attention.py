@@ -168,14 +168,12 @@ class MLA(Attention):
         )
         self.kv_rms_norm.generate_kernel(rngs)
 
-    def __call__(
-        self,
-        x,
-        is_prefill,
-        kv_cache: KVCache,
-        attention_metadata: AttentionMetadata,
-        use_attention_rope: bool = True
-    ):
+    def __call__(self,
+                 x,
+                 is_prefill,
+                 kv_cache: KVCache,
+                 attention_metadata: AttentionMetadata,
+                 use_attention_rope: bool = True):
         """Performs the forward pass of the attention module.
 
         Args:

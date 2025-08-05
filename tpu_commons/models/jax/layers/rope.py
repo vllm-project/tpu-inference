@@ -35,7 +35,7 @@ def apply_rope(
     # Prepare for rotation by calculating sin and cos values
     # `sinusoid_inp` gets shape (batch * seq_len, head_dim/2)
     sinusoid_inp = positions[..., jnp.newaxis] * timescale[jnp.newaxis, :]
-    
+
     # Broadcast over the 'heads' dimension, assuming shape (batch*seq, heads, head_dim)
     sinusoid_inp = sinusoid_inp[:, jnp.newaxis, ...]
     sin = jnp.sin(sinusoid_inp)
@@ -43,9 +43,11 @@ def apply_rope(
 
     if rope_input_ordering == "interleaved":
         # Reshape to group adjacent features for rotation, matching new_apply_rope
-        rotary_inputs = inputs[..., :head_dim] # Take just the non-padded amount.
-        reshaped_inputs = rotary_inputs.reshape(*rotary_inputs.shape[:-1], -1, 2)
-        
+        rotary_inputs = inputs[..., :
+                               head_dim]  # Take just the non-padded amount.
+        reshaped_inputs = rotary_inputs.reshape(*rotary_inputs.shape[:-1], -1,
+                                                2)
+
         # Apply the rotation
         first_half = reshaped_inputs[..., 0]
         second_half = reshaped_inputs[..., 1]
