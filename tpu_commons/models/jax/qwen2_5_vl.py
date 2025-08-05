@@ -6,7 +6,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import nnx
-from jax.experimental.pallas.ops.tpu.flash_attention import flash_attention
 from jax.sharding import Mesh
 from transformers import modeling_flax_utils
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
@@ -16,6 +15,7 @@ from vllm.config import VllmConfig
 from tpu_commons import utils as utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
+from tpu_commons.models.jax.layers.attention import sharded_flash_attention
 from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
 # from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from tpu_commons.models.jax.utils.multi_modal_utils import (
@@ -223,6 +223,11 @@ class Qwen2_5_VisionAttention(nnx.Module):
             bias_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rngs,
         )
+        self.flash_attention = sharded_flash_attention(
+            mesh=mesh,
+            causal=False,
+            sm_scale=1.0 / math.sqrt(self.head_dim),
+        )
 
     def __call__(
         self,
@@ -284,12 +289,7 @@ class Qwen2_5_VisionAttention(nnx.Module):
             segment_ids = generate_window_segment_ids(cu_window_seqlens,
                                                       T_attn, padded_T)
 
-        output = flash_attention(q,
-                                 k,
-                                 v,
-                                 segment_ids=segment_ids,
-                                 sm_scale=1.0 / math.sqrt(self.head_dim),
-                                 causal=False)
+        output = self.flash_attention(q, k, v, segment_ids)
 
         # Unpad the output
         output = output[:, :, :T_attn, :]
