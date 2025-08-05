@@ -74,7 +74,7 @@ Run `Llama 3.1 70B Instruct` offline inference on 4 hosts (v6e-16) in interleave
     -W "<worker1_public_ip>,<worker2_public_ip>,<etc...>"
 ```
 
-2. On the head node, use `sudo docker exec -it node /bin/bash` to enter the container. And then execute:
+1. On the head node, use `sudo docker exec -it node /bin/bash` to enter the container. And then execute:
 
 ```
 HF_TOKEN=<huggingface_token> python /workspace/tpu_commons/examples/offline_inference.py \

@@ -4,11 +4,13 @@ from collections import defaultdict
 from typing import Any, List, Tuple
 
 import jax
-
-from tpu_commons.logger import init_logger
+from jax._src import dtypes
 from vllm import envs
 
+from tpu_commons.logger import init_logger
+
 GBYTES = 1024 * 1024 * 1024
+TPU_HEAD_SIZE_ALIGNMENT = 128
 
 _megacore = False
 logger = init_logger(__name__)
@@ -99,3 +101,8 @@ def get_padded_num_heads(num_heads: int, sharding_size: int) -> int:
         assert sharding_size % num_heads == 0
         num_heads = sharding_size
     return num_heads
+
+
+def get_dtype_packing(dtype):
+    bits = dtypes.bit_width(dtype)
+    return 32 // bits

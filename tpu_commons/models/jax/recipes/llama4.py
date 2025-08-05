@@ -29,7 +29,8 @@ from tpu_commons.models.jax.common.transformer_block import (
     SharedExpertsTransformerBlock, SharedExpertsTransformerBlockConfig)
 from tpu_commons.models.jax.layers.misc import shard_put
 from tpu_commons.models.jax.recipes.recipe import RecipeConfig
-from tpu_commons.models.jax.utils.weight_utils import WeightLoader, get_param
+from tpu_commons.models.jax.utils.weight_utils import (WeightLoader, get_param,
+                                                       print_param_info)
 
 logger = init_logger(__name__)
 pp = pprint.PrettyPrinter(depth=6)
@@ -253,22 +254,22 @@ class Llama4ForCausalLM(Model):
         *args,
     ) -> Tuple[List[KVCacheType], jax.Array, jax.Array]:
         is_prefill = False
-        x = self.embedder.encode(input_ids)
+        x_TD = self.embedder.encode(input_ids)
         for (i, block) in enumerate(self.layers):
             kv_cache = kv_caches[i]
-            new_kv_cache, x = block(x, is_prefill, kv_cache,
-                                    attention_metadata)
-            jax.block_until_ready(x)
+            new_kv_cache, x_TD = block(x_TD, is_prefill, kv_cache,
+                                       attention_metadata)
+            jax.block_until_ready(x_TD)
             kv_caches[i] = new_kv_cache
 
-        final_activation = self.final_norm(x)
+        final_activation_TD = self.final_norm(x_TD)
 
-        return kv_caches, final_activation
+        return kv_caches, final_activation_TD
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        logits = jnp.dot(hidden_states,
-                         self.lm_head.input_embedding_table_DV.value)
-        return logits
+        logits_TV = jnp.dot(hidden_states,
+                            self.lm_head.input_embedding_table_DV.value)
+        return logits_TV
 
 
 class Llama4WeightLoader(WeightLoader):
@@ -279,10 +280,7 @@ class Llama4WeightLoader(WeightLoader):
                          framework="flax",
                          filter_regex="language_model")
         self.setup()
-
-    def setup(self):
-        super().setup()
-        self.set_transpose_param_map({
+        self._transpose_map = {
             "q_proj": (2, 0, 1),
             "k_proj": (2, 0, 1),
             "v_proj": (2, 0, 1),
@@ -292,23 +290,21 @@ class Llama4WeightLoader(WeightLoader):
             "shared_expert.up_proj": (1, 0),
             "o_proj": (1, 2, 0),
             "lm_head": (1, 0),
-        })
+        }
         hidden_size = self.model_config.hidden_size
         attn_heads = self.model_config.layers.attention.num_attention_heads
         num_key_value_heads = self.model_config.layers.attention.num_key_value_heads
         attn_head_dim = self.model_config.layers.attention.head_dim
-        self.set_reshape_param_map(
-            {
-                "q_proj": (attn_heads, attn_head_dim, hidden_size),
-                "k_proj": (num_key_value_heads, attn_head_dim, hidden_size),
-                "v_proj": (num_key_value_heads, attn_head_dim, hidden_size),
-                # o_proj is inverted: https://github.com/huggingface/transformers/blob/v4.53.2/src/transformers/models/llama4/modeling_llama4.py#L298
-                "o_proj": (hidden_size, attn_heads, attn_head_dim),
-            },
-            param_type="weight",
-        )
+        self._weight_shape_map = {
+            "q_proj": (attn_heads, attn_head_dim, hidden_size),
+            "k_proj": (num_key_value_heads, attn_head_dim, hidden_size),
+            "v_proj": (num_key_value_heads, attn_head_dim, hidden_size),
+            # o_proj is inverted: https://github.com/huggingface/transformers/blob/v4.53.2/src/transformers/models/llama4/modeling_llama4.py#L298
+            "o_proj": (hidden_size, attn_heads, attn_head_dim),
+        }
+
         # Set the mappings from loaded parameter keys to standardized names.
-        self.set_loaded_to_standardized_keys({
+        self._loaded_to_standardized_keys = {
             "language_model.model.embed_tokens.weight":
             "embedder.input_embedding_table_VD",
             "language_model.lm_head.weight":
@@ -339,19 +335,22 @@ class Llama4WeightLoader(WeightLoader):
             "layers.*.shared_experts.kernel_gating_DF",
             "language_model.model.layers.*.feed_forward.shared_expert.up_proj.weight":
             "layers.*.shared_experts.kernel_up_proj_DF",
-        })
+        }
+
+    def setup(self):
+        super().setup()
 
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
         # Find the corresponding model key using the HF key
         if "layer" in loaded_key:
             layer_num = re.search(r"layers\.(\d+)", loaded_key).group(1)
             layer_key = re.sub(r"layers\.\d+", "layers.*", loaded_key)
-            mapped_key = self.loaded_to_standardized_keys.get(
+            mapped_key = self._loaded_to_standardized_keys.get(
                 layer_key, loaded_key)
             mapped_key = re.sub(r"layers\.\*", f"layers.{layer_num}",
                                 mapped_key)
         else:
-            mapped_key = self.loaded_to_standardized_keys.get(
+            mapped_key = self._loaded_to_standardized_keys.get(
                 loaded_key, loaded_key)
         return mapped_key
 
@@ -376,14 +375,12 @@ class Llama4WeightLoader(WeightLoader):
             mapped_name = re.sub(r"layers\.\*", f"layers.{layer_num}",
                                  mapped_name)
             mapped_model_weight = get_param(model_params, mapped_name)
-            if loaded_name.endswith(".bias"):
+            if not loaded_name.endswith(".bias"):
                 loaded_weight = self.reshape_params(loaded_name, loaded_weight,
-                                                    "bias")
-            else:
-                loaded_weight = self.reshape_params(loaded_name, loaded_weight,
-                                                    "weight")
+                                                    self._weight_shape_map)
                 loaded_weight = self.transpose_params(loaded_name,
-                                                      loaded_weight)
+                                                      loaded_weight,
+                                                      self._transpose_map)
             if mapped_model_weight.value.shape != loaded_weight.shape:
                 raise ValueError(
                     f"Loaded shape for {split_loaded_name}: {loaded_weight.shape} "
@@ -397,7 +394,7 @@ class Llama4WeightLoader(WeightLoader):
                 f"{split_loaded_name}: {loaded_weight.shape}  -->  {mapped_name}: {mapped_model_weight.value.shape}"
             )
             if self.is_verbose:
-                WeightLoader.print_param_info(mapped_model_weight, mapped_name)
+                print_param_info(mapped_model_weight, mapped_name)
 
     def load_weights(self, model_for_loading: nnx.Module):
         model_params = nnx.state(model_for_loading)
@@ -411,14 +408,11 @@ class Llama4WeightLoader(WeightLoader):
                 mapped_name = self.map_loaded_to_standardized_name(loaded_name)
                 model_weight = get_param(model_params, mapped_name)
 
-                if loaded_name.endswith(".bias"):
+                if not loaded_name.endswith(".bias"):
                     loaded_weight = self.reshape_params(
-                        loaded_name, loaded_weight, "bias")
-                else:
-                    loaded_weight = self.reshape_params(
-                        loaded_name, loaded_weight, "weight")
+                        loaded_name, loaded_weight, self._weight_shape_map)
                     loaded_weight = self.transpose_params(
-                        loaded_name, loaded_weight)
+                        loaded_name, loaded_weight, self._transpose_map)
                 if model_weight.value.shape != loaded_weight.shape:
                     raise ValueError(
                         f"Loaded shape for {loaded_name}: {loaded_weight.shape} "
@@ -431,6 +425,6 @@ class Llama4WeightLoader(WeightLoader):
                                                model_weight.sharding.spec,
                                                mesh=model_for_loading.mesh)
                 if self.is_verbose:
-                    WeightLoader.print_param_info(model_weight, loaded_name)
+                    print_param_info(model_weight, loaded_name)
 
         nnx.update(model_for_loading, model_params)

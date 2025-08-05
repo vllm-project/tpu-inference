@@ -208,9 +208,8 @@ class TestLlamaForCausalLM:
         mock_loader_instance = MagicMock()
         mock_loader_cls.return_value = mock_loader_instance
         model.load_weights(rng, cache_dir="/tmp/cache")
-        mock_loader_cls.assert_called_once_with(
-            vllm_config=vllm_config,
-            model_config=model.cfg.model)
+        mock_loader_cls.assert_called_once_with(vllm_config=vllm_config,
+                                                model_config=model.cfg.model)
         mock_loader_instance.load_weights.assert_called_once_with(model)
 
 

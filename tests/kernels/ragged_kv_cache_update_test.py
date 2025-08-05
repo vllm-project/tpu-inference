@@ -21,8 +21,7 @@ def kv_cache_update_ref(new_kv, slot_mapping, kv_cache):
 @jtu.with_config(jax_numpy_dtype_promotion="standard")
 class KVCacheUpdateTest(jtu.JaxTestCase):
 
-    def _generate_data(self, page_size, combined_kv_head_num, head_dim,
-                       num_slices_per_block):
+    def _generate_data(self, page_size, combined_kv_head_num, head_dim):
         page_num = 20
         padded_num_tokens = 128
         prng_key = jax.random.key(1234)
@@ -45,12 +44,6 @@ class KVCacheUpdateTest(jtu.JaxTestCase):
              np.cumsum(slice_lens[:-1])])
         slot_mapping_np = np.stack(
             [kv_cache_start_indices, new_kv_cache_indices, slice_lens], axis=1)
-        padded_size = (slot_mapping_np.shape[0] + num_slices_per_block -
-                       1) // num_slices_per_block * num_slices_per_block
-        slot_mapping_np = np.pad(
-            slot_mapping_np,
-            [[0, padded_size - slot_mapping_np.shape[0]], [0, 0]],
-            constant_values=0)
         slot_mapping_np = np.transpose(slot_mapping_np)
         slot_mapping = jnp.array(slot_mapping_np, dtype=jnp.int32)
         return new_kv, slot_mapping, kv_cache, num_slices
@@ -59,14 +52,14 @@ class KVCacheUpdateTest(jtu.JaxTestCase):
         page_size=[32, 33],
         combined_kv_head_num=[2, 16],
         head_dim=[128, 256],
-        num_slices_per_block=[4, 8],
+        num_slices_per_block=[None, 8],
         dynamic_validate_inputs=[False, True],
     )
     def test_basic(self, page_size: int, combined_kv_head_num: int,
                    head_dim: int, num_slices_per_block: int,
                    dynamic_validate_inputs: bool):
         new_kv, slot_mapping, kv_cache, num_slices = self._generate_data(
-            page_size, combined_kv_head_num, head_dim, num_slices_per_block)
+            page_size, combined_kv_head_num, head_dim)
         old_kv_cache_copy = kv_cache.copy()
 
         with jax.disable_jit(disable=dynamic_validate_inputs):
@@ -90,12 +83,12 @@ class KVCacheUpdateTest(jtu.JaxTestCase):
         page_size=[32, 33],
         combined_kv_head_num=[16, 32],
         head_dim=[128, 256],
-        num_slices_per_block=[4, 8],
+        num_slices_per_block=[None, 8],
     )
     def test_torchax_shard_map(self, page_size: int, combined_kv_head_num: int,
                                head_dim: int, num_slices_per_block: int):
         new_kv, slot_mapping, kv_cache, num_slices = self._generate_data(
-            page_size, combined_kv_head_num, head_dim, num_slices_per_block)
+            page_size, combined_kv_head_num, head_dim)
         old_kv_cache_copy = kv_cache.copy()
 
         mesh = Mesh(jax.devices(), 'x')
@@ -127,10 +120,9 @@ class KVCacheUpdateTest(jtu.JaxTestCase):
         page_size = 32
         combined_kv_head_num = 2
         head_dim = 128
-        num_slices_per_block = 4
 
         new_kv, slot_mapping, kv_cache, num_slices = self._generate_data(
-            page_size, combined_kv_head_num, head_dim, num_slices_per_block)
+            page_size, combined_kv_head_num, head_dim)
 
         with jax.disable_jit():
             # Case 1: new_kv_start < 0

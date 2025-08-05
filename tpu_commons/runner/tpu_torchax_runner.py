@@ -46,8 +46,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv,
                         is_pin_memory_available)
 
 from tpu_commons.attention.backends.pallas_torchax import (
-    PallasAttentionBackend, PallasMetadata,
-    NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK)
+    PallasAttentionBackend, PallasMetadata)
 
 from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
                                         KVCacheConfig, KVCacheSpec,
@@ -1108,8 +1107,4 @@ def _get_padded_num_kv_cache_update_slices(num_tokens: int, max_num_reqs: int,
     recompilation."""
     padded_num_slices = 2 * max_num_reqs + num_tokens // page_size
     padded_num_slices = min(padded_num_slices, num_tokens)
-    padded_num_slices = (
-        padded_num_slices + NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK - 1
-    ) // NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK * \
-        NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK
     return padded_num_slices

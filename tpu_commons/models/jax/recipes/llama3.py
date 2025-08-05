@@ -27,8 +27,7 @@ from tpu_commons.models.jax.common.transformer_block import (
     TransformerBlock, TransformerBlockConfig)
 from tpu_commons.models.jax.layers.misc import shard_put
 from tpu_commons.models.jax.recipes.recipe import RecipeConfig
-from tpu_commons.models.jax.utils.weight_utils import (ParameterType,
-                                                       WeightLoader, get_param)
+from tpu_commons.models.jax.utils.weight_utils import WeightLoader, get_param
 
 logger = init_logger(__name__)
 pp = pprint.PrettyPrinter(depth=6)
@@ -215,7 +214,7 @@ class LlamaForCausalLM(Model):
     ) -> Tuple[List[KVCacheType], jax.Array]:
         is_prefill = False
         with jax.named_scope("llama_embed_input"):  #Embedding
-            x = self.embedder.encode(input_ids)
+            x_TD = self.embedder.encode(input_ids)
 
         with jax.named_scope("llama_model_transformer_blocks"):
             for (i, layer) in enumerate(self.layers):
@@ -226,28 +225,28 @@ class LlamaForCausalLM(Model):
                 # layer's kernel compilation to all subsequent layers. Skipping the
                 # first layer ensures distinct scope names for the remaining layers.
                 if i == 0:
-                    new_kv_cache, x = layer(x, is_prefill, kv_cache,
-                                            attention_metadata)
+                    new_kv_cache, x_TD = layer(x_TD, is_prefill, kv_cache,
+                                               attention_metadata)
                 else:
                     with jax.named_scope(f'layer_{i}'):
-                        new_kv_cache, x = layer(x, is_prefill, kv_cache,
-                                                attention_metadata)
+                        new_kv_cache, x_TD = layer(x_TD, is_prefill, kv_cache,
+                                                   attention_metadata)
 
                 kv_caches[i] = new_kv_cache
 
         with jax.named_scope(
                 "llama_final_norm"):  #Norm after last transformer block
-            final_activation = self.final_norm(x)
+            final_activation_TD = self.final_norm(x_TD)
 
-        return kv_caches, final_activation
+        return kv_caches, final_activation_TD
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         with jax.named_scope("llama_lm_head_projection"
                              ):  #LM head projection to produce logits
-            logits = jnp.dot(hidden_states,
-                             self.lm_head.input_embedding_table_DV.value)
+            logits_TV = jnp.dot(hidden_states,
+                                self.lm_head.input_embedding_table_DV.value)
 
-        return logits
+        return logits_TV
 
 
 class Llama3WeightLoader(WeightLoader):
@@ -258,10 +257,7 @@ class Llama3WeightLoader(WeightLoader):
                          model_config=model_config,
                          framework="flax")
         self.setup()
-
-    def setup(self):
-        super().setup()
-        self.set_transpose_param_map({
+        self._transpose_map = {
             "lm_head": (1, 0),
             "gate_proj": (1, 0),
             "up_proj": (1, 0),
@@ -270,39 +266,31 @@ class Llama3WeightLoader(WeightLoader):
             "k_proj": (2, 0, 1),
             "v_proj": (2, 0, 1),
             "o_proj": (1, 2, 0),
-        })
-        # Set weights reshape map
+        }
         hidden_size = self.model_config.hidden_size
         attn_heads = self.model_config.layers.attention.num_attention_heads
         num_key_value_heads = self.model_config.layers.attention.num_key_value_heads
         attn_head_dim = self.model_config.layers.attention.head_dim
-        self.set_reshape_param_map(
-            {
-                "q_proj": (attn_heads, -1, hidden_size),
-                "k_proj": (num_key_value_heads, -1, hidden_size),
-                "v_proj": (num_key_value_heads, -1, hidden_size),
-                "o_proj": (hidden_size, attn_heads, -1),
-            },
-            param_type=ParameterType.weight)
-        # Set bias reshape map
-        self.set_reshape_param_map(param_reshape_dict={
+        self._weight_shape_map = {
+            "q_proj": (attn_heads, -1, hidden_size),
+            "k_proj": (num_key_value_heads, -1, hidden_size),
+            "v_proj": (num_key_value_heads, -1, hidden_size),
+            "o_proj": (hidden_size, attn_heads, -1),
+        }
+        self._bias_shape_map = {
             "q_proj.bias": (attn_heads, attn_head_dim),
             "k_proj.bias": (num_key_value_heads, attn_head_dim),
             "v_proj.bias": (num_key_value_heads, attn_head_dim)
-        },
-                                   param_type=ParameterType.bias)
+        }
+
         # Set the mappings from loaded parameter keys to standardized names.
-        self.set_loaded_to_standardized_keys({
-            "model.embed_tokens":
-            "embedder.input_embedding_table_VD",
+        self._loaded_to_standardized_keys = {
+            "model.embed_tokens": "embedder.input_embedding_table_VD",
             "model.layers.*.input_layernorm":
             "layers.*.pre_attention_norm.scale",
-            "model.layers.*.mlp.down_proj":
-            "layers.*.mlp.kernel_down_proj_FD",
-            "model.layers.*.mlp.gate_proj":
-            "layers.*.mlp.kernel_gating_DF",
-            "model.layers.*.mlp.up_proj":
-            "layers.*.mlp.kernel_up_proj_DF",
+            "model.layers.*.mlp.down_proj": "layers.*.mlp.kernel_down_proj_FD",
+            "model.layers.*.mlp.gate_proj": "layers.*.mlp.kernel_gating_DF",
+            "model.layers.*.mlp.up_proj": "layers.*.mlp.kernel_up_proj_DF",
             "model.layers.*.post_attention_layernorm":
             "layers.*.pre_mlp_norm.scale",
             "model.layers.*.self_attn.k_proj":
@@ -313,11 +301,12 @@ class Llama3WeightLoader(WeightLoader):
             "layers.*.attn.kernel_q_proj_DNH",
             "model.layers.*.self_attn.v_proj":
             "layers.*.attn.kernel_v_proj_DKH",
-            "model.norm":
-            "final_norm.scale",
-            "lm_head":
-            "lm_head.input_embedding_table_DV"
-        })
+            "model.norm": "final_norm.scale",
+            "lm_head": "lm_head.input_embedding_table_DV"
+        }
+
+    def setup(self):
+        super().setup()
 
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
         # Find the corresponding model key using the HF key
@@ -326,13 +315,13 @@ class Llama3WeightLoader(WeightLoader):
             if layer_num_match:
                 layer_num = layer_num_match.group(1)
                 layer_key = re.sub(r"layers\.\d+", "layers.*", loaded_key)
-                mapped_key = self.loaded_to_standardized_keys.get(
+                mapped_key = self._loaded_to_standardized_keys.get(
                     layer_key, layer_key)
                 mapped_key = re.sub(r"layers\.\*", f"layers.{layer_num}",
                                     mapped_key)
                 return mapped_key
 
-        return self.loaded_to_standardized_keys.get(loaded_key, loaded_key)
+        return self._loaded_to_standardized_keys.get(loaded_key, loaded_key)
 
     def load_weights(self, model_for_loading: nnx.Module):
         model_params = nnx.state(model_for_loading)
@@ -354,12 +343,13 @@ class Llama3WeightLoader(WeightLoader):
             )
             if loaded_name.endswith(".bias"):
                 loaded_weight = self.reshape_params(loaded_name, loaded_weight,
-                                                    "bias")
+                                                    self._bias_shape_map)
             else:
                 loaded_weight = self.reshape_params(loaded_name, loaded_weight,
-                                                    "weight")
+                                                    self._weight_shape_map)
                 loaded_weight = self.transpose_params(loaded_name,
-                                                      loaded_weight)
+                                                      loaded_weight,
+                                                      self._transpose_map)
             if model_weight.value.shape != loaded_weight.shape:
                 raise ValueError(
                     f"Loaded shape for {loaded_name}: {loaded_weight.shape} "

@@ -125,8 +125,8 @@ class TpuPlatform(Platform):
         compilation_config = vllm_config.compilation_config
 
         # TPU only supports DYNAMO_ONCE compilation level
+        # NOTE(xiang): the compilation_config is not used by jax.
         if compilation_config.level != CompilationLevel.DYNAMO_ONCE:
-            logger.info("[TPU] Forcing DYNAMO_ONCE compilation level")
             compilation_config.level = CompilationLevel.DYNAMO_ONCE
 
         if compilation_config.backend == "":

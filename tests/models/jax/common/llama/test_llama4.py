@@ -105,8 +105,9 @@ def mock_vllm_config_llama4() -> MockVllmConfig:
 class TestLlama4ForCausalLM:
     """Tests for the main LlamaForCausalLM model class."""
 
-    @patch("tpu_commons.models.jax.recipes.llama4.Llama4ForCausalLM._init_layers",
-           return_value=None)
+    @patch(
+        "tpu_commons.models.jax.recipes.llama4.Llama4ForCausalLM._init_layers",
+        return_value=None)
     def test_init_llama4(self, _, mock_vllm_config_llama4, rng, mesh):
         """Tests correct parameter detection for the Llama4 model variant."""
         model = Llama4ForCausalLM(mock_vllm_config_llama4, rng, mesh)
@@ -133,8 +134,9 @@ class TestLlama4ForCausalLM:
 
         assert jnp.all(final_norm_scale == 1.0)
 
-    @patch("tpu_commons.models.jax.recipes.llama4.Llama4ForCausalLM._init_layers",
-           return_value=None)
+    @patch(
+        "tpu_commons.models.jax.recipes.llama4.Llama4ForCausalLM._init_layers",
+        return_value=None)
     @patch("tpu_commons.models.jax.recipes.llama4.Llama4WeightLoader")
     def test_load_weights_called_correctly(self, mock_loader_cls, _, rng,
                                            mesh):
@@ -213,8 +215,7 @@ class TestLlama4WeightLoader:
         mock_param = MockParamLlama4(shape=(128, 32))
 
         with patch("tpu_commons.models.jax.recipes.llama4.get_param", return_value=mock_param), \
-            patch("tpu_commons.models.jax.recipes.llama4.shard_put", return_value=jnp.ones(mock_param.value.shape)) as mock_shard_put, \
-            patch("flax.nnx.update") as mock_update:
+            patch("tpu_commons.models.jax.recipes.llama4.shard_put", return_value=jnp.ones(mock_param.value.shape)) as mock_shard_put:
 
             # This will now pass after the code fix
             loader.load_weights(model)
@@ -264,8 +265,7 @@ class TestLlama4WeightLoader:
         ]
 
         with patch("tpu_commons.models.jax.recipes.llama4.get_param", return_value=mock_param), \
-            patch("tpu_commons.models.jax.recipes.llama4.shard_put", return_value=jnp.ones(mock_param.value.shape)) as mock_shard_put, \
-            patch("flax.nnx.update") as mock_update:
+            patch("tpu_commons.models.jax.recipes.llama4.shard_put", return_value=jnp.ones(mock_param.value.shape)) as mock_shard_put:
 
             # Call _map_llama4_gate_up_proj directly
             weight_loader._map_llama4_gate_up_proj(

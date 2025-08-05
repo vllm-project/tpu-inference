@@ -69,7 +69,10 @@ class LlamaAttention(nnx.Module):
         self.num_kv_heads = config.num_key_value_heads
         self.rope_theta = config.rope_theta
         self.rope_scaling = getattr(config, "rope_scaling", None)
-        self.head_dim = config.head_dim
+
+        self.head_dim_original = getattr(config, "head_dim",
+                                         self.hidden_size // self.num_heads)
+        self.head_dim = utils.get_padded_head_dim(self.head_dim_original)
 
         sharding_size = mesh.shape["model"]
         self.num_heads = utils.get_padded_num_heads(self.num_heads,
@@ -117,12 +120,12 @@ class LlamaAttention(nnx.Module):
         md = attention_metadata
         # q: (T, N, H)
         q = self.q_proj(x)
-        q = apply_rope(q, md.input_positions, self.head_dim, self.rope_theta,
-                       self.rope_scaling)
+        q = apply_rope(q, md.input_positions, self.head_dim_original,
+                       self.rope_theta, self.rope_scaling)
         # k: (T, K, H)
         k = self.k_proj(x)
-        k = apply_rope(k, md.input_positions, self.head_dim, self.rope_theta,
-                       self.rope_scaling)
+        k = apply_rope(k, md.input_positions, self.head_dim_original,
+                       self.rope_theta, self.rope_scaling)
         # v: (T, K, H)
         v = self.v_proj(x)
         # o: (T, N, H)
@@ -133,7 +136,7 @@ class LlamaAttention(nnx.Module):
             v,
             attention_metadata,
             self.mesh,
-            self.head_dim,
+            self.head_dim_original,
         )
         # (T, D)
         o = self.o_proj(outputs)
@@ -262,11 +265,13 @@ class LlamaForCausalLM(nnx.Module):
             mesh=mesh,
         )
 
-        # TODO(xiang): Llama3.2 does not use lm_head
-        self.lm_head = nnx.Param(
-            init_fn(self.rng.params(), (hidden_size, vocab_size), dtype),
-            sharding=(None, "model"),
-        )
+        if model_config.hf_config.tie_word_embeddings:
+            self.lm_head = self.embed.embedding
+        else:
+            self.lm_head = nnx.Param(
+                init_fn(self.rng.params(), (hidden_size, vocab_size), dtype),
+                sharding=(None, "model"),
+            )
 
     def __call__(
         self,
@@ -284,7 +289,11 @@ class LlamaForCausalLM(nnx.Module):
         return kv_caches, x
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        return jnp.dot(hidden_states, self.lm_head.value)
+        if self.vllm_config.model_config.hf_config.tie_word_embeddings:
+            logits = jnp.dot(hidden_states, self.lm_head.value.T)
+        else:
+            logits = jnp.dot(hidden_states, self.lm_head.value)
+        return logits
 
     def load_weights(self, rng_key: jax.Array):
         # NOTE: Since we are using nnx.eval_shape to init the model,
@@ -294,7 +303,6 @@ class LlamaForCausalLM(nnx.Module):
         # Key: path to a HF layer weight
         # Value: path to a nnx layer weight
         mappings = {
-            "lm_head": "lm_head",
             "model.embed_tokens": "embed.embedding",
             "model.layers.*.input_layernorm":
             "model.layers.*.input_layernorm.scale",
@@ -315,6 +323,11 @@ class LlamaForCausalLM(nnx.Module):
             "model.layers.*.self_attn.v_proj.kernel",
             "model.norm": "model.norm.scale",
         }
+        # Add lm_head mapping only if it's not tied to embeddings
+        if not self.vllm_config.model_config.hf_config.tie_word_embeddings:
+            mappings.update({
+                "lm_head": "lm_head",
+            })
         load_hf_weights(vllm_config=self.vllm_config,
                         model=self,
                         mappings=mappings,

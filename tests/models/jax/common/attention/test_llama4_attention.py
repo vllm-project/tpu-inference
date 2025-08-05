@@ -1,20 +1,19 @@
-import chex
-from dataclasses import dataclass, field
+import os
 import unittest
+from dataclasses import dataclass, field
 from unittest.mock import MagicMock
-import os 
+
+import chex
+
 os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=8'
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 
 from tpu_commons.models.jax.common.attention.attention import AttentionMetadata
-from tpu_commons.models.jax.common.attention.llama4_attention import Llama4Attention
-from tpu_commons.models.jax.common.attention.llama4_attention import Llama4AttentionConfig
-from tpu_commons.models.jax.common.attention.llama4_attention import L2Norm
+from tpu_commons.models.jax.common.attention.llama4_attention import (
+    L2Norm, Llama4Attention, Llama4AttentionConfig)
 from tpu_commons.models.jax.common.sharding import Sharding
-
 
 
 @dataclass
@@ -23,7 +22,7 @@ class SimpleVLLMConfig:
 
 
 class Llama4AttentionTest(unittest.TestCase):
-    """Unit test suite for Llama4-specific attention components."""    
+    """Unit test suite for Llama4-specific attention components."""
 
     def setUp(self):
         devices = jax.devices()
@@ -47,11 +46,9 @@ class Llama4AttentionTest(unittest.TestCase):
         # mean_sq = (1^2 + 2^2 + 3^2 + 4^2) / 4 = (1+4+9+16)/4 = 30/4 = 7.5
         # norm_val = sqrt(7.5 + 1e-5)
         # expected = x / norm_val
-        expected_output = jnp.array(
-            [[0.365148, 0.730297, 1.095445, 1.460594]], dtype=jnp.float32
-        )
+        expected_output = jnp.array([[0.365148, 0.730297, 1.095445, 1.460594]],
+                                    dtype=jnp.float32)
         self.assertTrue(jnp.allclose(output, expected_output, atol=1e-6))
-
 
     def test_l2norm_with_zeros(self):
         """Tests L2Norm with an all-zero input."""
@@ -93,8 +90,7 @@ class Llama4AttentionTest(unittest.TestCase):
             use_qk_norm=False,
             temperature_tuning=True,
             temperature_tuning_scale=2.0,
-            temperature_tuning_floor_scale=2.0
-        )
+            temperature_tuning_floor_scale=2.0)
         llama4_attention = Llama4Attention(
             cfg=attention_config,
             mesh=self.mesh,
@@ -104,27 +100,28 @@ class Llama4AttentionTest(unittest.TestCase):
         )
 
         seq_len = 8
-        input_arr_TNH = jnp.ones((seq_len, num_attention_heads, head_dim), dtype=jnp.bfloat16)
-        attention_metadata = AttentionMetadata(
-            input_positions=jnp.arange(seq_len, dtype=jnp.int32),
-            slot_mapping=None,
-            block_tables=None,
-            seq_lens=None,
-            num_slices=None,
-            num_seqs=None,
-            query_start_loc=None)
+        input_arr_TNH = jnp.ones((seq_len, num_attention_heads, head_dim),
+                                 dtype=jnp.bfloat16)
+        attention_metadata = AttentionMetadata(input_positions=jnp.arange(
+            seq_len, dtype=jnp.int32),
+                                               slot_mapping=None,
+                                               block_tables=None,
+                                               seq_lens=None,
+                                               num_slices=None,
+                                               num_seqs=None,
+                                               query_start_loc=None)
         expected_scales = jnp.array(
             [1, 2.375, 2.375, 3.20312, 3.20312, 3.76562, 3.76562, 4.21875],
-            dtype=jnp.bfloat16
-        )
-        output = llama4_attention.apply_temperature_tuning(attention_metadata, input_arr_TNH)
+            dtype=jnp.bfloat16)
+        output = llama4_attention.apply_temperature_tuning(
+            attention_metadata, input_arr_TNH)
         chex.assert_shape(output, (seq_len, num_attention_heads, head_dim))
 
-        expected_output = jnp.ones_like(input_arr_TNH) * expected_scales[:, None, None]
+        expected_output = jnp.ones_like(input_arr_TNH) * expected_scales[:,
+                                                                         None,
+                                                                         None]
         chex.assert_trees_all_close(output, expected_output, atol=1e-3)
-
 
 
 if __name__ == "__main__":
     unittest.main()
-
