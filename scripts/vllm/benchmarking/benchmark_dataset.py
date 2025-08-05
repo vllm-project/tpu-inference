@@ -58,6 +58,7 @@ def sampled_dataset_statistics_info(data: List[SampleRequest]):
 
     print("Input length distribution:")
     print(f"Number of samples: {len(prompt_lens)}")
+    print(f"Total input tokens: {np.sum(prompt_lens)}")
     print(f"Mean input tokens per request: {np.mean(prompt_lens):.2f}")
     print(f"Mean output tokens per request: {np.mean(output_lens):.2f}")
 
@@ -443,8 +444,7 @@ class Math500Dataset(BenchmarkDataset):
                 SampleRequest(
                     prompt=prompt,
                     prompt_len=prompt_len,
-                    expected_output_len=output_len - prompt_len
-                    or new_output_len,
+                    expected_output_len=new_output_len or new_output_len,
                     completion=completion,
                 ))
         self.maybe_oversample_requests(samples, num_requests)
