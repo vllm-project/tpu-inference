@@ -2,9 +2,9 @@ import math
 from functools import partial
 from typing import Callable, Literal, NamedTuple, Optional, TypedDict, Union
 
-import numpy as np
 import jax
 import jax.numpy as jnp
+import numpy as np
 from flax import nnx
 from jax.experimental.pallas.ops.tpu.flash_attention import flash_attention
 from jax.sharding import Mesh
@@ -12,13 +12,14 @@ from transformers import modeling_flax_utils
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig)
 from vllm.config import VllmConfig
-# from vllm.model_executor.models.interfaces import MultiModalEmbeddings
-from tpu_commons.models.jax.utils.multi_modal_utils import MultiModalEmbeddings, merge_multimodal_embeddings
 
-from tpu_commons import utils_jax as utils
+from tpu_commons import utils as utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
+# from vllm.model_executor.models.interfaces import MultiModalEmbeddings
+from tpu_commons.models.jax.utils.multi_modal_utils import (
+    MultiModalEmbeddings, merge_multimodal_embeddings)
 from tpu_commons.models.jax.utils.weight_utils import load_hf_weights
 
 logger = init_logger(__name__)
@@ -153,7 +154,8 @@ def apply_rotary_pos_emb_vision(x: jax.Array,
     return x_rotated
 
 
-def generate_window_segment_ids(cu_seqlens: jax.Array, seq_len: int, padded_seq_len: int) -> SegmentIds:
+def generate_window_segment_ids(cu_seqlens: jax.Array, seq_len: int,
+                                padded_seq_len: int) -> SegmentIds:
     """Generates segment IDs for windowed attention
 
     Args:
@@ -164,7 +166,7 @@ def generate_window_segment_ids(cu_seqlens: jax.Array, seq_len: int, padded_seq_
         A SegmentIds object for flash_attention.
     """
     indices = jnp.arange(seq_len)
-    segment_ids = jnp.searchsorted(cu_seqlens[1:], indices,side='right') + 1
+    segment_ids = jnp.searchsorted(cu_seqlens[1:], indices, side='right') + 1
     padding_segment_ids = jnp.zeros(padded_seq_len - seq_len)
     segment_ids = jnp.concatenate([segment_ids, padding_segment_ids])
     segment_ids = segment_ids.reshape(1, -1)
@@ -212,7 +214,6 @@ class Qwen2_5_VisionAttention(nnx.Module):
             rngs=rngs,
         )
 
-
     def __call__(
         self,
         x: jax.Array,
@@ -256,7 +257,8 @@ class Qwen2_5_VisionAttention(nnx.Module):
         # Pad the sequence length to be a multiple of 128 for flash_attention
         block_k_major = DEFAULT_BLOCK_K_MAJOR
         T_attn = q.shape[2]
-        padded_T = (T_attn + block_k_major - 1) // block_k_major * block_k_major
+        padded_T = (T_attn + block_k_major -
+                    1) // block_k_major * block_k_major
         pad_width = ((0, 0), (0, 0), (0, padded_T - T_attn), (0, 0))
 
         q = jnp.pad(q, pad_width, 'constant')
@@ -266,10 +268,11 @@ class Qwen2_5_VisionAttention(nnx.Module):
         segment_ids = None
         if use_fullattn:
             segment_ids_val = (jnp.arange(padded_T)
-                           >= T_attn).astype(jnp.int32).reshape(B, -1)
+                               >= T_attn).astype(jnp.int32).reshape(B, -1)
             segment_ids = SegmentIds(q=segment_ids_val, kv=segment_ids_val)
         else:
-            segment_ids = generate_window_segment_ids(cu_window_seqlens, T_attn, padded_T)
+            segment_ids = generate_window_segment_ids(cu_window_seqlens,
+                                                      T_attn, padded_T)
 
         output = flash_attention(q,
                                  k,
@@ -315,9 +318,10 @@ class Qwen2_5_VisionBlock(nnx.Module):
                  cu_window_seqlens: Optional[jax.Array] = None,
                  use_fullattn: bool = True) -> jax.Array:
 
-        x = x + self.attn(self.norm1(x), rotary_pos_emb, cu_window_seqlens, use_fullattn)
+        x = x + self.attn(self.norm1(x), rotary_pos_emb, cu_window_seqlens,
+                          use_fullattn)
         x = x + self.mlp(self.norm2(x))
-        
+
         return x
 
 
@@ -390,6 +394,7 @@ class Qwen2_5_VisionPatchMerger(nnx.Module):
 
 
 class Qwen2_5_VisionRotaryEmbedding(nnx.Module):
+
     def __init__(self, dim: int, theta: float = 10000.0):
         self.dim = dim
         self.theta = theta
@@ -404,12 +409,11 @@ class Qwen2_5_VisionRotaryEmbedding(nnx.Module):
 
 class Qwen2_5_VisionTransformer(nnx.Module):
 
-    def __init__(
-            self,
-            vllm_config: VllmConfig,
-            rngs: nnx.Rngs,
-            mesh: Mesh,
-            norm_eps: float = 1e-6):
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 rngs: nnx.Rngs,
+                 mesh: Mesh,
+                 norm_eps: float = 1e-6):
         model_config = vllm_config.model_config
         hf_config = model_config.hf_config
         vision_config = hf_config.vision_config
@@ -572,7 +576,6 @@ class Qwen2_5_VisionTransformer(nnx.Module):
         rotary_pos_emb = []
         window_index: list = []
         cu_window_seqlens: list = [jnp.array([0], dtype=jnp.int32)]
-        cu_seqlens: list = []
 
         window_index_id = 0
         cu_window_seqlens_last = 0
@@ -599,8 +602,6 @@ class Qwen2_5_VisionTransformer(nnx.Module):
 
             rotary_pos_emb.append(rotary_pos_emb_thw)
 
-
-
         rotary_pos_emb = jnp.concatenate(rotary_pos_emb, axis=0)
         window_index = jnp.concatenate(window_index, axis=0)
         cu_window_seqlens = jnp.concatenate(cu_window_seqlens, axis=0)
@@ -612,7 +613,6 @@ class Qwen2_5_VisionTransformer(nnx.Module):
 
         hidden_states = jnp.expand_dims(hidden_states, axis=1)
 
-
         for layer_num, blk in enumerate(self.blocks):
             if layer_num in self.fullatt_block_indexes:
                 hidden_states = blk(hidden_states,
@@ -623,7 +623,6 @@ class Qwen2_5_VisionTransformer(nnx.Module):
                                     rotary_pos_emb=rotary_pos_emb,
                                     cu_window_seqlens=cu_window_seqlens,
                                     use_fullattn=False)
-
 
         # adapter
         hidden_states = self.merger(hidden_states)
@@ -747,7 +746,6 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             pixel_values = image_input["pixel_values"]
             image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
 
-
         # Split concatenated embeddings for each image item.
         merge_size = self.visual.config.spatial_merge_size
         sizes = np.prod(np.array(grid_thw, dtype=np.int64),
@@ -785,12 +783,12 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             #     video_embeddings = self._process_video_input(multimodal_input)
             #     multimodal_embeddings += video_embeddings
 
-
         return multimodal_embeddings
 
-    def get_input_embeddings(self, input_ids: jax.Array,
-                             multimodal_embeddings: Optional[MultiModalEmbeddings]) -> jax.Array:
-        
+    def get_input_embeddings(
+            self, input_ids: jax.Array,
+            multimodal_embeddings: Optional[MultiModalEmbeddings]
+    ) -> jax.Array:
 
         inputs_embeds = self.language_model.embed(input_ids)
 
@@ -802,7 +800,6 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
                 [self.config.image_token_id, self.config.video_token_id])
 
         return inputs_embeds
-        
 
     def __call__(
         self,
