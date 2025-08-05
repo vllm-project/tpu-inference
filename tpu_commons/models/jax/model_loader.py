@@ -168,14 +168,14 @@ def get_flax_model(
     # https://flax.readthedocs.io/en/latest/guides/performance.html
     graphdef, state = nnx.split(jit_model)
 
-    # @functools.partial(
-    #     jax.jit,
-    #     out_shardings=(
-    #         kv_cache_sharding,
-    #         hidden_states_sharding,
-    #     ),
-    #     donate_argnums=2,  # 0 is graphdef, 1 is state, 2 is kv_cache
-    # )
+    @functools.partial(
+        jax.jit,
+        out_shardings=(
+            kv_cache_sharding,
+            hidden_states_sharding,
+        ),
+        donate_argnums=2,  # 0 is graphdef, 1 is state, 2 is kv_cache
+    )
     def run_model(graphdef, state, *args):
         model = nnx.merge(graphdef, state)
         return model(*args)

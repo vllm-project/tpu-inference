@@ -155,8 +155,6 @@ class TPUModelRunner():
 
         self.sliding_window = model_config.get_sliding_window()
         self.block_size = cache_config.block_size
-        print("wenxin _init_inputs self.block_size", self.block_size)
-        print("scheduler_config.max_num_batched_tokens", scheduler_config.max_num_batched_tokens)
         self.max_model_len = model_config.max_model_len
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
         # InputBatch needs to work with sampling tensors greater than padding
@@ -170,11 +168,13 @@ class TPUModelRunner():
         # In case `max_num_tokens < max(num_tokens_paddings)` use the actual
         # padded max value to pre-allocate data structures and pre-compile.
         self.max_num_tokens = self.num_tokens_paddings[-1]
-        print("self.max_num_tokens", self.max_num_tokens)
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
         self.encoder_cache: dict[str, dict[int, jax.Array]] = {}
+        print("wenxin _init_inputs self.block_size", self.block_size)
+        print("scheduler_config.max_num_batched_tokens", scheduler_config.max_num_batched_tokens)
+        print("self.max_num_tokens", self.max_num_tokens)
         print("wenxin _init_inputs self.max_num_reqs", self.max_num_reqs)
         print("wenxin _init_inputs self.max_model_len", self.max_model_len)
         print("wenxin _init_inputs self.max_num_tokens", self.max_num_tokens)
@@ -293,6 +293,7 @@ class TPUModelRunner():
         logger.info(jax.lib.xla_bridge.get_backend().platform_version)
 
     def _precompile_backbone(self) -> None:
+        assert False
         for num_tokens in self.num_tokens_paddings:
             input_ids = np.ones((num_tokens, ), dtype=np.int32)
             positions = np.ones((num_tokens, ), dtype=np.int32)
@@ -693,7 +694,6 @@ class TPUModelRunner():
             return DUMMY_METADATA, EMPTY_MODEL_RUNNER_OUTPUT,
 
         inputs = self._prepare_inputs(scheduler_output)
-        print("here")
         _dynamic_validate_inputs(inputs[2].slot_mapping, inputs[1].shape[0], inputs[0][0].shape[0],
                                  self.block_size, inputs[2].num_slices)
         # breakpoint()
@@ -738,7 +738,6 @@ class TPUModelRunner():
                 logprobs = None
 
         num_reqs = self.input_batch.num_reqs
-        print("wenxin _execute_model num_reqs", num_reqs)
 
         # Update the cache state concurrently. Code above will not block until
         # we use `selected_token_ids`. Add mark_step if post-processing changes
@@ -767,13 +766,13 @@ class TPUModelRunner():
             req_id is not None for req_id in
             self.input_batch.req_ids[:num_reqs]), "req_ids contains None"
         req_ids = cast(list[str], self.input_batch.req_ids[:num_reqs])
-        print("wenxin _execute_model req_ids", req_ids)
         prompt_logprobs_dict = {}
         for req_id in self.input_batch.req_ids[:num_reqs]:
             prompt_logprobs_dict[req_id] = None
 
-        print("wenxin _execute_model next_tokens", next_tokens.shape, next_tokens.sharding, next_tokens.device)
         next_tokens = np.asarray(jax.device_get(next_tokens))
+        print("wenxin _execute_model req_ids", req_ids)
+        print("wenxin _execute_model next_tokens", next_tokens)
         selected_token_ids = np.expand_dims(next_tokens[:num_reqs], 1)
         valid_sampled_token_ids = selected_token_ids.tolist()
         # Mask out the sampled tokens that should not be sampled.
@@ -901,7 +900,6 @@ class TPUModelRunner():
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
-        print("wenxin _prepare_inputs num_reqs", num_reqs)
         preferred_device = scheduler_output.preferred_device
         print("wenxin _prepare_inputs preferred_device", preferred_device)
         # Get the number of scheduled tokens for each request.

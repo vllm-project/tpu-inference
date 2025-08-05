@@ -37,9 +37,6 @@ def _kv_cache_update_kernel(
     async_copies = []
     block_idx = pl.program_id(0)
     num_slices_per_block = scratch.shape[0]
-    # jax.debug.print("block_idx {}", block_idx)
-    # jax.debug.print("slices_ref {}", slices_ref)
-    # jax.debug.print("num_slices_ref {}", num_slices_ref[0])
 
     # Copy from new_kv_hbm_ref to scratch
     for i in range(num_slices_per_block):
