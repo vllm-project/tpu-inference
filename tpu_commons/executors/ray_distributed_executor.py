@@ -72,6 +72,8 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
 
         self.pp_locks: Optional[List[asyncio.Lock]] = None
 
+        self.has_connector = None
+
     def _initialize_ray_cluster(self,
                                 ray_address: Optional[str] = None) -> None:
         """Initialize the distributed cluster with Ray.
