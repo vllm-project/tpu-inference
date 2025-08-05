@@ -72,5 +72,3 @@ jobs:
           issue-number: ${{ github.event.pull_request.number }}
           body: ${{ env.TEMPLATE_CONTENT }}
           edit-mode: replace
-
-

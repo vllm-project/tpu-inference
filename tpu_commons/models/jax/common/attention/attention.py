@@ -16,8 +16,8 @@ from tpu_commons.kernels.ragged_paged_attention.v3.kernel import (
     prepare_inputs, prepare_outputs)
 from tpu_commons.kernels.ragged_paged_attention.v3.kernel import \
     ragged_paged_attention as ragged_paged_attention_v3
-from tpu_commons.kernels.ragged_paged_attention.v3.util import (
-    get_dtype_packing)
+from tpu_commons.kernels.ragged_paged_attention.v3.util import \
+    get_dtype_packing
 from tpu_commons.models.jax.attention_interface import update_kv_cache
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.common.base import Config, ParamFactory
