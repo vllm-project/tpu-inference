@@ -17,6 +17,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
+from vllm.lora.request import LoRARequest
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils import cdiv
@@ -972,6 +973,17 @@ class TPUModelRunner(LoRAModelRunnerMixin):
               block_tables, query_start_loc, seq_lens, num_seqs,
               logits_indices))
 
+        if self.lora_config is not None:
+            # We need to respect padding when activating LoRA adapters
+            padded_num_scheduled_tokens_per_req = np.copy(
+                num_scheduled_tokens_per_req
+            )  # Copying to avoid accidental state corruption bugs
+            padded_num_scheduled_tokens_per_req[-1] += \
+                padded_total_num_scheduled_tokens - total_num_scheduled_tokens
+
+            self.set_active_loras(self.input_batch,
+                                  padded_num_scheduled_tokens_per_req)
+
         return (
             self.kv_caches,
             input_ids,
@@ -987,6 +999,20 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             sampling_metadata,
             logits_indices,
         )
+
+    def set_active_loras(
+        self,
+        input_batch: InputBatch,  # Note, it's the jax InputBatch.
+        num_scheduled_tokens: np.ndarray) -> None:
+
+        prompt_lora_mapping: tuple[int, ...]  # of size input_batch.num_reqs
+        token_lora_mapping: tuple[int,
+                                  ...]  # of size np.sum(num_scheduled_tokens)
+        lora_requests: set[LoRARequest]
+        prompt_lora_mapping, token_lora_mapping, lora_requests = \
+                            input_batch.make_lora_inputs(num_scheduled_tokens)
+        return super()._set_active_loras(prompt_lora_mapping,
+                                         token_lora_mapping, lora_requests)
 
     def _get_slot_mapping_metadata(self, num_reqs,
                                    num_scheduled_tokens_per_req):

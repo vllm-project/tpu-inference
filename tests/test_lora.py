@@ -22,8 +22,6 @@ def use_v1_only(monkeypatch: pytest.MonkeyPatch):
     """
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
-        # m.setenv("MODEL_IMPL_TYPE", "vllm")  # these 2 flags needs to be set before we run the program.
-        # m.setenv("TPU_BACKEND_TYPE", "jax")
         yield
 
 
