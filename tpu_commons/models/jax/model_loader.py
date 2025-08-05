@@ -220,7 +220,7 @@ def get_model(
     mesh: Mesh,
 ) -> Any:
     impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
-    logger.info(f"Loading model, implementation type={impl}")
+    logger.info(f"Loading model with MODEL_IMPL_TYPE={impl}")
     if impl == "flax_nnx":
         return get_flax_model(vllm_config, rng, mesh)
     elif impl == "vllm":

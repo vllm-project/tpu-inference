@@ -68,6 +68,7 @@ class TpuPlatform(Platform):
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
+        logger.info(jax.lib.xla_bridge.get_backend().platform_version)
         try:
             if envs.VLLM_TPU_USING_PATHWAYS:
                 return jax.local_devices()[0].device_kind
@@ -174,14 +175,14 @@ class TpuPlatform(Platform):
 
         multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "").lower()
         if not multihost_backend:  # Single host
-            logger.warning(
-                "JAX requires to use uniproc_executor for single host.")
+            logger.info("Force using UniProcExecutor for JAX on single host.")
             parallel_config.distributed_executor_backend = "uni"
         elif multihost_backend == "ray":
             from tpu_commons.executors.ray_distributed_executor import \
                 RayDistributedExecutor
             parallel_config.distributed_executor_backend = RayDistributedExecutor
-            logger.info("Using Ray as the TPU multihost backend. ")
+            logger.info(
+                "Force using RayDistributedExecutor for JAX on single host.")
         else:
             logger.warning(
                 f"Unknown TPU multihost backend: {multihost_backend}. "

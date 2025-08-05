@@ -104,7 +104,7 @@ def _hf_model_weights_iterator(
     weights_files = []
     weights_location = "local"
     if os.path.isdir(model_name_or_path):
-        logger.info(f"Loading weights locally from: {model_name_or_path}")
+        logger.info(f"Found weights from local: {model_name_or_path}")
         weights_files = glob.glob(
             os.path.join(model_name_or_path, HF_WEIGHTS_FORMAT))
     elif file_utils.is_gcs_path(model_name_or_path):
