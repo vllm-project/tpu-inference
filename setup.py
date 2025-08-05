@@ -9,7 +9,6 @@ ROOT_DIR = os.path.dirname(__file__)
 
 
 def get_path(*filepath) -> str:
-    # Dummy comment.
     return os.path.join(ROOT_DIR, *filepath)
 
 
