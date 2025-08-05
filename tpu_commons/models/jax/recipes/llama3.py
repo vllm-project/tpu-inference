@@ -27,7 +27,8 @@ from tpu_commons.models.jax.common.transformer_block import (
     TransformerBlock, TransformerBlockConfig)
 from tpu_commons.models.jax.layers.misc import shard_put
 from tpu_commons.models.jax.recipes.recipe import RecipeConfig
-from tpu_commons.models.jax.utils.weight_utils import WeightLoader, get_param
+from tpu_commons.models.jax.utils.weight_utils import (
+    get_param, hf_model_weights_iterator, reshape_params, transpose_params)
 
 logger = init_logger(__name__)
 pp = pprint.PrettyPrinter(depth=6)
@@ -249,14 +250,13 @@ class LlamaForCausalLM(Model):
         return logits_TV
 
 
-class Llama3WeightLoader(WeightLoader):
+class Llama3WeightLoader:
 
     def __init__(self, vllm_config: VllmConfig,
                  model_config: Llama3ModelConfig):
-        super().__init__(vllm_config=vllm_config,
-                         model_config=model_config,
-                         framework="flax")
-        self.setup()
+        self.names_and_weights_generator = hf_model_weights_iterator(
+            model_name_or_path=vllm_config.model_config.model,
+            framework="flax")
         self._transpose_map = {
             "lm_head": (1, 0),
             "gate_proj": (1, 0),
@@ -267,10 +267,10 @@ class Llama3WeightLoader(WeightLoader):
             "v_proj": (2, 0, 1),
             "o_proj": (1, 2, 0),
         }
-        hidden_size = self.model_config.hidden_size
-        attn_heads = self.model_config.layers.attention.num_attention_heads
-        num_key_value_heads = self.model_config.layers.attention.num_key_value_heads
-        attn_head_dim = self.model_config.layers.attention.head_dim
+        hidden_size = model_config.hidden_size
+        attn_heads = model_config.layers.attention.num_attention_heads
+        num_key_value_heads = model_config.layers.attention.num_key_value_heads
+        attn_head_dim = model_config.layers.attention.head_dim
         self._weight_shape_map = {
             "q_proj": (attn_heads, -1, hidden_size),
             "k_proj": (num_key_value_heads, -1, hidden_size),
@@ -304,9 +304,6 @@ class Llama3WeightLoader(WeightLoader):
             "model.norm": "final_norm.scale",
             "lm_head": "lm_head.input_embedding_table_DV"
         }
-
-    def setup(self):
-        super().setup()
 
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
         # Find the corresponding model key using the HF key
@@ -342,14 +339,13 @@ class Llama3WeightLoader(WeightLoader):
                 f"{old_param_name}: {loaded_weight.shape}  -->  {mapped_name}: {model_weight.value.shape}"
             )
             if loaded_name.endswith(".bias"):
-                loaded_weight = self.reshape_params(loaded_name, loaded_weight,
-                                                    self._bias_shape_map)
+                loaded_weight = reshape_params(loaded_name, loaded_weight,
+                                               self._bias_shape_map)
             else:
-                loaded_weight = self.reshape_params(loaded_name, loaded_weight,
-                                                    self._weight_shape_map)
-                loaded_weight = self.transpose_params(loaded_name,
-                                                      loaded_weight,
-                                                      self._transpose_map)
+                loaded_weight = reshape_params(loaded_name, loaded_weight,
+                                               self._weight_shape_map)
+                loaded_weight = transpose_params(loaded_name, loaded_weight,
+                                                 self._transpose_map)
             if model_weight.value.shape != loaded_weight.shape:
                 raise ValueError(
                     f"Loaded shape for {loaded_name}: {loaded_weight.shape} "
