@@ -70,14 +70,15 @@ class Qwen2Attention(nnx.Module):
         self.rope_theta = config.rope_theta
         self.rope_scaling = getattr(config, "rope_scaling", None)
 
-        self.head_dim_original = config.hidden_size // config.num_attention_heads
+        self.head_dim_original = getattr(config, "head_dim",
+                                         self.hidden_size // self.num_heads)
+        self.head_dim = utils.get_padded_head_dim(self.head_dim_original)
 
         sharding_size = mesh.shape["model"]
         self.num_heads = utils.get_padded_num_heads(self.num_heads,
                                                     sharding_size)
         self.num_kv_heads = utils.get_padded_num_heads(self.num_kv_heads,
                                                        sharding_size)
-        self.head_dim = utils.get_padded_head_dim(self.head_dim_original)
 
         self.mesh = mesh
 
@@ -270,8 +271,7 @@ class Qwen2ForCausalLM(nnx.Module):
             mesh=mesh,
         )
 
-        hf_config = model_config.hf_config
-        if hf_config.tie_word_embeddings:
+        if model_config.hf_config.tie_word_embeddings:
             self.lm_head = self.embed.embedding
         else:
             self.lm_head = nnx.Param(
@@ -295,14 +295,10 @@ class Qwen2ForCausalLM(nnx.Module):
         return kv_caches, x
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        hf_config = self.vllm_config.model_config.hf_config
-        if hf_config.tie_word_embeddings:
-            # self.lm_head.value is (vocab_size, hidden_size)
+        if self.vllm_config.model_config.hf_config.tie_word_embeddings:
             logits = jnp.dot(hidden_states, self.lm_head.value.T)
         else:
-            # self.lm_head.value is (hidden_size, vocab_size)
             logits = jnp.dot(hidden_states, self.lm_head.value)
-
         return logits
 
     def load_weights(self, rng_key: jax.Array):
@@ -341,8 +337,7 @@ class Qwen2ForCausalLM(nnx.Module):
         }
 
         # Add lm_head mapping only if it's not tied to embeddings
-        hf_config = self.vllm_config.model_config.hf_config
-        if not hf_config.tie_word_embeddings:
+        if not self.vllm_config.model_config.hf_config.tie_word_embeddings:
             mappings.update({
                 "lm_head": "lm_head",
             })
