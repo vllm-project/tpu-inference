@@ -202,7 +202,7 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
         self.assertIsInstance(output, EngineCoreOutputs)
         self.assertIsInstance(output.utility_output, UtilityOutput)
         self.assertEqual(output.utility_output.call_id, "call-id-1")
-        self.assertEqual(output.utility_output.result, {1, 2, 3})
+        self.assertEqual(output.utility_output.result.result, {1, 2, 3})
 
     def test_prefill_logic(self):
         """Tests the core logic of the _prefill method for one iteration."""
