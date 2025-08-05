@@ -37,6 +37,9 @@ class TestMLA(unittest.TestCase):
             generate_rules=DeepSeekV3GenerateShardingRulesConfig,
         )
 
+    @unittest.skip(
+        "Skipping this test because RPA v3 is not compatible with the current CI env."
+    )
     def test_mla_forward_pass(self):
         mla_config = MLAConfig(
             hidden_size=256,
