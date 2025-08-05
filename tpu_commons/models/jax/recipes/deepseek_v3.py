@@ -32,22 +32,10 @@ from tpu_commons.models.jax.common.transformer_block import (
     TransformerBlock, TransformerBlockConfig)
 from tpu_commons.models.jax.layers.misc import shard_put
 from tpu_commons.models.jax.recipes.recipe import RecipeConfig
-from tpu_commons.models.jax.utils.weight_utils import WeightLoader, get_param
+from tpu_commons.models.jax.utils.weight_utils import (WeightLoader, get_param,
+                                                       print_param_info)
 
 logger = init_logger(__name__)
-
-
-def print_param_info(param: nnx.Param, name: str):
-    logger.warning(f"Global shape for {name}: {param.value.shape}"
-                   )  # Note: sharding is a PartitionSpec
-    logger.warning(f"Sharding for {name}: {param.sharding}"
-                   )  # Note: sharding is a PartitionSpec
-
-    # Print tensor shape for a single device
-    # buffers = [shard.data for shard in my_array.addressable_shards]
-    logger.warning(
-        f"Shape of {name} on a single device: {param.value.addressable_shards[0].data.shape}"
-    )
 
 
 @dataclass
