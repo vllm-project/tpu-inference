@@ -219,13 +219,8 @@ class TestLlama3WeightLoader:
     @pytest.fixture
     def weight_loader(self, small_model_config):
         # Patch the superclass's setup to isolate the Llama3 loader's logic
-        with patch(
-                'tpu_commons.models.jax.utils.weight_utils.WeightLoader.setup'
-        ):
-            loader = Llama3WeightLoader(
-                vllm_config=MockVllmConfig("test-model"),
-                model_config=small_model_config)
-        return loader
+        return Llama3WeightLoader(vllm_config=MockVllmConfig("test-model"),
+                                  model_config=small_model_config)
 
     @pytest.mark.parametrize("hf_key, expected", [
         ("model.layers.15.self_attn.q_proj",

@@ -29,8 +29,9 @@ from tpu_commons.models.jax.common.transformer_block import (
     SharedExpertsTransformerBlock, SharedExpertsTransformerBlockConfig)
 from tpu_commons.models.jax.layers.misc import shard_put
 from tpu_commons.models.jax.recipes.recipe import RecipeConfig
-from tpu_commons.models.jax.utils.weight_utils import (WeightLoader, get_param,
-                                                       print_param_info)
+from tpu_commons.models.jax.utils.weight_utils import (
+    get_param, hf_model_weights_iterator, print_param_info, reshape_params,
+    transpose_params)
 
 logger = init_logger(__name__)
 pp = pprint.PrettyPrinter(depth=6)
@@ -272,14 +273,15 @@ class Llama4ForCausalLM(Model):
         return logits_TV
 
 
-class Llama4WeightLoader(WeightLoader):
+class Llama4WeightLoader:
 
     def __init__(self, vllm_config: VllmConfig, model_config: ModelConfig):
-        super().__init__(vllm_config=vllm_config,
-                         model_config=model_config,
-                         framework="flax",
-                         filter_regex="language_model")
-        self.setup()
+        self.names_and_weights_generator = hf_model_weights_iterator(
+            model_name_or_path=vllm_config.model_config.model,
+            framework="flax",
+            filter_regex="language_model")
+        self.is_verbose = getattr(vllm_config.additional_config, "is_verbose",
+                                  False)
         self._transpose_map = {
             "q_proj": (2, 0, 1),
             "k_proj": (2, 0, 1),
@@ -291,10 +293,10 @@ class Llama4WeightLoader(WeightLoader):
             "o_proj": (1, 2, 0),
             "lm_head": (1, 0),
         }
-        hidden_size = self.model_config.hidden_size
-        attn_heads = self.model_config.layers.attention.num_attention_heads
-        num_key_value_heads = self.model_config.layers.attention.num_key_value_heads
-        attn_head_dim = self.model_config.layers.attention.head_dim
+        hidden_size = model_config.hidden_size
+        attn_heads = model_config.layers.attention.num_attention_heads
+        num_key_value_heads = model_config.layers.attention.num_key_value_heads
+        attn_head_dim = model_config.layers.attention.head_dim
         self._weight_shape_map = {
             "q_proj": (attn_heads, attn_head_dim, hidden_size),
             "k_proj": (num_key_value_heads, attn_head_dim, hidden_size),
@@ -337,9 +339,6 @@ class Llama4WeightLoader(WeightLoader):
             "layers.*.shared_experts.kernel_up_proj_DF",
         }
 
-    def setup(self):
-        super().setup()
-
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
         # Find the corresponding model key using the HF key
         if "layer" in loaded_key:
@@ -376,11 +375,10 @@ class Llama4WeightLoader(WeightLoader):
                                  mapped_name)
             mapped_model_weight = get_param(model_params, mapped_name)
             if not loaded_name.endswith(".bias"):
-                loaded_weight = self.reshape_params(loaded_name, loaded_weight,
-                                                    self._weight_shape_map)
-                loaded_weight = self.transpose_params(loaded_name,
-                                                      loaded_weight,
-                                                      self._transpose_map)
+                loaded_weight = reshape_params(loaded_name, loaded_weight,
+                                               self._weight_shape_map)
+                loaded_weight = transpose_params(loaded_name, loaded_weight,
+                                                 self._transpose_map)
             if mapped_model_weight.value.shape != loaded_weight.shape:
                 raise ValueError(
                     f"Loaded shape for {split_loaded_name}: {loaded_weight.shape} "
@@ -409,10 +407,11 @@ class Llama4WeightLoader(WeightLoader):
                 model_weight = get_param(model_params, mapped_name)
 
                 if not loaded_name.endswith(".bias"):
-                    loaded_weight = self.reshape_params(
-                        loaded_name, loaded_weight, self._weight_shape_map)
-                    loaded_weight = self.transpose_params(
-                        loaded_name, loaded_weight, self._transpose_map)
+                    loaded_weight = reshape_params(loaded_name, loaded_weight,
+                                                   self._weight_shape_map)
+                    loaded_weight = transpose_params(loaded_name,
+                                                     loaded_weight,
+                                                     self._transpose_map)
                 if model_weight.value.shape != loaded_weight.shape:
                     raise ValueError(
                         f"Loaded shape for {loaded_name}: {loaded_weight.shape} "

@@ -1,6 +1,5 @@
 """Utilities for downloading model weights from HuggingFace."""
 
-import abc
 import functools
 import glob
 import math
@@ -15,7 +14,6 @@ from flax import nnx
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from safetensors import safe_open
-from vllm.config import VllmConfig
 
 from tpu_commons import utils
 from tpu_commons.logger import init_logger
@@ -27,65 +25,6 @@ HF_WEIGHTS_FORMAT = "*.safetensors"
 FULL_DOWNLOAD_DISK_RATIO = 0.9
 
 
-class WeightLoader(abc.ABC):
-    # Create a doc string for this class.
-    """Abstract base class for loading model weights.
-
-    This class provides a common interface for loading model weights from various
-    sources (currently supports HuggingFace) and applying necessary transformations
-    (e.g., transposing, reshaping) before sharding and loading them into the
-    model.
-    Each implemeentation of the WeightLoader must define the procedure for loading the
-    weights in its own load_weights() method.
-
-    Args:
-        vllm_config (VllmConfig): The VLLM configuration object.
-        model_config (ModelConfig): The model configuration object.
-        framework str: Type of backend to use (defaults to "flax")
-        cache_dir str: An optional cache dir to load the model from (currently unused).
-        sharding_cfg (ShardingConfig): The sharding configuration object.
-    """
-
-    def __init__(self,
-                 vllm_config: VllmConfig,
-                 model_config,
-                 framework: str = "flax",
-                 filter_regex=None):
-        self.vllm_config = vllm_config
-        self.model_config = model_config
-        self.framework = framework
-        self.filter_regex = filter_regex
-        self.setup()
-
-    def setup(self):
-        model_name_or_path = self.vllm_config.model_config.model
-        self.names_and_weights_generator = _hf_model_weights_iterator(
-            model_name_or_path=model_name_or_path,
-            framework=self.framework,
-            filter_regex=self.filter_regex)
-        self.is_verbose = getattr(self.vllm_config.additional_config,
-                                  "is_verbose", False)
-
-    def transpose_params(self, param_key: str, param_tensor: jax.Array,
-                         transpose_map):
-        for key, value in transpose_map.items():
-            if key in param_key:
-                return jnp.transpose(param_tensor, value)
-        return param_tensor  # Base case / no-op
-
-    def reshape_params(self, param_key: str, param_tensor: jax.Array,
-                       shape_map):
-        for key, new_shape in shape_map.items():
-            if key in param_key:
-                return jnp.reshape(param_tensor, new_shape)
-        return param_tensor  # Base case / no-op
-
-    abc.abstractmethod
-
-    def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):
-        raise NotImplementedError
-
-
 def print_param_info(param: nnx.Param, name: str):
     logger.warning(f"Global shape for {name}: {param.value.shape}")
     logger.warning(f"Sharding for {name}: {param.sharding}")
@@ -95,8 +34,22 @@ def print_param_info(param: nnx.Param, name: str):
     )
 
 
+def transpose_params(param_key: str, param_tensor: jax.Array, transpose_map):
+    for key, value in transpose_map.items():
+        if key in param_key:
+            return jnp.transpose(param_tensor, value)
+    return param_tensor  # Base case / no-op
+
+
+def reshape_params(param_key: str, param_tensor: jax.Array, shape_map):
+    for key, new_shape in shape_map.items():
+        if key in param_key:
+            return jnp.reshape(param_tensor, new_shape)
+    return param_tensor  # Base case / no-op
+
+
 # TODO: Update to use the multithreading approach.
-def _hf_model_weights_iterator(
+def hf_model_weights_iterator(
     model_name_or_path: str,
     framework: str,
     filter_regex: Optional[str] = None,

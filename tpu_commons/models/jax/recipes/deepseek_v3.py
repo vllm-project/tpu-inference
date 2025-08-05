@@ -32,8 +32,8 @@ from tpu_commons.models.jax.common.transformer_block import (
     TransformerBlock, TransformerBlockConfig)
 from tpu_commons.models.jax.layers.misc import shard_put
 from tpu_commons.models.jax.recipes.recipe import RecipeConfig
-from tpu_commons.models.jax.utils.weight_utils import (WeightLoader, get_param,
-                                                       print_param_info)
+from tpu_commons.models.jax.utils.weight_utils import (
+    get_param, hf_model_weights_iterator, print_param_info, reshape_params)
 
 logger = init_logger(__name__)
 
@@ -338,14 +338,13 @@ class DeepSeekV3(Model):
 
 
 @dataclass
-class DeepSeekV3WeightLoader(WeightLoader):
+class DeepSeekV3WeightLoader:
 
     def __init__(self, vllm_config: VllmConfig, model_config: ModelConfig):
-        super().__init__(vllm_config=vllm_config,
-                         model_config=model_config,
-                         framework="pt",
-                         filter_regex="")
-        self.setup()
+        self.names_and_weights_generator = hf_model_weights_iterator(
+            model_name_or_path=vllm_config.model_config.model,
+            framework="flax",
+            filter_regex="")
         self.num_routed_experts = model_config.layers.moe.num_local_experts
 
         self._transpose_map = {
@@ -368,13 +367,14 @@ class DeepSeekV3WeightLoader(WeightLoader):
             r"mlp\.shared_experts\.gate_proj": (1, 0),
             r"mlp\.shared_experts\.up_proj": (1, 0)
         }
-        hidden_size = self.model_config.hidden_size
-        q_lora_rank = self.model_config.layers.attention.q_lora_rank
-        kv_lora_rank = self.model_config.layers.attention.kv_lora_rank
-        attn_heads = self.model_config.layers.attention.num_attention_heads
-        qk_nope_head_dim = self.model_config.layers.attention.qk_nope_head_dim
-        qk_rope_head_dim = self.model_config.layers.attention.qk_rope_head_dim
-        v_head_dim = self.model_config.layers.attention.v_head_dim
+        self._model_config = model_config
+        hidden_size = self._model_config.hidden_size
+        q_lora_rank = self._model_config.layers.attention.q_lora_rank
+        kv_lora_rank = self._model_config.layers.attention.kv_lora_rank
+        attn_heads = self._model_config.layers.attention.num_attention_heads
+        qk_nope_head_dim = self._model_config.layers.attention.qk_nope_head_dim
+        qk_rope_head_dim = self._model_config.layers.attention.qk_rope_head_dim
+        v_head_dim = self._model_config.layers.attention.v_head_dim
         self._weight_shape_map = {
             "q_b_proj":
             (attn_heads, qk_nope_head_dim + qk_rope_head_dim, q_lora_rank),
@@ -440,9 +440,6 @@ class DeepSeekV3WeightLoader(WeightLoader):
             "layers.*.shared_experts.kernel_up_proj_DF",
         }
 
-    def setup(self):
-        super().setup()
-
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
         # Find the corresponding model key using the HF key
         if "layer" in loaded_key:
@@ -497,7 +494,7 @@ class DeepSeekV3WeightLoader(WeightLoader):
         weight = weight.to(torch.float32).numpy().astype(cast_type)
 
         # Reshape and transpose weights if necessary.
-        weight = self.reshape_params(name, weight, self._weight_shape_map)
+        weight = reshape_params(name, weight, self._weight_shape_map)
         weight = self._transpose_params(name, weight)
         if model_weight.value.shape != weight.shape:
             raise ValueError(
@@ -530,7 +527,7 @@ class DeepSeekV3WeightLoader(WeightLoader):
                 if re.search(r"layers\.(\d+)", loaded_name):
                     layer_num = re.search(r"layers\.(\d+)",
                                           loaded_name).group(1)
-                    if int(layer_num) >= self.model_config.num_layers:
+                    if int(layer_num) >= self._model_config.num_layers:
                         del loaded_weight
                         continue
                 if 'layers.61' in loaded_name:
@@ -540,7 +537,7 @@ class DeepSeekV3WeightLoader(WeightLoader):
                 if re.search(r"experts\.(\d+)", loaded_name):
                     expert_num = re.search(r"experts\.(\d+)",
                                            loaded_name).group(1)
-                    if int(expert_num) >= self.model_config.num_local_experts:
+                    if int(expert_num) >= self._model_config.num_local_experts:
                         del loaded_weight
                         continue
                 if loaded_weight.dtype == torch.float8_e4m3fn:
