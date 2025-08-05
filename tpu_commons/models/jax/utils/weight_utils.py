@@ -6,7 +6,7 @@ import math
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, Generator, List, Optional, Tuple
+from typing import Any, Dict, Generator, List, Optional
 
 import jax
 import jax.numpy as jnp
@@ -127,19 +127,11 @@ def hf_model_weights_iterator(
 
 
 def model_weights_generator(
-    model_name_or_path: str,
-    weights_location: str,
     weights_file: str,
     framework: str,
 ) -> Generator[tuple, Any, None]:
     """A generator that loads model weights from a single weights file."""
     logger.info(f"Loading weights from {weights_file}")
-    if weights_location == "gcs":
-        weights_file = file_utils.download_model_weights_from_gcs(
-            model_name_or_path, os.path.basename(weights_file))[0]
-    elif weights_location == "hf":
-        weights_file = file_utils.download_model_weights_from_hf(
-            model_name_or_path, os.path.basename(weights_file))[0]
     # NOTE(xiang): We enforce loading tensors on CPU here.
     # Because otherwise the tensor will be loaded on TPU:0 by default,
     # although the tensor would eventually be sharded across multiple TPUs,
@@ -149,42 +141,21 @@ def model_weights_generator(
             for name in f.keys():
                 weight_tensor = f.get_tensor(name)
                 yield name, weight_tensor
-    if weights_location != "local":
-        file_utils.delete_file(weights_file)
 
 
-def get_model_weights_files(model_name_or_path: str) -> Tuple[str, List[str]]:
+def get_model_weights_files(model_name_or_path: str) -> List[str]:
     """Download and return all local model weights files."""
     weights_files = []
-    weights_location = "local"
     if os.path.isdir(model_name_or_path):
         logger.info(f"Loading weights locally from: {model_name_or_path}")
         weights_files = glob.glob(
             os.path.join(model_name_or_path, HF_WEIGHTS_FORMAT))
     elif file_utils.is_gcs_path(model_name_or_path):
-        local_free_disk_size = file_utils.get_free_disk_size()
-        model_size = file_utils.get_gcs_model_weights_size(
+        weights_files = file_utils.download_model_weights_from_gcs(
             model_name_or_path, HF_WEIGHTS_FORMAT)
-        if model_size < local_free_disk_size * FULL_DOWNLOAD_DISK_RATIO:
-            logger.info(f"Downloading weights from GCS {model_name_or_path}")
-            weights_files = file_utils.download_model_weights_from_gcs(
-                model_name_or_path, HF_WEIGHTS_FORMAT)
-        else:
-            weights_files = file_utils.list_gcs_dir(model_name_or_path,
-                                                    HF_WEIGHTS_FORMAT)
-            weights_location = "gcs"
     elif file_utils.is_hf_repo(model_name_or_path):
-        local_free_disk_size = file_utils.get_free_disk_size()
-        model_size = file_utils.get_hf_model_weights_size(
+        weights_files = file_utils.download_model_weights_from_hf(
             model_name_or_path, HF_WEIGHTS_FORMAT)
-        if model_size < local_free_disk_size * FULL_DOWNLOAD_DISK_RATIO:
-            logger.info(f"Downloading weights from HF {model_name_or_path}")
-            weights_files = file_utils.download_model_weights_from_hf(
-                model_name_or_path, HF_WEIGHTS_FORMAT)
-        else:
-            weights_files = file_utils.list_hf_repo(model_name_or_path,
-                                                    HF_WEIGHTS_FORMAT)
-            weights_location = "hf"
     else:
         raise ValueError(
             f"{model_name_or_path} must be a local path, or a gcs path, or a HF model id."
@@ -194,16 +165,9 @@ def get_model_weights_files(model_name_or_path: str) -> Tuple[str, List[str]]:
         raise RuntimeError(
             f"Cannot find any {HF_WEIGHTS_FORMAT} files in {model_name_or_path}."
         )
-
-    if weights_location != "local":
-        logger.warning(
-            "Weights files are not downloaded to local disk at once due to insufficient disk space. "
-            "They will be downloaded on the fly during loading.")
-
     # Sort to ensure the order of files is consistent.
     weights_files.sort()
-
-    return weights_location, weights_files
+    return weights_files
 
 
 def get_num_kv_heads_by_tp(num_kv_heads: int, tp_size: int) -> int:
@@ -272,13 +236,12 @@ def shard_put(x: jax.Array, sharding: P, mesh: jax.sharding.Mesh) -> jax.Array:
 
 def load_hf_weights_on_thread(vllm_config, params: nnx.State,
                               mappings: Dict[str, str], mesh: Mesh,
-                              weights_location: str, weights_file: str):
+                              weights_file: str):
     """Load weights from one model weights file to the model, run on single thread."""
     sharding_size = mesh.shape["model"]
     shard = functools.partial(shard_put, mesh=mesh)
 
     model_config = vllm_config.model_config
-    model_path = model_config.model
     hf_config = model_config.hf_config
 
     num_heads = hf_config.num_attention_heads
@@ -326,9 +289,7 @@ def load_hf_weights_on_thread(vllm_config, params: nnx.State,
     }
 
     shardings = nnx.get_named_sharding(params, mesh)
-    for hf_key, hf_weight in model_weights_generator(model_path,
-                                                     weights_location,
-                                                     weights_file,
+    for hf_key, hf_weight in model_weights_generator(weights_file,
                                                      framework="flax"):
         if hf_key.endswith(".weight"):
             hf_key = hf_key.removesuffix(".weight")
@@ -407,13 +368,13 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
                     mesh: Mesh):
     """Load weights from all model weights files to the model, run in multi threads."""
     model_path = vllm_config.model_config.model
-    weights_location, weights_files = get_model_weights_files(model_path)
+    weights_files = get_model_weights_files(model_path)
     params = nnx.state(model)
     max_workers = min(64, len(weights_files))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
             executor.submit(load_hf_weights_on_thread, vllm_config, params,
-                            mappings, mesh, weights_location, weights_file)
+                            mappings, mesh, weights_file)
             for weights_file in weights_files
         ]
         for future in futures:
