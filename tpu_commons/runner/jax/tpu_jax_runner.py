@@ -65,7 +65,6 @@ MIN_NUM_SEQS = 8
 
 DUMMY_METADATA = AttentionMetadata(
     input_positions=[],
-    input_mrope_positions=[],
     seq_lens=[],
     block_tables=[],
     slot_mapping=[],
@@ -221,18 +220,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
 
         # multi-modal support
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
-        # if self.uses_mrope:
-        # NOTE: `mrope_positions` is implemented with one additional dummy
-        # position on purpose to make it non-contiguous so that it can work
-        # with torch compile.
-        # See detailed explanation in https://github.com/vllm-project/vllm/pull/12128#discussion_r1926431923
 
         # NOTE: When M-RoPE is enabled, position ids are 3D regardless of
         # the modality of inputs. For text-only inputs, each dimension has
         # identical position IDs, making M-RoPE functionally equivalent to
         # 1D-RoPE.
         # See page 5 of https://arxiv.org/abs/2409.12191
-        self.mrope_positions_cpu = np.zeros((3, self.max_num_tokens + 1),
+        self.mrope_positions_cpu = np.zeros((3, self.max_num_tokens),
                                             dtype=np.int64)
 
     @functools.partial(jax.jit, static_argnums=(0, ))
@@ -1174,7 +1168,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         # Inputs
         input_ids = self.input_ids_cpu[:padded_total_num_scheduled_tokens]
         positions = self.positions_cpu[:padded_total_num_scheduled_tokens]
-        mrope_positions = self.mrope_positions_cpu[:
+        mrope_positions = self.mrope_positions_cpu[:, :
                                                    padded_total_num_scheduled_tokens]
         slot_mapping_metadata = self._get_slot_mapping_metadata(
             num_reqs, num_scheduled_tokens_per_req)
@@ -1199,12 +1193,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         request_distribution = np.array(self.input_batch.request_distribution)
 
         # Put to device
-        # TODO: only one of the positions and mrope_posistions may be actually needed
-        (input_ids, positions, mrope_positions, slot_mapping_metadata,
-         num_slices, block_tables, query_start_loc, seq_lens, num_seqs,
+        sampling_metadata = TPUSupportedSamplingMetadata.\
+            from_input_batch(self.mesh, self.input_batch, padded_num_reqs)
+
+        if self.uses_mrope:
+            positions = mrope_positions
+
+        (input_ids, positions, slot_mapping_metadata, num_slices, block_tables,
+         query_start_loc, seq_lens, num_seqs,
          logits_indices, request_distribution) = self._device_array(
-             (input_ids, positions, mrope_positions, slot_mapping_metadata,
-              num_slices, block_tables, query_start_loc, seq_lens, num_seqs,
+             (input_ids, positions, slot_mapping_metadata, num_slices,
+              block_tables, query_start_loc, seq_lens, num_seqs,
               logits_indices, request_distribution))
 
         return (
@@ -1212,7 +1211,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             input_ids,
             AttentionMetadata(
                 input_positions=positions,
-                input_mrope_positions=mrope_positions,
                 slot_mapping=slot_mapping_metadata,
                 block_tables=block_tables,
                 seq_lens=seq_lens,

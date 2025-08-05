@@ -128,10 +128,12 @@ class Qwen2Attention(nnx.Module):
         q = self.q_proj(x)
         q = apply_rope(q, md.input_positions, self.head_dim_original,
                        self.rope_theta, self.rope_scaling)
+
         # k: (T, K, H)
         k = self.k_proj(x)
         k = apply_rope(k, md.input_positions, self.head_dim_original,
                        self.rope_theta, self.rope_scaling)
+
         # v: (T, K, H)
         v = self.v_proj(x)
         # o: (T, N, H)
@@ -294,7 +296,6 @@ class Qwen2ForCausalLM(nnx.Module):
             x = inputs_embeds
         else:
             x = self.embed(input_ids)
-
 
         # (T, D)
         kv_caches, x = self.model(
