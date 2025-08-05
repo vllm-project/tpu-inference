@@ -88,7 +88,7 @@ class _DisaggOrchestrator:
         # Hack device config to pass in the subslice of TPUs.
         slice_sizes = list(prefill_slice_sizes)
         slice_sizes.extend(decode_slice_sizes)
-        setattr(self._config.vllm_config.device_config, "slice",
+        setattr(self._config.vllm_config().device_config, "slice",
                 (0, slice_sizes))
         logger.info(f"Adding slice config to device config: {slice_sizes}")
 
@@ -470,6 +470,7 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
             if addresses.coordinator_input is not None:
                 logger.info("Waiting for READY message from DP Coordinator...")
 
+        #TODO: check this block line by line
         self._orchestrator = _DisaggOrchestrator(
             config=VllmConfigAdapter(vllm_config),
             output_queue=self._output_queue,
