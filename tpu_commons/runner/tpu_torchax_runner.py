@@ -10,6 +10,7 @@ import time
 from typing import TYPE_CHECKING, Optional, cast
 from unittest.mock import patch
 
+from flax import nnx
 import numpy as np
 import torch
 import torch.nn as nn
@@ -820,6 +821,9 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
         if not hasattr(self, "model"):
             self.model = model
+
+        if not hasattr(self, "state"):
+            self.state = nnx.state(model)
 
     @torch.no_grad()
     def _dummy_run(self, num_tokens: int) -> None:
