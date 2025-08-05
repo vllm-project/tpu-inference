@@ -16,20 +16,21 @@ from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.common.attention.attention import AttentionMetadata
 from tpu_commons.models.jax.common.attention.llama4_attention import (
     Llama4Attention, Llama4AttentionConfig)
-from tpu_commons.models.jax.common.base import Config, ParamFactory
+from tpu_commons.models.jax.common.base import ParamFactory
 from tpu_commons.models.jax.common.constants import KVCacheType, RouterType
 from tpu_commons.models.jax.common.layers import (DenseFFWConfig, Embedder,
                                                   EmbedderConfig, LMhead,
                                                   RMSNorm)
 from tpu_commons.models.jax.common.model import Model, ModelConfig
 from tpu_commons.models.jax.common.moe.moe import MoEConfig, RouterConfig
-from tpu_commons.models.jax.common.sharding import (Sharding, ShardingConfig,
+from tpu_commons.models.jax.common.sharding import (Sharding,
                                                     ShardingRulesConfig)
 from tpu_commons.models.jax.common.transformer_block import (
     SharedExpertsTransformerBlock, SharedExpertsTransformerBlockConfig)
 from tpu_commons.models.jax.layers.misc import shard_put
-from tpu_commons.models.jax.recipes.recipe import RecipeConfig
-from tpu_commons.models.jax.utils.weight_utils import WeightLoader, get_param
+from tpu_commons.models.jax.utils.weight_utils import (
+    get_param, hf_model_weights_iterator, print_param_info, reshape_params,
+    transpose_params)
 
 logger = init_logger(__name__)
 pp = pprint.PrettyPrinter(depth=6)
@@ -113,21 +114,6 @@ class Llama4ShardingRulesConfig(ShardingRulesConfig):
     lm_head_dv: tuple = (None, sharding.MLP_TENSOR_AXIS_NAME)
 
 
-@dataclass
-class Llama4ServingConfig(Config):
-    vllm_config: VllmConfig = field(repr=False, default=None)
-
-
-@dataclass(frozen=True)
-class Llama4RecipeConfig(RecipeConfig):
-    model: Llama4ModelConfig = field(default_factory=Llama4ModelConfig)
-    sharding: ShardingConfig = field(
-        default_factory=ShardingConfig,
-        repr=False,
-    )
-    serving: Llama4ServingConfig = field(default_factory=Llama4ServingConfig)
-
-
 class Llama4ForCausalLM(Model):
 
     def __init__(self,
@@ -150,12 +136,11 @@ class Llama4ForCausalLM(Model):
                                  mesh=self.mesh,
                                  default_rules_cls=Llama4ShardingRulesConfig,
                                  vllm_config=self.vllm_config)
-        self.cfg = Llama4RecipeConfig(
-            model=Llama4ModelConfig(vllm_config=self.vllm_config),
-            sharding=self.sharding.sharding_cfg,
-            serving=Llama4ServingConfig(vllm_config=self.vllm_config))
+        self._model_config = Llama4ModelConfig(vllm_config=self.vllm_config)
 
-        logger.info(f"Using the following config:\n{self.cfg}")
+        logger.info(
+            f"Using the following config:\n{self._model_config}; {self.sharding.sharding_cfg}"
+        )
         logger.info(
             f"Using the following sharding overrides:\n{self.sharding}")
         self.mesh = self.sharding.mesh
@@ -167,27 +152,27 @@ class Llama4ForCausalLM(Model):
                 kernel_initializer=nnx.initializers.xavier_normal(),
                 scale_initializer=nnx.initializers.ones,
                 random_init=False)
-        self.embedder = Embedder(cfg=self.cfg.model.emb,
+        self.embedder = Embedder(cfg=self._model_config.emb,
                                  mesh=self.mesh,
                                  param_factory=self.param_factory,
-                                 sharding_cfg=self.cfg.sharding)
+                                 sharding_cfg=self.sharding.sharding_cfg)
         self.embedder.generate_kernel(self.rng)
 
         self.layers = []
 
-        for i in range(self.cfg.model.num_layers):
+        for i in range(self._model_config.num_layers):
             # For Llama4-Scout, all layers are MoE layers.
             # This can be adjusted for other variants.
             is_moe_layer = (i + 1) % \
-                            self.cfg.model.interleave_moe_layer_step == 0
+                            self._model_config.interleave_moe_layer_step == 0
             use_attention_rope = (
-                i + 1) % self.cfg.model.no_rope_layer_interval != 0
+                i + 1) % self._model_config.no_rope_layer_interval != 0
             block_type = "moe" if is_moe_layer else "dense"
-            block_cfg_nope = self.cfg.model.layers
+            block_cfg_nope = self._model_config.layers
             # RoPE layers do not use chunked attention
             block_cfg_rope = replace(
-                self.cfg.model.layers,
-                attention=replace(self.cfg.model.layers.attention,
+                self._model_config.layers,
+                attention=replace(self._model_config.layers.attention,
                                   attention_chunk_size=None),
             )
             block_cfg = block_cfg_rope if use_attention_rope else block_cfg_nope
@@ -198,34 +183,34 @@ class Llama4ForCausalLM(Model):
                 use_attention_rope=use_attention_rope,
                 param_factory=self.param_factory,
                 mesh=self.mesh,
-                sharding_cfg=self.cfg.sharding)
+                sharding_cfg=self.sharding.sharding_cfg)
             self.layers.append(block)
 
         for i in range(len(self.layers)):
             self.layers[i].generate_kernel(self.rng)
 
         self.final_norm = RMSNorm(
-            dims=self.cfg.model.hidden_size,
+            dims=self._model_config.hidden_size,
             mesh=self.mesh,
             param_factory=self.param_factory,
-            sharding_cfg=self.cfg.sharding,
-            epsilon=self.cfg.model.layers.rms_norm_eps,
+            sharding_cfg=self.sharding.sharding_cfg,
+            epsilon=self._model_config.layers.rms_norm_eps,
             with_scale=True,
-            dtype=self.cfg.model.dtype,
+            dtype=self._model_config.dtype,
         )
         self.final_norm.generate_kernel(self.rng)
 
-        self.lm_head = LMhead(cfg=self.cfg.model.emb,
+        self.lm_head = LMhead(cfg=self._model_config.emb,
                               mesh=self.mesh,
                               param_factory=self.param_factory,
-                              sharding_cfg=self.cfg.sharding)
+                              sharding_cfg=self.sharding.sharding_cfg)
         self.lm_head.generate_kernel(self.rng)
         if self.is_verbose:
             self._print_model_architecture()
 
     def _print_model_architecture(self):
-        num_display_layers = max(self.cfg.model.interleave_moe_layer_step,
-                                 self.cfg.model.no_rope_layer_interval)
+        num_display_layers = max(self._model_config.interleave_moe_layer_step,
+                                 self._model_config.no_rope_layer_interval)
 
         logger.info("### Embedding ###")
         nnx.display(self.embedder)
@@ -242,7 +227,7 @@ class Llama4ForCausalLM(Model):
     def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):
         self.rng = nnx.Rngs(rng)
         weight_loader = Llama4WeightLoader(vllm_config=self.vllm_config,
-                                           model_config=self.cfg.model)
+                                           model_config=self._model_config)
         weight_loader.load_weights(self)
 
     def __call__(
@@ -253,36 +238,34 @@ class Llama4ForCausalLM(Model):
         *args,
     ) -> Tuple[List[KVCacheType], jax.Array, jax.Array]:
         is_prefill = False
-        x = self.embedder.encode(input_ids)
+        x_TD = self.embedder.encode(input_ids)
         for (i, block) in enumerate(self.layers):
             kv_cache = kv_caches[i]
-            new_kv_cache, x = block(x, is_prefill, kv_cache,
-                                    attention_metadata)
-            jax.block_until_ready(x)
+            new_kv_cache, x_TD = block(x_TD, is_prefill, kv_cache,
+                                       attention_metadata)
+            jax.block_until_ready(x_TD)
             kv_caches[i] = new_kv_cache
 
-        final_activation = self.final_norm(x)
+        final_activation_TD = self.final_norm(x_TD)
 
-        return kv_caches, final_activation
+        return kv_caches, final_activation_TD
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        logits = jnp.dot(hidden_states,
-                         self.lm_head.input_embedding_table_DV.value)
-        return logits
+        logits_TV = jnp.dot(hidden_states,
+                            self.lm_head.input_embedding_table_DV.value)
+        return logits_TV
 
 
-class Llama4WeightLoader(WeightLoader):
+class Llama4WeightLoader:
 
     def __init__(self, vllm_config: VllmConfig, model_config: ModelConfig):
-        super().__init__(vllm_config=vllm_config,
-                         model_config=model_config,
-                         framework="flax",
-                         filter_regex="language_model")
-        self.setup()
-
-    def setup(self):
-        super().setup()
-        self.set_transpose_param_map({
+        self.names_and_weights_generator = hf_model_weights_iterator(
+            model_name_or_path=vllm_config.model_config.model,
+            framework="flax",
+            filter_regex="language_model")
+        self.is_verbose = getattr(vllm_config.additional_config, "is_verbose",
+                                  False)
+        self._transpose_map = {
             "q_proj": (2, 0, 1),
             "k_proj": (2, 0, 1),
             "v_proj": (2, 0, 1),
@@ -292,23 +275,21 @@ class Llama4WeightLoader(WeightLoader):
             "shared_expert.up_proj": (1, 0),
             "o_proj": (1, 2, 0),
             "lm_head": (1, 0),
-        })
-        hidden_size = self.model_config.hidden_size
-        attn_heads = self.model_config.layers.attention.num_attention_heads
-        num_key_value_heads = self.model_config.layers.attention.num_key_value_heads
-        attn_head_dim = self.model_config.layers.attention.head_dim
-        self.set_reshape_param_map(
-            {
-                "q_proj": (attn_heads, attn_head_dim, hidden_size),
-                "k_proj": (num_key_value_heads, attn_head_dim, hidden_size),
-                "v_proj": (num_key_value_heads, attn_head_dim, hidden_size),
-                # o_proj is inverted: https://github.com/huggingface/transformers/blob/v4.53.2/src/transformers/models/llama4/modeling_llama4.py#L298
-                "o_proj": (hidden_size, attn_heads, attn_head_dim),
-            },
-            param_type="weight",
-        )
+        }
+        hidden_size = model_config.hidden_size
+        attn_heads = model_config.layers.attention.num_attention_heads
+        num_key_value_heads = model_config.layers.attention.num_key_value_heads
+        attn_head_dim = model_config.layers.attention.head_dim
+        self._weight_shape_map = {
+            "q_proj": (attn_heads, attn_head_dim, hidden_size),
+            "k_proj": (num_key_value_heads, attn_head_dim, hidden_size),
+            "v_proj": (num_key_value_heads, attn_head_dim, hidden_size),
+            # o_proj is inverted: https://github.com/huggingface/transformers/blob/v4.53.2/src/transformers/models/llama4/modeling_llama4.py#L298
+            "o_proj": (hidden_size, attn_heads, attn_head_dim),
+        }
+
         # Set the mappings from loaded parameter keys to standardized names.
-        self.set_loaded_to_standardized_keys({
+        self._loaded_to_standardized_keys = {
             "language_model.model.embed_tokens.weight":
             "embedder.input_embedding_table_VD",
             "language_model.lm_head.weight":
@@ -339,19 +320,19 @@ class Llama4WeightLoader(WeightLoader):
             "layers.*.shared_experts.kernel_gating_DF",
             "language_model.model.layers.*.feed_forward.shared_expert.up_proj.weight":
             "layers.*.shared_experts.kernel_up_proj_DF",
-        })
+        }
 
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
         # Find the corresponding model key using the HF key
         if "layer" in loaded_key:
             layer_num = re.search(r"layers\.(\d+)", loaded_key).group(1)
             layer_key = re.sub(r"layers\.\d+", "layers.*", loaded_key)
-            mapped_key = self.loaded_to_standardized_keys.get(
+            mapped_key = self._loaded_to_standardized_keys.get(
                 layer_key, loaded_key)
             mapped_key = re.sub(r"layers\.\*", f"layers.{layer_num}",
                                 mapped_key)
         else:
-            mapped_key = self.loaded_to_standardized_keys.get(
+            mapped_key = self._loaded_to_standardized_keys.get(
                 loaded_key, loaded_key)
         return mapped_key
 
@@ -376,14 +357,11 @@ class Llama4WeightLoader(WeightLoader):
             mapped_name = re.sub(r"layers\.\*", f"layers.{layer_num}",
                                  mapped_name)
             mapped_model_weight = get_param(model_params, mapped_name)
-            if loaded_name.endswith(".bias"):
-                loaded_weight = self.reshape_params(loaded_name, loaded_weight,
-                                                    "bias")
-            else:
-                loaded_weight = self.reshape_params(loaded_name, loaded_weight,
-                                                    "weight")
-                loaded_weight = self.transpose_params(loaded_name,
-                                                      loaded_weight)
+            if not loaded_name.endswith(".bias"):
+                loaded_weight = reshape_params(loaded_name, loaded_weight,
+                                               self._weight_shape_map)
+                loaded_weight = transpose_params(loaded_name, loaded_weight,
+                                                 self._transpose_map)
             if mapped_model_weight.value.shape != loaded_weight.shape:
                 raise ValueError(
                     f"Loaded shape for {split_loaded_name}: {loaded_weight.shape} "
@@ -397,7 +375,7 @@ class Llama4WeightLoader(WeightLoader):
                 f"{split_loaded_name}: {loaded_weight.shape}  -->  {mapped_name}: {mapped_model_weight.value.shape}"
             )
             if self.is_verbose:
-                WeightLoader.print_param_info(mapped_model_weight, mapped_name)
+                print_param_info(mapped_model_weight, mapped_name)
 
     def load_weights(self, model_for_loading: nnx.Module):
         model_params = nnx.state(model_for_loading)
@@ -411,14 +389,12 @@ class Llama4WeightLoader(WeightLoader):
                 mapped_name = self.map_loaded_to_standardized_name(loaded_name)
                 model_weight = get_param(model_params, mapped_name)
 
-                if loaded_name.endswith(".bias"):
-                    loaded_weight = self.reshape_params(
-                        loaded_name, loaded_weight, "bias")
-                else:
-                    loaded_weight = self.reshape_params(
-                        loaded_name, loaded_weight, "weight")
-                    loaded_weight = self.transpose_params(
-                        loaded_name, loaded_weight)
+                if not loaded_name.endswith(".bias"):
+                    loaded_weight = reshape_params(loaded_name, loaded_weight,
+                                                   self._weight_shape_map)
+                    loaded_weight = transpose_params(loaded_name,
+                                                     loaded_weight,
+                                                     self._transpose_map)
                 if model_weight.value.shape != loaded_weight.shape:
                     raise ValueError(
                         f"Loaded shape for {loaded_name}: {loaded_weight.shape} "
@@ -431,6 +407,6 @@ class Llama4WeightLoader(WeightLoader):
                                                model_weight.sharding.spec,
                                                mesh=model_for_loading.mesh)
                 if self.is_verbose:
-                    WeightLoader.print_param_info(model_weight, loaded_name)
+                    print_param_info(model_weight, loaded_name)
 
         nnx.update(model_for_loading, model_params)

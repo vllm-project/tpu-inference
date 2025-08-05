@@ -17,13 +17,9 @@ from tpu_commons.logger import init_logger
 # Register custom op dispatcher.
 from tpu_commons.models.torchax.torchax_wrapper import (kv_cache_update,
                                                         ragged_paged_attention)
+from tpu_commons.utils import TPU_HEAD_SIZE_ALIGNMENT
 
 logger = init_logger(__name__)
-
-# TPU requires the head size to be a multiple of 128.
-TPU_HEAD_SIZE_ALIGNMENT = 128
-# Block size used for kv cache updating kernel
-NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK = 8
 
 
 class PallasAttentionBackend(AttentionBackend):
@@ -233,7 +229,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
             # these can be manually adjusted for debugging if necessary.
             num_kv_pages_per_block=None,
             num_queries_per_block=None,
-            vmem_limit_bytes=None,
+            vmem_limit_bytes=100 * 1024 * 1024,
             use_kernel=True,
             sm_scale=self.scale,
             sliding_window=self.sliding_window,
@@ -270,14 +266,12 @@ def write_to_kv_cache(key: torch.Tensor, value: torch.Tensor,
                                                   head_size)
 
     kv_cache = kv_cache.reshape(-1, num_combined_kv_heads, head_size)
-    kv_cache = call_jax(
-        kv_cache_update,
-        kv,
-        slot_mapping,
-        kv_cache,
-        num_slices,
-        page_size=block_size,
-        num_slices_per_block=NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK)
+    kv_cache = call_jax(kv_cache_update,
+                        kv,
+                        slot_mapping,
+                        kv_cache,
+                        num_slices,
+                        page_size=block_size)
     kv_cache = kv_cache.reshape(num_blocks, block_size, num_combined_kv_heads,
                                 head_size)
     return kv_cache

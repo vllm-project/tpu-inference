@@ -3,15 +3,14 @@
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import jax
-
 from vllm.logger import init_logger
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         run_method)
 from vllm.v1.executor.abstract import Executor
 from vllm.worker.worker_base import WorkerWrapperBase
 
-
 logger = init_logger(__name__)
+
 
 class DisaggExecutor(Executor):
 
@@ -27,9 +26,10 @@ class DisaggExecutor(Executor):
         start = sum(sizes[0:idx])
         end = start + sizes[idx]
 
-        devices = jax.devices()[start: end]
+        devices = jax.devices()[start:end]
         setattr(self.vllm_config.device_config, "slice", (idx + 1, sizes))
-        logger.info(f"Creating DisaggExecutor with {devices}, index: {start} -> {end}")
+        logger.info(
+            f"Creating DisaggExecutor with {devices}, index: {start} -> {end}")
 
         distributed_init_method = get_distributed_init_method(
             get_ip(), get_open_port())

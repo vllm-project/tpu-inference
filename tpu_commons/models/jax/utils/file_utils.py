@@ -7,8 +7,9 @@ import subprocess
 from typing import List
 
 import filelock
-from google.cloud import storage
+import huggingface_hub.constants
 from huggingface_hub import HfFileSystem, snapshot_download
+from tqdm.auto import tqdm
 
 from tpu_commons.logger import init_logger
 
@@ -16,25 +17,12 @@ logger = init_logger(__name__)
 # Do not set the HuggingFace token here, it should be set via the env `HF_TOKEN`.
 hfs = HfFileSystem()
 
-GCS_PREFIX = "gs://"
-LOCAL_MODEL_DIR = os.getenv("HF_HOME", "/tmp/model")
-LOCAL_LORA_DIR = "/tmp/lora"
 LOCK_DIR = "/tmp/lock"
 
 
 #####  Local file utils  #####
 def run_cmd(cmd: str, *args, **kwargs) -> subprocess.CompletedProcess:
     return subprocess.run(cmd.split(), *args, **kwargs)
-
-
-def _get_local_model_dir(remote_dir: str) -> str:
-    return os.path.join(LOCAL_MODEL_DIR, os.path.basename(remote_dir))
-
-
-def _encode_names(names: List[str]) -> str:
-    encoded = "#".join(names).encode()
-    encoded = base64.b64encode(encoded).decode()
-    return encoded
 
 
 def delete_file(path: str) -> None:
@@ -49,9 +37,17 @@ def list_files(dir: str, pattern: str = "*") -> List[str]:
     return files
 
 
-def file_lock(local_name) -> filelock.FileLock:
-    lock_file = os.path.join(LOCK_DIR, local_name + ".lock")
-    lock = filelock.FileLock(lock_file)
+def get_lock(model_name_or_path: str):
+    lock_dir = LOCK_DIR
+    model_name_or_path = str(model_name_or_path)
+    os.makedirs(os.path.dirname(lock_dir), exist_ok=True)
+    model_name = model_name_or_path.replace("/", "-")
+    hash_name = hashlib.sha256(model_name.encode()).hexdigest()
+    # add hash to avoid conflict with old users' lock files
+    lock_file_name = hash_name + model_name + ".lock"
+    # mode 0o666 is required for the filelock to be shared across users
+    lock = filelock.FileLock(os.path.join(lock_dir, lock_file_name),
+                             mode=0o666)
     return lock
 
 
@@ -60,24 +56,29 @@ def get_free_disk_size(path: str = "/") -> int:
     return free_bytes
 
 
-def get_md5_hash_of_file(file_path: str) -> str:
-    with open(file_path, "rb") as f:
-        file_hash = hashlib.md5(f.read()).digest()
-        return base64.b64encode(file_hash).decode()
-
-
-def get_md5_hash_of_local_dir(local_dir: str) -> str:
-    if not os.path.isdir(local_dir):
-        raise ValueError(f"Local directory {local_dir} not found.")
-    dir_hash = ""
-    for file_path in sorted(glob.glob(os.path.join(local_dir, "*"))):
-        if os.path.isfile(file_path):
-            file_hash = get_md5_hash_of_file(file_path)
-            dir_hash += f"{file_hash}_"
-    return dir_hash
-
-
 #####  GCS file utils  #####
+
+# TODO(xiang): Unify GCS path and HF path.
+
+GCS_PREFIX = "gs://"
+LOCAL_MODEL_DIR = os.getenv("HF_HOME", "/tmp/model")
+LOCAL_LORA_DIR = "/tmp/lora"
+
+
+def _get_local_model_dir(remote_dir: str) -> str:
+    return os.path.join(LOCAL_MODEL_DIR, os.path.basename(remote_dir))
+
+
+def _encode_names(names: List[str]) -> str:
+    encoded = "#".join(names).encode()
+    encoded = base64.b64encode(encoded).decode()
+    return encoded[:8]
+
+
+def file_lock(local_name) -> filelock.FileLock:
+    lock_file = os.path.join(LOCK_DIR, local_name + ".lock")
+    lock = filelock.FileLock(lock_file)
+    return lock
 
 
 def is_gcs_path(input_path: str) -> bool:
@@ -138,30 +139,6 @@ def download_model_weights_from_gcs(model_path: str,
     return local_files
 
 
-def download_lora_weights_from_gcs(lora_path: str,
-                                   download_folder: str) -> str:
-    local_dir = os.path.join(LOCAL_LORA_DIR, download_folder)
-    download_gcs_dir(lora_path, local_dir)
-    return local_dir
-
-
-# TODO: Re-implement this function using the `gcloud storage hash -m` command.
-def get_md5_hash_of_gcs_dir(gcs_dir: str) -> str:
-    # The GCS directory is structured as: gs://bucket_name/dir
-    bucket_name = gcs_dir.split("/")[2]
-    prefix = gcs_dir[len(GCS_PREFIX + bucket_name):].strip("/")
-    client = storage.Client()
-    blobs = client.list_blobs(bucket_name, prefix=prefix)  # Ordered by name.
-    if not blobs:
-        raise ValueError(f"No GCS blobs found in {gcs_dir}.")
-    dir_hash = ""
-    for blob in blobs:
-        if blob.name[-1] == "/":
-            continue
-        dir_hash += f"{blob.md5_hash}_"
-    return dir_hash
-
-
 #####  HuggingFace file utils  #####
 
 
@@ -182,28 +159,21 @@ def get_hf_model_weights_size(repo_id: str, weights_format: str) -> int:
     return weights_size
 
 
+class DisabledTqdm(tqdm):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs, disable=True)
+
+
 def download_model_weights_from_hf(model_path: str,
                                    weights_format: str) -> str:
-    local_dir = _get_local_model_dir(model_path)
-    with file_lock(_encode_names([model_path, local_dir, weights_format])):
-        snapshot_download(
+    with get_lock(model_path):
+        local_dir = snapshot_download(
             model_path,
+            cache_dir=None,  # can be specified by HF_HOME or HF_HUB_CACHE
             allow_patterns=weights_format,
-            local_dir=local_dir,
+            tqdm_class=DisabledTqdm,
+            local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
         )
     local_files = list_files(local_dir, weights_format)
     return local_files
-
-
-def download_preprocessor_config_from_hf(model_path: str) -> str:
-    local_dir = _get_local_model_dir(model_path)
-    with file_lock(
-            _encode_names([model_path, local_dir,
-                           "preprocessor_config.json"])):
-        snapshot_download(
-            model_path,
-            allow_patterns="preprocessor_config.json",
-            local_dir=local_dir,
-        )
-    local_files = list_files(local_dir, "preprocessor_config.json")
-    return local_files[0]

@@ -81,41 +81,41 @@ class DeepSeekV3Router(nnx.Module):
 
         self.create_sharding()
 
-    def get_topk_indices(self, scores: Float) -> Float:
+    def get_topk_indices(self, scores_TE: Float) -> Float:
         """Get the topk indices of the scores.
 
         Args:
-            scores: The scores to get the topk indices of. Shape (sequence, num_experts).
+            scores_TE: The scores to get the topk indices of. Shape (sequence, num_experts).
 
         Returns:
             The topk indices of the scores. Shape (sequence, num_experts_per_tok).
         """
 
-        scores = scores + self.bias_E
+        scores_TE = scores_TE + self.bias_E
         if self.n_groups > 1:
             experts_per_group = self.num_experts // self.n_groups
-            group_scores = jnp.reshape(scores,
-                                       (-1, self.n_groups, experts_per_group))
-            group_scores = jax.lax.top_k(group_scores, k=2)[0]
-            group_scores = jnp.sum(group_scores, axis=-1)
-            indices = jax.lax.top_k(group_scores, k=self.topk_groups)[1]
+            group_scores_TGM = jnp.reshape(
+                scores_TE, (-1, self.n_groups, experts_per_group))
+            group_scores_TG2 = jax.lax.top_k(group_scores_TGM, k=2)[0]
+            group_scores_TG = jnp.sum(group_scores_TG2, axis=-1)
+            indices = jax.lax.top_k(group_scores_TG, k=self.topk_groups)[1]
 
-            mask = jnp.any(jnp.arange(self.n_groups)[:,
-                                                     None] == indices[...,
-                                                                      None, :],
-                           axis=-1)
-            mask = jnp.repeat(mask, scores.shape[-1] // mask.shape[-1], -1)
-            scores = jnp.where(mask, scores, 0.0)
+            mask_TG = jnp.any(jnp.arange(
+                self.n_groups)[:, None] == indices[..., None, :],
+                              axis=-1)
+            mask_TE = jnp.repeat(mask_TG,
+                                 scores_TE.shape[-1] // mask_TG.shape[-1], -1)
+            scores_TE = jnp.where(mask_TE, scores_TE, 0.0)
 
-        indices = jax.lax.top_k(scores, k=self.num_experts_per_tok)[1]
+        indices_TX = jax.lax.top_k(scores_TE, k=self.num_experts_per_tok)[1]
 
-        return indices
+        return indices_TX
 
-    def __call__(self, x: Float, op_mode: str) -> Tuple[Float, Float]:
+    def __call__(self, x_TD: Float, op_mode: str) -> Tuple[Float, Float]:
         """Routes tokens to top k experts.
 
         Args:
-            x: Input array of shape (sequence, d_model).
+            x_TD: Input array of shape (sequence, d_model).
             op_mode: The operation mode ('prefill' or 'generate') to determine sharding.
 
         Returns:
@@ -123,24 +123,25 @@ class DeepSeekV3Router(nnx.Module):
                 - weights: Normalized weights for selected experts, shape (sequence, num_experts_per_tok).
                 - indices: Indices of selected experts, shape (sequence, num_experts_per_tok).
         """
-        x = jnp.asarray(x, self.dtype)
-        x_td = nnx.with_sharding_constraint(x, self.activation_ffw_td[op_mode])
+        x_TD = jnp.asarray(x_TD, self.dtype)
+        x_TD = nnx.with_sharding_constraint(x_TD,
+                                            self.activation_ffw_td[op_mode])
 
-        scores_te = jnp.einsum("TD,DE -> TE", x_td, self.kernel_DE.value)
-        scores_te = nnx.sigmoid(scores_te)
+        scores_TE = jnp.einsum("TD,DE -> TE", x_TD, self.kernel_DE.value)
+        scores_TE = nnx.sigmoid(scores_TE)
 
-        original_scores = scores_te
-        topk_indices_tk = self.get_topk_indices(scores_te)
-        weights_tk = jnp.take_along_axis(original_scores,
-                                         topk_indices_tk,
+        original_scores_TE = scores_TE
+        topk_indices_TX = self.get_topk_indices(scores_TE)
+        weights_TX = jnp.take_along_axis(original_scores_TE,
+                                         topk_indices_TX,
                                          axis=-1)
 
         if self.norm_topk_prob:
-            weights_tk /= jnp.sum(weights_tk, axis=-1)[..., None] + 1e-20
+            weights_TX /= jnp.sum(weights_TX, axis=-1)[..., None] + 1e-20
 
-        weights_tk *= self.routed_scaling_factor
+        weights_TX *= self.routed_scaling_factor
 
-        return weights_tk, topk_indices_tk
+        return weights_TX, topk_indices_TX
 
     def generate_kernel(self, rngs: nnx.Rngs):
         """Generates the router kernel (weights and bias) for routing."""

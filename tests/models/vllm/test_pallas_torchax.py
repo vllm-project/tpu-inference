@@ -6,8 +6,8 @@ from vllm.attention.backends.abstract import AttentionType
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
 
 from tpu_commons.attention.backends.pallas_torchax import (
-    NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK, PallasAttentionBackend,
-    PallasAttentionBackendImpl, PallasMetadata, write_to_kv_cache)
+    PallasAttentionBackend, PallasAttentionBackendImpl, PallasMetadata,
+    write_to_kv_cache)
 
 
 class TestPallasMetadata:
@@ -480,8 +480,6 @@ def test_write_to_kv_cache(mock_kv_cache_update, mock_call_jax):
     args, kwargs = mock_call_jax.call_args
     assert args[0] == mock_kv_cache_update
     assert kwargs['page_size'] == 16
-    assert kwargs[
-        'num_slices_per_block'] == NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK
 
 
 def test_write_to_kv_cache_tensor_shapes():

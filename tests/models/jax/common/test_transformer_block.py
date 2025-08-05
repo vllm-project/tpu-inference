@@ -5,12 +5,11 @@ import jax.numpy as jnp
 
 from tpu_commons.models.jax.common.attention.attention import AttentionConfig
 from tpu_commons.models.jax.common.layers import DenseFFWConfig
+from tpu_commons.models.jax.common.moe.moe import (MoEConfig, RouterConfig,
+                                                   RouterType)
 from tpu_commons.models.jax.common.transformer_block import (
     SharedExpertsTransformerBlock, SharedExpertsTransformerBlockConfig,
     TransformerBlock, TransformerBlockConfig)
-from tpu_commons.models.jax.common.moe.moe import MoEConfig, RouterConfig, RouterType
-
-
 
 
 class TestTransformerBlock(unittest.TestCase):
@@ -19,7 +18,7 @@ class TestTransformerBlock(unittest.TestCase):
     @patch.object(TransformerBlock, '_create_module')
     @patch('tpu_commons.models.jax.common.transformer_block.RMSNorm')
     def test_transformer_block_dense_logic(self, MockRMSNorm,
-                                        mock_create_module):
+                                           mock_create_module):
         """
         Tests the forward pass logic of a dense TransformerBlock by mocking its sub-modules.
         This test verifies the sequence of operations and residual connections.
@@ -69,7 +68,6 @@ class TestTransformerBlock(unittest.TestCase):
         dummy_mlp_output = jnp.full((64, hidden_size), 3.0, dtype=jnp.bfloat16)
         mock_mlp.return_value = dummy_mlp_output
         mock_create_module.side_effect = [mock_attn, mock_mlp]
-
 
         transformer_block = TransformerBlock(
             cfg=transformer_config,
@@ -159,9 +157,7 @@ class TestTransformerBlock(unittest.TestCase):
                                    router_act="sigmoid",
                                    expert_capacity=-1,
                                    dtype=jnp.bfloat16,
-                                   vllm_config=None
-                                   )
-                            )
+                                   vllm_config=None))
 
         dense_ffw_config = DenseFFWConfig(
             hidden_size=hidden_size,
@@ -197,11 +193,13 @@ class TestTransformerBlock(unittest.TestCase):
         mock_moe.return_value = dummy_moe_output
 
         mock_shared_experts = MagicMock()
-        dummy_shared_experts_output = jnp.full((64, hidden_size), 4.0,
+        dummy_shared_experts_output = jnp.full((64, hidden_size),
+                                               4.0,
                                                dtype=jnp.bfloat16)
         mock_shared_experts.return_value = dummy_shared_experts_output
-        mock_create_module.side_effect = [mock_attn, mock_moe, mock_shared_experts]
-
+        mock_create_module.side_effect = [
+            mock_attn, mock_moe, mock_shared_experts
+        ]
 
         transformer_block = SharedExpertsTransformerBlock(
             cfg=shared_config,

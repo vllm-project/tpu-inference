@@ -168,13 +168,12 @@ class MLA(Attention):
         )
         self.kv_rms_norm.generate_kernel(rngs)
 
-    def __call__(
-        self,
-        x,
-        is_prefill,
-        kv_cache: KVCache,
-        attention_metadata: AttentionMetadata,
-    ):
+    def __call__(self,
+                 x,
+                 is_prefill,
+                 kv_cache: KVCache,
+                 attention_metadata: AttentionMetadata,
+                 use_attention_rope: bool = True):
         """Performs the forward pass of the attention module.
 
         Args:
@@ -230,11 +229,11 @@ class MLA(Attention):
             kv_SA = kv_SA[..., :self.kv_lora_rank]
             kv_SA = self.kv_rms_norm(kv_SA)
             # KV up projection.
-            kv_nope = jnp.einsum("SA,ANH -> SNH", kv_SA,
-                                 self.kernel_kv_up_proj_ANH.value)
+            kv_nope_SNH = jnp.einsum("SA,ANH -> SNH", kv_SA,
+                                     self.kernel_kv_up_proj_ANH.value)
             # Split the latent kv vector into k nope vector and v vector.
-            k_nope_SNH = kv_nope[..., :self.qk_nope_head_dim]
-            v_SNH = kv_nope[..., self.qk_nope_head_dim:]
+            k_nope_SNH = kv_nope_SNH[..., :self.qk_nope_head_dim]
+            v_SNH = kv_nope_SNH[..., self.qk_nope_head_dim:]
             # Concatenate the key vector.
             k_SNH = jnp.concatenate([k_nope_SNH, k_rope_SNH], axis=-1)
             k_SNH = nnx.with_sharding_constraint(k_SNH,
@@ -258,7 +257,7 @@ class MLA(Attention):
                                     (0, multiple_of_128 - self.qk_head_dim)))
             v_SNH = jnp.pad(v_SNH, ((0, 0), (0, 0),
                                     (0, multiple_of_128 - self.v_head_dim)))
-            new_kv_cache, outputs_TNH = self.attention(
+            new_kv_cache, outputs_TNH = self.attention_v3(
                 is_prefill,
                 kv_cache,
                 q_TNH,

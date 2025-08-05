@@ -1,5 +1,6 @@
 import logging
 import unittest
+import warnings
 from dataclasses import dataclass, field, fields
 from typing import Any, List, Mapping
 
@@ -8,7 +9,6 @@ from tpu_commons.models.jax.common.base import Config
 # Use the 'warnings' module to globally ignore warnings within this block
 vllm_logger = logging.getLogger("vllm")
 original_level = vllm_logger.level
-import warnings
 
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")

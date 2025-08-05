@@ -11,7 +11,6 @@ from jax.sharding import Mesh
 
 from tpu_commons.models.jax.recipes.llama4 import (Llama4ForCausalLM,
                                                    Llama4ModelConfig,
-                                                   Llama4RecipeConfig,
                                                    Llama4WeightLoader)
 
 
@@ -105,12 +104,13 @@ def mock_vllm_config_llama4() -> MockVllmConfig:
 class TestLlama4ForCausalLM:
     """Tests for the main LlamaForCausalLM model class."""
 
-    @patch("tpu_commons.models.jax.recipes.llama4.Llama4ForCausalLM._init_layers",
-           return_value=None)
+    @patch(
+        "tpu_commons.models.jax.recipes.llama4.Llama4ForCausalLM._init_layers",
+        return_value=None)
     def test_init_llama4(self, _, mock_vllm_config_llama4, rng, mesh):
         """Tests correct parameter detection for the Llama4 model variant."""
         model = Llama4ForCausalLM(mock_vllm_config_llama4, rng, mesh)
-        assert model.cfg.model.hidden_size == 5120
+        assert model._model_config.hidden_size == 5120
         assert "llama-4" in model.vllm_config.model_config.model.lower()
 
     def test_create_model_with_random_weights(self, mock_vllm_config_llama4,
@@ -133,8 +133,9 @@ class TestLlama4ForCausalLM:
 
         assert jnp.all(final_norm_scale == 1.0)
 
-    @patch("tpu_commons.models.jax.recipes.llama4.Llama4ForCausalLM._init_layers",
-           return_value=None)
+    @patch(
+        "tpu_commons.models.jax.recipes.llama4.Llama4ForCausalLM._init_layers",
+        return_value=None)
     @patch("tpu_commons.models.jax.recipes.llama4.Llama4WeightLoader")
     def test_load_weights_called_correctly(self, mock_loader_cls, _, rng,
                                            mesh):
@@ -147,8 +148,8 @@ class TestLlama4ForCausalLM:
         mock_loader_cls.return_value = mock_loader_instance
         model.load_weights(rng)
 
-        mock_loader_cls.assert_called_once_with(vllm_config=vllm_config,
-                                                model_config=model.cfg.model)
+        mock_loader_cls.assert_called_once_with(
+            vllm_config=vllm_config, model_config=model._model_config)
         mock_loader_instance.load_weights.assert_called_once_with(model)
 
 
@@ -158,13 +159,8 @@ class TestLlama4WeightLoader:
     @pytest.fixture
     def weight_loader(self, small_model_config):
         # Patch the superclass's setup to isolate the Llama4 loader's logic
-        with patch(
-                'tpu_commons.models.jax.utils.weight_utils.WeightLoader.setup'
-        ):
-            loader = Llama4WeightLoader(
-                vllm_config=MockVllmConfig("test-model"),
-                model_config=small_model_config)
-        return loader
+        return Llama4WeightLoader(vllm_config=MockVllmConfig("test-model"),
+                                  model_config=small_model_config)
 
     @pytest.mark.parametrize("hf_key, expected", [
         ("language_model.model.layers.15.self_attn.q_proj.weight",
@@ -194,9 +190,7 @@ class TestLlama4WeightLoader:
                 return_value=None):
             model = Llama4ForCausalLM(vllm_config, rng, mesh)
 
-        cfg = Llama4RecipeConfig(model=small_model_config,
-                                 sharding=model.cfg.sharding)
-        model.cfg = cfg
+        model._model_config = small_model_config
         model._init_layers()  # Now initialize with the small config
 
         loader = Llama4WeightLoader(vllm_config=vllm_config,
@@ -213,8 +207,7 @@ class TestLlama4WeightLoader:
         mock_param = MockParamLlama4(shape=(128, 32))
 
         with patch("tpu_commons.models.jax.recipes.llama4.get_param", return_value=mock_param), \
-            patch("tpu_commons.models.jax.recipes.llama4.shard_put", return_value=jnp.ones(mock_param.value.shape)) as mock_shard_put, \
-            patch("flax.nnx.update") as mock_update:
+            patch("tpu_commons.models.jax.recipes.llama4.shard_put", return_value=jnp.ones(mock_param.value.shape)) as mock_shard_put:
 
             # This will now pass after the code fix
             loader.load_weights(model)
@@ -237,9 +230,7 @@ class TestLlama4WeightLoader:
                 return_value=None):
             model = Llama4ForCausalLM(MockVllmConfig("test-model"), rng, mesh)
 
-        cfg = Llama4RecipeConfig(model=small_model_config,
-                                 sharding=model.cfg.sharding)
-        model.cfg = cfg
+        model._model_config = small_model_config
         model._init_layers()
 
         # Create a dummy fused gate_up_proj weight tensor
@@ -264,8 +255,7 @@ class TestLlama4WeightLoader:
         ]
 
         with patch("tpu_commons.models.jax.recipes.llama4.get_param", return_value=mock_param), \
-            patch("tpu_commons.models.jax.recipes.llama4.shard_put", return_value=jnp.ones(mock_param.value.shape)) as mock_shard_put, \
-            patch("flax.nnx.update") as mock_update:
+            patch("tpu_commons.models.jax.recipes.llama4.shard_put", return_value=jnp.ones(mock_param.value.shape)) as mock_shard_put:
 
             # Call _map_llama4_gate_up_proj directly
             weight_loader._map_llama4_gate_up_proj(

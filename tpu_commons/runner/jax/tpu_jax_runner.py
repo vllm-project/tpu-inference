@@ -47,8 +47,6 @@ logger = init_logger(__name__)
 INVALID_TOKEN_ID = -1
 # Smallest output size
 MIN_NUM_SEQS = 8
-# Block size used for kv cache updating kernel
-NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK = 8
 
 DUMMY_METADATA = AttentionMetadata(
     input_positions=[],
@@ -86,7 +84,6 @@ class TPUModelRunner():
 
         self.maybe_forbid_compile = runner_utils.ForbidCompile(
         ) if envs.VLLM_XLA_CHECK_RECOMPILATION else nullcontext()
-        logger.info("TPUModelRunner created!")
 
     def _verify_chunked_prefill_config(self):
         if (self.scheduler_config.max_num_batched_tokens
@@ -108,9 +105,6 @@ class TPUModelRunner():
             sharding_strategy = \
                 self.vllm_config.additional_config["sharding"]["sharding_strategy"]
         except KeyError:
-            logger.warning(
-                f"No sharding strategy passed! Using default of full model parallelism={len(self.devices)}"
-            )
             sharding_strategy = {"tensor_parallelism": len(self.devices)}
 
         if os.getenv("NEW_MODEL_DESIGN", False):
@@ -122,19 +116,11 @@ class TPUModelRunner():
             try:
                 dp = sharding_strategy["data_parallelism"]
             except KeyError:
-                logger.warning(
-                    "No data parallelism passed! Using default value of 1")
                 dp = 1
-
             try:
                 tp = sharding_strategy["tensor_parallelism"]
             except KeyError:
-                logger.warning(
-                    f"No tensor parallelism passed! Using default value of {len(self.devices)}"
-                )
                 tp = len(self.devices)
-
-            tp = sharding_strategy["tensor_parallelism"]
 
             axis_names = ("data", "model")
             mesh_shape = (dp, tp)
@@ -278,8 +264,6 @@ class TPUModelRunner():
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(self.kv_caches)
-
-        logger.info(jax.lib.xla_bridge.get_backend().platform_version)
 
     def _precompile_backbone(self) -> None:
         for num_tokens in self.num_tokens_paddings:
@@ -1192,8 +1176,4 @@ def _get_padded_num_kv_cache_update_slices(num_tokens: int, max_num_reqs: int,
     recompilation."""
     padded_num_slices = 2 * max_num_reqs + num_tokens // page_size
     padded_num_slices = min(padded_num_slices, num_tokens)
-    padded_num_slices = (
-        padded_num_slices + NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK - 1
-    ) // NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK * \
-        NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK
     return padded_num_slices

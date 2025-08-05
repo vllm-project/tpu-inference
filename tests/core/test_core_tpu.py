@@ -58,7 +58,31 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
         self.mock_jet_thread = self.jet_thread_patcher.start()
         self.addCleanup(self.jet_thread_patcher.stop)
 
-        self.thread_patcher = patch("threading.Thread", MagicMock)
+        # Create a mock thread that sets the ready_event when started
+        def mock_thread_constructor(*args, **kwargs):
+            mock_thread = MagicMock()
+
+            def mock_start():
+                # Check if this is the input thread by looking at target and args
+                target = kwargs.get('target')
+                thread_args = kwargs.get('args', ())
+
+                # If this is the input thread (process_input_sockets), set the ready_event
+                if (target and hasattr(target, '__name__')
+                        and target.__name__ == 'process_input_sockets'):
+                    assert len(
+                        thread_args
+                    ) == 4, "Expected 4 arguments for vllm process_input_sockets function"
+                    ready_event = thread_args[
+                        3]  # ready_event is the 4th argument
+                    ready_event.set()
+
+            mock_thread.start = mock_start
+            mock_thread.is_alive.return_value = True
+            return mock_thread
+
+        self.thread_patcher = patch("threading.Thread",
+                                    side_effect=mock_thread_constructor)
         self.mock_thread = self.thread_patcher.start()
         self.addCleanup(self.thread_patcher.stop)
 

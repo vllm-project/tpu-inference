@@ -10,8 +10,6 @@ from vllm.config import VllmConfig
 
 from tpu_commons.models.jax.common.attention.attention import (
     Attention, AttentionConfig, AttentionMetadata, KVCache)
-from tpu_commons.models.jax.common.attention.llama4_attention import \
-    Llama4Attention
 from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
 from tpu_commons.models.jax.common.layers import (DenseFFW, DenseFFWConfig,
@@ -67,10 +65,11 @@ class TransformerBlock(nnx.Module):
         rmsnorm_epsilon = getattr(self.cfg,
                                   HuggingFaceArgNames.RMS_NORM_EPS.value)
         try:
-            self.attn = self._create_module(self.attention_cls, cfg=self.cfg.attention)
+            self.attn = self._create_module(self.attention_cls,
+                                            cfg=self.cfg.attention)
         except NameError:
-            raise NameError(f"Invalid attention class type: {self.attention_cls}")
-
+            raise NameError(
+                f"Invalid attention class type: {self.attention_cls}")
 
         if self.block_type == "moe":
             self.moe = self._create_module(MoE, cfg=self.cfg.moe)
@@ -97,29 +96,29 @@ class TransformerBlock(nnx.Module):
         )
 
     def __call__(
-            self, x: jax.Array, is_prefill: bool, kv_cache: KVCache,
+            self, x_TD: jax.Array, is_prefill: bool, kv_cache: KVCache,
             attention_metadata: AttentionMetadata
     ) -> Tuple[KVCache, jax.Array]:
         op_mode = "prefill" if is_prefill else "generate"
         # Attn Block
-        attn_residual = x
-        x = self.pre_attention_norm(x)
-        new_cache, attn_output = self.attn(x, is_prefill, kv_cache,
-                                           attention_metadata,
-                                           self.use_attention_rope)
-        attn_output += attn_residual
+        attn_residual_TD = x_TD
+        x_TD = self.pre_attention_norm(x_TD)
+        new_cache, attn_output_TD = self.attn(x_TD, is_prefill, kv_cache,
+                                              attention_metadata,
+                                              self.use_attention_rope)
+        attn_output_TD += attn_residual_TD
 
         # FFW Block
-        ffw_residual = attn_output
-        normed_ffw_input = self.pre_mlp_norm(attn_output)
+        ffw_residual_TD = attn_output_TD
+        normed_ffw_input_TD = self.pre_mlp_norm(attn_output_TD)
         if self.block_type == "moe":
-            logits = self.moe(normed_ffw_input, op_mode)
+            logits_TD = self.moe(normed_ffw_input_TD, op_mode)
         elif self.block_type == "dense":
-            logits = self.mlp(normed_ffw_input, op_mode)
+            logits_TD = self.mlp(normed_ffw_input_TD, op_mode)
         else:
             raise ValueError(f"Invalid block type: {self.block_type}")
-        logits += ffw_residual
-        return new_cache, logits
+        logits_TD += ffw_residual_TD
+        return new_cache, logits_TD
 
     def generate_kernel(self, rngs: nnx.Rngs):
         self.attn.generate_kernel(rngs)
@@ -159,37 +158,38 @@ class SharedExpertsTransformerBlock(TransformerBlock):
         moe_intermediate_size = getattr(
             self.cfg.moe, HuggingFaceArgNames.INTERMEDIATE_SIZE_MOE.value)
         shared_experts_cfg = deepcopy(self.cfg.dense_ffw)
-        setattr(shared_experts_cfg,
-                HuggingFaceArgNames.INTERMEDIATE_SIZE.value,
-                shared_experts * moe_intermediate_size) # intermediate_size = #shared_experts * intermediate_size_moe
+        setattr(
+            shared_experts_cfg, HuggingFaceArgNames.INTERMEDIATE_SIZE.value,
+            shared_experts * moe_intermediate_size
+        )  # intermediate_size = #shared_experts * intermediate_size_moe
         self.shared_experts = self._create_module(DenseFFW,
                                                   cfg=shared_experts_cfg)
 
-    def __call__(self, x, is_prefill, kv_cache, attention_metadata):
+    def __call__(self, x_TD, is_prefill, kv_cache, attention_metadata):
         op_mode = "prefill" if is_prefill else "generate"
         # Attn Block
-        attn_residual = x
-        x = self.pre_attention_norm(x)
-        new_cache, attn_output = self.attn(x, is_prefill, kv_cache,
-                                           attention_metadata,
-                                           self.use_attention_rope)
-        attn_output += attn_residual
+        attn_residual_TD = x_TD
+        x_TD = self.pre_attention_norm(x_TD)
+        new_cache, attn_output_TD = self.attn(x_TD, is_prefill, kv_cache,
+                                              attention_metadata,
+                                              self.use_attention_rope)
+        attn_output_TD += attn_residual_TD
 
         # FFW Block
-        ffw_residual = attn_output
-        normed_ffw_input = self.pre_mlp_norm(attn_output)
+        ffw_residual_TD = attn_output_TD
+        normed_ffw_input_TD = self.pre_mlp_norm(attn_output_TD)
         if self.block_type == "moe":
-            logits = self.moe(normed_ffw_input, op_mode)
+            logits_TD = self.moe(normed_ffw_input_TD, op_mode)
             # Add the shared expert outputs to the MoE outputs.
-            shared_expert_output = self.shared_experts(normed_ffw_input,
-                                                       op_mode)
-            logits += shared_expert_output
+            shared_expert_output_TD = self.shared_experts(
+                normed_ffw_input_TD, op_mode)
+            logits_TD += shared_expert_output_TD
         elif self.block_type == "dense":
-            logits = self.mlp(normed_ffw_input, op_mode)
+            logits_TD = self.mlp(normed_ffw_input_TD, op_mode)
         else:
             raise ValueError(f"Invalid block type: {self.block_type}")
-        logits += ffw_residual
-        return new_cache, logits
+        logits_TD += ffw_residual_TD
+        return new_cache, logits_TD
 
     def generate_kernel(self, rngs: nnx.Rngs):
         super().generate_kernel(rngs)

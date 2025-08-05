@@ -199,7 +199,7 @@ def _kv_cache_update(
     num_slices: jax.Array,  # [1]
     *,
     page_size: int = 32,
-    num_slices_per_block: int = 8,
+    num_slices_per_block: int = None,
 ) -> Array:
     # TODO: Get rid of this wrapper and call from pallas.py directly. Need to
     #       find a better way to get mesh in pallas.py.
