@@ -15,7 +15,7 @@ from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.common.attention.attention import AttentionMetadata
 from tpu_commons.models.jax.common.attention.deepseek_v3_attention import (
     MLA, MLAConfig)
-from tpu_commons.models.jax.common.base import Config, ParamFactory
+from tpu_commons.models.jax.common.base import ParamFactory
 from tpu_commons.models.jax.common.constants import KVCacheType
 from tpu_commons.models.jax.common.layers import (DenseFFWConfig, Embedder,
                                                   EmbedderConfig, RMSNorm)
@@ -25,13 +25,12 @@ from tpu_commons.models.jax.common.moe.deepseek_moe import \
 from tpu_commons.models.jax.common.moe.moe import MoEConfig
 from tpu_commons.models.jax.common.sharding import (ATTN_HEAD_AXIS_NAME,
                                                     ATTN_TENSOR_AXIS_NAME,
-                                                    Sharding, ShardingConfig,
+                                                    Sharding,
                                                     ShardingRulesConfig)
 from tpu_commons.models.jax.common.transformer_block import (
     SharedExpertsTransformerBlock, SharedExpertsTransformerBlockConfig,
     TransformerBlock, TransformerBlockConfig)
 from tpu_commons.models.jax.layers.misc import shard_put
-from tpu_commons.models.jax.recipes.recipe import RecipeConfig
 from tpu_commons.models.jax.utils.weight_utils import (
     get_param, hf_model_weights_iterator, print_param_info, reshape_params)
 
@@ -161,22 +160,6 @@ class DeepSeekV3GenerateShardingRulesConfig(DeepSeekV3ShardingRulesConfig):
 
 
 @dataclass
-class DeepSeekV3ServingConfig(Config):
-    vllm_config: VllmConfig = field(repr=False, default=None)
-
-
-@dataclass(frozen=True)
-class DeepSeekV3Config(RecipeConfig):
-    model: DeepseekV3ModelConfig = field(default_factory=DeepseekV3ModelConfig)
-    sharding: ShardingConfig = field(
-        default_factory=ShardingConfig,
-        repr=False,
-    )
-    serving: DeepSeekV3ServingConfig = field(
-        default_factory=DeepSeekV3ServingConfig)
-
-
-@dataclass
 class DeepSeekV3(Model):
 
     def __init__(self,
@@ -202,17 +185,17 @@ class DeepSeekV3(Model):
             default_rules_cls=DeepSeekV3ShardingRulesConfig,
             mesh=mesh,
             vllm_config=self.vllm_config)
-        self.cfg = DeepSeekV3Config(
-            model=DeepseekV3ModelConfig(vllm_config=self.vllm_config),
-            sharding=self.sharding.sharding_cfg,
-            serving=DeepSeekV3ServingConfig(vllm_config=self.vllm_config))
-        logger.info(f"Using the following config:\n{self.cfg}")
+        self._model_config = DeepseekV3ModelConfig(
+            vllm_config=self.vllm_config)
+        logger.info(
+            f"Using the following config:\n{self._model_config}; {self.sharding}"
+        )
         self.use_random_init = self.vllm_config.additional_config.get(
             "random_weights", False)
         self.mesh = self.sharding.mesh
 
         self.weight_loader = DeepSeekV3WeightLoader(
-            vllm_config=vllm_config, model_config=self.cfg.model)
+            vllm_config=vllm_config, model_config=self._model_config)
 
         self._init_layers()
 
@@ -222,55 +205,55 @@ class DeepSeekV3(Model):
                 kernel_initializer=nnx.initializers.xavier_normal(),
                 scale_initializer=nnx.initializers.ones,
                 random_init=self.use_random_init)
-        self.embedder = Embedder(cfg=self.cfg.model.emb,
+        self.embedder = Embedder(cfg=self._model_config.emb,
                                  mesh=self.mesh,
                                  param_factory=self.param_factory,
-                                 sharding_cfg=self.cfg.sharding)
+                                 sharding_cfg=self.sharding.sharding_cfg)
         self.embedder.generate_kernel(self.rng)
 
         self.layers = []
 
-        for i in range(self.cfg.model.first_k_dense_replace):
-            block = TransformerBlock(cfg=self.cfg.model.layers,
+        for i in range(self._model_config.first_k_dense_replace):
+            block = TransformerBlock(cfg=self._model_config.layers,
                                      block_type="dense",
                                      attention_cls=MLA,
                                      param_factory=self.param_factory,
                                      mesh=self.mesh,
-                                     sharding_cfg=self.cfg.sharding)
+                                     sharding_cfg=self.sharding.sharding_cfg)
             self.layers.append(block)
 
-        for i in range(self.cfg.model.first_k_dense_replace,
-                       self.cfg.model.num_layers):
+        for i in range(self._model_config.first_k_dense_replace,
+                       self._model_config.num_layers):
             is_moe_layer = ((i + 1) %
-                            self.cfg.model.interleave_moe_layer_step == 0)
+                            self._model_config.interleave_moe_layer_step == 0)
             block_type = "moe" if is_moe_layer else "dense"
             block = SharedExpertsTransformerBlock(
-                cfg=self.cfg.model.layers,
+                cfg=self._model_config.layers,
                 block_type=block_type,
                 attention_cls=MLA,
                 param_factory=self.param_factory,
                 mesh=self.mesh,
-                sharding_cfg=self.cfg.sharding)
+                sharding_cfg=self.sharding.sharding_cfg)
             self.layers.append(block)
 
         for i in range(len(self.layers)):
             self.layers[i].generate_kernel(self.rng)
 
         self.final_norm = RMSNorm(
-            dims=self.cfg.model.hidden_size,
+            dims=self._model_config.hidden_size,
             mesh=self.mesh,
             param_factory=self.param_factory,
-            sharding_cfg=self.cfg.sharding,
-            epsilon=self.cfg.model.layers.rms_norm_eps,
+            sharding_cfg=self.sharding.sharding_cfg,
+            epsilon=self._model_config.layers.rms_norm_eps,
             with_scale=True,
-            dtype=self.cfg.model.dtype,
+            dtype=self._model_config.dtype,
         )
         self.final_norm.generate_kernel(self.rng)
 
-        self.lm_head = Embedder(cfg=self.cfg.model.emb,
+        self.lm_head = Embedder(cfg=self._model_config.emb,
                                 mesh=self.mesh,
                                 param_factory=self.param_factory,
-                                sharding_cfg=self.cfg.sharding)
+                                sharding_cfg=self.sharding.sharding_cfg)
         self.lm_head.generate_kernel(self.rng)
 
         # TODO: Add MTP.

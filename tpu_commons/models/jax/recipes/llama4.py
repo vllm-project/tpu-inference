@@ -16,19 +16,18 @@ from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.common.attention.attention import AttentionMetadata
 from tpu_commons.models.jax.common.attention.llama4_attention import (
     Llama4Attention, Llama4AttentionConfig)
-from tpu_commons.models.jax.common.base import Config, ParamFactory
+from tpu_commons.models.jax.common.base import ParamFactory
 from tpu_commons.models.jax.common.constants import KVCacheType, RouterType
 from tpu_commons.models.jax.common.layers import (DenseFFWConfig, Embedder,
                                                   EmbedderConfig, LMhead,
                                                   RMSNorm)
 from tpu_commons.models.jax.common.model import Model, ModelConfig
 from tpu_commons.models.jax.common.moe.moe import MoEConfig, RouterConfig
-from tpu_commons.models.jax.common.sharding import (Sharding, ShardingConfig,
+from tpu_commons.models.jax.common.sharding import (Sharding,
                                                     ShardingRulesConfig)
 from tpu_commons.models.jax.common.transformer_block import (
     SharedExpertsTransformerBlock, SharedExpertsTransformerBlockConfig)
 from tpu_commons.models.jax.layers.misc import shard_put
-from tpu_commons.models.jax.recipes.recipe import RecipeConfig
 from tpu_commons.models.jax.utils.weight_utils import (
     get_param, hf_model_weights_iterator, print_param_info, reshape_params,
     transpose_params)
@@ -115,21 +114,6 @@ class Llama4ShardingRulesConfig(ShardingRulesConfig):
     lm_head_dv: tuple = (None, sharding.MLP_TENSOR_AXIS_NAME)
 
 
-@dataclass
-class Llama4ServingConfig(Config):
-    vllm_config: VllmConfig = field(repr=False, default=None)
-
-
-@dataclass(frozen=True)
-class Llama4RecipeConfig(RecipeConfig):
-    model: Llama4ModelConfig = field(default_factory=Llama4ModelConfig)
-    sharding: ShardingConfig = field(
-        default_factory=ShardingConfig,
-        repr=False,
-    )
-    serving: Llama4ServingConfig = field(default_factory=Llama4ServingConfig)
-
-
 class Llama4ForCausalLM(Model):
 
     def __init__(self,
@@ -152,12 +136,11 @@ class Llama4ForCausalLM(Model):
                                  mesh=self.mesh,
                                  default_rules_cls=Llama4ShardingRulesConfig,
                                  vllm_config=self.vllm_config)
-        self.cfg = Llama4RecipeConfig(
-            model=Llama4ModelConfig(vllm_config=self.vllm_config),
-            sharding=self.sharding.sharding_cfg,
-            serving=Llama4ServingConfig(vllm_config=self.vllm_config))
+        self._model_config = Llama4ModelConfig(vllm_config=self.vllm_config)
 
-        logger.info(f"Using the following config:\n{self.cfg}")
+        logger.info(
+            f"Using the following config:\n{self._model_config}; {self.sharding.sharding_cfg}"
+        )
         logger.info(
             f"Using the following sharding overrides:\n{self.sharding}")
         self.mesh = self.sharding.mesh
@@ -169,27 +152,27 @@ class Llama4ForCausalLM(Model):
                 kernel_initializer=nnx.initializers.xavier_normal(),
                 scale_initializer=nnx.initializers.ones,
                 random_init=False)
-        self.embedder = Embedder(cfg=self.cfg.model.emb,
+        self.embedder = Embedder(cfg=self._model_config.emb,
                                  mesh=self.mesh,
                                  param_factory=self.param_factory,
-                                 sharding_cfg=self.cfg.sharding)
+                                 sharding_cfg=self.sharding.sharding_cfg)
         self.embedder.generate_kernel(self.rng)
 
         self.layers = []
 
-        for i in range(self.cfg.model.num_layers):
+        for i in range(self._model_config.num_layers):
             # For Llama4-Scout, all layers are MoE layers.
             # This can be adjusted for other variants.
             is_moe_layer = (i + 1) % \
-                            self.cfg.model.interleave_moe_layer_step == 0
+                            self._model_config.interleave_moe_layer_step == 0
             use_attention_rope = (
-                i + 1) % self.cfg.model.no_rope_layer_interval != 0
+                i + 1) % self._model_config.no_rope_layer_interval != 0
             block_type = "moe" if is_moe_layer else "dense"
-            block_cfg_nope = self.cfg.model.layers
+            block_cfg_nope = self._model_config.layers
             # RoPE layers do not use chunked attention
             block_cfg_rope = replace(
-                self.cfg.model.layers,
-                attention=replace(self.cfg.model.layers.attention,
+                self._model_config.layers,
+                attention=replace(self._model_config.layers.attention,
                                   attention_chunk_size=None),
             )
             block_cfg = block_cfg_rope if use_attention_rope else block_cfg_nope
@@ -200,34 +183,34 @@ class Llama4ForCausalLM(Model):
                 use_attention_rope=use_attention_rope,
                 param_factory=self.param_factory,
                 mesh=self.mesh,
-                sharding_cfg=self.cfg.sharding)
+                sharding_cfg=self.sharding.sharding_cfg)
             self.layers.append(block)
 
         for i in range(len(self.layers)):
             self.layers[i].generate_kernel(self.rng)
 
         self.final_norm = RMSNorm(
-            dims=self.cfg.model.hidden_size,
+            dims=self._model_config.hidden_size,
             mesh=self.mesh,
             param_factory=self.param_factory,
-            sharding_cfg=self.cfg.sharding,
-            epsilon=self.cfg.model.layers.rms_norm_eps,
+            sharding_cfg=self.sharding.sharding_cfg,
+            epsilon=self._model_config.layers.rms_norm_eps,
             with_scale=True,
-            dtype=self.cfg.model.dtype,
+            dtype=self._model_config.dtype,
         )
         self.final_norm.generate_kernel(self.rng)
 
-        self.lm_head = LMhead(cfg=self.cfg.model.emb,
+        self.lm_head = LMhead(cfg=self._model_config.emb,
                               mesh=self.mesh,
                               param_factory=self.param_factory,
-                              sharding_cfg=self.cfg.sharding)
+                              sharding_cfg=self.sharding.sharding_cfg)
         self.lm_head.generate_kernel(self.rng)
         if self.is_verbose:
             self._print_model_architecture()
 
     def _print_model_architecture(self):
-        num_display_layers = max(self.cfg.model.interleave_moe_layer_step,
-                                 self.cfg.model.no_rope_layer_interval)
+        num_display_layers = max(self._model_config.interleave_moe_layer_step,
+                                 self._model_config.no_rope_layer_interval)
 
         logger.info("### Embedding ###")
         nnx.display(self.embedder)
@@ -244,7 +227,7 @@ class Llama4ForCausalLM(Model):
     def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):
         self.rng = nnx.Rngs(rng)
         weight_loader = Llama4WeightLoader(vllm_config=self.vllm_config,
-                                           model_config=self.cfg.model)
+                                           model_config=self._model_config)
         weight_loader.load_weights(self)
 
     def __call__(
