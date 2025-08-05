@@ -15,18 +15,17 @@ import tpu_commons.models.jax.common.sharding as sharding
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.common.attention.attention import (
     AttentionConfig, AttentionMetadata)
-from tpu_commons.models.jax.common.base import Config, ParamFactory
+from tpu_commons.models.jax.common.base import ParamFactory
 from tpu_commons.models.jax.common.constants import KVCacheType
 from tpu_commons.models.jax.common.layers import (DenseFFWConfig, Embedder,
                                                   EmbedderConfig, LMhead,
                                                   RMSNorm)
 from tpu_commons.models.jax.common.model import Model
-from tpu_commons.models.jax.common.sharding import (Sharding, ShardingConfig,
+from tpu_commons.models.jax.common.sharding import (Sharding,
                                                     ShardingRulesConfig)
 from tpu_commons.models.jax.common.transformer_block import (
     TransformerBlock, TransformerBlockConfig)
 from tpu_commons.models.jax.layers.misc import shard_put
-from tpu_commons.models.jax.recipes.recipe import RecipeConfig
 from tpu_commons.models.jax.utils.weight_utils import (
     get_param, hf_model_weights_iterator, reshape_params, transpose_params)
 
@@ -86,21 +85,6 @@ class Llama3ShardingRulesConfig(ShardingRulesConfig):
     lm_head_dv: tuple = (None, sharding.MLP_TENSOR_AXIS_NAME)
 
 
-@dataclass
-class Llama3ServingConfig(Config):
-    vllm_config: VllmConfig = field(repr=False, default=None)
-
-
-@dataclass(frozen=True)
-class Llama3RecipeConfig(RecipeConfig):
-    model: Llama3ModelConfig
-    sharding: ShardingConfig = field(
-        default_factory=ShardingConfig,
-        repr=False,
-    )
-    serving: Llama3ServingConfig = field(default_factory=Llama3ServingConfig)
-
-
 class LlamaForCausalLM(Model):
 
     def __init__(self,
@@ -148,13 +132,12 @@ class LlamaForCausalLM(Model):
                 f"Could not determine Llama3 variant (8B or 70B) from model name: '{model_name}'. "
                 "Please ensure '8b' or '70b' is in the model path.")
 
-        self.cfg = Llama3RecipeConfig(
-            model=Llama3ModelConfig(vllm_config=self.vllm_config,
-                                    **model_params),
-            sharding=self.sharding.sharding_cfg,
-            serving=Llama3ServingConfig(vllm_config=self.vllm_config))
+        self._model_config = Llama3ModelConfig(vllm_config=self.vllm_config,
+                                               **model_params)
 
-        logger.info(f"Using the following config:\n{self.cfg}")
+        logger.info(
+            f"Using the following config:\n{self._model_config}; {self.sharding}"
+        )
         logger.info(
             f"Using the following sharding overrides:\n{self.sharding}")
         self.mesh = self.sharding.mesh
@@ -166,44 +149,44 @@ class LlamaForCausalLM(Model):
                 kernel_initializer=nnx.initializers.xavier_normal(),
                 scale_initializer=nnx.initializers.ones,
                 random_init=False)
-        self.embedder = Embedder(cfg=self.cfg.model.emb,
+        self.embedder = Embedder(cfg=self._model_config.emb,
                                  mesh=self.mesh,
                                  param_factory=self.param_factory,
-                                 sharding_cfg=self.cfg.sharding)
+                                 sharding_cfg=self.sharding.sharding_cfg)
         self.embedder.generate_kernel(self.rng)
 
         self.layers = [
-            TransformerBlock(cfg=self.cfg.model.layers,
+            TransformerBlock(cfg=self._model_config.layers,
                              block_type="dense",
                              param_factory=self.param_factory,
                              mesh=self.mesh,
-                             sharding_cfg=self.cfg.sharding)
-            for i in range(self.cfg.model.num_layers)
+                             sharding_cfg=self.sharding.sharding_cfg)
+            for i in range(self._model_config.num_layers)
         ]
         for i in range(len(self.layers)):
             self.layers[i].generate_kernel(self.rng)
 
         self.final_norm = RMSNorm(
-            dims=self.cfg.model.hidden_size,
+            dims=self._model_config.hidden_size,
             mesh=self.mesh,
             param_factory=self.param_factory,
-            sharding_cfg=self.cfg.sharding,
-            epsilon=self.cfg.model.layers.rms_norm_eps,
+            sharding_cfg=self.sharding.sharding_cfg,
+            epsilon=self._model_config.layers.rms_norm_eps,
             with_scale=True,
-            dtype=self.cfg.model.dtype,
+            dtype=self._model_config.dtype,
         )
         self.final_norm.generate_kernel(self.rng)
 
-        self.lm_head = LMhead(cfg=self.cfg.model.emb,
+        self.lm_head = LMhead(cfg=self._model_config.emb,
                               mesh=self.mesh,
                               param_factory=self.param_factory,
-                              sharding_cfg=self.cfg.sharding)
+                              sharding_cfg=self.sharding.sharding_cfg)
         self.lm_head.generate_kernel(self.rng)
 
     def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):
         self.rng = nnx.Rngs(rng)
         weight_loader = Llama3WeightLoader(vllm_config=self.vllm_config,
-                                           model_config=self.cfg.model)
+                                           model_config=self._model_config)
         weight_loader.load_weights(self)
 
     def __call__(

@@ -9,7 +9,6 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh
 
 from tpu_commons.models.jax.recipes.llama3 import (Llama3ModelConfig,
-                                                   Llama3RecipeConfig,
                                                    Llama3WeightLoader,
                                                    LlamaForCausalLM)
 
@@ -137,13 +136,6 @@ class TestLlama3Configs:
         assert config.layers is not None
         assert config.layers.attention.hidden_size == config.hidden_size
 
-    def test_llama3_recipe_config(self, small_model_config):
-        """Tests the composition of configurations in Llama3RecipeConfig."""
-        recipe = Llama3RecipeConfig(model=small_model_config)
-        assert recipe.model == small_model_config
-        assert recipe.sharding is not None
-        assert recipe.serving is not None
-
 
 class TestLlamaForCausalLM:
     """Tests for the main LlamaForCausalLM model class."""
@@ -154,7 +146,7 @@ class TestLlamaForCausalLM:
     def test_init_8b_variant(self, _, mock_vllm_config_8b, rng, mesh):
         """Tests correct parameter detection for the 8B model variant."""
         model = LlamaForCausalLM(mock_vllm_config_8b, rng, mesh)
-        assert model.cfg.model.hidden_size == 4096
+        assert model._model_config.hidden_size == 4096
         assert "8b" in model.vllm_config.model_config.model.lower()
 
     @patch(
@@ -163,7 +155,7 @@ class TestLlamaForCausalLM:
     def test_init_70b_variant(self, _, mock_vllm_config_70b, rng, mesh):
         """Tests correct parameter detection for the 70B model variant."""
         model = LlamaForCausalLM(mock_vllm_config_70b, rng, mesh)
-        assert model.cfg.model.hidden_size == 8192
+        assert model._model_config.hidden_size == 8192
         assert "70b" in model.vllm_config.model_config.model.lower()
 
     def test_init_unknown_variant_raises_error(self, mock_vllm_config_unknown,
@@ -208,8 +200,8 @@ class TestLlamaForCausalLM:
         mock_loader_instance = MagicMock()
         mock_loader_cls.return_value = mock_loader_instance
         model.load_weights(rng, cache_dir="/tmp/cache")
-        mock_loader_cls.assert_called_once_with(vllm_config=vllm_config,
-                                                model_config=model.cfg.model)
+        mock_loader_cls.assert_called_once_with(
+            vllm_config=vllm_config, model_config=model._model_config)
         mock_loader_instance.load_weights.assert_called_once_with(model)
 
 
@@ -248,9 +240,8 @@ class TestLlama3WeightLoader:
                 return_value=None):
             model = LlamaForCausalLM(vllm_config, rng, mesh)
 
-        cfg = Llama3RecipeConfig(model=small_model_config,
-                                 sharding=model.cfg.sharding)
-        model.cfg = cfg
+        model._model_config = small_model_config
+        model.sharding = model.sharding
         model._init_layers()  # Now initialize with the small config
 
         loader = Llama3WeightLoader(vllm_config=vllm_config,
