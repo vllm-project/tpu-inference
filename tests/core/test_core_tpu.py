@@ -11,7 +11,8 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
 from vllm.v1.engine.core import ModelRunnerOutput
 from vllm.v1.request import Request
 
-from tpu_commons.core.adapters import VllmConfigAdapter, VllmEngineAdapter
+from tpu_commons.core.adapters import (VllmConfigAdapter, VllmEngineAdapter,
+                                       VllmRequestAdapter)
 from tpu_commons.core.core_tpu import DisaggEngineCoreProc, _DisaggOrchestrator
 from tpu_commons.interfaces.config import IConfig
 from tpu_commons.interfaces.engine import IEngineCore
@@ -646,7 +647,30 @@ class TestDisaggEngineCoreProcUnit(unittest.TestCase):
         self.addCleanup(self.mock_handshake_patcher.stop)
 
         # Patch threads to avoid them running in the background.
-        self.thread_patcher = patch("threading.Thread", MagicMock)
+        def mock_thread_constructor(*args, **kwargs):
+            mock_thread = MagicMock()
+
+            def mock_start():
+                # Check if this is the input thread by looking at target and args
+                target = kwargs.get('target')
+                thread_args = kwargs.get('args', ())
+
+                # If this is the input thread (process_input_sockets), set the ready_event
+                if (target and hasattr(target, '__name__')
+                        and target.__name__ == 'process_input_sockets'):
+                    assert len(
+                        thread_args
+                    ) == 4, "Expected 4 arguments for vllm process_input_sockets function"
+                    ready_event = thread_args[
+                        3]  # ready_event is the 4th argument
+                    ready_event.set()
+
+            mock_thread.start = mock_start
+            mock_thread.is_alive.return_value = True
+            return mock_thread
+
+        self.thread_patcher = patch("threading.Thread",
+                                    side_effect=mock_thread_constructor)
         self.mock_thread = self.thread_patcher.start()
         self.addCleanup(self.thread_patcher.stop)
 
@@ -693,11 +717,20 @@ class TestDisaggEngineCoreProcUnit(unittest.TestCase):
         mock_request = MagicMock(spec=EngineCoreRequest)
         mock_request.request_id = "test_req"
         mock_request.mm_hashes = None
+        mock_request.mm_inputs = []
         mock_request.use_structured_output = False
 
         proc.add_request(mock_request)
 
         self.mock_orchestrator.return_value.add_request.assert_called_once()
+        # Get the argument passed to add_request
+        passed_request_adapter = self.mock_orchestrator.return_value.add_request.call_args[
+            0][0]
+
+        # Assert it's the correct type and wraps the correct underlying request
+        self.assertIsInstance(passed_request_adapter, VllmRequestAdapter)
+        self.assertIsInstance(passed_request_adapter.vllm_request, Request)
+        self.assertEqual(passed_request_adapter.request_id, "test_req")
 
     def test_shutdown(self):
         """Tests that the adapter correctly delegates shutdown to the orchestrator."""
@@ -723,11 +756,20 @@ class TestDisaggEngineCoreProcUnit(unittest.TestCase):
         mock_request = MagicMock(spec=EngineCoreRequest)
         mock_request.request_id = "test_req"
         mock_request.mm_hashes = None
+        mock_request.mm_inputs = []
         mock_request.use_structured_output = False
 
         proc._handle_client_request(EngineCoreRequestType.ADD, mock_request)
 
         self.mock_orchestrator.return_value.add_request.assert_called_once()
+        # Get the argument passed to add_request
+        passed_request_adapter = self.mock_orchestrator.return_value.add_request.call_args[
+            0][0]
+
+        # Assert it's the correct type and wraps the correct underlying request
+        self.assertIsInstance(passed_request_adapter, VllmRequestAdapter)
+        self.assertIsInstance(passed_request_adapter.vllm_request, Request)
+        self.assertEqual(passed_request_adapter.request_id, "test_req")
 
     def test_handle_client_request_abort(self):
         """Tests that the adapter correctly handles an ABORT request."""
