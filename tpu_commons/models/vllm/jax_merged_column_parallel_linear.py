@@ -12,5 +12,7 @@ class JaxMergedColumnParallelLinear(JaxMergedColumnParallelLinearCore):
                  mesh: Mesh):
         assert isinstance(merged_col_parallel_linear,
                           MergedColumnParallelLinear)
-        super().__init__(merged_col_parallel_linear, mesh,
-                         "JaxMergedColumnParallelLinear")
+        super().__init__(merged_col_parallel_linear,
+                         mesh,
+                         "JaxMergedColumnParallelLinear",
+                         fuse_matmuls=False)
