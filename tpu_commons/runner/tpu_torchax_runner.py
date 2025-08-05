@@ -180,7 +180,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self.vocab_size = model_config.get_vocab_size()
 
         # Multi-modal data support
-        # NOTE(vlakarp): this mm budget computation ...
         if self.is_multimodal_model:
             from vllm.multimodal import MULTIMODAL_REGISTRY
             self.mm_registry = MULTIMODAL_REGISTRY
