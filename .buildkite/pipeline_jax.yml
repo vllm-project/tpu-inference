@@ -5,6 +5,8 @@ steps:
    - label: "E2E MLPerf tests for JAX models"
      key: test_0
      soft_fail: true
+     env:
+       HF_HUB_DISABLE_XET: "1"
      agents:
        queue: tpu_v6e_queue
      commands:
@@ -15,6 +17,7 @@ steps:
      soft_fail: true
      env:
        MODEL_IMPL_TYPE: "vllm"
+       HF_HUB_DISABLE_XET: "1"
      agents:
        queue: tpu_v6e_queue
      commands:
@@ -23,6 +26,8 @@ steps:
    - label: "JAX unit tests"
      key: test_2
      soft_fail: true
+     env:
+       HF_HUB_DISABLE_XET: "1"
      agents:
        queue: tpu_v6e_queue
      commands:
@@ -39,6 +44,7 @@ steps:
      env:
        TPU_BACKEND_TYPE: "jax"
        QUANTIZATION: "True"
+       HF_HUB_DISABLE_XET: "1"
      agents:
        queue: tpu_v6e_queue
      commands:
@@ -49,6 +55,7 @@ steps:
      soft_fail: true
      env:
        NEW_MODEL_DESIGN: "True"
+       HF_HUB_DISABLE_XET: "1"
      agents:
        queue: tpu_v6e_queue
      commands:
@@ -57,6 +64,8 @@ steps:
    - label: "Ragged Paged Attention v3 kernel tests"
      key: test_5
      soft_fail: true
+     env:
+       HF_HUB_DISABLE_XET: "1"
      agents:
        queue: tpu_v6e_queue
      commands:
