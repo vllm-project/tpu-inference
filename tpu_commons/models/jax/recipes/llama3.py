@@ -283,21 +283,14 @@ class Llama3WeightLoader(WeightLoader):
             "v_proj.bias": (num_key_value_heads, attn_head_dim)
         }
 
-    def setup(self):
-        super().setup()
-
         # Set the mappings from loaded parameter keys to standardized names.
-        self.set_loaded_to_standardized_keys({
-            "model.embed_tokens":
-            "embedder.input_embedding_table_VD",
+        self._loaded_to_standardized_keys = {
+            "model.embed_tokens": "embedder.input_embedding_table_VD",
             "model.layers.*.input_layernorm":
             "layers.*.pre_attention_norm.scale",
-            "model.layers.*.mlp.down_proj":
-            "layers.*.mlp.kernel_down_proj_FD",
-            "model.layers.*.mlp.gate_proj":
-            "layers.*.mlp.kernel_gating_DF",
-            "model.layers.*.mlp.up_proj":
-            "layers.*.mlp.kernel_up_proj_DF",
+            "model.layers.*.mlp.down_proj": "layers.*.mlp.kernel_down_proj_FD",
+            "model.layers.*.mlp.gate_proj": "layers.*.mlp.kernel_gating_DF",
+            "model.layers.*.mlp.up_proj": "layers.*.mlp.kernel_up_proj_DF",
             "model.layers.*.post_attention_layernorm":
             "layers.*.pre_mlp_norm.scale",
             "model.layers.*.self_attn.k_proj":
@@ -308,11 +301,12 @@ class Llama3WeightLoader(WeightLoader):
             "layers.*.attn.kernel_q_proj_DNH",
             "model.layers.*.self_attn.v_proj":
             "layers.*.attn.kernel_v_proj_DKH",
-            "model.norm":
-            "final_norm.scale",
-            "lm_head":
-            "lm_head.input_embedding_table_DV"
-        })
+            "model.norm": "final_norm.scale",
+            "lm_head": "lm_head.input_embedding_table_DV"
+        }
+
+    def setup(self):
+        super().setup()
 
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
         # Find the corresponding model key using the HF key
@@ -321,13 +315,13 @@ class Llama3WeightLoader(WeightLoader):
             if layer_num_match:
                 layer_num = layer_num_match.group(1)
                 layer_key = re.sub(r"layers\.\d+", "layers.*", loaded_key)
-                mapped_key = self.loaded_to_standardized_keys.get(
+                mapped_key = self._loaded_to_standardized_keys.get(
                     layer_key, layer_key)
                 mapped_key = re.sub(r"layers\.\*", f"layers.{layer_num}",
                                     mapped_key)
                 return mapped_key
 
-        return self.loaded_to_standardized_keys.get(loaded_key, loaded_key)
+        return self._loaded_to_standardized_keys.get(loaded_key, loaded_key)
 
     def load_weights(self, model_for_loading: nnx.Module):
         model_params = nnx.state(model_for_loading)
