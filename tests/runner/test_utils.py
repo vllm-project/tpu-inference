@@ -10,11 +10,14 @@ import pytest
 from jax._src.interpreters import pxla
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
+# yapf: disable
 from tpu_commons.runner.utils import (ForbidCompile, LatencyTracker,
                                       create_kv_caches, determine_do_sampling,
                                       get_padded_num_reqs_with_upper_limit,
                                       get_padded_token_len, get_req_paddings,
-                                      get_token_paddings, pad_to_multiple)
+                                      get_token_paddings,
+                                      log_batch_computation_stats,
+                                      pad_to_multiple)
 
 
 def test_determine_do_sampling():
@@ -288,3 +291,24 @@ def test_create_kv_caches(mesh: Mesh):
 
         # Ensure that separate array objects were created for each layer
         assert kv_caches[0] is not kv_caches[1]
+
+
+def test_log_batch_computation_stats():
+    mock_input_batch = MagicMock()
+    mock_input_batch.req_ids = [0, 1, 2, 3, 4]
+    mock_input_batch.num_computed_tokens_cpu = [0, 10, 5, 5, 2]
+    total_num_scheduled_tokens = 10
+    num_reqs = 5
+    padded_total_num_scheduled_tokens = 128
+    mock_scheduler_output = MagicMock()
+    mock_scheduler_output.num_scheduled_tokens = {0: 1, 1: 2, 2: 2, 3: 1, 4: 4}
+    return_str = log_batch_computation_stats(
+        mock_input_batch, total_num_scheduled_tokens, num_reqs,
+        padded_total_num_scheduled_tokens, mock_scheduler_output)
+    num_prefill_tokens = 9
+    num_decode_tokens = 1
+    assert return_str ==  f"\nBatch composition: Total tokens={total_num_scheduled_tokens}, " \
+            f"\nPrefill tokens={num_prefill_tokens}, " \
+            f"\nDecode tokens={num_decode_tokens} " \
+            f"\nTotal padded tokens={padded_total_num_scheduled_tokens}) " \
+            f"\nTotal number of requests={num_reqs})"

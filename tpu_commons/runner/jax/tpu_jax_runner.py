@@ -929,7 +929,7 @@ class TPUModelRunner():
 
         logger.debug(
             runner_utils.log_batch_computation_stats(
-                total_num_scheduled_tokens, num_reqs,
+                self.input_batch, total_num_scheduled_tokens, num_reqs,
                 padded_total_num_scheduled_tokens, scheduler_output))
 
         # Inputs

@@ -15,6 +15,7 @@ from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
 from tpu_commons import utils
 from tpu_commons.logger import init_logger
+from tpu_commons.runner.jax.input_batch_jax import InputBatch
 
 DEFAULT_KV_CACHE_DTYPE = jnp.bfloat16
 MIN_NUM_SEQS = 8
@@ -246,12 +247,25 @@ def create_kv_caches(
     return kv_caches
 
 
-def log_batch_computation_stats(self, total_num_scheduled_tokens: int,
-                                num_reqs: int,
-                                padded_total_num_scheduled_tokens: int,
-                                scheduler_output: "VllmSchedulerOutput"):
+def log_batch_computation_stats(
+        input_batch: InputBatch, total_num_scheduled_tokens: int,
+        num_reqs: int, padded_total_num_scheduled_tokens: int,
+        scheduler_output: "VllmSchedulerOutput") -> str:
     """
+    Logs the total number of tokens scheduled for the batch, the number of
+    prefill tokens, the number of decode tokens, and the number of padded
+    tokens scheduled for the batch.
 
+    Args:
+        input_batch: The input batch.
+        total_num_scheduled_tokens: The total number of tokens scheduled for the batch.
+        num_reqs: The number of requests in the batch.
+        padded_total_num_scheduled_tokens: The padded total number of tokens scheduled for the batch.
+        scheduler_output: The scheduler output.
+
+    Returns:
+        A string containing the total number of tokens scheduled for the batch, the number of
+        prefill tokens, the number of decode tokens, and the number of padded tokens scheduled for the batch.
     """
     num_prefill_tokens = 0
     num_decode_tokens = 0
@@ -259,10 +273,10 @@ def log_batch_computation_stats(self, total_num_scheduled_tokens: int,
     # Get the number of scheduled tokens for each request.
     num_scheduled_tokens_per_req_list = []
     # Get the number of tokens already processed for each request.
-    num_computed_tokens_per_req = self.input_batch.num_computed_tokens_cpu[:
-                                                                           num_reqs]
+    num_computed_tokens_per_req = input_batch.num_computed_tokens_cpu[:
+                                                                      num_reqs]
 
-    for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+    for i, req_id in enumerate(input_batch.req_ids[:num_reqs]):
         assert req_id is not None
 
         # This is the number of tokens to process in the current step for this request
@@ -283,10 +297,8 @@ def log_batch_computation_stats(self, total_num_scheduled_tokens: int,
             else:
                 # It's a single token for an ongoing request, so it's decode
                 num_decode_tokens += 1
-
-    logger.info(
-        f"\nBatch composition: Total tokens={total_num_scheduled_tokens}, "
-        f"\nPrefill tokens={num_prefill_tokens}, "
-        f"\nDecode tokens={num_decode_tokens} "
-        f"\n(padded_total_num_scheduled_tokens {padded_total_num_scheduled_tokens})"
-        f"\n(num reqs {num_reqs})")
+    return f"\nBatch composition: Total tokens={total_num_scheduled_tokens}, " \
+            f"\nPrefill tokens={num_prefill_tokens}, " \
+            f"\nDecode tokens={num_decode_tokens} " \
+            f"\nTotal padded tokens={padded_total_num_scheduled_tokens}) " \
+            f"\nTotal number of requests={num_reqs})"
