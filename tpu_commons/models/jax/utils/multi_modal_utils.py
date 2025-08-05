@@ -1,11 +1,9 @@
-
 from typing import Union
+
 import jax
 import jax.numpy as jnp
 from typing_extensions import TypeAlias
-
 from vllm.logger import init_logger
-
 
 logger = init_logger(__name__)
 
@@ -14,7 +12,6 @@ NestedTensors: TypeAlias = Union[list["NestedTensors"], list["jax.Array"],
 """
 Uses a list instead of a tensor if the dimensions of each element do not match.
 """
-
 
 MultiModalEmbeddings = Union[list[jax.Array], jax.Array, tuple[jax.Array, ...]]
 """
@@ -78,6 +75,7 @@ def _embedding_count_expression(embeddings: NestedTensors) -> str:
     return " + ".join(
         _embedding_count_expression(inner) for inner in embeddings)
 
+
 def _merge_multimodal_embeddings(
     inputs_embeds: jax.Array,
     is_multimodal: jax.Array,
@@ -130,11 +128,11 @@ def merge_multimodal_embeddings(
     Merge ``multimodal_embeddings`` into ``inputs_embeds`` by overwriting the
     positions in ``inputs_embeds`` corresponding to placeholder tokens in
     ``input_ids``.
-    
-    ``placeholder_token_id`` can be a list of token ids (e.g, token ids 
-    of img_start, img_break, and img_end tokens) when needed: This means 
-    the order of these tokens in the ``input_ids`` MUST MATCH the order of 
-    their embeddings in ``multimodal_embeddings`` since we need to 
+
+    ``placeholder_token_id`` can be a list of token ids (e.g, token ids
+    of img_start, img_break, and img_end tokens) when needed: This means
+    the order of these tokens in the ``input_ids`` MUST MATCH the order of
+    their embeddings in ``multimodal_embeddings`` since we need to
     slice-merge instead of individually scattering.
 
     For example, if input_ids is "TTTTTSIIIBIIIBIIIETTT", where
@@ -143,9 +141,9 @@ def merge_multimodal_embeddings(
     - I is image embedding token
     - B is image break token
     - E is image end token.
-    
-    Then the image embeddings (that correspond to I's) from vision encoder 
-    must be padded with embeddings of S, B, and E in the same order of 
+
+    Then the image embeddings (that correspond to I's) from vision encoder
+    must be padded with embeddings of S, B, and E in the same order of
     input_ids for a correct embedding merge.
 
         This returns a new array with the updated values.
@@ -156,7 +154,8 @@ def merge_multimodal_embeddings(
         return _merge_multimodal_embeddings(
             inputs_embeds,
             jnp.isin(input_ids, placeholder_token_id),
-            multimodal_embeddings,)
+            multimodal_embeddings,
+        )
 
     return _merge_multimodal_embeddings(
         inputs_embeds,

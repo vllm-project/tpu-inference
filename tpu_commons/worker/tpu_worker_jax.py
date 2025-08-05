@@ -4,8 +4,8 @@ import os
 from typing import Callable, Dict, Optional, Tuple, Union
 
 import jax
-import jaxtyping
 import jax.numpy as jnp
+import jaxtyping
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
