@@ -16,6 +16,7 @@ from jax.sharding import NamedSharding, PartitionSpec
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
+from vllm.forward_context import set_forward_context
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils import cdiv
@@ -661,7 +662,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         inputs = self._prepare_inputs(scheduler_output)
         with self.maybe_forbid_compile:
 
-            with self.maybe_get_kv_connector_output(
+            with set_forward_context(
+                    None,
+                    self.vllm_config,
+            ), self.maybe_get_kv_connector_output(
                     scheduler_output) as kv_connector_output:
                 self.kv_caches, hidden_states = self.model_fn(
                     self.state, *inputs[:3])
