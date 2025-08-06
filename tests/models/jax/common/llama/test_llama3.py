@@ -8,8 +8,7 @@ import pytest
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
 
-from tpu_commons.models.jax.recipes.llama3 import (Llama3ModelConfig,
-                                                   Llama3WeightLoader,
+from tpu_commons.models.jax.recipes.llama3 import (Llama3WeightLoader,
                                                    LlamaForCausalLM)
 
 
@@ -91,71 +90,22 @@ def mock_vllm_config_unknown() -> MockVllmConfig:
     return MockVllmConfig(model_name="some-other-model")
 
 
-@pytest.fixture
-def small_model_config() -> Llama3ModelConfig:
-    """A small model configuration for fast and memory-efficient tests."""
-    return Llama3ModelConfig(hidden_size=32,
-                             num_layers=2,
-                             num_attention_heads=4,
-                             num_key_value_heads=2,
-                             intermediate_size=64,
-                             head_dim=8,
-                             vocab_size=128,
-                             dtype=jnp.bfloat16)
-
-
 # --- Test Cases ---
-
-
-class TestLlama3Configs:
-    """Tests for the various dataclass configurations."""
-
-    def test_llama3_model_config_defaults(self):
-        """Tests that default values are set correctly."""
-        config = Llama3ModelConfig(
-            hidden_size=128,
-            num_layers=2,
-            num_attention_heads=4,
-            num_key_value_heads=2,
-            intermediate_size=256,
-        )
-        assert config.hidden_size == 128
-        assert config.vocab_size == 128256  # Default vocab size
-
-    def test_llama3_model_config_post_init(self):
-        """Tests that sub-configurations are created in __post_init__."""
-        config = Llama3ModelConfig(
-            hidden_size=128,
-            num_layers=2,
-            num_attention_heads=4,
-            num_key_value_heads=2,
-            intermediate_size=256,
-        )
-        assert config.emb is not None
-        assert config.emb.vocab_size == config.vocab_size
-        assert config.layers is not None
-        assert config.layers.attention.hidden_size == config.hidden_size
 
 
 class TestLlamaForCausalLM:
     """Tests for the main LlamaForCausalLM model class."""
 
-    @patch(
-        "tpu_commons.models.jax.recipes.llama3.LlamaForCausalLM._init_layers",
-        return_value=None)
-    def test_init_8b_variant(self, _, mock_vllm_config_8b, rng, mesh):
+    def test_init_8b_variant(self, mock_vllm_config_8b, rng, mesh):
         """Tests correct parameter detection for the 8B model variant."""
         model = LlamaForCausalLM(mock_vllm_config_8b, rng, mesh)
-        assert model._model_config.hidden_size == 4096
+        assert model.hidden_size == 4096
         assert "8b" in model.vllm_config.model_config.model.lower()
 
-    @patch(
-        "tpu_commons.models.jax.recipes.llama3.LlamaForCausalLM._init_layers",
-        return_value=None)
-    def test_init_70b_variant(self, _, mock_vllm_config_70b, rng, mesh):
+    def test_init_70b_variant(self, mock_vllm_config_70b, rng, mesh):
         """Tests correct parameter detection for the 70B model variant."""
         model = LlamaForCausalLM(mock_vllm_config_70b, rng, mesh)
-        assert model._model_config.hidden_size == 8192
+        assert model.hidden_size == 8192
         assert "70b" in model.vllm_config.model_config.model.lower()
 
     def test_init_unknown_variant_raises_error(self, mock_vllm_config_unknown,
@@ -186,12 +136,8 @@ class TestLlamaForCausalLM:
 
         assert jnp.all(final_norm_scale == 1.0)
 
-    @patch(
-        "tpu_commons.models.jax.recipes.llama3.LlamaForCausalLM._init_layers",
-        return_value=None)
     @patch("tpu_commons.models.jax.recipes.llama3.Llama3WeightLoader")
-    def test_load_weights_called_correctly(self, mock_loader_cls, _, rng,
-                                           mesh):
+    def test_load_weights_called_correctly(self, mock_loader_cls, rng, mesh):
         """Tests that the weight loader is called correctly for checkpoint loading."""
         vllm_config = MockVllmConfig(model_name="llama3-8b",
                                      random_weights=False)
@@ -200,8 +146,11 @@ class TestLlamaForCausalLM:
         mock_loader_instance = MagicMock()
         mock_loader_cls.return_value = mock_loader_instance
         model.load_weights(rng, cache_dir="/tmp/cache")
-        mock_loader_cls.assert_called_once_with(
-            vllm_config=vllm_config, model_config=model._model_config)
+        mock_loader_cls.assert_called_once_with(vllm_config=vllm_config,
+                                                hidden_size=4096,
+                                                attn_heads=32,
+                                                num_key_value_heads=8,
+                                                attn_head_dim=128)
         mock_loader_instance.load_weights.assert_called_once_with(model)
 
 
@@ -209,10 +158,13 @@ class TestLlama3WeightLoader:
     """Tests for the Llama3WeightLoader class."""
 
     @pytest.fixture
-    def weight_loader(self, small_model_config):
+    def weight_loader(self):
         # Patch the superclass's setup to isolate the Llama3 loader's logic
         return Llama3WeightLoader(vllm_config=MockVllmConfig("test-model"),
-                                  model_config=small_model_config)
+                                  hidden_size=32,
+                                  attn_heads=4,
+                                  num_key_value_heads=2,
+                                  attn_head_dim=8)
 
     @pytest.mark.parametrize("hf_key, expected", [
         ("model.layers.15.self_attn.q_proj",
@@ -229,29 +181,20 @@ class TestLlama3WeightLoader:
         assert weight_loader.map_loaded_to_standardized_name(
             hf_key) == expected
 
-    def test_load_weights_transformation(self, small_model_config, rng, mesh):
+    def test_load_weights_transformation(self, weight_loader, rng, mesh):
         """Tests that weights are correctly reshaped, transposed, and loaded."""
         vllm_config = MockVllmConfig("llama3-8b-small-test",
                                      random_weights=False)
 
         # Create a model instance but override its config for the test.
-        with patch(
-                "tpu_commons.models.jax.recipes.llama3.LlamaForCausalLM._init_layers",
-                return_value=None):
-            model = LlamaForCausalLM(vllm_config, rng, mesh)
-
-        model._model_config = small_model_config
-        model._init_layers()  # Now initialize with the small config
-
-        loader = Llama3WeightLoader(vllm_config=vllm_config,
-                                    model_config=small_model_config)
+        model = LlamaForCausalLM(vllm_config, rng, mesh)
 
         # Original weight shape is (vocab_size, hidden_size)
         original_weight = jnp.ones((128, 32))
         dummy_weights = [
             ("model.embed_tokens.weight", original_weight),
         ]
-        loader.names_and_weights_generator = dummy_weights
+        weight_loader.names_and_weights_generator = dummy_weights
 
         # Mock get_param to return a mock param with the target shape (hidden_size, vocab_size)
         mock_param = MockParam(shape=(128, 32))
@@ -261,7 +204,7 @@ class TestLlama3WeightLoader:
             patch("flax.nnx.update") as mock_update:
 
             # This will now pass after the code fix
-            loader.load_weights(model)
+            weight_loader.load_weights(model)
 
             # Assert that shard_put was called with the correctly transposed weight
             mock_shard_put.assert_called_once()
