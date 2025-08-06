@@ -17,8 +17,8 @@ from tpu_commons.models.jax.common.attention.attention import (
     AttentionConfig, AttentionMetadata)
 from tpu_commons.models.jax.common.base import ParamFactory
 from tpu_commons.models.jax.common.constants import KVCacheType
-from tpu_commons.models.jax.common.layers import (DenseFFWConfig, Embedder,
-                                                  LMhead, RMSNorm)
+from tpu_commons.models.jax.common.layers import (DenseFFW, DenseFFWConfig,
+                                                  Embedder, LMhead, RMSNorm)
 from tpu_commons.models.jax.common.model import Model
 from tpu_commons.models.jax.common.sharding import (Sharding,
                                                     ShardingRulesConfig)
@@ -127,10 +127,14 @@ class LlamaForCausalLM(Model):
 
         self.layers = [
             TransformerBlock(cfg=layer_config,
-                             block_type="dense",
                              param_factory=self.param_factory,
                              mesh=self.mesh,
-                             sharding_cfg=sharding_config)
+                             sharding_cfg=sharding_config,
+                             custom_module=DenseFFW(
+                                 cfg=layer_config.dense_ffw,
+                                 mesh=self.mesh,
+                                 param_factory=self.param_factory,
+                                 sharding_cfg=sharding_config))
             for _ in range(num_layers)
         ]
         for i in range(len(self.layers)):
