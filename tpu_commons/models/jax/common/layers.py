@@ -215,14 +215,35 @@ class DenseFFW(nnx.Module):
             shape=(D, F),
             dtype=self.cfg.dtype,
             sharding=self.df_sharding)
+        # FP8
+        # TODO: update 128 to use config
+        self.kernel_gating_scale_DF = self.param_factory.create_kernel_param(
+            rngs,
+            shape=(D // 128, F // 128),
+            dtype=self.cfg.dtype,
+            sharding=self.df_sharding)
         self.kernel_up_proj_DF = self.param_factory.create_kernel_param(
             rngs,
             shape=(D, F),
             dtype=self.cfg.dtype,
             sharding=self.df_sharding)
+        # FP8
+        # TODO: update 128 to use config
+        self.kernel_up_proj_scale_DF = self.param_factory.create_kernel_param(
+            rngs,
+            shape=(D // 128, F // 128),
+            dtype=self.cfg.dtype,
+            sharding=self.df_sharding)
         self.kernel_down_proj_FD = self.param_factory.create_kernel_param(
             rngs,
             shape=(F, D),
+            dtype=self.cfg.dtype,
+            sharding=self.fd_sharding)
+        # FP8
+        # TODO: update 128 to use config
+        self.kernel_down_proj_scale_FD = self.param_factory.create_kernel_param(
+            rngs,
+            shape=(F // 128, D // 128),
             dtype=self.cfg.dtype,
             sharding=self.fd_sharding)
 

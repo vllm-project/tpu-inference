@@ -383,21 +383,45 @@ class DeepSeekV3WeightLoader:
             "layers.*.attn.kv_rms_norm.scale",
             "model.layers.*.self_attn.q_a_proj.weight":
             "layers.*.attn.kernel_q_down_proj_DA",
+            # Scale
+            "model.layers.*.self_attn.q_a_proj.weight_scale_inv":
+            "layers.*.attn.kernel_q_down_proj_scale_DA",
             "model.layers.*.self_attn.q_b_proj.weight":
             "layers.*.attn.kernel_q_up_proj_ANH",
+            # Scale
+            "model.layers.*.self_attn.q_b_proj.weight_scale_inv":
+            "layers.*.attn.kernel_q_up_proj_scale_ANH",
             "model.layers.*.self_attn.kv_a_proj_with_mqa.weight":
             "layers.*.attn.kernel_kv_down_proj_DA",
+            # Scale
+            "model.layers.*.self_attn.kv_a_proj_with_mqa.weight_scale_inv":
+            "layers.*.attn.kernel_kv_down_proj_scale_DA",
             "model.layers.*.self_attn.kv_b_proj.weight":
             "layers.*.attn.kernel_kv_up_proj_ANH",
+            # Scale
+            "model.layers.*.self_attn.kv_b_proj.weight_scale_inv":
+            "layers.*.attn.kernel_kv_up_proj_scale_ANH",
             "model.layers.*.self_attn.o_proj.weight":
             "layers.*.attn.kernel_o_proj_NHD",
+            # Scale
+            "model.layers.*.self_attn.o_proj.weight_scale_inv":
+            "layers.*.attn.kernel_o_proj_scale_NHD",
             # Dense ffw
             "model.layers.*.mlp.gate_proj.weight":
             "layers.*.mlp.kernel_gating_DF",
+            # Scale
+            "model.layers.*.mlp.gate_proj.weight_scale_inv":
+            "layers.*.mlp.kernel_gating_scale_DF",
             "model.layers.*.mlp.up_proj.weight":
             "layers.*.mlp.kernel_up_proj_DF",
+            # Scale
+            "model.layers.*.mlp.up_proj.weight_scale_inv":
+            "layers.*.mlp.kernel_up_proj_scale_DF",
             "model.layers.*.mlp.down_proj.weight":
             "layers.*.mlp.kernel_down_proj_FD",
+            # Scale
+            "model.layers.*.mlp.down_proj.weight_scale_inv":
+            "layers.*.mlp.kernel_down_proj_scale_FD",
             # MOE(routed experts)
             "model.layers.*.mlp.gate.weight":
             "layers.*.moe.router.kernel_DE",
@@ -518,18 +542,18 @@ class DeepSeekV3WeightLoader:
                     if int(expert_num) >= self.num_routed_experts:
                         del loaded_weight
                         continue
-                if loaded_weight.dtype == torch.float8_e4m3fn:
-                    fp8_weights[loaded_name] = loaded_weight
-                    continue
-                if loaded_name.endswith(".weight_scale_inv"):
-                    # assuming weights are loaded before scales.
-                    weight_name = loaded_name.replace(".weight_scale_inv",
-                                                      ".weight")
+                # if loaded_weight.dtype == torch.float8_e4m3fn:
+                #     fp8_weights[loaded_name] = loaded_weight
+                #     continue
+                # if loaded_name.endswith(".weight_scale_inv"):
+                #     # assuming weights are loaded before scales.
+                #     weight_name = loaded_name.replace(".weight_scale_inv",
+                #                                       ".weight")
 
-                    loaded_weight = weights_dequant_cpu(
-                        fp8_weights[weight_name], loaded_weight)
-                    loaded_name = weight_name
-                    del fp8_weights[weight_name]
+                #     loaded_weight = weights_dequant_cpu(
+                #         fp8_weights[weight_name], loaded_weight)
+                #     loaded_name = weight_name
+                #     del fp8_weights[weight_name]
                 # concat mlp.experts weights
                 if "mlp.experts" in loaded_name:
                     print(f'[debug] {loaded_name=}')
