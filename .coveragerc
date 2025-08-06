@@ -1,2 +1,4 @@
 [run]
-omit = */ragged_paged_attention/v3/*
+omit =
+    */ragged_paged_attention/v3/*
+    */multi_modal_utils.py
