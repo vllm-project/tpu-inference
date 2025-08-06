@@ -1168,8 +1168,7 @@ class TPUModelRunner():
             self.input_batch.condense(removed_req_indices)
 
         batch_changed = len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
-        # batch_reordered = self._reorder_batch(scheduler_output)
-        batch_reordered = False
+        batch_reordered = self._reorder_batch(scheduler_output)
         return batch_changed or batch_reordered
 
     def _sync_weights(
@@ -1216,12 +1215,10 @@ class TPUModelRunner():
         assert num_reqs == self.input_batch.num_reqs
 
         # find the most frequent prefill length
-        max_prefill_cnt, most_freq_prefill_length = 0, 0
-        for prefill_len in non_decodes.keys():
-            prefill_cnt = len(non_decodes[prefill_len])
-            if prefill_cnt > max_prefill_cnt:
-                max_prefill_cnt = prefill_cnt
-                most_freq_prefill_length = prefill_len
+        most_freq_prefill_length = max(non_decodes,
+                                       key=lambda k: len(non_decodes[k]),
+                                       default=0)
+        max_prefill_cnt = len(non_decodes.get(most_freq_prefill_length, []))
 
         # Find out requests that need to be swapped.
         num_decode = len(decodes)
