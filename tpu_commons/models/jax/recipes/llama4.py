@@ -1,7 +1,5 @@
-import io
-import pprint
 import re
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import List, Optional, Tuple
 
 import jax
@@ -21,7 +19,7 @@ from tpu_commons.models.jax.common.constants import KVCacheType, RouterType
 from tpu_commons.models.jax.common.layers import (DenseFFWConfig, Embedder,
                                                   EmbedderConfig, LMhead,
                                                   RMSNorm)
-from tpu_commons.models.jax.common.model import Model, ModelConfig
+from tpu_commons.models.jax.common.model import Model
 from tpu_commons.models.jax.common.moe.moe import MoEConfig, RouterConfig
 from tpu_commons.models.jax.common.sharding import (Sharding,
                                                     ShardingRulesConfig)
@@ -33,80 +31,6 @@ from tpu_commons.models.jax.utils.weight_utils import (
     transpose_params)
 
 logger = init_logger(__name__)
-pp = pprint.PrettyPrinter(depth=6)
-string_buffer = io.StringIO()
-
-
-@dataclass
-class Llama4ModelConfig(ModelConfig):
-    # Add parameters shared across multiple layers here.
-    hidden_size: int = 5120
-    dtype: jnp.dtype = jnp.bfloat16
-    num_layers: int = 48
-    emb: EmbedderConfig = None
-    layers: SharedExpertsTransformerBlockConfig = None
-    vllm_config: VllmConfig = field(repr=False, default=None)
-    interleave_moe_layer_step: int = 1  # All layers are MoE for Scout
-    intermediate_size_moe: int = 8192
-    num_local_experts: int = 16
-    hidden_act: str = "silu"
-    no_rope_layer_interval: int = 4
-
-    def __post_init__(self):
-        # Initialize defaults:
-        if not self.emb:
-            self.emb = EmbedderConfig(vocab_size=202048,
-                                      hidden_size=self.hidden_size,
-                                      dtype=self.dtype,
-                                      normalize_embeddings=False,
-                                      vllm_config=self.vllm_config)
-        if not self.layers:
-            self.layers = SharedExpertsTransformerBlockConfig(
-                shared_experts=1,
-                attention=Llama4AttentionConfig(
-                    hidden_size=self.hidden_size,
-                    num_attention_heads=40,
-                    num_key_value_heads=8,
-                    head_dim=128,
-                    rope_theta=500000.0,
-                    # https://huggingface.co/meta-llama/Llama-4-Scout-17B-16E-Instruct/blob/main/config.json
-                    rope_scaling={
-                        "scale_factor": 16.0,
-                        "low_freq_factor": 1.0,
-                        "high_freq_factor": 1.0,
-                        "original_max_position_embeddings": 8192
-                    },
-                    rope_input_ordering="interleaved",
-                    temperature_tuning=True,
-                    temperature_tuning_scale=0.1,
-                    temperature_tuning_floor_scale=8192,
-                    use_qk_norm=True,
-                    attention_chunk_size=8192,
-                    dtype=self.dtype,
-                    vllm_config=self.vllm_config),
-                dense_ffw=DenseFFWConfig(hidden_size=self.hidden_size,
-                                         intermediate_size=16384,
-                                         hidden_act=self.hidden_act,
-                                         dtype=self.dtype,
-                                         vllm_config=self.vllm_config),
-                moe=MoEConfig(hidden_size=self.hidden_size,
-                              intermediate_size_moe=self.intermediate_size_moe,
-                              dtype=self.dtype,
-                              num_local_experts=self.num_local_experts,
-                              hidden_act=self.hidden_act,
-                              apply_expert_weight_before_computation=True,
-                              router=RouterConfig(
-                                  hidden_size=self.hidden_size,
-                                  num_local_experts=self.num_local_experts,
-                                  num_experts_per_token=1,
-                                  router_type=RouterType.TOP_K,
-                                  router_act="sigmoid",
-                                  expert_capacity=-1,
-                                  dtype=self.dtype,
-                                  vllm_config=self.vllm_config),
-                              vllm_config=self.vllm_config),
-                rms_norm_eps=1e-5,
-                vllm_config=self.vllm_config)
 
 
 @dataclass
@@ -138,20 +62,81 @@ class Llama4ForCausalLM(Model):
         self._sharding_config = Sharding(
             default_rules_cls=Llama4ShardingRulesConfig,
             vllm_config=self.vllm_config).sharding_cfg
-        self._model_config = Llama4ModelConfig(vllm_config=self.vllm_config)
 
-        logger.info(
-            f"Using the following config:\n{self._model_config}; {self._sharding_config}"
-        )
-        self._init_layers()
+        self.hidden_size: int = 5120
+        dtype: jnp.dtype = jnp.bfloat16
+        num_layers: int = 48
+        self.interleave_moe_layer_step = 1  # All layers are MoE for Scout
+        intermediate_size_moe: int = 8192
+        num_local_experts: int = 16
+        hidden_act: str = "silu"
+        self.no_rope_layer_interval = 4
 
-    def _init_layers(self):
+        layer_config = SharedExpertsTransformerBlockConfig(
+            shared_experts=1,
+            attention=Llama4AttentionConfig(
+                hidden_size=self.hidden_size,
+                num_attention_heads=40,
+                num_key_value_heads=8,
+                head_dim=128,
+                rope_theta=500000.0,
+                # https://huggingface.co/meta-llama/Llama-4-Scout-17B-16E-Instruct/blob/main/config.json
+                rope_scaling={
+                    "scale_factor": 16.0,
+                    "low_freq_factor": 1.0,
+                    "high_freq_factor": 1.0,
+                    "original_max_position_embeddings": 8192
+                },
+                rope_input_ordering="interleaved",
+                temperature_tuning=True,
+                temperature_tuning_scale=0.1,
+                temperature_tuning_floor_scale=8192,
+                use_qk_norm=True,
+                attention_chunk_size=8192,
+                dtype=dtype,
+                vllm_config=self.vllm_config),
+            dense_ffw=DenseFFWConfig(hidden_size=self.hidden_size,
+                                     intermediate_size=16384,
+                                     hidden_act=hidden_act,
+                                     dtype=dtype,
+                                     vllm_config=self.vllm_config),
+            moe=MoEConfig(hidden_size=self.hidden_size,
+                          intermediate_size_moe=intermediate_size_moe,
+                          dtype=dtype,
+                          num_local_experts=num_local_experts,
+                          hidden_act=hidden_act,
+                          apply_expert_weight_before_computation=True,
+                          router=RouterConfig(
+                              hidden_size=self.hidden_size,
+                              num_local_experts=num_local_experts,
+                              num_experts_per_token=1,
+                              router_type=RouterType.TOP_K,
+                              router_act="sigmoid",
+                              expert_capacity=-1,
+                              dtype=dtype,
+                              vllm_config=self.vllm_config),
+                          vllm_config=self.vllm_config),
+            rms_norm_eps=1e-5,
+            vllm_config=self.vllm_config)
+
+        self.num_attention_heads = layer_config.attention.num_attention_heads
+        self.num_key_value_heads = layer_config.attention.num_key_value_heads
+        self.head_dim = layer_config.attention.head_dim
+
+        logger.info(f"Using the following config:\n {self._sharding_config}")
+
         if not self.param_factory:
             self.param_factory = ParamFactory(
                 kernel_initializer=nnx.initializers.xavier_normal(),
                 scale_initializer=nnx.initializers.ones,
                 random_init=False)
-        self.embedder = Embedder(cfg=self._model_config.emb,
+
+        embedder_config = EmbedderConfig(vocab_size=202048,
+                                         hidden_size=self.hidden_size,
+                                         dtype=dtype,
+                                         normalize_embeddings=False,
+                                         vllm_config=self.vllm_config)
+        self.embedder = Embedder(cfg=embedder_config,
                                  mesh=self.mesh,
                                  param_factory=self.param_factory,
                                  sharding_cfg=self._sharding_config)
@@ -159,19 +144,18 @@ class Llama4ForCausalLM(Model):
 
         self.layers = []
 
-        for i in range(self._model_config.num_layers):
+        for i in range(num_layers):
             # For Llama4-Scout, all layers are MoE layers.
             # This can be adjusted for other variants.
             is_moe_layer = (i + 1) % \
-                            self._model_config.interleave_moe_layer_step == 0
-            use_attention_rope = (
-                i + 1) % self._model_config.no_rope_layer_interval != 0
+                            self.interleave_moe_layer_step == 0
+            use_attention_rope = (i + 1) % self.no_rope_layer_interval != 0
             block_type = "moe" if is_moe_layer else "dense"
-            block_cfg_nope = self._model_config.layers
+            block_cfg_nope = layer_config
             # RoPE layers do not use chunked attention
             block_cfg_rope = replace(
-                self._model_config.layers,
-                attention=replace(self._model_config.layers.attention,
+                layer_config,
+                attention=replace(layer_config.attention,
                                   attention_chunk_size=None),
             )
             block_cfg = block_cfg_rope if use_attention_rope else block_cfg_nope
@@ -189,17 +173,17 @@ class Llama4ForCausalLM(Model):
             self.layers[i].generate_kernel(self.rng)
 
         self.final_norm = RMSNorm(
-            dims=self._model_config.hidden_size,
+            dims=self.hidden_size,
             mesh=self.mesh,
             param_factory=self.param_factory,
             sharding_cfg=self._sharding_config,
-            epsilon=self._model_config.layers.rms_norm_eps,
+            epsilon=layer_config.rms_norm_eps,
             with_scale=True,
-            dtype=self._model_config.dtype,
+            dtype=dtype,
         )
         self.final_norm.generate_kernel(self.rng)
 
-        self.lm_head = LMhead(cfg=self._model_config.emb,
+        self.lm_head = LMhead(cfg=embedder_config,
                               mesh=self.mesh,
                               param_factory=self.param_factory,
                               sharding_cfg=self._sharding_config)
@@ -208,8 +192,8 @@ class Llama4ForCausalLM(Model):
             self._print_model_architecture()
 
     def _print_model_architecture(self):
-        num_display_layers = max(self._model_config.interleave_moe_layer_step,
-                                 self._model_config.no_rope_layer_interval)
+        num_display_layers = max(self.interleave_moe_layer_step,
+                                 self.no_rope_layer_interval)
 
         logger.info("### Embedding ###")
         nnx.display(self.embedder)
@@ -225,8 +209,12 @@ class Llama4ForCausalLM(Model):
 
     def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):
         self.rng = nnx.Rngs(rng)
-        weight_loader = Llama4WeightLoader(vllm_config=self.vllm_config,
-                                           model_config=self._model_config)
+        weight_loader = Llama4WeightLoader(
+            vllm_config=self.vllm_config,
+            hidden_size=self.hidden_size,
+            attn_heads=self.num_attention_heads,
+            num_key_value_heads=self.num_key_value_heads,
+            attn_head_dim=self.head_dim)
         weight_loader.load_weights(self)
 
     def __call__(
@@ -257,7 +245,8 @@ class Llama4ForCausalLM(Model):
 
 class Llama4WeightLoader:
 
-    def __init__(self, vllm_config: VllmConfig, model_config: ModelConfig):
+    def __init__(self, vllm_config: VllmConfig, hidden_size, attn_heads,
+                 num_key_value_heads, attn_head_dim):
         self.names_and_weights_generator = hf_model_weights_iterator(
             model_name_or_path=vllm_config.model_config.model,
             framework="flax",
@@ -275,10 +264,6 @@ class Llama4WeightLoader:
             "o_proj": (1, 2, 0),
             "lm_head": (1, 0),
         }
-        hidden_size = model_config.hidden_size
-        attn_heads = model_config.layers.attention.num_attention_heads
-        num_key_value_heads = model_config.layers.attention.num_key_value_heads
-        attn_head_dim = model_config.layers.attention.head_dim
         self._weight_shape_map = {
             "q_proj": (attn_heads, attn_head_dim, hidden_size),
             "k_proj": (num_key_value_heads, attn_head_dim, hidden_size),
