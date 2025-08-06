@@ -345,10 +345,9 @@ class Attention(nnx.Module):
                                                 kv_packing, H)
         page_indices_flat = md.block_tables.flatten()
 
-        # TODO: update this once attention_metadata has distribution info.
-        # Currently put all requests into prefill mode.
-        distribution = jnp.array([0, md.num_seqs[0], md.num_seqs[0]],
-                                 dtype=jnp.int32)
+        num_decode, num_prefill, _ = md.request_distribution
+        distribution = jnp.array(
+            [num_decode, num_decode + num_prefill, md.num_seqs[0]])
         in_specs = (
             P(*self.sharding_cfg.generate_rules.query_ktnph),  # q_transformed
             P(*self.sharding_cfg.generate_rules.keyvalue_cache_nbkph
