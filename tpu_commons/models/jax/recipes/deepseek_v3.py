@@ -17,12 +17,12 @@ from tpu_commons.models.jax.common.attention.deepseek_v3_attention import (
     MLA, MLAConfig)
 from tpu_commons.models.jax.common.base import ParamFactory
 from tpu_commons.models.jax.common.constants import KVCacheType
-from tpu_commons.models.jax.common.layers import (DenseFFWConfig, Embedder,
-                                                  LMhead, RMSNorm)
+from tpu_commons.models.jax.common.layers import (DenseFFW, DenseFFWConfig,
+                                                  Embedder, LMhead, RMSNorm)
 from tpu_commons.models.jax.common.model import Model
 from tpu_commons.models.jax.common.moe.deepseek_moe import \
     DeepSeekV3RoutingConfig
-from tpu_commons.models.jax.common.moe.moe import MoEConfig
+from tpu_commons.models.jax.common.moe.moe import MoE, MoEConfig
 from tpu_commons.models.jax.common.sharding import (ATTN_HEAD_AXIS_NAME,
                                                     ATTN_TENSOR_AXIS_NAME,
                                                     Sharding,
@@ -208,8 +208,12 @@ class DeepSeekV3(Model):
 
         for i in range(first_k_dense_replace):
             block = TransformerBlock(cfg=layer_config,
-                                     block_type="dense",
                                      attention_cls=MLA,
+                                     custom_module=DenseFFW(
+                                         cfg=layer_config.dense_ffw,
+                                         mesh=self.mesh,
+                                         param_factory=self.param_factory,
+                                         sharding_cfg=self._sharding_config),
                                      param_factory=self.param_factory,
                                      mesh=self.mesh,
                                      sharding_cfg=self._sharding_config)
@@ -217,10 +221,18 @@ class DeepSeekV3(Model):
 
         for i in range(first_k_dense_replace, num_layers):
             is_moe_layer = ((i + 1) % interleave_moe_layer_step == 0)
-            block_type = "moe" if is_moe_layer else "dense"
+            custom_module = MoE(cfg=layer_config.moe,
+                                mesh=self.mesh,
+                                param_factory=self.param_factory,
+                                sharding_cfg=self._sharding_config
+                                ) if is_moe_layer else DenseFFW(
+                                    cfg=layer_config.dense_ffw,
+                                    mesh=self.mesh,
+                                    param_factory=self.param_factory,
+                                    sharding_cfg=self._sharding_config)
             block = SharedExpertsTransformerBlock(
                 cfg=layer_config,
-                block_type=block_type,
+                custom_module=custom_module,
                 attention_cls=MLA,
                 param_factory=self.param_factory,
                 mesh=self.mesh,
