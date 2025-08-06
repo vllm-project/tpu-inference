@@ -4,11 +4,11 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from vllm.v1.outputs import LogprobsTensors
 
 from tpu_commons.models.jax.layers.binary_search import topk_mask, topp_mask
-from tpu_commons.models.jax.sampling_metadata import \
+from tpu_commons.models.jax.layers.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
+from vllm.v1.outputs import LogprobsTensors
 
 
 @functools.partial(
