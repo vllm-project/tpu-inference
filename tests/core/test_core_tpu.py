@@ -143,11 +143,15 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
         mock_engine_request.mm_inputs = []
         mock_engine_request.use_structured_output = False
         mock_engine_request.kv_transfer_params = None
+        mock_engine_request.pooling_params = None
+        mock_engine_request.sampling_params.guided_decoding = None
 
         # Mock the prefill engine's scheduler
         mock_prefill_scheduler = self.mock_prefill_engine_instance.scheduler
 
         # Call the method under test
+        mock_engine_request, _ = proc.preprocess_add_request(
+            mock_engine_request)
         proc.add_request(mock_engine_request)
 
         # Assert that the request was added to the first prefill engine's scheduler

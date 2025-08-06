@@ -13,6 +13,7 @@ from typing import Any, Callable, Optional, TypeVar, Union
 import jax
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.tasks import POOLING_TASKS
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput,
                             UtilityResult)
@@ -229,40 +230,34 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
 
         return engine_cores
 
-    def _add_request(self, request: EngineCoreRequest) -> Request:
-        if request.mm_hashes is not None:
-            # Here, if hash exists for a multimodal input, then it will be
-            # fetched from the cache, else it will be added to the cache.
-            # Note that the cache here is mirrored with the client cache, so
-            # anything that has a hash must have a HIT cache entry here
-            # as well.
-            assert request.mm_inputs is not None
-            request.mm_inputs = self._prefill_engines[
-                0].mm_input_cache_server.get_and_update_p1(
-                    request.mm_inputs, request.mm_hashes)
-
-        req = Request.from_engine_core_request(request)
-
-        if req.use_structured_output:
-            # Start grammar compilation asynchronously
-            self._prefill_engines[0].structured_output_manager.grammar_init(
-                req)
-
-        return req
-
-    def add_request(self, request: EngineCoreRequest):
-        vllm_request = self._add_request(request)
+    def add_request(self, request: EngineCoreRequest, request_wave: int = 0):
+        # vllm_request = self._add_request(request)
 
         # TODO(fhzhang): support multiple prefill engines.
-        self._prefill_engines[0].scheduler.add_request(vllm_request)
-        self._requests[request.request_id] = vllm_request
+        if not isinstance(request.request_id, str):
+            raise TypeError(
+                f"request_id must be a string, got {type(request.request_id)}")
+
+        if pooling_params := request.pooling_params:
+            supported_pooling_tasks = [
+                task for task in self.get_supported_tasks()
+                if task in POOLING_TASKS
+            ]
+
+            if pooling_params.task not in supported_pooling_tasks:
+                raise ValueError(f"Unsupported task: {pooling_params.task!r} "
+                                 f"Supported tasks: {supported_pooling_tasks}")
+
+        self._prefill_engines[0].scheduler.add_request(request)
+        self._requests[request.request_id] = request
 
     def _handle_client_request(self, request_type: EngineCoreRequestType,
                                request: Any) -> None:
         """Dispatch request from client."""
 
         if request_type == EngineCoreRequestType.ADD:
-            self.add_request(request)
+            req, request_wave = request
+            self.add_request(req)
         elif request_type == EngineCoreRequestType.ABORT:
             # TODO(fhzhang): we need to keep track of which engine is processing
             # the request and finish it there.
