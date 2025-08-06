@@ -167,32 +167,32 @@ class DeepSeekV3(Model):
                  rng: jax.Array,
                  mesh: Mesh,
                  param_factory: ParamFactory | None = None):
+        assert mesh is not None
+
         self.vllm_config = vllm_config
         self.rng = nnx.Rngs(rng)
         self.param_factory = param_factory
-        try:
-            strategy_dict = self.vllm_config.additional_config["sharding"][
-                "sharding_strategy"]
-        except (KeyError, TypeError):
-            strategy_dict = {
-                "tensor_parallelism": 4,
-                "expert_parallelism": 2
-            }  # todo: update this.
-        self.sharding = Sharding(
-            strategy_dict=strategy_dict,
+
+        # Currently the runner will always set a mesh, so the custom default sharding (when
+        #  no sharding is set in vllm config) doesn't take effect.
+        # TODO(fhzhang): figure out whether we need to actually enable this.
+        #    strategy_dict = {
+        #        "tensor_parallelism": 4,
+        #        "expert_parallelism": 2
+        #    }  # todo: update this.
+        self._sharding_config = Sharding(
             prefill_rules=asdict(DeepSeekV3PrefillShardingRulesConfig()),
             generate_rules=asdict(DeepSeekV3GenerateShardingRulesConfig()),
             default_rules_cls=DeepSeekV3ShardingRulesConfig,
-            mesh=mesh,
-            vllm_config=self.vllm_config)
+            vllm_config=self.vllm_config).sharding_cfg
         self._model_config = DeepseekV3ModelConfig(
             vllm_config=self.vllm_config)
         logger.info(
-            f"Using the following config:\n{self._model_config}; {self.sharding}"
+            f"Using the following config:\n{self._model_config}; {self._sharding_config}"
         )
         self.use_random_init = self.vllm_config.additional_config.get(
             "random_weights", False)
-        self.mesh = self.sharding.mesh
+        self.mesh = mesh
 
         self.weight_loader = DeepSeekV3WeightLoader(
             vllm_config=vllm_config, model_config=self._model_config)
@@ -208,7 +208,7 @@ class DeepSeekV3(Model):
         self.embedder = Embedder(cfg=self._model_config.emb,
                                  mesh=self.mesh,
                                  param_factory=self.param_factory,
-                                 sharding_cfg=self.sharding.sharding_cfg)
+                                 sharding_cfg=self._sharding_config)
         self.embedder.generate_kernel(self.rng)
 
         self.layers = []
@@ -219,7 +219,7 @@ class DeepSeekV3(Model):
                                      attention_cls=MLA,
                                      param_factory=self.param_factory,
                                      mesh=self.mesh,
-                                     sharding_cfg=self.sharding.sharding_cfg)
+                                     sharding_cfg=self._sharding_config)
             self.layers.append(block)
 
         for i in range(self._model_config.first_k_dense_replace,
@@ -233,7 +233,7 @@ class DeepSeekV3(Model):
                 attention_cls=MLA,
                 param_factory=self.param_factory,
                 mesh=self.mesh,
-                sharding_cfg=self.sharding.sharding_cfg)
+                sharding_cfg=self._sharding_config)
             self.layers.append(block)
 
         for i in range(len(self.layers)):
@@ -243,7 +243,7 @@ class DeepSeekV3(Model):
             dims=self._model_config.hidden_size,
             mesh=self.mesh,
             param_factory=self.param_factory,
-            sharding_cfg=self.sharding.sharding_cfg,
+            sharding_cfg=self._sharding_config,
             epsilon=self._model_config.layers.rms_norm_eps,
             with_scale=True,
             dtype=self._model_config.dtype,
@@ -253,7 +253,7 @@ class DeepSeekV3(Model):
         self.lm_head = Embedder(cfg=self._model_config.emb,
                                 mesh=self.mesh,
                                 param_factory=self.param_factory,
-                                sharding_cfg=self.sharding.sharding_cfg)
+                                sharding_cfg=self._sharding_config)
         self.lm_head.generate_kernel(self.rng)
 
         # TODO: Add MTP.

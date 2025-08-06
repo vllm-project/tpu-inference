@@ -13,7 +13,7 @@ import jax.numpy as jnp
 from tpu_commons.models.jax.common.attention.attention import AttentionMetadata
 from tpu_commons.models.jax.common.attention.llama4_attention import (
     L2Norm, Llama4Attention, Llama4AttentionConfig)
-from tpu_commons.models.jax.common.sharding import Sharding
+from tpu_commons.models.jax.common.sharding import build_mesh
 
 
 @dataclass
@@ -27,9 +27,7 @@ class Llama4AttentionTest(unittest.TestCase):
     def setUp(self):
         devices = jax.devices()
         sharding_strategy = {"tensor_parallelism": len(devices)}
-        vllm_config = SimpleVLLMConfig()
-        sharding = Sharding(sharding_strategy, vllm_config=vllm_config)
-        self.mesh = sharding.build_mesh(sharding.sharding_strategy)
+        self.mesh = build_mesh(devices, sharding_strategy)
 
     def test_l2norm_forward_pass(self):
         """Tests the forward pass of the L2Norm module with hardcoded values."""
