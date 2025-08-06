@@ -275,8 +275,9 @@ class TPUModelRunner():
                                             dtype=np.int32)
             block_tables = self.block_table_cpu[:self.max_num_reqs]
             seq_lens = np.ones((self.max_num_reqs, ), dtype=np.int32)
-            query_start_loc = np.ones((self.max_num_reqs + 1, ),
-                                      dtype=np.int32)
+            query_start_loc = np.cumsum(np.array([0] +
+                                                 [1] * self.max_num_reqs),
+                                        dtype=np.int32)
             num_seqs = np.array([self.max_num_reqs], dtype=np.int32)
             num_slices = np.array([1], dtype=np.int32)
 
