@@ -343,7 +343,7 @@ def get_tuned_block_sizes(
     )
     tuned_sizes = TUNED_BLOCK_SIZES.get(key, None)
     if tuned_sizes is None:
-        logger.warn(
+        logger.warning(
             f"Couldn't find tuned sizes for the quantized matmul kernel with {key=}"
         )
         return (128, 128, 128)
