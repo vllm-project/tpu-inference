@@ -1,5 +1,5 @@
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from typing import List, Optional, Tuple
 
 import jax
@@ -19,7 +19,7 @@ from tpu_commons.models.jax.common.base import ParamFactory
 from tpu_commons.models.jax.common.constants import KVCacheType
 from tpu_commons.models.jax.common.layers import (DenseFFWConfig, Embedder,
                                                   EmbedderConfig, RMSNorm)
-from tpu_commons.models.jax.common.model import Model, ModelConfig
+from tpu_commons.models.jax.common.model import Model
 from tpu_commons.models.jax.common.moe.deepseek_moe import \
     DeepSeekV3RoutingConfig
 from tpu_commons.models.jax.common.moe.moe import MoEConfig
@@ -29,92 +29,12 @@ from tpu_commons.models.jax.common.sharding import (ATTN_HEAD_AXIS_NAME,
                                                     ShardingRulesConfig)
 from tpu_commons.models.jax.common.transformer_block import (
     SharedExpertsTransformerBlock, SharedExpertsTransformerBlockConfig,
-    TransformerBlock, TransformerBlockConfig)
+    TransformerBlock)
 from tpu_commons.models.jax.layers.misc import shard_put
 from tpu_commons.models.jax.utils.weight_utils import (
     get_param, hf_model_weights_iterator, print_param_info, reshape_params)
 
 logger = init_logger(__name__)
-
-
-@dataclass
-class DeepseekV3ModelConfig(ModelConfig):
-    vocab_size: int = 129280
-    hidden_size: int = 7168
-    dtype: jnp.dtype = jnp.bfloat16
-    num_layers: int = 61
-    num_attention_heads: int = 128
-    num_key_value_heads: int = 128
-    ffw_intermediate_size: int = 18432
-    moe_intermediate_size: int = 2048
-    num_local_experts: int = 256
-    num_experts_per_token: int = 8
-    n_group: int = 8
-    emb: EmbedderConfig = None
-    layers: TransformerBlockConfig = None
-    vllm_config: VllmConfig = field(repr=False, default=None)
-    interleave_moe_layer_step: int = 1  # Deepseek V3 has moe_layer_freq=1 in hf config.
-    hidden_act: str = "silu"
-    rms_norm_eps: float = 1e-06
-    first_k_dense_replace: int = 3  # replace the first few MOE layers to dense layer.
-
-    def __post_init__(self):
-        if not self.emb:
-            self.emb = EmbedderConfig(vocab_size=self.vocab_size,
-                                      hidden_size=self.hidden_size,
-                                      dtype=jnp.bfloat16,
-                                      normalize_embeddings=False)
-        if not self.layers:
-            self.layers = SharedExpertsTransformerBlockConfig(
-                shared_experts=1,
-                attention=MLAConfig(
-                    hidden_size=self.hidden_size,
-                    num_attention_heads=self.num_attention_heads,
-                    num_key_value_heads=self.num_key_value_heads,
-                    rope_theta=10000,
-                    rope_scaling={
-                        "beta_fast": 32,
-                        "beta_slow": 1,
-                        "factor": 40,
-                        "mscale": 1.0,
-                        "mscale_all_dim": 1.0,
-                        "original_max_position_embeddings": 4096,
-                        "type": "yarn"
-                    },
-                    q_lora_rank=1536,
-                    kv_lora_rank=512,
-                    qk_nope_head_dim=128,
-                    qk_rope_head_dim=64,
-                    v_head_dim=128,
-                    rms_norm_eps=self.rms_norm_eps,
-                    dtype=self.dtype,
-                    vllm_config=self.vllm_config),
-                dense_ffw=DenseFFWConfig(
-                    hidden_size=self.hidden_size,
-                    intermediate_size=self.ffw_intermediate_size,
-                    hidden_act=self.hidden_act,
-                    dtype=self.dtype,
-                    vllm_config=self.vllm_config),
-                moe=MoEConfig(
-                    hidden_size=self.hidden_size,
-                    intermediate_size_moe=self.moe_intermediate_size,
-                    dtype=self.dtype,
-                    num_local_experts=self.num_local_experts,
-                    hidden_act=self.hidden_act,
-                    apply_expert_weight_before_computation=False,
-                    router=DeepSeekV3RoutingConfig(
-                        hidden_size=self.hidden_size,
-                        n_routed_experts=self.num_local_experts,
-                        num_experts_per_token=self.num_experts_per_token,
-                        n_group=self.n_group,
-                        routed_scaling_factor=2.5,
-                        topk_group=4,
-                        norm_topk_prob=True,
-                        dtype=self.dtype,
-                        vllm_config=self.vllm_config),
-                    vllm_config=self.vllm_config),
-                rms_norm_eps=self.rms_norm_eps,
-                vllm_config=self.vllm_config)
 
 
 @dataclass
@@ -185,27 +105,99 @@ class DeepSeekV3(Model):
             generate_rules=asdict(DeepSeekV3GenerateShardingRulesConfig()),
             default_rules_cls=DeepSeekV3ShardingRulesConfig,
             vllm_config=self.vllm_config).sharding_cfg
-        self._model_config = DeepseekV3ModelConfig(
+
+        num_layers: int = 61
+        num_local_experts: int = 256
+
+        vocab_size: int = 129280
+        hidden_size: int = 7168
+        dtype: jnp.dtype = jnp.bfloat16
+        num_attention_heads: int = 128
+        num_key_value_heads: int = 128
+        ffw_intermediate_size: int = 18432
+        moe_intermediate_size: int = 2048
+        num_experts_per_token: int = 8
+        n_group: int = 8
+        interleave_moe_layer_step: int = 1  # Deepseek V3 has moe_layer_freq=1 in hf config.
+        hidden_act: str = "silu"
+        rms_norm_eps: float = 1e-06
+        first_k_dense_replace: int = 3  # replace the first few MOE layers to dense layer.
+
+        embedder_config = EmbedderConfig(vocab_size=vocab_size,
+                                         hidden_size=hidden_size,
+                                         dtype=jnp.bfloat16,
+                                         normalize_embeddings=False)
+        layer_config = SharedExpertsTransformerBlockConfig(
+            shared_experts=1,
+            attention=MLAConfig(hidden_size=hidden_size,
+                                num_attention_heads=num_attention_heads,
+                                num_key_value_heads=num_key_value_heads,
+                                rope_theta=10000,
+                                rope_scaling={
+                                    "beta_fast": 32,
+                                    "beta_slow": 1,
+                                    "factor": 40,
+                                    "mscale": 1.0,
+                                    "mscale_all_dim": 1.0,
+                                    "original_max_position_embeddings": 4096,
+                                    "type": "yarn"
+                                },
+                                q_lora_rank=1536,
+                                kv_lora_rank=512,
+                                qk_nope_head_dim=128,
+                                qk_rope_head_dim=64,
+                                v_head_dim=128,
+                                rms_norm_eps=rms_norm_eps,
+                                dtype=dtype,
+                                vllm_config=self.vllm_config),
+            dense_ffw=DenseFFWConfig(hidden_size=hidden_size,
+                                     intermediate_size=ffw_intermediate_size,
+                                     hidden_act=hidden_act,
+                                     dtype=dtype,
+                                     vllm_config=self.vllm_config),
+            moe=MoEConfig(hidden_size=hidden_size,
+                          intermediate_size_moe=moe_intermediate_size,
+                          dtype=dtype,
+                          num_local_experts=num_local_experts,
+                          hidden_act=hidden_act,
+                          apply_expert_weight_before_computation=False,
+                          router=DeepSeekV3RoutingConfig(
+                              hidden_size=hidden_size,
+                              n_routed_experts=num_local_experts,
+                              num_experts_per_token=num_experts_per_token,
+                              n_group=n_group,
+                              routed_scaling_factor=2.5,
+                              topk_group=4,
+                              norm_topk_prob=True,
+                              dtype=dtype,
+                              vllm_config=self.vllm_config),
+                          vllm_config=self.vllm_config),
+            rms_norm_eps=rms_norm_eps,
             vllm_config=self.vllm_config)
-        logger.info(
-            f"Using the following config:\n{self._model_config}; {self._sharding_config}"
-        )
+
+        logger.info(f"Using the following config:\n {self._sharding_config}")
         self.use_random_init = self.vllm_config.additional_config.get(
             "random_weights", False)
         self.mesh = mesh
 
         self.weight_loader = DeepSeekV3WeightLoader(
-            vllm_config=vllm_config, model_config=self._model_config)
+            vllm_config=vllm_config,
+            num_layers=num_layers,
+            hidden_size=hidden_size,
+            q_lora_rank=layer_config.attention.q_lora_rank,
+            kv_lora_rank=layer_config.attention.kv_lora_rank,
+            attn_heads=layer_config.attention.num_attention_heads,
+            qk_nope_head_dim=layer_config.attention.qk_nope_head_dim,
+            qk_rope_head_dim=layer_config.attention.qk_rope_head_dim,
+            v_head_dim=layer_config.attention.v_head_dim,
+            num_local_experts=num_local_experts)
 
-        self._init_layers()
-
-    def _init_layers(self):
         if not self.param_factory:
             self.param_factory = ParamFactory(
                 kernel_initializer=nnx.initializers.xavier_normal(),
                 scale_initializer=nnx.initializers.ones,
                 random_init=self.use_random_init)
-        self.embedder = Embedder(cfg=self._model_config.emb,
+        self.embedder = Embedder(cfg=embedder_config,
                                  mesh=self.mesh,
                                  param_factory=self.param_factory,
                                  sharding_cfg=self._sharding_config)
@@ -213,8 +205,8 @@ class DeepSeekV3(Model):
 
         self.layers = []
 
-        for i in range(self._model_config.first_k_dense_replace):
-            block = TransformerBlock(cfg=self._model_config.layers,
+        for i in range(first_k_dense_replace):
+            block = TransformerBlock(cfg=layer_config,
                                      block_type="dense",
                                      attention_cls=MLA,
                                      param_factory=self.param_factory,
@@ -222,13 +214,11 @@ class DeepSeekV3(Model):
                                      sharding_cfg=self._sharding_config)
             self.layers.append(block)
 
-        for i in range(self._model_config.first_k_dense_replace,
-                       self._model_config.num_layers):
-            is_moe_layer = ((i + 1) %
-                            self._model_config.interleave_moe_layer_step == 0)
+        for i in range(first_k_dense_replace, num_layers):
+            is_moe_layer = ((i + 1) % interleave_moe_layer_step == 0)
             block_type = "moe" if is_moe_layer else "dense"
             block = SharedExpertsTransformerBlock(
-                cfg=self._model_config.layers,
+                cfg=layer_config,
                 block_type=block_type,
                 attention_cls=MLA,
                 param_factory=self.param_factory,
@@ -240,17 +230,17 @@ class DeepSeekV3(Model):
             self.layers[i].generate_kernel(self.rng)
 
         self.final_norm = RMSNorm(
-            dims=self._model_config.hidden_size,
+            dims=hidden_size,
             mesh=self.mesh,
             param_factory=self.param_factory,
             sharding_cfg=self._sharding_config,
-            epsilon=self._model_config.layers.rms_norm_eps,
+            epsilon=rms_norm_eps,
             with_scale=True,
-            dtype=self._model_config.dtype,
+            dtype=dtype,
         )
         self.final_norm.generate_kernel(self.rng)
 
-        self.lm_head = Embedder(cfg=self._model_config.emb,
+        self.lm_head = Embedder(cfg=embedder_config,
                                 mesh=self.mesh,
                                 param_factory=self.param_factory,
                                 sharding_cfg=self._sharding_config)
@@ -323,12 +313,16 @@ class DeepSeekV3(Model):
 @dataclass
 class DeepSeekV3WeightLoader:
 
-    def __init__(self, vllm_config: VllmConfig, model_config: ModelConfig):
+    def __init__(self, vllm_config: VllmConfig, num_layers, hidden_size,
+                 q_lora_rank, kv_lora_rank, attn_heads, qk_nope_head_dim,
+                 qk_rope_head_dim, v_head_dim, num_local_experts):
+
+        self.num_layers = num_layers
         self.names_and_weights_generator = hf_model_weights_iterator(
             model_name_or_path=vllm_config.model_config.model,
             framework="flax",
             filter_regex="")
-        self.num_routed_experts = model_config.layers.moe.num_local_experts
+        self.num_routed_experts = num_local_experts
 
         self._transpose_map = {
             # dense mlp
@@ -350,14 +344,6 @@ class DeepSeekV3WeightLoader:
             r"mlp\.shared_experts\.gate_proj": (1, 0),
             r"mlp\.shared_experts\.up_proj": (1, 0)
         }
-        self._model_config = model_config
-        hidden_size = self._model_config.hidden_size
-        q_lora_rank = self._model_config.layers.attention.q_lora_rank
-        kv_lora_rank = self._model_config.layers.attention.kv_lora_rank
-        attn_heads = self._model_config.layers.attention.num_attention_heads
-        qk_nope_head_dim = self._model_config.layers.attention.qk_nope_head_dim
-        qk_rope_head_dim = self._model_config.layers.attention.qk_rope_head_dim
-        v_head_dim = self._model_config.layers.attention.v_head_dim
         self._weight_shape_map = {
             "q_b_proj":
             (attn_heads, qk_nope_head_dim + qk_rope_head_dim, q_lora_rank),
@@ -510,7 +496,7 @@ class DeepSeekV3WeightLoader:
                 if re.search(r"layers\.(\d+)", loaded_name):
                     layer_num = re.search(r"layers\.(\d+)",
                                           loaded_name).group(1)
-                    if int(layer_num) >= self._model_config.num_layers:
+                    if int(layer_num) >= self.num_layers:
                         del loaded_weight
                         continue
                 if 'layers.61' in loaded_name:
@@ -520,7 +506,7 @@ class DeepSeekV3WeightLoader:
                 if re.search(r"experts\.(\d+)", loaded_name):
                     expert_num = re.search(r"experts\.(\d+)",
                                            loaded_name).group(1)
-                    if int(expert_num) >= self._model_config.num_local_experts:
+                    if int(expert_num) >= self.num_routed_experts:
                         del loaded_weight
                         continue
                 if loaded_weight.dtype == torch.float8_e4m3fn:
