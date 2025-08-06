@@ -96,21 +96,23 @@ class LlamaForCausalLM(Model):
                  rng: jax.Array,
                  mesh: Mesh,
                  param_factory: ParamFactory | None = None):
+        assert mesh is not None
+
         self.vllm_config = vllm_config
         self.rng = nnx.Rngs(rng)
         self.mesh = mesh
         self.param_factory = param_factory
-        try:
-            strategy_dict = self.vllm_config.additional_config["sharding"][
-                "sharding_strategy"]
-        except (KeyError, TypeError):
-            strategy_dict = {"tensor_parallelism": 1}
-        #TODO: after all models are migrated to the new sharding,
+
+        # Currently the runner will always set a mesh, so the custom default sharding (when
+        #  no sharding is set in vllm config) doesn't take effect.
+        # TODO(fhzhang): figure out whether we need to actually enable this.
+        #    strategy_dict = {"tensor_parallelism": 1}
+        #
+        # TODO: after all models are migrated to the new sharding,
         # we need to only create sharding obj in TPU runner
-        self.sharding = Sharding(strategy_dict=strategy_dict,
-                                 mesh=self.mesh,
-                                 default_rules_cls=Llama3ShardingRulesConfig,
-                                 vllm_config=self.vllm_config)
+        self._sharding_config = Sharding(
+            default_rules_cls=Llama3ShardingRulesConfig,
+            vllm_config=self.vllm_config).sharding_cfg
 
         model_name = self.vllm_config.model_config.model.lower()
         if "70b" in model_name:
@@ -140,11 +142,8 @@ class LlamaForCausalLM(Model):
                                                **model_params)
 
         logger.info(
-            f"Using the following config:\n{self._model_config}; {self.sharding}"
+            f"Using the following config:\n{self._model_config}; {self._sharding_config}"
         )
-        logger.info(
-            f"Using the following sharding overrides:\n{self.sharding}")
-        self.mesh = self.sharding.mesh
         self._init_layers()
 
     def _init_layers(self):
@@ -156,7 +155,7 @@ class LlamaForCausalLM(Model):
         self.embedder = Embedder(cfg=self._model_config.emb,
                                  mesh=self.mesh,
                                  param_factory=self.param_factory,
-                                 sharding_cfg=self.sharding.sharding_cfg)
+                                 sharding_cfg=self._sharding_config)
         self.embedder.generate_kernel(self.rng)
 
         self.layers = [
@@ -164,7 +163,7 @@ class LlamaForCausalLM(Model):
                              block_type="dense",
                              param_factory=self.param_factory,
                              mesh=self.mesh,
-                             sharding_cfg=self.sharding.sharding_cfg)
+                             sharding_cfg=self._sharding_config)
             for i in range(self._model_config.num_layers)
         ]
         for i in range(len(self.layers)):
@@ -174,7 +173,7 @@ class LlamaForCausalLM(Model):
             dims=self._model_config.hidden_size,
             mesh=self.mesh,
             param_factory=self.param_factory,
-            sharding_cfg=self.sharding.sharding_cfg,
+            sharding_cfg=self._sharding_config,
             epsilon=self._model_config.layers.rms_norm_eps,
             with_scale=True,
             dtype=self._model_config.dtype,
@@ -184,7 +183,7 @@ class LlamaForCausalLM(Model):
         self.lm_head = LMhead(cfg=self._model_config.emb,
                               mesh=self.mesh,
                               param_factory=self.param_factory,
-                              sharding_cfg=self.sharding.sharding_cfg)
+                              sharding_cfg=self._sharding_config)
         self.lm_head.generate_kernel(self.rng)
 
     def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):
