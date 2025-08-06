@@ -5,8 +5,10 @@ import jax.numpy as jnp
 import numpy as np
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, VllmConfig)
+from vllm.multimodal.utils import MultiModalKwargs
 from vllm.sampling_params import SamplingType
-from vllm.v1.request import Request
+from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
+from vllm.v1.request import PlaceholderRange, Request
 
 from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
                                                     InputBatch)
@@ -502,6 +504,278 @@ class TestTPUJaxRunner(unittest.TestCase):
         self.assertEqual(set(final_ids[4:6]), {"p1", "p4"})
         np.testing.assert_array_equal(
             self.runner.input_batch.request_distribution, [2, 2, 2])
+    def test_execute_mm_encoder_single_image(self):
+        import torch
+        """Tests _execute_mm_encoder with a single request and a single image."""
+        # 1. ===== Setup =====
+        self.runner.is_multimodal_model = True
+        self.mock_get_mm_embed_fn = MagicMock()
+        self.runner.get_multimodal_embeddings_fn = self.mock_get_mm_embed_fn
+
+        # Mock scheduler output
+        mock_scheduler_output = MagicMock(spec=VllmSchedulerOutput)
+        mock_scheduler_output.scheduled_encoder_inputs = {"req-1": [0]}
+
+        # Mock request state
+        dummy_pixel_values = torch.randn(1, 3, 224, 224, dtype=torch.bfloat16)
+        dummy_grid_thw = torch.tensor([[[1, 1, 1]]], dtype=torch.int64)
+        mm_kwargs = MultiModalKwargs(pixel_values=dummy_pixel_values,
+                                     image_grid_thw=dummy_grid_thw)
+
+        req_state = CachedRequestState(
+            req_id="req-1",
+            prompt_token_ids=[1, 2, 3],
+            output_token_ids=[],
+            sampling_params=MagicMock(),
+            block_ids=(),
+            num_computed_tokens=0,
+            mm_inputs=[mm_kwargs],
+            mm_positions=[PlaceholderRange(start_idx=0, end_idx=1)],
+            lora_request=None,
+            mm_hashes=[],
+            pooling_params=None,
+            generator=None,
+        )
+        self.runner.requests = {"req-1": req_state}
+
+        # Mock the return value of the multimodal encoder
+        dummy_embedding = jnp.ones((10, 128), dtype=jnp.bfloat16)
+        self.mock_get_mm_embed_fn.return_value = (dummy_embedding, )
+
+        # 2. ===== Act =====
+        self.runner._execute_mm_encoder(mock_scheduler_output)
+
+        # 3. ===== Assert =====
+        # Check if encoder_cache is populated correctly
+        self.assertIn("req-1", self.runner.encoder_cache)
+        self.assertIn(0, self.runner.encoder_cache["req-1"])
+        cached_embedding = self.runner.encoder_cache["req-1"][0]
+        np.testing.assert_array_equal(np.asarray(cached_embedding),
+                                      np.asarray(dummy_embedding))
+
+        # Check if get_multimodal_embeddings_fn was called with correct args
+        self.mock_get_mm_embed_fn.assert_called_once()
+        call_args = self.mock_get_mm_embed_fn.call_args
+
+        # Positional args: (state, image_grid_thw)
+        state_arg, grid_arg = call_args.args
+        # Keyword args: **batched_mm_inputs
+        kwargs_arg = call_args.kwargs
+
+        self.assertIs(state_arg, self.runner.state)
+        self.assertEqual(grid_arg, ((1, 1, 1), ))
+        self.assertIn('pixel_values', kwargs_arg)
+
+        # Verify the pixel values tensor passed to the mock
+        passed_pixel_values = kwargs_arg['pixel_values']
+        self.assertIsInstance(passed_pixel_values, jnp.ndarray)
+        self.assertEqual(passed_pixel_values.dtype, jnp.bfloat16)
+
+        # Convert torch tensor for comparison
+        expected_pixel_values = dummy_pixel_values.to(
+            torch.float32).numpy().astype(jnp.bfloat16)
+        np.testing.assert_array_equal(np.asarray(passed_pixel_values),
+                                      expected_pixel_values)
+
+    def test_execute_mm_encoder_multiple_images(self):
+        import torch
+        """Tests _execute_mm_encoder with multiple requests and images."""
+        # 1. ===== Setup =====
+        self.runner.is_multimodal_model = True
+        self.mock_get_mm_embed_fn = MagicMock()
+        self.runner.get_multimodal_embeddings_fn = self.mock_get_mm_embed_fn
+
+        # Mock scheduler output for two requests
+        mock_scheduler_output = MagicMock(spec=VllmSchedulerOutput)
+        mock_scheduler_output.scheduled_encoder_inputs = {
+            "req-1": [0],
+            "req-2": [0]
+        }
+
+        # Mock request states
+        px_1 = torch.randn(1, 3, 224, 224, dtype=torch.bfloat16)
+        grid_1 = torch.tensor([[[1, 1, 1]]], dtype=torch.int64)
+        mm_kwargs_1 = MultiModalKwargs(pixel_values=px_1,
+                                       image_grid_thw=grid_1)
+        req_state_1 = CachedRequestState(req_id="req-1",
+                                         prompt_token_ids=[],
+                                         output_token_ids=[],
+                                         sampling_params=MagicMock(),
+                                         block_ids=(),
+                                         num_computed_tokens=0,
+                                         mm_inputs=[mm_kwargs_1],
+                                         mm_positions=[PlaceholderRange(0, 1)],
+                                         lora_request=None,
+                                         mm_hashes=[],
+                                         pooling_params=None,
+                                         generator=None)
+
+        px_2 = torch.randn(1, 3, 224, 224, dtype=torch.bfloat16)
+        grid_2 = torch.tensor([[[1, 2, 2]]], dtype=torch.int64)
+        mm_kwargs_2 = MultiModalKwargs(pixel_values=px_2,
+                                       image_grid_thw=grid_2)
+        req_state_2 = CachedRequestState(req_id="req-2",
+                                         prompt_token_ids=[],
+                                         output_token_ids=[],
+                                         sampling_params=MagicMock(),
+                                         block_ids=(),
+                                         num_computed_tokens=0,
+                                         mm_inputs=[mm_kwargs_2],
+                                         mm_positions=[PlaceholderRange(0, 1)],
+                                         lora_request=None,
+                                         mm_hashes=[],
+                                         pooling_params=None,
+                                         generator=None)
+
+        self.runner.requests = {"req-1": req_state_1, "req-2": req_state_2}
+
+        emb_1 = jnp.ones((10, 128), dtype=jnp.bfloat16)
+        emb_2 = jnp.ones((20, 128), dtype=jnp.bfloat16) * 2
+        self.mock_get_mm_embed_fn.return_value = (emb_1, emb_2)
+
+        # 2. ===== Act =====
+        self.runner._execute_mm_encoder(mock_scheduler_output)
+
+        # 3. ===== Assert =====
+        self.assertIn("req-1", self.runner.encoder_cache)
+        np.testing.assert_array_equal(
+            np.asarray(self.runner.encoder_cache["req-1"][0]),
+            np.asarray(emb_1))
+        self.assertIn("req-2", self.runner.encoder_cache)
+        np.testing.assert_array_equal(
+            np.asarray(self.runner.encoder_cache["req-2"][0]),
+            np.asarray(emb_2))
+
+        self.mock_get_mm_embed_fn.assert_called_once()
+        call_args = self.mock_get_mm_embed_fn.call_args
+
+        state_arg, grid_arg = call_args.args
+        kwargs_arg = call_args.kwargs
+
+        self.assertIs(state_arg, self.runner.state)
+        self.assertEqual(grid_arg, ((1, 1, 1), (1, 2, 2)))
+        self.assertIn('pixel_values', kwargs_arg)
+
+        passed_pixel_values = kwargs_arg['pixel_values']
+        self.assertEqual(passed_pixel_values.shape, (2, 3, 224, 224))
+
+        expected_pixel_values = torch.cat([px_1, px_2], dim=0).to(
+            torch.float32).numpy().astype(jnp.bfloat16)
+        np.testing.assert_array_equal(np.asarray(passed_pixel_values),
+                                      expected_pixel_values)
+
+    def test_gather_mm_embeddings_chunked_prefill(self):
+        """Tests _gather_mm_embeddings with chunked prefill scenarios."""
+        # 1. ===== Setup =====
+        self.runner.is_multimodal_model = True
+        req_id = "req-1"
+
+        # Mock encoder output
+        encoder_embedding = jnp.arange(56 * 128, dtype=jnp.bfloat16).reshape(
+            (56, 128))
+        self.runner.encoder_cache = {req_id: {0: encoder_embedding}}
+
+        # Mock request state
+        req_state = CachedRequestState(
+            req_id=req_id,
+            prompt_token_ids=list(range(100)),
+            output_token_ids=[],
+            sampling_params=MagicMock(),
+            block_ids=(),
+            num_computed_tokens=0,  # This will be updated per step
+            mm_inputs=[],
+            mm_positions=[
+                PlaceholderRange(start_idx=10,
+                                 end_idx=66,
+                                 offset=10,
+                                 length=56)
+            ],
+            lora_request=None,
+            mm_hashes=[],
+            pooling_params=None,
+            generator=None,
+        )
+        self.runner.requests = {req_id: req_state}
+        self.runner.input_batch.add_request(req_state)
+
+        # 2. ===== Act & Assert =====
+
+        # ----- Step 1: First chunk of prefill -----
+        req_state.num_computed_tokens = 0
+        mock_scheduler_output_1 = MagicMock(spec=VllmSchedulerOutput)
+        mock_scheduler_output_1.num_scheduled_tokens = {req_id: 20}
+
+        gathered_embeds_1 = self.runner._gather_mm_embeddings(
+            mock_scheduler_output_1)
+
+        self.assertEqual(len(gathered_embeds_1), 1)
+        expected_embeds_1 = encoder_embedding[0:10]
+        np.testing.assert_array_equal(np.asarray(gathered_embeds_1[0]),
+                                      np.asarray(expected_embeds_1))
+
+        # ----- Step 2: Middle chunk of prefill -----
+        req_state.num_computed_tokens = 20
+        mock_scheduler_output_2 = MagicMock(spec=VllmSchedulerOutput)
+        mock_scheduler_output_2.num_scheduled_tokens = {req_id: 30}
+
+        gathered_embeds_2 = self.runner._gather_mm_embeddings(
+            mock_scheduler_output_2)
+
+        self.assertEqual(len(gathered_embeds_2), 1)
+        expected_embeds_2 = encoder_embedding[10:40]
+        np.testing.assert_array_equal(np.asarray(gathered_embeds_2[0]),
+                                      np.asarray(expected_embeds_2))
+
+        # ----- Step 3: Last chunk of prefill -----
+        req_state.num_computed_tokens = 50
+        mock_scheduler_output_3 = MagicMock(spec=VllmSchedulerOutput)
+        mock_scheduler_output_3.num_scheduled_tokens = {req_id: 30}
+
+        gathered_embeds_3 = self.runner._gather_mm_embeddings(
+            mock_scheduler_output_3)
+
+        self.assertEqual(len(gathered_embeds_3), 1)
+        expected_embeds_3 = encoder_embedding[40:56]
+        np.testing.assert_array_equal(np.asarray(gathered_embeds_3[0]),
+                                      np.asarray(expected_embeds_3))
+
+    def test_get_model_inputs(self):
+        """Tests _get_model_inputs for both multimodal and text-only models."""
+        # 1. ===== Setup =====
+        dummy_input_ids = jnp.array([1, 2, 3])
+        dummy_mm_embeds = [jnp.ones((10, 128))]
+        dummy_final_embeds = jnp.ones((3, 128))
+
+        # Mock the embedding function
+        self.mock_get_input_embed_fn = MagicMock()
+        self.runner.get_input_embeddings_fn = self.mock_get_input_embed_fn
+        self.mock_get_input_embed_fn.return_value = dummy_final_embeds
+
+        # 2. ===== Act & Assert (Multimodal) =====
+        self.runner.is_multimodal_model = True
+
+        input_ids_res, inputs_embeds_res = self.runner._get_model_inputs(
+            dummy_input_ids, dummy_mm_embeds)
+
+        self.assertIsNone(input_ids_res)
+        np.testing.assert_array_equal(np.asarray(inputs_embeds_res),
+                                      np.asarray(dummy_final_embeds))
+        self.mock_get_input_embed_fn.assert_called_once_with(
+            self.runner.state,
+            input_ids=dummy_input_ids,
+            multimodal_embeddings=dummy_mm_embeds)
+
+        # 3. ===== Act & Assert (Text-only) =====
+        self.mock_get_input_embed_fn.reset_mock()
+        self.runner.is_multimodal_model = False
+
+        input_ids_res, inputs_embeds_res = self.runner._get_model_inputs(
+            dummy_input_ids, dummy_mm_embeds)
+
+        self.assertIsNone(inputs_embeds_res)
+        np.testing.assert_array_equal(np.asarray(input_ids_res),
+                                      np.asarray(dummy_input_ids))
+        self.mock_get_input_embed_fn.assert_not_called()
 
 
 if __name__ == '__main__':
