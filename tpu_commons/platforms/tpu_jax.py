@@ -198,6 +198,10 @@ class TpuPlatform(Platform):
             "Forcing --disable_chunked_mm_input.")
             scheduler_config.disable_chunked_mm_input = True
 
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if kv_transfer_config is not None:
+            assert kv_transfer_config.kv_connector == "TPUConnector"
+
         # Validate additional config
         if additional_config := vllm_config.additional_config:
             # Try loading/parsing the quantization config so that we can fail fast
