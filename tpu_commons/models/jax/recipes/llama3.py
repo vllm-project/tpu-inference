@@ -1,6 +1,7 @@
 # TODO: Update documentation
 
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -25,8 +26,11 @@ from tpu_commons.models.jax.common.sharding import (Sharding,
 from tpu_commons.models.jax.common.transformer_block import (
     TransformerBlock, TransformerBlockConfig)
 from tpu_commons.models.jax.layers.misc import shard_put
-from tpu_commons.models.jax.utils.weight_utils import (
-    get_param, hf_model_weights_iterator, reshape_params, transpose_params)
+from tpu_commons.models.jax.utils.weight_utils import (get_model_weights_files,
+                                                       get_param,
+                                                       model_weights_generator,
+                                                       reshape_params,
+                                                       transpose_params)
 
 logger = init_logger(__name__)
 
@@ -209,9 +213,6 @@ class Llama3WeightLoader:
 
     def __init__(self, vllm_config: VllmConfig, hidden_size, attn_heads,
                  num_key_value_heads, attn_head_dim):
-        self.names_and_weights_generator = hf_model_weights_iterator(
-            model_name_or_path=vllm_config.model_config.model,
-            framework="flax")
         self._transpose_map = {
             "lm_head": (1, 0),
             "gate_proj": (1, 0),
@@ -255,6 +256,7 @@ class Llama3WeightLoader:
             "model.norm": "final_norm.scale",
             "lm_head": "lm_head.input_embedding_table_DV"
         }
+        self.vllm_config = vllm_config
 
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
         # Find the corresponding model key using the HF key
@@ -271,9 +273,9 @@ class Llama3WeightLoader:
 
         return self._loaded_to_standardized_keys.get(loaded_key, loaded_key)
 
-    def load_weights(self, model_for_loading: nnx.Module):
-        model_params = nnx.state(model_for_loading)
-        for loaded_name, loaded_weight in self.names_and_weights_generator:
+    def load_weights_single_thread(self, model_params, weights_file, mesh):
+        for loaded_name, loaded_weight in model_weights_generator(
+                weights_file, framework="flax"):
             old_param_name = loaded_name
             if loaded_name.endswith(".weight"):
                 loaded_name = loaded_name.removesuffix(".weight")
@@ -304,6 +306,21 @@ class Llama3WeightLoader:
                 )
             model_weight.value = shard_put(loaded_weight,
                                            model_weight.sharding.spec,
-                                           mesh=model_for_loading.mesh)
+                                           mesh=mesh)
+
+    def load_weights(self, model_for_loading: nnx.Module):
+        model_params = nnx.state(model_for_loading)
+        model_path = self.vllm_config.model_config.model
+        weights_files = get_model_weights_files(model_path)
+        max_workers = min(64, len(weights_files))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(self.load_weights_single_thread, model_params,
+                                weights_file, model_for_loading.mesh)
+                for weights_file in weights_files
+            ]
+            for future in futures:
+                future.result()
+
         # TODO: validate that all of the model_params were accounted for as well.
         nnx.update(model_for_loading, model_params)

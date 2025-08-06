@@ -199,12 +199,11 @@ class TestLlama3WeightLoader:
         # Mock get_param to return a mock param with the target shape (hidden_size, vocab_size)
         mock_param = MockParam(shape=(128, 32))
 
-        with patch("tpu_commons.models.jax.recipes.llama3.get_param", return_value=mock_param), \
-            patch("tpu_commons.models.jax.recipes.llama3.shard_put", return_value=jnp.ones(mock_param.value.shape)) as mock_shard_put, \
-            patch("flax.nnx.update") as mock_update:
-
+        with patch("tpu_commons.models.jax.recipes.llama3.model_weights_generator", return_value=dummy_weights), \
+            patch("tpu_commons.models.jax.recipes.llama3.get_param", return_value=mock_param), \
+            patch("tpu_commons.models.jax.recipes.llama3.shard_put", return_value=jnp.ones(mock_param.value.shape)) as mock_shard_put:
             # This will now pass after the code fix
-            weight_loader.load_weights(model)
+            weight_loader.load_weights_single_thread(model, [], mesh)
 
             # Assert that shard_put was called with the correctly transposed weight
             mock_shard_put.assert_called_once()
@@ -214,6 +213,3 @@ class TestLlama3WeightLoader:
 
             # Check if the shape of the array passed to shard_put matches the model's expected shape.
             assert called_with_weight.shape == mock_param.value.shape
-
-            # Assert that the model state was updated
-            mock_update.assert_called_once()
