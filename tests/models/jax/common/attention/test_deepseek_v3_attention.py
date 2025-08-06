@@ -107,6 +107,7 @@ class TestMLA(unittest.TestCase):
             num_seqs=jnp.ones((1, ), dtype=jnp.int32),
             query_start_loc=jnp.array([0, seq_len],
                                       dtype=jnp.int32),  # This is cu_q_lens
+            request_distribution=jnp.array([0, 0, 1], dtype=jnp.int32),
         )
 
         # Run forward pass
