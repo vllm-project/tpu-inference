@@ -5,7 +5,8 @@ import jax.numpy as jnp
 import numpy as np
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, VllmConfig)
-from vllm.multimodal.utils import MultiModalKwargs
+from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
+from vllm.multimodal.inputs import MultiModalKwargs
 from vllm.sampling_params import SamplingType
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.request import PlaceholderRange, Request
@@ -512,15 +513,18 @@ class TestTPUJaxRunner(unittest.TestCase):
         self.mock_get_mm_embed_fn = MagicMock()
         self.runner.get_multimodal_embeddings_fn = self.mock_get_mm_embed_fn
 
+        self.runner.state = MagicMock()
         # Mock scheduler output
         mock_scheduler_output = MagicMock(spec=VllmSchedulerOutput)
         mock_scheduler_output.scheduled_encoder_inputs = {"req-1": [0]}
 
         # Mock request state
-        dummy_pixel_values = torch.randn(1, 3, 224, 224, dtype=torch.bfloat16)
-        dummy_grid_thw = torch.tensor([[[1, 1, 1]]], dtype=torch.int64)
-        mm_kwargs = MultiModalKwargs(pixel_values=dummy_pixel_values,
-                                     image_grid_thw=dummy_grid_thw)
+        dummy_pixel_values = torch.randn(3, 224, 224, dtype=torch.bfloat16)
+        dummy_grid_thw = torch.tensor([[1, 1, 1]], dtype=torch.int64)
+        mm_kwargs = MultiModalKwargs({
+            "pixel_values": dummy_pixel_values,
+            "image_grid_thw": dummy_grid_thw,
+        })
 
         req_state = CachedRequestState(
             req_id="req-1",
@@ -530,7 +534,7 @@ class TestTPUJaxRunner(unittest.TestCase):
             block_ids=(),
             num_computed_tokens=0,
             mm_inputs=[mm_kwargs],
-            mm_positions=[PlaceholderRange(start_idx=0, end_idx=1)],
+            mm_positions=[PlaceholderRange(offset=0, length=1)],
             lora_request=None,
             mm_hashes=[],
             pooling_params=None,
@@ -562,17 +566,17 @@ class TestTPUJaxRunner(unittest.TestCase):
         # Keyword args: **batched_mm_inputs
         kwargs_arg = call_args.kwargs
 
-        self.assertIs(state_arg, self.runner.state)
+        self.assertEqual(state_arg, self.runner.state)
         self.assertEqual(grid_arg, ((1, 1, 1), ))
-        self.assertIn('pixel_values', kwargs_arg)
+        self.assertIn("pixel_values", kwargs_arg)
 
         # Verify the pixel values tensor passed to the mock
         passed_pixel_values = kwargs_arg['pixel_values']
-        self.assertIsInstance(passed_pixel_values, jnp.ndarray)
+        self.assertIsInstance(passed_pixel_values, np.ndarray)
         self.assertEqual(passed_pixel_values.dtype, jnp.bfloat16)
 
         # Convert torch tensor for comparison
-        expected_pixel_values = dummy_pixel_values.to(
+        expected_pixel_values = dummy_pixel_values.unsqueeze(0).to(
             torch.float32).numpy().astype(jnp.bfloat16)
         np.testing.assert_array_equal(np.asarray(passed_pixel_values),
                                       expected_pixel_values)
@@ -585,6 +589,7 @@ class TestTPUJaxRunner(unittest.TestCase):
         self.mock_get_mm_embed_fn = MagicMock()
         self.runner.get_multimodal_embeddings_fn = self.mock_get_mm_embed_fn
 
+        self.runner.state = MagicMock()
         # Mock scheduler output for two requests
         mock_scheduler_output = MagicMock(spec=VllmSchedulerOutput)
         mock_scheduler_output.scheduled_encoder_inputs = {
@@ -593,39 +598,45 @@ class TestTPUJaxRunner(unittest.TestCase):
         }
 
         # Mock request states
-        px_1 = torch.randn(1, 3, 224, 224, dtype=torch.bfloat16)
-        grid_1 = torch.tensor([[[1, 1, 1]]], dtype=torch.int64)
-        mm_kwargs_1 = MultiModalKwargs(pixel_values=px_1,
-                                       image_grid_thw=grid_1)
-        req_state_1 = CachedRequestState(req_id="req-1",
-                                         prompt_token_ids=[],
-                                         output_token_ids=[],
-                                         sampling_params=MagicMock(),
-                                         block_ids=(),
-                                         num_computed_tokens=0,
-                                         mm_inputs=[mm_kwargs_1],
-                                         mm_positions=[PlaceholderRange(0, 1)],
-                                         lora_request=None,
-                                         mm_hashes=[],
-                                         pooling_params=None,
-                                         generator=None)
+        px_1 = torch.randn(3, 224, 224, dtype=torch.bfloat16)
+        grid_1 = torch.tensor([[1, 1, 1]], dtype=torch.int64)
+        mm_kwargs_1 = MultiModalKwargs({
+            "pixel_values": px_1,
+            "image_grid_thw": grid_1
+        })
+        req_state_1 = CachedRequestState(
+            req_id="req-1",
+            prompt_token_ids=[],
+            output_token_ids=[],
+            sampling_params=MagicMock(),
+            block_ids=(),
+            num_computed_tokens=0,
+            mm_inputs=[mm_kwargs_1],
+            mm_positions=[PlaceholderRange(offset=0, length=1)],
+            lora_request=None,
+            mm_hashes=[],
+            pooling_params=None,
+            generator=None)
 
-        px_2 = torch.randn(1, 3, 224, 224, dtype=torch.bfloat16)
-        grid_2 = torch.tensor([[[1, 2, 2]]], dtype=torch.int64)
-        mm_kwargs_2 = MultiModalKwargs(pixel_values=px_2,
-                                       image_grid_thw=grid_2)
-        req_state_2 = CachedRequestState(req_id="req-2",
-                                         prompt_token_ids=[],
-                                         output_token_ids=[],
-                                         sampling_params=MagicMock(),
-                                         block_ids=(),
-                                         num_computed_tokens=0,
-                                         mm_inputs=[mm_kwargs_2],
-                                         mm_positions=[PlaceholderRange(0, 1)],
-                                         lora_request=None,
-                                         mm_hashes=[],
-                                         pooling_params=None,
-                                         generator=None)
+        px_2 = torch.randn(3, 224, 224, dtype=torch.bfloat16)
+        grid_2 = torch.tensor([[1, 2, 2]], dtype=torch.int64)
+        mm_kwargs_2 = MultiModalKwargs({
+            "pixel_values": px_2,
+            "image_grid_thw": grid_2
+        })
+        req_state_2 = CachedRequestState(
+            req_id="req-2",
+            prompt_token_ids=[],
+            output_token_ids=[],
+            sampling_params=MagicMock(),
+            block_ids=(),
+            num_computed_tokens=0,
+            mm_inputs=[mm_kwargs_2],
+            mm_positions=[PlaceholderRange(offset=0, length=1)],
+            lora_request=None,
+            mm_hashes=[],
+            pooling_params=None,
+            generator=None)
 
         self.runner.requests = {"req-1": req_state_1, "req-2": req_state_2}
 
@@ -652,14 +663,14 @@ class TestTPUJaxRunner(unittest.TestCase):
         state_arg, grid_arg = call_args.args
         kwargs_arg = call_args.kwargs
 
-        self.assertIs(state_arg, self.runner.state)
+        self.assertEqual(state_arg, self.runner.state)
         self.assertEqual(grid_arg, ((1, 1, 1), (1, 2, 2)))
-        self.assertIn('pixel_values', kwargs_arg)
+        self.assertIn("pixel_values", kwargs_arg)
 
         passed_pixel_values = kwargs_arg['pixel_values']
         self.assertEqual(passed_pixel_values.shape, (2, 3, 224, 224))
 
-        expected_pixel_values = torch.cat([px_1, px_2], dim=0).to(
+        expected_pixel_values = torch.stack([px_1, px_2], dim=0).to(
             torch.float32).numpy().astype(jnp.bfloat16)
         np.testing.assert_array_equal(np.asarray(passed_pixel_values),
                                       expected_pixel_values)
@@ -675,21 +686,28 @@ class TestTPUJaxRunner(unittest.TestCase):
             (56, 128))
         self.runner.encoder_cache = {req_id: {0: encoder_embedding}}
 
+        mock_sampling_params = MagicMock()
+        mock_sampling_params.sampling_type = SamplingType.GREEDY
+        mock_sampling_params.top_k = -1
+        mock_sampling_params.top_p = 1.0
+        mock_sampling_params.temperature = 0.0
+        mock_sampling_params.min_tokens = 0
+        mock_sampling_params.logprobs = None
+        mock_sampling_params.logit_bias = None
+        mock_sampling_params.allowed_token_ids = set()
+        mock_sampling_params.bad_words_token_ids = None
+        mock_sampling_params.all_stop_token_ids = set()
+
         # Mock request state
         req_state = CachedRequestState(
             req_id=req_id,
             prompt_token_ids=list(range(100)),
             output_token_ids=[],
-            sampling_params=MagicMock(),
-            block_ids=(),
+            sampling_params=mock_sampling_params,
+            block_ids=([], ),
             num_computed_tokens=0,  # This will be updated per step
             mm_inputs=[],
-            mm_positions=[
-                PlaceholderRange(start_idx=10,
-                                 end_idx=66,
-                                 offset=10,
-                                 length=56)
-            ],
+            mm_positions=[PlaceholderRange(offset=10, length=56)],
             lora_request=None,
             mm_hashes=[],
             pooling_params=None,
@@ -750,6 +768,7 @@ class TestTPUJaxRunner(unittest.TestCase):
         self.mock_get_input_embed_fn = MagicMock()
         self.runner.get_input_embeddings_fn = self.mock_get_input_embed_fn
         self.mock_get_input_embed_fn.return_value = dummy_final_embeds
+        self.runner.state = MagicMock()
 
         # 2. ===== Act & Assert (Multimodal) =====
         self.runner.is_multimodal_model = True
@@ -776,6 +795,80 @@ class TestTPUJaxRunner(unittest.TestCase):
         np.testing.assert_array_equal(np.asarray(input_ids_res),
                                       np.asarray(dummy_input_ids))
         self.mock_get_input_embed_fn.assert_not_called()
+
+    def test_calc_mrope_positions(self):
+        """Tests the calculation of M-RoPE positions for mixed prompt/completion."""
+        # 1. ===== Setup =====
+        self.runner.uses_mrope = True
+        req_id = "req-1"
+        prompt_len = 20
+        num_computed = 15
+        num_scheduled = 10
+        mrope_delta = 100
+
+        # Mock request state with pre-computed mrope positions for the prompt
+        mock_mrope_positions = np.arange(3 * prompt_len,
+                                         dtype=np.int64).reshape(
+                                             3, prompt_len)
+        mock_sampling_params = MagicMock()
+        mock_sampling_params.sampling_type = SamplingType.GREEDY
+        mock_sampling_params.top_k = -1
+        mock_sampling_params.top_p = 1.0
+        mock_sampling_params.temperature = 0.0
+        mock_sampling_params.min_tokens = 0
+        mock_sampling_params.logprobs = None
+        mock_sampling_params.logit_bias = None
+        mock_sampling_params.allowed_token_ids = set()
+        mock_sampling_params.bad_words_token_ids = None
+        mock_sampling_params.all_stop_token_ids = set()
+
+        req_state = CachedRequestState(
+            req_id=req_id,
+            prompt_token_ids=list(range(prompt_len)),
+            output_token_ids=[],
+            sampling_params=mock_sampling_params,
+            block_ids=([], ),
+            num_computed_tokens=num_computed,
+            mm_inputs=[],
+            mm_positions=[],
+            lora_request=None,
+            mm_hashes=[],
+            pooling_params=None,
+            generator=None,
+            mrope_positions=mock_mrope_positions,
+            mrope_position_delta=mrope_delta,
+        )
+        self.runner.requests = {req_id: req_state}
+        self.runner.input_batch.add_request(req_state)
+        # Manually set num_computed_tokens in the batch as add_request sets it to 0
+        self.runner.input_batch.num_computed_tokens_cpu[0] = num_computed
+
+        # Mock scheduler output
+        mock_scheduler_output = MagicMock(spec=VllmSchedulerOutput)
+        mock_scheduler_output.num_scheduled_tokens = {req_id: num_scheduled}
+
+        # Patch the static method that computes completion positions
+        with patch.object(MRotaryEmbedding,
+                          "get_next_input_positions_tensor") as mock_get_next:
+            # 2. ===== Act =====
+            self.runner._calc_mrope_positions(mock_scheduler_output)
+
+            # 3. ===== Assert =====
+            # The first 5 positions should be copied from the pre-computed prompt positions
+            expected_prompt_part = mock_mrope_positions[:, 15:20]
+            actual_prompt_part = self.runner.mrope_positions_cpu[:, 0:5]
+            np.testing.assert_array_equal(actual_prompt_part,
+                                          expected_prompt_part)
+
+            # The next 5 positions should be computed on-the-fly
+            mock_get_next.assert_called_once()
+            call_kwargs = mock_get_next.call_args.kwargs
+            np.testing.assert_array_equal(call_kwargs["out"],
+                                          self.runner.mrope_positions_cpu)
+            self.assertEqual(call_kwargs["out_offset"], 5)
+            self.assertEqual(call_kwargs["mrope_position_delta"], mrope_delta)
+            self.assertEqual(call_kwargs["context_len"], prompt_len)
+            self.assertEqual(call_kwargs["num_new_tokens"], 5)
 
 
 if __name__ == '__main__':
