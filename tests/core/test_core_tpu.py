@@ -11,8 +11,11 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
 from vllm.v1.engine.core import ModelRunnerOutput
 from vllm.v1.request import Request
 
-# The class we are testing
-from tpu_commons.core.core_tpu import DisaggEngineCoreProc
+from tpu_commons.core.adapters import (VllmConfigAdapter, VllmEngineAdapter,
+                                       VllmRequestAdapter)
+from tpu_commons.core.core_tpu import DisaggEngineCoreProc, _DisaggOrchestrator
+from tpu_commons.interfaces.config import IConfig
+from tpu_commons.interfaces.engine import IEngineCore
 
 
 class TestDisaggEngineCoreProc(unittest.TestCase):
@@ -157,8 +160,10 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
         self.assertEqual(added_vllm_request.request_id, "test-req-1")
 
         # Assert that the request is tracked internally
-        self.assertIn("test-req-1", proc._requests)
-        self.assertEqual(proc._requests["test-req-1"], added_vllm_request)
+        self.assertIn("test-req-1", proc._orchestrator._requests)
+        self.assertEqual(
+            proc._orchestrator._requests["test-req-1"].vllm_request,
+            added_vllm_request)
 
     def test_shutdown(self):
         """Tests the shutdown procedure."""
@@ -216,14 +221,14 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
         )
 
         prefill_engine = self.mock_prefill_engine_instance
-        transfer_backlog = proc._transfer_backlogs[0]
+        transfer_backlog = proc._orchestrator._transfer_backlogs[0]
         _ = proc.output_queue
 
         # Mock the request
         mock_request = MagicMock(spec=Request)
         mock_request.request_id = "prefill-req-1"
         mock_request._all_token_ids = [1, 2, 3]
-        proc._requests[mock_request.request_id] = mock_request
+        proc._orchestrator._requests[mock_request.request_id] = mock_request
 
         # Mock scheduler and its sub-components
         prefill_engine.scheduler = MagicMock()
@@ -265,7 +270,7 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
 
         # 2. Act
         proc.live = True
-        proc._prefill(
+        proc._orchestrator._prefill(
             0)  # This will run one iteration and exit via side_effect
 
         # 3. Assert
@@ -313,13 +318,13 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
         )
 
         # Place item on the transfer backlog.
-        transfer_backlog = proc._transfer_backlogs[0]
+        transfer_backlog = proc._orchestrator._transfer_backlogs[0]
         mock_kv_cache_map = {"req-1": MagicMock(name="OriginalKVCache")}
         transfer_backlog.put(mock_kv_cache_map)
         transfer_backlog.put(None)  # Sentinel to stop the loop.
 
         # 2. Act
-        proc._transfer(0)
+        proc._orchestrator._transfer(0)
 
         # 3. Assert
         self.mock_decode_engine_instance_1.model_executor.driver_worker.model_runner.transfer_kv_cache.assert_not_called(
@@ -327,7 +332,7 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
         self.mock_decode_engine_instance_2.model_executor.driver_worker.model_runner.transfer_kv_cache.assert_called_once(
         )
 
-        output_item = proc._decode_backlogs[1].get_nowait()
+        output_item = proc._orchestrator._decode_backlogs[1].get_nowait()
         self.assertEqual(output_item["req_id"], "req-1")
         self.assertEqual(output_item["cache"], mock_transferred_cache)
 
@@ -343,14 +348,14 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
         )
 
         decode_engine = self.mock_decode_engine_instance
-        decode_backlog = proc._decode_backlogs[0]
+        decode_backlog = proc._orchestrator._decode_backlogs[0]
         output_queue = proc.output_queue
 
         # Mock the request and its state as it would be after prefill
         mock_request = MagicMock(spec=Request)
         mock_request.request_id = "decode-req-1"
         mock_request.num_computed_tokens = 10  # Simulates it's post-prefill
-        proc._requests[mock_request.request_id] = mock_request
+        proc._orchestrator._requests[mock_request.request_id] = mock_request
 
         # Place a work item on the decode backlog for the thread to pick up
         mock_kv_cache = [MagicMock(name="layer0_cache_decode")]
@@ -360,7 +365,6 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
             None)  # Sentinel to stop the inner loop after one item
 
         # Mock the decode engine's scheduler and its sub-components
-        decode_engine.scheduler = MagicMock()
         decode_engine.scheduler.has_requests.return_value = False
         decode_engine.scheduler.get_request_counts.return_value = (0, 0)
         decode_engine.scheduler.kv_cache_manager.get_block_ids.return_value = (
@@ -392,14 +396,14 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
 
         # 2. Act
         proc.live = True
-        proc._decode(0)
+        proc._orchestrator._decode(0)
 
         # 3. Assert
         # Check that the request was inserted and its state updated
         decode_engine.model_executor.driver_worker.model_runner.insert_request_with_kv_cache.assert_called_once(
         )
         self.assertIn(mock_request, decode_engine.scheduler.running)
-        self.assertNotIn(mock_request.request_id, proc._requests)
+        self.assertNotIn(mock_request.request_id, proc._orchestrator._requests)
 
         # Check that the main decode steps were called
         decode_engine.scheduler.schedule.assert_called_once()
@@ -692,7 +696,7 @@ class TestDisaggEngineCoreProcUnit(unittest.TestCase):
         args, kwargs = self.mock_orchestrator.call_args
         self.assertIsInstance(kwargs['config'], VllmConfigAdapter)
         self.assertEqual(kwargs['config'].vllm_config, self.mock_vllm_config)
-        self.assertEqual(kwargs['output_queue'], proc._output_queue)
+        self.assertEqual(kwargs['output_queue'], proc.output_queue)
         self.assertEqual(len(kwargs['prefill_engines']), 1)
         self.assertIsInstance(kwargs['prefill_engines'][0], VllmEngineAdapter)
         self.assertEqual(len(kwargs['decode_engines']), 1)
@@ -786,7 +790,7 @@ class TestDisaggEngineCoreProcUnit(unittest.TestCase):
                                     utility_request)
 
         proc._prefill_engines[0].list_loras.assert_called_once()
-        self.assertTrue(proc._output_queue.qsize() > 0)
+        self.assertTrue(proc.output_queue.qsize() > 0)
 
 
 if __name__ == '__main__':

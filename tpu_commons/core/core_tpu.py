@@ -11,6 +11,9 @@ import traceback
 from typing import Any, Callable, Optional, TypeVar, Union
 
 import jax
+# ======================================================================================
+# Imports for DisaggEngineCoreProc (the vLLM adapter)
+# ======================================================================================
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
@@ -21,7 +24,19 @@ from vllm.v1.engine.core import EngineCoreProc as vLLMEngineCoreProc
 from vllm.v1.request import Request, RequestStatus
 
 from tpu_commons.core import disagg_executor, disagg_utils
+# ======================================================================================
+# Imports for _DisaggOrchestrator (decoupled from vLLM)
+# ======================================================================================
+from tpu_commons.interfaces.config import IConfig
+from tpu_commons.interfaces.engine import IEngineCore
+from tpu_commons.interfaces.request import IRequest
 from tpu_commons.runner.utils import LatencyTracker
+
+from .adapters import VllmConfigAdapter, VllmEngineAdapter, VllmRequestAdapter
+
+# This file contains two classes:
+# 1. _DisaggOrchestrator: The clean, decoupled core orchestration logic.
+# 2. DisaggEngineCoreProc: The vLLM-facing adapter that handles process management.
 
 logger = init_logger(__name__)
 
@@ -29,6 +44,10 @@ POLLING_TIMEOUT_S = 2.5
 HANDSHAKE_TIMEOUT_MINS = 5
 
 _R = TypeVar('_R')  # Return type for collective_rpc
+
+# ======================================================================================
+# Class 1: The Decoupled Orchestrator
+# ======================================================================================
 
 
 class JetThread(threading.Thread):
@@ -46,37 +65,25 @@ class JetThread(threading.Thread):
             os.kill(os.getpid(), signal.SIGKILL)
 
 
-class DisaggEngineCoreProc(vLLMEngineCoreProc):
-    """Wrapper for running vLLM EngineCore in background process."""
+class _DisaggOrchestrator:
+    """Contains the core orchestration logic, decoupled from vLLM."""
 
     def __init__(
         self,
-        vllm_config: VllmConfig,
-        local_client: bool,
-        handshake_address: str,
-        log_stats: bool,
-        engine_index: int = 0,
-        **kwargs,
+        config: IConfig,
+        output_queue: queue.Queue,
+        prefill_engines: list[IEngineCore],
+        decode_engines: list[IEngineCore],
+        prefill_slice_sizes: tuple[int, ...],
+        decode_slice_sizes: tuple[int, ...],
     ):
-        if 'dp_rank' in kwargs or 'local_dp_rank' in kwargs:
-            logger.debug(
-                "Ignoring data parallelism arguments for non-DP disaggregated engine."
-            )
-        # We don't invoke super class's ctor as we are not really the
-        # engine core to be executed, instead we create other instance of
-        # engine cores and let them do the work.
-        self.vllm_config = vllm_config
-
-        devices = jax.devices()
-        prefill_slice_sizes = disagg_utils.get_prefill_slices()
-        decode_slice_sizes = disagg_utils.get_decode_slices()
-        prefill_chip_cnt = sum(prefill_slice_sizes)
-        decode_chip_cnt = sum(decode_slice_sizes)
-        assert decode_chip_cnt + prefill_chip_cnt <= len(devices)
-        assert prefill_chip_cnt > 0 and decode_chip_cnt > 0
+        self._config = config
+        self._output_queue = output_queue
+        self._prefill_engines = prefill_engines
+        self._decode_engines = decode_engines
 
         # Keep track of active requests.
-        self._requests: dict[str, Request] = {}
+        self._requests: dict[str, IRequest] = {}
 
         # Hack device config to pass in the subslice of TPUs.
         slice_sizes = list(prefill_slice_sizes)
@@ -85,35 +92,12 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
                 (0, slice_sizes))
         logger.info(f"Adding slice config to device config: {slice_sizes}")
 
-        def executor_fail_callback():
-            self.input_queue.put_nowait(
-                (EngineCoreRequestType.EXECUTOR_FAILED, b''))
-
-        self._prefill_engines = self._create_engine_cores(
-            prefill_slice_sizes,
-            vllm_config,
-            log_stats,
-            executor_fail_callback,
-        )
-        logger.info(
-            f"{len(self._prefill_engines)} Disaggregated prefill engines created."
-        )
-
         self._transfer_backlogs = [
             queue.Queue(4) for i in range(len(self._prefill_engines))
         ]
-
-        self._decode_engines = self._create_engine_cores(
-            decode_slice_sizes,
-            vllm_config,
-            log_stats,
-            executor_fail_callback,
-        )
-        logger.info(
-            f"{len(self._decode_engines)} Disaggregated decode engines created."
-        )
         self._decode_backlogs = {
-            idx: queue.Queue(vllm_config.scheduler_config.max_num_seqs)
+            idx:
+            queue.Queue(self._config.vllm_config.scheduler_config.max_num_seqs)
             for idx, engine in enumerate(self._decode_engines)
         }
 
@@ -155,150 +139,23 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
         for t in self._all_threads:
             t.start()
 
-        # We should be taking the input from the client, the code below is forked from
-        # vllm.v1.engine.core.EngineCoreProc.
-        self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
-        self.output_queue = queue.Queue[Union[tuple[int, EngineCoreOutputs],
-                                              bytes]]()
+    def add_request(self, request: IRequest):
+        """
+        Adds a new request to the orchestrator.
 
-        self.engine_index = engine_index
-        identity = self.engine_index.to_bytes(length=2, byteorder="little")
-        self.engines_running = False
+        This is the main entry point for new work. It stores the request for
+        internal state tracking and hands it off to the first stage of the
+        processing pipeline (the prefill scheduler).
+        """
+        # Hand off the request to the prefill scheduler to be batched for
+        # execution. Note: We are calling add_request on our IScheduler
+        # interface. The VllmSchedulerAdapter will handle unwrapping the
+        # IRequest before passing it to the real vllm scheduler.
+        self._prefill_engines[0].scheduler.add_request(request)
 
-        with self._perform_handshakes(
-                handshake_address,
-                identity,
-                local_client,
-                vllm_config,
-                client_handshake_address=None) as addresses:
-            self.client_count = len(addresses.outputs)
-
-            # Set up data parallel environment.
-            self.has_coordinator = addresses.coordinator_output is not None
-            self.frontend_stats_publish_address = (
-                addresses.frontend_stats_publish_address)
-            self.publish_dp_lb_stats = (
-                self.has_coordinator
-                and not vllm_config.parallel_config.data_parallel_external_lb)
-
-        # Background Threads and Queues for IO. These enable us to
-        # overlap ZMQ socket IO with GPU since they release the GIL,
-        # and to overlap some serialization/deserialization with the
-        # model forward pass.
-        # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
-        ready_event = threading.Event()
-        input_thread = threading.Thread(target=self.process_input_sockets,
-                                        args=(addresses.inputs,
-                                              addresses.coordinator_input,
-                                              identity, ready_event),
-                                        daemon=True)
-        input_thread.start()
-
-        self.output_thread = threading.Thread(
-            target=self.process_output_sockets,
-            args=(addresses.outputs, addresses.coordinator_output,
-                  self.engine_index),
-            daemon=True)
-        self.output_thread.start()
-
-        # Don't complete handshake until DP coordinator ready message is
-        # received.
-        while not ready_event.wait(timeout=10):
-            if not input_thread.is_alive():
-                raise RuntimeError("Input socket thread died during startup")
-            if addresses.coordinator_input is not None:
-                logger.info("Waiting for READY message from DP Coordinator...")
-
-    @staticmethod
-    def _create_engine_cores(
-        slice_sizes: tuple[int, ...],
-        vllm_config: VllmConfig,
-        log_stats: bool,
-        executor_fail_callback: Optional[Callable] = None,
-    ) -> list[vLLMEngineCore]:
-        engine_cores = []
-        for _ in slice_sizes:
-            engine_core = vLLMEngineCore(
-                vllm_config,
-                disagg_executor.DisaggExecutor,
-                log_stats,
-                executor_fail_callback,
-            )
-
-            engine_cores.append(engine_core)
-            logger.info("Disaggregated engine core created.")
-
-        return engine_cores
-
-    def _add_request(self, request: EngineCoreRequest) -> Request:
-        if request.mm_hashes is not None:
-            # Here, if hash exists for a multimodal input, then it will be
-            # fetched from the cache, else it will be added to the cache.
-            # Note that the cache here is mirrored with the client cache, so
-            # anything that has a hash must have a HIT cache entry here
-            # as well.
-            assert request.mm_inputs is not None
-            request.mm_inputs = self._prefill_engines[
-                0].mm_input_cache_server.get_and_update_p1(
-                    request.mm_inputs, request.mm_hashes)
-
-        req = Request.from_engine_core_request(request)
-
-        if req.use_structured_output:
-            # Start grammar compilation asynchronously
-            self._prefill_engines[0].structured_output_manager.grammar_init(
-                req)
-
-        return req
-
-    def add_request(self, request: EngineCoreRequest):
-        vllm_request = self._add_request(request)
-
-        # TODO(fhzhang): support multiple prefill engines.
-        self._prefill_engines[0].scheduler.add_request(vllm_request)
-        self._requests[request.request_id] = vllm_request
-
-    def _handle_client_request(self, request_type: EngineCoreRequestType,
-                               request: Any) -> None:
-        """Dispatch request from client."""
-
-        if request_type == EngineCoreRequestType.ADD:
-            self.add_request(request)
-        elif request_type == EngineCoreRequestType.ABORT:
-            # TODO(fhzhang): we need to keep track of which engine is processing
-            # the request and finish it there.
-            # owner_engine.scheduler.finish_requests(request, RequestStatus.FINISHED_ABORTED)
-            pass
-        elif request_type == EngineCoreRequestType.UTILITY:
-            client_idx, call_id, method_name, args = request
-            output = UtilityOutput(call_id)
-            try:
-                method = getattr(self._prefill_engines[0], method_name)
-                result = method(*self._convert_msgspec_args(method, args))
-                output.result = UtilityResult(result)
-            except BaseException as e:
-                logger.exception("Invocation of %s method failed", method_name)
-                output.failure_message = (f"Call to {method_name} method"
-                                          f" failed: {str(e)}")
-            self.output_queue.put_nowait(
-                (client_idx, EngineCoreOutputs(utility_output=output)))
-        elif request_type == EngineCoreRequestType.EXECUTOR_FAILED:
-            raise RuntimeError("Executor failed.")
-        else:
-            logger.error("Unrecognized input request type encountered: %s",
-                         request_type)
-
-    def run_busy_loop(self):
-        """Core busy loop of the EngineCore."""
-
-        # Loop until process is sent a SIGINT or SIGTERM
-        while True:
-            while not self.input_queue.empty():
-                req = self.input_queue.get_nowait()
-                self._handle_client_request(*req)
-            # Yield control to other threads, as we are not doing any real work.
-            # Without this sleep, we'd be hogging all the cpu cycles with our run_busy_loop.
-            time.sleep(0.01)
+        # Add to internal state for tracking by other threads.
+        # The key is the request_id, the value is the adapted request object.
+        self._requests[request.vllm_request.request_id] = request
 
     def _prefill(self, idx: int):
         prefill_engine = self._prefill_engines[idx]
@@ -359,7 +216,7 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
 
                 for output in (engine_core_outputs.items()
                                if engine_core_outputs else ()):
-                    self.output_queue.put_nowait(output)
+                    self._output_queue.put_nowait(output)
 
     def _transfer(self, idx: int):
         """Transfers the kv cache on an active request to the least full
@@ -419,11 +276,11 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
             while True:
                 # We need to check input batch as well as the request completion is delayed
                 # from scheduler to the runner.
-                if (sum(decode_engine.scheduler.get_request_counts())
-                        >= self.vllm_config.scheduler_config.max_num_seqs
+                if (sum(decode_engine.scheduler.get_request_counts()) >=
+                        self._config.vllm_config.scheduler_config.max_num_seqs
                         or decode_engine.model_executor.driver_worker.
-                        model_runner.input_batch.num_reqs
-                        >= self.vllm_config.scheduler_config.max_num_seqs):
+                        model_runner.input_batch.num_reqs >= self._config.
+                        vllm_config.scheduler_config.max_num_seqs):
                     break
 
                 try:
@@ -461,7 +318,8 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
                 vllm_request.num_computed_tokens = prompt_tokens
                 new_block_ids = kv_cache_manager.get_block_ids(req_id)
                 assert (len(new_block_ids[0]) == math.ceil(
-                    prompt_tokens / self.vllm_config.cache_config.block_size))
+                    prompt_tokens /
+                    self._config.vllm_config.cache_config.block_size))
 
                 with LatencyTracker(f"KVCacheInsert-{len(new_block_ids[0])}"):
                     decode_engine.model_executor.driver_worker.model_runner.insert_request_with_kv_cache(
@@ -491,7 +349,7 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
                     scheduler_output, model_output)  # type: ignore
                 for output in (engine_core_outputs.items()
                                if engine_core_outputs else ()):
-                    self.output_queue.put_nowait(output)
+                    self._output_queue.put_nowait(output)
 
     def shutdown(self):
         for e in self._prefill_engines:
@@ -528,9 +386,10 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
 
         # We should be taking the input from the client, the code below is forked from
         # vllm.v1.engine.core.EngineCoreProc.
-        self._input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
-        self._output_queue = queue.Queue[Union[tuple[int, EngineCoreOutputs],
-                                               bytes]]()
+        self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
+        self.output_queue = queue.Queue[Union[tuple[int, EngineCoreOutputs],
+                                              bytes]]()
+
         self.engine_index = engine_index
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
@@ -571,10 +430,6 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
             daemon=True)
         self.output_thread.start()
 
-        def executor_fail_callback():
-            self._input_queue.put_nowait(
-                (EngineCoreRequestType.EXECUTOR_FAILED, b''))
-
         devices = jax.devices()
         prefill_slice_sizes = disagg_utils.get_prefill_slices()
         decode_slice_sizes = disagg_utils.get_decode_slices()
@@ -582,6 +437,10 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
         decode_chip_cnt = sum(decode_slice_sizes)
         assert decode_chip_cnt + prefill_chip_cnt <= len(devices)
         assert prefill_chip_cnt > 0 and decode_chip_cnt > 0
+
+        def executor_fail_callback():
+            self.input_queue.put_nowait(
+                (EngineCoreRequestType.EXECUTOR_FAILED, b''))
 
         self._prefill_engines = self._create_engine_cores(
             prefill_slice_sizes,
@@ -613,7 +472,7 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
 
         self._orchestrator = _DisaggOrchestrator(
             config=VllmConfigAdapter(vllm_config),
-            output_queue=self._output_queue,
+            output_queue=self.output_queue,
             prefill_engines=[
                 VllmEngineAdapter(e) for e in self._prefill_engines
             ],
@@ -694,7 +553,7 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
                 logger.exception("Invocation of %s method failed", method_name)
                 output.failure_message = (f"Call to {method_name} method"
                                           f" failed: {str(e)}")
-            self._output_queue.put_nowait(
+            self.output_queue.put_nowait(
                 (client_idx, EngineCoreOutputs(utility_output=output)))
         elif request_type == EngineCoreRequestType.EXECUTOR_FAILED:
             raise RuntimeError("Executor failed.")
@@ -707,8 +566,8 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
 
         # Loop until process is sent a SIGINT or SIGTERM
         while True:
-            while not self._input_queue.empty():
-                req = self._input_queue.get_nowait()
+            while not self.input_queue.empty():
+                req = self.input_queue.get_nowait()
                 self._handle_client_request(*req)
             # Yield control to other threads, as we are not doing any real work.
             # Without this sleep, we'd be hogging all the cpu cycles with our run_busy_loop.
