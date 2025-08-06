@@ -326,23 +326,26 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                   block_tables, query_start_loc, seq_lens, num_seqs,
                   request_distribution))
             logger.info(f"Precompile backbone --> num_tokens={num_tokens}")
-            inputs = (
-                self.kv_caches,
-                input_ids,
-                AttentionMetadata(
-                    input_positions=positions,
-                    slot_mapping=slot_mapping_metadata,
-                    block_tables=block_tables,
-                    seq_lens=seq_lens,
-                    query_start_loc=query_start_loc,
-                    num_seqs=num_seqs,
-                    num_slices=num_slices,
-                    request_distribution=request_distribution,
-                ),
+
+            attention_metadata = AttentionMetadata(
+                input_positions=positions,
+                slot_mapping=slot_mapping_metadata,
+                block_tables=block_tables,
+                seq_lens=seq_lens,
+                query_start_loc=query_start_loc,
+                num_seqs=num_seqs,
+                num_slices=num_slices,
+                request_distribution=request_distribution,
             )
+
+            # TODO:
+            # Use a None inputs_embeds here, assuming it is text-only model
+            # For mm model, we will use another precompile function
+            inputs_embeds = None
             start = time.perf_counter()
             self.kv_caches, hidden_states = self.model_fn(
-                self.state, *inputs[:3])
+                self.state, self.kv_caches, input_ids, attention_metadata,
+                inputs_embeds)
             end = time.perf_counter()
             logger.info("Compilation finished in %.2f [secs].", end - start)
             hidden_states.block_until_ready()
