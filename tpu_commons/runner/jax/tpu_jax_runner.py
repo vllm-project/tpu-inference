@@ -1234,56 +1234,55 @@ class TPUModelRunner():
         decode_index_set = set(decodes)
         prefill_index_set = set(non_decodes[most_freq_prefill_length]
                                 ) if max_prefill_cnt != 0 else set()
+        modified_batch = False
         for i in range(num_decode):
             if i in prefill_index_set:
                 prefill_in_decode.append(i)
+                modified_batch = True
             elif i in decode_index_set:
                 continue
             else:
                 mixed_in_decode.append(i)
+                modified_batch = True
         for i in range(num_decode, num_decode + num_prefill):
             if i in prefill_index_set:
                 continue
             elif i in decode_index_set:
                 decode_in_prefill.append(i)
+                modified_batch = True
             else:
                 mixed_in_prefill.append(i)
+                modified_batch = True
         for i in range(num_decode + num_prefill, num_reqs):
             if i in prefill_index_set:
                 prefill_in_mixed.append(i)
+                modified_batch = True
             elif i in decode_index_set:
                 decode_in_mixed.append(i)
+                modified_batch = True
             else:
                 continue
 
-        modified_batch = False
         # 2 way swap
-        while prefill_in_decode and decode_in_prefill:
-            i, j = prefill_in_decode.pop(), decode_in_prefill.pop()
-            self.input_batch.swap_states(i, j)
-            modified_batch = True
-        while prefill_in_mixed and mixed_in_prefill:
-            i, j = prefill_in_mixed.pop(), mixed_in_prefill.pop()
-            self.input_batch.swap_states(i, j)
-            modified_batch = True
-        while decode_in_mixed and mixed_in_decode:
-            i, j = decode_in_mixed.pop(), mixed_in_decode.pop()
-            self.input_batch.swap_states(i, j)
-            modified_batch = True
+        def two_way_swap(list1, list2):
+            while list1 and list2:
+                i, j = list1.pop(), list2.pop()
+                self.input_batch.swap_states(i, j)
+
+        two_way_swap(prefill_in_decode, decode_in_prefill)
+        two_way_swap(decode_in_mixed, mixed_in_decode)
+        two_way_swap(prefill_in_mixed, mixed_in_prefill)
 
         # 3 way swap
-        while prefill_in_decode and decode_in_mixed and mixed_in_prefill:
-            i, j, k = prefill_in_decode.pop(), decode_in_mixed.pop(
-            ), mixed_in_prefill.pop()
-            self.input_batch.swap_states(i, j)
-            self.input_batch.swap_states(j, k)
-            modified_batch = True
-        while decode_in_prefill and prefill_in_mixed and mixed_in_decode:
-            i, j, k = decode_in_prefill.pop(), prefill_in_mixed.pop(
-            ), mixed_in_decode.pop()
-            self.input_batch.swap_states(i, j)
-            self.input_batch.swap_states(j, k)
-            modified_batch = True
+        def three_way_swap(list1, list2, list3):
+            while list1 and list2 and list3:
+                i, j, k = list1.pop(), list2.pop(), list3.pop()
+                self.input_batch.swap_states(i, j)
+                self.input_batch.swap_states(j, k)
+
+        three_way_swap(prefill_in_decode, decode_in_mixed, mixed_in_prefill)
+        three_way_swap(decode_in_prefill, prefill_in_mixed, mixed_in_decode)
+
         return modified_batch
 
 
