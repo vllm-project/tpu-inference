@@ -1,4 +1,5 @@
 import re
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from typing import List, Optional, Tuple
 
@@ -123,8 +124,9 @@ class DeepSeekV3(Model):
         rms_norm_eps: float = 1e-06
         first_k_dense_replace: int = 3  # replace the first few MOE layers to dense layer.
 
+        shared_experts = 1
         layer_config = SharedExpertsTransformerBlockConfig(
-            shared_experts=1,
+            shared_experts=shared_experts,
             attention=MLAConfig(hidden_size=hidden_size,
                                 num_attention_heads=num_attention_heads,
                                 num_key_value_heads=num_key_value_heads,
@@ -207,18 +209,26 @@ class DeepSeekV3(Model):
         self.layers = []
 
         for i in range(first_k_dense_replace):
-            block = TransformerBlock(cfg=layer_config,
-                                     attention_cls=MLA,
-                                     custom_module=DenseFFW(
-                                         cfg=layer_config.dense_ffw,
-                                         mesh=self.mesh,
-                                         param_factory=self.param_factory,
-                                         sharding_cfg=self._sharding_config),
-                                     param_factory=self.param_factory,
-                                     mesh=self.mesh,
-                                     sharding_cfg=self._sharding_config)
+            block = TransformerBlock(
+                cfg=layer_config,
+                attn=MLA(cfg=layer_config.attention,
+                         mesh=self.mesh,
+                         param_factory=self.param_factory,
+                         sharding_cfg=self._sharding_config),
+                custom_module=DenseFFW(cfg=layer_config.dense_ffw,
+                                       mesh=self.mesh,
+                                       param_factory=self.param_factory,
+                                       sharding_cfg=self._sharding_config),
+                param_factory=self.param_factory,
+                mesh=self.mesh,
+                sharding_cfg=self._sharding_config)
             self.layers.append(block)
 
+        shared_experts_cfg = deepcopy(layer_config.dense_ffw)
+        setattr(
+            shared_experts_cfg, "intermediate_size",
+            shared_experts * moe_intermediate_size
+        )  # intermediate_size = #shared_experts * intermediate_size_moe
         for i in range(first_k_dense_replace, num_layers):
             is_moe_layer = ((i + 1) % interleave_moe_layer_step == 0)
             custom_module = MoE(cfg=layer_config.moe,
@@ -230,10 +240,18 @@ class DeepSeekV3(Model):
                                     mesh=self.mesh,
                                     param_factory=self.param_factory,
                                     sharding_cfg=self._sharding_config)
+
             block = SharedExpertsTransformerBlock(
                 cfg=layer_config,
                 custom_module=custom_module,
-                attention_cls=MLA,
+                attn=MLA(cfg=layer_config.attention,
+                         mesh=self.mesh,
+                         param_factory=self.param_factory,
+                         sharding_cfg=self._sharding_config),
+                shared_experts=DenseFFW(cfg=shared_experts_cfg,
+                                        mesh=self.mesh,
+                                        param_factory=self.param_factory,
+                                        sharding_cfg=self._sharding_config),
                 param_factory=self.param_factory,
                 mesh=self.mesh,
                 sharding_cfg=self._sharding_config)

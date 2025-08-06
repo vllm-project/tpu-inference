@@ -16,10 +16,8 @@ from tpu_commons.models.jax.common.transformer_block import (
 class TestTransformerBlock(unittest.TestCase):
     """Unit test suite for the JAX TransformerBlock module."""
 
-    @patch.object(TransformerBlock, '_create_module')
     @patch('tpu_commons.models.jax.common.transformer_block.RMSNorm')
-    def test_transformer_block_dense_logic(self, MockRMSNorm,
-                                           mock_create_module):
+    def test_transformer_block_dense_logic(self, MockRMSNorm):
         """
         Tests the forward pass logic of a dense TransformerBlock by mocking its sub-modules.
         This test verifies the sequence of operations and residual connections.
@@ -68,7 +66,6 @@ class TestTransformerBlock(unittest.TestCase):
         mock_mlp = MagicMock()
         dummy_mlp_output = jnp.full((64, hidden_size), 3.0, dtype=jnp.bfloat16)
         mock_mlp.return_value = dummy_mlp_output
-        mock_create_module.side_effect = [mock_attn]
 
         transformer_block = TransformerBlock(
             cfg=transformer_config,
@@ -76,6 +73,7 @@ class TestTransformerBlock(unittest.TestCase):
             mesh=None,
             sharding_cfg=ShardingConfig(),
             custom_module=mock_mlp,
+            attn=mock_attn,
             # The custom_module is passed directly to the TransformerBlock
             # in the test setup, so we need to ensure it's initialized
             # with a mock that matches the expected behavior of a DenseFFW
@@ -125,10 +123,8 @@ class TestTransformerBlock(unittest.TestCase):
 
         self.assertTrue(jnp.array_equal(new_kv_cache, dummy_kv_cache))
 
-    @patch.object(TransformerBlock, '_create_module')
     @patch('tpu_commons.models.jax.common.transformer_block.RMSNorm')
-    def test_shared_experts_transformer_block_logic(self, MockRMSNorm,
-                                                    mock_create_module):
+    def test_shared_experts_transformer_block_logic(self, MockRMSNorm):
         """Tests the forward pass logic of a SharedExpertsTransformerBlock."""
         hidden_size = 1024
         intermediate_size_moe = 4096
@@ -203,14 +199,16 @@ class TestTransformerBlock(unittest.TestCase):
                                                4.0,
                                                dtype=jnp.bfloat16)
         mock_shared_experts.return_value = dummy_shared_experts_output
-        mock_create_module.side_effect = [mock_attn, mock_shared_experts]
 
         transformer_block = SharedExpertsTransformerBlock(
             cfg=shared_config,
             param_factory=MagicMock(),
             mesh=MagicMock(),
             sharding_cfg=MagicMock(),
-            custom_module=mock_moe,
+            custom_module=mock_moe,  # Pass the mock MoE module
+            attn=mock_attn,  # Pass the mock attention module
+            shared_experts=
+            mock_shared_experts,  # Pass the mock shared experts module
         )
 
         seq_len = 64

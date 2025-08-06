@@ -1,6 +1,5 @@
-from copy import deepcopy
 from dataclasses import dataclass, field, make_dataclass
-from typing import Any, Tuple, Type
+from typing import Any, Tuple
 
 # Flax and JAX sharding imports
 import jax
@@ -9,7 +8,7 @@ from jax.sharding import Mesh
 from vllm.config import VllmConfig
 
 from tpu_commons.models.jax.common.attention.attention import (
-    Attention, AttentionConfig, AttentionMetadata, KVCache)
+    AttentionConfig, AttentionMetadata, KVCache)
 from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
 from tpu_commons.models.jax.common.layers import (DenseFFW, DenseFFWConfig,
@@ -46,32 +45,15 @@ class TransformerBlock(nnx.Module):
     mesh: Mesh
     sharding_cfg: ShardingConfig
     custom_module: nnx.Module
-    attention_cls: type[Attention] = Attention
+    attn: nnx.Module
     use_attention_rope: bool = True
     quant: Any | None = None
-
-    def _create_module(self, module_cls: Type[nnx.Module], cfg: Any,
-                       **overrides) -> nnx.Module:
-        args = {
-            "mesh": self.mesh,
-            "param_factory": self.param_factory,
-            "sharding_cfg": self.sharding_cfg,
-            "quant": self.quant
-        }
-        args.update(overrides)
-        return module_cls(cfg=cfg, **args)
 
     def __post_init__(self):
         hidden_size = getattr(self.cfg.attention,
                               HuggingFaceArgNames.HIDDEN_SIZE.value)
         rmsnorm_epsilon = getattr(self.cfg,
                                   HuggingFaceArgNames.RMS_NORM_EPS.value)
-        try:
-            self.attn = self._create_module(self.attention_cls,
-                                            cfg=self.cfg.attention)
-        except NameError:
-            raise NameError(
-                f"Invalid attention class type: {self.attention_cls}")
 
         self.pre_attention_norm = RMSNorm(
             dims=hidden_size,
@@ -140,21 +122,7 @@ Inherits TransformerBlockConfig docstring:
 @dataclass(kw_only=True)
 class SharedExpertsTransformerBlock(TransformerBlock):
     """Create a modified TransformerBlock that sums MoE layer output with shared expert output."""
-
-    def __post_init__(self):
-        super().__post_init__()
-        # Create a modified config for the shared expert layer (which is a dense FFW layer)
-        shared_experts = getattr(self.cfg,
-                                 HuggingFaceArgNames.SHARED_EXPERTS.value)
-        moe_intermediate_size = getattr(
-            self.cfg.moe, HuggingFaceArgNames.INTERMEDIATE_SIZE_MOE.value)
-        shared_experts_cfg = deepcopy(self.cfg.dense_ffw)
-        setattr(
-            shared_experts_cfg, HuggingFaceArgNames.INTERMEDIATE_SIZE.value,
-            shared_experts * moe_intermediate_size
-        )  # intermediate_size = #shared_experts * intermediate_size_moe
-        self.shared_experts = self._create_module(DenseFFW,
-                                                  cfg=shared_experts_cfg)
+    shared_experts: nnx.Module
 
     def __call__(self, x_TD, is_prefill, kv_cache, attention_metadata):
         op_mode = "prefill" if is_prefill else "generate"
