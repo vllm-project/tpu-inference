@@ -17,8 +17,8 @@ from tpu_commons.models.jax.common.attention.attention import (
     AttentionConfig, AttentionMetadata)
 from tpu_commons.models.jax.common.base import ParamFactory
 from tpu_commons.models.jax.common.constants import KVCacheType
-from tpu_commons.models.jax.common.layers import (DenseFFWConfig, Embedder,
-                                                  LMhead, RMSNorm)
+from tpu_commons.models.jax.common.layers import (DenseFFW, DenseFFWConfig,
+                                                  Embedder, LMhead, RMSNorm)
 from tpu_commons.models.jax.common.model import Model
 from tpu_commons.models.jax.common.sharding import (Sharding,
                                                     ShardingRulesConfig)
@@ -127,10 +127,14 @@ class LlamaForCausalLM(Model):
 
         self.layers = [
             TransformerBlock(cfg=layer_config,
-                             block_type="dense",
                              param_factory=self.param_factory,
                              mesh=self.mesh,
-                             sharding_cfg=sharding_config)
+                             sharding_cfg=sharding_config,
+                             custom_module=DenseFFW(
+                                 cfg=layer_config.dense_ffw,
+                                 mesh=self.mesh,
+                                 param_factory=self.param_factory,
+                                 sharding_cfg=sharding_config))
             for _ in range(num_layers)
         ]
         for i in range(len(self.layers)):
@@ -246,9 +250,12 @@ class Llama3WeightLoader:
             "model.embed_tokens": "embedder.input_embedding_table_VD",
             "model.layers.*.input_layernorm":
             "layers.*.pre_attention_norm.scale",
-            "model.layers.*.mlp.down_proj": "layers.*.mlp.kernel_down_proj_FD",
-            "model.layers.*.mlp.gate_proj": "layers.*.mlp.kernel_gating_DF",
-            "model.layers.*.mlp.up_proj": "layers.*.mlp.kernel_up_proj_DF",
+            "model.layers.*.mlp.down_proj":
+            "layers.*.custom_module.kernel_down_proj_FD",
+            "model.layers.*.mlp.gate_proj":
+            "layers.*.custom_module.kernel_gating_DF",
+            "model.layers.*.mlp.up_proj":
+            "layers.*.custom_module.kernel_up_proj_DF",
             "model.layers.*.post_attention_layernorm":
             "layers.*.pre_mlp_norm.scale",
             "model.layers.*.self_attn.k_proj":
