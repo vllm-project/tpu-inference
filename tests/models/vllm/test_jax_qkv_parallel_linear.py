@@ -51,7 +51,8 @@ def setup_environment():
 
 @pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize("mesh", [test_utils.get_spmd_mesh()])
-def test_jax_qkv_parallel_linear(bias, mesh):
+@pytest.mark.parametrize("fuse_matmuls", [False, True])
+def test_jax_qkv_parallel_linear(bias, mesh, fuse_matmuls):
     dtype = torch.bfloat16
 
     qkv_linear = QKVParallelLinear(
@@ -76,7 +77,7 @@ def test_jax_qkv_parallel_linear(bias, mesh):
 
     # Set jax default device to workaround a layout bug in JAX 0.7.0 and earlier
     with torchax.default_env(), jax.default_device(jax.devices("tpu")[0]):
-        jax_qkv_linear = JaxQKVParallelLinear(qkv_linear, mesh=mesh)
+        jax_qkv_linear = JaxQKVParallelLinear(qkv_linear, mesh, fuse_matmuls)
         jax_input_tensor = torch_view(t2j(input_tensor, use_dlpack=False))
         jax_input_tensor.apply_jax_(jax.device_put,
                                     NamedSharding(mesh, P(None, None)))
@@ -90,7 +91,8 @@ def test_jax_qkv_parallel_linear(bias, mesh):
 
 @pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize("mesh", [test_utils.get_spmd_mesh()])
-def test_jax_qkv_parallel_linear_w8a8_int8(bias, mesh):
+@pytest.mark.parametrize("fuse_matmuls", [False, True])
+def test_jax_qkv_parallel_linear_w8a8_int8(bias, mesh, fuse_matmuls):
     dtype = torch.bfloat16
 
     qkv_linear = QKVParallelLinear(
@@ -128,7 +130,7 @@ def test_jax_qkv_parallel_linear_w8a8_int8(bias, mesh):
 
     # Set jax default device to workaround a layout bug in JAX 0.7.0 and earlier
     with torchax.default_env(), jax.default_device(jax.devices("tpu")[0]):
-        jax_qkv_linear = JaxQKVParallelLinear(qkv_linear, mesh=mesh)
+        jax_qkv_linear = JaxQKVParallelLinear(qkv_linear, mesh, fuse_matmuls)
         jax_input_tensor = torch_view(t2j(input_tensor, use_dlpack=False))
         jax_input_tensor.apply_jax_(jax.device_put,
                                     NamedSharding(mesh, P(None, None)))
