@@ -505,6 +505,7 @@ class TestTPUJaxRunner(unittest.TestCase):
         self.assertEqual(set(final_ids[4:6]), {"p1", "p4"})
         np.testing.assert_array_equal(
             self.runner.input_batch.request_distribution, [2, 2, 2])
+
     def test_execute_mm_encoder_single_image(self):
         import torch
         """Tests _execute_mm_encoder with a single request and a single image."""

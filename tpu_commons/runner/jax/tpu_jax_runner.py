@@ -16,12 +16,7 @@ from jax.sharding import NamedSharding, PartitionSpec
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
-
 from vllm.forward_context import set_forward_context
-
-from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
-
-
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
@@ -1212,8 +1207,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             positions = mrope_positions
 
         (input_ids, positions, slot_mapping_metadata, num_slices, block_tables,
-         query_start_loc, seq_lens, num_seqs,
-         logits_indices, request_distribution) = self._device_array(
+         query_start_loc, seq_lens, num_seqs, logits_indices,
+         request_distribution) = self._device_array(
              (input_ids, positions, slot_mapping_metadata, num_slices,
               block_tables, query_start_loc, seq_lens, num_seqs,
               logits_indices, request_distribution))
