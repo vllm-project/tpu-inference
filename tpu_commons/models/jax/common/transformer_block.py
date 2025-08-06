@@ -38,14 +38,12 @@ TransformerBlockConfig.__doc__ = f"""light weighted transformer config, which in
 class TransformerBlock(nnx.Module):
     """
     A heavy weight module which serves as the stateful live blocks in serving
-
-    custom_module can be eitehr a dense module (i.e., DenseFFW) or MoE.
     """
     cfg: TransformerBlockConfig
+    block_type: str
     param_factory: ParamFactory
     mesh: Mesh
     sharding_cfg: ShardingConfig
-    custom_module: nnx.Module
     attention_cls: type[Attention] = Attention
     use_attention_rope: bool = True
     quant: Any | None = None
@@ -72,6 +70,11 @@ class TransformerBlock(nnx.Module):
         except NameError:
             raise NameError(
                 f"Invalid attention class type: {self.attention_cls}")
+
+        if self.block_type == "moe":
+            self.moe = self._create_module(MoE, cfg=self.cfg.moe)
+        elif self.block_type == "dense":
+            self.mlp = self._create_module(DenseFFW, cfg=self.cfg.dense_ffw)
 
         self.pre_attention_norm = RMSNorm(
             dims=hidden_size,
@@ -110,13 +113,21 @@ class TransformerBlock(nnx.Module):
         # FFW Block
         ffw_residual_TD = attn_output_TD
         normed_ffw_input_TD = self.pre_mlp_norm(attn_output_TD)
-        logits_TD = self.custom_module(normed_ffw_input_TD, op_mode)
+        if self.block_type == "moe":
+            logits_TD = self.moe(normed_ffw_input_TD, op_mode)
+        elif self.block_type == "dense":
+            logits_TD = self.mlp(normed_ffw_input_TD, op_mode)
+        else:
+            raise ValueError(f"Invalid block type: {self.block_type}")
         logits_TD += ffw_residual_TD
         return new_cache, logits_TD
 
     def generate_kernel(self, rngs: nnx.Rngs):
         self.attn.generate_kernel(rngs)
-        self.custom_module.generate_kernel(rngs)
+        if self.block_type == "moe":
+            self.moe.generate_kernel(rngs)
+        else:
+            self.mlp.generate_kernel(rngs)
         self.pre_attention_norm.generate_kernel(rngs)
         self.pre_mlp_norm.generate_kernel(rngs)
 
@@ -169,17 +180,16 @@ class SharedExpertsTransformerBlock(TransformerBlock):
         # FFW Block
         ffw_residual_TD = attn_output_TD
         normed_ffw_input_TD = self.pre_mlp_norm(attn_output_TD)
-        if isinstance(self.custom_module, MoE):
-            logits_TD = self.custom_module(normed_ffw_input_TD, op_mode)
+        if self.block_type == "moe":
+            logits_TD = self.moe(normed_ffw_input_TD, op_mode)
             # Add the shared expert outputs to the MoE outputs.
             shared_expert_output_TD = self.shared_experts(
                 normed_ffw_input_TD, op_mode)
             logits_TD += shared_expert_output_TD
-        elif isinstance(self.custom_module, DenseFFW):
-            logits_TD = self.custom_module(normed_ffw_input_TD, op_mode)
+        elif self.block_type == "dense":
+            logits_TD = self.mlp(normed_ffw_input_TD, op_mode)
         else:
-            raise ValueError(
-                f"Invalid custom moduel type: {type(self.custom_module)}")
+            raise ValueError(f"Invalid block type: {self.block_type}")
         logits_TD += ffw_residual_TD
         return new_cache, logits_TD
 
