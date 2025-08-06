@@ -17,6 +17,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
+from vllm.lora.request import LoRARequest
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils import cdiv
@@ -25,6 +26,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.request import Request
+from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from tpu_commons import utils as common_utils
 from tpu_commons.logger import init_logger
@@ -56,7 +58,7 @@ DUMMY_METADATA = AttentionMetadata(
 )
 
 
-class TPUModelRunner():
+class TPUModelRunner(LoRAModelRunnerMixin):
 
     def __init__(
         self,
@@ -77,6 +79,12 @@ class TPUModelRunner():
 
         self.devices = devices
         self.dtype = self.model_config.dtype
+
+        # vocab_size is currently used in structured decoding and sample_from_logits.
+        # lora_config.lora_extra_vocab_size is the "Maximum size of extra vocabulary that can be present in a LoRA adapter" per https://github.com/vanbasten23/vllm/blob/7f4a8b6705622fde952a2e633e86716f902d6e1b/vllm/config.py#L3040
+        self.vocab_size = self.model_config.get_vocab_size()
+        if self.lora_config is not None:
+            self.vocab_size += self.lora_config.lora_extra_vocab_size
 
         self._init_random()
         self._init_mesh()
@@ -198,11 +206,12 @@ class TPUModelRunner():
         return hidden_states[indices_do_sample]
 
     def load_model(self):
-        self.model_fn, self.compute_logits_fn, self.state = get_model(
+        self.model_fn, self.compute_logits_fn, self.state, lora_manager = get_model(
             self.vllm_config,
             self.rng_key,
             self.mesh,
         )
+        self.lora_manager = lora_manager
         self.rng_params_for_sampling = nnx.Rngs(
             jax.random.key(self.model_config.seed)).params()
 
@@ -301,8 +310,10 @@ class TPUModelRunner():
                 ),
             )
             start = time.perf_counter()
-            self.kv_caches, hidden_states = self.model_fn(
-                self.state, *inputs[:3])
+            with self.maybe_select_dummy_loras(
+                    self.lora_config, np.array([num_tokens], dtype=np.int32)):
+                self.kv_caches, hidden_states = self.model_fn(
+                    self.state, *inputs[:3])
             end = time.perf_counter()
             logger.info("Compilation finished in %.2f [secs].", end - start)
             hidden_states.block_until_ready()
@@ -406,12 +417,13 @@ class TPUModelRunner():
             return
         logger.info("Precompile all the subgraphs with possible input shapes.")
 
-        self._precompile_backbone()
-        self._precompile_select_hidden_states()
-        self._precompile_compute_logits()
-        self._precompile_sampling()
-        self._precompile_gather_logprobs()
-        self._precompile_structured_decoding()
+        with self.maybe_setup_dummy_loras(self.lora_config):
+            self._precompile_backbone()
+            self._precompile_select_hidden_states()
+            self._precompile_compute_logits()
+            self._precompile_sampling()
+            self._precompile_gather_logprobs()
+            self._precompile_structured_decoding()
 
     def _precompile_structured_decoding(self) -> None:
         logger.info(
@@ -948,6 +960,17 @@ class TPUModelRunner():
               block_tables, query_start_loc, seq_lens, num_seqs,
               logits_indices))
 
+        if self.lora_config is not None:
+            # We need to respect padding when activating LoRA adapters
+            padded_num_scheduled_tokens_per_req = np.copy(
+                num_scheduled_tokens_per_req
+            )  # Copying to avoid accidental state corruption bugs
+            padded_num_scheduled_tokens_per_req[-1] += \
+                padded_total_num_scheduled_tokens - total_num_scheduled_tokens
+
+            self.set_active_loras(self.input_batch,
+                                  padded_num_scheduled_tokens_per_req)
+
         return (
             self.kv_caches,
             input_ids,
@@ -963,6 +986,20 @@ class TPUModelRunner():
             sampling_metadata,
             logits_indices,
         )
+
+    def set_active_loras(
+        self,
+        input_batch: InputBatch,  # Note, it's the jax InputBatch.
+        num_scheduled_tokens: np.ndarray) -> None:
+
+        prompt_lora_mapping: tuple[int, ...]  # of size input_batch.num_reqs
+        token_lora_mapping: tuple[int,
+                                  ...]  # of size np.sum(num_scheduled_tokens)
+        lora_requests: set[LoRARequest]
+        prompt_lora_mapping, token_lora_mapping, lora_requests = \
+                            input_batch.make_lora_inputs(num_scheduled_tokens)
+        return super()._set_active_loras(prompt_lora_mapping,
+                                         token_lora_mapping, lora_requests)
 
     def _get_slot_mapping_metadata(self, num_reqs,
                                    num_scheduled_tokens_per_req):

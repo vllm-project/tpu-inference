@@ -14,3 +14,4 @@ class JaxMergedColumnParallelLinear(JaxMergedColumnParallelLinearCore):
                           MergedColumnParallelLinear)
         super().__init__(merged_col_parallel_linear, mesh,
                          "JaxMergedColumnParallelLinear")
+        self.quant_method = merged_col_parallel_linear.quant_method

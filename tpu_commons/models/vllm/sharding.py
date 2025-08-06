@@ -7,7 +7,7 @@ import torchax
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torch.nn.parameter import Parameter
 from torch.utils import _pytree as pytree
-from torchax.interop import extract_all_buffers, torch_view
+from torchax.interop import torch_view
 from torchax.ops.mappings import t2j
 from vllm.attention import Attention as VllmAttention
 from vllm.config import ParallelConfig
@@ -113,6 +113,18 @@ def shard_parallel_layers_to_tpu(model: torch.nn.Module, mesh: Mesh,
     _shard_layer(model)
 
 
+def _extract_all_params_buffers(m: torch.nn.Module):
+    params = {}
+    buffers = {}
+
+    for name, param in m.named_parameters(remove_duplicate=False):
+        params[name] = param
+    for name, buf in m.named_buffers(remove_duplicate=False):
+        buffers[name] = buf
+
+    return params, buffers
+
+
 def shard_model_to_tpu(model: torch.nn.Module, mesh: Mesh,
                        vllm_parallel_config: ParallelConfig):
     """
@@ -142,8 +154,8 @@ def shard_model_to_tpu(model: torch.nn.Module, mesh: Mesh,
     with jax.default_device(jax.devices("cpu")[0]), torchax.default_env():
         shard_parallel_layers_to_tpu(model, mesh, vllm_parallel_config)
 
-        # For other weight tensors, repliate them on all the TPU chips.
-        params, buffers = extract_all_buffers(model)
+        # For other weight tensors, replicate them on all the TPU chips.
+        params, buffers = _extract_all_params_buffers(model)
 
         fmt_size = functools.partial(humanize.naturalsize, binary=True)
         for qual_name, x in {**params, **buffers}.items():

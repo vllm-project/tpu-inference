@@ -29,6 +29,9 @@ class JaxRowParallelLinear(torch.nn.Module):
         self.reduce_results = row_linear.reduce_results
         self.skip_bias_add = row_linear.skip_bias_add
         self.return_bias = row_linear.return_bias
+        self.input_is_parallel = row_linear.input_is_parallel
+        self.quant_method = row_linear.quant_method
+        self.tp_size = row_linear.tp_size
 
         self.w8q8_int8_quant = False
         if isinstance(row_linear.quant_method,
