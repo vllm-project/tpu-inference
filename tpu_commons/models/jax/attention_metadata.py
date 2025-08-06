@@ -36,5 +36,3 @@ class AttentionMetadata(object):
     num_slices: jax.Array = None
     # (3,)
     request_distribution: jax.Array = None
-    # (padded_total_num_scheduled_tokens,)
-    input_mrope_positions: jax.Array = None
