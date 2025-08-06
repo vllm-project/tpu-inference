@@ -17,8 +17,7 @@ from tpu_commons.models.jax.common.attention.llama4_attention import (
 from tpu_commons.models.jax.common.base import ParamFactory
 from tpu_commons.models.jax.common.constants import KVCacheType, RouterType
 from tpu_commons.models.jax.common.layers import (DenseFFWConfig, Embedder,
-                                                  EmbedderConfig, LMhead,
-                                                  RMSNorm)
+                                                  LMhead, RMSNorm)
 from tpu_commons.models.jax.common.model import Model
 from tpu_commons.models.jax.common.moe.moe import MoEConfig, RouterConfig
 from tpu_commons.models.jax.common.sharding import (Sharding,
@@ -131,15 +130,16 @@ class Llama4ForCausalLM(Model):
                 scale_initializer=nnx.initializers.ones,
                 random_init=False)
 
-        embedder_config = EmbedderConfig(vocab_size=202048,
-                                         hidden_size=self.hidden_size,
-                                         dtype=dtype,
-                                         normalize_embeddings=False,
-                                         vllm_config=self.vllm_config)
-        self.embedder = Embedder(cfg=embedder_config,
+        vocab_size = 202048
+        self.embedder = Embedder(vocab_size=vocab_size,
+                                 hidden_size=self.hidden_size,
+                                 dtype=dtype,
+                                 generate_rules_prelogit_td=self.
+                                 _sharding_config.generate_rules.prelogit_td,
+                                 generate_rules_vocab_vd=self._sharding_config.
+                                 generate_rules.vocab_vd,
                                  mesh=self.mesh,
-                                 param_factory=self.param_factory,
-                                 sharding_cfg=self._sharding_config)
+                                 param_factory=self.param_factory)
         self.embedder.generate_kernel(self.rng)
 
         self.layers = []
@@ -176,17 +176,25 @@ class Llama4ForCausalLM(Model):
             dims=self.hidden_size,
             mesh=self.mesh,
             param_factory=self.param_factory,
-            sharding_cfg=self._sharding_config,
+            prefill_rules=self._sharding_config.prefill_rules,
+            generate_rules=self._sharding_config.generate_rules,
             epsilon=layer_config.rms_norm_eps,
             with_scale=True,
             dtype=dtype,
         )
         self.final_norm.generate_kernel(self.rng)
 
-        self.lm_head = LMhead(cfg=embedder_config,
+        self.lm_head = LMhead(vocab_size=vocab_size,
+                              hidden_size=self.hidden_size,
+                              dtype=dtype,
+                              generate_rules_prelogit_td=self._sharding_config.
+                              generate_rules.prelogit_td,
+                              generate_rules_vocab_vd=self._sharding_config.
+                              generate_rules.vocab_vd,
+                              generate_rules_vocab_dv=self._sharding_config.
+                              generate_rules.vocab_dv,
                               mesh=self.mesh,
-                              param_factory=self.param_factory,
-                              sharding_cfg=self._sharding_config)
+                              param_factory=self.param_factory)
         self.lm_head.generate_kernel(self.rng)
         if self.is_verbose:
             self._print_model_architecture()

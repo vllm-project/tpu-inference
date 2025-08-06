@@ -18,7 +18,7 @@ from tpu_commons.models.jax.common.attention.deepseek_v3_attention import (
 from tpu_commons.models.jax.common.base import ParamFactory
 from tpu_commons.models.jax.common.constants import KVCacheType
 from tpu_commons.models.jax.common.layers import (DenseFFWConfig, Embedder,
-                                                  EmbedderConfig, RMSNorm)
+                                                  LMhead, RMSNorm)
 from tpu_commons.models.jax.common.model import Model
 from tpu_commons.models.jax.common.moe.deepseek_moe import \
     DeepSeekV3RoutingConfig
@@ -123,10 +123,6 @@ class DeepSeekV3(Model):
         rms_norm_eps: float = 1e-06
         first_k_dense_replace: int = 3  # replace the first few MOE layers to dense layer.
 
-        embedder_config = EmbedderConfig(vocab_size=vocab_size,
-                                         hidden_size=hidden_size,
-                                         dtype=jnp.bfloat16,
-                                         normalize_embeddings=False)
         layer_config = SharedExpertsTransformerBlockConfig(
             shared_experts=1,
             attention=MLAConfig(hidden_size=hidden_size,
@@ -197,10 +193,15 @@ class DeepSeekV3(Model):
                 kernel_initializer=nnx.initializers.xavier_normal(),
                 scale_initializer=nnx.initializers.ones,
                 random_init=self.use_random_init)
-        self.embedder = Embedder(cfg=embedder_config,
+        self.embedder = Embedder(vocab_size=vocab_size,
+                                 hidden_size=hidden_size,
+                                 dtype=dtype,
+                                 generate_rules_prelogit_td=self.
+                                 _sharding_config.generate_rules.prelogit_td,
+                                 generate_rules_vocab_vd=self._sharding_config.
+                                 generate_rules.vocab_vd,
                                  mesh=self.mesh,
-                                 param_factory=self.param_factory,
-                                 sharding_cfg=self._sharding_config)
+                                 param_factory=self.param_factory)
         self.embedder.generate_kernel(self.rng)
 
         self.layers = []
@@ -233,17 +234,25 @@ class DeepSeekV3(Model):
             dims=hidden_size,
             mesh=self.mesh,
             param_factory=self.param_factory,
-            sharding_cfg=self._sharding_config,
+            prefill_rules=self._sharding_config.prefill_rules,
+            generate_rules=self._sharding_config.generate_rules,
             epsilon=rms_norm_eps,
             with_scale=True,
             dtype=dtype,
         )
         self.final_norm.generate_kernel(self.rng)
 
-        self.lm_head = Embedder(cfg=embedder_config,
-                                mesh=self.mesh,
-                                param_factory=self.param_factory,
-                                sharding_cfg=self._sharding_config)
+        self.lm_head = LMhead(vocab_size=vocab_size,
+                              hidden_size=hidden_size,
+                              dtype=dtype,
+                              generate_rules_prelogit_td=self._sharding_config.
+                              generate_rules.prelogit_td,
+                              generate_rules_vocab_vd=self._sharding_config.
+                              generate_rules.vocab_vd,
+                              generate_rules_vocab_dv=self._sharding_config.
+                              generate_rules.vocab_dv,
+                              mesh=self.mesh,
+                              param_factory=self.param_factory)
         self.lm_head.generate_kernel(self.rng)
 
         # TODO: Add MTP.

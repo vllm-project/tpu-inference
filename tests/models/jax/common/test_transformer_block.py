@@ -7,6 +7,7 @@ from tpu_commons.models.jax.common.attention.attention import AttentionConfig
 from tpu_commons.models.jax.common.layers import DenseFFWConfig
 from tpu_commons.models.jax.common.moe.moe import (MoEConfig, RouterConfig,
                                                    RouterType)
+from tpu_commons.models.jax.common.sharding import ShardingConfig
 from tpu_commons.models.jax.common.transformer_block import (
     SharedExpertsTransformerBlock, SharedExpertsTransformerBlockConfig,
     TransformerBlock, TransformerBlockConfig)
@@ -74,7 +75,7 @@ class TestTransformerBlock(unittest.TestCase):
             block_type="dense",
             param_factory=None,
             mesh=None,
-            sharding_cfg=None,
+            sharding_cfg=ShardingConfig(),
         )
 
         seq_len = 64

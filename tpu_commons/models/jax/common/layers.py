@@ -11,7 +11,8 @@ from vllm.config import VllmConfig
 
 from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
-from tpu_commons.models.jax.common.sharding import ShardingConfig
+from tpu_commons.models.jax.common.sharding import (ShardingConfig,
+                                                    ShardingRulesConfig)
 
 
 # A dummy for modeling_flax_utils which might contain activation functions
@@ -66,7 +67,8 @@ class RMSNorm(nnx.Module):
     dims: int
     mesh: Mesh
     param_factory: ParamFactory
-    sharding_cfg: ShardingConfig
+    prefill_rules: ShardingRulesConfig
+    generate_rules: ShardingRulesConfig
     epsilon: float = 1e-6
     with_scale: bool = True
     dtype: Any = jnp.float32
@@ -113,10 +115,8 @@ class RMSNorm(nnx.Module):
             "activation_ffw_td",
         ]
         for attr_name in mode_dependent_attrs:
-            prefill_sharding_config = getattr(self.sharding_cfg.prefill_rules,
-                                              attr_name)
-            generate_sharding_config = getattr(
-                self.sharding_cfg.generate_rules, attr_name)
+            prefill_sharding_config = getattr(self.prefill_rules, attr_name)
+            generate_sharding_config = getattr(self.generate_rules, attr_name)
 
             sharding_dict = {
                 'prefill': NamedSharding(self.mesh,
@@ -287,11 +287,14 @@ class Embedder(nnx.Module):
         sharding_cfg: Configuration for tensor sharding strategies.
         quant: Optional configuration for quantization.
     """
-    cfg: EmbedderConfig
+    vocab_size: int
+    hidden_size: int
+    dtype: jnp.dtype
     mesh: Mesh
     param_factory: ParamFactory
-    sharding_cfg: ShardingConfig
-    quant: Any | None = None
+    normalize_embeddings: bool = False
+    generate_rules_prelogit_td: tuple = (None, None)
+    generate_rules_vocab_vd: tuple = (None, None)
 
     def __post_init__(self):
         """Initializes the embedding table."""
@@ -315,13 +318,11 @@ class Embedder(nnx.Module):
             return self.encode(x)
 
     def generate_kernel(self, rngs: nnx.Rngs):
-        V = getattr(self.cfg, HuggingFaceArgNames.VOCAB_SIZE.value)
-        D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
         self.input_embedding_table_VD = self.param_factory.create_kernel_param(
             rngs,
-            shape=(V, D),
+            shape=(self.vocab_size, self.hidden_size),
             sharding=self.vd_sharding,
-            dtype=self.cfg.dtype)
+            dtype=self.dtype)
 
     def decode(self, x_TD: Float) -> Float:
         """Projects hidden states to vocabulary logits.
@@ -334,7 +335,7 @@ class Embedder(nnx.Module):
             The output logits over the vocabulary, with shape
             `(sequence, vocab_size)`.
         """
-        x_TD = jnp.asarray(x_TD, self.cfg.dtype)
+        x_TD = jnp.asarray(x_TD, self.dtype)
         x_TD = nnx.with_sharding_constraint(x_TD, self.prelogit_td)
 
         with jax.named_scope("embedder_decode_projection"):
@@ -357,18 +358,17 @@ class Embedder(nnx.Module):
                                     x_T,
                                     axis=0)
 
-        D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
-        if self.cfg.normalize_embeddings:
+        if self.normalize_embeddings:
             with jax.named_scope("embedder_normalize_embeddings"):
-                embedding_TD *= jnp.sqrt(D).astype(self.cfg.dtype)
+                embedding_TD *= jnp.sqrt(self.hidden_size).astype(self.dtype)
         return embedding_TD
 
     def create_sharding(self):
         """Creates and sets sharding attributes for weights and activations."""
-        self.prelogit_td = NamedSharding(
-            self.mesh, P(*self.sharding_cfg.generate_rules.prelogit_td))
-        self.vd_sharding = NamedSharding(
-            self.mesh, P(*self.sharding_cfg.generate_rules.vocab_vd))
+        self.prelogit_td = NamedSharding(self.mesh,
+                                         P(*self.generate_rules_prelogit_td))
+        self.vd_sharding = NamedSharding(self.mesh,
+                                         P(*self.generate_rules_vocab_vd))
 
 
 @dataclass
@@ -380,16 +380,14 @@ class LMhead(Embedder):
     This implementation overrides the kernel generation, encoding, and decoding
     methods to work with the transposed embedding matrix layout.
     """
+    generate_rules_vocab_dv: tuple = (None, None)
 
     def generate_kernel(self, rngs: nnx.Rngs):
-        V = getattr(self.cfg, HuggingFaceArgNames.VOCAB_SIZE.value)
-        D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
-
         self.input_embedding_table_DV = self.param_factory.create_kernel_param(
             rngs,
-            shape=(D, V),
+            shape=(self.hidden_size, self.vocab_size),
             sharding=self.dv_sharding,
-            dtype=self.cfg.dtype)
+            dtype=self.dtype)
 
     def __call__(self, x):
         """Dispatches to decode method.
@@ -416,7 +414,7 @@ class LMhead(Embedder):
             The output logits over the vocabulary, with shape
             `(sequence, vocab_size)`.
         """
-        x_TD = jnp.asarray(x_TD, self.cfg.dtype)
+        x_TD = jnp.asarray(x_TD, self.dtype)
         x_TD = nnx.with_sharding_constraint(x_TD, self.prelogit_td)
 
         with jax.named_scope("lmhead_decode_projection"):
@@ -426,7 +424,7 @@ class LMhead(Embedder):
 
     def create_sharding(self):
         """Creates and sets sharding attributes for weights and activations."""
-        self.prelogit_td = NamedSharding(
-            self.mesh, P(*self.sharding_cfg.generate_rules.prelogit_td))
-        self.dv_sharding = NamedSharding(
-            self.mesh, P(*self.sharding_cfg.generate_rules.vocab_dv))
+        self.prelogit_td = NamedSharding(self.mesh,
+                                         P(*self.generate_rules_prelogit_td))
+        self.dv_sharding = NamedSharding(self.mesh,
+                                         P(*self.generate_rules_vocab_dv))
