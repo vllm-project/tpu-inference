@@ -10,7 +10,6 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh
 
 from tpu_commons.models.jax.recipes.llama4 import (Llama4ForCausalLM,
-                                                   Llama4ModelConfig,
                                                    Llama4WeightLoader)
 
 
@@ -57,21 +56,6 @@ class MockVllmConfig:
         }
 
 
-@pytest.fixture
-def small_model_config() -> Llama4ModelConfig:
-    """A small model configuration for fast and memory-efficient tests."""
-    config = Llama4ModelConfig(
-        hidden_size=32,
-        num_layers=2,
-        intermediate_size_moe=64,
-        num_local_experts=2,
-        #  no_rope_layer_interval=2,
-        dtype=jnp.bfloat16)
-    config.emb.vocab_size = 128
-    config.layers.attention.head_dim = 8
-    return config
-
-
 @pytest.fixture(scope="module")
 def mesh():
     """
@@ -104,13 +88,10 @@ def mock_vllm_config_llama4() -> MockVllmConfig:
 class TestLlama4ForCausalLM:
     """Tests for the main LlamaForCausalLM model class."""
 
-    @patch(
-        "tpu_commons.models.jax.recipes.llama4.Llama4ForCausalLM._init_layers",
-        return_value=None)
-    def test_init_llama4(self, _, mock_vllm_config_llama4, rng, mesh):
+    def test_init_llama4(self, mock_vllm_config_llama4, rng, mesh):
         """Tests correct parameter detection for the Llama4 model variant."""
         model = Llama4ForCausalLM(mock_vllm_config_llama4, rng, mesh)
-        assert model._model_config.hidden_size == 5120
+        assert model.hidden_size == 5120
         assert "llama-4" in model.vllm_config.model_config.model.lower()
 
     def test_create_model_with_random_weights(self, mock_vllm_config_llama4,
@@ -133,12 +114,8 @@ class TestLlama4ForCausalLM:
 
         assert jnp.all(final_norm_scale == 1.0)
 
-    @patch(
-        "tpu_commons.models.jax.recipes.llama4.Llama4ForCausalLM._init_layers",
-        return_value=None)
     @patch("tpu_commons.models.jax.recipes.llama4.Llama4WeightLoader")
-    def test_load_weights_called_correctly(self, mock_loader_cls, _, rng,
-                                           mesh):
+    def test_load_weights_called_correctly(self, mock_loader_cls, rng, mesh):
         """Tests that the weight loader is called correctly for checkpoint loading."""
         vllm_config = MockVllmConfig(model_name="llama4-scout",
                                      random_weights=False)
@@ -148,8 +125,11 @@ class TestLlama4ForCausalLM:
         mock_loader_cls.return_value = mock_loader_instance
         model.load_weights(rng)
 
-        mock_loader_cls.assert_called_once_with(
-            vllm_config=vllm_config, model_config=model._model_config)
+        mock_loader_cls.assert_called_once_with(vllm_config=vllm_config,
+                                                hidden_size=5120,
+                                                attn_heads=40,
+                                                num_key_value_heads=8,
+                                                attn_head_dim=128)
         mock_loader_instance.load_weights.assert_called_once_with(model)
 
 
@@ -157,10 +137,13 @@ class TestLlama4WeightLoader:
     """Tests for the Llama4WeightLoader class."""
 
     @pytest.fixture
-    def weight_loader(self, small_model_config):
+    def weight_loader(self):
         # Patch the superclass's setup to isolate the Llama4 loader's logic
         return Llama4WeightLoader(vllm_config=MockVllmConfig("test-model"),
-                                  model_config=small_model_config)
+                                  hidden_size=32,
+                                  attn_heads=40,
+                                  num_key_value_heads=8,
+                                  attn_head_dim=128)
 
     @pytest.mark.parametrize("hf_key, expected", [
         ("language_model.model.layers.15.self_attn.q_proj.weight",
@@ -179,29 +162,19 @@ class TestLlama4WeightLoader:
         assert weight_loader.map_loaded_to_standardized_name(
             hf_key) == expected
 
-    def test_load_weights_transformation(self, small_model_config, rng, mesh):
+    def test_load_weights_transformation(self, weight_loader, rng, mesh):
         """Tests that weights are correctly reshaped, transposed, and loaded."""
         vllm_config = MockVllmConfig(model_name="llama4-small-test",
                                      random_weights=False)
 
-        # Create a model instance but override its config for the test.
-        with patch(
-                "tpu_commons.models.jax.recipes.llama4.Llama4ForCausalLM._init_layers",
-                return_value=None):
-            model = Llama4ForCausalLM(vllm_config, rng, mesh)
-
-        model._model_config = small_model_config
-        model._init_layers()  # Now initialize with the small config
-
-        loader = Llama4WeightLoader(vllm_config=vllm_config,
-                                    model_config=small_model_config)
+        model = Llama4ForCausalLM(vllm_config, rng, mesh)
 
         # Original weight shape is (vocab_size, hidden_size)
         original_weight = jnp.ones((128, 32))
         dummy_weights = [
             ("language_model.model.embed_tokens.weight", original_weight),
         ]
-        loader.names_and_weights_generator = dummy_weights
+        weight_loader.names_and_weights_generator = dummy_weights
 
         # Mock get_param to return a mock param with the target shape (vocab_size, hidden_size)
         mock_param = MockParamLlama4(shape=(128, 32))
@@ -210,7 +183,7 @@ class TestLlama4WeightLoader:
             patch("tpu_commons.models.jax.recipes.llama4.shard_put", return_value=jnp.ones(mock_param.value.shape)) as mock_shard_put:
 
             # This will now pass after the code fix
-            loader.load_weights(model)
+            weight_loader.load_weights(model)
 
             # Assert that shard_put was called with the correctly transposed weight
             mock_shard_put.assert_called_once()
@@ -221,22 +194,15 @@ class TestLlama4WeightLoader:
             # Check if the shape of the array passed to shard_put matches the model's expected shape.
             assert called_with_weight.shape == mock_param.value.shape
 
-    def test_map_llama4_gate_up_proj(self, small_model_config, weight_loader,
-                                     rng, mesh):
+    def test_map_llama4_gate_up_proj(self, weight_loader, rng, mesh):
         """Tests that gate_up_proj weights are correctly split, reshaped, transposed, and loaded."""
         # Set up a dummy model and its config
-        with patch(
-                "tpu_commons.models.jax.recipes.llama4.Llama4ForCausalLM._init_layers",
-                return_value=None):
-            model = Llama4ForCausalLM(MockVllmConfig("test-model"), rng, mesh)
-
-        model._model_config = small_model_config
-        model._init_layers()
+        model = Llama4ForCausalLM(MockVllmConfig("test-model"), rng, mesh)
 
         # Create a dummy fused gate_up_proj weight tensor
-        hidden_size = small_model_config.hidden_size
-        intermediate_size_moe = small_model_config.intermediate_size_moe
-        num_local_experts = small_model_config.num_local_experts
+        hidden_size = 32
+        intermediate_size_moe = 8192
+        num_local_experts = 2
         dummy_weight = jnp.ones(
             (num_local_experts, hidden_size, 2 * intermediate_size_moe))
 
@@ -246,7 +212,6 @@ class TestLlama4WeightLoader:
                                             intermediate_size_moe))
 
         # Create a dummy WeightLoader and set up the necessary attributes
-        weight_loader.model_config = small_model_config
         weight_loader.is_verbose = False
         layer_num = 0
         weight_loader.names_and_weights_generator = [
@@ -266,6 +231,4 @@ class TestLlama4WeightLoader:
             assert mock_shard_put.call_count == 2
             # call_args_list gives you a list of all the calls with their arguments.
             for call in mock_shard_put.call_args_list:
-                assert call[0][0].shape == (
-                    num_local_experts, small_model_config.hidden_size,
-                    small_model_config.intermediate_size_moe)
+                assert call[0][0].shape == (num_local_experts, 32, 8192)

@@ -1,9 +1,8 @@
 # TODO: Update documentation
 
-import pprint
 import re
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import jax
@@ -34,54 +33,6 @@ from tpu_commons.models.jax.utils.weight_utils import (get_model_weights_files,
                                                        transpose_params)
 
 logger = init_logger(__name__)
-pp = pprint.PrettyPrinter(depth=6)
-
-
-@dataclass
-class Llama3ModelConfig():
-    """Configuration for the Llama3 model family."""
-    hidden_size: int
-    num_layers: int
-    num_attention_heads: int
-    num_key_value_heads: int
-    intermediate_size: int
-    dtype: jnp.dtype = jnp.bfloat16
-    head_dim: int = 128
-    rope_theta: float = 500000.0
-    vocab_size: int = 128256
-    rms_norm_eps: float = 1e-5
-    emb: EmbedderConfig = None
-    layers: TransformerBlockConfig = None
-    vllm_config: VllmConfig = field(repr=False, default=None)
-
-    def __post_init__(self):
-
-        # Initialize defaults:
-        if not self.emb:
-            self.emb = EmbedderConfig(vocab_size=self.vocab_size,
-                                      hidden_size=self.hidden_size,
-                                      dtype=self.dtype,
-                                      normalize_embeddings=False,
-                                      vllm_config=self.vllm_config)
-        if not self.layers:
-            self.layers = TransformerBlockConfig(
-                attention=AttentionConfig(
-                    hidden_size=self.hidden_size,
-                    num_attention_heads=self.num_attention_heads,
-                    num_key_value_heads=self.num_key_value_heads,
-                    head_dim=self.head_dim,
-                    rope_theta=self.rope_theta,
-                    rope_scaling={},
-                    dtype=self.dtype,
-                    vllm_config=self.vllm_config),
-                dense_ffw=DenseFFWConfig(
-                    hidden_size=self.hidden_size,
-                    intermediate_size=self.intermediate_size,
-                    hidden_act="silu",
-                    dtype=self.dtype,
-                    vllm_config=self.vllm_config),
-                rms_norm_eps=self.rms_norm_eps,
-                vllm_config=self.vllm_config)
 
 
 @dataclass
@@ -110,86 +61,108 @@ class LlamaForCausalLM(Model):
         #
         # TODO: after all models are migrated to the new sharding,
         # we need to only create sharding obj in TPU runner
-        self._sharding_config = Sharding(
-            default_rules_cls=Llama3ShardingRulesConfig,
-            vllm_config=self.vllm_config).sharding_cfg
+        sharding_config = Sharding(default_rules_cls=Llama3ShardingRulesConfig,
+                                   vllm_config=self.vllm_config).sharding_cfg
 
         model_name = self.vllm_config.model_config.model.lower()
         if "70b" in model_name:
             logger.info("Initializing Llama3 70B model variant.")
-            model_params = {
-                "hidden_size": 8192,
-                "num_layers": 80,
-                "num_attention_heads": 64,
-                "num_key_value_heads": 8,
-                "intermediate_size": 28672,
-            }
+            self.hidden_size = 8192
+            num_layers = 80
+            self.num_attention_heads = 64
+            self.num_key_value_heads = 8
+            intermediate_size = 28672
         elif "8b" in model_name:
             logger.info("Initializing Llama3 8B model variant.")
-            model_params = {
-                "hidden_size": 4096,
-                "num_layers": 32,
-                "num_attention_heads": 32,
-                "num_key_value_heads": 8,
-                "intermediate_size": 14336,
-            }
+            self.hidden_size = 4096
+            num_layers = 32
+            self.num_attention_heads = 32
+            self.num_key_value_heads = 8
+            intermediate_size = 14336
         else:
             raise ValueError(
                 f"Could not determine Llama3 variant (8B or 70B) from model name: '{model_name}'. "
                 "Please ensure '8b' or '70b' is in the model path.")
 
-        self._model_config = Llama3ModelConfig(vllm_config=self.vllm_config,
-                                               **model_params)
+        dtype = jnp.bfloat16
+        self.head_dim = 128
+        rope_theta = 500000.0
+        vocab_size = 128256
+        rms_norm_eps = 1e-5
+        embedder_config = EmbedderConfig(vocab_size=vocab_size,
+                                         hidden_size=self.hidden_size,
+                                         dtype=dtype,
+                                         normalize_embeddings=False,
+                                         vllm_config=self.vllm_config)
 
-        logger.info(
-            f"Using the following config:\n{self._model_config}; {self._sharding_config}"
-        )
-        self._init_layers()
+        logger.info(f"Using the following config:\n {sharding_config}")
 
-    def _init_layers(self):
         if not self.param_factory:
             self.param_factory = ParamFactory(
                 kernel_initializer=nnx.initializers.xavier_normal(),
                 scale_initializer=nnx.initializers.ones,
                 random_init=False)
-        self.embedder = Embedder(cfg=self._model_config.emb,
+        self.embedder = Embedder(cfg=embedder_config,
                                  mesh=self.mesh,
                                  param_factory=self.param_factory,
-                                 sharding_cfg=self._sharding_config)
+                                 sharding_cfg=sharding_config)
         self.embedder.generate_kernel(self.rng)
 
+        layer_config = TransformerBlockConfig(
+            attention=AttentionConfig(
+                hidden_size=self.hidden_size,
+                num_attention_heads=self.num_attention_heads,
+                num_key_value_heads=self.num_key_value_heads,
+                head_dim=self.head_dim,
+                rope_theta=rope_theta,
+                rope_scaling={},
+                dtype=dtype,
+                vllm_config=self.vllm_config),
+            dense_ffw=DenseFFWConfig(hidden_size=self.hidden_size,
+                                     intermediate_size=intermediate_size,
+                                     hidden_act="silu",
+                                     dtype=dtype,
+                                     vllm_config=self.vllm_config),
+            rms_norm_eps=rms_norm_eps,
+            vllm_config=self.vllm_config)
+
         self.layers = [
-            TransformerBlock(cfg=self._model_config.layers,
+            TransformerBlock(cfg=layer_config,
                              block_type="dense",
                              param_factory=self.param_factory,
                              mesh=self.mesh,
-                             sharding_cfg=self._sharding_config)
-            for i in range(self._model_config.num_layers)
+                             sharding_cfg=sharding_config)
+            for _ in range(num_layers)
         ]
         for i in range(len(self.layers)):
             self.layers[i].generate_kernel(self.rng)
 
         self.final_norm = RMSNorm(
-            dims=self._model_config.hidden_size,
+            dims=self.hidden_size,
             mesh=self.mesh,
             param_factory=self.param_factory,
-            sharding_cfg=self._sharding_config,
-            epsilon=self._model_config.layers.rms_norm_eps,
+            sharding_cfg=sharding_config,
+            epsilon=rms_norm_eps,
             with_scale=True,
-            dtype=self._model_config.dtype,
+            dtype=dtype,
         )
         self.final_norm.generate_kernel(self.rng)
 
-        self.lm_head = LMhead(cfg=self._model_config.emb,
+        self.lm_head = LMhead(cfg=embedder_config,
                               mesh=self.mesh,
                               param_factory=self.param_factory,
-                              sharding_cfg=self._sharding_config)
+                              sharding_cfg=sharding_config)
         self.lm_head.generate_kernel(self.rng)
 
     def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):
         self.rng = nnx.Rngs(rng)
-        weight_loader = Llama3WeightLoader(vllm_config=self.vllm_config,
-                                           model_config=self._model_config)
+        weight_loader = Llama3WeightLoader(
+            vllm_config=self.vllm_config,
+            hidden_size=self.hidden_size,
+            attn_heads=self.num_attention_heads,
+            num_key_value_heads=self.num_key_value_heads,
+            attn_head_dim=self.head_dim)
+
         weight_loader.load_weights(self)
 
     def __call__(
@@ -238,8 +211,8 @@ class LlamaForCausalLM(Model):
 
 class Llama3WeightLoader:
 
-    def __init__(self, vllm_config: VllmConfig,
-                 model_config: Llama3ModelConfig):
+    def __init__(self, vllm_config: VllmConfig, hidden_size, attn_heads,
+                 num_key_value_heads, attn_head_dim):
         self._transpose_map = {
             "lm_head": (1, 0),
             "gate_proj": (1, 0),
@@ -250,10 +223,6 @@ class Llama3WeightLoader:
             "v_proj": (2, 0, 1),
             "o_proj": (1, 2, 0),
         }
-        hidden_size = model_config.hidden_size
-        attn_heads = model_config.layers.attention.num_attention_heads
-        num_key_value_heads = model_config.layers.attention.num_key_value_heads
-        attn_head_dim = model_config.layers.attention.head_dim
         self._weight_shape_map = {
             "q_proj": (attn_heads, -1, hidden_size),
             "k_proj": (num_key_value_heads, -1, hidden_size),
