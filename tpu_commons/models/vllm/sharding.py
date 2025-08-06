@@ -44,22 +44,16 @@ def shard_attention(layer: torch.nn.Module, mesh: Mesh,
 def shard_qkv_parallel_linear(layer: torch.nn.Module, mesh: Mesh,
                               vllm_config: VllmConfig):
     assert isinstance(layer, QKVParallelLinear)
-    fuse_matmuls = get_model_matmul_fusion_assignment(
-        vllm_config.model_config.model,
-        vllm_config.scheduler_config.max_num_batched_tokens, layer.tp_size,
-        "QKVParallelLinear")
-    jax_layer = JaxQKVParallelLinear(layer, mesh, fuse_matmuls)
+    jax_layer = JaxQKVParallelLinear(layer, mesh,
+                                     shard_qkv_parallel_linear.fuse_matmuls)
     return jax_layer
 
 
 def shard_merged_column_parallel_linear(layer: torch.nn.Module, mesh: Mesh,
                                         vllm_config: VllmConfig):
     assert isinstance(layer, MergedColumnParallelLinear)
-    fuse_matmuls = get_model_matmul_fusion_assignment(
-        vllm_config.model_config.model,
-        vllm_config.scheduler_config.max_num_batched_tokens, layer.tp_size,
-        "MergedColumnParallelLinear")
-    jax_layer = JaxMergedColumnParallelLinear(layer, mesh, fuse_matmuls)
+    jax_layer = JaxMergedColumnParallelLinear(
+        layer, mesh, shard_merged_column_parallel_linear.fuse_matmuls)
     return jax_layer
 
 
@@ -147,6 +141,16 @@ def shard_model_to_tpu(model: torch.nn.Module, mesh: Mesh,
             x = t2j(x, use_dlpack=False)
         return torch_view(x).apply_jax_(jax.device_put,
                                         NamedSharding(mesh, P()))
+
+    tp_size = vllm_config.parallel_config.tensor_parallel_size
+    shard_qkv_parallel_linear.fuse_matmuls = get_model_matmul_fusion_assignment(
+        vllm_config.model_config.model,
+        vllm_config.scheduler_config.max_num_batched_tokens, tp_size,
+        "QKVParallelLinear")
+    shard_merged_column_parallel_linear.fuse_matmuls = get_model_matmul_fusion_assignment(
+        vllm_config.model_config.model,
+        vllm_config.scheduler_config.max_num_batched_tokens, tp_size,
+        "MergedColumnParallelLinear")
 
     with jax.default_device(jax.devices("cpu")[0]), torchax.default_env():
         shard_parallel_layers_to_tpu(model, mesh, vllm_config)
