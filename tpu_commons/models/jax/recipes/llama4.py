@@ -121,29 +121,28 @@ class Llama4ForCausalLM(Model):
                  rng: PRNGKey,
                  mesh: Mesh,
                  param_factory: ParamFactory | None = None):
+        assert mesh is not None
+
         self.vllm_config = vllm_config
         self.rng = nnx.Rngs(rng)
         self.mesh = mesh
         self.param_factory = param_factory
         self.is_verbose = getattr(self.vllm_config.additional_config,
                                   "is_verbose", False)
-        try:
-            strategy_dict = self.vllm_config.additional_config["sharding"][
-                "sharding_strategy"]
-        except (KeyError, TypeError):
-            strategy_dict = {"tensor_parallelism": 4, "expert_parallelism": 2}
-        self.sharding = Sharding(strategy_dict=strategy_dict,
-                                 mesh=self.mesh,
-                                 default_rules_cls=Llama4ShardingRulesConfig,
-                                 vllm_config=self.vllm_config)
+
+        # Currently the runner will always set a mesh, so the custom default sharding (when
+        #  no sharding is set in vllm config) doesn't take effect.
+        # TODO(fhzhang): figure out whether we need to actually enable this.
+        #    strategy_dict = {"tensor_parallelism": 4, "expert_parallelism": 2}
+
+        self._sharding_config = Sharding(
+            default_rules_cls=Llama4ShardingRulesConfig,
+            vllm_config=self.vllm_config).sharding_cfg
         self._model_config = Llama4ModelConfig(vllm_config=self.vllm_config)
 
         logger.info(
-            f"Using the following config:\n{self._model_config}; {self.sharding.sharding_cfg}"
+            f"Using the following config:\n{self._model_config}; {self._sharding_config}"
         )
-        logger.info(
-            f"Using the following sharding overrides:\n{self.sharding}")
-        self.mesh = self.sharding.mesh
         self._init_layers()
 
     def _init_layers(self):
@@ -155,7 +154,7 @@ class Llama4ForCausalLM(Model):
         self.embedder = Embedder(cfg=self._model_config.emb,
                                  mesh=self.mesh,
                                  param_factory=self.param_factory,
-                                 sharding_cfg=self.sharding.sharding_cfg)
+                                 sharding_cfg=self._sharding_config)
         self.embedder.generate_kernel(self.rng)
 
         self.layers = []
@@ -183,7 +182,7 @@ class Llama4ForCausalLM(Model):
                 use_attention_rope=use_attention_rope,
                 param_factory=self.param_factory,
                 mesh=self.mesh,
-                sharding_cfg=self.sharding.sharding_cfg)
+                sharding_cfg=self._sharding_config)
             self.layers.append(block)
 
         for i in range(len(self.layers)):
@@ -193,7 +192,7 @@ class Llama4ForCausalLM(Model):
             dims=self._model_config.hidden_size,
             mesh=self.mesh,
             param_factory=self.param_factory,
-            sharding_cfg=self.sharding.sharding_cfg,
+            sharding_cfg=self._sharding_config,
             epsilon=self._model_config.layers.rms_norm_eps,
             with_scale=True,
             dtype=self._model_config.dtype,
@@ -203,7 +202,7 @@ class Llama4ForCausalLM(Model):
         self.lm_head = LMhead(cfg=self._model_config.emb,
                               mesh=self.mesh,
                               param_factory=self.param_factory,
-                              sharding_cfg=self.sharding.sharding_cfg)
+                              sharding_cfg=self._sharding_config)
         self.lm_head.generate_kernel(self.rng)
         if self.is_verbose:
             self._print_model_architecture()

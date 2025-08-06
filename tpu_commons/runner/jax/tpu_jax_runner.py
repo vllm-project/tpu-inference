@@ -29,7 +29,7 @@ from vllm.v1.request import Request
 from tpu_commons import utils as common_utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.models.jax.common.sharding import Sharding
+from tpu_commons.models.jax.common.sharding import build_mesh
 from tpu_commons.models.jax.layers.misc import shard_put
 from tpu_commons.models.jax.layers.sampling import (compute_logprobs,
                                                     gather_logprobs, sample)
@@ -108,10 +108,7 @@ class TPUModelRunner():
             sharding_strategy = {"tensor_parallelism": len(self.devices)}
 
         if os.getenv("NEW_MODEL_DESIGN", False):
-            sharding = Sharding(strategy_dict=sharding_strategy,
-                                vllm_config=self.vllm_config,
-                                devices=self.devices)
-            self.mesh = sharding.mesh
+            self.mesh = build_mesh(self.devices, sharding_strategy)
         else:
             try:
                 dp = sharding_strategy["data_parallelism"]

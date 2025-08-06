@@ -241,7 +241,6 @@ class TestLlama3WeightLoader:
             model = LlamaForCausalLM(vllm_config, rng, mesh)
 
         model._model_config = small_model_config
-        model.sharding = model.sharding
         model._init_layers()  # Now initialize with the small config
 
         loader = Llama3WeightLoader(vllm_config=vllm_config,
