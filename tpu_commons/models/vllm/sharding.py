@@ -10,7 +10,7 @@ from torch.utils import _pytree as pytree
 from torchax.interop import extract_all_buffers, torch_view
 from torchax.ops.mappings import t2j
 from vllm.attention import Attention as VllmAttention
-from vllm.config import ParallelConfig
+from vllm.config import VllmConfig
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import \
     UnquantizedLinearMethod  # yapf: disable
@@ -24,6 +24,8 @@ from tpu_commons.models.vllm.jax_attention import JaxAttention
 from tpu_commons.models.vllm.jax_fused_moe import JaxFusedMoE
 from tpu_commons.models.vllm.jax_merged_column_parallel_linear import \
     JaxMergedColumnParallelLinear
+from tpu_commons.models.vllm.jax_merged_column_parallel_linear_fusion_assignments import \
+    get_model_matmul_fusion_assignment
 from tpu_commons.models.vllm.jax_qkv_parallel_linear import \
     JaxQKVParallelLinear
 from tpu_commons.models.vllm.jax_row_parallel_linear import \
@@ -35,26 +37,28 @@ logger = init_logger(__name__)
 
 
 def shard_attention(layer: torch.nn.Module, mesh: Mesh,
-                    vllm_parallel_config: ParallelConfig):
+                    vllm_config: VllmConfig):
     return JaxAttention(layer, mesh)
 
 
 def shard_qkv_parallel_linear(layer: torch.nn.Module, mesh: Mesh,
-                              vllm_parallel_config: ParallelConfig):
+                              vllm_config: VllmConfig):
     assert isinstance(layer, QKVParallelLinear)
-    jax_layer = JaxQKVParallelLinear(layer, mesh)
+    jax_layer = JaxQKVParallelLinear(layer, mesh,
+                                     shard_qkv_parallel_linear.fuse_matmuls)
     return jax_layer
 
 
 def shard_merged_column_parallel_linear(layer: torch.nn.Module, mesh: Mesh,
-                                        vllm_parallel_config: ParallelConfig):
+                                        vllm_config: VllmConfig):
     assert isinstance(layer, MergedColumnParallelLinear)
-    jax_layer = JaxMergedColumnParallelLinear(layer, mesh)
+    jax_layer = JaxMergedColumnParallelLinear(
+        layer, mesh, shard_merged_column_parallel_linear.fuse_matmuls)
     return jax_layer
 
 
 def shard_column_parallel_linear(layer: torch.nn.Module, mesh: Mesh,
-                                 vllm_parallel_config: ParallelConfig):
+                                 vllm_config: VllmConfig):
     assert isinstance(layer, ColumnParallelLinear)
     if not isinstance(layer.quant_method, UnquantizedLinearMethod):
         raise ValueError(
@@ -67,16 +71,16 @@ def shard_column_parallel_linear(layer: torch.nn.Module, mesh: Mesh,
 
 
 def shard_row_parallel_linear(layer: torch.nn.Module, mesh: Mesh,
-                              vllm_parallel_config: ParallelConfig):
+                              vllm_config: VllmConfig):
     assert isinstance(layer, RowParallelLinear)
     jax_layer = JaxRowParallelLinear(layer, mesh)
     return jax_layer
 
 
 def shard_fused_moe(layer: torch.nn.Module, mesh: Mesh,
-                    vllm_parallel_config: ParallelConfig):
+                    vllm_config: VllmConfig):
     assert isinstance(layer, FusedMoE)
-    jax_layer = JaxFusedMoE(layer, mesh, vllm_parallel_config)
+    jax_layer = JaxFusedMoE(layer, mesh, vllm_config.parallel_config)
     return jax_layer
 
 
@@ -91,13 +95,12 @@ MODULE_TYPE_TO_WRAPPING_FUNC = {
 
 
 def shard_parallel_layers_to_tpu(model: torch.nn.Module, mesh: Mesh,
-                                 vllm_parallel_config: ParallelConfig) -> None:
+                                 vllm_config: VllmConfig) -> None:
 
     def _shard_layer(module, name=None, parent=None):
         for module_type, wrapping_func in MODULE_TYPE_TO_WRAPPING_FUNC.items():
             if isinstance(module, module_type):
-                wrapped_module = wrapping_func(module, mesh,
-                                               vllm_parallel_config)
+                wrapped_module = wrapping_func(module, mesh, vllm_config)
 
                 assert parent is not None and name is not None, (
                     "Top Level module is not expected to be wrapped.")
@@ -114,7 +117,7 @@ def shard_parallel_layers_to_tpu(model: torch.nn.Module, mesh: Mesh,
 
 
 def shard_model_to_tpu(model: torch.nn.Module, mesh: Mesh,
-                       vllm_parallel_config: ParallelConfig):
+                       vllm_config: VllmConfig):
     """
     Shard the model weights and move them to TPU.
 
@@ -139,8 +142,18 @@ def shard_model_to_tpu(model: torch.nn.Module, mesh: Mesh,
         return torch_view(x).apply_jax_(jax.device_put,
                                         NamedSharding(mesh, P()))
 
+    tp_size = vllm_config.parallel_config.tensor_parallel_size
+    shard_qkv_parallel_linear.fuse_matmuls = get_model_matmul_fusion_assignment(
+        vllm_config.model_config.model,
+        vllm_config.scheduler_config.max_num_batched_tokens, tp_size,
+        "QKVParallelLinear")
+    shard_merged_column_parallel_linear.fuse_matmuls = get_model_matmul_fusion_assignment(
+        vllm_config.model_config.model,
+        vllm_config.scheduler_config.max_num_batched_tokens, tp_size,
+        "MergedColumnParallelLinear")
+
     with jax.default_device(jax.devices("cpu")[0]), torchax.default_env():
-        shard_parallel_layers_to_tpu(model, mesh, vllm_parallel_config)
+        shard_parallel_layers_to_tpu(model, mesh, vllm_config)
 
         # For other weight tensors, repliate them on all the TPU chips.
         params, buffers = extract_all_buffers(model)
