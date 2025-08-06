@@ -68,7 +68,6 @@ class TpuPlatform(Platform):
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
-        logger.info(jax.lib.xla_bridge.get_backend().platform_version)
         try:
             if envs.VLLM_TPU_USING_PATHWAYS:
                 return jax.local_devices()[0].device_kind
