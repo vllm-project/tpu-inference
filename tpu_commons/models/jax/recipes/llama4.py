@@ -16,10 +16,10 @@ from tpu_commons.models.jax.common.attention.llama4_attention import (
     Llama4Attention, Llama4AttentionConfig)
 from tpu_commons.models.jax.common.base import ParamFactory
 from tpu_commons.models.jax.common.constants import KVCacheType, RouterType
-from tpu_commons.models.jax.common.layers import (DenseFFW, DenseFFWConfig,
-                                                  Embedder, LMhead, RMSNorm)
+from tpu_commons.models.jax.common.layers import (DenseFFWConfig, Embedder,
+                                                  LMhead, RMSNorm)
 from tpu_commons.models.jax.common.model import Model
-from tpu_commons.models.jax.common.moe.moe import MoE, MoEConfig, RouterConfig
+from tpu_commons.models.jax.common.moe.moe import MoEConfig, RouterConfig
 from tpu_commons.models.jax.common.sharding import (Sharding,
                                                     ShardingRulesConfig)
 from tpu_commons.models.jax.common.transformer_block import (
@@ -150,6 +150,7 @@ class Llama4ForCausalLM(Model):
             is_moe_layer = (i + 1) % \
                             self.interleave_moe_layer_step == 0
             use_attention_rope = (i + 1) % self.no_rope_layer_interval != 0
+            block_type = "moe" if is_moe_layer else "dense"
             block_cfg_nope = layer_config
             # RoPE layers do not use chunked attention
             block_cfg_rope = replace(
@@ -158,18 +159,9 @@ class Llama4ForCausalLM(Model):
                                   attention_chunk_size=None),
             )
             block_cfg = block_cfg_rope if use_attention_rope else block_cfg_nope
-            custom_module = MoE(cfg=layer_config.moe,
-                                mesh=self.mesh,
-                                param_factory=self.param_factory,
-                                sharding_cfg=self._sharding_config
-                                ) if is_moe_layer else DenseFFW(
-                                    cfg=layer_config.dense_ffw,
-                                    mesh=self.mesh,
-                                    param_factory=self.param_factory,
-                                    sharding_cfg=self._sharding_config)
             block = SharedExpertsTransformerBlock(
                 cfg=block_cfg,
-                custom_module=custom_module,
+                block_type=block_type,
                 attention_cls=Llama4Attention,
                 use_attention_rope=use_attention_rope,
                 param_factory=self.param_factory,

@@ -5,8 +5,8 @@ import jax.numpy as jnp
 
 from tpu_commons.models.jax.common.attention.attention import AttentionConfig
 from tpu_commons.models.jax.common.layers import DenseFFWConfig
-from tpu_commons.models.jax.common.moe.moe import (MoE, MoEConfig,
-                                                   RouterConfig, RouterType)
+from tpu_commons.models.jax.common.moe.moe import (MoEConfig, RouterConfig,
+                                                   RouterType)
 from tpu_commons.models.jax.common.sharding import ShardingConfig
 from tpu_commons.models.jax.common.transformer_block import (
     SharedExpertsTransformerBlock, SharedExpertsTransformerBlockConfig,
@@ -68,19 +68,14 @@ class TestTransformerBlock(unittest.TestCase):
         mock_mlp = MagicMock()
         dummy_mlp_output = jnp.full((64, hidden_size), 3.0, dtype=jnp.bfloat16)
         mock_mlp.return_value = dummy_mlp_output
-        mock_create_module.side_effect = [mock_attn]
+        mock_create_module.side_effect = [mock_attn, mock_mlp]
 
         transformer_block = TransformerBlock(
             cfg=transformer_config,
+            block_type="dense",
             param_factory=None,
             mesh=None,
             sharding_cfg=ShardingConfig(),
-            custom_module=mock_mlp,
-            # The custom_module is passed directly to the TransformerBlock
-            # in the test setup, so we need to ensure it's initialized
-            # with a mock that matches the expected behavior of a DenseFFW
-            # or MoE module. In this case, mock_mlp is already set up
-            # to return dummy_mlp_output.
         )
 
         seq_len = 64
@@ -194,7 +189,7 @@ class TestTransformerBlock(unittest.TestCase):
         dummy_kv_cache = jnp.zeros((8, 16, 16, 128), dtype=jnp.bfloat16)
         mock_attn.return_value = (dummy_kv_cache, dummy_attn_output)
 
-        mock_moe = MagicMock(spec=MoE)
+        mock_moe = MagicMock()
         dummy_moe_output = jnp.full((64, hidden_size), 3.0, dtype=jnp.bfloat16)
         mock_moe.return_value = dummy_moe_output
 
@@ -203,14 +198,16 @@ class TestTransformerBlock(unittest.TestCase):
                                                4.0,
                                                dtype=jnp.bfloat16)
         mock_shared_experts.return_value = dummy_shared_experts_output
-        mock_create_module.side_effect = [mock_attn, mock_shared_experts]
+        mock_create_module.side_effect = [
+            mock_attn, mock_moe, mock_shared_experts
+        ]
 
         transformer_block = SharedExpertsTransformerBlock(
             cfg=shared_config,
+            block_type="moe",  # Assuming MoE block type for this test
             param_factory=MagicMock(),
             mesh=MagicMock(),
             sharding_cfg=MagicMock(),
-            custom_module=mock_moe,
         )
 
         seq_len = 64
@@ -231,9 +228,9 @@ class TestTransformerBlock(unittest.TestCase):
         self.assertEqual(final_output.shape, (seq_len, hidden_size))
 
         # Basic check that the moe and shared experts are used.
-        self.assertEqual(mock_moe.call_count, 1)
-        self.assertEqual(mock_attn.call_count, 1)
-        self.assertEqual(mock_shared_experts.call_count, 1)
+        self.assertTrue(mock_moe.call_count == 1)
+        self.assertTrue(mock_attn.call_count == 1)
+        self.assertTrue(mock_shared_experts.call_count == 1)
 
 
 if __name__ == "__main__":
