@@ -102,6 +102,18 @@ class VllmRequestAdapter(IRequest):
     def num_computed_tokens(self) -> int:
         return self._vllm_request.num_computed_tokens
 
+    @property
+    def num_output_placeholders(self) -> int:
+        return self._vllm_request.num_output_placeholders
+
+    @property
+    def num_tokens(self) -> int:
+        return self._vllm_request.num_tokens
+
+    @property
+    def num_tokens_with_spec(self) -> int:
+        return self._vllm_request.num_tokens_with_spec
+
     @num_computed_tokens.setter
     def num_computed_tokens(self, value: int) -> None:
         self._vllm_request.num_computed_tokens = value
@@ -109,6 +121,22 @@ class VllmRequestAdapter(IRequest):
     @property
     def status(self) -> RequestStatus:
         return self._vllm_request.status
+
+    @property
+    def prompt_token_ids(self):
+        return self._vllm_request.prompt_token_ids
+
+    @property
+    def all_token_ids(self):
+        return self._vllm_request.all_token_ids
+
+    @property
+    def sampling_params(self):
+        return self._vllm_request.sampling_params
+
+    @property
+    def lora_request(self):
+        return self._vllm_request.lora_request
 
     @status.setter
     def status(self, value: RequestStatus) -> None:

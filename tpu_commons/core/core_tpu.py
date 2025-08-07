@@ -33,7 +33,7 @@ from tpu_commons.interfaces.engine import IEngineCore
 from tpu_commons.interfaces.request import IRequest
 from tpu_commons.runner.utils import LatencyTracker
 
-from .adapters import VllmConfigAdapter, VllmEngineAdapter
+from .adapters import VllmConfigAdapter, VllmEngineAdapter, VllmRequestAdapter
 
 # This file contains two classes:
 # 1. _DisaggOrchestrator: The clean, decoupled core orchestration logic.
@@ -89,9 +89,6 @@ class _DisaggOrchestrator:
         # Hack device config to pass in the subslice of TPUs.
         slice_sizes = list(prefill_slice_sizes)
         slice_sizes.extend(decode_slice_sizes)
-        setattr(self._config.vllm_config.device_config, "slice",
-                (0, slice_sizes))
-        logger.info(f"Adding slice config to device config: {slice_sizes}")
 
         self._transfer_backlogs = [
             queue.Queue(4) for i in range(len(self._prefill_engines))
@@ -198,9 +195,9 @@ class _DisaggOrchestrator:
 
                 for req_id, idx in model_output.req_id_to_index.items():
                     if len(model_output.sampled_token_ids[idx]) > 0:
-                        request = self._requests[req_id]
+                        request = self._requests[req_id].vllm_request
                         logger.debug(
-                            f"request-{req_id}: tokens={request._all_token_ids} after prefill"
+                            f"request-{req_id}: tokens={request.all_token_ids} after prefill"
                         )
                         # Remove request from the prefill engine.
 
@@ -303,7 +300,7 @@ class _DisaggOrchestrator:
 
                 # Insert the request to the decoder.
                 req_id = prefill_output["req_id"]
-                vllm_request = self._requests[req_id]
+                vllm_request = self._requests[req_id].vllm_request
                 # Caching num_computed_tokens. The tokens in kv manager allocate blocks
                 # is computed as num_computed_tokens + num_new_tokens, so without caching
                 # the token number would double.
@@ -406,20 +403,19 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
         slice_sizes = list(prefill_slice_sizes)
         slice_sizes.extend(decode_slice_sizes)
         setattr(vllm_config.device_config, "slice", (0, slice_sizes))
-        logger.warning(f"Adding slice config to device config: {slice_sizes}")
+        logger.info(f"Adding slice config to device config: {slice_sizes}")
 
         def executor_fail_callback():
             self.input_queue.put_nowait(
                 (EngineCoreRequestType.EXECUTOR_FAILED, b''))
 
-        logger.warning("init disagg engine core 3")
         self._prefill_engines = self._create_engine_cores(
             prefill_slice_sizes,
             vllm_config,
             log_stats,
             executor_fail_callback,
         )
-        logger.warning(
+        logger.info(
             f"{len(self._prefill_engines)} Disaggregated prefill engines created."
         )
 
@@ -429,7 +425,7 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
             log_stats,
             executor_fail_callback,
         )
-        logger.warning(
+        logger.info(
             f"{len(self._decode_engines)} Disaggregated decode engines created."
         )
 
@@ -450,7 +446,6 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
             self.publish_dp_lb_stats = (
                 self.has_coordinator
                 and not vllm_config.parallel_config.data_parallel_external_lb)
-        logger.warning("init disagg engine core 1.1")
         # Background Threads and Queues for IO. These enable us to
         # overlap ZMQ socket IO with GPU since they release the GIL,
         # and to overlap some serialization/deserialization with the
@@ -463,7 +458,6 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
                                               identity, ready_event),
                                         daemon=True)
         input_thread.start()
-        logger.warning("init disagg engine core 2")
 
         self.output_thread = threading.Thread(
             target=self.process_output_sockets,
@@ -526,8 +520,7 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
                 raise ValueError(f"Unsupported task: {pooling_params.task!r} "
                                  f"Supported tasks: {supported_pooling_tasks}")
 
-        self._prefill_engines[0].scheduler.add_request(request)
-        self._orchestrator._requests[request.request_id] = request
+        self._orchestrator.add_request(VllmRequestAdapter(request))
 
     def _handle_client_request(self, request_type: EngineCoreRequestType,
                                request: Any) -> None:

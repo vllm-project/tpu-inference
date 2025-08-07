@@ -85,6 +85,7 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
         # VLLM Config
         self.mock_vllm_config = MagicMock(spec=VllmConfig)
         self.mock_vllm_config.parallel_config = MagicMock(spec=ParallelConfig)
+        self.mock_vllm_config.device_config = MagicMock()
         self.mock_vllm_config.__post_init__ = MagicMock()
 
     def test_initialization(self):
@@ -121,8 +122,11 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
         mock_request.mm_hashes = None
         mock_request.mm_inputs = []
         mock_request.use_structured_output = False
+        mock_request.pooling_params = None
+        mock_request.sampling_params.guided_decoding = None
 
-        proc.add_request(mock_request)
+        mock_engine_request, _ = proc.preprocess_add_request(mock_request)
+        proc.add_request(mock_engine_request)
 
         self.mock_orchestrator.return_value.add_request.assert_called_once()
         # Get the argument passed to add_request
@@ -160,6 +164,9 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
         mock_request.mm_hashes = None
         mock_request.mm_inputs = []
         mock_request.use_structured_output = False
+        mock_request.pooling_params = None
+        mock_request.sampling_params.guided_decoding = None
+        mock_request = proc.preprocess_add_request(mock_request)
 
         proc._handle_client_request(EngineCoreRequestType.ADD, mock_request)
 
@@ -343,7 +350,7 @@ class TestDisaggOrchestrator(unittest.TestCase):
 
         # Mock request
         mock_request = MagicMock()
-        mock_request.num_computed_tokens = 10
+        mock_request.vllm_request.num_computed_tokens = 10
         orchestrator._requests["test_req"] = mock_request
 
         # Mock scheduler and model runner states for the loop condition
