@@ -241,10 +241,12 @@ for model_name in $model_list; do
     # Define model-specific arguments
     current_serve_args=("${extra_serve_args[@]}")
     max_batched_tokens=8192
-    if [ "$model_name" == "meta-llama/Llama-4-Scout-17B-16E-Instruct" ]; then
-        current_serve_args+=(--hf-overrides '{"architectures": ["Llama4ForCausalLM"]}')
+    if [ "$USE_V6E8_QUEUE" == "True" ]; then
         current_serve_args+=(--tensor-parallel-size 8)
         max_batched_tokens=1024
+        if [ "$model_name" == "meta-llama/Llama-4-Scout-17B-16E-Instruct" ]; then
+            current_serve_args+=(--hf-overrides '{"architectures": ["Llama4ForCausalLM"]}')
+        fi
     fi
 
     # Spin up the vLLM server
