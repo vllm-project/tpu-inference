@@ -644,8 +644,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
             if has_kv_transfer_group():
-                return self.kv_connector_no_forward(scheduler_output,
-                                                    self.vllm_config)
+                return DUMMY_METADATA, self.kv_connector_no_forward(
+                    scheduler_output, self.vllm_config)
 
             # Return empty ModelRunnerOutput if there's no work to do.
             # TODO(fhzhang): We rely on empty cycles to remove requests in input batch. Fix it to reduce overhead.
