@@ -103,7 +103,7 @@ class DeepSeekV3(Model):
             default_rules_cls=DeepSeekV3ShardingRulesConfig,
             vllm_config=self.vllm_config).sharding_cfg
 
-        num_layers: int = 61
+        num_layers: int = 4
         num_local_experts: int = 256
 
         vocab_size: int = 129280

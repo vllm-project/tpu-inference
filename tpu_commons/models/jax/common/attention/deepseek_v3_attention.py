@@ -108,13 +108,12 @@ class MLA(Attention):
         """Initializes the weight kernels."""
 
         self.kernel_q_down_proj_DA = self.param_factory.create_kernel_param(
-            rngs, (self.D, self.query_lora_rank), self.q_da_sharding,
-            self.dtype)
+            rngs, (self.D, self.q_lora_rank), self.q_da_sharding, self.dtype)
         # FP8 Scale
         # TODO: update 128 to use config
         self.kernel_q_down_proj_scale_DA = self.param_factory.create_kernel_param(
-            rngs, (self.D // 128, self.query_lora_rank // 128),
-            self.q_da_sharding, self.dtype)
+            rngs, (self.D // 128, self.q_lora_rank // 128), self.q_da_sharding,
+            self.dtype)
         self.kernel_q_up_proj_ANH = self.param_factory.create_kernel_param(
             rngs,
             (self.q_lora_rank, self.N, self.qk_head_dim),
@@ -125,8 +124,7 @@ class MLA(Attention):
         # TODO: update 128 to use config
         self.kernel_q_up_proj_scale_ANH = self.param_factory.create_kernel_param(
             rngs,
-            (self.query_lora_rank // 128, self.N // 128,
-             self.qk_head_dim // 128),
+            (self.q_lora_rank // 128, self.N // 128, self.qk_head_dim // 128),
             self.anh_sharding,
             self.dtype,
         )
@@ -168,7 +166,7 @@ class MLA(Attention):
         # TODO: update 128 to use config
         self.kernel_o_proj_scale_NHD = self.param_factory.create_kernel_param(
             rngs, (self.N // 128, self.v_head_dim // 128, self.D),
-            self.nhd_sharding, self.cfg.dtype)
+            self.nhd_sharding, self.dtype)
         self.q_rms_norm = RMSNorm(
             dims=self.q_lora_rank,
             mesh=self.mesh,
