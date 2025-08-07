@@ -62,6 +62,17 @@ steps:
      commands:
        - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/scripts/run_rpa_v3_tests.sh
 
+   - label: "E2E MLperf tests for Llama4 models"
+     key: test_6
+     soft_fail: true
+     env:
+       NEW_MODEL_DESIGN: "True"
+       USE_V6E8_QUEUE: "True"
+     agents:
+       queue: tpu_v6e_8_queue
+     commands:
+       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
+
   # -----------------------------------------------------------------
   # NOTIFICATION STEP
   # -----------------------------------------------------------------
@@ -73,6 +84,7 @@ steps:
        - test_3
        - test_4
        - test_5
+       - test_6
      agents:
        queue: tpu_v6e_queue
-     commands: "bash .buildkite/scripts/check_results.sh 'TPU JAX Tests Failed' test_0 test_1 test_2 test_3 test_4 test_5"
+     commands: "bash .buildkite/scripts/check_results.sh 'TPU JAX Tests Failed' test_0 test_1 test_2 test_3 test_4 test_5 test_6"
