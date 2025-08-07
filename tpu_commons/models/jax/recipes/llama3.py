@@ -22,8 +22,7 @@ from tpu_commons.models.jax.common.layers import (DenseFFW, DenseFFWConfig,
 from tpu_commons.models.jax.common.model import Model
 from tpu_commons.models.jax.common.sharding import (Sharding,
                                                     ShardingRulesConfig)
-from tpu_commons.models.jax.common.transformer_block import (
-    TransformerBlock, TransformerBlockConfig)
+from tpu_commons.models.jax.common.transformer_block import TransformerBlock
 from tpu_commons.models.jax.layers.misc import shard_put
 from tpu_commons.models.jax.utils.weight_utils import (get_model_weights_files,
                                                        get_param,
@@ -107,35 +106,35 @@ class LlamaForCausalLM(Model):
             param_factory=self.param_factory)
         self.embedder.generate_kernel(self.rng)
 
-        layer_config = TransformerBlockConfig(
-            attention=AttentionConfig(
-                hidden_size=self.hidden_size,
-                num_attention_heads=self.num_attention_heads,
-                num_key_value_heads=self.num_key_value_heads,
-                head_dim=self.head_dim,
-                rope_theta=rope_theta,
-                rope_scaling={},
-                dtype=dtype,
-                vllm_config=self.vllm_config),
-            dense_ffw=DenseFFWConfig(hidden_size=self.hidden_size,
-                                     intermediate_size=intermediate_size,
-                                     hidden_act="silu",
-                                     dtype=dtype,
-                                     vllm_config=self.vllm_config),
-            rms_norm_eps=rms_norm_eps,
+        attention_cfg = AttentionConfig(
+            hidden_size=self.hidden_size,
+            num_attention_heads=self.num_attention_heads,
+            num_key_value_heads=self.num_key_value_heads,
+            head_dim=self.head_dim,
+            rope_theta=rope_theta,
+            rope_scaling={},
+            dtype=dtype,
             vllm_config=self.vllm_config)
+        dense_ffw_cfg = DenseFFWConfig(hidden_size=self.hidden_size,
+                                       intermediate_size=intermediate_size,
+                                       hidden_act="silu",
+                                       dtype=dtype,
+                                       vllm_config=self.vllm_config)
 
         self.layers = [
-            TransformerBlock(cfg=layer_config,
-                             param_factory=self.param_factory,
+            TransformerBlock(param_factory=self.param_factory,
+                             hidden_size=self.hidden_size,
+                             rmsnorm_epsilon=rms_norm_eps,
+                             attn_dtype=dtype,
+                             dense_dtype=dtype,
                              mesh=self.mesh,
                              sharding_cfg=sharding_config,
-                             attn=Attention(cfg=layer_config.attention,
+                             attn=Attention(cfg=attention_cfg,
                                             mesh=self.mesh,
                                             param_factory=self.param_factory,
                                             sharding_cfg=sharding_config),
                              custom_module=DenseFFW(
-                                 cfg=layer_config.dense_ffw,
+                                 cfg=dense_ffw_cfg,
                                  mesh=self.mesh,
                                  param_factory=self.param_factory,
                                  sharding_cfg=sharding_config))

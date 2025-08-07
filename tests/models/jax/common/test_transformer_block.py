@@ -68,17 +68,15 @@ class TestTransformerBlock(unittest.TestCase):
         mock_mlp.return_value = dummy_mlp_output
 
         transformer_block = TransformerBlock(
-            cfg=transformer_config,
             param_factory=None,
             mesh=None,
             sharding_cfg=ShardingConfig(),
             custom_module=mock_mlp,
             attn=mock_attn,
-            # The custom_module is passed directly to the TransformerBlock
-            # in the test setup, so we need to ensure it's initialized
-            # with a mock that matches the expected behavior of a DenseFFW
-            # or MoE module. In this case, mock_mlp is already set up
-            # to return dummy_mlp_output.
+            hidden_size=hidden_size,
+            rmsnorm_epsilon=transformer_config.rms_norm_eps,
+            attn_dtype=jnp.bfloat16,
+            dense_dtype=jnp.bfloat16,
         )
 
         seq_len = 64
@@ -201,11 +199,14 @@ class TestTransformerBlock(unittest.TestCase):
         mock_shared_experts.return_value = dummy_shared_experts_output
 
         transformer_block = SharedExpertsTransformerBlock(
-            cfg=shared_config,
             param_factory=MagicMock(),
             mesh=MagicMock(),
             sharding_cfg=MagicMock(),
             custom_module=mock_moe,  # Pass the mock MoE module
+            hidden_size=hidden_size,
+            rmsnorm_epsilon=shared_config.rms_norm_eps,
+            attn_dtype=jnp.bfloat16,
+            dense_dtype=jnp.bfloat16,
             attn=mock_attn,  # Pass the mock attention module
             shared_experts=
             mock_shared_experts,  # Pass the mock shared experts module
