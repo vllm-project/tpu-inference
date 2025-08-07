@@ -46,11 +46,14 @@ class DeepSeekV3ShardingRulesConfig(ShardingRulesConfig):
     attn_mla_kvb_weight_anh: tuple = (None, None, None)
     # TODO(chenyang) this might not needed after RPA kernel V3 is refactored.
     # Attention V3 output: (actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim)
-    attn_o_ktnph: tuple = (ATTN_HEAD_AXIS_NAME, None, None, None,
-                           ATTN_TENSOR_AXIS_NAME)
+    # attn_o_ktnph: tuple = (ATTN_HEAD_AXIS_NAME, None, None, None,
+    #                        ATTN_TENSOR_AXIS_NAME)
+    attn_o_tx: tuple = (None, ATTN_HEAD_AXIS_NAME)
     # Attention V3 query: (actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim)
-    query_ktnph: tuple = (ATTN_HEAD_AXIS_NAME, None, None, None,
-                          ATTN_TENSOR_AXIS_NAME)
+    # query_ktnph: tuple = (ATTN_HEAD_AXIS_NAME, None, None, None,
+    #                       ATTN_TENSOR_AXIS_NAME)
+    query_tx: tuple = (None, ATTN_HEAD_AXIS_NAME)
+    keyvalue_sx: tuple = (None, ATTN_HEAD_AXIS_NAME)
     # Attention V3 kv_cache: (total_num_pages, page_size, num_kv_heads_x2 // kv_packing, kv_packing, head_dim)
     keyvalue_cache_nbkph: tuple = (None, None, ATTN_HEAD_AXIS_NAME, None,
                                    ATTN_TENSOR_AXIS_NAME)

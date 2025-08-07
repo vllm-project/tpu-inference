@@ -303,7 +303,7 @@ class Attention(nnx.Module):
 
         return kv_cache, output_TNH
 
-    def attention_v3(
+    def attention_v3_old(
         self,
         is_prefill: bool,
         kv_cache: KVCache,
@@ -391,3 +391,78 @@ class Attention(nnx.Module):
                                      actual_num_q_heads_per_kv_head,
                                      actual_head_dim)
         return kv_cache, output_TNH
+    
+    def attention_v3(
+        self,
+        is_prefill: bool,
+        kv_cache: KVCache,
+        q_TNH: jax.Array,
+        k_SKH: jax.Array,
+        v_SKH: jax.Array,
+        attention_metadata: AttentionMetadata,
+        mesh: Mesh,
+    ) -> Tuple[KVCache, jax.Array]:
+        md = attention_metadata
+        T, _, H= q_TNH.shape
+        actual_head_dim = H
+        assert k_SKH.shape[0] == v_SKH.shape[0]
+        S = k_SKH.shape[0]
+        queries = q_TNH.reshape(T, -1)
+        keys = k_SKH.reshape(S, -1)
+        values = v_SKH.reshape(S, -1)
+        L, S, K_2, H = kv_cache.shape
+        kv_packing = get_dtype_packing(kv_cache.dtype)
+        kv_cache_transformed = kv_cache.reshape(L, S, K_2 // kv_packing,
+                                                kv_packing, H)
+        page_indices_flat = md.block_tables.flatten()
+        
+        num_decode, num_prefill, _ = md.request_distribution
+        distribution = jnp.array(
+            [num_decode, num_decode + num_prefill, md.num_seqs[0]])
+
+        in_specs = (
+            P(*self.sharding_cfg.generate_rules.query_tx),  # queries
+            P(*self.sharding_cfg.generate_rules.keyvalue_sx), # keys
+            P(*self.sharding_cfg.generate_rules.keyvalue_sx), # values
+            P(*self.sharding_cfg.generate_rules.keyvalue_cache_nbkph
+              ),  # kv_cache_transformed
+            P(),  # md.seq_lens: Replicated
+            P(),  # page_indices_flat: Replicated
+            P(),  # query_start_loc: Replicated
+            P(),  # distribution: Replicated
+        )
+        out_specs = (
+            P(*self.sharding_cfg.generate_rules.attn_o_tx), # output
+            P(*self.sharding_cfg.generate_rules.keyvalue_cache_nbkph), #updated_kv_cache
+        )
+        
+        def _ragged_paged_attention(*args):
+            return ragged_paged_attention_v3(
+                *args,
+                actual_head_dim=actual_head_dim,
+                sm_scale=q_TNH.shape[-1]**-0.5,
+                sliding_window=None,
+                soft_cap=None,
+                vmem_limit_bytes=64 * 1024 * 1024,
+            )
+
+        output, updated_kv_cache = jax.jit(
+            shard_map.shard_map(
+                _ragged_paged_attention,
+                mesh=mesh,
+                in_specs=in_specs,
+                out_specs=out_specs,
+                check_rep=False,
+            ))(
+                queries,
+                keys,
+                values,
+                kv_cache_transformed,
+                md.seq_lens,
+                page_indices_flat,
+                md.query_start_loc,
+                distribution,
+            )
+        output_TNH = output.reshape(q_TNH.shape)
+        updated_kv_cache = updated_kv_cache.reshape(kv_cache.shape)
+        return updated_kv_cache, output_TNH
