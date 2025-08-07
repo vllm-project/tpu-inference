@@ -355,10 +355,10 @@ class Llama4WeightLoader:
             split_loaded_name = loaded_name.replace("gate_up_proj",
                                                     f"{split_type}_proj")
             if split_type == "gate":
-                mapped_name = "layers.*.moe.kernel_gating_EDF"
+                mapped_name = "layers.*.custom_module.kernel_gating_EDF"
                 loaded_weight = split_weights[0]
             else:
-                mapped_name = "layers.*.moe.kernel_up_proj_EDF"
+                mapped_name = "layers.*.custom_module.kernel_up_proj_EDF"
                 loaded_weight = split_weights[1]
 
             layer_num = re.search(r"layers\.(\d+)", split_loaded_name).group(1)
