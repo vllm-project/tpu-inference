@@ -251,10 +251,10 @@ def static_validate_inputs(
         raise ValueError(
             f"Expected {kv_lens.shape=} to be ({max_num_seqs},) where"
             " `max_num_seqs` is `page_indices.shape[0]`.")
-    if cu_q_lens.shape != (max_num_seqs + 1, ):
-        raise ValueError(
-            f"Expected {cu_q_lens.shape=} to be ({max_num_seqs + 1},)  where"
-            " `max_num_seqs` is `page_indices.shape[0]`.")
+    # if cu_q_lens.shape != (max_num_seqs + 1, ):
+    #     raise ValueError(
+    #         f"Expected {cu_q_lens.shape=} to be ({max_num_seqs + 1},)  where"
+    #         " `max_num_seqs` is `page_indices.shape[0]`.")
     if (kv_lens.dtype != jnp.int32 or page_indices.dtype != jnp.int32
             or cu_q_lens.dtype != jnp.int32):
         raise ValueError(
@@ -308,6 +308,7 @@ def ragged_paged_attention_kernel(
     k_scale: float | None = None,
     v_scale: float | None = None,
 ):
+    print("ragged_paged_attention_kernel", ragged_paged_attention_kernel)
     if mask_value is None:
         mask_value = DEFAULT_MASK_VALUE
     num_q_per_blk, num_q_heads_per_blk, head_dim = q_ref.shape
@@ -397,7 +398,8 @@ def ragged_paged_attention_kernel(
         async_copy_kv = create_kv_async_copy_descriptors(
             heads_blk_idx, init_seq_idx, 0, init_buf_idx)
         async_copy_kv.start()
-
+    print("num_seqs", num_seqs)
+    print("cu_q_lens_ref", cu_q_lens_ref)
     def is_cur_q_blk_needed(q_states):
         done, cur_seq_idx, _ = q_states
         should_run = jnp.logical_and(q_len_start < cu_q_lens_ref[num_seqs],
@@ -643,10 +645,12 @@ def ragged_paged_attention_kernel(
         compute_with_cur_q_blk,
         (0, init_seq_idx, init_buf_idx),  # (done, seq_idx, buf_idx)
     )
+    print("here")
     # Reset seq_idx for next kv_heads_blk if run out of seqs!
     seq_buf_idx_ref[0] = lax.select(seq_idx < num_seqs, seq_idx, 0)
     seq_buf_idx_ref[1] = buf_idx
     o_ref[...] = acc_ref[...].astype(q_ref.dtype)
+    print("here 2")
 
 
 def cdiv(a, b):

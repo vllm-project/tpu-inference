@@ -673,8 +673,8 @@ class TPUModelRunner():
         scheduler_output: "VllmSchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> ModelRunnerOutput:
-        # with jax.disable_jit():
-        return self._execute_model(scheduler_output)[1]
+        with jax.disable_jit():
+            return self._execute_model(scheduler_output)[1]
 
     def _execute_model(
         self,
@@ -704,10 +704,15 @@ class TPUModelRunner():
             self.maybe_setup_kv_connector(scheduler_output)
             self.kv_caches, hidden_states = self.model_fn(
                 self.state, *inputs[:3])
+            print("after model_fn")
+            jax.block_until_ready(self.kv_caches)
+            jax.block_until_ready(hidden_states)
+            
             self.maybe_wait_for_kv_save()
 
             hidden_states = self.select_hidden_states_fn(
                 hidden_states, inputs[4])
+            jax.block_until_ready(hidden_states)
             logits = self.compute_logits_fn(self.state, hidden_states)
             if scheduler_output.grammar_bitmask is not None:
                 require_struct_decoding, grammar_bitmask_padded, arange = \
@@ -936,17 +941,21 @@ class TPUModelRunner():
                 padded_total_num_scheduled_tokens, self.max_num_reqs,
                 self.block_size)
         padded_num_slices_per_dp_rank = padded_num_slices // dp_size
-                
+        padded_num_reqs_per_dp_rank = self.max_num_reqs // dp_size
+        print("padded_num_reqs_per_dp_rank", padded_num_reqs_per_dp_rank)
         self.query_start_loc_cpu[0] = 0
         
         slot_mapping_metadata =[[] for _ in range(dp_size)]
         num_slices =[[] for _ in range(dp_size)]
+        block_tables = self.block_table_cpu[:self.max_num_reqs]
         for dp_rank in range(dp_size):
             print("---- dp_rank", dp_rank, "-----")
             dp_token_offset = dp_rank * padded_num_scheduled_tokens_per_dp_rank
             print("dp_token_offset", dp_token_offset)
             dp_req_offset = cumsum_num_reqs_per_dp_rank[dp_rank]
+            dp_req_padded_offset = dp_rank * padded_num_reqs_per_dp_rank
             print("dp_req_offset", dp_req_offset)
+            print("dp_req_padded_offset", dp_req_padded_offset)
             num_reqs_dp = len(dp_rank_reqs[dp_rank])
             print("num_reqs_dp", num_reqs_dp)
             num_scheduled_tokens_per_req = dp_rank_num_scheduled_tokens[dp_rank]
@@ -964,77 +973,85 @@ class TPUModelRunner():
             # Get batched arange.
             # E.g., [2, 5, 3] -> [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
             # For each scheduled token, what is its position in corresponding req.
-            arange = np.concatenate(
-                [self.arange_cpu[:n] for n in num_scheduled_tokens_per_req])
-            print("arange", arange)
-            # Get positions.
-            positions_np = self.positions_cpu[dp_token_offset: dp_token_offset + total_num_scheduled_tokens]
-            print("positions_np", positions_np)
-            np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
-                arange,
-                out=positions_np)
-            print("positions_np after add", positions_np)
-            # add -1 padding
+            if num_reqs_dp > 0:
+                arange = np.concatenate(
+                    [self.arange_cpu[:n] for n in num_scheduled_tokens_per_req])
+                print("arange", arange)
+                # Get positions.
+                positions_np = self.positions_cpu[dp_token_offset: dp_token_offset + total_num_scheduled_tokens]
+                print("positions_np", positions_np)
+                print("self.input_batch.num_computed_tokens_cpu[req_indices]", self.input_batch.num_computed_tokens_cpu[req_indices])
+                np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
+                    arange,
+                    out=positions_np)
+                print("positions_np after add", positions_np)
+                # add -1 padding
 
 
-            # Get token indices.
-            # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-            # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
-            # where M is the max_model_len.
-            token_indices = (positions_np +
-                            req_indices * self.input_batch.token_ids_cpu.shape[1]) 
-            print("token_indices", token_indices)
-            # NOTE(woosuk): We use torch.index_select instead of np.take here
-            # because torch.index_select is much faster than np.take for large
-            # tensors.
-            np.take(self.input_batch.token_ids_cpu.flatten(),
-                    token_indices,
-                    out=self.input_ids_cpu[dp_token_offset:dp_token_offset + total_num_scheduled_tokens])
-            print("self.input_ids_cpu", self.input_ids_cpu[dp_token_offset:dp_token_offset + total_num_scheduled_tokens])
-            # Prepare the attention metadata.
-            if dp_rank == 0:
-                np.cumsum([0] + num_scheduled_tokens_per_req,
-                        out=self.query_start_loc_cpu[dp_req_offset:dp_req_offset+num_reqs_dp+1])
-            else:
-                np.cumsum([0] + num_scheduled_tokens_per_req[:-1],
-                        out=self.query_start_loc_cpu[dp_req_offset+1:dp_req_offset+num_reqs_dp+1])
-                self.query_start_loc_cpu[dp_req_offset+1:dp_req_offset + num_reqs_dp+1] += dp_token_offset
+                # Get token indices.
+                # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+                # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
+                # where M is the max_model_len.
+                token_indices = (positions_np +
+                                req_indices * self.input_batch.token_ids_cpu.shape[1]) 
+                print("token_indices", token_indices)
+                # NOTE(woosuk): We use torch.index_select instead of np.take here
+                # because torch.index_select is much faster than np.take for large
+                # tensors.
+                np.take(self.input_batch.token_ids_cpu.flatten(),
+                        token_indices,
+                        out=self.input_ids_cpu[dp_token_offset:dp_token_offset + total_num_scheduled_tokens])
+                print("self.input_ids_cpu", self.input_ids_cpu[dp_token_offset:dp_token_offset + total_num_scheduled_tokens])
+                # Prepare the attention metadata.
+                if dp_rank == 0:
+                    np.cumsum([0] + num_scheduled_tokens_per_req,
+                            out=self.query_start_loc_cpu[dp_req_padded_offset:dp_req_padded_offset+num_reqs_dp+1])
+                else:
+                    np.cumsum([0] + num_scheduled_tokens_per_req[:-1],
+                            out=self.query_start_loc_cpu[dp_req_padded_offset+1:dp_req_padded_offset+num_reqs_dp+1])
+                    self.query_start_loc_cpu[dp_req_padded_offset+1:dp_req_padded_offset + num_reqs_dp+1] += dp_token_offset
             
-            # self.query_start_loc_cpu[dp_offset + 1:] = 1
-            print("self.query_start_loc_cpu", self.query_start_loc_cpu)
-            self.seq_lens_cpu[dp_req_offset:dp_req_offset + num_reqs_dp] = (
-                self.input_batch.num_computed_tokens_cpu[dp_req_offset:dp_req_offset+num_reqs_dp] +
-                num_scheduled_tokens_per_req)
-            print("self.seq_lens_cpu", self.seq_lens_cpu)
-            # Zero out to avoid spurious values from prev iteration (last cp chunk)
+                # self.query_start_loc_cpu[dp_offset + 1:] = 1
+                print("self.query_start_loc_cpu", self.query_start_loc_cpu)
+                self.seq_lens_cpu[dp_req_padded_offset:dp_req_padded_offset + num_reqs_dp] = (
+                    self.input_batch.num_computed_tokens_cpu[dp_req_offset:dp_req_offset+num_reqs_dp] +
+                    num_scheduled_tokens_per_req)
+                print("self.seq_lens_cpu", self.seq_lens_cpu)
+                slot_mapping_metadata[dp_rank] = self._get_slot_mapping_metadata(
+                    num_reqs_dp, num_scheduled_tokens_per_req, dp_req_offset, dp_token_offset)
+                print("slot_mapping_metadata", slot_mapping_metadata[dp_rank])
+                num_slices[dp_rank] = slot_mapping_metadata[dp_rank].shape[0]
+                print("num_slices", num_slices)
+                print("padded_num_slices_per_dp_rank", padded_num_slices_per_dp_rank)
+                slot_mapping_metadata[dp_rank] = np.pad(
+                    slot_mapping_metadata[dp_rank],
+                    [[0, padded_num_slices_per_dp_rank - len(slot_mapping_metadata[dp_rank])], [0, 0]],
+                    constant_values=0)
+                print("slot_mapping_metadata after pad", slot_mapping_metadata[dp_rank].shape)
+                slot_mapping_metadata[dp_rank] = np.transpose(slot_mapping_metadata[dp_rank])
+
+                block_tables[dp_req_padded_offset:dp_req_padded_offset+num_reqs_dp, :self.max_num_blocks_per_req] = (
+                    self.input_batch.block_table[0].get_cpu_tensor()[dp_req_offset: dp_req_offset+num_reqs_dp])
+            else:
+                slot_mapping_metadata[dp_rank] = np.zeros(
+                    (3, padded_num_slices_per_dp_rank), dtype=np.int32)
+                print("slot_mapping_metadata", slot_mapping_metadata[dp_rank])
+                num_slices[dp_rank] = 0
+                   # Zero out to avoid spurious values from prev iteration (last cp chunk)
+            
             self.input_ids_cpu[
                 dp_token_offset + total_num_scheduled_tokens:dp_token_offset + padded_num_scheduled_tokens_per_dp_rank] = 0
             print("self.input_ids_cpu", self.input_ids_cpu)
-            slot_mapping_metadata[dp_rank] = self._get_slot_mapping_metadata(
-                num_reqs_dp, num_scheduled_tokens_per_req, dp_req_offset, dp_token_offset)
-            print("slot_mapping_metadata", slot_mapping_metadata[dp_rank])
-            num_slices[dp_rank] = slot_mapping_metadata[dp_rank].shape[0]
-            print("num_slices", num_slices)
-            print("padded_num_slices_per_dp_rank", padded_num_slices_per_dp_rank)
-            slot_mapping_metadata[dp_rank] = np.pad(
-                slot_mapping_metadata[dp_rank],
-                [[0, padded_num_slices_per_dp_rank - len(slot_mapping_metadata[dp_rank])], [0, 0]],
-                constant_values=0)
-            print("slot_mapping_metadata after pad", slot_mapping_metadata[dp_rank].shape)
-            slot_mapping_metadata[dp_rank] = np.transpose(slot_mapping_metadata[dp_rank])
-
-
-       
+        print("---- ---- -----")
         input_ids = self.input_ids_cpu[:padded_total_num_scheduled_tokens]
-        positions = self.positions_cpu[:padded_total_num_scheduled_tokens]        
+        print("input_ids", input_ids.shape, input_ids)
+        positions = self.positions_cpu[:padded_total_num_scheduled_tokens]  
+        print("positions", positions)      
         slot_mapping_metadata = np.concatenate(slot_mapping_metadata, axis=1)
         print("final slot_mapping_metadata", slot_mapping_metadata.shape)
         print("final slot_mapping_metadata", slot_mapping_metadata)
+        print("final slot_mapping_metadata", slot_mapping_metadata[:, 256:])
         num_slices = np.array(num_slices, dtype=np.int32)
-        block_tables = self.block_table_cpu[:self.max_num_reqs]
-        print("block_tables", block_tables)
-        block_tables[:num_reqs, :self.max_num_blocks_per_req] = (
-            self.input_batch.block_table[0].get_cpu_tensor()[:num_reqs])
         print("block_tables", block_tables)
         query_start_loc = self.query_start_loc_cpu[:self.max_num_reqs + 1]
         print("query_start_loc", query_start_loc)
@@ -1045,8 +1062,11 @@ class TPUModelRunner():
         print("padded_num_reqs", padded_num_reqs)
         logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
         print("logits_indices", logits_indices)
-        num_seqs = np.array([num_reqs])
+        num_seqs = np.array([len(dp_rank_reqs[i]) for i in range(dp_size)])
+        print("dp_rank_reqs", dp_rank_reqs)
         print("num_seqs", num_seqs)
+        # num_seqs[1] = 0 
+        # num_seqs[0] = 0
 
         # Put to device
         sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(

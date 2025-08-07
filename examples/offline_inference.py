@@ -50,8 +50,8 @@ def main(args: dict):
     # Generate texts from the prompts. The output is a list of RequestOutput
     # objects that contain the prompt, generated text, and other information.
     prompts = [
-        "T "*128, # 128 tokens
-        "P "*128 , # 128 tokens
+        "T "*65, # 128 tokens
+        "T "*65 + "p " , # 128 tokens
         # "The capital of France is",
         # "The colors of the rainbow are",
         # "The future of AI is",
