@@ -958,6 +958,7 @@ class TPUModelRunner():
             print("dp_req_padded_offset", dp_req_padded_offset)
             num_reqs_dp = len(dp_rank_reqs[dp_rank])
             print("num_reqs_dp", num_reqs_dp)
+            # assert num_reqs_dp != 0, "RPA kernel currently doesn't handle num_seqs = 0"
             num_scheduled_tokens_per_req = dp_rank_num_scheduled_tokens[dp_rank]
             print("num_scheduled_tokens_per_req", num_scheduled_tokens_per_req)
             
@@ -1063,10 +1064,9 @@ class TPUModelRunner():
         logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
         print("logits_indices", logits_indices)
         num_seqs = np.array([len(dp_rank_reqs[i]) for i in range(dp_size)])
+        
         print("dp_rank_reqs", dp_rank_reqs)
         print("num_seqs", num_seqs)
-        # num_seqs[1] = 0 
-        # num_seqs[0] = 0
 
         # Put to device
         sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(

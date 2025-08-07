@@ -51,7 +51,7 @@ def main(args: dict):
     # objects that contain the prompt, generated text, and other information.
     prompts = [
         "T "*65, # 128 tokens
-        "T "*65 + "p " , # 128 tokens
+        "P"*65 , # 128 tokens
         # "The capital of France is",
         # "The colors of the rainbow are",
         # "The future of AI is",

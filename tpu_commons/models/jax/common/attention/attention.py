@@ -262,7 +262,7 @@ class Attention(nnx.Module):
         H = q_TNH.shape[-1]
         #TODO: we use generate_rules as the default sharding for ragged_paged_attention,
         # but it could be configurable based on the op_mode.
-        data_dim = None
+        data_dim = "data"
         in_specs = (
             P(*self.sharding_cfg.generate_rules.query_tnh),  # q_TNH
             P(*self.sharding_cfg.generate_rules.keyvalue_cache_lskh
@@ -270,8 +270,9 @@ class Attention(nnx.Module):
             P(data_dim),  # md.seq_lens: Replicated
             P(data_dim, None),  # md.block_tables: Replicated
             P(data_dim),  # md.query_start_loc: Replicated
-            P(data_dim),  # md.num_seqs: Replicated
+            P("data"),  # md.num_seqs: Replicated # cannot have 0s
         )
+        
         out_specs = P(*self.sharding_cfg.generate_rules.attn_o_tnh
                       )  # output_TNH: Shard the 'model' dimension
 
@@ -290,6 +291,7 @@ class Attention(nnx.Module):
         print("md.seq_lens", md.seq_lens)
         print("md.block_tables", md.block_tables)
         print("md.query_start_loc[:256]", md.query_start_loc[:256])
+        md.query_start_loc = md.query_start_loc + 1
         print("md.num_seqs", md.num_seqs)
         output_TNH = shard_map.shard_map(
                 _ragged_paged_attention,
@@ -303,7 +305,7 @@ class Attention(nnx.Module):
                 md.seq_lens,
                 md.block_tables,
                 md.query_start_loc[:256],
-                md.num_seqs[:1],
+                md.num_seqs,
             )
         
         jax.block_until_ready(kv_cache)
