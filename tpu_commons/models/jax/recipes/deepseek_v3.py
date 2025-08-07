@@ -19,9 +19,8 @@ from tpu_commons.models.jax.common.constants import KVCacheType
 from tpu_commons.models.jax.common.layers import (DenseFFW, Embedder, LMhead,
                                                   RMSNorm)
 from tpu_commons.models.jax.common.model import Model
-from tpu_commons.models.jax.common.moe.deepseek_moe import \
-    DeepSeekV3RoutingConfig
-from tpu_commons.models.jax.common.moe.moe import MoE, MoEConfig
+from tpu_commons.models.jax.common.moe.deepseek_moe import DeepSeekV3Router
+from tpu_commons.models.jax.common.moe.moe import MoE
 from tpu_commons.models.jax.common.sharding import (ATTN_HEAD_AXIS_NAME,
                                                     ATTN_TENSOR_AXIS_NAME,
                                                     Sharding,
@@ -138,24 +137,6 @@ class DeepSeekV3(Model):
         qk_rope_head_dim = 64
         v_head_dim = 128
 
-        moe_cfg = MoEConfig(hidden_size=hidden_size,
-                            intermediate_size_moe=moe_intermediate_size,
-                            dtype=dtype,
-                            num_local_experts=num_local_experts,
-                            hidden_act=hidden_act,
-                            apply_expert_weight_before_computation=False,
-                            router=DeepSeekV3RoutingConfig(
-                                hidden_size=hidden_size,
-                                n_routed_experts=num_local_experts,
-                                num_experts_per_token=num_experts_per_token,
-                                n_group=n_group,
-                                routed_scaling_factor=2.5,
-                                topk_group=4,
-                                norm_topk_prob=True,
-                                dtype=dtype,
-                                vllm_config=self.vllm_config),
-                            vllm_config=self.vllm_config)
-
         logger.info(f"Using the following config:\n {self._sharding_config}")
         self.use_random_init = self.vllm_config.additional_config.get(
             "random_weights", False)
@@ -231,11 +212,28 @@ class DeepSeekV3(Model):
 
         for i in range(first_k_dense_replace, num_layers):
             is_moe_layer = ((i + 1) % interleave_moe_layer_step == 0)
-            custom_module = MoE(cfg=moe_cfg,
+            router = DeepSeekV3Router(
+                mesh=self.mesh,
+                param_factory=self.param_factory,
+                sharding_cfg=self._sharding_config,
+                hidden_size=hidden_size,
+                num_experts=num_local_experts,
+                num_experts_per_tok=num_experts_per_token,
+                n_groups=n_group,
+                topk_groups=4,
+                norm_topk_prob=True,
+                routed_scaling_factor=2.5,
+                dtype=dtype)
+            custom_module = MoE(dtype=dtype,
+                                num_local_experts=num_local_experts,
+                                apply_expert_weight_before_computation=False,
+                                hidden_size=hidden_size,
+                                intermediate_size_moe=moe_intermediate_size,
+                                hidden_act=hidden_act,
                                 mesh=self.mesh,
                                 param_factory=self.param_factory,
-                                sharding_cfg=self._sharding_config
-                                ) if is_moe_layer else DenseFFW(
+                                sharding_cfg=self._sharding_config,
+                                router=router) if is_moe_layer else DenseFFW(
                                     dtype=dtype,
                                     hidden_act=hidden_act,
                                     hidden_size=hidden_size,

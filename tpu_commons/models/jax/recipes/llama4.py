@@ -15,11 +15,11 @@ from tpu_commons.models.jax.common.attention.attention import AttentionMetadata
 from tpu_commons.models.jax.common.attention.llama4_attention import \
     Llama4Attention
 from tpu_commons.models.jax.common.base import ParamFactory
-from tpu_commons.models.jax.common.constants import KVCacheType, RouterType
+from tpu_commons.models.jax.common.constants import KVCacheType
 from tpu_commons.models.jax.common.layers import (DenseFFW, Embedder, LMhead,
                                                   RMSNorm)
 from tpu_commons.models.jax.common.model import Model
-from tpu_commons.models.jax.common.moe.moe import MoE, MoEConfig, RouterConfig
+from tpu_commons.models.jax.common.moe.moe import MoE, Router
 from tpu_commons.models.jax.common.sharding import (Sharding,
                                                     ShardingRulesConfig)
 from tpu_commons.models.jax.common.transformer_block import \
@@ -47,6 +47,8 @@ class Llama4ForCausalLM(Model):
         assert mesh is not None
 
         self.vllm_config = vllm_config
+        model_config = vllm_config.model_config
+
         self.rng = nnx.Rngs(rng)
         self.mesh = mesh
         self.param_factory = param_factory
@@ -62,8 +64,14 @@ class Llama4ForCausalLM(Model):
             default_rules_cls=Llama4ShardingRulesConfig,
             vllm_config=self.vllm_config).sharding_cfg
 
-        self.hidden_size: int = 5120
+        # TODO(fhzhang): remove these once we confirm that the values we get from config are good.
+        # self.hidden_size: int = 5120
+        # vocab_size = 202048
+        vocab_size = model_config.get_vocab_size()
+        self.hidden_size = model_config.get_hidden_size()
+
         dtype: jnp.dtype = jnp.bfloat16
+
         num_layers: int = 48
         self.interleave_moe_layer_step = 1  # All layers are MoE for Scout
         intermediate_size_moe: int = 8192
@@ -77,23 +85,6 @@ class Llama4ForCausalLM(Model):
         self.num_key_value_heads = 8
         self.head_dim = 128
 
-        moe_config = MoEConfig(hidden_size=self.hidden_size,
-                               intermediate_size_moe=intermediate_size_moe,
-                               dtype=dtype,
-                               num_local_experts=num_local_experts,
-                               hidden_act=hidden_act,
-                               apply_expert_weight_before_computation=True,
-                               router=RouterConfig(
-                                   hidden_size=self.hidden_size,
-                                   num_local_experts=num_local_experts,
-                                   num_experts_per_token=1,
-                                   router_type=RouterType.TOP_K,
-                                   router_act="sigmoid",
-                                   expert_capacity=-1,
-                                   dtype=dtype,
-                                   vllm_config=self.vllm_config),
-                               vllm_config=self.vllm_config)
-
         intermediate_size = 16384
 
         logger.info(f"Using the following config:\n {self._sharding_config}")
@@ -104,7 +95,6 @@ class Llama4ForCausalLM(Model):
                 scale_initializer=nnx.initializers.ones,
                 random_init=False)
 
-        vocab_size = 202048
         self.embedder = Embedder(vocab_size=vocab_size,
                                  hidden_size=self.hidden_size,
                                  dtype=dtype,
@@ -124,19 +114,34 @@ class Llama4ForCausalLM(Model):
             is_moe_layer = (i + 1) % \
                             self.interleave_moe_layer_step == 0
             use_attention_rope = (i + 1) % self.no_rope_layer_interval != 0
-            custom_module = MoE(cfg=moe_config,
-                                mesh=self.mesh,
-                                param_factory=self.param_factory,
-                                sharding_cfg=self._sharding_config
-                                ) if is_moe_layer else DenseFFW(
-                                    mesh=self.mesh,
-                                    param_factory=self.param_factory,
-                                    sharding_cfg=self._sharding_config,
-                                    dtype=dtype,
-                                    hidden_act=hidden_act,
-                                    hidden_size=self.hidden_size,
-                                    intermediate_size=intermediate_size,
-                                )
+            router = Router(mesh=self.mesh,
+                            dtype=dtype,
+                            hidden_size=self.hidden_size,
+                            param_factory=self.param_factory,
+                            sharding_cfg=self._sharding_config,
+                            num_experts=num_local_experts,
+                            num_experts_per_tok=1,
+                            router_act="sigmoid")
+            custom_module = MoE(
+                mesh=self.mesh,
+                param_factory=self.param_factory,
+                sharding_cfg=self._sharding_config,
+                dtype=dtype,
+                num_local_experts=num_local_experts,
+                apply_expert_weight_before_computation=True,
+                hidden_size=self.hidden_size,
+                intermediate_size_moe=intermediate_size_moe,
+                hidden_act=hidden_act,
+                router=router,
+            ) if is_moe_layer else DenseFFW(
+                mesh=self.mesh,
+                param_factory=self.param_factory,
+                sharding_cfg=self._sharding_config,
+                dtype=dtype,
+                hidden_act=hidden_act,
+                hidden_size=self.hidden_size,
+                intermediate_size=intermediate_size,
+            )
             block = SharedExpertsTransformerBlock(
                 custom_module=custom_module,
                 hidden_size=self.hidden_size,

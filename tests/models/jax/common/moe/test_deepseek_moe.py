@@ -6,8 +6,7 @@ from flax import nnx
 from jax.sharding import Mesh
 
 from tpu_commons.models.jax.common.base import ParamFactory
-from tpu_commons.models.jax.common.moe.deepseek_moe import (
-    DeepSeekV3Router, DeepSeekV3RoutingConfig)
+from tpu_commons.models.jax.common.moe.deepseek_moe import DeepSeekV3Router
 from tpu_commons.models.jax.common.sharding import ShardingConfig
 
 
@@ -24,22 +23,17 @@ class TestDeepSeekV3Router(unittest.TestCase):
 
     def test_get_topk_indices_single_group(self):
         """Test get_topk_indices with single expert group."""
-        router_config = DeepSeekV3RoutingConfig(
-            hidden_size=512,
-            n_routed_experts=8,
-            num_experts_per_token=2,
-            n_group=1,
-            topk_group=1,
-            routed_scaling_factor=1.0,
-            norm_topk_prob=True,
-            vllm_config=None,
-            dtype=jnp.bfloat16,
-        )
-
-        router = DeepSeekV3Router(router_config,
-                                  self.cpu_mesh,
-                                  self.param_factory,
-                                  self.sharding_cfg,
+        router = DeepSeekV3Router(mesh=self.cpu_mesh,
+                                  param_factory=self.param_factory,
+                                  sharding_cfg=self.sharding_cfg,
+                                  hidden_size=512,
+                                  num_experts=8,
+                                  num_experts_per_tok=2,
+                                  n_groups=1,
+                                  topk_groups=1,
+                                  norm_topk_prob=True,
+                                  routed_scaling_factor=1.0,
+                                  dtype=jnp.bfloat16,
                                   quant=None)
         router.bias_E = jnp.zeros((4, ))
 
@@ -52,21 +46,17 @@ class TestDeepSeekV3Router(unittest.TestCase):
 
     def test_get_topk_indices_2_groups(self):
         """Test get_topk_indices with 2 expert groups."""
-        router_config = DeepSeekV3RoutingConfig(
-            hidden_size=512,
-            n_routed_experts=4,
-            num_experts_per_token=2,
-            n_group=2,
-            topk_group=1,
-            routed_scaling_factor=1.0,
-            norm_topk_prob=True,
-            vllm_config=None,
-            dtype=jnp.bfloat16,
-        )
-        router = DeepSeekV3Router(router_config,
-                                  self.cpu_mesh,
-                                  self.param_factory,
-                                  self.sharding_cfg,
+        router = DeepSeekV3Router(mesh=self.cpu_mesh,
+                                  param_factory=self.param_factory,
+                                  sharding_cfg=self.sharding_cfg,
+                                  hidden_size=512,
+                                  num_experts=4,
+                                  num_experts_per_tok=2,
+                                  n_groups=2,
+                                  topk_groups=1,
+                                  norm_topk_prob=True,
+                                  routed_scaling_factor=1.0,
+                                  dtype=jnp.bfloat16,
                                   quant=None)
         router.bias_E = jnp.zeros((4, ))
 
@@ -79,21 +69,17 @@ class TestDeepSeekV3Router(unittest.TestCase):
         self.assertTrue(jnp.array_equal(indices, expected_indices))
 
     def test_router_e2e(self):
-        router_config = DeepSeekV3RoutingConfig(
-            hidden_size=512,
-            n_routed_experts=8,
-            num_experts_per_token=2,
-            n_group=2,
-            topk_group=1,
-            routed_scaling_factor=1.0,
-            norm_topk_prob=True,
-            vllm_config=None,
-            dtype=jnp.bfloat16,
-        )
-        router = DeepSeekV3Router(router_config,
-                                  self.tpu_mesh,
-                                  self.param_factory,
-                                  self.sharding_cfg,
+        router = DeepSeekV3Router(mesh=self.cpu_mesh,
+                                  param_factory=self.param_factory,
+                                  sharding_cfg=self.sharding_cfg,
+                                  hidden_size=512,
+                                  num_experts=8,
+                                  num_experts_per_tok=2,
+                                  n_groups=2,
+                                  topk_groups=1,
+                                  norm_topk_prob=True,
+                                  routed_scaling_factor=1.0,
+                                  dtype=jnp.bfloat16,
                                   quant=None)
         router.generate_kernel(nnx.Rngs(42))
         x = jnp.ones((2, 512))

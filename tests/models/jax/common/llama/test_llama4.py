@@ -8,6 +8,7 @@ import pytest
 from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
+from vllm.config import ModelConfig
 
 from tpu_commons.models.jax.recipes.llama4 import (Llama4ForCausalLM,
                                                    Llama4WeightLoader)
@@ -36,16 +37,13 @@ class MockVllmConfig:
                  model_name: str,
                  random_weights: bool = False,
                  tensor_parallelism: int = 1):
-        self.model_config = SimpleNamespace(
-            model=model_name,
-            dtype="bfloat16",
-            hf_overrides={
-                "num_layers": 2,
-                "hidden_size": 32,
-                "intermediate_size_moe": 64,
-                "num_local_experts": 2
-            },  # Choose small amount of layers to avoid OOM.
-            override_generation_config={})
+        self.model_config = MagicMock(spec=ModelConfig)
+
+        # Choose small amount of layers to avoid OOM.
+        self.model_config.get_vocab_size.return_value = 202048
+        self.model_config.get_hidden_size.return_value = 32
+        self.model_config.model = model_name
+
         self.additional_config = {
             "random_weights": random_weights,
             "sharding": {
@@ -91,7 +89,7 @@ class TestLlama4ForCausalLM:
     def test_init_llama4(self, mock_vllm_config_llama4, rng, mesh):
         """Tests correct parameter detection for the Llama4 model variant."""
         model = Llama4ForCausalLM(mock_vllm_config_llama4, rng, mesh)
-        assert model.hidden_size == 5120
+        assert model.hidden_size == 32
         assert "llama-4" in model.vllm_config.model_config.model.lower()
 
     def test_create_model_with_random_weights(self, mock_vllm_config_llama4,
@@ -126,7 +124,7 @@ class TestLlama4ForCausalLM:
         model.load_weights(rng)
 
         mock_loader_cls.assert_called_once_with(vllm_config=vllm_config,
-                                                hidden_size=5120,
+                                                hidden_size=32,
                                                 attn_heads=40,
                                                 num_key_value_heads=8,
                                                 attn_head_dim=128)
