@@ -288,11 +288,17 @@ class Attention(nnx.Module):
                 sliding_window=getattr(self.cfg, "attention_chunk_size", None),
                 vmem_limit_bytes=64 * 1024 * 1024,
             )
-        print("md.seq_lens", md.seq_lens)
-        print("md.block_tables", md.block_tables)
-        print("md.query_start_loc[:256]", md.query_start_loc)
         
-        print("md.num_seqs", md.num_seqs)
+        print("md.seq_lens", md.seq_lens[:len(md.seq_lens)//2])
+        print("md.block_tables", md.block_tables[:len(md.block_tables)//2])
+        print("md.query_start_loc", md.query_start_loc[:len(md.query_start_loc)//2])
+        print("md.num_seqs", md.num_seqs[:len(md.num_seqs)//2])
+        print("---- * ----")
+        print("md.seq_lens", md.seq_lens[len(md.seq_lens)//2:])
+        print("md.block_tables", md.block_tables[len(md.block_tables)//2:])
+        print("md.query_start_loc", md.query_start_loc[len(md.query_start_loc)//2:])
+        print("md.num_seqs", md.num_seqs[len(md.num_seqs)//2:])
+        print("---- * ----")
         output_TNH = jax.jit(shard_map.shard_map(
                 _ragged_paged_attention,
                 mesh=mesh,
