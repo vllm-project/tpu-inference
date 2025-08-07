@@ -55,29 +55,21 @@ class DeepSeekV3Router(nnx.Module):
         quant: Optional configuration for quantization.
     """
 
-    cfg: DeepSeekV3RoutingConfig
     mesh: Mesh
     param_factory: ParamFactory
     sharding_cfg: ShardingConfig
+    hidden_size: int
+    num_experts: int
+    num_experts_per_tok: int
+    n_groups: int
+    topk_groups: int
+    norm_topk_prob: bool
+    routed_scaling_factor: float
+    dtype: jnp.dtype
     quant: Any | None = None
 
     def __post_init__(self):
         """Initializes the Router module by creating sharding configurations and generating the router kernel."""
-
-        self.hidden_size = getattr(self.cfg,
-                                   HuggingFaceArgNames.HIDDEN_SIZE.value)
-        self.num_experts = getattr(
-            self.cfg, HuggingFaceArgNames.NUM_ROUTED_EXPERTS.value)
-        self.num_experts_per_tok = getattr(
-            self.cfg, HuggingFaceArgNames.NUM_EXPERTS_PER_TOKEN.value)
-        self.n_groups = getattr(self.cfg, HuggingFaceArgNames.NUM_GROUPS.value)
-        self.topk_groups = getattr(self.cfg,
-                                   HuggingFaceArgNames.TOPK_GROUP.value)
-        self.norm_topk_prob = getattr(self.cfg,
-                                      HuggingFaceArgNames.NORM_TOPK_PROB.value)
-        self.routed_scaling_factor = getattr(
-            self.cfg, HuggingFaceArgNames.ROUTED_SCALING_FACTOR.value)
-        self.dtype = self.cfg.dtype
 
         self.create_sharding()
 
@@ -148,14 +140,11 @@ class DeepSeekV3Router(nnx.Module):
         D = self.hidden_size
         E = self.num_experts
         self.kernel_DE = self.param_factory.create_kernel_param(
-            rngs,
-            shape=(D, E),
-            dtype=self.cfg.dtype,
-            sharding=self.ed_sharding)
+            rngs, shape=(D, E), dtype=self.dtype, sharding=self.ed_sharding)
         self.bias_E = self.param_factory.create_scale_param(
             rngs,
             shape=(E, ),
-            dtype=self.cfg.dtype,
+            dtype=self.dtype,
             sharding=self.e_sharding,
         )
 
