@@ -1,5 +1,4 @@
 import re
-from copy import deepcopy
 from dataclasses import asdict, dataclass
 from typing import List, Optional, Tuple
 
@@ -18,8 +17,8 @@ from tpu_commons.models.jax.common.attention.deepseek_v3_attention import (
     MLA, MLAConfig)
 from tpu_commons.models.jax.common.base import ParamFactory
 from tpu_commons.models.jax.common.constants import KVCacheType
-from tpu_commons.models.jax.common.layers import (DenseFFW, DenseFFWConfig,
-                                                  Embedder, LMhead, RMSNorm)
+from tpu_commons.models.jax.common.layers import (DenseFFW, Embedder, LMhead,
+                                                  RMSNorm)
 from tpu_commons.models.jax.common.model import Model
 from tpu_commons.models.jax.common.moe.deepseek_moe import \
     DeepSeekV3RoutingConfig
@@ -145,11 +144,6 @@ class DeepSeekV3(Model):
                                   rms_norm_eps=rms_norm_eps,
                                   dtype=dtype,
                                   vllm_config=self.vllm_config)
-        dense_ffw_cfg = DenseFFWConfig(hidden_size=hidden_size,
-                                       intermediate_size=ffw_intermediate_size,
-                                       hidden_act=hidden_act,
-                                       dtype=dtype,
-                                       vllm_config=self.vllm_config)
         moe_cfg = MoEConfig(hidden_size=hidden_size,
                             intermediate_size_moe=moe_intermediate_size,
                             dtype=dtype,
@@ -213,7 +207,10 @@ class DeepSeekV3(Model):
                          mesh=self.mesh,
                          param_factory=self.param_factory,
                          sharding_cfg=self._sharding_config),
-                custom_module=DenseFFW(cfg=dense_ffw_cfg,
+                custom_module=DenseFFW(dtype=dtype,
+                                       hidden_act=hidden_act,
+                                       hidden_size=hidden_size,
+                                       intermediate_size=ffw_intermediate_size,
                                        mesh=self.mesh,
                                        param_factory=self.param_factory,
                                        sharding_cfg=self._sharding_config),
@@ -222,11 +219,6 @@ class DeepSeekV3(Model):
                 sharding_cfg=self._sharding_config)
             self.layers.append(block)
 
-        shared_experts_cfg = deepcopy(dense_ffw_cfg)
-        setattr(
-            shared_experts_cfg, "intermediate_size",
-            shared_experts * moe_intermediate_size
-        )  # intermediate_size = #shared_experts * intermediate_size_moe
         for i in range(first_k_dense_replace, num_layers):
             is_moe_layer = ((i + 1) % interleave_moe_layer_step == 0)
             custom_module = MoE(cfg=moe_cfg,
@@ -234,7 +226,10 @@ class DeepSeekV3(Model):
                                 param_factory=self.param_factory,
                                 sharding_cfg=self._sharding_config
                                 ) if is_moe_layer else DenseFFW(
-                                    cfg=dense_ffw_cfg,
+                                    dtype=dtype,
+                                    hidden_act=hidden_act,
+                                    hidden_size=hidden_size,
+                                    intermediate_size=ffw_intermediate_size,
                                     mesh=self.mesh,
                                     param_factory=self.param_factory,
                                     sharding_cfg=self._sharding_config)
@@ -249,7 +244,11 @@ class DeepSeekV3(Model):
                          mesh=self.mesh,
                          param_factory=self.param_factory,
                          sharding_cfg=self._sharding_config),
-                shared_experts=DenseFFW(cfg=shared_experts_cfg,
+                shared_experts=DenseFFW(dtype=dtype,
+                                        hidden_act=hidden_act,
+                                        hidden_size=hidden_size,
+                                        intermediate_size=shared_experts *
+                                        moe_intermediate_size,
                                         mesh=self.mesh,
                                         param_factory=self.param_factory,
                                         sharding_cfg=self._sharding_config),
