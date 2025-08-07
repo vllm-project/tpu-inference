@@ -945,9 +945,16 @@ class TPUModelRunner():
         print("padded_num_reqs_per_dp_rank", padded_num_reqs_per_dp_rank)
         self.query_start_loc_cpu[0] = 0
         
+        padded_num_reqs_per_dp_rank_logits = runner_utils.get_padded_num_reqs_with_upper_limit(
+        max(len(dp_rank_reqs_i) for dp_rank_reqs_i in dp_rank_reqs), self.max_num_reqs)
+        padded_num_reqs_logits = padded_num_reqs_per_dp_rank_logits * dp_size
+        print("padded_num_reqs_logits", padded_num_reqs_logits)
+
         slot_mapping_metadata =[[] for _ in range(dp_size)]
         num_slices =[[] for _ in range(dp_size)]
         block_tables = self.block_table_cpu[:self.max_num_reqs]
+        
+        logits_indices = np.zeros(padded_num_reqs_logits, dtype=np.int32)
         for dp_rank in range(dp_size):
             print("---- dp_rank", dp_rank, "-----")
             dp_token_offset = dp_rank * padded_num_scheduled_tokens_per_dp_rank
@@ -1011,9 +1018,16 @@ class TPUModelRunner():
                     np.cumsum([0] + num_scheduled_tokens_per_req[:-1],
                             out=self.query_start_loc_cpu[dp_req_padded_offset:dp_req_padded_offset+num_reqs_dp])
                     self.query_start_loc_cpu[dp_req_padded_offset:dp_req_padded_offset + num_reqs_dp] += dp_token_offset
-                self.query_start_loc_cpu[dp_req_padded_offset + num_reqs_dp: dp_req_padded_offset+ padded_num_scheduled_tokens_per_dp_rank] = 1
-            
+                self.query_start_loc_cpu[dp_req_padded_offset + num_reqs_dp: dp_req_padded_offset+ padded_num_reqs_per_dp_rank] = 1
+                    
                 print("self.query_start_loc_cpu", self.query_start_loc_cpu)
+                
+                np.cumsum(num_scheduled_tokens_per_req,
+                out=logits_indices[padded_num_reqs_per_dp_rank_logits*dp_rank: padded_num_reqs_per_dp_rank_logits*dp_rank + num_reqs_dp])
+
+                logits_indices[padded_num_reqs_per_dp_rank_logits*dp_rank: padded_num_reqs_per_dp_rank_logits*dp_rank + num_reqs_dp] += dp_token_offset - 1
+
+                
                 self.seq_lens_cpu[dp_req_padded_offset:dp_req_padded_offset + num_reqs_dp] = (
                     self.input_batch.num_computed_tokens_cpu[dp_req_offset:dp_req_offset+num_reqs_dp] +
                     num_scheduled_tokens_per_req)
@@ -1043,6 +1057,7 @@ class TPUModelRunner():
             self.input_ids_cpu[
                 dp_token_offset + total_num_scheduled_tokens:dp_token_offset + padded_num_scheduled_tokens_per_dp_rank] = 0
             print("self.input_ids_cpu", self.input_ids_cpu)
+        
         print("---- ---- -----")
         input_ids = self.input_ids_cpu[:padded_total_num_scheduled_tokens]
         print("input_ids", input_ids.shape, input_ids)
@@ -1058,10 +1073,6 @@ class TPUModelRunner():
         print("query_start_loc", query_start_loc)
         seq_lens = self.seq_lens_cpu[:self.max_num_reqs]
         print("seq_lens", seq_lens)
-        padded_num_reqs = runner_utils.get_padded_num_reqs_with_upper_limit(
-            num_reqs, self.max_num_reqs)
-        print("padded_num_reqs", padded_num_reqs)
-        logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
         print("logits_indices", logits_indices)
         num_seqs = np.array([len(dp_rank_reqs[i]) for i in range(dp_size)])
         
@@ -1070,7 +1081,7 @@ class TPUModelRunner():
 
         # Put to device
         sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
-            self.mesh, self.input_batch, padded_num_reqs,
+            self.mesh, self.input_batch, padded_num_reqs_logits,
             # reordered_req_ids=sum(dp_rank_reqs, []),
             # preferred_device=scheduler_output.preferred_device
         )
