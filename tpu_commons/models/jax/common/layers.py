@@ -11,8 +11,6 @@ from vllm.config import VllmConfig
 
 from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
-from tpu_commons.models.jax.common.sharding import (ShardingConfig,
-                                                    ShardingRulesConfig)
 
 
 # A dummy for modeling_flax_utils which might contain activation functions
@@ -67,8 +65,7 @@ class RMSNorm(nnx.Module):
     dims: int
     mesh: Mesh
     param_factory: ParamFactory
-    prefill_rules: ShardingRulesConfig
-    generate_rules: ShardingRulesConfig
+    activation_ffw_td: dict[str, NamedSharding]
     epsilon: float = 1e-6
     with_scale: bool = True
     dtype: Any = jnp.float32
@@ -172,12 +169,10 @@ class DenseFFW(nnx.Module):
     hidden_size: int
     intermediate_size: int
     param_factory: ParamFactory
-    sharding_cfg: ShardingConfig
+    df_sharding: NamedSharding
+    fd_sharding: NamedSharding
+    activation_ffw_td: dict[str, NamedSharding]
     quant: Any | None = None
-
-    def __post_init__(self):
-        """Initializes the weight kernels for the feed-forward layer."""
-        self.create_sharding()
 
     def __call__(self, x_TD, op_mode):
         """Performs the forward pass of the FFW layer.
@@ -220,33 +215,6 @@ class DenseFFW(nnx.Module):
         self.kernel_down_proj_FD = self.param_factory.create_kernel_param(
             rngs, shape=(F, D), dtype=self.dtype, sharding=self.fd_sharding)
 
-    def create_sharding(self):
-        """Creates and sets sharding attributes for weights and activations."""
-        mode_dependent_attrs = [
-            "activation_ffw_td",
-        ]
-        for attr_name in mode_dependent_attrs:
-            prefill_sharding_config = getattr(self.sharding_cfg.prefill_rules,
-                                              attr_name)
-            generate_sharding_config = getattr(
-                self.sharding_cfg.generate_rules, attr_name)
-
-            sharding_dict = {
-                'prefill': NamedSharding(self.mesh,
-                                         P(*prefill_sharding_config)),
-                'generate': NamedSharding(self.mesh,
-                                          P(*generate_sharding_config))
-            }
-            setattr(self, attr_name, sharding_dict)
-
-        # static sharding for kernel/weights
-        self.df_sharding = NamedSharding(
-            self.mesh, P(*self.sharding_cfg.generate_rules.ffw_weight_df))
-        self.fd_sharding = NamedSharding(
-            self.mesh, P(*self.sharding_cfg.generate_rules.ffw_weight_fd))
-
-        return
-
 
 EmbedderConfig = make_dataclass(
     "EmbedderConfig",
@@ -286,13 +254,9 @@ class Embedder(nnx.Module):
     dtype: jnp.dtype
     mesh: Mesh
     param_factory: ParamFactory
+    prelogit_td: NamedSharding
+    vd_sharding: NamedSharding
     normalize_embeddings: bool = False
-    generate_rules_prelogit_td: tuple = (None, None)
-    generate_rules_vocab_vd: tuple = (None, None)
-
-    def __post_init__(self):
-        """Initializes the embedding table."""
-        self.create_sharding()
 
     def __call__(self, x, decode=False):
         """Dispatches to either the encode or decode method.
@@ -357,15 +321,8 @@ class Embedder(nnx.Module):
                 embedding_TD *= jnp.sqrt(self.hidden_size).astype(self.dtype)
         return embedding_TD
 
-    def create_sharding(self):
-        """Creates and sets sharding attributes for weights and activations."""
-        self.prelogit_td = NamedSharding(self.mesh,
-                                         P(*self.generate_rules_prelogit_td))
-        self.vd_sharding = NamedSharding(self.mesh,
-                                         P(*self.generate_rules_vocab_vd))
 
-
-@dataclass
+@dataclass(kw_only=True)
 class LMhead(Embedder):
     """
     An Embedder that uses a (D, V) shaped embedding table, inheriting from
@@ -374,7 +331,7 @@ class LMhead(Embedder):
     This implementation overrides the kernel generation, encoding, and decoding
     methods to work with the transposed embedding matrix layout.
     """
-    generate_rules_vocab_dv: tuple = (None, None)
+    dv_sharding: NamedSharding
 
     def generate_kernel(self, rngs: nnx.Rngs):
         self.input_embedding_table_DV = self.param_factory.create_kernel_param(

@@ -22,7 +22,6 @@ from tpu_commons.models.jax.attention_interface import update_kv_cache
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
-from tpu_commons.models.jax.common.sharding import ShardingConfig
 from tpu_commons.models.jax.layers.rope import apply_rope
 
 KVCache = Tuple[jax.Array, jax.Array]
@@ -80,13 +79,22 @@ class Attention(nnx.Module):
     dtype: jnp.dtype
     mesh: Mesh
     param_factory: ParamFactory
-    sharding_cfg: ShardingConfig
+
+    activation_attention_td: dict[str, NamedSharding]
+    activation_q_td: dict[str, NamedSharding]
+    query_tnh: dict[str, NamedSharding]
+    keyvalue_skh: dict[str, NamedSharding]
+    activation_attention_out_td: dict[str, NamedSharding]
+    dnh_sharding: NamedSharding
+    dkh_sharding: NamedSharding
+    nhd_sharding: NamedSharding
+    pallas_q_spec: dict[str, P]
+    pallas_kv_spec: dict[str, P]
+    pallas_cache_page_spec: dict[str, P]
+
     attention_chunk_size: int | None = None
     rope_input_ordering: str = "split"
     quant: Any | None = None
-
-    def __post_init__(self):
-        self.create_sharding()
 
     def generate_kernel(self, rngs: nnx.Rngs):
         """Initializes the weight kernels for Q, K, V, and O projections."""
@@ -103,51 +111,6 @@ class Attention(nnx.Module):
             rngs, (D, K, H), self.dkh_sharding, self.dtype)
         self.kernel_o_proj_NHD = self.param_factory.create_kernel_param(
             rngs, (N, H, D), self.nhd_sharding, self.dtype)
-
-    def create_sharding(self):
-        """Creates sharding rules for activations and weights."""
-        mode_dependent_attrs = [
-            "activation_attention_td", "activation_q_td", "query_tnh",
-            "keyvalue_skh", "activation_attention_out_td"
-        ]
-        for attr_name in mode_dependent_attrs:
-            prefill_sharding_config = getattr(self.sharding_cfg.prefill_rules,
-                                              attr_name)
-            generate_sharding_config = getattr(
-                self.sharding_cfg.generate_rules, attr_name)
-
-            sharding_dict = {
-                'prefill': NamedSharding(self.mesh,
-                                         P(*prefill_sharding_config)),
-                'generate': NamedSharding(self.mesh,
-                                          P(*generate_sharding_config))
-            }
-            setattr(self, attr_name, sharding_dict)
-
-        # static sharding for kernel/weights
-        self.dnh_sharding = NamedSharding(
-            self.mesh, P(*self.sharding_cfg.generate_rules.attn_q_weight_dnh))
-        self.dkh_sharding = NamedSharding(
-            self.mesh, P(*self.sharding_cfg.generate_rules.attn_k_weight_dkh))
-        self.nhd_sharding = NamedSharding(
-            self.mesh, P(*self.sharding_cfg.generate_rules.attn_o_weight_nhd))
-
-        # TODO: the pallas kernels of flash_attention/paged_attention need to be called
-        # via shard_map with sharding specs, However, the q/k/v have been sharded outside of attention()
-        # So we replicate the sharding below but it should be better organized if we use pallas kernels
-        self.pallas_q_spec = {
-            'prefill': P(*self.sharding_cfg.prefill_rules.query_tnh),
-            'generate': P(*self.sharding_cfg.generate_rules.query_tnh)
-        }
-        self.pallas_kv_spec = {
-            'prefill': P(*self.sharding_cfg.prefill_rules.keyvalue_skh),
-            'generate': P(*self.sharding_cfg.generate_rules.keyvalue_skh)
-        }
-        self.pallas_cache_page_spec = {
-            'prefill': P(*self.sharding_cfg.prefill_rules.keyvalue_cache_lskh),
-            'generate':
-            P(*self.sharding_cfg.generate_rules.keyvalue_cache_lskh)
-        }
 
     def __call__(self,
                  x,

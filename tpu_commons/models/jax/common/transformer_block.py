@@ -3,19 +3,15 @@ from typing import Any, Tuple
 
 # Flax and JAX sharding imports
 import jax
-import jax.numpy as jnp
 from flax import nnx
-from jax.sharding import Mesh
 from vllm.config import VllmConfig
 
 from tpu_commons.models.jax.common.attention.attention import (
     AttentionConfig, AttentionMetadata, KVCache)
-from tpu_commons.models.jax.common.base import Config, ParamFactory
+from tpu_commons.models.jax.common.base import Config
 from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
-from tpu_commons.models.jax.common.layers import (DenseFFW, DenseFFWConfig,
-                                                  RMSNorm)
+from tpu_commons.models.jax.common.layers import DenseFFW, DenseFFWConfig
 from tpu_commons.models.jax.common.moe.moe import MoE, MoEConfig
-from tpu_commons.models.jax.common.sharding import ShardingConfig
 
 TransformerBlockConfig = make_dataclass(
     "TransformerBlockConfig",
@@ -41,39 +37,12 @@ class TransformerBlock(nnx.Module):
 
     custom_module can be either a dense module (i.e., DenseFFW) or MoE.
     """
-    hidden_size: int
-    rmsnorm_epsilon: float
-    attn_dtype: jnp.dtype
-    dense_dtype: jnp.dtype
-    param_factory: ParamFactory
-    mesh: Mesh
-    sharding_cfg: ShardingConfig
+    pre_attention_norm: nnx.Module
+    pre_mlp_norm: nnx.Module
     custom_module: nnx.Module
     attn: nnx.Module
     use_attention_rope: bool = True
     quant: Any | None = None
-
-    def __post_init__(self):
-        self.pre_attention_norm = RMSNorm(
-            dims=self.hidden_size,
-            mesh=self.mesh,
-            param_factory=self.param_factory,
-            prefill_rules=self.sharding_cfg.prefill_rules,
-            generate_rules=self.sharding_cfg.generate_rules,
-            epsilon=self.rmsnorm_epsilon,
-            with_scale=True,
-            dtype=self.attn_dtype,
-        )
-        self.pre_mlp_norm = RMSNorm(
-            dims=self.hidden_size,
-            mesh=self.mesh,
-            param_factory=self.param_factory,
-            prefill_rules=self.sharding_cfg.prefill_rules,
-            generate_rules=self.sharding_cfg.generate_rules,
-            epsilon=self.rmsnorm_epsilon,
-            with_scale=True,
-            dtype=self.dense_dtype,
-        )
 
     def __call__(
             self, x_TD: jax.Array, is_prefill: bool, kv_cache: KVCache,

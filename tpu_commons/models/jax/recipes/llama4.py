@@ -7,6 +7,7 @@ import jax.numpy as jnp
 from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
+from jax.sharding import PartitionSpec as P
 from vllm.config import VllmConfig
 
 import tpu_commons.models.jax.common.sharding as sharding
@@ -79,7 +80,7 @@ class Llama4ForCausalLM(Model):
         hidden_act: str = "silu"
         self.no_rope_layer_interval = 4
 
-        shared_experts = 1
+        num_shared_experts = 1
         rms_norm_eps = 1e-5
         self.num_attention_heads = 40
         self.num_key_value_heads = 8
@@ -95,15 +96,14 @@ class Llama4ForCausalLM(Model):
                 scale_initializer=nnx.initializers.ones,
                 random_init=False)
 
-        self.embedder = Embedder(vocab_size=vocab_size,
-                                 hidden_size=self.hidden_size,
-                                 dtype=dtype,
-                                 generate_rules_prelogit_td=self.
-                                 _sharding_config.generate_rules.prelogit_td,
-                                 generate_rules_vocab_vd=self._sharding_config.
-                                 generate_rules.vocab_vd,
-                                 mesh=self.mesh,
-                                 param_factory=self.param_factory)
+        self.embedder = Embedder(
+            vocab_size=vocab_size,
+            hidden_size=self.hidden_size,
+            dtype=dtype,
+            prelogit_td=self._sharding_config.generate_rules.prelogit_td,
+            vd_sharding=self._sharding_config.generate_rules.vocab_vd,
+            mesh=self.mesh,
+            param_factory=self.param_factory)
         self.embedder.generate_kernel(self.rng)
 
         self.layers = []
@@ -136,53 +136,98 @@ class Llama4ForCausalLM(Model):
             ) if is_moe_layer else DenseFFW(
                 mesh=self.mesh,
                 param_factory=self.param_factory,
-                sharding_cfg=self._sharding_config,
                 dtype=dtype,
                 hidden_act=hidden_act,
                 hidden_size=self.hidden_size,
                 intermediate_size=intermediate_size,
-            )
+                df_sharding=NamedSharding(self.mesh, P(None, "model",
+                                                       "expert")),
+                fd_sharding=NamedSharding(self.mesh, P("model", "expert",
+                                                       None)),
+                activation_ffw_td=activation_ffw_td)
+            attn = Llama4Attention(
+                hidden_size=self.hidden_size,
+                dtype=dtype,
+                num_attention_heads=40,
+                num_key_value_heads=8,
+                head_dim=128,
+                rope_theta=500000.0,
+                # https://huggingface.co/meta-llama/Llama-4-Scout-17B-16E-Instruct/blob/main/config.json
+                rope_scaling={
+                    "scale_factor": 16.0,
+                    "low_freq_factor": 1.0,
+                    "high_freq_factor": 1.0,
+                    "original_max_position_embeddings": 8192
+                },
+                rope_input_ordering="interleaved",
+                temperature_tuning=True,
+                temperature_tuning_scale=0.1,
+                temperature_tuning_floor_scale=8192,
+                use_qk_norm=True,
+                attention_chunk_size=None if use_attention_rope else 8192,
+                activation_attention_td=self._sharding_config.generate_rules.
+                activation_attention_td,
+                activation_q_td=self._sharding_config.generate_rules.
+                activation_q_td,
+                query_tnh=self._sharding_config.generate_rules.query_tnh,
+                keyvalue_skh=self._sharding_config.generate_rules.keyvalue_skh,
+                activation_attention_out_td=self._sharding_config.
+                generate_rules.activation_attention_out_td,
+                dnh_sharding=NamedSharding(
+                    self.mesh,
+                    P(*
+                      self._sharding_config.generate_rules.attn_q_weight_dnh)),
+                dkh_sharding=NamedSharding(
+                    self.mesh,
+                    P(*
+                      self._sharding_config.generate_rules.attn_k_weight_dkh)),
+                nhd_sharding=NamedSharding(
+                    self.mesh,
+                    P(*
+                      self._sharding_config.generate_rules.attn_o_weight_nhd)),
+                pallas_q_spec={
+                    'prefill':
+                    P(*self._sharding_config.prefill_rules.query_tnh),
+                    'generate':
+                    P(*self._sharding_config.generate_rules.query_tnh)
+                },
+                pallas_kv_spec={
+                    'prefill':
+                    P(*self._sharding_config.prefill_rules.keyvalue_skh),
+                    'generate':
+                    P(*self._sharding_config.generate_rules.keyvalue_skh)
+                },
+                pallas_cache_page_spec={
+                    'prefill':
+                    P(*
+                      self._sharding_config.prefill_rules.keyvalue_cache_lskh),
+                    'generate':
+                    P(*
+                      self._sharding_config.generate_rules.keyvalue_cache_lskh)
+                },
+                mesh=self.mesh,
+                param_factory=self.param_factory)
+            shared_experts = DenseFFW(
+                dtype=dtype,
+                hidden_act=hidden_act,
+                hidden_size=self.hidden_size,
+                intermediate_size=num_shared_experts * intermediate_size_moe,
+                mesh=self.mesh,
+                param_factory=self.param_factory,
+                df_sharding=NamedSharding(self.mesh, P(None, "model",
+                                                       "expert")),
+                fd_sharding=NamedSharding(self.mesh, P("model", "expert",
+                                                       None)),
+                activation_ffw_td=activation_ffw_td)
             block = SharedExpertsTransformerBlock(
                 custom_module=custom_module,
-                hidden_size=self.hidden_size,
-                rmsnorm_epsilon=rms_norm_eps,
-                attn_dtype=dtype,
-                dense_dtype=dtype,
-                attn=Llama4Attention(
-                    hidden_size=self.hidden_size,
-                    dtype=dtype,
-                    num_attention_heads=40,
-                    num_key_value_heads=8,
-                    head_dim=128,
-                    rope_theta=500000.0,
-                    # https://huggingface.co/meta-llama/Llama-4-Scout-17B-16E-Instruct/blob/main/config.json
-                    rope_scaling={
-                        "scale_factor": 16.0,
-                        "low_freq_factor": 1.0,
-                        "high_freq_factor": 1.0,
-                        "original_max_position_embeddings": 8192
-                    },
-                    rope_input_ordering="interleaved",
-                    temperature_tuning=True,
-                    temperature_tuning_scale=0.1,
-                    temperature_tuning_floor_scale=8192,
-                    use_qk_norm=True,
-                    attention_chunk_size=None if use_attention_rope else 8192,
-                    mesh=self.mesh,
-                    param_factory=self.param_factory,
-                    sharding_cfg=self._sharding_config),
-                shared_experts=DenseFFW(dtype=dtype,
-                                        hidden_act=hidden_act,
-                                        hidden_size=self.hidden_size,
-                                        intermediate_size=shared_experts *
-                                        intermediate_size_moe,
-                                        mesh=self.mesh,
-                                        param_factory=self.param_factory,
-                                        sharding_cfg=self._sharding_config),
-                use_attention_rope=use_attention_rope,
-                param_factory=self.param_factory,
-                mesh=self.mesh,
-                sharding_cfg=self._sharding_config)
+                attn=attn,
+                pre_attention_norm=
+                None,  # Placeholder, will be initialized in generate_kernel
+                pre_mlp_norm=
+                None,  # Placeholder, will be initialized in generate_kernel
+                shared_experts=shared_experts,
+                use_attention_rope=use_attention_rope)
             self.layers.append(block)
 
         for i in range(len(self.layers)):
@@ -192,25 +237,24 @@ class Llama4ForCausalLM(Model):
             dims=self.hidden_size,
             mesh=self.mesh,
             param_factory=self.param_factory,
-            prefill_rules=self._sharding_config.prefill_rules,
-            generate_rules=self._sharding_config.generate_rules,
+            activation_ffw_td=activation_ffw_td,
             epsilon=rms_norm_eps,
             with_scale=True,
             dtype=dtype,
         )
         self.final_norm.generate_kernel(self.rng)
 
-        self.lm_head = LMhead(vocab_size=vocab_size,
-                              hidden_size=self.hidden_size,
-                              dtype=dtype,
-                              generate_rules_prelogit_td=self._sharding_config.
-                              generate_rules.prelogit_td,
-                              generate_rules_vocab_vd=self._sharding_config.
-                              generate_rules.vocab_vd,
-                              generate_rules_vocab_dv=self._sharding_config.
-                              generate_rules.vocab_dv,
-                              mesh=self.mesh,
-                              param_factory=self.param_factory)
+        self.lm_head = LMhead(
+            vocab_size=vocab_size,
+            hidden_size=self.hidden_size,
+            dtype=dtype,
+            prelogit_td=NamedSharding(self.mesh, P("data", None)),
+            vd_sharding=NamedSharding(self.mesh,
+                                      P('data', 'expert', 'model', None)),
+            dv_sharding=NamedSharding(self.mesh,
+                                      P(None, 'data', 'expert', 'model')),
+            mesh=self.mesh,
+            param_factory=self.param_factory)
         self.lm_head.generate_kernel(self.rng)
         if self.is_verbose:
             self._print_model_architecture()
