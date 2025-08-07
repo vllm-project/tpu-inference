@@ -2,7 +2,7 @@
 This module defines the engine interface contracts required by tpu_commons.
 """
 
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 # tpu_commons now depends on its own, locally defined interfaces.
 from .cache import IMirroredProcessingCache
@@ -41,6 +41,7 @@ class IEngineCore(Protocol):
     scheduler: IScheduler
     mm_input_cache_server: IMirroredProcessingCache
     structured_output_manager: IStructuredOutputManager
+    model_executor: Any
 
     def execute_model_with_error_logging(self, *args,
                                          **kwargs) -> "IModelRunnerOutput":
