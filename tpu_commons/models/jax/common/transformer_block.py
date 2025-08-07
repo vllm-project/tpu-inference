@@ -1,15 +1,15 @@
-from copy import deepcopy
 from dataclasses import dataclass, field, make_dataclass
-from typing import Any, Tuple, Type
+from typing import Any, Tuple
 
 # Flax and JAX sharding imports
 import jax
+import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh
 from vllm.config import VllmConfig
 
 from tpu_commons.models.jax.common.attention.attention import (
-    Attention, AttentionConfig, AttentionMetadata, KVCache)
+    AttentionConfig, AttentionMetadata, KVCache)
 from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
 from tpu_commons.models.jax.common.layers import (DenseFFW, DenseFFWConfig,
@@ -38,63 +38,41 @@ TransformerBlockConfig.__doc__ = f"""light weighted transformer config, which in
 class TransformerBlock(nnx.Module):
     """
     A heavy weight module which serves as the stateful live blocks in serving
+
+    custom_module can be either a dense module (i.e., DenseFFW) or MoE.
     """
-    cfg: TransformerBlockConfig
-    block_type: str
+    hidden_size: int
+    rmsnorm_epsilon: float
+    attn_dtype: jnp.dtype
+    dense_dtype: jnp.dtype
     param_factory: ParamFactory
     mesh: Mesh
     sharding_cfg: ShardingConfig
-    attention_cls: type[Attention] = Attention
+    custom_module: nnx.Module
+    attn: nnx.Module
     use_attention_rope: bool = True
     quant: Any | None = None
 
-    def _create_module(self, module_cls: Type[nnx.Module], cfg: Any,
-                       **overrides) -> nnx.Module:
-        args = {
-            "mesh": self.mesh,
-            "param_factory": self.param_factory,
-            "sharding_cfg": self.sharding_cfg,
-            "quant": self.quant
-        }
-        args.update(overrides)
-        return module_cls(cfg=cfg, **args)
-
     def __post_init__(self):
-        hidden_size = getattr(self.cfg.attention,
-                              HuggingFaceArgNames.HIDDEN_SIZE.value)
-        rmsnorm_epsilon = getattr(self.cfg,
-                                  HuggingFaceArgNames.RMS_NORM_EPS.value)
-        try:
-            self.attn = self._create_module(self.attention_cls,
-                                            cfg=self.cfg.attention)
-        except NameError:
-            raise NameError(
-                f"Invalid attention class type: {self.attention_cls}")
-
-        if self.block_type == "moe":
-            self.moe = self._create_module(MoE, cfg=self.cfg.moe)
-        elif self.block_type == "dense":
-            self.mlp = self._create_module(DenseFFW, cfg=self.cfg.dense_ffw)
-
         self.pre_attention_norm = RMSNorm(
-            dims=hidden_size,
+            dims=self.hidden_size,
             mesh=self.mesh,
             param_factory=self.param_factory,
             prefill_rules=self.sharding_cfg.prefill_rules,
             generate_rules=self.sharding_cfg.generate_rules,
-            epsilon=rmsnorm_epsilon,
+            epsilon=self.rmsnorm_epsilon,
             with_scale=True,
-            dtype=self.cfg.attention.dtype,
+            dtype=self.attn_dtype,
         )
         self.pre_mlp_norm = RMSNorm(
-            dims=hidden_size,
+            dims=self.hidden_size,
             mesh=self.mesh,
             param_factory=self.param_factory,
             prefill_rules=self.sharding_cfg.prefill_rules,
             generate_rules=self.sharding_cfg.generate_rules,
-            epsilon=rmsnorm_epsilon,
+            epsilon=self.rmsnorm_epsilon,
             with_scale=True,
-            dtype=self.cfg.dense_ffw.dtype,
+            dtype=self.dense_dtype,
         )
 
     def __call__(
@@ -113,21 +91,13 @@ class TransformerBlock(nnx.Module):
         # FFW Block
         ffw_residual_TD = attn_output_TD
         normed_ffw_input_TD = self.pre_mlp_norm(attn_output_TD)
-        if self.block_type == "moe":
-            logits_TD = self.moe(normed_ffw_input_TD, op_mode)
-        elif self.block_type == "dense":
-            logits_TD = self.mlp(normed_ffw_input_TD, op_mode)
-        else:
-            raise ValueError(f"Invalid block type: {self.block_type}")
+        logits_TD = self.custom_module(normed_ffw_input_TD, op_mode)
         logits_TD += ffw_residual_TD
         return new_cache, logits_TD
 
     def generate_kernel(self, rngs: nnx.Rngs):
         self.attn.generate_kernel(rngs)
-        if self.block_type == "moe":
-            self.moe.generate_kernel(rngs)
-        else:
-            self.mlp.generate_kernel(rngs)
+        self.custom_module.generate_kernel(rngs)
         self.pre_attention_norm.generate_kernel(rngs)
         self.pre_mlp_norm.generate_kernel(rngs)
 
@@ -151,21 +121,7 @@ Inherits TransformerBlockConfig docstring:
 @dataclass(kw_only=True)
 class SharedExpertsTransformerBlock(TransformerBlock):
     """Create a modified TransformerBlock that sums MoE layer output with shared expert output."""
-
-    def __post_init__(self):
-        super().__post_init__()
-        # Create a modified config for the shared expert layer (which is a dense FFW layer)
-        shared_experts = getattr(self.cfg,
-                                 HuggingFaceArgNames.SHARED_EXPERTS.value)
-        moe_intermediate_size = getattr(
-            self.cfg.moe, HuggingFaceArgNames.INTERMEDIATE_SIZE_MOE.value)
-        shared_experts_cfg = deepcopy(self.cfg.dense_ffw)
-        setattr(
-            shared_experts_cfg, HuggingFaceArgNames.INTERMEDIATE_SIZE.value,
-            shared_experts * moe_intermediate_size
-        )  # intermediate_size = #shared_experts * intermediate_size_moe
-        self.shared_experts = self._create_module(DenseFFW,
-                                                  cfg=shared_experts_cfg)
+    shared_experts: nnx.Module
 
     def __call__(self, x_TD, is_prefill, kv_cache, attention_metadata):
         op_mode = "prefill" if is_prefill else "generate"
@@ -180,16 +136,17 @@ class SharedExpertsTransformerBlock(TransformerBlock):
         # FFW Block
         ffw_residual_TD = attn_output_TD
         normed_ffw_input_TD = self.pre_mlp_norm(attn_output_TD)
-        if self.block_type == "moe":
-            logits_TD = self.moe(normed_ffw_input_TD, op_mode)
+        if isinstance(self.custom_module, MoE):
+            logits_TD = self.custom_module(normed_ffw_input_TD, op_mode)
             # Add the shared expert outputs to the MoE outputs.
             shared_expert_output_TD = self.shared_experts(
                 normed_ffw_input_TD, op_mode)
             logits_TD += shared_expert_output_TD
-        elif self.block_type == "dense":
-            logits_TD = self.mlp(normed_ffw_input_TD, op_mode)
+        elif isinstance(self.custom_module, DenseFFW):
+            logits_TD = self.custom_module(normed_ffw_input_TD, op_mode)
         else:
-            raise ValueError(f"Invalid block type: {self.block_type}")
+            raise ValueError(
+                f"Invalid custom moduel type: {type(self.custom_module)}")
         logits_TD += ffw_residual_TD
         return new_cache, logits_TD
 

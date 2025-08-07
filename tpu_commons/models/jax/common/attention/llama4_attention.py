@@ -51,8 +51,12 @@ Inherits AttentionConfig docstring:
 """
 
 
-@dataclass
+@dataclass(kw_only=True)
 class Llama4Attention(Attention):
+    use_qk_norm: bool
+    temperature_tuning: bool
+    temperature_tuning_floor_scale: float
+    temperature_tuning_scale: float
 
     def __call__(self,
                  x,
@@ -84,15 +88,13 @@ class Llama4Attention(Attention):
         """
         op_mode = "prefill" if is_prefill else "generate"
         md = attention_metadata
-        x = jnp.asarray(x, self.cfg.dtype)
+        x = jnp.asarray(x, self.dtype)
         x_SD = nnx.with_sharding_constraint(
             x, self.activation_attention_td[op_mode])
         x_q_TD = nnx.with_sharding_constraint(x, self.activation_q_td[op_mode])
-        rope_scaling = getattr(self.cfg,
-                               HuggingFaceArgNames.ROPE_SCALING.value)
-        rope_theta = getattr(self.cfg, HuggingFaceArgNames.ROPE_THETA.value)
-        rope_input_ordering = self.cfg.rope_input_ordering
-        H = getattr(self.cfg, HuggingFaceArgNames.HEAD_DIM.value)
+        rope_scaling = self.rope_scaling
+        rope_theta = self.rope_theta
+        H = self.head_dim
         l2_norm = L2Norm()
 
         with jax.named_scope("q_proj"):
@@ -100,13 +102,13 @@ class Llama4Attention(Attention):
                                self.kernel_q_proj_DNH.value)
             if use_attention_rope:
                 q_TNH = apply_rope(q_TNH, md.input_positions, H, rope_theta,
-                                   rope_scaling, rope_input_ordering)
+                                   rope_scaling, self.rope_input_ordering)
 
                 # Apply normaliation after RoPE
-                if self.cfg.use_qk_norm:
+                if self.use_qk_norm:
                     q_TNH = l2_norm(q_TNH)
             else:
-                if self.cfg.temperature_tuning:
+                if self.temperature_tuning:
                     q_TNH = self.apply_temperature_tuning(md, q_TNH)
 
             q_TNH = nnx.with_sharding_constraint(q_TNH,
@@ -116,10 +118,10 @@ class Llama4Attention(Attention):
                                self.kernel_k_proj_DKH.value)
             if use_attention_rope:
                 k_SKH = apply_rope(k_SKH, md.input_positions, H, rope_theta,
-                                   rope_scaling, rope_input_ordering)
+                                   rope_scaling, self.rope_input_ordering)
 
                 # Apply normaliation after RoPE
-                if self.cfg.use_qk_norm:
+                if self.use_qk_norm:
                     k_SKH = l2_norm(k_SKH)
             k_SKH = nnx.with_sharding_constraint(k_SKH,
                                                  self.keyvalue_skh[op_mode])
@@ -156,7 +158,7 @@ class Llama4Attention(Attention):
             input_arr_TNH: Input array of shape (T, N, H) which will have scaled temperatures applied.
         """
         attn_scales = (jnp.log(
-            jnp.floor((md.input_positions.astype(self.cfg.dtype) + 1.0) /
-                      self.cfg.temperature_tuning_floor_scale) + 1.0) *
-                       self.cfg.temperature_tuning_scale + 1.0)
+            jnp.floor((md.input_positions.astype(self.dtype) + 1.0) /
+                      self.temperature_tuning_floor_scale) + 1.0) *
+                       self.temperature_tuning_scale + 1.0)
         return input_arr_TNH * attn_scales[:, None, None]

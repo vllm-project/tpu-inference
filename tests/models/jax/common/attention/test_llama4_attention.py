@@ -12,7 +12,7 @@ import jax.numpy as jnp
 
 from tpu_commons.models.jax.common.attention.attention import AttentionMetadata
 from tpu_commons.models.jax.common.attention.llama4_attention import (
-    L2Norm, Llama4Attention, Llama4AttentionConfig)
+    L2Norm, Llama4Attention)
 from tpu_commons.models.jax.common.sharding import build_mesh
 
 
@@ -76,7 +76,7 @@ class Llama4AttentionTest(unittest.TestCase):
         param_factory = MagicMock()
         sharding_cfg = MagicMock()
 
-        attention_config = Llama4AttentionConfig(
+        llama4_attention = Llama4Attention(
             hidden_size=hidden_size,
             num_attention_heads=num_attention_heads,
             num_key_value_heads=num_attention_heads,
@@ -84,13 +84,10 @@ class Llama4AttentionTest(unittest.TestCase):
             rope_theta=10000.0,
             rope_scaling={},
             dtype=jnp.bfloat16,
-            vllm_config=None,
             use_qk_norm=False,
             temperature_tuning=True,
             temperature_tuning_scale=2.0,
-            temperature_tuning_floor_scale=2.0)
-        llama4_attention = Llama4Attention(
-            cfg=attention_config,
+            temperature_tuning_floor_scale=2.0,
             mesh=self.mesh,
             param_factory=param_factory,
             sharding_cfg=sharding_cfg,

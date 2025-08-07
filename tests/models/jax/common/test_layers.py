@@ -7,8 +7,7 @@ from flax import nnx
 from jax.sharding import Mesh
 
 from tpu_commons.models.jax.common.base import ParamFactory
-from tpu_commons.models.jax.common.layers import (DenseFFW, DenseFFWConfig,
-                                                  Embedder, RMSNorm)
+from tpu_commons.models.jax.common.layers import DenseFFW, Embedder, RMSNorm
 from tpu_commons.models.jax.common.sharding import (ShardingConfig,
                                                     ShardingRulesConfig)
 
@@ -68,19 +67,14 @@ class TestLayers(unittest.TestCase):
         hidden_size = 512
         intermediate_size = 2048
 
-        ffw_config = DenseFFWConfig(
-            hidden_size=hidden_size,
-            intermediate_size=intermediate_size,
-            hidden_act="silu",
-            dtype=jnp.bfloat16,
-            vllm_config=None,
-        )
-
         ffw_layer = DenseFFW(
-            cfg=ffw_config,
             mesh=self.mesh,
             param_factory=self.param_factory,
             sharding_cfg=self.sharding_cfg,
+            dtype=jnp.bfloat16,
+            hidden_act="silu",
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
         )
         ffw_layer.generate_kernel(nnx.Rngs(0))
 

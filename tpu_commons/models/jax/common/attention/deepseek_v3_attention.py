@@ -58,49 +58,35 @@ MLAConfig.__doc__ = f"""Configuration for the MLA module.
 
 
 # TODO (wenxindongwork): Add MLA KV cache implementation. For now, cache complete KV vectors.
-@dataclass
+@dataclass(kw_only=True)
 class MLA(Attention):
     """An implementation of Multi-Head Latent Attention as
     described in the DeepSeek V3 paper.
 
     Attributes:
-        cfg: The configuration object of type `MLAConfig`.
         mesh: The JAX device mesh for distributed computation.
         param_factory: A factory for creating and initializing model parameters.
         sharding_cfg: Configuration for tensor sharding strategies.
         quant: Optional configuration for quantization.
     """
 
-    cfg: MLAConfig
     mesh: Mesh
     param_factory: ParamFactory
     sharding_cfg: ShardingConfig
+    q_lora_rank: int
+    kv_lora_rank: int
+    qk_nope_head_dim: int
+    qk_rope_head_dim: int
+    v_head_dim: int
+    rms_norm_eps: float
     quant: Any | None = None
 
     def __post_init__(self):
-        self.N = getattr(self.cfg,
-                         HuggingFaceArgNames.NUM_ATTENTION_HEADS.value)
-        self.K = getattr(self.cfg,
-                         HuggingFaceArgNames.NUM_KEY_VALUE_HEADS.value)
-        self.D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
-        self.query_lora_rank = getattr(self.cfg,
-                                       HuggingFaceArgNames.Q_LORA_RANK.value)
-        self.kv_lora_rank = getattr(self.cfg,
-                                    HuggingFaceArgNames.KV_LORA_RANK.value)
-        self.rope_scaling = getattr(self.cfg,
-                                    HuggingFaceArgNames.ROPE_SCALING.value)
-        self.rope_theta = getattr(self.cfg,
-                                  HuggingFaceArgNames.ROPE_THETA.value)
-        self.rms_norm_eps = getattr(self.cfg,
-                                    HuggingFaceArgNames.RMS_NORM_EPS.value)
-        self.qk_nope_head_dim = getattr(
-            self.cfg, HuggingFaceArgNames.QK_NOPE_HEAD_DIM.value)
-        self.qk_rope_head_dim = getattr(
-            self.cfg, HuggingFaceArgNames.QK_ROPE_HEAD_DIM.value)
+        self.N = self.num_attention_heads
+        self.K = self.num_key_value_heads
+        self.D = self.hidden_size
+
         self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
-        self.v_head_dim = getattr(self.cfg,
-                                  HuggingFaceArgNames.V_HEAD_DIM.value)
-        self.dtype = getattr(self.cfg, "dtype")
 
         assert self.N == self.K, "N and K must be equal for MLA"
 
@@ -123,17 +109,17 @@ class MLA(Attention):
 
         self.kernel_q_down_proj_DA = self.param_factory.create_kernel_param(
             rngs, (self.D, self.query_lora_rank), self.q_da_sharding,
-            self.cfg.dtype)
+            self.dtype)
         # FP8 Scale
         # TODO: update 128 to use config
         self.kernel_q_down_proj_scale_DA = self.param_factory.create_kernel_param(
             rngs, (self.D // 128, self.query_lora_rank // 128),
-            self.q_da_sharding, self.cfg.dtype)
+            self.q_da_sharding, self.dtype)
         self.kernel_q_up_proj_ANH = self.param_factory.create_kernel_param(
             rngs,
-            (self.query_lora_rank, self.N, self.qk_head_dim),
+            (self.q_lora_rank, self.N, self.qk_head_dim),
             self.anh_sharding,
-            self.cfg.dtype,
+            self.dtype,
         )
         # FP8 Scale
         # TODO: update 128 to use config
@@ -142,7 +128,7 @@ class MLA(Attention):
             (self.query_lora_rank // 128, self.N // 128,
              self.qk_head_dim // 128),
             self.anh_sharding,
-            self.cfg.dtype,
+            self.dtype,
         )
         self.kernel_kv_down_proj_DA = self.param_factory.create_kernel_param(
             rngs,
@@ -177,14 +163,14 @@ class MLA(Attention):
         )
         self.kernel_o_proj_NHD = self.param_factory.create_kernel_param(
             rngs, (self.N, self.v_head_dim, self.D), self.nhd_sharding,
-            self.cfg.dtype)
+            self.dtype)
         # FP8 Scale
         # TODO: update 128 to use config
         self.kernel_o_proj_scale_NHD = self.param_factory.create_kernel_param(
             rngs, (self.N // 128, self.v_head_dim // 128, self.D),
             self.nhd_sharding, self.cfg.dtype)
         self.q_rms_norm = RMSNorm(
-            dims=self.query_lora_rank,
+            dims=self.q_lora_rank,
             mesh=self.mesh,
             param_factory=self.param_factory,
             prefill_rules=self.sharding_cfg.prefill_rules,
@@ -229,7 +215,7 @@ class MLA(Attention):
         """
         op_mode = "prefill" if is_prefill else "generate"
         md = attention_metadata
-        x = jnp.asarray(x, self.cfg.dtype)
+        x = jnp.asarray(x, self.dtype)
         x_SD = nnx.with_sharding_constraint(
             x, self.activation_attention_td[op_mode])
         x_q_TD = nnx.with_sharding_constraint(x, self.activation_q_td[op_mode])
