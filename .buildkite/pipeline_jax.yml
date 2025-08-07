@@ -64,7 +64,6 @@ steps:
 
    - label: "E2E MLperf tests for Llama4 models"
      key: test_6
-     depends_on: []
      soft_fail: true
      env:
        NEW_MODEL_DESIGN: "True"
