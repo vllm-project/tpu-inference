@@ -13,8 +13,7 @@ from vllm.config import VllmConfig
 
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.common.attention.attention import AttentionMetadata
-from tpu_commons.models.jax.common.attention.deepseek_v3_attention import (
-    MLA, MLAConfig)
+from tpu_commons.models.jax.common.attention.deepseek_v3_attention import MLA
 from tpu_commons.models.jax.common.base import ParamFactory
 from tpu_commons.models.jax.common.constants import KVCacheType
 from tpu_commons.models.jax.common.layers import (DenseFFW, Embedder, LMhead,
@@ -123,27 +122,22 @@ class DeepSeekV3(Model):
         first_k_dense_replace: int = 3  # replace the first few MOE layers to dense layer.
 
         shared_experts = 1
-        attention_cfg = MLAConfig(hidden_size=hidden_size,
-                                  num_attention_heads=num_attention_heads,
-                                  num_key_value_heads=num_key_value_heads,
-                                  rope_theta=10000,
-                                  rope_scaling={
-                                      "beta_fast": 32,
-                                      "beta_slow": 1,
-                                      "factor": 40,
-                                      "mscale": 1.0,
-                                      "mscale_all_dim": 1.0,
-                                      "original_max_position_embeddings": 4096,
-                                      "type": "yarn"
-                                  },
-                                  q_lora_rank=1536,
-                                  kv_lora_rank=512,
-                                  qk_nope_head_dim=128,
-                                  qk_rope_head_dim=64,
-                                  v_head_dim=128,
-                                  rms_norm_eps=rms_norm_eps,
-                                  dtype=dtype,
-                                  vllm_config=self.vllm_config)
+        rope_theta = 10000
+        rope_scaling = {
+            "beta_fast": 32,
+            "beta_slow": 1,
+            "factor": 40,
+            "mscale": 1.0,
+            "mscale_all_dim": 1.0,
+            "original_max_position_embeddings": 4096,
+            "type": "yarn"
+        }
+        q_lora_rank = 1536
+        kv_lora_rank = 512
+        qk_nope_head_dim = 128
+        qk_rope_head_dim = 64
+        v_head_dim = 128
+
         moe_cfg = MoEConfig(hidden_size=hidden_size,
                             intermediate_size_moe=moe_intermediate_size,
                             dtype=dtype,
@@ -171,12 +165,12 @@ class DeepSeekV3(Model):
             vllm_config=vllm_config,
             num_layers=num_layers,
             hidden_size=hidden_size,
-            q_lora_rank=attention_cfg.q_lora_rank,
-            kv_lora_rank=attention_cfg.kv_lora_rank,
-            attn_heads=attention_cfg.num_attention_heads,
-            qk_nope_head_dim=attention_cfg.qk_nope_head_dim,
-            qk_rope_head_dim=attention_cfg.qk_rope_head_dim,
-            v_head_dim=attention_cfg.v_head_dim,
+            q_lora_rank=q_lora_rank,
+            kv_lora_rank=kv_lora_rank,
+            attn_heads=num_attention_heads,
+            qk_nope_head_dim=qk_nope_head_dim,
+            qk_rope_head_dim=qk_rope_head_dim,
+            v_head_dim=v_head_dim,
             num_local_experts=num_local_experts)
 
         if not self.param_factory:
@@ -197,16 +191,32 @@ class DeepSeekV3(Model):
 
         self.layers = []
 
+        def _create_mla() -> MLA:
+            return MLA(
+                rope_theta=rope_theta,
+                rope_scaling=rope_scaling,
+                q_lora_rank=q_lora_rank,
+                kv_lora_rank=kv_lora_rank,
+                qk_nope_head_dim=qk_nope_head_dim,
+                qk_rope_head_dim=qk_rope_head_dim,
+                rms_norm_eps=rms_norm_eps,
+                v_head_dim=v_head_dim,
+                mesh=self.mesh,
+                param_factory=self.param_factory,
+                sharding_cfg=self._sharding_config,
+                hidden_size=hidden_size,
+                num_attention_heads=num_attention_heads,
+                num_key_value_heads=num_key_value_heads,
+                head_dim=v_head_dim,  # MLA uses v_head_dim as head_dim
+                dtype=dtype)
+
         for i in range(first_k_dense_replace):
             block = TransformerBlock(
                 hidden_size=hidden_size,
                 rmsnorm_epsilon=rms_norm_eps,
                 attn_dtype=dtype,
                 dense_dtype=dtype,
-                attn=MLA(cfg=attention_cfg,
-                         mesh=self.mesh,
-                         param_factory=self.param_factory,
-                         sharding_cfg=self._sharding_config),
+                attn=_create_mla(),
                 custom_module=DenseFFW(dtype=dtype,
                                        hidden_act=hidden_act,
                                        hidden_size=hidden_size,
@@ -240,10 +250,7 @@ class DeepSeekV3(Model):
                 attn_dtype=dtype,
                 dense_dtype=dtype,
                 custom_module=custom_module,
-                attn=MLA(cfg=attention_cfg,
-                         mesh=self.mesh,
-                         param_factory=self.param_factory,
-                         sharding_cfg=self._sharding_config),
+                attn=_create_mla(),
                 shared_experts=DenseFFW(dtype=dtype,
                                         hidden_act=hidden_act,
                                         hidden_size=hidden_size,

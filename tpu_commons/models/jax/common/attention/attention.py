@@ -71,10 +71,18 @@ class Attention(nnx.Module):
         sharding_cfg: Configuration for tensor sharding strategies.
         quant: Optional configuration for quantization.
     """
-    cfg: AttentionConfig
+    hidden_size: int
+    num_attention_heads: int
+    num_key_value_heads: int
+    head_dim: int
+    rope_theta: float
+    rope_scaling: dict[str, Any]
+    dtype: jnp.dtype
     mesh: Mesh
     param_factory: ParamFactory
     sharding_cfg: ShardingConfig
+    attention_chunk_size: int | None = None
+    rope_input_ordering: str = "split"
     quant: Any | None = None
 
     def __post_init__(self):
@@ -82,19 +90,19 @@ class Attention(nnx.Module):
 
     def generate_kernel(self, rngs: nnx.Rngs):
         """Initializes the weight kernels for Q, K, V, and O projections."""
-        N = getattr(self.cfg, HuggingFaceArgNames.NUM_ATTENTION_HEADS.value)
-        K = getattr(self.cfg, HuggingFaceArgNames.NUM_KEY_VALUE_HEADS.value)
-        D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
-        H = getattr(self.cfg, HuggingFaceArgNames.HEAD_DIM.value)
+        N = self.num_attention_heads
+        K = self.num_key_value_heads
+        D = self.hidden_size
+        H = self.head_dim
 
         self.kernel_q_proj_DNH = self.param_factory.create_kernel_param(
-            rngs, (D, N, H), self.dnh_sharding, self.cfg.dtype)
+            rngs, (D, N, H), self.dnh_sharding, self.dtype)
         self.kernel_k_proj_DKH = self.param_factory.create_kernel_param(
-            rngs, (D, K, H), self.dkh_sharding, self.cfg.dtype)
+            rngs, (D, K, H), self.dkh_sharding, self.dtype)
         self.kernel_v_proj_DKH = self.param_factory.create_kernel_param(
-            rngs, (D, K, H), self.dkh_sharding, self.cfg.dtype)
+            rngs, (D, K, H), self.dkh_sharding, self.dtype)
         self.kernel_o_proj_NHD = self.param_factory.create_kernel_param(
-            rngs, (N, H, D), self.nhd_sharding, self.cfg.dtype)
+            rngs, (N, H, D), self.nhd_sharding, self.dtype)
 
     def create_sharding(self):
         """Creates sharding rules for activations and weights."""
@@ -169,27 +177,25 @@ class Attention(nnx.Module):
         """
         op_mode = "prefill" if is_prefill else "generate"
         md = attention_metadata
-        x_SD = jnp.asarray(x, self.cfg.dtype)
+        x_SD = jnp.asarray(x, self.dtype)
         x_q_TD = nnx.with_sharding_constraint(x, self.activation_q_td[op_mode])
-        rope_scaling = getattr(self.cfg,
-                               HuggingFaceArgNames.ROPE_SCALING.value)
-        rope_theta = getattr(self.cfg, HuggingFaceArgNames.ROPE_THETA.value)
-        rope_input_ordering = self.cfg.rope_input_ordering
-        H = getattr(self.cfg, HuggingFaceArgNames.HEAD_DIM.value)
+        H = self.head_dim
         with jax.named_scope("q_proj"):
             q_TNH = jnp.einsum('TD,DNH -> TNH', x_q_TD,
                                self.kernel_q_proj_DNH.value)
             if use_attention_rope:
-                q_TNH = apply_rope(q_TNH, md.input_positions, H, rope_theta,
-                                   rope_scaling, rope_input_ordering)
+                q_TNH = apply_rope(q_TNH, md.input_positions, H,
+                                   self.rope_theta, self.rope_scaling,
+                                   self.rope_input_ordering)
             q_TNH = nnx.with_sharding_constraint(q_TNH,
                                                  self.query_tnh[op_mode])
         with jax.named_scope("k_proj"):
             k_SKH = jnp.einsum('SD,DKH -> SKH', x_SD,
                                self.kernel_k_proj_DKH.value)
             if use_attention_rope:
-                k_SKH = apply_rope(k_SKH, md.input_positions, H, rope_theta,
-                                   rope_scaling, rope_input_ordering)
+                k_SKH = apply_rope(k_SKH, md.input_positions, H,
+                                   self.rope_theta, self.rope_scaling,
+                                   self.rope_input_ordering)
             k_SKH = nnx.with_sharding_constraint(k_SKH,
                                                  self.keyvalue_skh[op_mode])
 
@@ -212,9 +218,6 @@ class Attention(nnx.Module):
             o_TD = jnp.einsum('TNH,NHD -> TD', outputs_TNH,
                               self.kernel_o_proj_NHD.value)
         return new_kv_cache, o_TD
-
-    def get_cfg(self) -> AttentionConfig:
-        return self.cfg
 
     def attention(
         self,
@@ -278,7 +281,7 @@ class Attention(nnx.Module):
                 # NOTE(xiang): v6e chip has 128M VMEM capacity,
                 # set this to 64M to avoid VMEM OOM,
                 # otherwise the default value is 16M.
-                sliding_window=getattr(self.cfg, "attention_chunk_size", None),
+                sliding_window=self.attention_chunk_size,
                 vmem_limit_bytes=64 * 1024 * 1024,
             )
 

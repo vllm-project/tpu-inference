@@ -1,5 +1,5 @@
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import jax
@@ -12,18 +12,18 @@ from vllm.config import VllmConfig
 import tpu_commons.models.jax.common.sharding as sharding
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.common.attention.attention import AttentionMetadata
-from tpu_commons.models.jax.common.attention.llama4_attention import (
-    Llama4Attention, Llama4AttentionConfig)
+from tpu_commons.models.jax.common.attention.llama4_attention import \
+    Llama4Attention
 from tpu_commons.models.jax.common.base import ParamFactory
 from tpu_commons.models.jax.common.constants import KVCacheType, RouterType
-from tpu_commons.models.jax.common.layers import (DenseFFW, DenseFFWConfig,
-                                                  Embedder, LMhead, RMSNorm)
+from tpu_commons.models.jax.common.layers import (DenseFFW, Embedder, LMhead,
+                                                  RMSNorm)
 from tpu_commons.models.jax.common.model import Model
 from tpu_commons.models.jax.common.moe.moe import MoE, MoEConfig, RouterConfig
 from tpu_commons.models.jax.common.sharding import (Sharding,
                                                     ShardingRulesConfig)
-from tpu_commons.models.jax.common.transformer_block import (
-    SharedExpertsTransformerBlock, SharedExpertsTransformerBlockConfig)
+from tpu_commons.models.jax.common.transformer_block import \
+    SharedExpertsTransformerBlock
 from tpu_commons.models.jax.layers.misc import shard_put
 from tpu_commons.models.jax.utils.weight_utils import (
     get_param, hf_model_weights_iterator, print_param_info, reshape_params,
@@ -73,57 +73,28 @@ class Llama4ForCausalLM(Model):
 
         shared_experts = 1
         rms_norm_eps = 1e-5
-        layer_config = SharedExpertsTransformerBlockConfig(
-            shared_experts=shared_experts,
-            attention=Llama4AttentionConfig(
-                hidden_size=self.hidden_size,
-                num_attention_heads=40,
-                num_key_value_heads=8,
-                head_dim=128,
-                rope_theta=500000.0,
-                # https://huggingface.co/meta-llama/Llama-4-Scout-17B-16E-Instruct/blob/main/config.json
-                rope_scaling={
-                    "scale_factor": 16.0,
-                    "low_freq_factor": 1.0,
-                    "high_freq_factor": 1.0,
-                    "original_max_position_embeddings": 8192
-                },
-                rope_input_ordering="interleaved",
-                temperature_tuning=True,
-                temperature_tuning_scale=0.1,
-                temperature_tuning_floor_scale=8192,
-                use_qk_norm=True,
-                attention_chunk_size=8192,
-                dtype=dtype,
-                vllm_config=self.vllm_config),
-            dense_ffw=DenseFFWConfig(hidden_size=self.hidden_size,
-                                     intermediate_size=16384,
-                                     hidden_act=hidden_act,
-                                     dtype=dtype,
-                                     vllm_config=self.vllm_config),
-            moe=MoEConfig(hidden_size=self.hidden_size,
-                          intermediate_size_moe=intermediate_size_moe,
-                          dtype=dtype,
-                          num_local_experts=num_local_experts,
-                          hidden_act=hidden_act,
-                          apply_expert_weight_before_computation=True,
-                          router=RouterConfig(
-                              hidden_size=self.hidden_size,
-                              num_local_experts=num_local_experts,
-                              num_experts_per_token=1,
-                              router_type=RouterType.TOP_K,
-                              router_act="sigmoid",
-                              expert_capacity=-1,
-                              dtype=dtype,
-                              vllm_config=self.vllm_config),
-                          vllm_config=self.vllm_config),
-            rms_norm_eps=rms_norm_eps,
-            vllm_config=self.vllm_config)
+        self.num_attention_heads = 40
+        self.num_key_value_heads = 8
+        self.head_dim = 128
+
+        moe_config = MoEConfig(hidden_size=self.hidden_size,
+                               intermediate_size_moe=intermediate_size_moe,
+                               dtype=dtype,
+                               num_local_experts=num_local_experts,
+                               hidden_act=hidden_act,
+                               apply_expert_weight_before_computation=True,
+                               router=RouterConfig(
+                                   hidden_size=self.hidden_size,
+                                   num_local_experts=num_local_experts,
+                                   num_experts_per_token=1,
+                                   router_type=RouterType.TOP_K,
+                                   router_act="sigmoid",
+                                   expert_capacity=-1,
+                                   dtype=dtype,
+                                   vllm_config=self.vllm_config),
+                               vllm_config=self.vllm_config)
 
         intermediate_size = 16384
-        self.num_attention_heads = layer_config.attention.num_attention_heads
-        self.num_key_value_heads = layer_config.attention.num_key_value_heads
-        self.head_dim = layer_config.attention.head_dim
 
         logger.info(f"Using the following config:\n {self._sharding_config}")
 
@@ -153,15 +124,7 @@ class Llama4ForCausalLM(Model):
             is_moe_layer = (i + 1) % \
                             self.interleave_moe_layer_step == 0
             use_attention_rope = (i + 1) % self.no_rope_layer_interval != 0
-            block_cfg_nope = layer_config
-            # RoPE layers do not use chunked attention
-            block_cfg_rope = replace(
-                layer_config,
-                attention=replace(layer_config.attention,
-                                  attention_chunk_size=None),
-            )
-            block_cfg = block_cfg_rope if use_attention_rope else block_cfg_nope
-            custom_module = MoE(cfg=layer_config.moe,
+            custom_module = MoE(cfg=moe_config,
                                 mesh=self.mesh,
                                 param_factory=self.param_factory,
                                 sharding_cfg=self._sharding_config
@@ -180,10 +143,29 @@ class Llama4ForCausalLM(Model):
                 rmsnorm_epsilon=rms_norm_eps,
                 attn_dtype=dtype,
                 dense_dtype=dtype,
-                attn=Llama4Attention(cfg=block_cfg.attention,
-                                     mesh=self.mesh,
-                                     param_factory=self.param_factory,
-                                     sharding_cfg=self._sharding_config),
+                attn=Llama4Attention(
+                    hidden_size=self.hidden_size,
+                    dtype=dtype,
+                    num_attention_heads=40,
+                    num_key_value_heads=8,
+                    head_dim=128,
+                    rope_theta=500000.0,
+                    # https://huggingface.co/meta-llama/Llama-4-Scout-17B-16E-Instruct/blob/main/config.json
+                    rope_scaling={
+                        "scale_factor": 16.0,
+                        "low_freq_factor": 1.0,
+                        "high_freq_factor": 1.0,
+                        "original_max_position_embeddings": 8192
+                    },
+                    rope_input_ordering="interleaved",
+                    temperature_tuning=True,
+                    temperature_tuning_scale=0.1,
+                    temperature_tuning_floor_scale=8192,
+                    use_qk_norm=True,
+                    attention_chunk_size=None if use_attention_rope else 8192,
+                    mesh=self.mesh,
+                    param_factory=self.param_factory,
+                    sharding_cfg=self._sharding_config),
                 shared_experts=DenseFFW(dtype=dtype,
                                         hidden_act=hidden_act,
                                         hidden_size=self.hidden_size,
