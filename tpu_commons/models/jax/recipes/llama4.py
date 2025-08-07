@@ -1,5 +1,4 @@
 import re
-from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import List, Optional, Tuple
 
@@ -73,6 +72,7 @@ class Llama4ForCausalLM(Model):
         self.no_rope_layer_interval = 4
 
         shared_experts = 1
+        rms_norm_eps = 1e-5
         layer_config = SharedExpertsTransformerBlockConfig(
             shared_experts=shared_experts,
             attention=Llama4AttentionConfig(
@@ -117,9 +117,10 @@ class Llama4ForCausalLM(Model):
                               dtype=dtype,
                               vllm_config=self.vllm_config),
                           vllm_config=self.vllm_config),
-            rms_norm_eps=1e-5,
+            rms_norm_eps=rms_norm_eps,
             vllm_config=self.vllm_config)
 
+        intermediate_size = 16384
         self.num_attention_heads = layer_config.attention.num_attention_heads
         self.num_key_value_heads = layer_config.attention.num_key_value_heads
         self.head_dim = layer_config.attention.head_dim
@@ -146,12 +147,6 @@ class Llama4ForCausalLM(Model):
 
         self.layers = []
 
-        shared_experts_cfg = deepcopy(layer_config.dense_ffw)
-        setattr(
-            shared_experts_cfg, "intermediate_size",
-            shared_experts * intermediate_size_moe
-        )  # intermediate_size = #shared_experts * intermediate_size_moe
-
         for i in range(num_layers):
             # For Llama4-Scout, all layers are MoE layers.
             # This can be adjusted for other variants.
@@ -171,21 +166,29 @@ class Llama4ForCausalLM(Model):
                                 param_factory=self.param_factory,
                                 sharding_cfg=self._sharding_config
                                 ) if is_moe_layer else DenseFFW(
-                                    cfg=layer_config.dense_ffw,
                                     mesh=self.mesh,
                                     param_factory=self.param_factory,
-                                    sharding_cfg=self._sharding_config)
+                                    sharding_cfg=self._sharding_config,
+                                    dtype=dtype,
+                                    hidden_act=hidden_act,
+                                    hidden_size=self.hidden_size,
+                                    intermediate_size=intermediate_size,
+                                )
             block = SharedExpertsTransformerBlock(
                 custom_module=custom_module,
                 hidden_size=self.hidden_size,
-                rmsnorm_epsilon=layer_config.rms_norm_eps,
+                rmsnorm_epsilon=rms_norm_eps,
                 attn_dtype=dtype,
                 dense_dtype=dtype,
                 attn=Llama4Attention(cfg=block_cfg.attention,
                                      mesh=self.mesh,
                                      param_factory=self.param_factory,
                                      sharding_cfg=self._sharding_config),
-                shared_experts=DenseFFW(cfg=shared_experts_cfg,
+                shared_experts=DenseFFW(dtype=dtype,
+                                        hidden_act=hidden_act,
+                                        hidden_size=self.hidden_size,
+                                        intermediate_size=shared_experts *
+                                        intermediate_size_moe,
                                         mesh=self.mesh,
                                         param_factory=self.param_factory,
                                         sharding_cfg=self._sharding_config),
@@ -204,7 +207,7 @@ class Llama4ForCausalLM(Model):
             param_factory=self.param_factory,
             prefill_rules=self._sharding_config.prefill_rules,
             generate_rules=self._sharding_config.generate_rules,
-            epsilon=layer_config.rms_norm_eps,
+            epsilon=rms_norm_eps,
             with_scale=True,
             dtype=dtype,
         )

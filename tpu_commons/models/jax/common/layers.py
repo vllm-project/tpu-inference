@@ -166,8 +166,11 @@ class DenseFFW(nnx.Module):
         sharding_cfg: The configuration for tensor sharding.
         quant: Optional configuration for quantization.
     """
-    cfg: DenseFFWConfig
     mesh: Mesh
+    dtype: jnp.dtype
+    hidden_act: str
+    hidden_size: int
+    intermediate_size: int
     param_factory: ParamFactory
     sharding_cfg: ShardingConfig
     quant: Any | None = None
@@ -188,14 +191,14 @@ class DenseFFW(nnx.Module):
             The output tensor of shape `(batch, sequence, d_model)`.
         """
         # TODO consider to create factories for einsum(?)
-        x_TD = jnp.asarray(x_TD, self.cfg.dtype)
+        x_TD = jnp.asarray(x_TD, self.dtype)
         x_TD = nnx.with_sharding_constraint(x_TD,
                                             self.activation_ffw_td[op_mode])
-        act = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_ACT.value)
         with jax.named_scope("wi_0"):
             gating_TF = jnp.einsum('TD,DF -> TF', x_TD,
                                    self.kernel_gating_DF.value)
-            activated_gating_TF = modeling_flax_utils.ACT2FN[act](gating_TF)
+            activated_gating_TF = modeling_flax_utils.ACT2FN[self.hidden_act](
+                gating_TF)
         with jax.named_scope("wi_1"):
             up_proj_TF = jnp.einsum('TD,DF -> TF', x_TD,
                                     self.kernel_up_proj_DF.value)
@@ -207,24 +210,15 @@ class DenseFFW(nnx.Module):
         return output_TD
 
     def generate_kernel(self, rngs: nnx.Rngs):
-        D = getattr(self.cfg, HuggingFaceArgNames.HIDDEN_SIZE.value)
-        F = getattr(self.cfg, HuggingFaceArgNames.INTERMEDIATE_SIZE.value)
+        D = self.hidden_size
+        F = self.intermediate_size
 
         self.kernel_gating_DF = self.param_factory.create_kernel_param(
-            rngs,
-            shape=(D, F),
-            dtype=self.cfg.dtype,
-            sharding=self.df_sharding)
+            rngs, shape=(D, F), dtype=self.dtype, sharding=self.df_sharding)
         self.kernel_up_proj_DF = self.param_factory.create_kernel_param(
-            rngs,
-            shape=(D, F),
-            dtype=self.cfg.dtype,
-            sharding=self.df_sharding)
+            rngs, shape=(D, F), dtype=self.dtype, sharding=self.df_sharding)
         self.kernel_down_proj_FD = self.param_factory.create_kernel_param(
-            rngs,
-            shape=(F, D),
-            dtype=self.cfg.dtype,
-            sharding=self.fd_sharding)
+            rngs, shape=(F, D), dtype=self.dtype, sharding=self.fd_sharding)
 
     def create_sharding(self):
         """Creates and sets sharding attributes for weights and activations."""

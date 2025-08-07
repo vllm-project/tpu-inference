@@ -17,8 +17,8 @@ from tpu_commons.models.jax.common.attention.attention import (
     Attention, AttentionConfig, AttentionMetadata)
 from tpu_commons.models.jax.common.base import ParamFactory
 from tpu_commons.models.jax.common.constants import KVCacheType
-from tpu_commons.models.jax.common.layers import (DenseFFW, DenseFFWConfig,
-                                                  Embedder, LMhead, RMSNorm)
+from tpu_commons.models.jax.common.layers import (DenseFFW, Embedder, LMhead,
+                                                  RMSNorm)
 from tpu_commons.models.jax.common.model import Model
 from tpu_commons.models.jax.common.sharding import (Sharding,
                                                     ShardingRulesConfig)
@@ -115,11 +115,6 @@ class LlamaForCausalLM(Model):
             rope_scaling={},
             dtype=dtype,
             vllm_config=self.vllm_config)
-        dense_ffw_cfg = DenseFFWConfig(hidden_size=self.hidden_size,
-                                       intermediate_size=intermediate_size,
-                                       hidden_act="silu",
-                                       dtype=dtype,
-                                       vllm_config=self.vllm_config)
 
         self.layers = [
             TransformerBlock(param_factory=self.param_factory,
@@ -134,7 +129,10 @@ class LlamaForCausalLM(Model):
                                             param_factory=self.param_factory,
                                             sharding_cfg=sharding_config),
                              custom_module=DenseFFW(
-                                 cfg=dense_ffw_cfg,
+                                 dtype=dtype,
+                                 hidden_act="silu",
+                                 hidden_size=self.hidden_size,
+                                 intermediate_size=intermediate_size,
                                  mesh=self.mesh,
                                  param_factory=self.param_factory,
                                  sharding_cfg=sharding_config))
