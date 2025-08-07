@@ -135,11 +135,14 @@ class TpuPlatform(Platform):
         assert vllm_config.speculative_config is None, \
             "TPU does not support speculative decoding"
 
+        # If we use vLLM's model implementation in PyTorch, we should set it with torch version of the dtype.
+        impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
+
         # NOTE(xiang): convert dtype to jnp.dtype
         # NOTE(wenlong): skip this logic for mm model preprocessing
         # For mm model preprocessors, it may need the output dtype to be torch.
         # In order to avoid a PR to vLLM, we postpone the dtype checking during tpu_worker initialization
-        if not vllm_config.scheduler_config.is_multimodal_model:
+        if not vllm_config.scheduler_config.is_multimodal_model or impl == "vllm":
             if not isinstance(vllm_config.model_config.dtype, str):
                 logger.warning(
                     "The model dtype is not properly set for JAX backend. "
@@ -149,8 +152,6 @@ class TpuPlatform(Platform):
                 vllm_config.model_config.dtype = _DTYPE.get(
                     vllm_config.model_config.dtype, jnp.bfloat16)
 
-        # If we use vLLM's model implementation in PyTorch, we should set it with torch version of the dtype.
-        impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
         if impl == "vllm":
             vllm_config.model_config.dtype = j2t_dtype(
                 vllm_config.model_config.dtype.dtype)
