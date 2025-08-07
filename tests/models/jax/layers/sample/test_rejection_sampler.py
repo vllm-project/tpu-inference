@@ -2,7 +2,7 @@
 Tests for the JAX-based rejection sampler for speculative decoding on TPU.
 This test suite is structured to mirror the GPU rejection sampler tests.
 """
-from typing import List
+from typing import List, Optional
 
 import jax.numpy as jnp
 import pytest
@@ -52,10 +52,13 @@ def create_sampling_metadata(
     )
 
 
-def _run_rejection_sampler_test(rejection_sampler: RejectionSampler,
-                                spec_tokens: List[List[int]],
-                                output_tokens: List[List[int]],
-                                expected_output: List[List[int]]):
+def _run_rejection_sampler_test(
+    rejection_sampler: RejectionSampler,
+    spec_tokens: List[List[int]],
+    output_tokens: List[List[int]],
+    expected_output: List[List[int]],
+    num_draft_tokens_override: Optional[List[int]] = None,
+):
     """Helper function to run a single rejection sampler test case."""
     metadata = create_sampling_metadata(all_greedy=True)
     target_probs = create_batched_target_probs(output_tokens)
@@ -79,8 +82,12 @@ def _run_rejection_sampler_test(rejection_sampler: RejectionSampler,
                 jnp.array(tokens))
 
     # Create num_draft_tokens array
-    num_draft_tokens = jnp.array([len(tokens) for tokens in spec_tokens],
-                                 dtype=jnp.int32)
+    if num_draft_tokens_override:
+        num_draft_tokens = jnp.array(num_draft_tokens_override,
+                                     dtype=jnp.int32)
+    else:
+        num_draft_tokens = jnp.array([len(tokens) for tokens in spec_tokens],
+                                     dtype=jnp.int32)
 
     # Call the rejection sampler with batched inputs
     output = rejection_sampler(
@@ -177,6 +184,35 @@ def test_parametrized_cases(rejection_sampler, spec_tokens, output_tokens,
     """Run various parametrized test scenarios."""
     _run_rejection_sampler_test(rejection_sampler, spec_tokens, output_tokens,
                                 expected_output)
+
+
+def test_draft_tokens_with_explicit_padding(rejection_sampler):
+    """
+    Tests the case where the number of draft tokens is explicitly set to be
+    less than the length of the provided draft token list.
+    """
+    # We provide a draft token list of length 4, but specify that only
+    # the first 2 are actual draft tokens. The rest are padding.
+    spec_tokens = [[1, 2, 98, 99]]  # 98 and 99 are just padding
+    num_draft_tokens = [2]
+
+    # Target argmax: [1, 5, ...], which mismatches at position 1
+    output_tokens = [[1, 5, 8, 9, 10]]
+
+    # Expected:
+    # - Pos 0: draft 1 == target 1. Accept 1.
+    # - Pos 1: draft 2 != target 5. Reject. Take target's 5.
+    # - num_draft_tokens is 2, so we stop.
+    # - Final output is [1, 5]. No bonus token because of rejection.
+    expected_output = [[1, 5]]
+
+    _run_rejection_sampler_test(
+        rejection_sampler,
+        spec_tokens,
+        output_tokens,
+        expected_output,
+        num_draft_tokens_override=num_draft_tokens,
+    )
 
 
 def test_parse_output(rejection_sampler):

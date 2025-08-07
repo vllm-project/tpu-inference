@@ -209,10 +209,10 @@ def greedy_scan_step(carry, inputs):
     prev_rejected = carry
     draft_k, target_k, mask_k = inputs
 
-    # Determine the output for this step
-    # If we were already rejected, the output is -1. Otherwise, it's the target token.
-    # We apply the mask_k to avoid overwriting padding with -1.
-    output_k = jnp.where(prev_rejected & mask_k, PLACEHOLDER_TOKEN_ID,
+    # Determine the output for this step.
+    # If the sequence was already rejected OR if the current position is padding,
+    # the output is a placeholder. Otherwise, it's the target token.
+    output_k = jnp.where(prev_rejected | ~mask_k, PLACEHOLDER_TOKEN_ID,
                          target_k)
 
     # Determine the new 'rejected' state for the next step
