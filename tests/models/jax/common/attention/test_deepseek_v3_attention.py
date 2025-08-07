@@ -7,8 +7,7 @@ from flax import nnx
 from jax.sharding import Mesh
 
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.models.jax.common.attention.deepseek_v3_attention import (
-    MLA, MLAConfig)
+from tpu_commons.models.jax.common.attention.deepseek_v3_attention import MLA
 from tpu_commons.models.jax.common.base import ParamFactory
 from tpu_commons.models.jax.common.sharding import ShardingConfig
 from tpu_commons.models.jax.recipes.deepseek_v3 import (
@@ -38,16 +37,25 @@ class TestMLA(unittest.TestCase):
         )
 
     def test_mla_forward_pass(self):
-        mla_config = MLAConfig(
-            hidden_size=256,
+        hidden_size = 256
+
+        num_key_value_heads = 32
+        qk_nope_head_dim = 64
+        qk_rope_head_dim = 32
+
+        mla = MLA(
+            hidden_size=hidden_size,
             num_attention_heads=32,
-            num_key_value_heads=32,
+            num_key_value_heads=num_key_value_heads,
+            head_dim=64,  # MLA uses v_head_dim as head_dim
             rope_theta=10000,
             dtype=jnp.bfloat16,
             q_lora_rank=512,
             kv_lora_rank=512,
-            qk_nope_head_dim=64,  # Half of DeepSeek v3's real values
-            qk_rope_head_dim=32,  # Half of DeepSeek v3's real values
+            qk_nope_head_dim=
+            qk_nope_head_dim,  # Half of DeepSeek v3's real values
+            qk_rope_head_dim=
+            qk_rope_head_dim,  # Half of DeepSeek v3's real values
             v_head_dim=64,  # Half of DeepSeek v3's real values
             rms_norm_eps=1e-5,
             rope_scaling={
@@ -59,10 +67,6 @@ class TestMLA(unittest.TestCase):
                 "original_max_position_embeddings": 4096,
                 "type": "yarn",
             },
-            vllm_config={})
-
-        mla = MLA(
-            cfg=mla_config,
             mesh=self.mesh,
             param_factory=self.param_factory,
             sharding_cfg=self.sharding_cfg,
@@ -72,19 +76,19 @@ class TestMLA(unittest.TestCase):
 
         # Create input tensor
         seq_len = 32
-        x = jnp.ones((seq_len, mla_config.hidden_size), dtype=jnp.bfloat16)
+        x = jnp.ones((seq_len, hidden_size), dtype=jnp.bfloat16)
 
         # Create KV cache
         # TODO(wenxindongwork): test with unpadded head dimension once
         # MLA kv cache implementation is added.
-        qk_head_dim = mla_config.qk_nope_head_dim + mla_config.qk_rope_head_dim
+        qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
         multiple_of_128 = ((qk_head_dim - 1) // 128 + 1) * 128
         block_size = 16
         num_blocks = 8
         cache_shape = (
             num_blocks,
             block_size,
-            mla_config.num_key_value_heads * 2,
+            num_key_value_heads * 2,
             multiple_of_128,
         )
         kv_cache = jnp.zeros(cache_shape, dtype=jnp.bfloat16)
@@ -117,7 +121,7 @@ class TestMLA(unittest.TestCase):
                                    attention_metadata=attention_metadata)
 
         # Verify output shapes
-        self.assertEqual(output.shape, (seq_len, mla_config.hidden_size))
+        self.assertEqual(output.shape, (seq_len, hidden_size))
         self.assertEqual(new_kv_cache.shape, kv_cache.shape)
 
 
