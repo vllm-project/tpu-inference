@@ -3,6 +3,7 @@ from typing import Any, Tuple
 
 # Flax and JAX sharding imports
 import jax
+import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh
 from vllm.config import VllmConfig
@@ -40,7 +41,10 @@ class TransformerBlock(nnx.Module):
 
     custom_module can be either a dense module (i.e., DenseFFW) or MoE.
     """
-    cfg: TransformerBlockConfig
+    hidden_size: int
+    rmsnorm_epsilon: float
+    attn_dtype: jnp.dtype
+    dense_dtype: jnp.dtype
     param_factory: ParamFactory
     mesh: Mesh
     sharding_cfg: ShardingConfig
@@ -50,30 +54,25 @@ class TransformerBlock(nnx.Module):
     quant: Any | None = None
 
     def __post_init__(self):
-        hidden_size = getattr(self.cfg.attention,
-                              HuggingFaceArgNames.HIDDEN_SIZE.value)
-        rmsnorm_epsilon = getattr(self.cfg,
-                                  HuggingFaceArgNames.RMS_NORM_EPS.value)
-
         self.pre_attention_norm = RMSNorm(
-            dims=hidden_size,
+            dims=self.hidden_size,
             mesh=self.mesh,
             param_factory=self.param_factory,
             prefill_rules=self.sharding_cfg.prefill_rules,
             generate_rules=self.sharding_cfg.generate_rules,
-            epsilon=rmsnorm_epsilon,
+            epsilon=self.rmsnorm_epsilon,
             with_scale=True,
-            dtype=self.cfg.attention.dtype,
+            dtype=self.attn_dtype,
         )
         self.pre_mlp_norm = RMSNorm(
-            dims=hidden_size,
+            dims=self.hidden_size,
             mesh=self.mesh,
             param_factory=self.param_factory,
             prefill_rules=self.sharding_cfg.prefill_rules,
             generate_rules=self.sharding_cfg.generate_rules,
-            epsilon=rmsnorm_epsilon,
+            epsilon=self.rmsnorm_epsilon,
             with_scale=True,
-            dtype=self.cfg.dense_ffw.dtype,
+            dtype=self.dense_dtype,
         )
 
     def __call__(

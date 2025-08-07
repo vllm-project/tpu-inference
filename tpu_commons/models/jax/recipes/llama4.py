@@ -176,9 +176,12 @@ class Llama4ForCausalLM(Model):
                                     param_factory=self.param_factory,
                                     sharding_cfg=self._sharding_config)
             block = SharedExpertsTransformerBlock(
-                cfg=block_cfg,
                 custom_module=custom_module,
-                attn=Llama4Attention(cfg=layer_config.attention,
+                hidden_size=self.hidden_size,
+                rmsnorm_epsilon=layer_config.rms_norm_eps,
+                attn_dtype=dtype,
+                dense_dtype=dtype,
+                attn=Llama4Attention(cfg=block_cfg.attention,
                                      mesh=self.mesh,
                                      param_factory=self.param_factory,
                                      sharding_cfg=self._sharding_config),
