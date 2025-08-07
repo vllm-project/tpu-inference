@@ -46,14 +46,13 @@ def main(args: dict):
         sampling_params.top_p = top_p
     if top_k is not None:
         sampling_params.top_k = top_k
-
     # Generate texts from the prompts. The output is a list of RequestOutput
     # objects that contain the prompt, generated text, and other information.
     prompts = [
-        "T "*65, # 128 tokens
-        "P"*65 , # 128 tokens
-        # "The capital of France is",
-        # "The colors of the rainbow are",
+        # "T "*65, # 128 tokens
+        # "P"*65 , # 128 tokens
+        "The capital of France is",
+        "Colors of the rainbow are",
         # "The future of AI is",
         # "The president of the United States is",
         # "How many players are on a standard soccer team on the field at one time?",

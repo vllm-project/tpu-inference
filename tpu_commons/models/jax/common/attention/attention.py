@@ -211,7 +211,7 @@ class Attention(nnx.Module):
         with jax.named_scope("o_proj"):
             o_TD = jnp.einsum('TNH,NHD -> TD', outputs_TNH,
                               self.kernel_o_proj_NHD.value)
-        return new_kv_cache, o_TD
+        return kv_cache, o_TD
 
     def get_cfg(self) -> AttentionConfig:
         return self.cfg
@@ -262,7 +262,7 @@ class Attention(nnx.Module):
         H = q_TNH.shape[-1]
         #TODO: we use generate_rules as the default sharding for ragged_paged_attention,
         # but it could be configurable based on the op_mode.
-        data_dim = None
+        data_dim ="data"
         in_specs = (
             P(*self.sharding_cfg.generate_rules.query_tnh),  # q_TNH
             P(*self.sharding_cfg.generate_rules.keyvalue_cache_lskh
@@ -270,9 +270,8 @@ class Attention(nnx.Module):
             P(data_dim),  # md.seq_lens: Replicated
             P(data_dim, None),  # md.block_tables: Replicated
             P(data_dim),  # md.query_start_loc: Replicated
-            P("data"),  # md.num_seqs: Replicated # cannot have 0s
+            P("data"),  # md.num_seqs: Replicated
         )
-        
         
         out_specs = P(*self.sharding_cfg.generate_rules.attn_o_tnh
                       )  # output_TNH: Shard the 'model' dimension
@@ -289,21 +288,18 @@ class Attention(nnx.Module):
                 sliding_window=getattr(self.cfg, "attention_chunk_size", None),
                 vmem_limit_bytes=64 * 1024 * 1024,
             )
-        print("md.seq_lens[:128]", md.seq_lens[:128])
-        print("md.seq_lens[128:]", md.seq_lens[128:])
-        print("md.block_tables[:128]", md.block_tables[:128])
-        print("md.block_tables[128:]", md.block_tables[128:])
-        print("md.query_start_loc[:128]", md.query_start_loc[:128])
-        print("md.query_start_loc[128:]", md.query_start_loc[128:])
-
+        print("md.seq_lens", md.seq_lens)
+        print("md.block_tables", md.block_tables)
+        print("md.query_start_loc[:256]", md.query_start_loc)
+        
         print("md.num_seqs", md.num_seqs)
-        output_TNH = shard_map.shard_map(
+        output_TNH = jax.jit(shard_map.shard_map(
                 _ragged_paged_attention,
                 mesh=mesh,
                 in_specs=in_specs,
                 out_specs=out_specs,
                 check_rep=False,
-            )(
+            ))(
                 q_TNH,
                 kv_cache,
                 md.seq_lens,
