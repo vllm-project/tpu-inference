@@ -151,11 +151,9 @@ class _DisaggOrchestrator:
         # IRequest before passing it to the real vllm scheduler.
         self._prefill_engines[0].scheduler.add_request(request)
 
-
         # Add to internal state for tracking by other threads.
         # The key is the request_id, the value is the adapted request object.
         self._requests[request.vllm_request.request_id] = request
-
 
     def _prefill(self, idx: int):
         prefill_engine = self._prefill_engines[idx]
