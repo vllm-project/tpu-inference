@@ -319,16 +319,6 @@ class DeepSeekV3(Model):
 
     def load_weights(self, rng: PRNGKey, cache_dir: Optional[str] = None):
         self.rng = nnx.Rngs(rng)
-        try:
-            # use_random_weights = self.vllm_config.additional_config[
-            #     "random_weights"]
-            logger.warning(
-                "Using randomly initialized weights instead of loading parameter weights."
-            )
-            return
-        except KeyError:
-            # use_random_weights = False
-            pass
         self.weight_loader.load_weights(self)
 
     def __call__(
@@ -364,7 +354,7 @@ class DeepSeekV3WeightLoader:
         self.num_layers = num_layers
         self.names_and_weights_generator = hf_model_weights_iterator(
             model_name_or_path=vllm_config.model_config.model,
-            framework="flax",
+            framework="pt",
             filter_regex="")
         self.num_routed_experts = num_local_experts
 
@@ -386,7 +376,9 @@ class DeepSeekV3WeightLoader:
             r"mlp\.experts\.\d+\.up_proj": (0, 2, 1),
             r"mlp\.shared_experts\.down_proj": (1, 0),
             r"mlp\.shared_experts\.gate_proj": (1, 0),
-            r"mlp\.shared_experts\.up_proj": (1, 0)
+            r"mlp\.shared_experts\.up_proj": (1, 0),
+            # lm_head
+            r"lm_head\.weight": (1, 0)
         }
         self._weight_shape_map = {
             "q_b_proj":
@@ -402,7 +394,7 @@ class DeepSeekV3WeightLoader:
             "model.embed_tokens.weight":
             "embedder.input_embedding_table_VD",
             "lm_head.weight":
-            "lm_head.input_embedding_table_VD",
+            "lm_head.input_embedding_table_DV",
             # final norm
             "model.norm.weight":
             "final_norm.scale",
@@ -567,7 +559,6 @@ class DeepSeekV3WeightLoader:
                     del fp8_weights[weight_name]
                 # concat mlp.experts weights
                 if "mlp.experts" in loaded_name:
-                    print(f'[debug] {loaded_name=}')
                     if "down_proj" in loaded_name:
                         stacked_weights = self._process_moe_weights(
                             loaded_name, loaded_weight,
