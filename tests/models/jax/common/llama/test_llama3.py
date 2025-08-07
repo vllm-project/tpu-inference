@@ -169,7 +169,8 @@ class TestLlama3WeightLoader:
     @pytest.mark.parametrize("hf_key, expected", [
         ("model.layers.15.self_attn.q_proj",
          "layers.15.attn.kernel_q_proj_DNH"),
-        ("model.layers.0.mlp.down_proj", "layers.0.mlp.kernel_down_proj_FD"),
+        ("model.layers.0.mlp.down_proj",
+         "layers.0.custom_module.kernel_down_proj_FD"),
         ("model.embed_tokens", "embedder.input_embedding_table_VD"),
         ("model.norm", "final_norm.scale"),
         ("lm_head", "lm_head.input_embedding_table_DV"),

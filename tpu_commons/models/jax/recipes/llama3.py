@@ -14,7 +14,7 @@ from vllm.config import VllmConfig
 import tpu_commons.models.jax.common.sharding as sharding
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.common.attention.attention import (
-    AttentionConfig, AttentionMetadata)
+    Attention, AttentionConfig, AttentionMetadata)
 from tpu_commons.models.jax.common.base import ParamFactory
 from tpu_commons.models.jax.common.constants import KVCacheType
 from tpu_commons.models.jax.common.layers import (DenseFFW, DenseFFWConfig,
@@ -130,6 +130,10 @@ class LlamaForCausalLM(Model):
                              param_factory=self.param_factory,
                              mesh=self.mesh,
                              sharding_cfg=sharding_config,
+                             attn=Attention(cfg=layer_config.attention,
+                                            mesh=self.mesh,
+                                            param_factory=self.param_factory,
+                                            sharding_cfg=sharding_config),
                              custom_module=DenseFFW(
                                  cfg=layer_config.dense_ffw,
                                  mesh=self.mesh,

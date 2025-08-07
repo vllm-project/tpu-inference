@@ -1,4 +1,5 @@
 import re
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import List, Optional, Tuple
 
@@ -71,8 +72,9 @@ class Llama4ForCausalLM(Model):
         hidden_act: str = "silu"
         self.no_rope_layer_interval = 4
 
+        shared_experts = 1
         layer_config = SharedExpertsTransformerBlockConfig(
-            shared_experts=1,
+            shared_experts=shared_experts,
             attention=Llama4AttentionConfig(
                 hidden_size=self.hidden_size,
                 num_attention_heads=40,
@@ -144,6 +146,12 @@ class Llama4ForCausalLM(Model):
 
         self.layers = []
 
+        shared_experts_cfg = deepcopy(layer_config.dense_ffw)
+        setattr(
+            shared_experts_cfg, "intermediate_size",
+            shared_experts * intermediate_size_moe
+        )  # intermediate_size = #shared_experts * intermediate_size_moe
+
         for i in range(num_layers):
             # For Llama4-Scout, all layers are MoE layers.
             # This can be adjusted for other variants.
@@ -170,7 +178,14 @@ class Llama4ForCausalLM(Model):
             block = SharedExpertsTransformerBlock(
                 cfg=block_cfg,
                 custom_module=custom_module,
-                attention_cls=Llama4Attention,
+                attn=Llama4Attention(cfg=layer_config.attention,
+                                     mesh=self.mesh,
+                                     param_factory=self.param_factory,
+                                     sharding_cfg=self._sharding_config),
+                shared_experts=DenseFFW(cfg=shared_experts_cfg,
+                                        mesh=self.mesh,
+                                        param_factory=self.param_factory,
+                                        sharding_cfg=self._sharding_config),
                 use_attention_rope=use_attention_rope,
                 param_factory=self.param_factory,
                 mesh=self.mesh,
