@@ -58,7 +58,13 @@ class TestAttention(unittest.TestCase):
         )
 
         attention = Attention(
-            cfg=attention_config,
+            hidden_size=hidden_size,
+            num_attention_heads=num_attention_heads,
+            num_key_value_heads=num_attention_heads,
+            head_dim=head_dim,
+            rope_theta=10000.0,
+            rope_scaling={},
+            dtype=jnp.bfloat16,
             mesh=self.mesh,
             param_factory=self.param_factory,
             sharding_cfg=self.sharding_cfg,
@@ -67,16 +73,15 @@ class TestAttention(unittest.TestCase):
         attention.generate_kernel(nnx.Rngs(42))
 
         seq_len = 64
-        x = jnp.ones((seq_len, attention_config.hidden_size),
-                     dtype=jnp.bfloat16)
+        x = jnp.ones((seq_len, hidden_size), dtype=jnp.bfloat16)
 
         block_size = 16
         num_blocks = 8
         cache_shape = (
             num_blocks,
             block_size,
-            attention_config.num_key_value_heads * 2,
-            attention_config.head_dim,
+            num_attention_heads * 2,
+            head_dim,
         )
 
         kv_cache = jnp.zeros(cache_shape, dtype=jnp.bfloat16)

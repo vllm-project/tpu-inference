@@ -14,17 +14,15 @@ from vllm.config import VllmConfig
 import tpu_commons.models.jax.common.sharding as sharding
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.common.attention.attention import (
-    AttentionConfig, AttentionMetadata)
+    Attention, AttentionMetadata)
 from tpu_commons.models.jax.common.base import ParamFactory
 from tpu_commons.models.jax.common.constants import KVCacheType
-from tpu_commons.models.jax.common.layers import (DenseFFWConfig, Embedder,
-                                                  EmbedderConfig, LMhead,
+from tpu_commons.models.jax.common.layers import (DenseFFW, Embedder, LMhead,
                                                   RMSNorm)
 from tpu_commons.models.jax.common.model import Model
 from tpu_commons.models.jax.common.sharding import (Sharding,
                                                     ShardingRulesConfig)
-from tpu_commons.models.jax.common.transformer_block import (
-    TransformerBlock, TransformerBlockConfig)
+from tpu_commons.models.jax.common.transformer_block import TransformerBlock
 from tpu_commons.models.jax.layers.misc import shard_put
 from tpu_commons.models.jax.utils.weight_utils import (get_model_weights_files,
                                                        get_param,
@@ -89,11 +87,6 @@ class LlamaForCausalLM(Model):
         rope_theta = 500000.0
         vocab_size = 128256
         rms_norm_eps = 1e-5
-        embedder_config = EmbedderConfig(vocab_size=vocab_size,
-                                         hidden_size=self.hidden_size,
-                                         dtype=dtype,
-                                         normalize_embeddings=False,
-                                         vllm_config=self.vllm_config)
 
         logger.info(f"Using the following config:\n {sharding_config}")
 
@@ -102,36 +95,43 @@ class LlamaForCausalLM(Model):
                 kernel_initializer=nnx.initializers.xavier_normal(),
                 scale_initializer=nnx.initializers.ones,
                 random_init=False)
-        self.embedder = Embedder(cfg=embedder_config,
-                                 mesh=self.mesh,
-                                 param_factory=self.param_factory,
-                                 sharding_cfg=sharding_config)
+        self.embedder = Embedder(
+            vocab_size=vocab_size,
+            hidden_size=self.hidden_size,
+            dtype=dtype,
+            generate_rules_prelogit_td=sharding_config.generate_rules.
+            prelogit_td,
+            generate_rules_vocab_vd=sharding_config.generate_rules.vocab_vd,
+            mesh=self.mesh,
+            param_factory=self.param_factory)
         self.embedder.generate_kernel(self.rng)
 
-        layer_config = TransformerBlockConfig(
-            attention=AttentionConfig(
-                hidden_size=self.hidden_size,
-                num_attention_heads=self.num_attention_heads,
-                num_key_value_heads=self.num_key_value_heads,
-                head_dim=self.head_dim,
-                rope_theta=rope_theta,
-                rope_scaling={},
-                dtype=dtype,
-                vllm_config=self.vllm_config),
-            dense_ffw=DenseFFWConfig(hidden_size=self.hidden_size,
-                                     intermediate_size=intermediate_size,
-                                     hidden_act="silu",
-                                     dtype=dtype,
-                                     vllm_config=self.vllm_config),
-            rms_norm_eps=rms_norm_eps,
-            vllm_config=self.vllm_config)
-
         self.layers = [
-            TransformerBlock(cfg=layer_config,
-                             block_type="dense",
-                             param_factory=self.param_factory,
-                             mesh=self.mesh,
-                             sharding_cfg=sharding_config)
+            TransformerBlock(
+                param_factory=self.param_factory,
+                hidden_size=self.hidden_size,
+                rmsnorm_epsilon=rms_norm_eps,
+                attn_dtype=dtype,
+                dense_dtype=dtype,
+                mesh=self.mesh,
+                sharding_cfg=sharding_config,
+                attn=Attention(hidden_size=self.hidden_size,
+                               num_attention_heads=self.num_attention_heads,
+                               num_key_value_heads=self.num_key_value_heads,
+                               head_dim=self.head_dim,
+                               rope_theta=rope_theta,
+                               rope_scaling={},
+                               dtype=dtype,
+                               mesh=self.mesh,
+                               param_factory=self.param_factory,
+                               sharding_cfg=sharding_config),
+                custom_module=DenseFFW(dtype=dtype,
+                                       hidden_act="silu",
+                                       hidden_size=self.hidden_size,
+                                       intermediate_size=intermediate_size,
+                                       mesh=self.mesh,
+                                       param_factory=self.param_factory,
+                                       sharding_cfg=sharding_config))
             for _ in range(num_layers)
         ]
         for i in range(len(self.layers)):
@@ -141,17 +141,24 @@ class LlamaForCausalLM(Model):
             dims=self.hidden_size,
             mesh=self.mesh,
             param_factory=self.param_factory,
-            sharding_cfg=sharding_config,
+            prefill_rules=sharding_config.prefill_rules,
+            generate_rules=sharding_config.generate_rules,
             epsilon=rms_norm_eps,
             with_scale=True,
             dtype=dtype,
         )
         self.final_norm.generate_kernel(self.rng)
 
-        self.lm_head = LMhead(cfg=embedder_config,
-                              mesh=self.mesh,
-                              param_factory=self.param_factory,
-                              sharding_cfg=sharding_config)
+        self.lm_head = LMhead(
+            vocab_size=vocab_size,
+            hidden_size=self.hidden_size,
+            dtype=dtype,
+            generate_rules_prelogit_td=sharding_config.generate_rules.
+            prelogit_td,
+            generate_rules_vocab_vd=sharding_config.generate_rules.vocab_vd,
+            generate_rules_vocab_dv=sharding_config.generate_rules.vocab_dv,
+            mesh=self.mesh,
+            param_factory=self.param_factory)
         self.lm_head.generate_kernel(self.rng)
 
     def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):
@@ -240,9 +247,12 @@ class Llama3WeightLoader:
             "model.embed_tokens": "embedder.input_embedding_table_VD",
             "model.layers.*.input_layernorm":
             "layers.*.pre_attention_norm.scale",
-            "model.layers.*.mlp.down_proj": "layers.*.mlp.kernel_down_proj_FD",
-            "model.layers.*.mlp.gate_proj": "layers.*.mlp.kernel_gating_DF",
-            "model.layers.*.mlp.up_proj": "layers.*.mlp.kernel_up_proj_DF",
+            "model.layers.*.mlp.down_proj":
+            "layers.*.custom_module.kernel_down_proj_FD",
+            "model.layers.*.mlp.gate_proj":
+            "layers.*.custom_module.kernel_gating_DF",
+            "model.layers.*.mlp.up_proj":
+            "layers.*.custom_module.kernel_up_proj_DF",
             "model.layers.*.post_attention_layernorm":
             "layers.*.pre_mlp_norm.scale",
             "model.layers.*.self_attn.k_proj":

@@ -7,9 +7,7 @@ from flax import nnx
 from jax.sharding import Mesh
 
 from tpu_commons.models.jax.common.base import ParamFactory
-from tpu_commons.models.jax.common.layers import (DenseFFW, DenseFFWConfig,
-                                                  Embedder, EmbedderConfig,
-                                                  RMSNorm)
+from tpu_commons.models.jax.common.layers import DenseFFW, Embedder, RMSNorm
 from tpu_commons.models.jax.common.sharding import (ShardingConfig,
                                                     ShardingRulesConfig)
 
@@ -46,7 +44,8 @@ class TestLayers(unittest.TestCase):
             dims=dims,
             mesh=self.mesh,
             param_factory=self.param_factory,
-            sharding_cfg=self.sharding_cfg,
+            prefill_rules=self.sharding_cfg.prefill_rules,
+            generate_rules=self.sharding_cfg.generate_rules,
             epsilon=epsilon,
             dtype=jnp.float32,
         )
@@ -68,19 +67,14 @@ class TestLayers(unittest.TestCase):
         hidden_size = 512
         intermediate_size = 2048
 
-        ffw_config = DenseFFWConfig(
-            hidden_size=hidden_size,
-            intermediate_size=intermediate_size,
-            hidden_act="silu",
-            dtype=jnp.bfloat16,
-            vllm_config=None,
-        )
-
         ffw_layer = DenseFFW(
-            cfg=ffw_config,
             mesh=self.mesh,
             param_factory=self.param_factory,
             sharding_cfg=self.sharding_cfg,
+            dtype=jnp.bfloat16,
+            hidden_act="silu",
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
         )
         ffw_layer.generate_kernel(nnx.Rngs(0))
 
@@ -96,20 +90,14 @@ class TestLayers(unittest.TestCase):
         """Tests both the encode and decode passes of the Embedder module."""
         hidden_size = 512
         vocab_size = 32000
-
-        embedder_config = EmbedderConfig(
-            hidden_size=hidden_size,
-            vocab_size=vocab_size,
-            normalize_embeddings=False,
-            dtype=jnp.bfloat16,
-            vllm_config=None,
-        )
+        dtype = jnp.bfloat16
 
         embedder = Embedder(
-            cfg=embedder_config,
+            vocab_size=vocab_size,
+            hidden_size=hidden_size,
+            dtype=dtype,
             mesh=self.mesh,
             param_factory=self.param_factory,
-            sharding_cfg=self.sharding_cfg,
         )
         embedder.generate_kernel(nnx.Rngs(0))
 
@@ -117,49 +105,37 @@ class TestLayers(unittest.TestCase):
         token_ids = jnp.arange(seq_len, dtype=jnp.int32) % vocab_size
         embeddings = embedder(token_ids, decode=False)
         self.assertEqual(embeddings.shape, (seq_len, hidden_size))
-        self.assertEqual(embeddings.dtype, embedder_config.dtype)
+        self.assertEqual(embeddings.dtype, dtype)
 
         hidden_states = jnp.ones((seq_len, hidden_size), dtype=jnp.bfloat16)
         logits = embedder(hidden_states, decode=True)
         self.assertEqual(logits.shape, (seq_len, vocab_size))
-        self.assertEqual(logits.dtype, embedder_config.dtype)
+        self.assertEqual(logits.dtype, dtype)
 
     def test_embedder_normalization(self):
         """Tests the embedding normalization feature."""
         hidden_size = 512
         vocab_size = 32000
 
-        config_norm = EmbedderConfig(
-            hidden_size=hidden_size,
-            vocab_size=vocab_size,
-            normalize_embeddings=True,
-            dtype=jnp.float32,
-            vllm_config=None,
-        )
-        config_no_norm = EmbedderConfig(
-            hidden_size=hidden_size,
-            vocab_size=vocab_size,
-            normalize_embeddings=False,
-            dtype=jnp.float32,
-            vllm_config=None,
-        )
-
         rngs_1 = nnx.Rngs(42)
         rngs_2 = nnx.Rngs(42)
 
         embedder_norm = Embedder(
-            cfg=config_norm,
+            vocab_size=vocab_size,
+            hidden_size=hidden_size,
+            dtype=jnp.float32,
+            normalize_embeddings=True,
             mesh=self.mesh,
             param_factory=self.param_factory,
-            sharding_cfg=self.sharding_cfg,
         )
         embedder_norm.generate_kernel(rngs_1)
 
         embedder_no_norm = Embedder(
-            cfg=config_no_norm,
+            vocab_size=vocab_size,
+            hidden_size=hidden_size,
+            dtype=jnp.float32,
             mesh=self.mesh,
             param_factory=self.param_factory,
-            sharding_cfg=self.sharding_cfg,
         )
         embedder_no_norm.generate_kernel(rngs_2)
 

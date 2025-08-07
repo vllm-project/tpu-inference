@@ -123,6 +123,8 @@ class InputBatch:
 
         self.req_output_token_ids: list[Optional[list[int]]] = []
 
+        self.request_distribution: list[int] = [0, 0, 0]
+
     @property
     def req_ids(self) -> list[str]:
         # None elements should only be present transiently

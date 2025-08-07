@@ -127,8 +127,8 @@ class VllmModelWrapper:
 
         # jax.config.update("jax_explain_cache_misses", True)
 
-        params_and_buffers = shard_model_to_tpu(
-            self.model, self.mesh, self.vllm_config.parallel_config)
+        params_and_buffers = shard_model_to_tpu(self.model, self.mesh,
+                                                self.vllm_config)
 
         # Returning to the jax land, so we need to wrap it into a JaxValue.
         return jax_view(params_and_buffers)

@@ -117,6 +117,7 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
             handshake_address="dummy_addr",
             log_stats=False,
         )
+
         mock_request = MagicMock(spec=EngineCoreRequest)
         mock_request.request_id = "test_req"
         mock_request.mm_hashes = None
@@ -126,6 +127,7 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
         mock_request.sampling_params.guided_decoding = None
 
         mock_engine_request, _ = proc.preprocess_add_request(mock_request)
+        
         proc.add_request(mock_engine_request)
 
         self.mock_orchestrator.return_value.add_request.assert_called_once()

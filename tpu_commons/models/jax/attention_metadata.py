@@ -14,6 +14,7 @@ import jax
         "query_start_loc",
         "num_seqs",
         "num_slices",
+        "request_distribution",
     ],
     meta_fields=[],
 )
@@ -33,3 +34,5 @@ class AttentionMetadata(object):
     num_seqs: jax.Array = None
     # (1,)
     num_slices: jax.Array = None
+    # (3,)
+    request_distribution: jax.Array = None

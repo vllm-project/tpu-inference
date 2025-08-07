@@ -1,5 +1,5 @@
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from typing import List, Optional, Tuple
 
 import jax
@@ -13,108 +13,25 @@ from vllm.config import VllmConfig
 
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.common.attention.attention import AttentionMetadata
-from tpu_commons.models.jax.common.attention.deepseek_v3_attention import (
-    MLA, MLAConfig)
+from tpu_commons.models.jax.common.attention.deepseek_v3_attention import MLA
 from tpu_commons.models.jax.common.base import ParamFactory
 from tpu_commons.models.jax.common.constants import KVCacheType
-from tpu_commons.models.jax.common.layers import (DenseFFWConfig, Embedder,
-                                                  EmbedderConfig, RMSNorm)
-from tpu_commons.models.jax.common.model import Model, ModelConfig
-from tpu_commons.models.jax.common.moe.deepseek_moe import \
-    DeepSeekV3RoutingConfig
-from tpu_commons.models.jax.common.moe.moe import MoEConfig
+from tpu_commons.models.jax.common.layers import (DenseFFW, Embedder, LMhead,
+                                                  RMSNorm)
+from tpu_commons.models.jax.common.model import Model
+from tpu_commons.models.jax.common.moe.deepseek_moe import DeepSeekV3Router
+from tpu_commons.models.jax.common.moe.moe import MoE
 from tpu_commons.models.jax.common.sharding import (ATTN_HEAD_AXIS_NAME,
                                                     ATTN_TENSOR_AXIS_NAME,
                                                     Sharding,
                                                     ShardingRulesConfig)
 from tpu_commons.models.jax.common.transformer_block import (
-    SharedExpertsTransformerBlock, SharedExpertsTransformerBlockConfig,
-    TransformerBlock, TransformerBlockConfig)
+    SharedExpertsTransformerBlock, TransformerBlock)
 from tpu_commons.models.jax.layers.misc import shard_put
 from tpu_commons.models.jax.utils.weight_utils import (
     get_param, hf_model_weights_iterator, print_param_info, reshape_params)
 
 logger = init_logger(__name__)
-
-
-@dataclass
-class DeepseekV3ModelConfig(ModelConfig):
-    vocab_size: int = 129280
-    hidden_size: int = 7168
-    dtype: jnp.dtype = jnp.bfloat16
-    num_layers: int = 61
-    num_attention_heads: int = 128
-    num_key_value_heads: int = 128
-    ffw_intermediate_size: int = 18432
-    moe_intermediate_size: int = 2048
-    num_local_experts: int = 256
-    num_experts_per_token: int = 8
-    n_group: int = 8
-    emb: EmbedderConfig = None
-    layers: TransformerBlockConfig = None
-    vllm_config: VllmConfig = field(repr=False, default=None)
-    interleave_moe_layer_step: int = 1  # Deepseek V3 has moe_layer_freq=1 in hf config.
-    hidden_act: str = "silu"
-    rms_norm_eps: float = 1e-06
-    first_k_dense_replace: int = 3  # replace the first few MOE layers to dense layer.
-
-    def __post_init__(self):
-        if not self.emb:
-            self.emb = EmbedderConfig(vocab_size=self.vocab_size,
-                                      hidden_size=self.hidden_size,
-                                      dtype=jnp.bfloat16,
-                                      normalize_embeddings=False)
-        if not self.layers:
-            self.layers = SharedExpertsTransformerBlockConfig(
-                shared_experts=1,
-                attention=MLAConfig(
-                    hidden_size=self.hidden_size,
-                    num_attention_heads=self.num_attention_heads,
-                    num_key_value_heads=self.num_key_value_heads,
-                    rope_theta=10000,
-                    rope_scaling={
-                        "beta_fast": 32,
-                        "beta_slow": 1,
-                        "factor": 40,
-                        "mscale": 1.0,
-                        "mscale_all_dim": 1.0,
-                        "original_max_position_embeddings": 4096,
-                        "type": "yarn"
-                    },
-                    q_lora_rank=1536,
-                    kv_lora_rank=512,
-                    qk_nope_head_dim=128,
-                    qk_rope_head_dim=64,
-                    v_head_dim=128,
-                    rms_norm_eps=self.rms_norm_eps,
-                    dtype=self.dtype,
-                    vllm_config=self.vllm_config),
-                dense_ffw=DenseFFWConfig(
-                    hidden_size=self.hidden_size,
-                    intermediate_size=self.ffw_intermediate_size,
-                    hidden_act=self.hidden_act,
-                    dtype=self.dtype,
-                    vllm_config=self.vllm_config),
-                moe=MoEConfig(
-                    hidden_size=self.hidden_size,
-                    intermediate_size_moe=self.moe_intermediate_size,
-                    dtype=self.dtype,
-                    num_local_experts=self.num_local_experts,
-                    hidden_act=self.hidden_act,
-                    apply_expert_weight_before_computation=False,
-                    router=DeepSeekV3RoutingConfig(
-                        hidden_size=self.hidden_size,
-                        n_routed_experts=self.num_local_experts,
-                        num_experts_per_token=self.num_experts_per_token,
-                        n_group=self.n_group,
-                        routed_scaling_factor=2.5,
-                        topk_group=4,
-                        norm_topk_prob=True,
-                        dtype=self.dtype,
-                        vllm_config=self.vllm_config),
-                    vllm_config=self.vllm_config),
-                rms_norm_eps=self.rms_norm_eps,
-                vllm_config=self.vllm_config)
 
 
 @dataclass
@@ -185,52 +102,161 @@ class DeepSeekV3(Model):
             generate_rules=asdict(DeepSeekV3GenerateShardingRulesConfig()),
             default_rules_cls=DeepSeekV3ShardingRulesConfig,
             vllm_config=self.vllm_config).sharding_cfg
-        self._model_config = DeepseekV3ModelConfig(
-            vllm_config=self.vllm_config)
-        logger.info(
-            f"Using the following config:\n{self._model_config}; {self._sharding_config}"
-        )
+
+        num_layers: int = 61
+        num_local_experts: int = 256
+
+        vocab_size: int = 129280
+        hidden_size: int = 7168
+        dtype: jnp.dtype = jnp.bfloat16
+        num_attention_heads: int = 128
+        num_key_value_heads: int = 128
+        ffw_intermediate_size: int = 18432
+        moe_intermediate_size: int = 2048
+        num_experts_per_token: int = 8
+        n_group: int = 8
+        interleave_moe_layer_step: int = 1  # Deepseek V3 has moe_layer_freq=1 in hf config.
+        hidden_act: str = "silu"
+        rms_norm_eps: float = 1e-06
+        first_k_dense_replace: int = 3  # replace the first few MOE layers to dense layer.
+
+        shared_experts = 1
+        rope_theta = 10000
+        rope_scaling = {
+            "beta_fast": 32,
+            "beta_slow": 1,
+            "factor": 40,
+            "mscale": 1.0,
+            "mscale_all_dim": 1.0,
+            "original_max_position_embeddings": 4096,
+            "type": "yarn"
+        }
+        q_lora_rank = 1536
+        kv_lora_rank = 512
+        qk_nope_head_dim = 128
+        qk_rope_head_dim = 64
+        v_head_dim = 128
+
+        logger.info(f"Using the following config:\n {self._sharding_config}")
         self.use_random_init = self.vllm_config.additional_config.get(
             "random_weights", False)
         self.mesh = mesh
 
         self.weight_loader = DeepSeekV3WeightLoader(
-            vllm_config=vllm_config, model_config=self._model_config)
+            vllm_config=vllm_config,
+            num_layers=num_layers,
+            hidden_size=hidden_size,
+            q_lora_rank=q_lora_rank,
+            kv_lora_rank=kv_lora_rank,
+            attn_heads=num_attention_heads,
+            qk_nope_head_dim=qk_nope_head_dim,
+            qk_rope_head_dim=qk_rope_head_dim,
+            v_head_dim=v_head_dim,
+            num_local_experts=num_local_experts)
 
-        self._init_layers()
-
-    def _init_layers(self):
         if not self.param_factory:
             self.param_factory = ParamFactory(
                 kernel_initializer=nnx.initializers.xavier_normal(),
                 scale_initializer=nnx.initializers.ones,
                 random_init=self.use_random_init)
-        self.embedder = Embedder(cfg=self._model_config.emb,
+        self.embedder = Embedder(vocab_size=vocab_size,
+                                 hidden_size=hidden_size,
+                                 dtype=dtype,
+                                 generate_rules_prelogit_td=self.
+                                 _sharding_config.generate_rules.prelogit_td,
+                                 generate_rules_vocab_vd=self._sharding_config.
+                                 generate_rules.vocab_vd,
                                  mesh=self.mesh,
-                                 param_factory=self.param_factory,
-                                 sharding_cfg=self._sharding_config)
+                                 param_factory=self.param_factory)
         self.embedder.generate_kernel(self.rng)
 
         self.layers = []
 
-        for i in range(self._model_config.first_k_dense_replace):
-            block = TransformerBlock(cfg=self._model_config.layers,
-                                     block_type="dense",
-                                     attention_cls=MLA,
-                                     param_factory=self.param_factory,
-                                     mesh=self.mesh,
-                                     sharding_cfg=self._sharding_config)
+        def _create_mla() -> MLA:
+            return MLA(
+                rope_theta=rope_theta,
+                rope_scaling=rope_scaling,
+                q_lora_rank=q_lora_rank,
+                kv_lora_rank=kv_lora_rank,
+                qk_nope_head_dim=qk_nope_head_dim,
+                qk_rope_head_dim=qk_rope_head_dim,
+                rms_norm_eps=rms_norm_eps,
+                v_head_dim=v_head_dim,
+                mesh=self.mesh,
+                param_factory=self.param_factory,
+                sharding_cfg=self._sharding_config,
+                hidden_size=hidden_size,
+                num_attention_heads=num_attention_heads,
+                num_key_value_heads=num_key_value_heads,
+                head_dim=v_head_dim,  # MLA uses v_head_dim as head_dim
+                dtype=dtype)
+
+        for i in range(first_k_dense_replace):
+            block = TransformerBlock(
+                hidden_size=hidden_size,
+                rmsnorm_epsilon=rms_norm_eps,
+                attn_dtype=dtype,
+                dense_dtype=dtype,
+                attn=_create_mla(),
+                custom_module=DenseFFW(dtype=dtype,
+                                       hidden_act=hidden_act,
+                                       hidden_size=hidden_size,
+                                       intermediate_size=ffw_intermediate_size,
+                                       mesh=self.mesh,
+                                       param_factory=self.param_factory,
+                                       sharding_cfg=self._sharding_config),
+                param_factory=self.param_factory,
+                mesh=self.mesh,
+                sharding_cfg=self._sharding_config)
             self.layers.append(block)
 
-        for i in range(self._model_config.first_k_dense_replace,
-                       self._model_config.num_layers):
-            is_moe_layer = ((i + 1) %
-                            self._model_config.interleave_moe_layer_step == 0)
-            block_type = "moe" if is_moe_layer else "dense"
+        for i in range(first_k_dense_replace, num_layers):
+            is_moe_layer = ((i + 1) % interleave_moe_layer_step == 0)
+            router = DeepSeekV3Router(
+                mesh=self.mesh,
+                param_factory=self.param_factory,
+                sharding_cfg=self._sharding_config,
+                hidden_size=hidden_size,
+                num_experts=num_local_experts,
+                num_experts_per_tok=num_experts_per_token,
+                n_groups=n_group,
+                topk_groups=4,
+                norm_topk_prob=True,
+                routed_scaling_factor=2.5,
+                dtype=dtype)
+            custom_module = MoE(dtype=dtype,
+                                num_local_experts=num_local_experts,
+                                apply_expert_weight_before_computation=False,
+                                hidden_size=hidden_size,
+                                intermediate_size_moe=moe_intermediate_size,
+                                hidden_act=hidden_act,
+                                mesh=self.mesh,
+                                param_factory=self.param_factory,
+                                sharding_cfg=self._sharding_config,
+                                router=router) if is_moe_layer else DenseFFW(
+                                    dtype=dtype,
+                                    hidden_act=hidden_act,
+                                    hidden_size=hidden_size,
+                                    intermediate_size=ffw_intermediate_size,
+                                    mesh=self.mesh,
+                                    param_factory=self.param_factory,
+                                    sharding_cfg=self._sharding_config)
+
             block = SharedExpertsTransformerBlock(
-                cfg=self._model_config.layers,
-                block_type=block_type,
-                attention_cls=MLA,
+                hidden_size=hidden_size,
+                rmsnorm_epsilon=rms_norm_eps,
+                attn_dtype=dtype,
+                dense_dtype=dtype,
+                custom_module=custom_module,
+                attn=_create_mla(),
+                shared_experts=DenseFFW(dtype=dtype,
+                                        hidden_act=hidden_act,
+                                        hidden_size=hidden_size,
+                                        intermediate_size=shared_experts *
+                                        moe_intermediate_size,
+                                        mesh=self.mesh,
+                                        param_factory=self.param_factory,
+                                        sharding_cfg=self._sharding_config),
                 param_factory=self.param_factory,
                 mesh=self.mesh,
                 sharding_cfg=self._sharding_config)
@@ -240,20 +266,28 @@ class DeepSeekV3(Model):
             self.layers[i].generate_kernel(self.rng)
 
         self.final_norm = RMSNorm(
-            dims=self._model_config.hidden_size,
+            dims=hidden_size,
             mesh=self.mesh,
             param_factory=self.param_factory,
-            sharding_cfg=self._sharding_config,
-            epsilon=self._model_config.layers.rms_norm_eps,
+            prefill_rules=self._sharding_config.prefill_rules,
+            generate_rules=self._sharding_config.generate_rules,
+            epsilon=rms_norm_eps,
             with_scale=True,
-            dtype=self._model_config.dtype,
+            dtype=dtype,
         )
         self.final_norm.generate_kernel(self.rng)
 
-        self.lm_head = Embedder(cfg=self._model_config.emb,
-                                mesh=self.mesh,
-                                param_factory=self.param_factory,
-                                sharding_cfg=self._sharding_config)
+        self.lm_head = LMhead(vocab_size=vocab_size,
+                              hidden_size=hidden_size,
+                              dtype=dtype,
+                              generate_rules_prelogit_td=self._sharding_config.
+                              generate_rules.prelogit_td,
+                              generate_rules_vocab_vd=self._sharding_config.
+                              generate_rules.vocab_vd,
+                              generate_rules_vocab_dv=self._sharding_config.
+                              generate_rules.vocab_dv,
+                              mesh=self.mesh,
+                              param_factory=self.param_factory)
         self.lm_head.generate_kernel(self.rng)
 
         # TODO: Add MTP.
@@ -323,12 +357,16 @@ class DeepSeekV3(Model):
 @dataclass
 class DeepSeekV3WeightLoader:
 
-    def __init__(self, vllm_config: VllmConfig, model_config: ModelConfig):
+    def __init__(self, vllm_config: VllmConfig, num_layers, hidden_size,
+                 q_lora_rank, kv_lora_rank, attn_heads, qk_nope_head_dim,
+                 qk_rope_head_dim, v_head_dim, num_local_experts):
+
+        self.num_layers = num_layers
         self.names_and_weights_generator = hf_model_weights_iterator(
             model_name_or_path=vllm_config.model_config.model,
             framework="flax",
             filter_regex="")
-        self.num_routed_experts = model_config.layers.moe.num_local_experts
+        self.num_routed_experts = num_local_experts
 
         self._transpose_map = {
             # dense mlp
@@ -350,14 +388,6 @@ class DeepSeekV3WeightLoader:
             r"mlp\.shared_experts\.gate_proj": (1, 0),
             r"mlp\.shared_experts\.up_proj": (1, 0)
         }
-        self._model_config = model_config
-        hidden_size = self._model_config.hidden_size
-        q_lora_rank = self._model_config.layers.attention.q_lora_rank
-        kv_lora_rank = self._model_config.layers.attention.kv_lora_rank
-        attn_heads = self._model_config.layers.attention.num_attention_heads
-        qk_nope_head_dim = self._model_config.layers.attention.qk_nope_head_dim
-        qk_rope_head_dim = self._model_config.layers.attention.qk_rope_head_dim
-        v_head_dim = self._model_config.layers.attention.v_head_dim
         self._weight_shape_map = {
             "q_b_proj":
             (attn_heads, qk_nope_head_dim + qk_rope_head_dim, q_lora_rank),
@@ -398,22 +428,22 @@ class DeepSeekV3WeightLoader:
             "layers.*.attn.kernel_o_proj_NHD",
             # Dense ffw
             "model.layers.*.mlp.gate_proj.weight":
-            "layers.*.mlp.kernel_gating_DF",
+            "layers.*.custom_module.kernel_gating_DF",
             "model.layers.*.mlp.up_proj.weight":
-            "layers.*.mlp.kernel_up_proj_DF",
+            "layers.*.custom_module.kernel_up_proj_DF",
             "model.layers.*.mlp.down_proj.weight":
-            "layers.*.mlp.kernel_down_proj_FD",
+            "layers.*.custom_module.kernel_down_proj_FD",
             # MOE(routed experts)
             "model.layers.*.mlp.gate.weight":
-            "layers.*.moe.router.kernel_DE",
+            "layers.*.custom_module.router.kernel_DE",
             "model.layers.*.mlp.gate.e_score_correction_bias":
-            "layers.*.moe.router.bias_E",
+            "layers.*.custom_module.router.bias_E",
             "model.layers.*.mlp.experts.*.gate_proj.weight":
-            "layers.*.moe.kernel_gating_EDF",
+            "layers.*.custom_module.kernel_gating_EDF",
             "model.layers.*.mlp.experts.*.down_proj.weight":
-            "layers.*.moe.kernel_down_proj_EFD",
+            "layers.*.custom_module.kernel_down_proj_EFD",
             "model.layers.*.mlp.experts.*.up_proj.weight":
-            "layers.*.moe.kernel_up_proj_EDF",
+            "layers.*.custom_module.kernel_up_proj_EDF",
             # MOE(shared experts)
             "model.layers.*.mlp.shared_experts.down_proj.weight":
             "layers.*.shared_experts.kernel_down_proj_FD",
@@ -510,7 +540,7 @@ class DeepSeekV3WeightLoader:
                 if re.search(r"layers\.(\d+)", loaded_name):
                     layer_num = re.search(r"layers\.(\d+)",
                                           loaded_name).group(1)
-                    if int(layer_num) >= self._model_config.num_layers:
+                    if int(layer_num) >= self.num_layers:
                         del loaded_weight
                         continue
                 if 'layers.61' in loaded_name:
@@ -520,7 +550,7 @@ class DeepSeekV3WeightLoader:
                 if re.search(r"experts\.(\d+)", loaded_name):
                     expert_num = re.search(r"experts\.(\d+)",
                                            loaded_name).group(1)
-                    if int(expert_num) >= self._model_config.num_local_experts:
+                    if int(expert_num) >= self.num_routed_experts:
                         del loaded_weight
                         continue
                 if loaded_weight.dtype == torch.float8_e4m3fn:
