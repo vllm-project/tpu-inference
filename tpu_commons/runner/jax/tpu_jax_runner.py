@@ -1005,14 +1005,14 @@ class TPUModelRunner():
                 print("self.input_ids_cpu", self.input_ids_cpu[dp_token_offset:dp_token_offset + total_num_scheduled_tokens])
                 # Prepare the attention metadata.
                 if dp_rank == 0:
-                    np.cumsum([0] + num_scheduled_tokens_per_req,
-                            out=self.query_start_loc_cpu[dp_req_padded_offset:dp_req_padded_offset+num_reqs_dp+1])
+                    np.cumsum([0] + num_scheduled_tokens_per_req[:-1],
+                            out=self.query_start_loc_cpu[dp_req_padded_offset:dp_req_padded_offset+num_reqs_dp])
                 else:
                     np.cumsum([0] + num_scheduled_tokens_per_req[:-1],
-                            out=self.query_start_loc_cpu[dp_req_padded_offset+1:dp_req_padded_offset+num_reqs_dp+1])
-                    self.query_start_loc_cpu[dp_req_padded_offset+1:dp_req_padded_offset + num_reqs_dp+1] += dp_token_offset
+                            out=self.query_start_loc_cpu[dp_req_padded_offset:dp_req_padded_offset+num_reqs_dp])
+                    self.query_start_loc_cpu[dp_req_padded_offset:dp_req_padded_offset + num_reqs_dp] += dp_token_offset
+                self.query_start_loc_cpu[dp_req_padded_offset + num_reqs_dp: dp_req_padded_offset+ padded_num_scheduled_tokens_per_dp_rank] = 1
             
-                # self.query_start_loc_cpu[dp_offset + 1:] = 1
                 print("self.query_start_loc_cpu", self.query_start_loc_cpu)
                 self.seq_lens_cpu[dp_req_padded_offset:dp_req_padded_offset + num_reqs_dp] = (
                     self.input_batch.num_computed_tokens_cpu[dp_req_offset:dp_req_offset+num_reqs_dp] +
