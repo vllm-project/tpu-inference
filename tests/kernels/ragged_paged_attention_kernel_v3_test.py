@@ -7,7 +7,7 @@ from jax._src import test_util as jtu
 
 from tpu_commons.kernels.ragged_paged_attention.v3.kernel import (
     dynamic_validate_inputs, prepare_inputs, prepare_outputs,
-    ragged_paged_attention, ref_ragged_paged_attention)
+    ragged_paged_attention, ref_ragged_paged_atv3tention)
 from tpu_commons.kernels.ragged_paged_attention.v3.util import (
     align_to, cdiv, get_dtype_packing)
 

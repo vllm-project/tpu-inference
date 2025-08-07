@@ -273,6 +273,7 @@ class Attention(nnx.Module):
             P("data"),  # md.num_seqs: Replicated # cannot have 0s
         )
         
+        
         out_specs = P(*self.sharding_cfg.generate_rules.attn_o_tnh
                       )  # output_TNH: Shard the 'model' dimension
 
