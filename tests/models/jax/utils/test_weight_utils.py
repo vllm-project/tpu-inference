@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import os
 import tempfile
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import jax
@@ -102,6 +101,24 @@ VOCAB_SIZE = 1000
 TP_SIZE = 2
 
 
+class MockDevice:
+    """A hashable mock for a JAX device."""
+
+    def __init__(self, id):
+        self.id = id
+        self.platform = 'cpu'
+        self.device_kind = 'cpu'
+
+    def __hash__(self):
+        return hash(self.id)
+
+    def __eq__(self, other):
+        return isinstance(other, self.__class__) and self.id == other.id
+
+    def __repr__(self):
+        return f"MockDevice(id={self.id})"
+
+
 class MockAttention(nnx.Module):
 
     def __init__(self, rngs):
@@ -146,10 +163,7 @@ class HFWeightLoadingTest(jtu.JaxTestCase):
         self.addCleanup(self.temp_dir.cleanup)
 
         # Mock devices to control TP size
-        self.mock_devices = [
-            SimpleNamespace(platform='cpu', device_kind='cpu')
-            for _ in range(TP_SIZE)
-        ]
+        self.mock_devices = [MockDevice(id=i) for i in range(TP_SIZE)]
         self.original_jax_devices = jax.devices
         jax.devices = lambda: self.mock_devices
 
