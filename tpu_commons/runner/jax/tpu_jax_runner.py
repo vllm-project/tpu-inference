@@ -935,6 +935,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                 )
             self.maybe_wait_for_kv_save()
 
+            print("[DEBUG] Model output:")
+            print(f"  - hidden_states shape: {hidden_states.shape}")
+            print(f"  - hidden_states dtype: {hidden_states.dtype}")
+            print(f"  - hidden_states content: {hidden_states}")
+
             hidden_states = self.select_hidden_states_fn(
                 hidden_states, logits_indices)
             logits = self.compute_logits_fn(self.state, hidden_states)
