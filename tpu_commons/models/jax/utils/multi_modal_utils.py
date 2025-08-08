@@ -2,7 +2,6 @@ from typing import Union
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 from typing_extensions import TypeAlias
 from vllm.logger import init_logger
 
@@ -64,17 +63,6 @@ def _flatten_embeddings(embeddings: NestedTensors) -> jax.Array:
                            axis=0)
 
 
-def _count_flattened_embeddings(embeddings: NestedTensors) -> int:
-    """Counts the total number of embedding vectors in the NestedTensors."""
-    if isinstance(embeddings, jax.Array):
-        if embeddings.ndim == 0:
-            return 0
-        if embeddings.ndim == 1:  # Should not happen based on structure, but safe
-            return 1
-        return int(np.prod(embeddings.shape[:-1]))
-    return sum(_count_flattened_embeddings(t) for t in embeddings)
-
-
 def _embedding_count_expression(embeddings: NestedTensors) -> str:
     """
     Constructs a debugging representation of the number of embeddings in the
@@ -101,9 +89,6 @@ def _merge_multimodal_embeddings(
     Note:
         This returns a new array with the updated values.
     """
-    if not jnp.any(is_multimodal):
-        return inputs_embeds
-
     flattened = _flatten_embeddings(multimodal_embeddings)
     # The check for matching number of tokens is removed as it is not
     # JIT-compatible. If the shapes mismatch, JAX will raise an error
@@ -164,32 +149,16 @@ def merge_multimodal_embeddings(
         This returns a new array with the updated values.
     """
     if isinstance(placeholder_token_id, list):
-        is_multimodal = jnp.isin(input_ids, jnp.array(placeholder_token_id))
-    else:
-        is_multimodal = (input_ids == placeholder_token_id)
+        placeholder_token_id = jnp.array(placeholder_token_id)
 
-    num_mm_placeholders = jnp.sum(is_multimodal).item()
-
-    if num_mm_placeholders == 0:
-        # If there are no placeholders, mm_embeddings should also be empty.
-        # We can add a check, but _count_flattened_embeddings handles empty lists/arrays.
-        num_mm_embeds = _count_flattened_embeddings(multimodal_embeddings)
-        if num_mm_embeds != 0:
-            raise ValueError(
-                f"Input has no placeholder tokens, but {num_mm_embeds} multimodal embeddings were provided."
-            )
-        return inputs_embeds
-
-    num_mm_embeds = _count_flattened_embeddings(multimodal_embeddings)
-
-    if num_mm_embeds != num_mm_placeholders:
-        raise ValueError(
-            f"Number of multimodal embeddings ({num_mm_embeds}) does not match "
-            f"the number of placeholder tokens ({num_mm_placeholders}) in input_ids."
+        return _merge_multimodal_embeddings(
+            inputs_embeds,
+            jnp.isin(input_ids, placeholder_token_id),
+            multimodal_embeddings,
         )
 
     return _merge_multimodal_embeddings(
         inputs_embeds,
-        is_multimodal,
+        (input_ids == placeholder_token_id),
         multimodal_embeddings,
     )
