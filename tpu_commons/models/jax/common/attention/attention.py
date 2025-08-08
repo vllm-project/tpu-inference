@@ -80,17 +80,16 @@ class Attention(nnx.Module):
     mesh: Mesh
     param_factory: ParamFactory
 
-    activation_attention_td: dict[str, NamedSharding]
-    activation_q_td: dict[str, NamedSharding]
-    query_tnh: dict[str, NamedSharding]
-    keyvalue_skh: dict[str, NamedSharding]
-    activation_attention_out_td: dict[str, NamedSharding]
     dnh_sharding: NamedSharding
     dkh_sharding: NamedSharding
     nhd_sharding: NamedSharding
-    pallas_q_spec: dict[str, P]
-    pallas_kv_spec: dict[str, P]
-    pallas_cache_page_spec: dict[str, P]
+
+    activation_q_td: NamedSharding
+    query_tnh: NamedSharding
+    keyvalue_skh: NamedSharding
+
+    keyvalue_cache_lskh: NamedSharding
+    attn_o_tnh: NamedSharding
 
     attention_chunk_size: int | None = None
     rope_input_ordering: str = "split"
@@ -138,10 +137,9 @@ class Attention(nnx.Module):
                 - The attention output tensor of shape
                   `(batch_size, seq_len, d_model)`.
         """
-        op_mode = "prefill" if is_prefill else "generate"
         md = attention_metadata
         x_SD = jnp.asarray(x, self.dtype)
-        x_q_TD = nnx.with_sharding_constraint(x, self.activation_q_td[op_mode])
+        x_q_TD = nnx.with_sharding_constraint(x, self.activation_q_td)
         H = self.head_dim
         with jax.named_scope("q_proj"):
             q_TNH = jnp.einsum('TD,DNH -> TNH', x_q_TD,
@@ -150,8 +148,7 @@ class Attention(nnx.Module):
                 q_TNH = apply_rope(q_TNH, md.input_positions, H,
                                    self.rope_theta, self.rope_scaling,
                                    self.rope_input_ordering)
-            q_TNH = nnx.with_sharding_constraint(q_TNH,
-                                                 self.query_tnh[op_mode])
+            q_TNH = nnx.with_sharding_constraint(q_TNH, self.query_tnh)
         with jax.named_scope("k_proj"):
             k_SKH = jnp.einsum('SD,DKH -> SKH', x_SD,
                                self.kernel_k_proj_DKH.value)
@@ -159,8 +156,7 @@ class Attention(nnx.Module):
                 k_SKH = apply_rope(k_SKH, md.input_positions, H,
                                    self.rope_theta, self.rope_scaling,
                                    self.rope_input_ordering)
-            k_SKH = nnx.with_sharding_constraint(k_SKH,
-                                                 self.keyvalue_skh[op_mode])
+            k_SKH = nnx.with_sharding_constraint(k_SKH, self.keyvalue_skh)
 
         with jax.named_scope("v_proj"):
             v_SKH = jnp.einsum('SD,DKH -> SKH', x_SD,
@@ -224,16 +220,14 @@ class Attention(nnx.Module):
         #TODO: we use generate_rules as the default sharding for ragged_paged_attention,
         # but it could be configurable based on the op_mode.
         in_specs = (
-            P(*self.sharding_cfg.generate_rules.query_tnh),  # q_TNH
-            P(*self.sharding_cfg.generate_rules.keyvalue_cache_lskh
-              ),  # kv_cache:
+            self.query_tnh.spec,  # q_TNH
+            self.keyvalue_cache_lskh.spec,  # kv_cache:
             P(),  # md.seq_lens: Replicated
             P(),  # md.block_tables: Replicated
             P(),  # md.query_start_loc: Replicated
             P(),  # md.num_seqs: Replicated
         )
-        out_specs = P(*self.sharding_cfg.generate_rules.attn_o_tnh
-                      )  # output_TNH: Shard the 'model' dimension
+        out_specs = self.attn_o_tnh.spec  # output_TNH: Shard the 'model' dimension
 
         def _ragged_paged_attention(*args):
             return ragged_paged_attention(
@@ -315,16 +309,14 @@ class Attention(nnx.Module):
         distribution = jnp.array(
             [num_decode, num_decode + num_prefill, md.num_seqs[0]])
         in_specs = (
-            P(*self.sharding_cfg.generate_rules.query_ktnph),  # q_transformed
-            P(*self.sharding_cfg.generate_rules.keyvalue_cache_nbkph
-              ),  # kv_cache_transformed
+            P(*self.query_ktnph),  # q_transformed
+            P(*self.keyvalue_cache_nbkph),  # kv_cache_transformed
             P(),  # md.seq_lens: Replicated
             P(),  # page_indices_flat: Replicated
             P(),  # query_start_loc: Replicated
             P(),  # distribution: Replicated
         )
-        out_specs = P(*self.sharding_cfg.generate_rules.attn_o_ktnph
-                      )  #output_transformed
+        out_specs = P(*self.attn_o_ktnph)  #output_transformed
 
         def _ragged_paged_attention(*args):
             return ragged_paged_attention_v3(
