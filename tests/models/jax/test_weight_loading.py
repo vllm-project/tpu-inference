@@ -202,6 +202,8 @@ def test_load_q_proj(mock_config, mesh, mappings, mock_thread_deps):
     mock_thread_deps["model_weights_generator"].return_value = [(hf_key,
                                                                  hf_weight)]
 
+    # Expected shape: (hidden_size, num_heads, head_dim)
+    # No repeat since sharding_size // num_heads < 1
     expected_shape = (config.get_hidden_size(),
                       config.hf_config.num_attention_heads,
                       config.get_head_size())
@@ -212,7 +214,7 @@ def test_load_q_proj(mock_config, mesh, mappings, mock_thread_deps):
 
     mock_thread_deps["get_param_and_sharding"].assert_called_once_with(
         mock.ANY, mock_thread_deps["get_named_sharding"].return_value,
-        "transformer.h.0.attn.c_attn_q")
+        "transformer.h.*.attn.c_attn_q")
 
     transformed_weight = mock_thread_deps["shard_put"].call_args[0][0]
     assert transformed_weight.shape == expected_shape
