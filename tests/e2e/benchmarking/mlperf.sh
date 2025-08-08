@@ -249,6 +249,11 @@ for model_name in $model_list; do
         fi
     fi
 
+    if [ "$JAX_RANDOM_WEIGHTS" == "True" ] && [ "$model_name" != "meta-llama/Llama-3.1-8B-Instruct" ]; then
+       echo "Skipping $model_name for JAX_RANDOM_WEIGHTS: True"
+        continue
+    fi
+
     # Spin up the vLLM server
     echo "Spinning up the vLLM server..."
     (vllm serve "$model_name" --max-model-len=1024 --disable-log-requests --max-num-batched-tokens "$max_batched_tokens" "${current_serve_args[@]}" 2>&1 | tee -a "$LOG_FILE") &
@@ -292,9 +297,13 @@ for model_name in $model_list; do
 
         # TODO (jacobplatin): probably want to add an option to skip this in the future
         if [ "$dataset_name" == "mlperf" ]; then
-            checkThroughputAndRouge
-            if [ "$exit_code" -ne 0 ]; then
-                exit_code=1
+            if [ "$JAX_RANDOM_WEIGHTS" == "True" ]; then
+                echo "JAX_RANDOM_WEIGHTS is True. Skipping ROUGE score check."
+            else
+                checkThroughputAndRouge
+                if [ "$exit_code" -ne 0 ]; then
+                    exit_code=1
+                fi
             fi
         fi
     else

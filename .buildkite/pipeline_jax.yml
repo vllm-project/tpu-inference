@@ -73,6 +73,17 @@ steps:
      commands:
        - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
 
+   - label: "E2E MLPerf tests for JAX random weights"
+     key: test_7
+     soft_fail: true
+     env:
+       JAX_RANDOM_WEIGHTS: "True"
+       NEW_MODEL_DESIGN: "True"
+     agents:
+       queue: tpu_v6e_queue
+     commands:
+       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
+
   # -----------------------------------------------------------------
   # NOTIFICATION STEP
   # -----------------------------------------------------------------
@@ -85,6 +96,7 @@ steps:
        - test_4
        - test_5
        - test_6
+       - test_7
      agents:
        queue: tpu_v6e_queue
-     commands: "bash .buildkite/scripts/check_results.sh 'TPU JAX Tests Failed' test_0 test_1 test_2 test_3 test_4 test_5 test_6"
+     commands: "bash .buildkite/scripts/check_results.sh 'TPU JAX Tests Failed' test_0 test_1 test_2 test_3 test_4 test_5 test_6 test_7"
