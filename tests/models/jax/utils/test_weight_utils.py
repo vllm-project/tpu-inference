@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import os
 import tempfile
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import jax
@@ -145,8 +146,10 @@ class HFWeightLoadingTest(jtu.JaxTestCase):
         self.addCleanup(self.temp_dir.cleanup)
 
         # Mock devices to control TP size
-        self.mock_devices = [MagicMock(platform='cpu', device_kind='cpu')
-                             ] * TP_SIZE
+        self.mock_devices = [
+            SimpleNamespace(platform='cpu', device_kind='cpu')
+            for _ in range(TP_SIZE)
+        ]
         self.original_jax_devices = jax.devices
         jax.devices = lambda: self.mock_devices
 
