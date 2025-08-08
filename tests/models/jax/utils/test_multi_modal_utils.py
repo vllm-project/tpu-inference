@@ -1,9 +1,10 @@
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from multi_modal_utils import MultiModalEmbeddings, NestedTensors
 
 import tpu_commons.models.jax.utils.multi_modal_utils as multi_modal_utils
+from tpu_commons.models.jax.utils.multi_modal_utils import (
+    MultiModalEmbeddings, NestedTensors)
 
 # --- Tests for sanity_check_mm_encoder_outputs ---
 
