@@ -165,7 +165,13 @@ class HFWeightLoadingTest(jtu.JaxTestCase):
         # Mock devices to control TP size
         self.mock_devices = [MockDevice(id=i) for i in range(TP_SIZE)]
         self.original_jax_devices = jax.devices
-        jax.devices = lambda: self.mock_devices
+
+        def mock_devices_func(backend=None):
+            if backend is None:
+                return self.mock_devices
+            return self.original_jax_devices(backend)
+
+        jax.devices = mock_devices_func
 
         self.mesh = jax.sharding.Mesh(np.array(jax.devices()), ("model", ))
 
@@ -285,8 +291,10 @@ class HFWeightLoadingTest(jtu.JaxTestCase):
         for i, mock_file in enumerate(mock_files):
             call_args = mock_load_on_thread.call_args_list[i].args
             self.assertIs(call_args[0], self.vllm_config)
-            # nnx.State doesn't have a good __eq__, so we check identity
-            self.assertIs(call_args[1], self.params)
+            # nnx.State doesn't have a good __eq__, so we check that a State
+            # object with the same structure is passed.
+            self.assertIsInstance(call_args[1], nnx.State)
+            self.assertEqual(set(call_args[1].keys()), set(self.params.keys()))
             self.assertIs(call_args[2], self.mappings)
             self.assertIs(call_args[3], self.mesh)
             self.assertEqual(call_args[4], mock_file)
