@@ -3,6 +3,7 @@ from dataclasses import dataclass, make_dataclass
 import jax
 import jax.numpy as jnp
 from flax import nnx
+from jax.sharding import NamedSharding
 
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
@@ -57,6 +58,8 @@ class Llama4Attention(Attention):
     temperature_tuning: bool
     temperature_tuning_floor_scale: float
     temperature_tuning_scale: float
+    activation_attention_td: NamedSharding
+    activation_attention_out_td: NamedSharding
 
     def __call__(self,
                  x,
@@ -86,12 +89,10 @@ class Llama4Attention(Attention):
                 - The attention output tensor of shape
                   `(batch_size, seq_len, d_model)`.
         """
-        op_mode = "prefill" if is_prefill else "generate"
         md = attention_metadata
         x = jnp.asarray(x, self.dtype)
-        x_SD = nnx.with_sharding_constraint(
-            x, self.activation_attention_td[op_mode])
-        x_q_TD = nnx.with_sharding_constraint(x, self.activation_q_td[op_mode])
+        x_SD = nnx.with_sharding_constraint(x, self.activation_attention_td)
+        x_q_TD = nnx.with_sharding_constraint(x, self.activation_q_td)
         rope_scaling = self.rope_scaling
         rope_theta = self.rope_theta
         H = self.head_dim
@@ -111,8 +112,7 @@ class Llama4Attention(Attention):
                 if self.temperature_tuning:
                     q_TNH = self.apply_temperature_tuning(md, q_TNH)
 
-            q_TNH = nnx.with_sharding_constraint(q_TNH,
-                                                 self.query_tnh[op_mode])
+            q_TNH = nnx.with_sharding_constraint(q_TNH, self.query_tnh)
         with jax.named_scope("k_proj"):
             k_SKH = jnp.einsum('SD,DKH -> SKH', x_SD,
                                self.kernel_k_proj_DKH.value)
@@ -123,14 +123,12 @@ class Llama4Attention(Attention):
                 # Apply normaliation after RoPE
                 if self.use_qk_norm:
                     k_SKH = l2_norm(k_SKH)
-            k_SKH = nnx.with_sharding_constraint(k_SKH,
-                                                 self.keyvalue_skh[op_mode])
+            k_SKH = nnx.with_sharding_constraint(k_SKH, self.keyvalue_skh)
 
         with jax.named_scope("v_proj"):
             v_SKH = jnp.einsum('SD,DKH -> SKH', x_SD,
                                self.kernel_v_proj_DKH.value)
-            v_SKH = nnx.with_sharding_constraint(v_SKH,
-                                                 self.keyvalue_skh[op_mode])
+            v_SKH = nnx.with_sharding_constraint(v_SKH, self.keyvalue_skh)
 
         with jax.named_scope("attn_op"):
             new_kv_cache, outputs_TNH = self.attention(
@@ -147,7 +145,7 @@ class Llama4Attention(Attention):
             o_TD = jnp.einsum('TNH,NHD -> TD', outputs_TNH,
                               self.kernel_o_proj_NHD.value)
             o_TD = nnx.with_sharding_constraint(
-                o_TD, self.activation_attention_out_td[op_mode])
+                o_TD, self.activation_attention_out_td)
         return new_kv_cache, o_TD
 
     def apply_temperature_tuning(self, md: AttentionMetadata,

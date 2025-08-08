@@ -4,15 +4,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import nnx
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
 
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.common.attention.deepseek_v3_attention import MLA
 from tpu_commons.models.jax.common.base import ParamFactory
-from tpu_commons.models.jax.common.sharding import ShardingConfig
-from tpu_commons.models.jax.recipes.deepseek_v3 import (
-    DeepSeekV3GenerateShardingRulesConfig,
-    DeepSeekV3PrefillShardingRulesConfig, DeepSeekV3ShardingRulesConfig)
 
 
 class TestMLA(unittest.TestCase):
@@ -30,11 +27,6 @@ class TestMLA(unittest.TestCase):
             scale_initializer=nnx.initializers.ones,
             random_init=True,
         )
-        self.sharding_cfg = ShardingConfig(
-            default_rules_cls=DeepSeekV3ShardingRulesConfig,
-            prefill_rules=DeepSeekV3PrefillShardingRulesConfig,
-            generate_rules=DeepSeekV3GenerateShardingRulesConfig,
-        )
 
     def test_mla_forward_pass(self):
         hidden_size = 256
@@ -42,6 +34,8 @@ class TestMLA(unittest.TestCase):
         num_key_value_heads = 32
         qk_nope_head_dim = 64
         qk_rope_head_dim = 32
+
+        dummy_sharding = NamedSharding(self.mesh, P())
 
         mla = MLA(
             hidden_size=hidden_size,
@@ -69,8 +63,22 @@ class TestMLA(unittest.TestCase):
             },
             mesh=self.mesh,
             param_factory=self.param_factory,
-            sharding_cfg=self.sharding_cfg,
             quant=None,
+            # Provide all required sharding objects
+            nhd_sharding=dummy_sharding,
+            q_da_sharding=dummy_sharding,
+            anh_sharding=dummy_sharding,
+            kv_da_sharding=dummy_sharding,
+            activation_attention_td=dummy_sharding,
+            activation_q_td=dummy_sharding,
+            query_tnh=dummy_sharding,
+            query_ktnph=dummy_sharding,
+            keyvalue_skh=dummy_sharding,
+            keyvalue_cache_lskh=dummy_sharding,
+            keyvalue_cache_nbkph=dummy_sharding,
+            attn_o_tnh=dummy_sharding,
+            attn_o_ktnph=dummy_sharding,
+            activation_attention_out_td=dummy_sharding,
         )
         mla.generate_kernel(nnx.Rngs(42))
 

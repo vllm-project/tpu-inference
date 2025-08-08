@@ -5,13 +5,11 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding
-from jax.sharding import PartitionSpec as P
 from jaxtyping import DTypeLike, Float
 from vllm.config import VllmConfig
 
 from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
-from tpu_commons.models.jax.common.sharding import ShardingConfig
 
 DeepSeekV3RoutingConfig = make_dataclass(
     "RoutingConfig",
@@ -51,13 +49,11 @@ class DeepSeekV3Router(nnx.Module):
         cfg: The RoutingConfig object.
         mesh: The JAX device mesh for distributed computation.
         param_factory: A factory for creating and initializing model parameters.
-        sharding_cfg: Configuration for tensor sharding strategies.
         quant: Optional configuration for quantization.
     """
 
     mesh: Mesh
     param_factory: ParamFactory
-    sharding_cfg: ShardingConfig
     hidden_size: int
     num_experts: int
     num_experts_per_tok: int
@@ -66,12 +62,13 @@ class DeepSeekV3Router(nnx.Module):
     norm_topk_prob: bool
     routed_scaling_factor: float
     dtype: jnp.dtype
+
+    # Sharding Attributes
+    activation_ffw_td: NamedSharding
+    ed_sharding: NamedSharding
+    e_sharding: NamedSharding
+
     quant: Any | None = None
-
-    def __post_init__(self):
-        """Initializes the Router module by creating sharding configurations and generating the router kernel."""
-
-        self.create_sharding()
 
     def get_topk_indices(self, scores_TE: Float) -> Float:
         """Get the topk indices of the scores.
@@ -103,12 +100,11 @@ class DeepSeekV3Router(nnx.Module):
 
         return indices_TX
 
-    def __call__(self, x_TD: Float, op_mode: str) -> Tuple[Float, Float]:
+    def __call__(self, x_TD: Float) -> Tuple[Float, Float]:
         """Routes tokens to top k experts.
 
         Args:
             x_TD: Input array of shape (sequence, d_model).
-            op_mode: The operation mode ('prefill' or 'generate') to determine sharding.
 
         Returns:
             A tuple containing:
@@ -116,8 +112,7 @@ class DeepSeekV3Router(nnx.Module):
                 - indices: Indices of selected experts, shape (sequence, num_experts_per_tok).
         """
         x_TD = jnp.asarray(x_TD, self.dtype)
-        x_TD = nnx.with_sharding_constraint(x_TD,
-                                            self.activation_ffw_td[op_mode])
+        x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
 
         scores_TE = jnp.einsum("TD,DE -> TE", x_TD, self.kernel_DE.value)
         scores_TE = nnx.sigmoid(scores_TE)
@@ -147,31 +142,3 @@ class DeepSeekV3Router(nnx.Module):
             dtype=self.dtype,
             sharding=self.e_sharding,
         )
-
-    def create_sharding(self):
-        """Creates sharding configurations for activations and kernel."""
-        mode_dependent_attrs = [
-            "activation_ffw_td",
-        ]
-        for attr_name in mode_dependent_attrs:
-            prefill_sharding_config = getattr(self.sharding_cfg.prefill_rules,
-                                              attr_name)
-            generate_sharding_config = getattr(
-                self.sharding_cfg.generate_rules, attr_name)
-
-            sharding_dict = {
-                "prefill": NamedSharding(self.mesh,
-                                         P(*prefill_sharding_config)),
-                "generate": NamedSharding(self.mesh,
-                                          P(*generate_sharding_config)),
-            }
-            setattr(self, attr_name, sharding_dict)
-
-        # static sharding for kernel/weights
-        self.ed_sharding = NamedSharding(
-            self.mesh, P(*self.sharding_cfg.generate_rules.moe_router_de))
-
-        self.e_sharding = NamedSharding(
-            self.mesh, P(*self.sharding_cfg.generate_rules.moe_router_bias_e))
-
-        return
