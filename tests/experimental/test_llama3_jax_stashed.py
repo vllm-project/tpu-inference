@@ -8,8 +8,8 @@ import pytest
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
 
-from tpu_commons.models.jax.recipes.llama3 import (Llama3WeightLoader,
-                                                   LlamaForCausalLM)
+from tpu_commons.experimental.llama3_jax_stashed import (Llama3WeightLoader,
+                                                         LlamaForCausalLM)
 
 
 class MockParam:
@@ -136,7 +136,7 @@ class TestLlamaForCausalLM:
 
         assert jnp.all(final_norm_scale == 1.0)
 
-    @patch("tpu_commons.models.jax.recipes.llama3.Llama3WeightLoader")
+    @patch("tpu_commons.experimental.llama3_jax_stashed.Llama3WeightLoader")
     def test_load_weights_called_correctly(self, mock_loader_cls, rng, mesh):
         """Tests that the weight loader is called correctly for checkpoint loading."""
         vllm_config = MockVllmConfig(model_name="llama3-8b",
@@ -200,9 +200,9 @@ class TestLlama3WeightLoader:
         # Mock get_param to return a mock param with the target shape (hidden_size, vocab_size)
         mock_param = MockParam(shape=(128, 32))
 
-        with patch("tpu_commons.models.jax.recipes.llama3.model_weights_generator", return_value=dummy_weights), \
-            patch("tpu_commons.models.jax.recipes.llama3.get_param", return_value=mock_param), \
-            patch("tpu_commons.models.jax.recipes.llama3.shard_put", return_value=jnp.ones(mock_param.value.shape)) as mock_shard_put:
+        with patch("tpu_commons.experimental.llama3_jax_stashed.model_weights_generator", return_value=dummy_weights), \
+            patch("tpu_commons.experimental.llama3_jax_stashed.get_param", return_value=mock_param), \
+            patch("tpu_commons.experimental.llama3_jax_stashed.shard_put", return_value=jnp.ones(mock_param.value.shape)) as mock_shard_put:
             # This will now pass after the code fix
             weight_loader.load_weights_single_thread(model, [], mesh)
 
