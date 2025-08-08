@@ -221,7 +221,7 @@ class TPUModelRunner():
         )
         self.structured_decode_arange = np.arange(0, 32, dtype=np.int32)
 
-    @functools.partial(jax.jit, static_argnums=(0, ))
+    @functools.partial(jax.jit, static_argnums=(0, )) # the output should be sharded.
     def select_hidden_states_fn(self, hidden_states, indices_do_sample):
         return hidden_states[indices_do_sample]
 
@@ -704,7 +704,8 @@ class TPUModelRunner():
             self.maybe_setup_kv_connector(scheduler_output)
             self.kv_caches, hidden_states = self.model_fn(
                 self.state, *inputs[:3])
-            print("after model_fn")
+            print("hidden_states after model_fn", hidden_states.shape, hidden_states.sharding)
+            print("inputs[4]", inputs[4].shape, inputs[4].sharding)
             jax.block_until_ready(self.kv_caches)
             jax.block_until_ready(hidden_states)
             
@@ -713,7 +714,38 @@ class TPUModelRunner():
             hidden_states = self.select_hidden_states_fn(
                 hidden_states, inputs[4])
             jax.block_until_ready(hidden_states)
+            print("hidden_states after select", hidden_states.shape, hidden_states.sharding)
+            print("hidden_states 0", hidden_states[0].ravel()[:10])
+            print("hidden_states 1", hidden_states[1].ravel()[:10])
+            print("hidden_states 2", hidden_states[2].ravel()[:10])
+            print("hidden_states 3", hidden_states[3].ravel()[:10])
+            print("hidden_states 4", hidden_states[4].ravel()[:10])
+            print("hidden_states 5", hidden_states[5].ravel()[:10])
+            print("hidden_states 6", hidden_states[6].ravel()[:10])
+            print("hidden_states 7", hidden_states[7].ravel()[:10])
+            print("hidden_states 8", hidden_states[8].ravel()[:10])
+            print("hidden_states 9", hidden_states[9].ravel()[:10])
+            print("hidden_states 10", hidden_states[10].ravel()[:10])
+            print("hidden_states 11", hidden_states[11].ravel()[:10])
+
+
             logits = self.compute_logits_fn(self.state, hidden_states)
+            print("logits", logits.shape, logits.sharding) # should be 16, and ("data", )
+            
+            print("logits after select", logits.shape, logits.sharding)
+            print("logits 0", logits[0].ravel()[:10])
+            print("logits 1", logits[1].ravel()[:10])
+            print("logits 2", logits[2].ravel()[:10])
+            print("logits 3", logits[3].ravel()[:10])
+            print("logits 4", logits[4].ravel()[:10])
+            print("logits 5", logits[5].ravel()[:10])
+            print("logits 6", logits[6].ravel()[:10])
+            print("logits 7", logits[7].ravel()[:10])
+            print("logits 8", logits[8].ravel()[:10])
+            print("logits 9", logits[9].ravel()[:10])
+            print("logits 10", logits[10].ravel()[:10])
+            print("logits 11", logits[11].ravel()[:10])
+
             if scheduler_output.grammar_bitmask is not None:
                 require_struct_decoding, grammar_bitmask_padded, arange = \
                     self.prepare_structured_decoding_input(
@@ -726,12 +758,16 @@ class TPUModelRunner():
                     arange,
                 )
             tpu_sampling_metadata = inputs[3]
+            
             next_tokens = sample(
                 self.rng_params_for_sampling,
                 self.mesh,
                 logits,
                 tpu_sampling_metadata,
             )
+            
+            print("next_tokens after sampling", next_tokens)
+            
             if tpu_sampling_metadata.logprobs:
                 logprobs = self._compute_and_gather_logprobs(
                     logits, next_tokens, self.model_config.max_logprobs)
@@ -773,8 +809,7 @@ class TPUModelRunner():
             prompt_logprobs_dict[req_id] = None
 
         next_tokens = np.asarray(jax.device_get(next_tokens))
-        print("wenxin _execute_model req_ids", req_ids)
-        print("wenxin _execute_model next_tokens", next_tokens)
+        print("wenxin next_tokens", next_tokens)
         selected_token_ids = np.expand_dims(next_tokens[:num_reqs], 1)
         valid_sampled_token_ids = selected_token_ids.tolist()
         # Mask out the sampled tokens that should not be sampled.
@@ -1058,7 +1093,7 @@ class TPUModelRunner():
                 dp_token_offset + total_num_scheduled_tokens:dp_token_offset + padded_num_scheduled_tokens_per_dp_rank] = 0
             print("self.input_ids_cpu", self.input_ids_cpu)
         
-        print("---- ---- -----")
+        print("---- --final start -- -----")
         input_ids = self.input_ids_cpu[:padded_total_num_scheduled_tokens]
         print("input_ids", input_ids.shape, input_ids)
         positions = self.positions_cpu[:padded_total_num_scheduled_tokens]  
@@ -1078,10 +1113,10 @@ class TPUModelRunner():
         
         print("dp_rank_reqs", dp_rank_reqs)
         print("num_seqs", num_seqs)
-
+        print("---- --final finish-- -----")
         # Put to device
         sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
-            self.mesh, self.input_batch, padded_num_reqs_logits,
+            self.mesh, self.input_batch, padded_num_reqs_logits, logits_indices=logits_indices
             # reordered_req_ids=sum(dp_rank_reqs, []),
             # preferred_device=scheduler_output.preferred_device
         )

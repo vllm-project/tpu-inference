@@ -27,9 +27,9 @@ def sample(
         logits = jax.lax.with_sharding_constraint(
             logits, NamedSharding(mesh, P(None, None)))
 
-    if not tpu_sampling_metadata.do_sampling:
+    if True :
         return jnp.argmax(logits, axis=-1)
-
+    print("tpu_sampling_metadata", tpu_sampling_metadata)
     logits = logits.astype(jnp.float32)
     logits = topk_mask(logits, tpu_sampling_metadata.top_k, replace_val=-1e12)
     logits = topp_mask(logits, tpu_sampling_metadata.top_p, replace_val=-1e12)

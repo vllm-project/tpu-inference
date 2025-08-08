@@ -39,16 +39,20 @@ class TPUSupportedSamplingMetadata:
         mesh: Mesh,
         input_batch: InputBatch,
         padded_num_reqs: int,
+        logits_indices: Optional[jnp.ndarray] = None,
     ) -> "TPUSupportedSamplingMetadata":
         needs_logprobs = input_batch.max_num_logprobs > 0 if input_batch.max_num_logprobs else False
         if input_batch.all_greedy:
             return cls(do_sampling=False, logprobs=needs_logprobs)
-        num_reqs = input_batch.num_reqs
+        num_reqs = len(logits_indices) if logits_indices is not None else input_batch.num_reqs
 
         def fill_slice(cpu_torch_tensor: torch.Tensor,
                        fill_val: float) -> torch.Tensor:
             # Pad value is the default one.
-            cpu_torch_tensor[num_reqs:padded_num_reqs] = fill_val
+            if logits_indices is None:
+                cpu_torch_tensor[num_reqs: num_reqs + padded_num_reqs] = fill_val
+            else:
+                cpu_torch_tensor[:num_reqs][logits_indices==0] = fill_val
             return cpu_torch_tensor
 
         temp_tensor = fill_slice(input_batch.temperature_cpu,
@@ -57,7 +61,10 @@ class TPUSupportedSamplingMetadata:
                                   DEFAULT_SAMPLING_PARAMS["top_k"])
         top_p_tensor = fill_slice(input_batch.top_p_cpu,
                                   DEFAULT_SAMPLING_PARAMS["top_p"])
-
+        print("temp_tensor", temp_tensor)
+        print("top_k_tensor", top_k_tensor)
+        print("top_p_tensor", top_p_tensor)
+        
         def _device_array(cpu_tensor):
             sharding = NamedSharding(mesh, PartitionSpec(None))
             return jax.device_put(cpu_tensor, device=sharding)
