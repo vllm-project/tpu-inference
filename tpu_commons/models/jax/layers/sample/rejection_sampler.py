@@ -120,7 +120,7 @@ class RejectionSampler:
     def parse_output(
         output_token_ids: jnp.ndarray,
         vocab_size: int,
-        num_draft_tokens: jnp.ndarray,
+        num_draft_tokens_cpu: np.ndarray,
     ) -> list[list[int]]:
         """Parse the output of the rejection sampler.
 
@@ -130,15 +130,16 @@ class RejectionSampler:
                 the main tokens, and the last batch_size elements are bonus tokens.
                 Rejected tokens are replaced with `PLACEHOLDER_TOKEN_ID`.
             vocab_size: The size of the vocabulary.
-            num_draft_tokens: Number of draft tokens per request [batch_size].
+            num_draft_tokens_cpu: Number of draft tokens per request [batch_size]
+                as a numpy array on CPU.
 
         Returns:
             A list of lists of token IDs.
         """
         # Convert JAX array to numpy for easier manipulation
         output_token_ids_np = np.asarray(output_token_ids)
-        batch_size = num_draft_tokens.shape[0]
-        total_tokens = int(jnp.sum(num_draft_tokens))
+        batch_size = num_draft_tokens_cpu.shape[0]
+        total_tokens = int(np.sum(num_draft_tokens_cpu))
 
         # Split main tokens and bonus tokens
         main_tokens = output_token_ids_np[:total_tokens]  # [num_tokens]
@@ -149,7 +150,7 @@ class RejectionSampler:
         start_idx = 0
 
         for i in range(batch_size):
-            seq_length = int(num_draft_tokens[i])
+            seq_length = int(num_draft_tokens_cpu[i])
             end_idx = start_idx + seq_length
 
             # Get main tokens for this sequence

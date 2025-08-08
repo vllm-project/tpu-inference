@@ -5,6 +5,7 @@ This test suite is structured to mirror the GPU rejection sampler tests.
 from typing import List, Optional
 
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from tpu_commons.models.jax.layers.sample.rejection_sampler import (
@@ -131,7 +132,9 @@ def _run_rejection_sampler_test(
 
     # Parse the output using the new format
     parsed_output = rejection_sampler.parse_output(
-        output, vocab_size=100, num_draft_tokens=num_draft_tokens)
+        output,
+        vocab_size=100,
+        num_draft_tokens_cpu=np.asarray(num_draft_tokens))
 
     assert parsed_output == expected_output, f"Expected {expected_output}, got {parsed_output}"
 
@@ -252,9 +255,10 @@ def test_parse_output(rejection_sampler):
 
     num_draft_tokens = jnp.array([3, 2], dtype=jnp.int32)
 
-    parsed_output = rejection_sampler.parse_output(output_token_ids,
-                                                   vocab_size,
-                                                   num_draft_tokens)
+    parsed_output = rejection_sampler.parse_output(
+        output_token_ids,
+        vocab_size,
+        num_draft_tokens_cpu=np.asarray(num_draft_tokens))
 
     expected = [[10, 20, 30, 40], [50, 60, 70]]
     assert parsed_output == expected, f"Expected {expected}, got {parsed_output}"
@@ -275,9 +279,10 @@ def test_parse_output_edge_cases(rejection_sampler):
 
     num_draft_tokens = jnp.array([3, 2], dtype=jnp.int32)
 
-    parsed_output = rejection_sampler.parse_output(output_token_ids,
-                                                   vocab_size,
-                                                   num_draft_tokens)
+    parsed_output = rejection_sampler.parse_output(
+        output_token_ids,
+        vocab_size,
+        num_draft_tokens_cpu=np.asarray(num_draft_tokens))
     expected = [[10], [20, 30, 40]]
     assert parsed_output == expected, f"Expected {expected}, got {parsed_output}"
 
@@ -289,9 +294,10 @@ def test_parse_output_edge_cases(rejection_sampler):
 
     num_draft_tokens = jnp.array([3], dtype=jnp.int32)
 
-    parsed_output = rejection_sampler.parse_output(output_token_ids,
-                                                   vocab_size,
-                                                   num_draft_tokens)
+    parsed_output = rejection_sampler.parse_output(
+        output_token_ids,
+        vocab_size,
+        num_draft_tokens_cpu=np.asarray(num_draft_tokens))
     expected = [[10, 20]]  # Invalid tokens filtered out
     assert parsed_output == expected, f"Expected {expected}, got {parsed_output}"
 
@@ -302,8 +308,9 @@ def test_parse_output_edge_cases(rejection_sampler):
 
     num_draft_tokens = jnp.array([0, 0], dtype=jnp.int32)
 
-    parsed_output = rejection_sampler.parse_output(output_token_ids,
-                                                   vocab_size,
-                                                   num_draft_tokens)
+    parsed_output = rejection_sampler.parse_output(
+        output_token_ids,
+        vocab_size,
+        num_draft_tokens_cpu=np.asarray(num_draft_tokens))
     expected = [[50], [60]]  # Only bonus tokens
     assert parsed_output == expected, f"Expected {expected}, got {parsed_output}"
