@@ -108,6 +108,7 @@ class MockDevice:
         self.id = id
         self.platform = 'cpu'
         self.device_kind = 'cpu'
+        self.process_index = 0  # Mock process index
 
     def __hash__(self):
         return hash(self.id)
