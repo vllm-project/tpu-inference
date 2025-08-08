@@ -4,6 +4,7 @@ import os
 from typing import Callable, Dict, Optional, Tuple, Union
 
 import jax
+import jax.numpy as jnp
 import jaxtyping
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -29,6 +30,12 @@ from tpu_commons.worker.base import AbstractTpuWorker
 
 logger = init_logger(__name__)
 
+_DTYPE: dict[str, jnp.dtype] = {
+    "bfloat16": jnp.bfloat16,
+    "float": jnp.float32,
+    "float32": jnp.float32,
+}
+
 
 class TPUWorker(AbstractTpuWorker):
 
@@ -41,6 +48,21 @@ class TPUWorker(AbstractTpuWorker):
                  devices=None,
                  host_interface: Optional[HostInterface] = None):
         super().__init__(host_interface)
+
+        # If we use vLLM's model implementation in PyTorch, we should set it with torch version of the dtype.
+        impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
+        if impl != "vllm":  # vllm-pytorch implementation does not need this conversion
+
+            # NOTE(wenlong): because sometimes mm needs to use torch for preprocessing
+            if not isinstance(vllm_config.model_config.dtype, str):
+                logger.warning(
+                    "The model dtype is not properly set for JAX backend. "
+                    "Overwriting it to jnp.bfloat16")
+                vllm_config.model_config.dtype = jnp.bfloat16
+            else:
+                vllm_config.model_config.dtype = _DTYPE.get(
+                    vllm_config.model_config.dtype, jnp.bfloat16)
+
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.parallel_config = vllm_config.parallel_config
