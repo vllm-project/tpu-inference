@@ -758,8 +758,8 @@ class TestTPUJaxRunner(unittest.TestCase):
         np.testing.assert_array_equal(np.asarray(gathered_embeds_3[0]),
                                       np.asarray(expected_embeds_3))
 
-    def test_get_model_inputs(self):
-        """Tests _get_model_inputs for both multimodal and text-only models."""
+    def test_get_input_ids_embeds(self):
+        """Tests _get_input_ids_embeds for both multimodal and text-only models."""
         # 1. ===== Setup =====
         dummy_input_ids = jnp.array([1, 2, 3])
         dummy_mm_embeds = [jnp.ones((10, 128))]
@@ -774,7 +774,7 @@ class TestTPUJaxRunner(unittest.TestCase):
         # 2. ===== Act & Assert (Multimodal) =====
         self.runner.is_multimodal_model = True
 
-        input_ids_res, inputs_embeds_res = self.runner._get_model_inputs(
+        input_ids_res, inputs_embeds_res = self.runner._get_input_ids_embeds(
             dummy_input_ids, dummy_mm_embeds)
 
         self.assertIsNone(input_ids_res)
@@ -789,7 +789,7 @@ class TestTPUJaxRunner(unittest.TestCase):
         self.mock_get_input_embed_fn.reset_mock()
         self.runner.is_multimodal_model = False
 
-        input_ids_res, inputs_embeds_res = self.runner._get_model_inputs(
+        input_ids_res, inputs_embeds_res = self.runner._get_input_ids_embeds(
             dummy_input_ids, dummy_mm_embeds)
 
         self.assertIsNone(inputs_embeds_res)
