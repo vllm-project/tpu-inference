@@ -308,6 +308,8 @@ def mock_load_deps(monkeypatch):
     monkeypatch.setattr(f"{base_path}.load_hf_weights_on_thread",
                         mocks["load_hf_weights_on_thread"])
     monkeypatch.setattr(f"{base_path}.nnx.update", mocks["nnx_update"])
+    monkeypatch.setattr(f"{base_path}.ThreadPoolExecutor",
+                        mocks["ThreadPoolExecutor"])
     return mocks
 
 
