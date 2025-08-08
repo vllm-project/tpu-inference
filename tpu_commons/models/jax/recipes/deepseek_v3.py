@@ -1,5 +1,5 @@
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import jax
@@ -8,7 +8,8 @@ import ml_dtypes
 import torch
 from flax import nnx
 from flax.typing import PRNGKey
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
 from vllm.config import VllmConfig
 
 from tpu_commons.logger import init_logger
@@ -21,10 +22,6 @@ from tpu_commons.models.jax.common.layers import (DenseFFW, Embedder, LMhead,
 from tpu_commons.models.jax.common.model import Model
 from tpu_commons.models.jax.common.moe.deepseek_moe import DeepSeekV3Router
 from tpu_commons.models.jax.common.moe.moe import MoE
-from tpu_commons.models.jax.common.sharding import (ATTN_HEAD_AXIS_NAME,
-                                                    ATTN_TENSOR_AXIS_NAME,
-                                                    Sharding,
-                                                    ShardingRulesConfig)
 from tpu_commons.models.jax.common.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
 from tpu_commons.models.jax.layers.misc import shard_put
@@ -32,48 +29,6 @@ from tpu_commons.models.jax.utils.weight_utils import (
     get_param, hf_model_weights_iterator, print_param_info, reshape_params)
 
 logger = init_logger(__name__)
-
-
-@dataclass
-class DeepSeekV3ShardingRulesConfig(ShardingRulesConfig):
-    # MLA Query down projection weight: (Dim, QueryLoraRank)
-    attn_mla_qa_weight_da: tuple = (None, None)
-    # MLA Query up projection weight: (QueryLoraRank, NumHeads, HeadDim)
-    attn_mla_qb_weight_anh: tuple = (None, None, None)
-    # MLA KV down projection weight: (Dim, KVLoRA + QKRopeHeadDim)
-    attn_mla_kva_weight_da: tuple = (None, None)
-    # MLA KV up projection weight: (KVLoRA, NumHeads, QKNopeHeadDim + VHeadDim)
-    attn_mla_kvb_weight_anh: tuple = (None, None, None)
-    # TODO(chenyang) this might not needed after RPA kernel V3 is refactored.
-    # Attention V3 output: (actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim)
-    attn_o_ktnph: tuple = (ATTN_HEAD_AXIS_NAME, None, None, None,
-                           ATTN_TENSOR_AXIS_NAME)
-    # Attention V3 query: (actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim)
-    query_ktnph: tuple = (ATTN_HEAD_AXIS_NAME, None, None, None,
-                          ATTN_TENSOR_AXIS_NAME)
-    # Attention V3 kv_cache: (total_num_pages, page_size, num_kv_heads_x2 // kv_packing, kv_packing, head_dim)
-    keyvalue_cache_nbkph: tuple = (None, None, ATTN_HEAD_AXIS_NAME, None,
-                                   ATTN_TENSOR_AXIS_NAME)
-
-
-@dataclass
-class DeepSeekV3PrefillShardingRulesConfig(DeepSeekV3ShardingRulesConfig):
-    # MLA Query up projection weight: (QueryLoraRank, NumHeads, HeadDim)
-    attn_mla_qb_weight_anh: tuple = (None, ATTN_HEAD_AXIS_NAME,
-                                     ATTN_TENSOR_AXIS_NAME)
-    # MLA Query up projection weight: (QueryLoraRank, NumHeads, HeadDim)
-    attn_mla_kvb_weight_anh: tuple = (None, ATTN_HEAD_AXIS_NAME,
-                                      ATTN_TENSOR_AXIS_NAME)
-
-
-@dataclass
-class DeepSeekV3GenerateShardingRulesConfig(DeepSeekV3ShardingRulesConfig):
-    # MLA Query up projection weight: (QueryLoraRank, NumHeads, HeadDim)
-    attn_mla_qb_weight_anh: tuple = (None, ATTN_HEAD_AXIS_NAME,
-                                     ATTN_TENSOR_AXIS_NAME)
-    # MLA KV up projection weight: (KVLoRA, NumHeads, QKNopeHeadDim + VHeadDim)
-    attn_mla_kvb_weight_anh: tuple = (None, ATTN_HEAD_AXIS_NAME,
-                                      ATTN_TENSOR_AXIS_NAME)
 
 
 @dataclass
@@ -97,11 +52,6 @@ class DeepSeekV3(Model):
         #        "tensor_parallelism": 4,
         #        "expert_parallelism": 2
         #    }  # todo: update this.
-        self._sharding_config = Sharding(
-            prefill_rules=asdict(DeepSeekV3PrefillShardingRulesConfig()),
-            generate_rules=asdict(DeepSeekV3GenerateShardingRulesConfig()),
-            default_rules_cls=DeepSeekV3ShardingRulesConfig,
-            vllm_config=self.vllm_config).sharding_cfg
 
         num_layers: int = 61
         num_local_experts: int = 256
@@ -137,7 +87,6 @@ class DeepSeekV3(Model):
         qk_rope_head_dim = 64
         v_head_dim = 128
 
-        logger.info(f"Using the following config:\n {self._sharding_config}")
         self.use_random_init = self.vllm_config.additional_config.get(
             "random_weights", False)
         self.mesh = mesh
@@ -162,10 +111,10 @@ class DeepSeekV3(Model):
         self.embedder = Embedder(vocab_size=vocab_size,
                                  hidden_size=hidden_size,
                                  dtype=dtype,
-                                 generate_rules_prelogit_td=self.
-                                 _sharding_config.generate_rules.prelogit_td,
-                                 generate_rules_vocab_vd=self._sharding_config.
-                                 generate_rules.vocab_vd,
+                                 vd_sharding=NamedSharding(
+                                     self.mesh,
+                                     P(('data', 'expert', 'model'), None)),
+                                 prelogit_td=NamedSharding(self.mesh, P()),
                                  mesh=self.mesh,
                                  param_factory=self.param_factory)
         self.embedder.generate_kernel(self.rng)
@@ -184,30 +133,49 @@ class DeepSeekV3(Model):
                 v_head_dim=v_head_dim,
                 mesh=self.mesh,
                 param_factory=self.param_factory,
-                sharding_cfg=self._sharding_config,
                 hidden_size=hidden_size,
                 num_attention_heads=num_attention_heads,
                 num_key_value_heads=num_key_value_heads,
                 head_dim=v_head_dim,  # MLA uses v_head_dim as head_dim
-                dtype=dtype)
+                dtype=dtype,
+                activation_attention_td=NamedSharding(self.mesh,
+                                                      P(None, 'model')),
+                activation_q_td=NamedSharding(self.mesh, P(None, 'model')),
+                query_tnh=NamedSharding(self.mesh, P(None, 'model', None)),
+                keyvalue_skh=NamedSharding(self.mesh, P(None, 'model', None)),
+                activation_attention_out_td=NamedSharding(
+                    self.mesh, P(None, 'model')),
+                keyvalue_cache_lskh=NamedSharding(self.mesh,
+                                                  P(None, None, 'model',
+                                                    None)),
+                attn_o_tnh=NamedSharding(self.mesh, P(None, 'model', None)),
+                q_da_sharding=NamedSharding(self.mesh, P(None, 'model')),
+                anh_sharding=NamedSharding(self.mesh, P(None, 'model', None)),
+                kv_da_sharding=NamedSharding(self.mesh, P(None, 'model')),
+                nhd_sharding=NamedSharding(self.mesh, P('model', None, None)),
+                query_ktnph=NamedSharding(self.mesh,
+                                          P('model', None, None, None, None)),
+                keyvalue_cache_nbkph=NamedSharding(
+                    self.mesh, P(None, None, 'model', None, None)),
+                attn_o_ktnph=NamedSharding(self.mesh,
+                                           P('model', None, None, None, None)))
 
         for i in range(first_k_dense_replace):
             block = TransformerBlock(
-                hidden_size=hidden_size,
-                rmsnorm_epsilon=rms_norm_eps,
-                attn_dtype=dtype,
-                dense_dtype=dtype,
                 attn=_create_mla(),
-                custom_module=DenseFFW(dtype=dtype,
-                                       hidden_act=hidden_act,
-                                       hidden_size=hidden_size,
-                                       intermediate_size=ffw_intermediate_size,
-                                       mesh=self.mesh,
-                                       param_factory=self.param_factory,
-                                       sharding_cfg=self._sharding_config),
-                param_factory=self.param_factory,
-                mesh=self.mesh,
-                sharding_cfg=self._sharding_config)
+                custom_module=DenseFFW(
+                    dtype=dtype,
+                    hidden_act=hidden_act,
+                    hidden_size=hidden_size,
+                    intermediate_size=ffw_intermediate_size,
+                    mesh=self.mesh,
+                    df_sharding=NamedSharding(self.mesh,
+                                              P(None, ('model', 'expert'))),
+                    fd_sharding=NamedSharding(self.mesh,
+                                              P(('model', 'expert'), None)),
+                    activation_ffw_td=NamedSharding(self.mesh, P()),
+                    param_factory=self.param_factory))
+
             self.layers.append(block)
 
         for i in range(first_k_dense_replace, num_layers):
@@ -215,7 +183,6 @@ class DeepSeekV3(Model):
             router = DeepSeekV3Router(
                 mesh=self.mesh,
                 param_factory=self.param_factory,
-                sharding_cfg=self._sharding_config,
                 hidden_size=hidden_size,
                 num_experts=num_local_experts,
                 num_experts_per_tok=num_experts_per_token,
@@ -223,24 +190,38 @@ class DeepSeekV3(Model):
                 topk_groups=4,
                 norm_topk_prob=True,
                 routed_scaling_factor=2.5,
-                dtype=dtype)
-            custom_module = MoE(dtype=dtype,
-                                num_local_experts=num_local_experts,
-                                apply_expert_weight_before_computation=False,
-                                hidden_size=hidden_size,
-                                intermediate_size_moe=moe_intermediate_size,
-                                hidden_act=hidden_act,
-                                mesh=self.mesh,
-                                param_factory=self.param_factory,
-                                sharding_cfg=self._sharding_config,
-                                router=router) if is_moe_layer else DenseFFW(
-                                    dtype=dtype,
-                                    hidden_act=hidden_act,
-                                    hidden_size=hidden_size,
-                                    intermediate_size=ffw_intermediate_size,
-                                    mesh=self.mesh,
-                                    param_factory=self.param_factory,
-                                    sharding_cfg=self._sharding_config)
+                dtype=dtype,
+                activation_ffw_td=NamedSharding(self.mesh, P('data', None)),
+                ed_sharding=NamedSharding(self.mesh, P('expert', None)),
+                e_sharding=NamedSharding(self.mesh, P('expert')))
+            custom_module = MoE(
+                dtype=dtype,
+                num_local_experts=num_local_experts,
+                apply_expert_weight_before_computation=False,
+                hidden_size=hidden_size,
+                intermediate_size_moe=moe_intermediate_size,
+                hidden_act=hidden_act,
+                mesh=self.mesh,
+                param_factory=self.param_factory,
+                activation_ffw_td=NamedSharding(self.mesh, P('data', None)),
+                activation_ffw_ted=NamedSharding(self.mesh,
+                                                 P('data', 'expert', None)),
+                edf_sharding=NamedSharding(self.mesh, P(
+                    'expert', None, 'model')),
+                efd_sharding=NamedSharding(self.mesh, P(
+                    'expert', 'model', None)),
+                router=router) if is_moe_layer else DenseFFW(
+                    dtype=dtype,
+                    hidden_act=hidden_act,
+                    hidden_size=hidden_size,
+                    intermediate_size=ffw_intermediate_size,
+                    mesh=self.mesh,
+                    param_factory=self.param_factory,
+                    df_sharding=NamedSharding(self.mesh,
+                                              P(None, ('model', 'expert'))),
+                    fd_sharding=NamedSharding(self.mesh,
+                                              P(('model', 'expert'), None)),
+                    activation_ffw_td=NamedSharding(self.mesh, P()))
 
             block = SharedExpertsTransformerBlock(
                 hidden_size=hidden_size,
@@ -249,17 +230,20 @@ class DeepSeekV3(Model):
                 dense_dtype=dtype,
                 custom_module=custom_module,
                 attn=_create_mla(),
-                shared_experts=DenseFFW(dtype=dtype,
-                                        hidden_act=hidden_act,
-                                        hidden_size=hidden_size,
-                                        intermediate_size=shared_experts *
-                                        moe_intermediate_size,
-                                        mesh=self.mesh,
-                                        param_factory=self.param_factory,
-                                        sharding_cfg=self._sharding_config),
+                shared_experts=DenseFFW(
+                    dtype=dtype,
+                    hidden_act=hidden_act,
+                    hidden_size=hidden_size,
+                    intermediate_size=shared_experts * moe_intermediate_size,
+                    mesh=self.mesh,
+                    param_factory=self.param_factory,
+                    df_sharding=NamedSharding(self.mesh,
+                                              P(None, ('model', 'expert'))),
+                    fd_sharding=NamedSharding(self.mesh,
+                                              P(('model', 'expert'), None)),
+                    activation_ffw_td=NamedSharding(self.mesh, P())),
                 param_factory=self.param_factory,
-                mesh=self.mesh,
-                sharding_cfg=self._sharding_config)
+                mesh=self.mesh)
             self.layers.append(block)
 
         for i in range(len(self.layers)):
@@ -269,25 +253,24 @@ class DeepSeekV3(Model):
             dims=hidden_size,
             mesh=self.mesh,
             param_factory=self.param_factory,
-            prefill_rules=self._sharding_config.prefill_rules,
-            generate_rules=self._sharding_config.generate_rules,
+            activation_ffw_td=NamedSharding(self.mesh, P()),
             epsilon=rms_norm_eps,
             with_scale=True,
             dtype=dtype,
         )
         self.final_norm.generate_kernel(self.rng)
 
-        self.lm_head = LMhead(vocab_size=vocab_size,
-                              hidden_size=hidden_size,
-                              dtype=dtype,
-                              generate_rules_prelogit_td=self._sharding_config.
-                              generate_rules.prelogit_td,
-                              generate_rules_vocab_vd=self._sharding_config.
-                              generate_rules.vocab_vd,
-                              generate_rules_vocab_dv=self._sharding_config.
-                              generate_rules.vocab_dv,
-                              mesh=self.mesh,
-                              param_factory=self.param_factory)
+        self.lm_head = LMhead(
+            vocab_size=vocab_size,
+            hidden_size=hidden_size,
+            dtype=dtype,
+            prelogit_td=NamedSharding(self.mesh, P()),
+            vd_sharding=NamedSharding(self.mesh,
+                                      P(('data', 'expert', 'model'), None)),
+            dv_sharding=NamedSharding(self.mesh,
+                                      P(None, ('data', 'expert', 'model'))),
+            mesh=self.mesh,
+            param_factory=self.param_factory)
         self.lm_head.generate_kernel(self.rng)
 
         # TODO: Add MTP.

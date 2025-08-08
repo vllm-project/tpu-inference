@@ -11,8 +11,6 @@ from vllm.config import VllmConfig
 
 from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
-from tpu_commons.models.jax.common.sharding import (ShardingConfig,
-                                                    ShardingRulesConfig)
 
 
 # A dummy for modeling_flax_utils which might contain activation functions
@@ -67,16 +65,11 @@ class RMSNorm(nnx.Module):
     dims: int
     mesh: Mesh
     param_factory: ParamFactory
-    prefill_rules: ShardingRulesConfig
-    generate_rules: ShardingRulesConfig
+    activation_ffw_td: NamedSharding
     epsilon: float = 1e-6
     with_scale: bool = True
     dtype: Any = jnp.float32
     quant: Any | None = None
-
-    def __post_init__(self):
-        """Initializes the scale parameter."""
-        self.create_sharding()
 
     def __call__(self, x_TD: Float, op_mode='generate') -> Float:
         """Applies RMS Normalization to the input tensor.
@@ -88,8 +81,7 @@ class RMSNorm(nnx.Module):
             The normalized tensor with the same shape as the input.
         """
         x_TD = jnp.asarray(x_TD, self.dtype)
-        x_TD = nnx.with_sharding_constraint(x_TD,
-                                            self.activation_ffw_td[op_mode])
+        x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
 
         with jax.named_scope("rms_norm_variance"):
             var_T1 = jnp.mean(jnp.square(x_TD), axis=-1, keepdims=True)
@@ -98,38 +90,16 @@ class RMSNorm(nnx.Module):
 
         with jax.named_scope("rms_norm_scale_apply"):
             normed_x_TD *= self.scale.value
-        normed_x_TD = nnx.with_sharding_constraint(
-            normed_x_TD, self.activation_ffw_td[op_mode])
+        normed_x_TD = nnx.with_sharding_constraint(normed_x_TD,
+                                                   self.activation_ffw_td)
         return normed_x_TD.astype(self.dtype)
 
     def generate_kernel(self, rngs: nnx.Rngs):
         self.scale = self.param_factory.create_scale_param(
             rngs,
             shape=(self.dims, ),
-            sharding=self.scale_sharding,
+            sharding=NamedSharding(self.mesh, P()),
             dtype=self.dtype)
-
-    def create_sharding(self):
-        """Creates and sets sharding attributes for weights and activations."""
-        mode_dependent_attrs = [
-            "activation_ffw_td",
-        ]
-        for attr_name in mode_dependent_attrs:
-            prefill_sharding_config = getattr(self.prefill_rules, attr_name)
-            generate_sharding_config = getattr(self.generate_rules, attr_name)
-
-            sharding_dict = {
-                'prefill': NamedSharding(self.mesh,
-                                         P(*prefill_sharding_config)),
-                'generate': NamedSharding(self.mesh,
-                                          P(*generate_sharding_config))
-            }
-            setattr(self, attr_name, sharding_dict)
-
-        # No Sharding on the scale parameter
-        self.scale_sharding = NamedSharding(self.mesh, P())
-
-        return
 
 
 DenseFFWConfig = make_dataclass(
@@ -172,28 +142,23 @@ class DenseFFW(nnx.Module):
     hidden_size: int
     intermediate_size: int
     param_factory: ParamFactory
-    sharding_cfg: ShardingConfig
+    df_sharding: NamedSharding
+    fd_sharding: NamedSharding
+    activation_ffw_td: NamedSharding
     quant: Any | None = None
 
-    def __post_init__(self):
-        """Initializes the weight kernels for the feed-forward layer."""
-        self.create_sharding()
-
-    def __call__(self, x_TD, op_mode):
+    def __call__(self, x_TD):
         """Performs the forward pass of the FFW layer.
 
         Args:
             x_TD: The input tensor of shape either `(sequence, d_model)`
-            op_mode: The operational mode ('prefill' or 'generate'), used for
-                selecting sharding annotations.
 
         Returns:
             The output tensor of shape `(batch, sequence, d_model)`.
         """
         # TODO consider to create factories for einsum(?)
         x_TD = jnp.asarray(x_TD, self.dtype)
-        x_TD = nnx.with_sharding_constraint(x_TD,
-                                            self.activation_ffw_td[op_mode])
+        x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
         with jax.named_scope("wi_0"):
             gating_TF = jnp.einsum('TD,DF -> TF', x_TD,
                                    self.kernel_gating_DF.value)
@@ -219,33 +184,6 @@ class DenseFFW(nnx.Module):
             rngs, shape=(D, F), dtype=self.dtype, sharding=self.df_sharding)
         self.kernel_down_proj_FD = self.param_factory.create_kernel_param(
             rngs, shape=(F, D), dtype=self.dtype, sharding=self.fd_sharding)
-
-    def create_sharding(self):
-        """Creates and sets sharding attributes for weights and activations."""
-        mode_dependent_attrs = [
-            "activation_ffw_td",
-        ]
-        for attr_name in mode_dependent_attrs:
-            prefill_sharding_config = getattr(self.sharding_cfg.prefill_rules,
-                                              attr_name)
-            generate_sharding_config = getattr(
-                self.sharding_cfg.generate_rules, attr_name)
-
-            sharding_dict = {
-                'prefill': NamedSharding(self.mesh,
-                                         P(*prefill_sharding_config)),
-                'generate': NamedSharding(self.mesh,
-                                          P(*generate_sharding_config))
-            }
-            setattr(self, attr_name, sharding_dict)
-
-        # static sharding for kernel/weights
-        self.df_sharding = NamedSharding(
-            self.mesh, P(*self.sharding_cfg.generate_rules.ffw_weight_df))
-        self.fd_sharding = NamedSharding(
-            self.mesh, P(*self.sharding_cfg.generate_rules.ffw_weight_fd))
-
-        return
 
 
 EmbedderConfig = make_dataclass(
@@ -286,13 +224,9 @@ class Embedder(nnx.Module):
     dtype: jnp.dtype
     mesh: Mesh
     param_factory: ParamFactory
+    prelogit_td: NamedSharding
+    vd_sharding: NamedSharding
     normalize_embeddings: bool = False
-    generate_rules_prelogit_td: tuple = (None, None)
-    generate_rules_vocab_vd: tuple = (None, None)
-
-    def __post_init__(self):
-        """Initializes the embedding table."""
-        self.create_sharding()
 
     def __call__(self, x, decode=False):
         """Dispatches to either the encode or decode method.
@@ -357,15 +291,8 @@ class Embedder(nnx.Module):
                 embedding_TD *= jnp.sqrt(self.hidden_size).astype(self.dtype)
         return embedding_TD
 
-    def create_sharding(self):
-        """Creates and sets sharding attributes for weights and activations."""
-        self.prelogit_td = NamedSharding(self.mesh,
-                                         P(*self.generate_rules_prelogit_td))
-        self.vd_sharding = NamedSharding(self.mesh,
-                                         P(*self.generate_rules_vocab_vd))
 
-
-@dataclass
+@dataclass(kw_only=True)
 class LMhead(Embedder):
     """
     An Embedder that uses a (D, V) shaped embedding table, inheriting from
@@ -374,7 +301,7 @@ class LMhead(Embedder):
     This implementation overrides the kernel generation, encoding, and decoding
     methods to work with the transposed embedding matrix layout.
     """
-    generate_rules_vocab_dv: tuple = (None, None)
+    dv_sharding: NamedSharding
 
     def generate_kernel(self, rngs: nnx.Rngs):
         self.input_embedding_table_DV = self.param_factory.create_kernel_param(
@@ -415,10 +342,3 @@ class LMhead(Embedder):
             logits_TV = jnp.einsum('DV,TD -> TV',
                                    self.input_embedding_table_DV.value, x_TD)
         return logits_TV
-
-    def create_sharding(self):
-        """Creates and sets sharding attributes for weights and activations."""
-        self.prelogit_td = NamedSharding(self.mesh,
-                                         P(*self.generate_rules_prelogit_td))
-        self.dv_sharding = NamedSharding(self.mesh,
-                                         P(*self.generate_rules_vocab_dv))

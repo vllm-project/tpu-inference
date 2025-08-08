@@ -1,22 +1,31 @@
 from dataclasses import dataclass, field, make_dataclass
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
+from jax.experimental import shard_map
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from jax.typing import DTypeLike
 from vllm.config import VllmConfig
 
+from tpu_commons.kernels.ragged_paged_attention.kernel import \
+    ragged_paged_attention
+from tpu_commons.kernels.ragged_paged_attention.v3.kernel import (
+    prepare_inputs, prepare_outputs)
+from tpu_commons.kernels.ragged_paged_attention.v3.kernel import \
+    ragged_paged_attention as ragged_paged_attention_v3
+from tpu_commons.kernels.ragged_paged_attention.v3.util import \
+    get_dtype_packing
+from tpu_commons.models.jax.attention_interface import update_kv_cache
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.models.jax.common.attention.attention import (Attention,
-                                                               KVCache)
 from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
 from tpu_commons.models.jax.common.layers import RMSNorm
 from tpu_commons.models.jax.common.rope import DeepseekScalingRotaryEmbedding
-from tpu_commons.models.jax.common.sharding import ShardingConfig
+
+KVCache = Tuple[jax.Array, jax.Array]
 
 MLAConfig = make_dataclass(
     "MLAConfig",
@@ -59,26 +68,53 @@ MLAConfig.__doc__ = f"""Configuration for the MLA module.
 
 # TODO (wenxindongwork): Add MLA KV cache implementation. For now, cache complete KV vectors.
 @dataclass(kw_only=True)
-class MLA(Attention):
+class MLA(nnx.Module):
     """An implementation of Multi-Head Latent Attention as
     described in the DeepSeek V3 paper.
 
     Attributes:
         mesh: The JAX device mesh for distributed computation.
         param_factory: A factory for creating and initializing model parameters.
-        sharding_cfg: Configuration for tensor sharding strategies.
         quant: Optional configuration for quantization.
     """
-
+    hidden_size: int
+    num_attention_heads: int
+    num_key_value_heads: int
+    head_dim: int
+    rope_theta: float
+    rope_scaling: dict[str, Any]
+    dtype: jnp.dtype
     mesh: Mesh
     param_factory: ParamFactory
-    sharding_cfg: ShardingConfig
+
     q_lora_rank: int
     kv_lora_rank: int
     qk_nope_head_dim: int
     qk_rope_head_dim: int
     v_head_dim: int
     rms_norm_eps: float
+
+    # Sharding attributes
+    nhd_sharding: NamedSharding
+    q_da_sharding: NamedSharding
+    anh_sharding: NamedSharding
+    kv_da_sharding: NamedSharding
+
+    activation_attention_td: NamedSharding
+    activation_q_td: NamedSharding
+    query_tnh: NamedSharding
+    query_ktnph: NamedSharding
+
+    keyvalue_skh: NamedSharding
+    keyvalue_cache_lskh: NamedSharding
+    keyvalue_cache_nbkph: NamedSharding
+
+    attn_o_tnh: NamedSharding
+    attn_o_ktnph: NamedSharding
+    activation_attention_out_td: NamedSharding
+
+    attention_chunk_size: int | None = None
+    rope_input_ordering: str = "split"
     quant: Any | None = None
 
     def __post_init__(self):
@@ -89,8 +125,6 @@ class MLA(Attention):
         self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
 
         assert self.N == self.K, "N and K must be equal for MLA"
-
-        self.create_sharding()
 
         self.rope = DeepseekScalingRotaryEmbedding(
             self.qk_rope_head_dim,
@@ -135,8 +169,7 @@ class MLA(Attention):
             dims=self.q_lora_rank,
             mesh=self.mesh,
             param_factory=self.param_factory,
-            prefill_rules=self.sharding_cfg.prefill_rules,
-            generate_rules=self.sharding_cfg.generate_rules,
+            activation_ffw_td=NamedSharding(self.mesh, P()),
             epsilon=self.rms_norm_eps,
             with_scale=True,
             dtype=self.dtype,
@@ -147,8 +180,7 @@ class MLA(Attention):
             dims=self.kv_lora_rank,
             mesh=self.mesh,
             param_factory=self.param_factory,
-            prefill_rules=self.sharding_cfg.prefill_rules,
-            generate_rules=self.sharding_cfg.generate_rules,
+            activation_ffw_td=NamedSharding(self.mesh, P()),
             epsilon=self.rms_norm_eps,
             with_scale=True,
             dtype=self.dtype,
@@ -165,7 +197,7 @@ class MLA(Attention):
 
         Args:
             x: The input tensor of shape `(batch_size, seq_len, d_model)`.
-            op_mode: The operational mode, either 'prefill' or 'generate'.
+            is_prefill: Whether the operation mode is prefill (otherwise it is generate).
             kv_cache: The key-value cache for storing past attention states.
             attention_metadata: Metadata for attention, such as input positions.
 
@@ -175,12 +207,10 @@ class MLA(Attention):
                 - The attention output tensor of shape
                   `(batch_size, seq_len, d_model)`.
         """
-        op_mode = "prefill" if is_prefill else "generate"
         md = attention_metadata
         x = jnp.asarray(x, self.dtype)
-        x_SD = nnx.with_sharding_constraint(
-            x, self.activation_attention_td[op_mode])
-        x_q_TD = nnx.with_sharding_constraint(x, self.activation_q_td[op_mode])
+        x_SD = nnx.with_sharding_constraint(x, self.activation_attention_td)
+        x_q_TD = nnx.with_sharding_constraint(x, self.activation_q_td)
 
         with jax.named_scope("q_proj"):
             # Query down projection.
@@ -198,8 +228,7 @@ class MLA(Attention):
             q_TNH = jnp.concatenate([q_nope_TNH, q_rope_TNH], axis=-1)
             # Multiple the query by scaling factor
             q_TNH = q_TNH * self.qk_head_dim**-0.5
-            q_TNH = nnx.with_sharding_constraint(q_TNH,
-                                                 self.query_tnh[op_mode])
+            q_TNH = nnx.with_sharding_constraint(q_TNH, self.query_tnh)
 
         with jax.named_scope("kv_proj"):
             # KV down projection.
@@ -223,10 +252,8 @@ class MLA(Attention):
             v_SNH = kv_nope_SNH[..., self.qk_nope_head_dim:]
             # Concatenate the key vector.
             k_SNH = jnp.concatenate([k_nope_SNH, k_rope_SNH], axis=-1)
-            k_SNH = nnx.with_sharding_constraint(k_SNH,
-                                                 self.keyvalue_skh[op_mode])
-            v_SNH = nnx.with_sharding_constraint(v_SNH,
-                                                 self.keyvalue_skh[op_mode])
+            k_SNH = nnx.with_sharding_constraint(k_SNH, self.keyvalue_skh)
+            v_SNH = nnx.with_sharding_constraint(v_SNH, self.keyvalue_skh)
 
         with jax.named_scope("attn_op"):
             # TODO(wenxindongwork): K and V have different head dimension,
@@ -261,61 +288,174 @@ class MLA(Attention):
             o_TD = jnp.einsum("TNH,NHD -> TD", outputs_TNH,
                               self.kernel_o_proj_NHD.value)
             o_TD = nnx.with_sharding_constraint(
-                o_TD, self.activation_attention_out_td[op_mode])
+                o_TD, self.activation_attention_out_td)
         return new_kv_cache, o_TD
 
-    def create_sharding(self):
-        """Creates sharding rules for activations and weights."""
-        mode_dependent_attrs = [
-            "activation_attention_td",
-            "activation_q_td",
-            "query_tnh",
-            "keyvalue_skh",
-            "activation_attention_out_td",
-        ]
-        for attr_name in mode_dependent_attrs:
-            prefill_sharding_config = getattr(self.sharding_cfg.prefill_rules,
-                                              attr_name)
-            generate_sharding_config = getattr(
-                self.sharding_cfg.generate_rules, attr_name)
+    def attention(
+        self,
+        is_prefill: bool,
+        kv_cache: KVCache,
+        q_TNH: jax.Array,
+        k_SKH: jax.Array,
+        v_SKH: jax.Array,
+        attention_metadata: AttentionMetadata,
+        mesh: Mesh,
+    ) -> Tuple[KVCache, jax.Array]:
+        """Performs scaled dot-product attention and updates the KV cache.
 
-            sharding_dict = {
-                "prefill": NamedSharding(self.mesh,
-                                         P(*prefill_sharding_config)),
-                "generate": NamedSharding(self.mesh,
-                                          P(*generate_sharding_config)),
-            }
-            setattr(self, attr_name, sharding_dict)
+        This function handles the core attention logic, which varies between
+        prefill and generation modes. In prefill, it computes self-attention
+        over the input sequence with a causal mask. In generation, it attends
+        to the full history of keys and values stored in the cache.
 
-        # static sharding for kernel/weights
-        self.q_da_sharding = NamedSharding(
-            self.mesh,
-            P(*self.sharding_cfg.generate_rules.attn_mla_qa_weight_da))
-        self.anh_sharding = NamedSharding(
-            self.mesh,
-            P(*self.sharding_cfg.generate_rules.attn_mla_qb_weight_anh))
-        self.kv_da_sharding = NamedSharding(
-            self.mesh,
-            P(*self.sharding_cfg.generate_rules.attn_mla_kva_weight_da))
-        self.anh_sharding = NamedSharding(
-            self.mesh,
-            P(*self.sharding_cfg.generate_rules.attn_mla_kvb_weight_anh))
-        self.nhd_sharding = NamedSharding(
-            self.mesh, P(*self.sharding_cfg.generate_rules.attn_o_weight_nhd))
+        Args:
+            is_prefill: A boolean indicating if the mode is 'prefill'.
+            kv_cache: The key-value cache to be updated and used.
+            q_TNH: Query tensor of shape `(query_seq, num_attention_heads, head_dim)`.
+            k_SKH: Key tensor of shape `(kv_seq, num_key_value_heads, head_dim)`.
+            v_SKH: Value tensor of shape `(kv_seq, num_key_value_heads, head_dim)`.
+            attention_metadata: Metadata containing sequence lengths.
+            mesh: The JAX device mesh (unused in this specific function but
+                kept for potential future use or API consistency).
+            attention_chunk_size: The chunk size during sliding window attention.
 
-        # TODO: the pallas kernels of flash_attention/paged_attention need to be called
-        # via shard_map with sharding specs, However, the q/k/v have been sharded outside of attention()
-        # So we replicate the sharding below but it should be better organized if we use pallas kernels
-        self.pallas_q_spec = {
-            "prefill": P(*self.sharding_cfg.prefill_rules.query_tnh),
-            "generate": P(*self.sharding_cfg.generate_rules.query_tnh),
-        }
-        self.pallas_kv_spec = {
-            "prefill": P(*self.sharding_cfg.prefill_rules.keyvalue_skh),
-            "generate": P(*self.sharding_cfg.generate_rules.keyvalue_skh),
-        }
-        self.pallas_cache_page_spec = {
-            "prefill": P(*self.sharding_cfg.prefill_rules.keyvalue_cache_lskh),
-            "generate":
-            P(*self.sharding_cfg.generate_rules.keyvalue_cache_lskh),
-        }
+        Returns:
+            A tuple containing:
+                - The updated KV cache.
+                - The attention output tensor of shape
+                  `(seq, num_q_heads, head_dim)`.
+        """
+        md = attention_metadata
+        kv_cache = update_kv_cache(k_SKH, v_SKH, kv_cache, md.slot_mapping,
+                                   md.num_slices, mesh)
+
+        H = q_TNH.shape[-1]
+        #TODO: we use generate_rules as the default sharding for ragged_paged_attention,
+        # but it could be configurable based on the op_mode.
+        in_specs = (
+            self.query_tnh.spec,  # q_TNH
+            self.keyvalue_cache_lskh.spec,  # kv_cache:
+            P(),  # md.seq_lens: Replicated
+            P(),  # md.block_tables: Replicated
+            P(),  # md.query_start_loc: Replicated
+            P(),  # md.num_seqs: Replicated
+        )
+        out_specs = self.attn_o_tnh.spec  # output_TNH: Shard the 'model' dimension
+
+        def _ragged_paged_attention(*args):
+            return ragged_paged_attention(
+                *args,
+                sm_scale=H**-0.5,
+                soft_cap=None,
+                mask_value=None,
+                # NOTE(xiang): v6e chip has 128M VMEM capacity,
+                # set this to 64M to avoid VMEM OOM,
+                # otherwise the default value is 16M.
+                sliding_window=self.attention_chunk_size,
+                vmem_limit_bytes=64 * 1024 * 1024,
+            )
+
+        output_TNH = jax.jit(
+            shard_map.shard_map(
+                _ragged_paged_attention,
+                mesh=mesh,
+                in_specs=in_specs,
+                out_specs=out_specs,
+                check_rep=False,
+            ))(
+                q_TNH,
+                kv_cache,
+                md.seq_lens,
+                md.block_tables,
+                md.query_start_loc,
+                md.num_seqs,
+            )
+
+        return kv_cache, output_TNH
+
+    def attention_v3(
+        self,
+        is_prefill: bool,
+        kv_cache: KVCache,
+        q_TNH: jax.Array,
+        k_SKH: jax.Array,
+        v_SKH: jax.Array,
+        attention_metadata: AttentionMetadata,
+        mesh: Mesh,
+    ) -> Tuple[KVCache, jax.Array]:
+        """Performs scaled dot-product attention and updates the KV cache.
+
+        This function handles the core attention logic, which varies between
+        prefill and generation modes. In prefill, it computes self-attention
+        over the input sequence with a causal mask. In generation, it attends
+        to the full history of keys and values stored in the cache.
+
+        Args:
+            is_prefill: A boolean indicating if the mode is 'prefill'.
+            kv_cache: The key-value cache to be updated and used.
+            q_TNH: Query tensor of shape `(query_seq, num_attention_heads, head_dim)`.
+            k_SKH: Key tensor of shape `(kv_seq, num_key_value_heads, head_dim)`.
+            v_SKH: Value tensor of shape `(kv_seq, num_key_value_heads, head_dim)`.
+            attention_metadata: Metadata containing sequence lengths.
+            mesh: The JAX device mesh (unused in this specific function but
+                kept for potential future use or API consistency).
+
+        Returns:
+            A tuple containing:
+                - The updated KV cache.
+                - The attention output tensor of shape
+                  `(seq, num_q_heads, head_dim)`.
+        """
+        md = attention_metadata
+        kv_cache = update_kv_cache(k_SKH, v_SKH, kv_cache, md.slot_mapping,
+                                   md.num_slices, mesh)
+        q_transformed, actual_num_q_heads_per_kv_head, actual_head_dim = prepare_inputs(
+            q_TNH, self.K)
+        kv_packing = get_dtype_packing(
+            kv_cache.dtype)  # 2 for bf16, 4 for fp8.
+        L, S, K_2, H = kv_cache.shape
+        kv_cache_transformed = kv_cache.reshape(L, S, K_2 // kv_packing,
+                                                kv_packing, H)
+        page_indices_flat = md.block_tables.flatten()
+
+        num_decode, num_prefill, _ = md.request_distribution
+        distribution = jnp.array(
+            [num_decode, num_decode + num_prefill, md.num_seqs[0]])
+        in_specs = (
+            self.query_ktnph.spec,  # q_transformed
+            self.keyvalue_cache_nbkph.spec,  # kv_cache_transformed
+            P(),  # md.seq_lens: Replicated
+            P(),  # page_indices_flat: Replicated
+            P(),  # query_start_loc: Replicated
+            P(),  # distribution: Replicated
+        )
+        out_specs = self.attn_o_ktnph.spec  #output_transformed
+
+        def _ragged_paged_attention(*args):
+            return ragged_paged_attention_v3(
+                *args,
+                sm_scale=q_TNH.shape[-1]**-0.5,
+                sliding_window=None,
+                soft_cap=None,
+                vmem_limit_bytes=64 * 1024 * 1024,
+            )
+
+        output_transformed = jax.jit(
+            shard_map.shard_map(
+                _ragged_paged_attention,
+                mesh=mesh,
+                in_specs=in_specs,
+                out_specs=out_specs,
+                check_rep=False,
+            ))(
+                q_transformed,
+                kv_cache_transformed,
+                md.seq_lens,
+                page_indices_flat,
+                md.query_start_loc,
+                distribution,
+            )
+        output_TNH = prepare_outputs(output_transformed,
+                                     actual_num_q_heads_per_kv_head,
+                                     actual_head_dim)
+        return kv_cache, output_TNH
