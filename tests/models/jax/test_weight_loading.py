@@ -202,6 +202,13 @@ def test_load_q_proj(mock_config, mesh, mappings, mock_thread_deps):
     mock_thread_deps["model_weights_generator"].return_value = [(hf_key,
                                                                  hf_weight)]
 
+    # Expected shape: (hidden_size, num_heads, head_dim)
+    # No repeat since sharding_size // num_heads < 1
+    expected_shape = (config.get_hidden_size(),
+                      config.hf_config.num_attention_heads,
+                      config.get_head_size())
+    mock_thread_deps["mock_model_weight"].value = jnp.zeros(expected_shape)
+
     load_hf_weights_on_thread(mock_config, mock.MagicMock(), mappings, mesh,
                               "dummy.bin")
 
@@ -210,10 +217,7 @@ def test_load_q_proj(mock_config, mesh, mappings, mock_thread_deps):
         "transformer.h.0.attn.c_attn_q")
 
     transformed_weight = mock_thread_deps["shard_put"].call_args[0][0]
-    # reshape: (4, 4, 16) -> transpose: (16, 4, 4)
-    assert transformed_weight.shape == (config.get_hidden_size(),
-                                        config.hf_config.num_attention_heads,
-                                        config.get_head_size())
+    assert transformed_weight.shape == expected_shape
 
 
 def test_load_k_proj_gqa(mock_config, mappings, mock_thread_deps):
@@ -226,25 +230,30 @@ def test_load_k_proj_gqa(mock_config, mappings, mock_thread_deps):
     mock_thread_deps["model_weights_generator"].return_value = [(hf_key,
                                                                  hf_weight)]
 
+    # Expected shape: (hidden_size, num_kv_heads * repeat_factor, head_dim)
+    num_kv_heads = config.hf_config.num_key_value_heads
+    repeat_factor = sharding_size // num_kv_heads
+    expected_heads = num_kv_heads * repeat_factor
+    expected_shape = (config.get_hidden_size(), expected_heads,
+                      config.get_head_size())
+    mock_thread_deps["mock_model_weight"].value = jnp.zeros(expected_shape)
+
     load_hf_weights_on_thread(mock_config, mock.MagicMock(), mappings,
                               mesh_sharding_4, "dummy.bin")
 
     transformed_weight = mock_thread_deps["shard_put"].call_args[0][0]
-    # reshape: (2, 4, 16) -> transpose: (16, 2, 4)
-    # repeat: dim=1, size = sharding_size // num_kv_heads = 4 // 2 = 2
-    expected_heads = config.hf_config.num_key_value_heads * (
-        sharding_size // config.hf_config.num_key_value_heads)
-    expected_shape = (config.get_hidden_size(), expected_heads,
-                      config.get_head_size())
     assert transformed_weight.shape == expected_shape
 
 
 def test_load_embedding(mock_config, mesh, mappings, mock_thread_deps):
     config = mock_config.model_config
     hf_key = "model.embed_tokens.weight"
-    hf_weight = jnp.ones((100, config.get_hidden_size()))
+    expected_shape = (100, config.get_hidden_size())
+    hf_weight = jnp.ones(expected_shape)
     mock_thread_deps["model_weights_generator"].return_value = [(hf_key,
                                                                  hf_weight)]
+
+    mock_thread_deps["mock_model_weight"].value = jnp.zeros(expected_shape)
 
     load_hf_weights_on_thread(mock_config, mock.MagicMock(), mappings, mesh,
                               "dummy.bin")
@@ -253,7 +262,7 @@ def test_load_embedding(mock_config, mesh, mappings, mock_thread_deps):
         mock.ANY, mock_thread_deps["get_named_sharding"].return_value,
         "transformer.wte")
     transformed_weight = mock_thread_deps["shard_put"].call_args[0][0]
-    assert transformed_weight.shape == (100, config.get_hidden_size())
+    assert transformed_weight.shape == expected_shape
     assert np.array_equal(transformed_weight, hf_weight)
 
 
@@ -262,6 +271,8 @@ def test_load_with_head_padding(mock_config, mesh, mappings, mock_thread_deps):
     config = mock_config.model_config
     head_dim_original = config.get_head_size()
     head_dim_padded = head_dim_original + 4
+    # sharding_size = mesh.shape["model"]
+    # num_heads = config.hf_config.num_attention_heads
 
     hf_key = "model.layers.0.self_attn.q_proj.weight"
     hf_weight = jnp.ones((config.hf_config.num_attention_heads *
@@ -269,11 +280,14 @@ def test_load_with_head_padding(mock_config, mesh, mappings, mock_thread_deps):
     mock_thread_deps["model_weights_generator"].return_value = [(hf_key,
                                                                  hf_weight)]
 
+    # Assertion is skipped due to head_dim_pad > 0, so no need to mock model_weight shape
+
     load_hf_weights_on_thread(mock_config, mock.MagicMock(), mappings, mesh,
                               "dummy.bin")
 
     transformed_weight = mock_thread_deps["shard_put"].call_args[0][0]
     # reshape: (4, 4, 16) -> pad: (4, 8, 16) -> transpose: (16, 4, 8)
+    # No repeat: sharding_size // num_heads < 1
     expected_shape = (config.get_hidden_size(),
                       config.hf_config.num_attention_heads, head_dim_padded)
     assert transformed_weight.shape == expected_shape
