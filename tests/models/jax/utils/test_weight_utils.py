@@ -1,20 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
-import os
-import tempfile
-from unittest.mock import MagicMock, patch
+
+from unittest import mock
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-import torch
+import pytest
 from flax import nnx
 from jax._src import test_util as jtu
-from safetensors.torch import save_file
+from jax.sharding import Mesh
 
 from tpu_commons.models.jax.utils.weight_utils import (
     load_hf_weights, load_hf_weights_on_thread, transfer_state_with_mappings)
-
-# Test for LoRA weight loading API
 
 # ----- nnx.Module Wrappers -----
 
@@ -90,212 +87,265 @@ class WeightTransfer(jtu.JaxTestCase):
         assert jnp.allclose(new_tgt_state["tgt_lm_head"].value, 6.0)
 
 
-# ----- Mocks for HF Weight Loading Test -----
+# ----- Test -----
+# Dummy classes to mock configurations
+class MockVLLMConfig:
 
-HIDDEN_SIZE = 128
-INTERMEDIATE_SIZE = 256
-NUM_HEADS = 8
-NUM_KV_HEADS = 4  # For GQA
-HEAD_DIM = 16
-VOCAB_SIZE = 1000
-TP_SIZE = 2
+    def __init__(self, model_config):
+        self.model_config = model_config
 
 
-class MockDevice:
-    """A hashable mock for a JAX device."""
+class MockModelConfig:
 
-    def __init__(self, id):
-        self.id = id
-        self.platform = 'cpu'
-        self.device_kind = 'cpu'
-        self.process_index = 0  # Mock process index
+    def __init__(self,
+                 hf_config,
+                 hidden_size,
+                 head_size,
+                 is_multimodal_model=False):
+        self.hf_config = hf_config
+        self._hidden_size = hidden_size
+        self._head_size = head_size
+        self.is_multimodal_model = is_multimodal_model
+        self.model = "mock_model_path"
 
-    def __hash__(self):
-        return hash(self.id)
+    def get_hidden_size(self):
+        return self._hidden_size
 
-    def __eq__(self, other):
-        return isinstance(other, self.__class__) and self.id == other.id
-
-    def __repr__(self):
-        return f"MockDevice(id={self.id})"
-
-
-class MockAttention(nnx.Module):
-
-    def __init__(self, rngs):
-        # Shapes are post-transformation
-        self.q_proj = nnx.Param(jnp.zeros((HIDDEN_SIZE, NUM_HEADS, HEAD_DIM)))
-        # K/V heads are repeated for GQA
-        kv_heads_padded = NUM_KV_HEADS * (TP_SIZE // NUM_KV_HEADS)
-        self.k_proj = nnx.Param(
-            jnp.zeros((HIDDEN_SIZE, kv_heads_padded, HEAD_DIM)))
-        self.v_proj = nnx.Param(
-            jnp.zeros((HIDDEN_SIZE, kv_heads_padded, HEAD_DIM)))
-        self.o_proj = nnx.Param(jnp.zeros((NUM_HEADS, HEAD_DIM, HIDDEN_SIZE)))
+    def get_head_size(self):
+        return self._head_size
 
 
-class MockMLP(nnx.Module):
+class MockHFConfig:
+
+    def __init__(self, num_attention_heads, num_key_value_heads):
+        self.num_attention_heads = num_attention_heads
+        self.num_key_value_heads = num_key_value_heads
+
+
+# Dummy model for testing load_hf_weights
+class SimpleModel(nnx.Module):
 
     def __init__(self, rngs):
-        self.gate_proj = nnx.Param(jnp.zeros((HIDDEN_SIZE, INTERMEDIATE_SIZE)))
-        self.down_proj = nnx.Param(jnp.zeros((INTERMEDIATE_SIZE, HIDDEN_SIZE)))
+        self.param = nnx.Param(jnp.zeros(1), rngs=rngs)
 
 
-class MockBlock(nnx.Module):
-
-    def __init__(self, rngs):
-        self.attention = MockAttention(rngs)
-        self.mlp = MockMLP(rngs)
-
-
-class MockModel(nnx.Module):
-
-    def __init__(self, rngs):
-        self.embed_tokens = nnx.Param(jnp.zeros((VOCAB_SIZE, HIDDEN_SIZE)))
-        self.layers = [MockBlock(rngs)]
-        self.lm_head = nnx.Param(jnp.zeros((HIDDEN_SIZE, VOCAB_SIZE)))
+@pytest.fixture
+def mock_config():
+    hf_config = MockHFConfig(num_attention_heads=4, num_key_value_heads=2)
+    model_config = MockModelConfig(hf_config, hidden_size=16, head_size=4)
+    return MockVLLMConfig(model_config)
 
 
-class HFWeightLoadingTest(jtu.JaxTestCase):
+@pytest.fixture
+def mesh():
+    # Simulate a mesh with 2 devices for model parallelism
+    return Mesh(np.array(jax.devices()[:2]), ('model', ))
 
-    def setUp(self):
-        super().setUp()
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp_dir.cleanup)
 
-        # Mock devices to control TP size
-        self.mock_devices = [MockDevice(id=i) for i in range(TP_SIZE)]
-        self.original_jax_devices = jax.devices
+@pytest.fixture
+def mappings():
+    return {
+        "model.layers.*.self_attn.q_proj": "transformer.h.*.attn.attn_q",
+        "model.layers.*.self_attn.k_proj": "transformer.h.*.attn.attn_k",
+        "model.layers.*.self_attn.v_proj": "transformer.h.*.attn.attn_v",
+        "model.layers.*.self_attn.o_proj": "transformer.h.*.attn.proj",
+        "model.embed_tokens": "transformer.wte",
+    }
 
-        def mock_devices_func(backend=None):
-            if backend is None:
-                return self.mock_devices
-            return self.original_jax_devices(backend)
 
-        jax.devices = mock_devices_func
+# Fixture to mock dependencies for load_hf_weights_on_thread
+@pytest.fixture
+def mock_thread_deps(monkeypatch):
+    base_path = "tpu_commons.models.jax.utils.weight_utils"
 
-        self.mesh = jax.sharding.Mesh(np.array(jax.devices()), ("model", ))
+    mocks = {
+        "get_named_sharding":
+        mock.MagicMock(return_value=mock.MagicMock()),
+        "model_weights_generator":
+        mock.MagicMock(),
+        "get_param_and_sharding":
+        mock.MagicMock(),
+        "shard_put":
+        mock.MagicMock(side_effect=lambda tensor, sharding, mesh: tensor),
+        "get_padded_head_dim":
+        mock.MagicMock(side_effect=lambda x: x),  # No padding by default
+        "logger":
+        mock.MagicMock(),
+    }
 
-        # Create mock vllm_config
-        self.vllm_config = MagicMock()
-        hf_config = MagicMock()
-        hf_config.num_attention_heads = NUM_HEADS
-        hf_config.num_key_value_heads = NUM_KV_HEADS
-        model_config = MagicMock()
-        model_config.hf_config = hf_config
-        model_config.get_hidden_size.return_value = HIDDEN_SIZE
-        model_config.get_head_size.return_value = HEAD_DIM
-        model_config.is_multimodal_model = False
-        self.vllm_config.model_config = model_config
+    monkeypatch.setattr(f"{base_path}.nnx.get_named_sharding",
+                        mocks["get_named_sharding"])
+    monkeypatch.setattr(f"{base_path}.model_weights_generator",
+                        mocks["model_weights_generator"])
+    monkeypatch.setattr(f"{base_path}.get_param_and_sharding",
+                        mocks["get_param_and_sharding"])
+    monkeypatch.setattr(f"{base_path}.shard_put", mocks["shard_put"])
+    monkeypatch.setattr(f"{base_path}.utils.get_padded_head_dim",
+                        mocks["get_padded_head_dim"])
+    monkeypatch.setattr(f"{base_path}.logger", mocks["logger"])
 
-        # Create mock model and get its state
-        rng = nnx.Rngs(0)
-        self.model = MockModel(rng)
-        self.params = nnx.state(self.model)
+    # Setup mock return for get_param_and_sharding
+    mock_model_weight = nnx.Variable(jnp.zeros(1))
+    mocks["get_param_and_sharding"].return_value = (mock_model_weight,
+                                                    mock.MagicMock())
+    mocks["mock_model_weight"] = mock_model_weight
 
-        # Create dummy safetensors file with HF-style weights
-        self.weights_file = os.path.join(self.temp_dir.name,
-                                         "model.safetensors")
-        dummy_weights = {
-            "model.layers.0.self_attn.q_proj.weight":
-            torch.ones((NUM_HEADS * HEAD_DIM, HIDDEN_SIZE)),
-            "model.layers.0.self_attn.k_proj.weight":
-            torch.ones((NUM_KV_HEADS * HEAD_DIM, HIDDEN_SIZE)) * 2,
-            "model.layers.0.mlp.gate_proj.weight":
-            torch.ones((INTERMEDIATE_SIZE, HIDDEN_SIZE)) * 3,
-            "lm_head.weight":
-            torch.ones((VOCAB_SIZE, HIDDEN_SIZE)) * 4,
-        }
-        save_file(dummy_weights, self.weights_file)
+    return mocks
 
-        # Define mappings
-        self.mappings = {
-            "model.layers.*.self_attn.q_proj": "layers.*.attention.q_proj",
-            "model.layers.*.self_attn.k_proj": "layers.*.attention.k_proj",
-            "model.layers.*.mlp.gate_proj": "layers.*.mlp.gate_proj",
-            "lm_head": "lm_head",
-        }
 
-    def tearDown(self):
-        jax.devices = self.original_jax_devices
-        super().tearDown()
+def test_load_q_proj(mock_config, mesh, mappings, mock_thread_deps):
+    config = mock_config.model_config
+    hf_key = "model.layers.0.self_attn.q_proj.weight"
+    hf_weight = jnp.ones((config.hf_config.num_attention_heads *
+                          config.get_head_size() * config.get_hidden_size(), ))
+    mock_thread_deps["model_weights_generator"].return_value = [(hf_key,
+                                                                 hf_weight)]
 
-    @patch("tpu_commons.utils.get_padded_head_dim", lambda x: HEAD_DIM)
-    def test_load_hf_weights_on_thread(self):
-        """Tests loading weights and applying transformations in a single thread."""
-        # Call the function under test
-        load_hf_weights_on_thread(self.vllm_config, self.params, self.mappings,
-                                  self.mesh, self.weights_file)
+    # Expected shape: (hidden_size, num_heads, head_dim)
+    # No repeat since sharding_size // num_heads < 1
+    expected_shape = (config.get_hidden_size(),
+                      config.hf_config.num_attention_heads,
+                      config.get_head_size())
+    mock_thread_deps["mock_model_weight"].value = jnp.zeros(expected_shape)
 
-        # --- Assertions ---
+    load_hf_weights_on_thread(mock_config, mock.MagicMock(), mappings, mesh,
+                              "dummy.bin")
 
-        # 1. Test lm_head (transpose only)
-        lm_head_val = self.params["lm_head"].value
-        hf_lm_head = jnp.ones(
-            (VOCAB_SIZE, HIDDEN_SIZE), dtype=lm_head_val.dtype) * 4
-        expected_lm_head = jnp.transpose(hf_lm_head, (1, 0))
-        self.assertArraysEqual(lm_head_val, expected_lm_head)
+    mock_thread_deps["get_param_and_sharding"].assert_called_once_with(
+        mock.ANY, mock_thread_deps["get_named_sharding"].return_value,
+        "transformer.h.*.attn.attn_q")
 
-        # 2. Test gate_proj (transpose only)
-        gate_proj_val = self.params["layers"][0]["mlp"]["gate_proj"].value
-        hf_gate_proj = jnp.ones(
-            (INTERMEDIATE_SIZE, HIDDEN_SIZE), dtype=gate_proj_val.dtype) * 3
-        expected_gate_proj = jnp.transpose(hf_gate_proj, (1, 0))
-        self.assertArraysEqual(gate_proj_val, expected_gate_proj)
+    transformed_weight = mock_thread_deps["shard_put"].call_args[0][0]
+    assert transformed_weight.shape == expected_shape
 
-        # 3. Test q_proj (reshape and transpose)
-        q_proj_val = self.params["layers"][0]["attention"]["q_proj"].value
-        hf_q_proj = jnp.ones((NUM_HEADS * HEAD_DIM, HIDDEN_SIZE),
-                             dtype=q_proj_val.dtype)
-        expected_q_proj = jnp.reshape(hf_q_proj,
-                                      (NUM_HEADS, HEAD_DIM, HIDDEN_SIZE))
-        expected_q_proj = jnp.transpose(expected_q_proj, (2, 0, 1))
-        self.assertArraysEqual(q_proj_val, expected_q_proj)
 
-        # 4. Test k_proj (reshape, transpose, and repeat for GQA)
-        k_proj_val = self.params["layers"][0]["attention"]["k_proj"].value
-        hf_k_proj = jnp.ones(
-            (NUM_KV_HEADS * HEAD_DIM, HIDDEN_SIZE), dtype=k_proj_val.dtype) * 2
-        expected_k_proj = jnp.reshape(hf_k_proj,
-                                      (NUM_KV_HEADS, HEAD_DIM, HIDDEN_SIZE))
-        expected_k_proj = jnp.transpose(expected_k_proj, (2, 0, 1))
+def test_load_k_proj_gqa(mock_config, mappings, mock_thread_deps):
+    mesh_sharding_4 = Mesh(np.array(jax.devices()[:4]), ('model', ))
+    sharding_size = 4
+    config = mock_config.model_config
+    hf_key = "model.layers.0.self_attn.k_proj.weight"
+    hf_weight = jnp.ones((config.hf_config.num_key_value_heads *
+                          config.get_head_size() * config.get_hidden_size(), ))
+    mock_thread_deps["model_weights_generator"].return_value = [(hf_key,
+                                                                 hf_weight)]
 
-        # Repeat KV heads to match TP size
-        repeats = TP_SIZE // NUM_KV_HEADS
-        if repeats > 1:
-            expected_k_proj = jnp.repeat(expected_k_proj, repeats, axis=1)
+    num_kv_heads = config.hf_config.num_key_value_heads
+    repeat_factor = sharding_size // num_kv_heads
+    expected_heads = num_kv_heads * repeat_factor
+    expected_shape = (config.get_hidden_size(), expected_heads,
+                      config.get_head_size())
+    mock_thread_deps["mock_model_weight"].value = jnp.zeros(expected_shape)
 
-        self.assertArraysEqual(k_proj_val, expected_k_proj)
+    load_hf_weights_on_thread(mock_config, mock.MagicMock(), mappings,
+                              mesh_sharding_4, "dummy.bin")
 
-    @patch(
-        "tpu_commons.models.jax.utils.weight_utils.load_hf_weights_on_thread")
-    @patch("tpu_commons.models.jax.utils.weight_utils.get_model_weights_files")
-    def test_load_hf_weights_multithreaded(self, mock_get_files,
-                                           mock_load_on_thread):
-        """Tests the multi-threaded wrapper to ensure it calls the single-thread loader."""
-        # Arrange
-        model_path = "/fake/model/path"
-        self.vllm_config.model_config.model = model_path
-        mock_files = [
-            "/fake/model.safetensors", "/fake/model-00001.safetensors"
-        ]
-        mock_get_files.return_value = mock_files
+    transformed_weight = mock_thread_deps["shard_put"].call_args[0][0]
+    assert transformed_weight.shape == expected_shape
 
-        # Act
-        load_hf_weights(self.vllm_config, self.model, self.mappings, self.mesh)
 
-        # Assert
-        mock_get_files.assert_called_once_with(model_path)
-        self.assertEqual(mock_load_on_thread.call_count, len(mock_files))
+def test_load_embedding(mock_config, mesh, mappings, mock_thread_deps):
+    config = mock_config.model_config
+    hf_key = "model.embed_tokens.weight"
+    expected_shape = (100, config.get_hidden_size())
+    hf_weight = jnp.ones(expected_shape)
+    mock_thread_deps["model_weights_generator"].return_value = [(hf_key,
+                                                                 hf_weight)]
 
-        # Check that it was called with the correct arguments for each file
-        for i, mock_file in enumerate(mock_files):
-            call_args = mock_load_on_thread.call_args_list[i].args
-            self.assertIs(call_args[0], self.vllm_config)
-            # nnx.State doesn't have a good __eq__, so we check that a State
-            # object with the same structure is passed.
-            self.assertIsInstance(call_args[1], nnx.State)
-            self.assertEqual(set(call_args[1].keys()), set(self.params.keys()))
-            self.assertIs(call_args[2], self.mappings)
-            self.assertIs(call_args[3], self.mesh)
-            self.assertEqual(call_args[4], mock_file)
+    mock_thread_deps["mock_model_weight"].value = jnp.zeros(expected_shape)
+
+    load_hf_weights_on_thread(mock_config, mock.MagicMock(), mappings, mesh,
+                              "dummy.bin")
+
+    mock_thread_deps["get_param_and_sharding"].assert_called_once_with(
+        mock.ANY, mock_thread_deps["get_named_sharding"].return_value,
+        "transformer.wte")
+    transformed_weight = mock_thread_deps["shard_put"].call_args[0][0]
+    assert transformed_weight.shape == expected_shape
+    assert np.array_equal(transformed_weight, hf_weight)
+
+
+def test_load_with_head_padding(mock_config, mesh, mappings, mock_thread_deps):
+    mock_thread_deps["get_padded_head_dim"].side_effect = lambda x: x + 4
+    config = mock_config.model_config
+    head_dim_original = config.get_head_size()
+    head_dim_padded = head_dim_original + 4
+    # sharding_size = mesh.shape["model"]
+    # num_heads = config.hf_config.num_attention_heads
+
+    hf_key = "model.layers.0.self_attn.q_proj.weight"
+    hf_weight = jnp.ones((config.hf_config.num_attention_heads *
+                          head_dim_original * config.get_hidden_size(), ))
+    mock_thread_deps["model_weights_generator"].return_value = [(hf_key,
+                                                                 hf_weight)]
+
+    load_hf_weights_on_thread(mock_config, mock.MagicMock(), mappings, mesh,
+                              "dummy.bin")
+
+    transformed_weight = mock_thread_deps["shard_put"].call_args[0][0]
+    expected_shape = (config.get_hidden_size(),
+                      config.hf_config.num_attention_heads, head_dim_padded)
+    assert transformed_weight.shape == expected_shape
+
+
+# Fixture to mock dependencies for load_hf_weights
+@pytest.fixture
+def mock_load_deps(monkeypatch):
+    base_path = "tpu_commons.models.jax.utils.weight_utils"
+    mocks = {
+        "get_model_weights_files": mock.MagicMock(),
+        "load_hf_weights_on_thread": mock.MagicMock(),
+        "nnx_update": mock.MagicMock(),
+    }
+    monkeypatch.setattr(f"{base_path}.get_model_weights_files",
+                        mocks["get_model_weights_files"])
+    monkeypatch.setattr(f"{base_path}.load_hf_weights_on_thread",
+                        mocks["load_hf_weights_on_thread"])
+    monkeypatch.setattr(f"{base_path}.nnx.update", mocks["nnx_update"])
+
+    mock_executor_instance = mock.MagicMock()
+
+    def mock_submit(fn, *args, **kwargs):
+        # Directly call the function to simulate execution
+        result = fn(*args, **kwargs)
+        mock_future = mock.MagicMock()
+        mock_future.result.return_value = result
+        return mock_future
+
+    mock_executor_instance.submit.side_effect = mock_submit
+
+    mock_thread_pool_cls = mock.MagicMock()
+    mock_thread_pool_cls.return_value.__enter__.return_value = mock_executor_instance
+    mocks["ThreadPoolExecutor"] = mock_thread_pool_cls
+    monkeypatch.setattr(f"{base_path}.ThreadPoolExecutor",
+                        mocks["ThreadPoolExecutor"])
+
+    return mocks
+
+
+def test_load_weights_multiple_files(mock_config, mesh, mappings,
+                                     mock_load_deps):
+    model = SimpleModel(rngs=nnx.Rngs(0))
+    file_list = ["file1.bin", "file2.bin"]
+    mock_load_deps["get_model_weights_files"].return_value = file_list
+
+    load_hf_weights(mock_config, model, mappings, mesh)
+
+    mock_load_deps["get_model_weights_files"].assert_called_once_with(
+        mock_config.model_config.model)
+    mock_load_deps["ThreadPoolExecutor"].assert_called_once_with(max_workers=2)
+    assert mock_load_deps["load_hf_weights_on_thread"].call_count == 2
+    mock_load_deps["nnx_update"].assert_called_once()
+    update_args = mock_load_deps["nnx_update"].call_args[0]
+    assert update_args[0] is model
+    assert isinstance(update_args[1], nnx.State)
+
+
+def test_load_weights_no_files(mock_config, mesh, mappings, mock_load_deps):
+    model = SimpleModel(rngs=nnx.Rngs(0))
+    mock_load_deps["get_model_weights_files"].return_value = []
+
+    load_hf_weights(mock_config, model, mappings, mesh)
+
+    mock_load_deps["ThreadPoolExecutor"].assert_called_once_with(max_workers=0)
+    mock_load_deps["load_hf_weights_on_thread"].assert_not_called()
+    mock_load_deps["nnx_update"].assert_called_once()
