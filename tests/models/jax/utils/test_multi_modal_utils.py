@@ -2,12 +2,11 @@
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from multi_modal_utils import (MultiModalEmbeddings, NestedTensors,
-                               _count_flattened_embeddings,
-                               _embedding_count_expression,
-                               _flatten_embeddings,
-                               merge_multimodal_embeddings,
-                               sanity_check_mm_encoder_outputs)
+
+from tpu_commons.models.jax.utils.multi_modal_utils import (
+    MultiModalEmbeddings, NestedTensors, _count_flattened_embeddings,
+    _embedding_count_expression, _flatten_embeddings,
+    merge_multimodal_embeddings, sanity_check_mm_encoder_outputs)
 
 # --- Tests for sanity_check_mm_encoder_outputs ---
 
