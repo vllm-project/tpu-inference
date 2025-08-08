@@ -9,6 +9,8 @@ os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=8'
 
 import jax
 import jax.numpy as jnp
+from jax.sharding import NamedSharding
+from jax.sharding import PartitionSpec as P
 
 from tpu_commons.models.jax.common.attention.attention import AttentionMetadata
 from tpu_commons.models.jax.common.attention.llama4_attention import (
@@ -74,7 +76,9 @@ class Llama4AttentionTest(unittest.TestCase):
         num_attention_heads = 4
         head_dim = hidden_size // num_attention_heads
         param_factory = MagicMock()
-        sharding_cfg = MagicMock()
+
+        # Create dummy sharding objects
+        dummy_sharding = NamedSharding(self.mesh, P())
 
         llama4_attention = Llama4Attention(
             hidden_size=hidden_size,
@@ -90,8 +94,17 @@ class Llama4AttentionTest(unittest.TestCase):
             temperature_tuning_floor_scale=2.0,
             mesh=self.mesh,
             param_factory=param_factory,
-            sharding_cfg=sharding_cfg,
             quant=None,
+            activation_attention_td=dummy_sharding,
+            activation_attention_out_td=dummy_sharding,
+            dnh_sharding=dummy_sharding,
+            dkh_sharding=dummy_sharding,
+            nhd_sharding=dummy_sharding,
+            activation_q_td=dummy_sharding,
+            query_tnh=dummy_sharding,
+            keyvalue_skh=dummy_sharding,
+            keyvalue_cache_lskh=dummy_sharding,
+            attn_o_tnh=dummy_sharding,
         )
 
         seq_len = 8

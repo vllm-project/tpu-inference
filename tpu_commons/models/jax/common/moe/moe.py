@@ -5,7 +5,6 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding
-from jax.sharding import PartitionSpec as P
 from jaxtyping import DTypeLike, Float
 from vllm.config import VllmConfig
 
@@ -15,7 +14,6 @@ from tpu_commons.models.jax.common.constants import (HuggingFaceArgNames,
 from tpu_commons.models.jax.common.layers import FlaxUtils
 from tpu_commons.models.jax.common.moe.deepseek_moe import \
     DeepSeekV3RoutingConfig
-from tpu_commons.models.jax.common.sharding import ShardingConfig
 
 modeling_flax_utils = FlaxUtils()
 
@@ -52,29 +50,24 @@ class Router(nnx.Module):
         cfg: The RouterConfig object.
         mesh: The JAX device mesh for distributed computation.
         param_factory: A factory for creating and initializing model parameters.
-        sharding_cfg: Configuration for tensor sharding strategies.
         quant: Optional configuration for quantization.
     """
     mesh: Mesh
     dtype: jnp.dtype
     hidden_size: int
     param_factory: ParamFactory
-    sharding_cfg: ShardingConfig
     num_experts: int
     num_experts_per_tok: int
     router_act: str
+    activation_ffw_td: NamedSharding
+    ed_sharding: NamedSharding
     quant: Any | None = None
 
-    def __post_init__(self):
-        """Initializes the Router module by creating sharding configurations and generating the router kernel."""
-        self.create_sharding()
-
-    def __call__(self, x_TD: Float, op_mode):
+    def __call__(self, x_TD: Float):
         """Routes tokens to experts.
 
         Args:
             x_TD: Input array of shape (sequence_length, d_model).
-            op_mode: The operation mode ('prefill' or 'generate') to determine sharding.
 
         Returns:
             A tuple containing:
@@ -82,8 +75,7 @@ class Router(nnx.Module):
                 - selected_experts_TX: Indices of selected experts, shape (sequence_length, num_experts_per_tok).
         """
         x_TD = jnp.asarray(x_TD, self.dtype)
-        x_TD = nnx.with_sharding_constraint(x_TD,
-                                            self.activation_ffw_td[op_mode])
+        x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
         router_act = modeling_flax_utils.ACT2FN[self.router_act]
         router_logits_TE = jnp.einsum('TD,DE -> TE', x_TD,
                                       self.kernel_DE.value)
@@ -101,31 +93,6 @@ class Router(nnx.Module):
         shape = (self.hidden_size, self.num_experts)
         self.kernel_DE = self.param_factory.create_kernel_param(
             rngs, shape=shape, dtype=self.dtype, sharding=self.ed_sharding)
-
-    def create_sharding(self):
-        """Creates sharding configurations for activations and kernel."""
-        mode_dependent_attrs = [
-            "activation_ffw_td",
-        ]
-        for attr_name in mode_dependent_attrs:
-            prefill_sharding_config = getattr(self.sharding_cfg.prefill_rules,
-                                              attr_name)
-            generate_sharding_config = getattr(
-                self.sharding_cfg.generate_rules, attr_name)
-
-            sharding_dict = {
-                'prefill': NamedSharding(self.mesh,
-                                         P(*prefill_sharding_config)),
-                'generate': NamedSharding(self.mesh,
-                                          P(*generate_sharding_config))
-            }
-            setattr(self, attr_name, sharding_dict)
-
-        # static sharding for kernel/weights
-        self.ed_sharding = NamedSharding(
-            self.mesh, P(*self.sharding_cfg.generate_rules.moe_router_de))
-
-        return
 
 
 MoEConfig = make_dataclass(
@@ -163,12 +130,10 @@ class MoE(nnx.Module):
         mesh: The JAX mesh for device sharding.
         param_factory: A factory for creating and initializing model parameters.
         router: The Router module.
-        sharding_cfg: Configuration for tensor sharding strategies.
         quant: Optional configuration for quantization.
     """
     mesh: Mesh
     param_factory: ParamFactory
-    sharding_cfg: ShardingConfig
     dtype: jnp.dtype
     num_local_experts: int
     apply_expert_weight_before_computation: bool
@@ -176,27 +141,24 @@ class MoE(nnx.Module):
     intermediate_size_moe: int
     hidden_act: str
     router: nnx.Module
+    activation_ffw_td: NamedSharding
+    activation_ffw_ted: NamedSharding
+    edf_sharding: NamedSharding
+    efd_sharding: NamedSharding
     quant: Any | None = None
 
-    def __post_init__(self):
-        """Initializes the MoE module by creating sharding configurations and generating expert kernels."""
-        self.router.create_sharding()
-        self.create_sharding()
-
-    def __call__(self, x_TD: Float, op_mode):
+    def __call__(self, x_TD: Float):
         """Performs the forward pass of the MoE layer.
 
         Args:
             x_TD: Input array of shape (sequence_length, d_model).
-            op_mode: The operation mode ('prefill' or 'generate') to determine sharding.
 
         Returns:
             Output array of shape (sequence_length, d_model) after passing through MoE.
         """
         x_TD = jnp.asarray(x_TD, self.dtype)
-        x_TD = nnx.with_sharding_constraint(x_TD,
-                                            self.activation_ffw_td[op_mode])
-        weights_TX, indices_TX = self.router(x_TD, op_mode)
+        x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
+        weights_TX, indices_TX = self.router(x_TD)
         one_hot_indices_TXE = jax.nn.one_hot(
             indices_TX, num_classes=self.num_local_experts, dtype=self.dtype)
         full_weights_TE = jnp.sum(one_hot_indices_TXE * weights_TX[..., None],
@@ -207,9 +169,9 @@ class MoE(nnx.Module):
         if self.apply_expert_weight_before_computation:
             with jax.named_scope("pre_computing_weight"):
                 return self._moe_fwd_preapply_router_weights(
-                    x_TD, full_weights_TE, op_mode)
+                    x_TD, full_weights_TE)
         else:
-            return self._moe_fwd(x_TD, full_weights_TE, op_mode)
+            return self._moe_fwd(x_TD, full_weights_TE)
 
     def generate_kernel(self, rngs: nnx.Rngs):
         """Generates the kernels (weights) for the router and experts (gating, up-projection, and down-projection layers)."""
@@ -236,14 +198,12 @@ class MoE(nnx.Module):
             dtype=self.dtype,
             sharding=self.efd_sharding)
 
-    def _moe_fwd_preapply_router_weights(self, x_TD: jax.Array, weights_TE,
-                                         op_mode):
+    def _moe_fwd_preapply_router_weights(self, x_TD: jax.Array, weights_TE):
         """Performs the forward pass of the MoE experts with router weights pre-applied to the inputs.
 
         Args:
             x_TD: Input array for the experts, shape (sequence_length, hidden_size).
             weights_TE: Router weights, shape (sequence_length, num_experts).
-            op_mode: The operation mode ('prefill' or 'generate') to determine sharding.
 
         Returns:
             Output array of shape (sequence_length, d_model).
@@ -254,11 +214,11 @@ class MoE(nnx.Module):
         x_TED = jnp.repeat(x_TD[:, None, :], num_experts, 1)
         weights_TED = weights_TE[..., None]
         x_TED = jnp.asarray(x_TED, self.dtype)
+
         with jax.named_scope("activation_expert_weighting"):
             x_TED = x_TED * weights_TED
 
-        x_TED = nnx.with_sharding_constraint(x_TED,
-                                             self.activation_ffw_ted[op_mode])
+        x_TED = nnx.with_sharding_constraint(x_TED, self.activation_ffw_ted)
         with jax.named_scope("gating"):
             gating_TEF = jnp.einsum('TED,EDF -> TEF', x_TED,
                                     self.kernel_gating_EDF.value)
@@ -267,7 +227,9 @@ class MoE(nnx.Module):
         with jax.named_scope("up_projection"):
             up_proj_TEF = jnp.einsum('TED,EDF -> TEF', x_TED,
                                      self.kernel_up_proj_EDF.value)
+
         fuse_TEF = activated_gating_TEF * up_proj_TEF
+
         with jax.named_scope("down_projection"):
             down_proj_TED = jnp.einsum('TEF,EFD -> TED', fuse_TEF,
                                        self.kernel_down_proj_EFD.value)
@@ -275,20 +237,18 @@ class MoE(nnx.Module):
             output_TD = down_proj_TED.sum(axis=1)
         return output_TD.astype(self.dtype)
 
-    def _moe_fwd(self, x_TD: Float, weights, op_mode):
+    def _moe_fwd(self, x_TD: Float, weights):
         """Performs the basic forward pass of the MoE experts without dropping or megablocks.
 
         Args:
             x_TD: Input array for the experts, shape (sequence_length, d_model).
             weights: Weights for combining expert outputs, shape (sequence_length, num_experts).
-            op_mode: The operation mode ('prefill' or 'generate') to determine sharding.
 
         Returns:
             Output array of shape (sequence_length, d_model).
         """
         x_TD = jnp.asarray(x_TD, self.dtype)
-        x_TD = nnx.with_sharding_constraint(x_TD,
-                                            self.activation_ffw_td[op_mode])
+        x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
         with jax.named_scope("gating"):
             gating_TEF = jnp.einsum('TD,EDF -> TEF', x_TD,
                                     self.kernel_gating_EDF.value)
@@ -297,39 +257,12 @@ class MoE(nnx.Module):
         with jax.named_scope("up_projection"):
             up_proj_TEF = jnp.einsum('TD,EDF -> TEF', x_TD,
                                      self.kernel_up_proj_EDF.value)
+
         fuse_TEF = activated_gating_TEF * up_proj_TEF
+
         with jax.named_scope("down_projection"):
             down_proj_TED = jnp.einsum('TEF,EFD -> TED', fuse_TEF,
                                        self.kernel_down_proj_EFD.value)
         with jax.named_scope("sum"):
             output_TD = jnp.einsum('TED,TE -> TD', down_proj_TED, weights)
         return output_TD.astype(self.dtype)
-
-    def create_sharding(self):
-        """Creates sharding configurations for activations and expert kernels."""
-        mode_dependent_attrs = [
-            "activation_ffw_td",
-            "activation_ffw_ted",
-        ]
-
-        for attr_name in mode_dependent_attrs:
-            prefill_sharding_config = getattr(self.sharding_cfg.prefill_rules,
-                                              attr_name)
-            generate_sharding_config = getattr(
-                self.sharding_cfg.generate_rules, attr_name)
-
-            sharding_dict = {
-                'prefill': NamedSharding(self.mesh,
-                                         P(*prefill_sharding_config)),
-                'generate': NamedSharding(self.mesh,
-                                          P(*generate_sharding_config))
-            }
-            setattr(self, attr_name, sharding_dict)
-
-        # static sharding for kernel/weights
-        self.edf_sharding = NamedSharding(
-            self.mesh, P(*self.sharding_cfg.generate_rules.moe_weights_edf))
-        self.efd_sharding = NamedSharding(
-            self.mesh, P(*self.sharding_cfg.generate_rules.moe_weights_efd))
-
-        return
