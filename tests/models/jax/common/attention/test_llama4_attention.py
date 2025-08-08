@@ -76,7 +76,7 @@ class Llama4AttentionTest(unittest.TestCase):
         num_attention_heads = 4
         head_dim = hidden_size // num_attention_heads
         param_factory = MagicMock()
-        
+
         # Create dummy sharding objects
         dummy_sharding = NamedSharding(self.mesh, P())
 

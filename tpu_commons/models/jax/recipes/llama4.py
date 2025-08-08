@@ -1,5 +1,4 @@
 import re
-from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import jax
@@ -10,7 +9,6 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from vllm.config import VllmConfig
 
-import tpu_commons.models.jax.common.sharding as sharding
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.common.attention.attention import AttentionMetadata
 from tpu_commons.models.jax.common.attention.llama4_attention import \
@@ -21,8 +19,6 @@ from tpu_commons.models.jax.common.layers import (DenseFFW, Embedder, LMhead,
                                                   RMSNorm)
 from tpu_commons.models.jax.common.model import Model
 from tpu_commons.models.jax.common.moe.moe import MoE, Router
-from tpu_commons.models.jax.common.sharding import (Sharding,
-                                                    ShardingRulesConfig)
 from tpu_commons.models.jax.common.transformer_block import \
     SharedExpertsTransformerBlock
 from tpu_commons.models.jax.layers.misc import shard_put
@@ -31,6 +27,7 @@ from tpu_commons.models.jax.utils.weight_utils import (
     transpose_params)
 
 logger = init_logger(__name__)
+
 
 class Llama4ForCausalLM(Model):
 
@@ -84,14 +81,15 @@ class Llama4ForCausalLM(Model):
                 scale_initializer=nnx.initializers.ones,
                 random_init=False)
 
-        self.embedder = Embedder(
-            vocab_size=vocab_size,
-            hidden_size=self.hidden_size,
-            dtype=dtype,
-            prelogit_td=NamedSharding(self.mesh, P()),
-            vd_sharding=NamedSharding(self.mesh, P(('data', 'expert', 'model'), None)),
-            mesh=self.mesh,
-            param_factory=self.param_factory)
+        self.embedder = Embedder(vocab_size=vocab_size,
+                                 hidden_size=self.hidden_size,
+                                 dtype=dtype,
+                                 prelogit_td=NamedSharding(self.mesh, P()),
+                                 vd_sharding=NamedSharding(
+                                     self.mesh,
+                                     P(('data', 'expert', 'model'), None)),
+                                 mesh=self.mesh,
+                                 param_factory=self.param_factory)
         self.embedder.generate_kernel(self.rng)
 
         self.layers = []
@@ -102,7 +100,7 @@ class Llama4ForCausalLM(Model):
             is_moe_layer = (i + 1) % \
                             self.interleave_moe_layer_step == 0
             use_attention_rope = (i + 1) % self.no_rope_layer_interval != 0
-            
+
             router = Router(
                 mesh=self.mesh,
                 dtype=dtype,
@@ -114,7 +112,7 @@ class Llama4ForCausalLM(Model):
                 activation_ffw_td=NamedSharding(self.mesh, P('data', None)),
                 ed_sharding=NamedSharding(self.mesh, P(None, 'expert')),
             )
-            
+
             custom_module = MoE(
                 mesh=self.mesh,
                 param_factory=self.param_factory,
@@ -126,9 +124,12 @@ class Llama4ForCausalLM(Model):
                 hidden_act=hidden_act,
                 router=router,
                 activation_ffw_td=NamedSharding(self.mesh, P('data', None)),
-                activation_ffw_ted=NamedSharding(self.mesh, P('data', 'expert', None)),
-                edf_sharding=NamedSharding(self.mesh, P('expert', None, 'model')),
-                efd_sharding=NamedSharding(self.mesh, P('expert', 'model', None)),
+                activation_ffw_ted=NamedSharding(self.mesh,
+                                                 P('data', 'expert', None)),
+                edf_sharding=NamedSharding(self.mesh, P(
+                    'expert', None, 'model')),
+                efd_sharding=NamedSharding(self.mesh, P(
+                    'expert', 'model', None)),
             ) if is_moe_layer else DenseFFW(
                 mesh=self.mesh,
                 param_factory=self.param_factory,
@@ -139,7 +140,7 @@ class Llama4ForCausalLM(Model):
                 df_sharding=NamedSharding(self.mesh, P(None, 'model')),
                 fd_sharding=NamedSharding(self.mesh, P('model', None)),
                 activation_ffw_td=NamedSharding(self.mesh, P('data', None)))
-                
+
             attn = Llama4Attention(
                 hidden_size=self.hidden_size,
                 dtype=dtype,
@@ -162,18 +163,23 @@ class Llama4ForCausalLM(Model):
                 attention_chunk_size=None if use_attention_rope else 8192,
                 mesh=self.mesh,
                 param_factory=self.param_factory,
-                activation_attention_td=NamedSharding(self.mesh, P('data', 'model')),
+                activation_attention_td=NamedSharding(self.mesh,
+                                                      P('data', 'model')),
                 activation_q_td=NamedSharding(self.mesh, P('data', 'model')),
                 query_tnh=NamedSharding(self.mesh, P('data', 'model', None)),
-                keyvalue_skh=NamedSharding(self.mesh, P('data', 'model', None)),
-                activation_attention_out_td=NamedSharding(self.mesh, P('data', 'model')),
-                keyvalue_cache_lskh=NamedSharding(self.mesh, P(None, None, 'model', None)),
+                keyvalue_skh=NamedSharding(self.mesh, P('data', 'model',
+                                                        None)),
+                activation_attention_out_td=NamedSharding(
+                    self.mesh, P('data', 'model')),
+                keyvalue_cache_lskh=NamedSharding(self.mesh,
+                                                  P(None, None, 'model',
+                                                    None)),
                 attn_o_tnh=NamedSharding(self.mesh, P('data', 'model', None)),
                 dnh_sharding=NamedSharding(self.mesh, P(None, 'model', None)),
                 dkh_sharding=NamedSharding(self.mesh, P(None, 'model', None)),
                 nhd_sharding=NamedSharding(self.mesh, P('model', None, None)),
             )
-            
+
             shared_experts = DenseFFW(
                 dtype=dtype,
                 hidden_act=hidden_act,
@@ -185,7 +191,7 @@ class Llama4ForCausalLM(Model):
                 fd_sharding=NamedSharding(self.mesh, P('model', None)),
                 activation_ffw_td=NamedSharding(self.mesh, P('data', None)))
 
-            pre_attention_norm=RMSNorm(
+            pre_attention_norm = RMSNorm(
                 dims=self.hidden_size,
                 mesh=self.mesh,
                 param_factory=self.param_factory,
@@ -195,7 +201,7 @@ class Llama4ForCausalLM(Model):
                 dtype=dtype,
             )
 
-            pre_mlp_norm=RMSNorm(
+            pre_mlp_norm = RMSNorm(
                 dims=self.hidden_size,
                 mesh=self.mesh,
                 param_factory=self.param_factory,
@@ -233,10 +239,10 @@ class Llama4ForCausalLM(Model):
             hidden_size=self.hidden_size,
             dtype=dtype,
             prelogit_td=NamedSharding(self.mesh, P()),
-            vd_sharding=NamedSharding(
-                self.mesh, P(('data', 'expert', 'model'), None)),
-            dv_sharding=NamedSharding(
-                self.mesh, P(None, ('data', 'expert', 'model'))),
+            vd_sharding=NamedSharding(self.mesh,
+                                      P(('data', 'expert', 'model'), None)),
+            dv_sharding=NamedSharding(self.mesh,
+                                      P(None, ('data', 'expert', 'model'))),
             mesh=self.mesh,
             param_factory=self.param_factory)
         self.lm_head.generate_kernel(self.rng)

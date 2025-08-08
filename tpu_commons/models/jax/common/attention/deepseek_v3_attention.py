@@ -10,13 +10,6 @@ from jax.sharding import PartitionSpec as P
 from jax.typing import DTypeLike
 from vllm.config import VllmConfig
 
-from tpu_commons.models.jax.attention_interface import update_kv_cache
-from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.models.jax.common.base import Config, ParamFactory
-from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
-from tpu_commons.models.jax.common.layers import RMSNorm
-from tpu_commons.models.jax.common.rope import DeepseekScalingRotaryEmbedding
-
 from tpu_commons.kernels.ragged_paged_attention.kernel import \
     ragged_paged_attention
 from tpu_commons.kernels.ragged_paged_attention.v3.kernel import (
@@ -25,6 +18,12 @@ from tpu_commons.kernels.ragged_paged_attention.v3.kernel import \
     ragged_paged_attention as ragged_paged_attention_v3
 from tpu_commons.kernels.ragged_paged_attention.v3.util import \
     get_dtype_packing
+from tpu_commons.models.jax.attention_interface import update_kv_cache
+from tpu_commons.models.jax.attention_metadata import AttentionMetadata
+from tpu_commons.models.jax.common.base import Config, ParamFactory
+from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
+from tpu_commons.models.jax.common.layers import RMSNorm
+from tpu_commons.models.jax.common.rope import DeepseekScalingRotaryEmbedding
 
 KVCache = Tuple[jax.Array, jax.Array]
 
@@ -117,7 +116,6 @@ class MLA(nnx.Module):
     attention_chunk_size: int | None = None
     rope_input_ordering: str = "split"
     quant: Any | None = None
-
 
     def __post_init__(self):
         self.N = self.num_attention_heads
