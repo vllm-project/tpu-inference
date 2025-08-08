@@ -202,8 +202,6 @@ def test_load_q_proj(mock_config, mesh, mappings, mock_thread_deps):
     mock_thread_deps["model_weights_generator"].return_value = [(hf_key,
                                                                  hf_weight)]
 
-    # Expected shape: (hidden_size, num_heads, head_dim)
-    # No repeat since sharding_size // num_heads < 1
     expected_shape = (config.get_hidden_size(),
                       config.hf_config.num_attention_heads,
                       config.get_head_size())
@@ -214,7 +212,7 @@ def test_load_q_proj(mock_config, mesh, mappings, mock_thread_deps):
 
     mock_thread_deps["get_param_and_sharding"].assert_called_once_with(
         mock.ANY, mock_thread_deps["get_named_sharding"].return_value,
-        "transformer.h.*.attn.c_attn_q")
+        "transformer.h.0.attn.c_attn_q")
 
     transformed_weight = mock_thread_deps["shard_put"].call_args[0][0]
     assert transformed_weight.shape == expected_shape
@@ -230,7 +228,6 @@ def test_load_k_proj_gqa(mock_config, mappings, mock_thread_deps):
     mock_thread_deps["model_weights_generator"].return_value = [(hf_key,
                                                                  hf_weight)]
 
-    # Expected shape: (hidden_size, num_kv_heads * repeat_factor, head_dim)
     num_kv_heads = config.hf_config.num_key_value_heads
     repeat_factor = sharding_size // num_kv_heads
     expected_heads = num_kv_heads * repeat_factor
@@ -280,14 +277,10 @@ def test_load_with_head_padding(mock_config, mesh, mappings, mock_thread_deps):
     mock_thread_deps["model_weights_generator"].return_value = [(hf_key,
                                                                  hf_weight)]
 
-    # Assertion is skipped due to head_dim_pad > 0, so no need to mock model_weight shape
-
     load_hf_weights_on_thread(mock_config, mock.MagicMock(), mappings, mesh,
                               "dummy.bin")
 
     transformed_weight = mock_thread_deps["shard_put"].call_args[0][0]
-    # reshape: (4, 4, 16) -> pad: (4, 8, 16) -> transpose: (16, 4, 8)
-    # No repeat: sharding_size // num_heads < 1
     expected_shape = (config.get_hidden_size(),
                       config.hf_config.num_attention_heads, head_dim_padded)
     assert transformed_weight.shape == expected_shape
@@ -301,15 +294,30 @@ def mock_load_deps(monkeypatch):
         "get_model_weights_files": mock.MagicMock(),
         "load_hf_weights_on_thread": mock.MagicMock(),
         "nnx_update": mock.MagicMock(),
-        "ThreadPoolExecutor": mock.MagicMock(),
     }
     monkeypatch.setattr(f"{base_path}.get_model_weights_files",
                         mocks["get_model_weights_files"])
     monkeypatch.setattr(f"{base_path}.load_hf_weights_on_thread",
                         mocks["load_hf_weights_on_thread"])
     monkeypatch.setattr(f"{base_path}.nnx.update", mocks["nnx_update"])
+
+    mock_executor_instance = mock.MagicMock()
+
+    def mock_submit(fn, *args, **kwargs):
+        # Directly call the function to simulate execution
+        result = fn(*args, **kwargs)
+        mock_future = mock.MagicMock()
+        mock_future.result.return_value = result
+        return mock_future
+
+    mock_executor_instance.submit.side_effect = mock_submit
+
+    mock_thread_pool_cls = mock.MagicMock()
+    mock_thread_pool_cls.return_value.__enter__.return_value = mock_executor_instance
+    mocks["ThreadPoolExecutor"] = mock_thread_pool_cls
     monkeypatch.setattr(f"{base_path}.ThreadPoolExecutor",
                         mocks["ThreadPoolExecutor"])
+
     return mocks
 
 
@@ -323,6 +331,7 @@ def test_load_weights_multiple_files(mock_config, mesh, mappings,
 
     mock_load_deps["get_model_weights_files"].assert_called_once_with(
         mock_config.model_config.model)
+    mock_load_deps["ThreadPoolExecutor"].assert_called_once_with(max_workers=2)
     assert mock_load_deps["load_hf_weights_on_thread"].call_count == 2
     mock_load_deps["nnx_update"].assert_called_once()
     update_args = mock_load_deps["nnx_update"].call_args[0]
@@ -336,5 +345,6 @@ def test_load_weights_no_files(mock_config, mesh, mappings, mock_load_deps):
 
     load_hf_weights(mock_config, model, mappings, mesh)
 
+    mock_load_deps["ThreadPoolExecutor"].assert_called_once_with(max_workers=0)
     mock_load_deps["load_hf_weights_on_thread"].assert_not_called()
-    mock_load_deps["nnx_update"].assert_not_called()
+    mock_load_deps["nnx_update"].assert_called_once()
