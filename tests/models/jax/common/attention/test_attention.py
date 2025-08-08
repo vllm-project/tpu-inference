@@ -5,14 +5,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import nnx
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
 
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.common.attention.attention import (Attention,
                                                                AttentionConfig)
 from tpu_commons.models.jax.common.base import ParamFactory
-from tpu_commons.models.jax.common.sharding import (ShardingConfig,
-                                                    ShardingRulesConfig)
 
 KVCache = Tuple[jax.Array, jax.Array]
 
@@ -34,11 +33,6 @@ class TestAttention(unittest.TestCase):
             scale_initializer=nnx.initializers.ones,
             random_init=True,
         )
-        self.sharding_cfg = ShardingConfig(
-            default_rules_cls=ShardingRulesConfig,
-            prefill_rules=ShardingRulesConfig,
-            generate_rules=ShardingRulesConfig,
-        )
 
     def test_attention_forward_pass(self):
         """Tests the forward pass of the Attention module in prefill mode."""
@@ -57,6 +51,8 @@ class TestAttention(unittest.TestCase):
             vllm_config=None,
         )
 
+        dummy_sharding = NamedSharding(self.mesh, P())
+
         attention = Attention(
             hidden_size=hidden_size,
             num_attention_heads=num_attention_heads,
@@ -67,8 +63,15 @@ class TestAttention(unittest.TestCase):
             dtype=jnp.bfloat16,
             mesh=self.mesh,
             param_factory=self.param_factory,
-            sharding_cfg=self.sharding_cfg,
             quant=None,
+            dnh_sharding=dummy_sharding,
+            dkh_sharding=dummy_sharding,
+            nhd_sharding=dummy_sharding,
+            activation_q_td=dummy_sharding,
+            query_tnh=dummy_sharding,
+            keyvalue_skh=dummy_sharding,
+            keyvalue_cache_lskh=dummy_sharding,
+            attn_o_tnh=dummy_sharding,
         )
         attention.generate_kernel(nnx.Rngs(42))
 
@@ -101,6 +104,7 @@ class TestAttention(unittest.TestCase):
             num_seqs=jnp.array([1], dtype=jnp.int32),
             query_start_loc=jnp.array([0, seq_len], dtype=jnp.int32),
             num_slices=jnp.array([1], dtype=jnp.int32),
+            request_distribution=None,
         )
 
         new_kv_cache, output = attention(

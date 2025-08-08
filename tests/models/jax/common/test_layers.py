@@ -4,12 +4,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import nnx
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
 
 from tpu_commons.models.jax.common.base import ParamFactory
 from tpu_commons.models.jax.common.layers import DenseFFW, Embedder, RMSNorm
-from tpu_commons.models.jax.common.sharding import (ShardingConfig,
-                                                    ShardingRulesConfig)
 
 
 class TestLayers(unittest.TestCase):
@@ -29,11 +28,6 @@ class TestLayers(unittest.TestCase):
             scale_initializer=nnx.initializers.ones,
             random_init=True,
         )
-        self.sharding_cfg = ShardingConfig(
-            default_rules_cls=ShardingRulesConfig,
-            prefill_rules=ShardingRulesConfig,
-            generate_rules=ShardingRulesConfig,
-        )
 
     def test_rmsnorm_forward_pass(self):
         """Tests the forward pass of the RMSNorm module."""
@@ -44,8 +38,7 @@ class TestLayers(unittest.TestCase):
             dims=dims,
             mesh=self.mesh,
             param_factory=self.param_factory,
-            prefill_rules=self.sharding_cfg.prefill_rules,
-            generate_rules=self.sharding_cfg.generate_rules,
+            activation_ffw_td=NamedSharding(self.mesh, P()),
             epsilon=epsilon,
             dtype=jnp.float32,
         )
@@ -54,7 +47,7 @@ class TestLayers(unittest.TestCase):
         seq_len = 128
         x = jax.random.normal(jax.random.PRNGKey(42), (seq_len, dims))
 
-        output = norm(x, op_mode="prefill")
+        output = norm(x)
 
         self.assertEqual(output.shape, x.shape)
         self.assertEqual(output.dtype, jnp.float32)
@@ -70,18 +63,20 @@ class TestLayers(unittest.TestCase):
         ffw_layer = DenseFFW(
             mesh=self.mesh,
             param_factory=self.param_factory,
-            sharding_cfg=self.sharding_cfg,
             dtype=jnp.bfloat16,
             hidden_act="silu",
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
+            df_sharding=NamedSharding(self.mesh, P()),
+            fd_sharding=NamedSharding(self.mesh, P()),
+            activation_ffw_td=NamedSharding(self.mesh, P()),
         )
         ffw_layer.generate_kernel(nnx.Rngs(0))
 
         seq_len = 128
         x = jnp.ones((seq_len, hidden_size), dtype=jnp.bfloat16)
 
-        output = ffw_layer(x, op_mode="prefill")
+        output = ffw_layer(x)
 
         self.assertEqual(output.shape, x.shape)
         self.assertEqual(output.dtype, x.dtype)
@@ -98,6 +93,8 @@ class TestLayers(unittest.TestCase):
             dtype=dtype,
             mesh=self.mesh,
             param_factory=self.param_factory,
+            prelogit_td=NamedSharding(self.mesh, P()),
+            vd_sharding=NamedSharding(self.mesh, P()),
         )
         embedder.generate_kernel(nnx.Rngs(0))
 
@@ -127,6 +124,8 @@ class TestLayers(unittest.TestCase):
             normalize_embeddings=True,
             mesh=self.mesh,
             param_factory=self.param_factory,
+            prelogit_td=NamedSharding(self.mesh, P()),
+            vd_sharding=NamedSharding(self.mesh, P()),
         )
         embedder_norm.generate_kernel(rngs_1)
 
@@ -136,6 +135,8 @@ class TestLayers(unittest.TestCase):
             dtype=jnp.float32,
             mesh=self.mesh,
             param_factory=self.param_factory,
+            prelogit_td=NamedSharding(self.mesh, P()),
+            vd_sharding=NamedSharding(self.mesh, P()),
         )
         embedder_no_norm.generate_kernel(rngs_2)
 

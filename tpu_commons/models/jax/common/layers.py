@@ -147,13 +147,11 @@ class DenseFFW(nnx.Module):
     activation_ffw_td: NamedSharding
     quant: Any | None = None
 
-    def __call__(self, x_TD, op_mode):
+    def __call__(self, x_TD):
         """Performs the forward pass of the FFW layer.
 
         Args:
             x_TD: The input tensor of shape either `(sequence, d_model)`
-            op_mode: The operational mode ('prefill' or 'generate'), used for
-                selecting sharding annotations.
 
         Returns:
             The output tensor of shape `(batch, sequence, d_model)`.

@@ -48,7 +48,6 @@ class TransformerBlock(nnx.Module):
             self, x_TD: jax.Array, is_prefill: bool, kv_cache: KVCache,
             attention_metadata: AttentionMetadata
     ) -> Tuple[KVCache, jax.Array]:
-        op_mode = "prefill" if is_prefill else "generate"
         # Attn Block
         attn_residual_TD = x_TD
         x_TD = self.pre_attention_norm(x_TD)
@@ -60,7 +59,7 @@ class TransformerBlock(nnx.Module):
         # FFW Block
         ffw_residual_TD = attn_output_TD
         normed_ffw_input_TD = self.pre_mlp_norm(attn_output_TD)
-        logits_TD = self.custom_module(normed_ffw_input_TD, op_mode)
+        logits_TD = self.custom_module(normed_ffw_input_TD)
         logits_TD += ffw_residual_TD
         return new_cache, logits_TD
 
@@ -93,7 +92,6 @@ class SharedExpertsTransformerBlock(TransformerBlock):
     shared_experts: nnx.Module
 
     def __call__(self, x_TD, is_prefill, kv_cache, attention_metadata):
-        op_mode = "prefill" if is_prefill else "generate"
         # Attn Block
         attn_residual_TD = x_TD
         x_TD = self.pre_attention_norm(x_TD)
@@ -106,13 +104,12 @@ class SharedExpertsTransformerBlock(TransformerBlock):
         ffw_residual_TD = attn_output_TD
         normed_ffw_input_TD = self.pre_mlp_norm(attn_output_TD)
         if isinstance(self.custom_module, MoE):
-            logits_TD = self.custom_module(normed_ffw_input_TD, op_mode)
+            logits_TD = self.custom_module(normed_ffw_input_TD)
             # Add the shared expert outputs to the MoE outputs.
-            shared_expert_output_TD = self.shared_experts(
-                normed_ffw_input_TD, op_mode)
+            shared_expert_output_TD = self.shared_experts(normed_ffw_input_TD)
             logits_TD += shared_expert_output_TD
         elif isinstance(self.custom_module, DenseFFW):
-            logits_TD = self.custom_module(normed_ffw_input_TD, op_mode)
+            logits_TD = self.custom_module(normed_ffw_input_TD)
         else:
             raise ValueError(
                 f"Invalid custom moduel type: {type(self.custom_module)}")
