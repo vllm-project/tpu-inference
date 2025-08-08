@@ -849,8 +849,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                 mm_embeds.append(mm_embeds_item)
         return mm_embeds
 
-    def _get_model_inputs(self, input_ids: jax.Array,
-                          mm_embeds: list[jax.Array]):
+    def _get_input_ids_embeds(self, input_ids: jax.Array,
+                              mm_embeds: list[jax.Array]):
         if self.is_multimodal_model:
             inputs_embeds = self.get_input_embeddings_fn(
                 self.state,
@@ -891,7 +891,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                 #     "Should not schedule a request that does nothing!")
             return DUMMY_METADATA, EMPTY_MODEL_RUNNER_OUTPUT,
 
-        (kv_caches, input_ids, attn_metadata, sampling_metadata,
+        (input_ids, attn_metadata, sampling_metadata,
          logits_indices) = self._prepare_inputs(scheduler_output)
 
         # multi-modal support
@@ -908,13 +908,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         # Later, the multi-modality model will take the embedding as the input.
         # For text-only model, this does nothing. It will input the input_ids and
         # leave the mebedding job inside the forward pass
-        input_ids, inputs_embeds = self._get_model_inputs(input_ids, mm_embeds)
+        input_ids, inputs_embeds = self._get_input_ids_embeds(
+            input_ids, mm_embeds)
 
         # TODO: Disable this for now
         if self.is_multimodal_model:
             self.maybe_forbid_compile = nullcontext()
 
-        # TODO: make _get_model_inputs within this context
+        # TODO: make _get_input_ids_embeds within this context
         # NOTE: right now, mm model will use embeddings as the input,
         # but text-only model will use input_ids
         with self.maybe_forbid_compile:
@@ -928,7 +929,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                 # but one of them would be `None`
                 self.kv_caches, hidden_states = self.model_fn(
                     self.state,
-                    kv_caches,
+                    self.kv_caches,
                     input_ids,
                     attn_metadata,
                     inputs_embeds,
@@ -1214,7 +1215,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
               logits_indices, request_distribution))
 
         return (
-            self.kv_caches,
             input_ids,
             AttentionMetadata(
                 input_positions=positions,
