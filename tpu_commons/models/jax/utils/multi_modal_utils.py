@@ -89,6 +89,10 @@ def _merge_multimodal_embeddings(
     Note:
         This returns a new array with the updated values.
     """
+    # Check the number of mm embeddings is non-zero
+    if not jnp.any(is_multimodal):
+        return inputs_embeds
+
     flattened = _flatten_embeddings(multimodal_embeddings)
     # The check for matching number of tokens is removed as it is not
     # JIT-compatible. If the shapes mismatch, JAX will raise an error

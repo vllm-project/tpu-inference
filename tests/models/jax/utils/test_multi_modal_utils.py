@@ -26,20 +26,12 @@ def test_sanity_check_valid_tuple():
     # No assertion error expected
 
 
-def test_sanity_check_3d_jax_array_raises():
-    """Tests sanity_check with a 3D jax.Array.
-
-    Note: The current implementation of sanity_check_mm_encoder_outputs does not
-    seem to correctly handle the documented case of a single 3D tensor for MultiModalEmbeddings.
-    This test verifies the *current* behavior, which is to raise an AssertionError
-    because the code iterates through the first dimension and expects each element to be 2D.
-    """
+def test_sanity_check_valid_3d_jax_array():
+    """Tests sanity_check with a valid 3D jax.Array."""
     embeddings: MultiModalEmbeddings = jnp.ones((2, 10, 128))
-    with pytest.raises(
-            AssertionError,
-            match=
-            "Expected multimodal embeddings to be a sequence of 2D tensors"):
-        multi_modal_utils.sanity_check_mm_encoder_outputs(embeddings, 2)
+    multi_modal_utils.sanity_check_mm_encoder_outputs(embeddings, 2)
+    # No assertion error expected, as the function iterates through the first dimension (2),
+    # and each element is a 2D array of shape (10, 128).
 
 
 def test_sanity_check_invalid_type():
@@ -246,3 +238,42 @@ def test_merge_mm_embeds_count_mismatch_raises(placeholder_id, base_embeds):
             inputs_embeds,
             mm_embeds_too_many,
             placeholder_token_id=placeholder_id)
+
+
+@pytest.mark.parametrize("placeholder_id", [-1, [-1, -2]])
+def test_merge_mm_embeds_count_too_few_raises(placeholder_id, base_embeds):
+    """Tests that an error is raised if mm_embeds are too few."""
+    input_ids = jnp.array([1, 2, -1, -1, 3])  # 2 placeholders
+    inputs_embeds = base_embeds[:len(input_ids)]
+    mm_embeds_too_few: NestedTensors = jnp.ones((1, EMBED_DIM))
+
+    # Expect a JAX index error from the gather operation.
+    with pytest.raises(
+            TypeError,
+            match="Slice size at index 0 in gather op is out of range"):
+        multi_modal_utils.merge_multimodal_embeddings(
+            input_ids,
+            inputs_embeds,
+            mm_embeds_too_few,
+            placeholder_token_id=placeholder_id)
+
+
+@pytest.mark.parametrize("placeholder_id", [-1, [-1, -2]])
+def test_merge_mm_embeds_count_too_many_no_raise(placeholder_id, base_embeds):
+    """Tests that no error is raised if mm_embeds are too many; extras are ignored."""
+    input_ids = jnp.array([1, 2, -1, -1, 3])  # 2 placeholders
+    inputs_embeds = base_embeds[:len(input_ids)]
+    mm_embeds_too_many: NestedTensors = jnp.arange(3 * EMBED_DIM).reshape(
+        (3, EMBED_DIM))
+
+    result = multi_modal_utils.merge_multimodal_embeddings(
+        input_ids,
+        inputs_embeds,
+        mm_embeds_too_many,
+        placeholder_token_id=placeholder_id)
+
+    expected = np.array(inputs_embeds)
+    is_mm = np.isin(input_ids, np.array(placeholder_id))
+    expected[is_mm] = multi_modal_utils._flatten_embeddings(
+        mm_embeds_too_many)[:2]
+    np.testing.assert_array_equal(result, expected)
