@@ -21,22 +21,32 @@ MAX_ALLOWED_PAGE_INDICES_N = (
 )  # Based on experiments on v5e, 256x1024 results in smem oom but 128x1024 not. TODO: Adjust this based on TPU version.
 
 
-def sharded_flash_attention(mesh: Mesh,
-                            causal: bool = True) -> Callable[..., Any]:
+def sharded_flash_attention(
+        mesh: Mesh,
+        causal: bool = True,
+        sm_scale: Optional[float] = None) -> Callable[..., Any]:
     in_specs = (
         P("data", "model", None, None),  # q
         P("data", "model", None, None),  # k
-        P("data", "model", None, None),  # vx
+        P("data", "model", None, None),  # v
+        P(),  # segment_ids
     )
     out_specs = P("data", "model", None, None)
+
+    def _flash_attention(q, k, v, segment_ids):
+        return flash_attention(q,
+                               k,
+                               v,
+                               segment_ids=segment_ids,
+                               sm_scale=sm_scale,
+                               causal=causal)
+
     return jax.jit(
-        shard_map.shard_map(
-            functools.partial(flash_attention, causal=causal),
-            mesh=mesh,
-            in_specs=in_specs,
-            out_specs=out_specs,
-            check_rep=False,
-        ))
+        shard_map.shard_map(_flash_attention,
+                            mesh=mesh,
+                            in_specs=in_specs,
+                            out_specs=out_specs,
+                            check_rep=False))
 
 
 def sharded_paged_attention(

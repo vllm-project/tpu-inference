@@ -17,9 +17,14 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
+from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils import cdiv
+from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
@@ -27,6 +32,8 @@ from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.worker.kv_connector_model_runner_mixin import \
     KVConnectorModelRunnerMixin
+from vllm.v1.worker.utils import (gather_mm_placeholders,
+                                  scatter_mm_placeholders)
 
 from tpu_commons import utils as common_utils
 from tpu_commons.logger import init_logger
@@ -38,6 +45,8 @@ from tpu_commons.models.jax.layers.sampling import (compute_logprobs,
 from tpu_commons.models.jax.model_loader import get_model
 from tpu_commons.models.jax.sampling_metadata import \
     TPUSupportedSamplingMetadata
+from tpu_commons.models.jax.utils.multi_modal_utils import \
+    sanity_check_mm_encoder_outputs
 from tpu_commons.models.jax.utils.weight_utils import \
     transfer_state_with_mappings
 from tpu_commons.runner import utils as runner_utils
@@ -80,6 +89,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
 
         self.devices = devices
         self.dtype = self.model_config.dtype
+
+        # multi-modal related
+        self.is_multimodal_model = self.model_config.is_multimodal_model
+        self.mm_registry = MULTIMODAL_REGISTRY
+        self.uses_mrope = self.model_config.uses_mrope
+        encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
+            model_config=self.model_config,
+            scheduler_config=self.scheduler_config,
+            mm_registry=self.mm_registry,
+        )
+        self.max_num_encoder_input_tokens = encoder_compute_budget
+        self.encoder_cache_size = encoder_cache_size
 
         self._init_random()
         self._init_mesh()
@@ -193,12 +214,23 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         )
         self.structured_decode_arange = np.arange(0, 32, dtype=np.int32)
 
+        # multi-modal support
+        # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
+
+        # NOTE: When M-RoPE is enabled, position ids are 3D regardless of
+        # the modality of inputs. For text-only inputs, each dimension has
+        # identical position IDs, making M-RoPE functionally equivalent to
+        # 1D-RoPE.
+        # See page 5 of https://arxiv.org/abs/2409.12191
+        self.mrope_positions_cpu = np.zeros((3, self.max_num_tokens),
+                                            dtype=np.int64)
+
     @functools.partial(jax.jit, static_argnums=(0, ))
     def select_hidden_states_fn(self, hidden_states, indices_do_sample):
         return hidden_states[indices_do_sample]
 
     def load_model(self):
-        self.model_fn, self.compute_logits_fn, self.state = get_model(
+        self.model_fn, self.compute_logits_fn, self.get_multimodal_embeddings_fn, self.get_input_embeddings_fn, self.state = get_model(
             self.vllm_config,
             self.rng_key,
             self.mesh,
@@ -213,8 +245,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         return ("generate", )
 
     def get_kv_cache_spec(self):
-        # TODO(xiang): this hack tricks engine core to init successfully
         import torch
+
+        # TODO(xiang): this hack tricks engine core to init successfully
         block_size = self.vllm_config.cache_config.block_size
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         model_config = self.vllm_config.model_config
@@ -288,23 +321,26 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                   block_tables, query_start_loc, seq_lens, num_seqs,
                   request_distribution))
             logger.info(f"Precompile backbone --> num_tokens={num_tokens}")
-            inputs = (
-                self.kv_caches,
-                input_ids,
-                AttentionMetadata(
-                    input_positions=positions,
-                    slot_mapping=slot_mapping_metadata,
-                    block_tables=block_tables,
-                    seq_lens=seq_lens,
-                    query_start_loc=query_start_loc,
-                    num_seqs=num_seqs,
-                    num_slices=num_slices,
-                    request_distribution=request_distribution,
-                ),
+
+            attention_metadata = AttentionMetadata(
+                input_positions=positions,
+                slot_mapping=slot_mapping_metadata,
+                block_tables=block_tables,
+                seq_lens=seq_lens,
+                query_start_loc=query_start_loc,
+                num_seqs=num_seqs,
+                num_slices=num_slices,
+                request_distribution=request_distribution,
             )
+
+            # TODO:
+            # Use a None inputs_embeds here, assuming it is text-only model
+            # For mm model, we will use another precompile function
+            inputs_embeds = None
             start = time.perf_counter()
             self.kv_caches, hidden_states = self.model_fn(
-                self.state, *inputs[:3])
+                self.state, self.kv_caches, input_ids, attention_metadata,
+                inputs_embeds)
             end = time.perf_counter()
             logger.info("Compilation finished in %.2f [secs].", end - start)
             hidden_states.block_until_ready()
@@ -407,6 +443,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         if os.getenv("SKIP_JAX_PRECOMPILE", False):
             return
         logger.info("Precompile all the subgraphs with possible input shapes.")
+
+        # TODO: wenlong: skip precompiling for mm models
+        # because the model requires input_embeds
+        if self.is_multimodal_model:
+            logger.info("[TEMP] skip precompiling for multi-modal models")
+            return
 
         self._precompile_backbone()
         self._precompile_select_hidden_states()
@@ -630,6 +672,195 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         self.requests[req_id] = req_state
         self.input_batch.add_request(req_state)
 
+    def _calc_mrope_positions(self, scheduler_output: "VllmSchedulerOutput"):
+        mrope_pos_ptr = 0
+        for index, req_id in enumerate(self.input_batch.req_ids):
+            req = self.requests[req_id]
+            assert req.mrope_positions is not None
+
+            num_computed_tokens = \
+                self.input_batch.num_computed_tokens_cpu[index]
+            num_scheduled_tokens = \
+                scheduler_output.num_scheduled_tokens[req_id]
+            num_prompt_tokens = len(req.prompt_token_ids)
+
+            if num_computed_tokens + num_scheduled_tokens > num_prompt_tokens:
+                prompt_part_len = max(0,
+                                      num_prompt_tokens - num_computed_tokens)
+                completion_part_len = max(
+                    0, num_scheduled_tokens - prompt_part_len)
+            else:
+                prompt_part_len = num_scheduled_tokens
+                completion_part_len = 0
+
+            assert num_scheduled_tokens == prompt_part_len + completion_part_len
+
+            if prompt_part_len > 0:
+                # prompt's mrope_positions are pre-computed
+                dst_start = mrope_pos_ptr
+                dst_end = mrope_pos_ptr + prompt_part_len
+                src_start = num_computed_tokens
+                src_end = num_computed_tokens + prompt_part_len
+
+                self.mrope_positions_cpu[:, dst_start:dst_end] = \
+                    req.mrope_positions[:,src_start:src_end]
+
+                mrope_pos_ptr += prompt_part_len
+
+            if completion_part_len > 0:
+                # compute completion's mrope_positions on-the-fly
+                dst_start = mrope_pos_ptr
+                dst_end = mrope_pos_ptr + completion_part_len
+
+                MRotaryEmbedding.get_next_input_positions_tensor(
+                    out=self.mrope_positions_cpu,
+                    out_offset=dst_start,
+                    mrope_position_delta=req.mrope_position_delta,
+                    context_len=num_computed_tokens + prompt_part_len,
+                    num_new_tokens=completion_part_len,
+                )
+
+                mrope_pos_ptr += completion_part_len
+
+    def _execute_mm_encoder(self, scheduler_output: "VllmSchedulerOutput"):
+        import torch
+        scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
+        if not scheduled_encoder_inputs:
+            return
+
+        # Batch the multi-modal inputs.
+        mm_inputs = list[MultiModalKwargs]()
+        req_ids_pos = list[tuple[str, int, PlaceholderRange]]()
+        for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
+            req_state = self.requests[req_id]
+
+            for mm_input_id in encoder_input_ids:
+                mm_inputs.append(req_state.mm_inputs[mm_input_id])
+                req_ids_pos.append(
+                    (req_id, mm_input_id, req_state.mm_positions[mm_input_id]))
+
+        # Batch mm inputs as much as we can: if a request in the batch has
+        # multiple modalities or a different modality than the previous one,
+        # we process it separately to preserve item order.
+        # FIXME(ywang96): This is a hacky way to deal with multiple modalities
+        # in the same batch while still being able to benefit from batching
+        # multimodal inputs. The proper solution should be reordering the
+        # encoder outputs.
+        grouped_mm_inputs_list = group_mm_inputs_by_modality(mm_inputs)
+        encoder_outputs = []
+        image_grid_thw = ()
+        for grouped_mm_inputs in grouped_mm_inputs_list:
+            batched_mm_inputs = MultiModalKwargs.batch(grouped_mm_inputs)
+            # Convert torch tensors to numpy arrays that JAX can handle.
+            for key, value in batched_mm_inputs.items():
+                if isinstance(value, torch.Tensor):
+                    if key == 'image_grid_thw':
+                        # change it to tuple of tuples to make it hashable for JIT
+
+                        # Shape: (B, N, 3) -> (B*N, 3) -> tuple of tuples
+                        grid_thw_tensor = batched_mm_inputs[key]
+                        grid_thw_reshaped = grid_thw_tensor.reshape(-1, 3)
+                        image_grid_thw = tuple(
+                            tuple(row) for row in grid_thw_reshaped.tolist())
+
+                        continue
+
+                    if value.dtype == torch.bfloat16:
+                        batched_mm_inputs[key] = value.to(
+                            torch.float32).numpy().astype(jnp.bfloat16)
+                    else:
+                        batched_mm_inputs[key] = value.numpy()
+            batched_mm_inputs.pop('image_grid_thw')
+
+            # Run the encoder.
+            # `curr_group_outputs` is either of the following:
+            # 1. A tensor of shape (num_items, feature_size, hidden_size)
+            # in case feature_size is fixed across all multimodal items.
+            # 2. A list or tuple (length: num_items) of tensors, each of shape
+            # (feature_size, hidden_size) in case the feature size is dynamic
+            # depending on the input multimodal items.
+            curr_group_outputs = self.get_multimodal_embeddings_fn(
+                self.state, image_grid_thw, **batched_mm_inputs)
+
+            sanity_check_mm_encoder_outputs(
+                curr_group_outputs,
+                expected_num_items=len(grouped_mm_inputs),
+            )
+
+            for output in curr_group_outputs:
+                encoder_outputs.append(output)
+
+        # Cache the encoder outputs.
+        for (req_id, input_id, pos_info), output in zip(
+                req_ids_pos,
+                encoder_outputs,
+        ):
+            if req_id not in self.encoder_cache:
+                self.encoder_cache[req_id] = {}
+
+            self.encoder_cache[req_id][input_id] = scatter_mm_placeholders(
+                output,
+                is_embed=pos_info.is_embed,
+            )
+
+    def _gather_mm_embeddings(
+        self,
+        scheduler_output: "VllmSchedulerOutput",
+    ) -> list[jax.Array]:
+        mm_embeds: list[jax.Array] = []
+        for req_id in self.input_batch.req_ids:
+            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
+                req_id]
+            req_state = self.requests[req_id]
+            num_computed_tokens = req_state.num_computed_tokens
+            mm_positions = req_state.mm_positions
+            for i, pos_info in enumerate(mm_positions):
+                start_pos = pos_info.offset
+                num_encoder_tokens = pos_info.length
+
+                # The encoder output is needed if the two ranges overlap:
+                # [num_computed_tokens,
+                #  num_computed_tokens + num_scheduled_tokens) and
+                # [start_pos, start_pos + num_encoder_tokens)
+                if start_pos >= num_computed_tokens + num_scheduled_tokens:
+                    # The encoder output is not needed in this step.
+                    break
+                if start_pos + num_encoder_tokens <= num_computed_tokens:
+                    # The encoder output is already processed and stored
+                    # in the decoder's KV cache.
+                    continue
+
+                start_idx = max(num_computed_tokens - start_pos, 0)
+                end_idx = min(
+                    num_computed_tokens - start_pos + num_scheduled_tokens,
+                    num_encoder_tokens)
+                assert start_idx < end_idx
+                assert req_id in self.encoder_cache
+                assert i in self.encoder_cache[req_id]
+                encoder_output = self.encoder_cache[req_id][i]
+
+                if (is_embed := pos_info.is_embed) is not None:
+                    is_embed = is_embed[start_idx:end_idx]
+
+                mm_embeds_item = gather_mm_placeholders(
+                    encoder_output[start_idx:end_idx],
+                    is_embed=is_embed,
+                )
+                mm_embeds.append(mm_embeds_item)
+        return mm_embeds
+
+    def _get_model_inputs(self, input_ids: jax.Array,
+                          mm_embeds: list[jax.Array]):
+        if self.is_multimodal_model:
+            inputs_embeds = self.get_input_embeddings_fn(
+                self.state,
+                input_ids=input_ids,
+                multimodal_embeddings=mm_embeds,
+            )
+            return None, inputs_embeds
+        else:
+            return input_ids, None
+
     def execute_model(
         self,
         scheduler_output: "VllmSchedulerOutput",
@@ -641,6 +872,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         self,
         scheduler_output: "VllmSchedulerOutput",
     ) -> tuple[AttentionMetadata, ModelRunnerOutput]:
+
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
             if has_kv_transfer_group():
@@ -659,7 +891,32 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                 #     "Should not schedule a request that does nothing!")
             return DUMMY_METADATA, EMPTY_MODEL_RUNNER_OUTPUT,
 
-        inputs = self._prepare_inputs(scheduler_output)
+        (kv_caches, input_ids, attn_metadata, sampling_metadata,
+         logits_indices) = self._prepare_inputs(scheduler_output)
+
+        # multi-modal support
+        if self.is_multimodal_model:
+            # Run the multimodal encoder if any.
+            # We have the modality embeds at this time.
+            self._execute_mm_encoder(scheduler_output)
+            mm_embeds = self._gather_mm_embeddings(scheduler_output)
+        else:
+            mm_embeds = []
+
+        # NOTE(Wenlong): For multi-modal model,
+        # it will embed the text tokens and merge with the existing modality embeds
+        # Later, the multi-modality model will take the embedding as the input.
+        # For text-only model, this does nothing. It will input the input_ids and
+        # leave the mebedding job inside the forward pass
+        input_ids, inputs_embeds = self._get_model_inputs(input_ids, mm_embeds)
+
+        # TODO: Disable this for now
+        if self.is_multimodal_model:
+            self.maybe_forbid_compile = nullcontext()
+
+        # TODO: make _get_model_inputs within this context
+        # NOTE: right now, mm model will use embeddings as the input,
+        # but text-only model will use input_ids
         with self.maybe_forbid_compile:
 
             with set_forward_context(
@@ -667,11 +924,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                     self.vllm_config,
             ), self.maybe_get_kv_connector_output(
                     scheduler_output) as kv_connector_output:
+                # NOTE(Wenlong): It takes both `input_ids` and `inputs_embeds`,
+                # but one of them would be `None`
                 self.kv_caches, hidden_states = self.model_fn(
-                    self.state, *inputs[:3])
+                    self.state,
+                    kv_caches,
+                    input_ids,
+                    attn_metadata,
+                    inputs_embeds,
+                )
+            self.maybe_wait_for_kv_save()
 
             hidden_states = self.select_hidden_states_fn(
-                hidden_states, inputs[4])
+                hidden_states, logits_indices)
             logits = self.compute_logits_fn(self.state, hidden_states)
             if scheduler_output.grammar_bitmask is not None:
                 require_struct_decoding, grammar_bitmask_padded, arange = \
@@ -684,7 +949,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                     logits,
                     arange,
                 )
-            tpu_sampling_metadata = inputs[3]
+            tpu_sampling_metadata = sampling_metadata
             next_tokens = sample(
                 self.rng_params_for_sampling,
                 self.mesh,
@@ -759,7 +1024,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             pooler_output=[],
             kv_connector_output=kv_connector_output,
         )
-        return inputs[2], model_runner_output
+        return attn_metadata, model_runner_output
 
     @functools.partial(jax.jit, static_argnums=(0, ))
     def structured_decode_fn(self, require_struct_decoding: jax.Array,
@@ -870,6 +1135,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                arange,
                out=positions_np)
 
+        # Multi-modal support
+        # Calculate M-RoPE positions.
+        # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
+        if self.uses_mrope:
+            self._calc_mrope_positions(scheduler_output)
+
         # Get token indices.
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
@@ -904,6 +1175,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         # Inputs
         input_ids = self.input_ids_cpu[:padded_total_num_scheduled_tokens]
         positions = self.positions_cpu[:padded_total_num_scheduled_tokens]
+        mrope_positions = self.mrope_positions_cpu[:, :
+                                                   padded_total_num_scheduled_tokens]
         slot_mapping_metadata = self._get_slot_mapping_metadata(
             num_reqs, num_scheduled_tokens_per_req)
         num_slices = np.array([slot_mapping_metadata.shape[0]])
@@ -929,6 +1202,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         # Put to device
         sampling_metadata = TPUSupportedSamplingMetadata.\
             from_input_batch(self.mesh, self.input_batch, padded_num_reqs)
+
+        if self.uses_mrope:
+            positions = mrope_positions
+
         (input_ids, positions, slot_mapping_metadata, num_slices, block_tables,
          query_start_loc, seq_lens, num_seqs, logits_indices,
          request_distribution) = self._device_array(
@@ -1085,6 +1362,49 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
 
             self.requests[req_id] = CachedRequestState(**data_items,
                                                        output_token_ids=[])
+
+            # NOTE(wenlong): We need to explicitly set this
+            # because asdict will convert List[PlaceholderRange] to list[dict]
+            self.requests[req_id].mm_positions = new_req_data.mm_positions
+
+            # multi-modal related
+            # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
+            if self.uses_mrope:
+                image_grid_thw = []
+                video_grid_thw = []
+                second_per_grid_ts = []
+                audio_feature_lengths = []
+                use_audio_in_video = False
+                for mm_input in self.requests[req_id].mm_inputs:
+                    if mm_input.get("image_grid_thw") is not None:
+                        image_grid_thw.extend(
+                            mm_input["image_grid_thw"].tolist())
+                    if mm_input.get("video_grid_thw") is not None:
+                        video_grid_thw.extend(
+                            mm_input["video_grid_thw"].tolist())
+                    if mm_input.get("second_per_grid_ts") is not None:
+                        second_per_grid_ts.extend(
+                            mm_input["second_per_grid_ts"])
+                    if mm_input.get("audio_feature_lengths") is not None:
+                        audio_feature_lengths.extend(
+                            mm_input["audio_feature_lengths"])
+                    if mm_input.get("use_audio_in_video") is True:
+                        use_audio_in_video = True
+
+                hf_config = self.model_config.hf_config
+
+                self.requests[req_id].mrope_positions, \
+                    self.requests[req_id].mrope_position_delta = \
+                    MRotaryEmbedding.get_input_positions_tensor(
+                        self.requests[req_id].prompt_token_ids,
+                        hf_config=hf_config,
+                        image_grid_thw=image_grid_thw,
+                        video_grid_thw=video_grid_thw,
+                        second_per_grid_ts=second_per_grid_ts,
+                        audio_feature_lengths=audio_feature_lengths,
+                        use_audio_in_video=use_audio_in_video,
+                    )
+
             req_ids_to_add.append(req_id)
 
         # Update the states of the running/resumed requests.
