@@ -19,28 +19,68 @@ def rejection_sampler():
     return RejectionSampler()
 
 
-def create_batched_target_probs(output_token_ids: List[List[int]],
-                                vocab_size: int = 100) -> jnp.ndarray:
+def create_flattened_target_probs(output_token_ids: List[List[int]],
+                                  vocab_size: int = 100) -> jnp.ndarray:
     """
-    Helper function to create batched target probabilities that will produce
+    Helper function to create flattened target probabilities that will produce
     desired token ids on argmax.
     """
     # Remove bonus tokens to get the target tokens for each step
     token_ids = [tokens[:-1] for tokens in output_token_ids]
-    batch_size = len(token_ids)
-    max_spec_len = max(len(tokens) for tokens in token_ids) if token_ids else 1
 
-    # Create batched target probs with low values
-    target_probs = jnp.full((batch_size, max_spec_len, vocab_size),
+    # Flatten the token IDs
+    flattened_tokens = []
+    for tokens in token_ids:
+        flattened_tokens.extend(tokens)
+
+    num_tokens = len(flattened_tokens)
+    if num_tokens == 0:
+        return jnp.empty((0, vocab_size), dtype=jnp.float32)
+
+    # Create flattened target probs with low values
+    target_probs = jnp.full((num_tokens, vocab_size),
                             -100.0,
                             dtype=jnp.float32)
 
     # Set high values at desired token positions to make them the argmax
-    for i, tokens in enumerate(token_ids):
-        for j, token_id in enumerate(tokens):
-            target_probs = target_probs.at[i, j, token_id].set(100.0)
+    for i, token_id in enumerate(flattened_tokens):
+        target_probs = target_probs.at[i, token_id].set(100.0)
 
     return target_probs
+
+
+def convert_batched_to_flattened(
+    spec_tokens: List[List[int]],
+    output_tokens: List[List[int]],
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """
+    Helper function to convert batched test inputs to flattened format.
+
+    Returns:
+        draft_token_ids: Flattened draft tokens [num_tokens]
+        target_probs: Flattened target probabilities [num_tokens, vocab_size]
+        num_draft_tokens: Number of draft tokens per sequence [batch_size]
+        bonus_token_ids: Bonus tokens [batch_size]
+    """
+    # Flatten draft tokens
+    flattened_draft_tokens = []
+    for tokens in spec_tokens:
+        flattened_draft_tokens.extend(tokens)
+
+    draft_token_ids = jnp.array(flattened_draft_tokens, dtype=jnp.int32)
+
+    # Create flattened target probabilities
+    target_probs = create_flattened_target_probs(output_tokens)
+
+    # Number of draft tokens per sequence
+    num_draft_tokens = jnp.array([len(tokens) for tokens in spec_tokens],
+                                 dtype=jnp.int32)
+
+    # Bonus tokens are the last token of each output sequence
+    bonus_token_ids = jnp.array([tokens[-1] for tokens in output_tokens],
+                                dtype=jnp.int32)
+
+    return draft_token_ids, target_probs, num_draft_tokens, bonus_token_ids
 
 
 def create_sampling_metadata(
@@ -61,35 +101,24 @@ def _run_rejection_sampler_test(
 ):
     """Helper function to run a single rejection sampler test case."""
     metadata = create_sampling_metadata(all_greedy=True)
-    target_probs = create_batched_target_probs(output_tokens)
 
-    # Bonus tokens are the last token of each output sequence
-    bonus_token_ids = jnp.array([[tokens[-1]] for tokens in output_tokens],
-                                dtype=jnp.int32)
+    # Convert to flattened format
+    draft_token_ids, target_probs, num_draft_tokens, bonus_token_ids = convert_batched_to_flattened(
+        spec_tokens, output_tokens)
 
-    # Create batched draft token IDs
-    batch_size = len(spec_tokens)
-    max_spec_len = max(len(tokens)
-                       for tokens in spec_tokens) if spec_tokens else 1
-    draft_token_ids = jnp.full((batch_size, max_spec_len),
-                               PLACEHOLDER_TOKEN_ID,
-                               dtype=jnp.int32)
-
-    # Fill in the draft tokens
-    for i, tokens in enumerate(spec_tokens):
-        if tokens:
-            draft_token_ids = draft_token_ids.at[i, :len(tokens)].set(
-                jnp.array(tokens))
-
-    # Create num_draft_tokens array
+    # Override num_draft_tokens if specified (for padding tests)
     if num_draft_tokens_override:
         num_draft_tokens = jnp.array(num_draft_tokens_override,
                                      dtype=jnp.int32)
-    else:
-        num_draft_tokens = jnp.array([len(tokens) for tokens in spec_tokens],
-                                     dtype=jnp.int32)
+        # Need to adjust flattened inputs based on the override
+        total_tokens = sum(num_draft_tokens_override)
+        draft_token_ids = draft_token_ids[:total_tokens]
+        target_probs = target_probs[:total_tokens]
 
-    # Call the rejection sampler with batched inputs
+    max_spec_len = int(
+        jnp.max(num_draft_tokens)) if len(num_draft_tokens) > 0 else 1
+
+    # Call the rejection sampler with flattened inputs
     output = rejection_sampler(
         draft_token_ids=draft_token_ids,
         num_draft_tokens=num_draft_tokens,
@@ -100,16 +129,11 @@ def _run_rejection_sampler_test(
         sampling_metadata=metadata,
     )
 
-    # Pad expected output with placeholders to match the output shape
-    max_len = output.shape[1]
-    padded_expected = [
-        row + [PLACEHOLDER_TOKEN_ID] * (max_len - len(row))
-        for row in expected_output
-    ]
-    expected = jnp.array(padded_expected, dtype=jnp.int32)
+    # Parse the output using the new format
+    parsed_output = rejection_sampler.parse_output(
+        output, vocab_size=100, num_draft_tokens=num_draft_tokens)
 
-    assert jnp.array_equal(output,
-                           expected), f"Expected {expected}, got {output}"
+    assert parsed_output == expected_output, f"Expected {expected_output}, got {parsed_output}"
 
 
 def test_perfect_match(rejection_sampler):
@@ -216,17 +240,23 @@ def test_draft_tokens_with_explicit_padding(rejection_sampler):
 
 
 def test_parse_output(rejection_sampler):
-    """Test the parse_output method."""
+    """Test the parse_output method with the new flattened format."""
     vocab_size = 100
-    output_token_ids = jnp.array(
-        [[10, 20, 30, PLACEHOLDER_TOKEN_ID],
-         [40, 50, PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID]],
-        dtype=jnp.int32)
+
+    # Create flattened output: [main_tokens..., bonus_tokens...]
+    # Sequence 1: [10, 20, 30] + bonus 40
+    # Sequence 2: [50, 60] + bonus 70
+    main_tokens = jnp.array([10, 20, 30, 50, 60], dtype=jnp.int32)
+    bonus_tokens = jnp.array([40, 70], dtype=jnp.int32)
+    output_token_ids = jnp.concatenate([main_tokens, bonus_tokens])
+
+    num_draft_tokens = jnp.array([3, 2], dtype=jnp.int32)
 
     parsed_output = rejection_sampler.parse_output(output_token_ids,
-                                                   vocab_size)
+                                                   vocab_size,
+                                                   num_draft_tokens)
 
-    expected = [[10, 20, 30], [40, 50]]
+    expected = [[10, 20, 30, 40], [50, 60, 70]]
     assert parsed_output == expected, f"Expected {expected}, got {parsed_output}"
 
 
@@ -234,16 +264,46 @@ def test_parse_output_edge_cases(rejection_sampler):
     """Test the parse_output method with edge cases."""
     vocab_size = 100
 
-    # All placeholders
-    output_token_ids = jnp.full((2, 4), PLACEHOLDER_TOKEN_ID, dtype=jnp.int32)
-    parsed_output = rejection_sampler.parse_output(output_token_ids,
-                                                   vocab_size)
-    assert parsed_output == [[], []]
-
-    # Tokens outside vocab size
-    output_token_ids = jnp.array(
-        [[10, vocab_size + 1, 20], [vocab_size + 2, 30, PLACEHOLDER_TOKEN_ID]],
+    # Test with rejected tokens (placeholders)
+    # Sequence 1: [10, -1, -1] + bonus -1 (rejected)
+    # Sequence 2: [20, 30] + bonus 40 (accepted)
+    main_tokens = jnp.array(
+        [10, PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID, 20, 30],
         dtype=jnp.int32)
+    bonus_tokens = jnp.array([PLACEHOLDER_TOKEN_ID, 40], dtype=jnp.int32)
+    output_token_ids = jnp.concatenate([main_tokens, bonus_tokens])
+
+    num_draft_tokens = jnp.array([3, 2], dtype=jnp.int32)
+
     parsed_output = rejection_sampler.parse_output(output_token_ids,
-                                                   vocab_size)
-    assert parsed_output == [[10, 20], [30]]
+                                                   vocab_size,
+                                                   num_draft_tokens)
+    expected = [[10], [20, 30, 40]]
+    assert parsed_output == expected, f"Expected {expected}, got {parsed_output}"
+
+    # Test with tokens outside vocab size
+    # Sequence 1: [10, vocab_size+1, 20] + bonus vocab_size+2 (invalid tokens)
+    main_tokens = jnp.array([10, vocab_size + 1, 20], dtype=jnp.int32)
+    bonus_tokens = jnp.array([vocab_size + 2], dtype=jnp.int32)
+    output_token_ids = jnp.concatenate([main_tokens, bonus_tokens])
+
+    num_draft_tokens = jnp.array([3], dtype=jnp.int32)
+
+    parsed_output = rejection_sampler.parse_output(output_token_ids,
+                                                   vocab_size,
+                                                   num_draft_tokens)
+    expected = [[10, 20]]  # Invalid tokens filtered out
+    assert parsed_output == expected, f"Expected {expected}, got {parsed_output}"
+
+    # Test with empty sequences
+    main_tokens = jnp.array([], dtype=jnp.int32)
+    bonus_tokens = jnp.array([50, 60], dtype=jnp.int32)
+    output_token_ids = jnp.concatenate([main_tokens, bonus_tokens])
+
+    num_draft_tokens = jnp.array([0, 0], dtype=jnp.int32)
+
+    parsed_output = rejection_sampler.parse_output(output_token_ids,
+                                                   vocab_size,
+                                                   num_draft_tokens)
+    expected = [[50], [60]]  # Only bonus tokens
+    assert parsed_output == expected, f"Expected {expected}, got {parsed_output}"
