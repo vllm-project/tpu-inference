@@ -162,6 +162,24 @@ class DeepSeekV3(Model):
 
         for i in range(first_k_dense_replace):
             block = TransformerBlock(
+                RMSNorm(
+                    dims=hidden_size,
+                    mesh=self.mesh,
+                    param_factory=self.param_factory,
+                    epsilon=rms_norm_eps,
+                    activation_ffw_td=NamedSharding(self.mesh, P()),
+                    with_scale=True,
+                    dtype=dtype,
+                ),
+                pre_mlp_norm=RMSNorm(
+                    dims=hidden_size,
+                    mesh=self.mesh,
+                    param_factory=self.param_factory,
+                    activation_ffw_td=NamedSharding(self.mesh, P()),
+                    epsilon=rms_norm_eps,
+                    with_scale=True,
+                    dtype=dtype,
+                ),
                 attn=_create_mla(),
                 custom_module=DenseFFW(
                     dtype=dtype,
@@ -223,27 +241,45 @@ class DeepSeekV3(Model):
                                               P(('model', 'expert'), None)),
                     activation_ffw_td=NamedSharding(self.mesh, P()))
 
-            block = SharedExpertsTransformerBlock(
+            shared_experts = DenseFFW(
+                dtype=dtype,
+                hidden_act=hidden_act,
                 hidden_size=hidden_size,
-                rmsnorm_epsilon=rms_norm_eps,
-                attn_dtype=dtype,
-                dense_dtype=dtype,
+                intermediate_size=shared_experts * moe_intermediate_size,
+                mesh=self.mesh,
+                param_factory=self.param_factory,
+                df_sharding=NamedSharding(self.mesh,
+                                          P(None, ('model', 'expert'))),
+                fd_sharding=NamedSharding(self.mesh,
+                                          P(('model', 'expert'), None)),
+                activation_ffw_td=NamedSharding(self.mesh, P()))
+
+            pre_attention_norm = RMSNorm(
+                dims=hidden_size,
+                mesh=self.mesh,
+                param_factory=self.param_factory,
+                epsilon=rms_norm_eps,
+                activation_ffw_td=NamedSharding(self.mesh, P()),
+                with_scale=True,
+                dtype=dtype,
+            )
+
+            pre_mlp_norm = RMSNorm(
+                dims=hidden_size,
+                mesh=self.mesh,
+                param_factory=self.param_factory,
+                activation_ffw_td=NamedSharding(self.mesh, P()),
+                epsilon=rms_norm_eps,
+                with_scale=True,
+                dtype=dtype,
+            )
+
+            block = SharedExpertsTransformerBlock(
                 custom_module=custom_module,
                 attn=_create_mla(),
-                shared_experts=DenseFFW(
-                    dtype=dtype,
-                    hidden_act=hidden_act,
-                    hidden_size=hidden_size,
-                    intermediate_size=shared_experts * moe_intermediate_size,
-                    mesh=self.mesh,
-                    param_factory=self.param_factory,
-                    df_sharding=NamedSharding(self.mesh,
-                                              P(None, ('model', 'expert'))),
-                    fd_sharding=NamedSharding(self.mesh,
-                                              P(('model', 'expert'), None)),
-                    activation_ffw_td=NamedSharding(self.mesh, P())),
-                param_factory=self.param_factory,
-                mesh=self.mesh)
+                pre_attention_norm=pre_attention_norm,
+                pre_mlp_norm=pre_mlp_norm,
+                shared_experts=shared_experts)
             self.layers.append(block)
 
         for i in range(len(self.layers)):
