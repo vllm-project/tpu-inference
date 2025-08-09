@@ -1454,8 +1454,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             self.input_batch.condense(removed_req_indices)
 
         batch_changed = len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
-        batch_reordered = self._reorder_batch(scheduler_output)
-        return batch_changed or batch_reordered
+        # batch_reordered = self._reorder_batch(scheduler_output)
+        # return batch_changed or batch_reordered
+        self._set_request_distribution(scheduler_output)
+        return batch_changed
 
     def _sync_weights(
         self,
@@ -1476,6 +1478,24 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             mappings=mappings,
             transpose_keys=transpose_keys,
             shard=shard)
+
+    def _set_request_distribution(
+            self, scheduler_output: "VllmSchedulerOutput") -> None:
+        """Set the request distribution in the input batch based on the current
+        requests."""
+        num_decode = 0
+        for req_id in self.input_batch.req_ids:
+            if scheduler_output.num_scheduled_tokens[req_id] == 1:
+                num_decode += 1
+            else:
+                break
+        # print("[jevin debug] num_decode=", num_decode)
+        # print("[jevin debug] self.input_batch.req_ids=", self.input_batch.req_ids)
+        # print("[jevin debug] self.input_batch.req_tokens=", [self.requests[req_id].num_tokens for req_id in self.input_batch.req_ids])
+        # print("[jevin debug] scheduler_output.num_scheduled_tokens=", [scheduler_output.num_scheduled_tokens[req_id] for req_id in self.input_batch.req_ids])
+        self.input_batch.request_distribution = [
+            num_decode, num_decode, self.input_batch.num_reqs
+        ]
 
     def _reorder_batch(self, scheduler_output: "VllmSchedulerOutput") -> bool:
         """Reorder the requests in scheduler_output into the order of

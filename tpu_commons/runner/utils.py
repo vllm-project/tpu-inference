@@ -197,7 +197,7 @@ def create_kv_caches(
 ) -> List[jax.Array]:
     """
     Creates the KV caches, one per each decoder layer in the model, where the shape of each cache is
-    (num_blocks, block_size, num_kv_heads * 2, head_size).
+    (num_blocks, block_size, num_kv_heads * 2 // packing, packing, head_size).
 
     Args:
         num_blocks: The number of blocks in the KV cache.
@@ -217,10 +217,13 @@ def create_kv_caches(
     # TODO(xiang): fix this together with get_kv_cache_spec
     # cache_dtype = kv_cache_spec.dtype
 
+    assert cache_dtype == jnp.bfloat16, "[jevin debug] Only bfloat16 KV cache is supported for now"
+
     cache_shape = (
         num_blocks,
         block_size,
-        num_kv_heads * 2,
+        num_kv_heads * 2 // 2,
+        2,  # packing, always 2 for now
         head_size,
     )
 
