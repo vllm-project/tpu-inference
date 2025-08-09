@@ -135,7 +135,7 @@ class DeepSeekV3Router(nnx.Module):
         D = self.hidden_size
         E = self.num_experts
         self.kernel_DE = self.param_factory.create_kernel_param(
-            rngs, shape=(D, E), dtype=self.dtype, sharding=self.ed_sharding)
+            rngs, shape=(D, E), dtype=jnp.bfloat16, sharding=self.ed_sharding)
         self.bias_E = self.param_factory.create_scale_param(
             rngs,
             shape=(E, ),

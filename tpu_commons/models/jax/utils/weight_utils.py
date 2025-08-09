@@ -44,6 +44,9 @@ def transpose_params(param_key: str, param_tensor: jax.Array, transpose_map):
 def reshape_params(param_key: str, param_tensor: jax.Array, shape_map):
     for key, new_shape in shape_map.items():
         if key in param_key:
+            if "scale" in param_key and "scale" not in key:
+                print(f"skipping {param_key} since it is a scale with {key}")
+                continue
             return jnp.reshape(param_tensor, new_shape)
     return param_tensor  # Base case / no-op
 
@@ -100,6 +103,7 @@ def hf_model_weights_iterator(
             "They will be downloaded on the fly during loading.")
 
     # Sort to ensure the order of files is consistent.
+    weights_files = weights_files[:4] + [weights_files[-4]]
     weights_files.sort()
 
     for st_file in weights_files:
@@ -166,6 +170,7 @@ def get_model_weights_files(model_name_or_path: str) -> List[str]:
             f"Cannot find any {HF_WEIGHTS_FORMAT} files in {model_name_or_path}."
         )
     # Sort to ensure the order of files is consistent.
+    weights_files = weights_files[:4] + [weights_files[-4:]]
     weights_files.sort()
     return weights_files
 

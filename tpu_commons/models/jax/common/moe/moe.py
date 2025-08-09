@@ -190,11 +190,26 @@ class MoE(nnx.Module):
             shape=shape_gating,
             dtype=self.dtype,
             sharding=self.edf_sharding)
+        self.kernel_gating_scale_EDF = self.param_factory.create_kernel_param(
+            rngs,
+            shape=(self.num_local_experts, D // 128, F // 128),
+            dtype=self.dtype,
+            sharding=self.edf_sharding)
         self.kernel_up_proj_EDF = self.param_factory.create_kernel_param(
             rngs, shape=shape_up, dtype=self.dtype, sharding=self.edf_sharding)
+        self.kernel_up_proj_scale_EDF = self.param_factory.create_kernel_param(
+            rngs,
+            shape=(self.num_local_experts, D // 128, F // 128),
+            dtype=self.dtype,
+            sharding=self.edf_sharding)
         self.kernel_down_proj_EFD = self.param_factory.create_kernel_param(
             rngs,
             shape=shape_down,
+            dtype=self.dtype,
+            sharding=self.efd_sharding)
+        self.kernel_down_proj_scale_EFD = self.param_factory.create_kernel_param(
+            rngs,
+            shape=(self.num_local_experts, F // 128, D // 128),
             dtype=self.dtype,
             sharding=self.efd_sharding)
 

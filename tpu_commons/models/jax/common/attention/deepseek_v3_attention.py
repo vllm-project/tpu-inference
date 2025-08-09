@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass, field, make_dataclass
 from typing import Any, Dict, Tuple
 
@@ -155,10 +156,10 @@ class MLA(nnx.Module):
             self.dtype,
         )
         # FP8 Scale
-        # TODO: update 128 to use config
+        # TODO: update 192 to use config
         self.kernel_q_up_proj_scale_ANH = self.param_factory.create_kernel_param(
             rngs,
-            (self.q_lora_rank // 128, self.N // 128, self.qk_head_dim // 128),
+            (self.q_lora_rank // 128, 192, self.qk_head_dim // 128),
             self.anh_sharding,
             self.dtype,
         )
@@ -172,8 +173,8 @@ class MLA(nnx.Module):
         # TODO: update 128 to use config
         self.kernel_kv_down_proj_scale_DA = self.param_factory.create_kernel_param(
             rngs,
-            (self.D // 128,
-             (self.kv_lora_rank + self.qk_rope_head_dim) // 128),
+            (math.ceil(self.D // 128),
+             math.ceil((self.kv_lora_rank + self.qk_rope_head_dim) / 128)),
             self.kv_da_sharding,
             self.dtype,
         )
@@ -188,8 +189,8 @@ class MLA(nnx.Module):
         # TODO: update 128 to use config
         self.kernel_kv_up_proj_scale_ANH = self.param_factory.create_kernel_param(
             rngs,
-            (self.kv_lora_rank // 128, self.N // 128,
-             self.qk_nope_head_dim + self.v_head_dim),
+            (self.kv_lora_rank // 128, self.N,
+             (self.qk_nope_head_dim + self.v_head_dim) // 128),
             self.anh_sharding,
             self.dtype,
         )
@@ -199,8 +200,11 @@ class MLA(nnx.Module):
         # FP8 Scale
         # TODO: update 128 to use config
         self.kernel_o_proj_scale_NHD = self.param_factory.create_kernel_param(
-            rngs, (self.N // 128, self.v_head_dim // 128, self.D),
-            self.nhd_sharding, self.dtype)
+            # TODO: 56
+            rngs,
+            (self.N, self.v_head_dim // 128, 56),
+            self.nhd_sharding,
+            self.dtype)
         self.q_rms_norm = RMSNorm(
             dims=self.q_lora_rank,
             mesh=self.mesh,
@@ -208,7 +212,7 @@ class MLA(nnx.Module):
             activation_ffw_td=NamedSharding(self.mesh, P()),
             epsilon=self.rms_norm_eps,
             with_scale=True,
-            dtype=self.dtype,
+            dtype=jnp.bfloat16,
         )
         self.q_rms_norm.generate_kernel(rngs)
 
@@ -219,7 +223,7 @@ class MLA(nnx.Module):
             activation_ffw_td=NamedSharding(self.mesh, P()),
             epsilon=self.rms_norm_eps,
             with_scale=True,
-            dtype=self.dtype,
+            dtype=jnp.bfloat16,
         )
         self.kv_rms_norm.generate_kernel(rngs)
 
@@ -250,12 +254,23 @@ class MLA(nnx.Module):
 
         with jax.named_scope("q_proj"):
             # Query down projection.
-            q_TA = jnp.einsum("TD,DA -> TA", x_q_TD,
-                              self.kernel_q_down_proj_DA.value)
+            w_q_down, s_q_down = self.kernel_q_down_proj_DA.value, self.kernel_q_down_proj_scale_DA.value
+            D, A = w_q_down.shape
+            sD, sA = s_q_down.shape
+            w_q_down_dequant = (w_q_down.reshape(sD, D // sD, sA, A // sA) *
+                                s_q_down.reshape(sD, 1, sA, 1)).reshape(D, A)
+            q_TA = jnp.einsum("TD,DA -> TA", x_q_TD, w_q_down_dequant)
+
             q_TA = self.q_rms_norm(q_TA)
             # Query up projection.
-            q_TNH = jnp.einsum("TA,ANH -> TNH", q_TA,
-                               self.kernel_q_up_proj_ANH.value)
+            w_q_up, s_q_up = self.kernel_q_up_proj_ANH.value, self.kernel_q_up_proj_scale_ANH.value
+            A, N, H = w_q_up.shape
+            sA, sN, sH = s_q_up.shape
+            w_q_up_dequant = (w_q_up.reshape(sA, A // sA, sN, 1, sH, H // sH) *
+                              s_q_up.reshape(sA, 1, sN, 1, sH, 1)).reshape(
+                                  A, N, H)
+            q_TNH = jnp.einsum("TA,ANH -> TNH", q_TA, w_q_up_dequant)
+
             # Split the query into nope and rope.
             q_nope_TNH = q_TNH[..., :self.qk_nope_head_dim]
             q_rope_TNH = q_TNH[..., self.qk_nope_head_dim:]
@@ -268,8 +283,14 @@ class MLA(nnx.Module):
 
         with jax.named_scope("kv_proj"):
             # KV down projection.
-            kv_SA = jnp.einsum("SD,DA -> SA", x_SD,
-                               self.kernel_kv_down_proj_DA.value)
+            w_kv_down, s_kv_down = self.kernel_kv_down_proj_DA.value, self.kernel_kv_down_proj_scale_DA.value
+            D, A = w_kv_down.shape
+            sD, sA = s_kv_down.shape
+            w_kv_down_dequant = (w_kv_down.reshape(sD, D // sD, sA, A // sA) *
+                                 s_kv_down.reshape(sD, 1, sA, 1)).reshape(
+                                     D, A)
+            kv_SA = jnp.einsum("SD,DA -> SA", x_SD, w_kv_down_dequant)
+
             # Split the key and value into latent kv vector and k rope vector.
             k_rope_SH = kv_SA[..., self.kv_lora_rank:]
             # Reshape k_rope_BSH to include head dimension for RoPE application

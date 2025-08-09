@@ -271,7 +271,7 @@ class Embedder(nnx.Module):
             rngs,
             shape=(self.vocab_size, self.hidden_size),
             sharding=self.vd_sharding,
-            dtype=self.dtype)
+            dtype=jnp.bfloat16)
 
     def decode(self, x_TD: Float) -> Float:
         """Projects hidden states to vocabulary logits.
@@ -329,7 +329,7 @@ class LMhead(Embedder):
             rngs,
             shape=(self.hidden_size, self.vocab_size),
             sharding=self.dv_sharding,
-            dtype=self.dtype)
+            dtype=jnp.bfloat16)
 
     def __call__(self, x):
         """Dispatches to decode method.

@@ -58,7 +58,7 @@ class DeepSeekV3(Model):
 
         vocab_size: int = 129280
         hidden_size: int = 7168
-        dtype: jnp.dtype = jnp.bfloat16
+        dtype: jnp.dtype = jnp.float8_e4m3
         num_attention_heads: int = 128
         num_key_value_heads: int = 128
         ffw_intermediate_size: int = 18432
@@ -162,6 +162,24 @@ class DeepSeekV3(Model):
 
         for i in range(first_k_dense_replace):
             block = TransformerBlock(
+                RMSNorm(
+                    dims=hidden_size,
+                    mesh=self.mesh,
+                    param_factory=self.param_factory,
+                    epsilon=rms_norm_eps,
+                    activation_ffw_td=NamedSharding(self.mesh, P()),
+                    with_scale=True,
+                    dtype=jnp.bfloat16,
+                ),
+                pre_mlp_norm=RMSNorm(
+                    dims=hidden_size,
+                    mesh=self.mesh,
+                    param_factory=self.param_factory,
+                    activation_ffw_td=NamedSharding(self.mesh, P()),
+                    epsilon=rms_norm_eps,
+                    with_scale=True,
+                    dtype=jnp.bfloat16,
+                ),
                 attn=_create_mla(),
                 custom_module=DenseFFW(
                     dtype=dtype,
@@ -223,27 +241,45 @@ class DeepSeekV3(Model):
                                               P(('model', 'expert'), None)),
                     activation_ffw_td=NamedSharding(self.mesh, P()))
 
-            block = SharedExpertsTransformerBlock(
+            shared_experts = DenseFFW(
+                dtype=dtype,
+                hidden_act=hidden_act,
                 hidden_size=hidden_size,
-                rmsnorm_epsilon=rms_norm_eps,
-                attn_dtype=dtype,
-                dense_dtype=dtype,
+                intermediate_size=shared_experts * moe_intermediate_size,
+                mesh=self.mesh,
+                param_factory=self.param_factory,
+                df_sharding=NamedSharding(self.mesh,
+                                          P(None, ('model', 'expert'))),
+                fd_sharding=NamedSharding(self.mesh,
+                                          P(('model', 'expert'), None)),
+                activation_ffw_td=NamedSharding(self.mesh, P()))
+
+            pre_attention_norm = RMSNorm(
+                dims=hidden_size,
+                mesh=self.mesh,
+                param_factory=self.param_factory,
+                epsilon=rms_norm_eps,
+                activation_ffw_td=NamedSharding(self.mesh, P()),
+                with_scale=True,
+                dtype=jnp.bfloat16,
+            )
+
+            pre_mlp_norm = RMSNorm(
+                dims=hidden_size,
+                mesh=self.mesh,
+                param_factory=self.param_factory,
+                activation_ffw_td=NamedSharding(self.mesh, P()),
+                epsilon=rms_norm_eps,
+                with_scale=True,
+                dtype=jnp.bfloat16,
+            )
+
+            block = SharedExpertsTransformerBlock(
                 custom_module=custom_module,
                 attn=_create_mla(),
-                shared_experts=DenseFFW(
-                    dtype=dtype,
-                    hidden_act=hidden_act,
-                    hidden_size=hidden_size,
-                    intermediate_size=shared_experts * moe_intermediate_size,
-                    mesh=self.mesh,
-                    param_factory=self.param_factory,
-                    df_sharding=NamedSharding(self.mesh,
-                                              P(None, ('model', 'expert'))),
-                    fd_sharding=NamedSharding(self.mesh,
-                                              P(('model', 'expert'), None)),
-                    activation_ffw_td=NamedSharding(self.mesh, P())),
-                param_factory=self.param_factory,
-                mesh=self.mesh)
+                pre_attention_norm=pre_attention_norm,
+                pre_mlp_norm=pre_mlp_norm,
+                shared_experts=shared_experts)
             self.layers.append(block)
 
         for i in range(len(self.layers)):
@@ -256,7 +292,7 @@ class DeepSeekV3(Model):
             activation_ffw_td=NamedSharding(self.mesh, P()),
             epsilon=rms_norm_eps,
             with_scale=True,
-            dtype=dtype,
+            dtype=jnp.bfloat16,
         )
         self.final_norm.generate_kernel(self.rng)
 
@@ -364,11 +400,19 @@ class DeepSeekV3WeightLoader:
             r"lm_head\.weight": (1, 0)
         }
         self._weight_shape_map = {
-            "q_b_proj":
+            "q_b_proj.weight":
             (attn_heads, qk_nope_head_dim + qk_rope_head_dim, q_lora_rank),
-            "kv_b_proj":
+            "q_b_proj.weight_scale_inv":
+            (qk_nope_head_dim + qk_rope_head_dim, 1, q_lora_rank // 128),
+            "kv_b_proj.weight":
             (attn_heads, qk_nope_head_dim + v_head_dim, kv_lora_rank),
-            "o_proj": (hidden_size, attn_heads, v_head_dim)
+            # TODO: 128
+            "kv_b_proj.weight_scale_inv":
+            (attn_heads, (qk_nope_head_dim + v_head_dim) // 128,
+             kv_lora_rank // 128),
+            "o_proj.weight": (hidden_size, attn_heads, v_head_dim),
+            # TODO: 56
+            "o_proj.weight_scale_inv": (56, attn_heads, v_head_dim // 128),
         }
 
         # Set the mappings from loaded parameter keys to standardized names.
@@ -439,17 +483,35 @@ class DeepSeekV3WeightLoader:
             "layers.*.custom_module.router.bias_E",
             "model.layers.*.mlp.experts.*.gate_proj.weight":
             "layers.*.custom_module.kernel_gating_EDF",
+            # Scale
+            "model.layers.*.mlp.experts.*.gate_proj.weight_scale_inv":
+            "layers.*.custom_module.kernel_gating_scale_EDF",
             "model.layers.*.mlp.experts.*.down_proj.weight":
             "layers.*.custom_module.kernel_down_proj_EFD",
+            # Scale
+            "model.layers.*.mlp.experts.*.down_proj.weight_scale_inv":
+            "layers.*.custom_module.kernel_down_proj_scale_EFD",
             "model.layers.*.mlp.experts.*.up_proj.weight":
             "layers.*.custom_module.kernel_up_proj_EDF",
+            # Scale
+            "model.layers.*.mlp.experts.*.up_proj.weight_scale_inv":
+            "layers.*.custom_module.kernel_up_proj_scale_EDF",
             # MOE(shared experts)
             "model.layers.*.mlp.shared_experts.down_proj.weight":
             "layers.*.shared_experts.kernel_down_proj_FD",
+            # Scale
+            "model.layers.*.mlp.shared_experts.down_proj.weight_scale_inv":
+            "layers.*.shared_experts.kernel_down_proj_scale_FD",
             "model.layers.*.mlp.shared_experts.gate_proj.weight":
             "layers.*.shared_experts.kernel_gating_DF",
+            # Scale
+            "model.layers.*.mlp.shared_experts.gate_proj.weight_scale_inv":
+            "layers.*.shared_experts.kernel_gating_scale_DF",
             "model.layers.*.mlp.shared_experts.up_proj.weight":
             "layers.*.shared_experts.kernel_up_proj_DF",
+            # Scale
+            "model.layers.*.mlp.shared_experts.up_proj.weight_scale_inv":
+            "layers.*.shared_experts.kernel_up_proj_scale_DF",
         }
 
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
@@ -523,6 +585,7 @@ class DeepSeekV3WeightLoader:
             0].data.nbytes / 1e9
 
     def load_weights(self, model_for_loading: nnx.Module):
+        print(model_for_loading)
         model_params = nnx.state(model_for_loading)
         logger.warning(
             f"loaded_to_standardized_keys: {self._loaded_to_standardized_keys}"
@@ -530,8 +593,11 @@ class DeepSeekV3WeightLoader:
         cumulative_global_memory = 0
         cumulative_local_memory = 0
         mlp_experts_gate_proj_weights = {}
+        mlp_experts_gate_proj_scales = {}
         mlp_experts_up_proj_weights = {}
+        mlp_experts_up_proj_scales = {}
         mlp_experts_down_proj_weights = {}
+        mlp_experts_down_proj_scales = {}
         fp8_weights = {}
         with jax.default_device(jax.devices("cpu")[0]):
             for loaded_name, loaded_weight in self.names_and_weights_generator:
@@ -569,15 +635,18 @@ class DeepSeekV3WeightLoader:
                     if "down_proj" in loaded_name:
                         stacked_weights = self._process_moe_weights(
                             loaded_name, loaded_weight,
-                            mlp_experts_down_proj_weights)
+                            mlp_experts_down_proj_scales if "scale"
+                            in loaded_name else mlp_experts_down_proj_weights)
                     if "gate_proj" in loaded_name:
                         stacked_weights = self._process_moe_weights(
                             loaded_name, loaded_weight,
-                            mlp_experts_gate_proj_weights)
+                            mlp_experts_gate_proj_scales if "scale"
+                            in loaded_name else mlp_experts_gate_proj_weights)
                     if "up_proj" in loaded_name:
                         stacked_weights = self._process_moe_weights(
                             loaded_name, loaded_weight,
-                            mlp_experts_up_proj_weights)
+                            mlp_experts_up_proj_scales if "scale"
+                            in loaded_name else mlp_experts_up_proj_weights)
                     if stacked_weights is not None:
                         weight_bytes, weight_shards = self._load_individual_weight(
                             loaded_name, stacked_weights, model_params,
