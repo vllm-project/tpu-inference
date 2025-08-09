@@ -121,6 +121,8 @@ class RejectionSampler:
         output_token_ids: jnp.ndarray,
         vocab_size: int,
         num_draft_tokens_cpu: np.ndarray,
+        batch_size: int,
+        padded_tokens_length: int,
     ) -> list[list[int]]:
         """Parse the output of the rejection sampler.
 
@@ -132,18 +134,20 @@ class RejectionSampler:
             vocab_size: The size of the vocabulary.
             num_draft_tokens_cpu: Number of draft tokens per request [batch_size]
                 as a numpy array on CPU.
+            batch_size: The number of requests in the batch.
+            padded_tokens_length: The padded length of the main tokens in the output.
 
         Returns:
             A list of lists of token IDs.
         """
         # Convert JAX array to numpy for easier manipulation
         output_token_ids_np = np.asarray(output_token_ids)
-        batch_size = num_draft_tokens_cpu.shape[0]
-        total_tokens = int(np.sum(num_draft_tokens_cpu))
 
         # Split main tokens and bonus tokens
-        main_tokens = output_token_ids_np[:total_tokens]  # [num_tokens]
-        bonus_tokens = output_token_ids_np[total_tokens:]  # [batch_size]
+        main_tokens = output_token_ids_np[:
+                                          padded_tokens_length]  # [num_tokens]
+        bonus_tokens = output_token_ids_np[
+            padded_tokens_length:]  # [batch_size]
 
         # Reconstruct per-sequence outputs
         outputs = []
