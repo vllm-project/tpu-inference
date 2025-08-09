@@ -177,7 +177,7 @@ class Attention(nnx.Module):
         rope_input_ordering = self.cfg.rope_input_ordering
         H = getattr(self.cfg, HuggingFaceArgNames.HEAD_DIM.value)
         with jax.named_scope("q_proj"):
-            q_TNH = jnp.einsum('TD,DNH -> TNH', x_q_TD,
+            q_TNH = jnp.einsum('KTD,DNH -> KTNH', x_q_TD,
                                self.kernel_q_proj_DNH.value)
             if use_attention_rope:
                 q_TNH = apply_rope(q_TNH, md.input_positions, H, rope_theta,
@@ -185,7 +185,7 @@ class Attention(nnx.Module):
             q_TNH = nnx.with_sharding_constraint(q_TNH,
                                                  self.query_tnh[op_mode])
         with jax.named_scope("k_proj"):
-            k_SKH = jnp.einsum('SD,DKH -> SKH', x_SD,
+            k_SKH = jnp.einsum('ASD,DKH -> ASKH', x_SD,
                                self.kernel_k_proj_DKH.value)
             if use_attention_rope:
                 k_SKH = apply_rope(k_SKH, md.input_positions, H, rope_theta,
@@ -194,7 +194,7 @@ class Attention(nnx.Module):
                                                  self.keyvalue_skh[op_mode])
 
         with jax.named_scope("v_proj"):
-            v_SKH = jnp.einsum('SD,DKH -> SKH', x_SD,
+            v_SKH = jnp.einsum('ASD,DKH -> ASKH', x_SD,
                                self.kernel_v_proj_DKH.value)
 
         with jax.named_scope("attn_op"):
@@ -209,7 +209,7 @@ class Attention(nnx.Module):
             )
 
         with jax.named_scope("o_proj"):
-            o_TD = jnp.einsum('TNH,NHD -> TD', outputs_TNH,
+            o_TD = jnp.einsum('KTNH,NHD -> KTD', outputs_TNH,
                               self.kernel_o_proj_NHD.value)
         return kv_cache, o_TD
 
@@ -310,7 +310,7 @@ class Attention(nnx.Module):
                 kv_cache,
                 md.seq_lens,
                 md.block_tables,
-                md.query_start_loc[:256],
+                md.query_start_loc,
                 md.num_seqs,
             )
         

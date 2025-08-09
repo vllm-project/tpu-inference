@@ -20,33 +20,33 @@ def _ceil_div(a, b):
 
 def _kv_cache_update_kernel(
     # Prefetch
-    slices_ref,  # [3, padded_num_slices], list of (kv_cache_start, new_kv_start,
-    # slice_len)
-    num_slices_ref,  # [1]
+    slices_ref,  # [DP, 3, padded_num_slices_per_dp]
+    num_slices_ref,  # [DP]
     # Input
-    new_kv_hbm_ref,  # [num_tokens, num_combined_kv_heads, head_dim]
-    kv_cache_hbm_ref,  # [total_num_pages * page_size, num_combined_kv_heads,
-    # head_dim]
+    new_kv_hbm_ref,  # [DP, num_tokens_per_dp, num_combined_kv_heads, head_dim]
+    kv_cache_hbm_ref,  # [total_num_pages * page_size, num_combined_kv_heads, head_dim]
     # Output
     _,  # [total_num_pages * page_size, num_combined_kv_heads, head_dim]
     # Scratch
-    scratch,  # [num_slices_per_block, page_size, num_combined_kv_heads,
-    # head_dim]
+    scratch,  # [num_slices_per_block, page_size, num_combined_kv_heads, head_dim]
     sem,
 ):
     async_copies = []
-    block_idx = pl.program_id(0)
+    # program_id(0) now corresponds to the DP rank
+    # program_id(1) corresponds to the slice block index
+    dp_rank = pl.program_id(0)
+    block_idx = pl.program_id(1)
     num_slices_per_block = scratch.shape[0]
 
     # Copy from new_kv_hbm_ref to scratch
     for i in range(num_slices_per_block):
         offset_i = i + block_idx * num_slices_per_block
-        new_kv_start = jax.lax.select(offset_i < num_slices_ref[0],
-                                      slices_ref[1, offset_i], 0)
-        length = jax.lax.select(offset_i < num_slices_ref[0],
-                                slices_ref[2, offset_i], 0)
+        new_kv_start = jax.lax.select(offset_i < num_slices_ref[dp_rank],
+                                      slices_ref[dp_rank, 1, offset_i], 0)
+        length = jax.lax.select(offset_i < num_slices_ref[dp_rank],
+                                slices_ref[dp_rank, 2, offset_i], 0)
         async_copy = pltpu.make_async_copy(
-            new_kv_hbm_ref.at[pl.ds(new_kv_start, length), ...],
+            new_kv_hbm_ref.at[dp_rank, pl.ds(new_kv_start, length), ...],
             scratch.at[i, pl.ds(0, length), ...],
             sem,
         )
@@ -60,13 +60,13 @@ def _kv_cache_update_kernel(
     async_copies.clear()
     for i in range(num_slices_per_block):
         offset_i = i + block_idx * num_slices_per_block
-        kv_cache_start = jax.lax.select(offset_i < num_slices_ref[0],
-                                        slices_ref[0, offset_i], 0)
-        length = jax.lax.select(offset_i < num_slices_ref[0],
-                                slices_ref[2, offset_i], 0)
+        kv_cache_start = jax.lax.select(offset_i < num_slices_ref[dp_rank],
+                                        slices_ref[dp_rank, 0, offset_i], 0)
+        length = jax.lax.select(offset_i < num_slices_ref[dp_rank],
+                                slices_ref[dp_rank, 2, offset_i], 0)
         async_copy = pltpu.make_async_copy(
             scratch.at[i, pl.ds(0, length), ...],
-            kv_cache_hbm_ref.at[pl.ds(kv_cache_start, length), ...],
+            kv_cache_hbm_ref.at[dp_rank, pl.ds(kv_cache_start, length), ...],
             sem,
         )
         async_copy.start()
@@ -74,10 +74,11 @@ def _kv_cache_update_kernel(
     for async_copy in async_copies:
         async_copy.wait()
 
-
 def _dynamic_validate_inputs(slices, new_token_num, kv_cache_token_num,
                              page_size, num_slices):
     slices = slices.tolist()
+    print("slices", slices)
+    slices = slices[0] # DP dimension
     # NOTE: The padding part is unnecessary to check because kv_cache_start, new_kv_start,
     # slice_len will be set to 0 in the kernel implementation.
     for i in range(num_slices[0]):
@@ -133,13 +134,10 @@ def _dynamic_validate_inputs(slices, new_token_num, kv_cache_token_num,
 
 
 def _kv_cache_update(
-    new_kv: jax.Array,  # [total_num_token, num_combined_kv_heads, head_dim]
-    slices: jax.Array,  # [3, slices], list of (kv_cache_start, new_kv_start,
-    # slice_len)
-    kv_cache: jax.
-    Array,  # [total_num_pages * page_size, num_combined_kv_heads,
-    # head_dim]
-    num_slices: jax.Array,  # [1]
+    new_kv: jax.Array,  # [DP, total_num_token_per_dp, num_combined_kv_heads, head_dim]
+    slices: jax.Array,  # [DP, 3, slices_per_dp], list of (kv_cache_start, new_kv_start, slice_len)
+    kv_cache: jax.Array,  # [total_num_pages * page_size, num_combined_kv_heads, head_dim]
+    num_slices: jax.Array,  # [DP]
     page_size: int,
     num_slices_per_block: int,
     dynamic_validate_inputs: bool,
@@ -152,15 +150,24 @@ def _kv_cache_update(
     print("2. num_slices", num_slices)
     print("2. num_slices_per_block", num_slices_per_block)
 
-    new_token_num, num_combined_kv_heads, head_dim = new_kv.shape
-    assert kv_cache.shape[1] == num_combined_kv_heads
-    assert kv_cache.shape[2] == head_dim
+    dp_size, new_token_num, num_combined_kv_heads, head_dim = new_kv.shape
+    assert kv_cache.shape[2] == num_combined_kv_heads
+    assert kv_cache.shape[3] == head_dim
     assert head_dim % 128 == 0
     if dynamic_validate_inputs is True:
+        # TODO(wenxindong): The dynamic validation function needs to be aware of the DP dimension
+        # and should likely run per DP slice.
         _dynamic_validate_inputs(slices, new_token_num, kv_cache.shape[0],
                                  page_size, num_slices)
 
+    # The grid must now account for both DP and the slices within each DP rank.
+    # The first dimension of the grid corresponds to the DP dimension.
+    # We use a 2D grid: (dp_size, slices_per_dp)
+    grid_x = dp_size
+    grid_y = _ceil_div(num_slices[0], num_slices_per_block) # Assumes all DP ranks have the same padded num_slices
+
     in_specs = [
+        # Pass the entire sharded array, Pallas will handle the per-device view
         pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY),
         pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY),
     ]
@@ -185,10 +192,11 @@ def _kv_cache_update(
             num_scalar_prefetch=len(scalar_prefetches),
             in_specs=in_specs,
             out_specs=out_specs,
-            grid=(_ceil_div(num_slices[0], num_slices_per_block), ),
+            grid=(grid_x, grid_y),
             scratch_shapes=scratch_shapes,
         ),
         out_shape=out_shape,
+        # input_output_aliases needs to be updated to handle the DP dimension
         input_output_aliases={len(scalar_prefetches) + 1: 0},
         compiler_params=pltpu.CompilerParams(
             vmem_limit_bytes=vmem_limit_bytes, ),
@@ -262,7 +270,7 @@ def kv_cache_update(
     vmem_limit_bytes: int = 40 * 1024 * 1024,
 ):
     if num_slices_per_block is None:
-        _, num_combined_kv_heads, head_dim = new_kv.shape
+        dp_size, _, num_combined_kv_heads, head_dim = new_kv.shape
         page_size_bytes = _get_page_size_bytes(page_size,
                                                num_combined_kv_heads, head_dim,
                                                kv_cache.dtype)

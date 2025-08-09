@@ -218,14 +218,15 @@ def create_kv_caches(
     # cache_dtype = kv_cache_spec.dtype
 
     cache_shape = (
-        num_blocks,
+        2, 
+        num_blocks//2,
         block_size,
         num_kv_heads * 2,
         head_size,
     )
 
     # Shard the num_kv_heads dim along the 'model' axis.
-    sharding = NamedSharding(mesh, PartitionSpec("data", None, "model"))
+    sharding = NamedSharding(mesh, PartitionSpec("data", None, None, "model"))
 
     def _allocate() -> jax.Array:
         return jnp.empty(

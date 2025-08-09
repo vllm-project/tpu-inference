@@ -1,0 +1,83 @@
+INFO 08-08 22:58:18 [__init__.py:241] Automatically detected platform tpu.
+Running vLLM without Pathways. Module pathwaysutils is not imported.
+WARNING 08-08 22:58:20 [__init__.py:1683] argument 'task' is deprecated
+INFO 08-08 22:58:20 [utils.py:326] non-default args: {'model': 'meta-llama/Meta-Llama-3-8B-Instruct', 'task': 'generate', 'max_model_len': 1024, 'tensor_parallel_size': 8, 'enable_lora': None, 'additional_config': {'sharding': {'sharding_strategy': {'data_parallelism': 2, 'tensor_parallelism': 4}}}}
+WARNING 08-08 22:58:20 [config.py:535] The global random seed is set to 0. Since VLLM_ENABLE_V1_MULTIPROCESSING is set to False, this may affect the random state of the Python process that launched vLLM.
+INFO 08-08 22:58:26 [config.py:726] Resolved architecture: LlamaForCausalLM
+INFO 08-08 22:58:26 [config.py:1759] Using max model len 1024
+INFO 08-08 22:58:26 [config.py:2588] Chunked prefill is enabled with max_num_batched_tokens=8192.
+WARNING 08-08 22:58:26 [tpu_jax.py:140] The model dtype is not properly set for JAX backend. Overwriting it to bfloat16
+WARNING 08-08 22:58:28 [tpu_jax.py:177] JAX requires to use uniproc_executor for single host.
+INFO 08-08 22:58:28 [core.py:71] Initializing a V1 LLM engine (v0.1.dev8276+gc6541b1) with config: model='meta-llama/Meta-Llama-3-8B-Instruct', speculative_config=None, tokenizer='meta-llama/Meta-Llama-3-8B-Instruct', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, override_neuron_config={}, tokenizer_revision=None, trust_remote_code=False, dtype=<class 'jax.numpy.bfloat16'>, max_seq_len=1024, download_dir=None, load_format=auto, tensor_parallel_size=8, pipeline_parallel_size=1, disable_custom_all_reduce=True, quantization=None, enforce_eager=False, kv_cache_dtype=auto, device_config=None, decoding_config=DecodingConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_backend=''), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None), seed=0, served_model_name=meta-llama/Meta-Llama-3-8B-Instruct, num_scheduler_steps=1, multi_step_stream_outputs=True, enable_prefix_caching=True, chunked_prefill_enabled=True, use_async_output_proc=False, pooler_config=None, compilation_config={"level":2,"debug_dump_path":"","cache_dir":"","backend":"openxla","custom_ops":[],"splitting_ops":["vllm.unified_attention","vllm.unified_attention_with_output","vllm.mamba_mixer2"],"use_inductor":true,"compile_sizes":[],"inductor_compile_config":{"enable_auto_functionalized_v2":false},"inductor_passes":{},"use_cudagraph":true,"cudagraph_num_of_warmups":1,"cudagraph_capture_sizes":[512,504,496,488,480,472,464,456,448,440,432,424,416,408,400,392,384,376,368,360,352,344,336,328,320,312,304,296,288,280,272,264,256,248,240,232,224,216,208,200,192,184,176,168,160,152,144,136,128,120,112,104,96,88,80,72,64,56,48,40,32,24,16,8,4,2,1],"cudagraph_copy_inputs":false,"full_cuda_graph":false,"max_capture_size":512,"local_cache_dir":null}
+INFO 08-08 22:58:28 [tpu_worker_jax.py:74] Pre-sliced devices by engine: []
+wenxin init_device self.devices []
+INFO 08-08 22:59:16 [tpu_worker_jax.py:102] Init devices | devices=[TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0), TpuDevice(id=1, process_index=0, coords=(1,0,0), core_on_chip=0), TpuDevice(id=2, process_index=0, coords=(0,1,0), core_on_chip=0), TpuDevice(id=3, process_index=0, coords=(1,1,0), core_on_chip=0), TpuDevice(id=4, process_index=0, coords=(0,2,0), core_on_chip=0), TpuDevice(id=5, process_index=0, coords=(1,2,0), core_on_chip=0), TpuDevice(id=6, process_index=0, coords=(0,3,0), core_on_chip=0), TpuDevice(id=7, process_index=0, coords=(1,3,0), core_on_chip=0)] | hbm=[(0.0, 31.25), (0.0, 31.25), (0.0, 31.25), (0.0, 31.25), (0.0, 31.25), (0.0, 31.25), (0.0, 31.25), (0.0, 31.25)]Gb
+INFO 08-08 22:59:16 [tpu_jax_runner.py:153] Init mesh | mesh=Mesh('data': 2, 'expert': 1, 'seq': 1, 'model': 4, axis_types=(Auto, Auto, Auto, Auto))
+INFO 08-08 22:59:16 [utils.py:98] Prepared token paddings: [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
+wenxin _init_inputs self.block_size 64
+scheduler_config.max_num_batched_tokens 8192
+self.max_num_tokens 8192
+wenxin _init_inputs self.max_num_reqs 256
+wenxin _init_inputs self.max_model_len 1024
+wenxin _init_inputs self.max_num_tokens 8192
+INFO 08-08 22:59:16 [utils.py:64] Prepared request paddings: [8, 16, 32, 64, 128, 256]
+INFO 08-08 22:59:16 [tpu_jax_runner.py:88] TPUModelRunner created!
+INFO 08-08 22:59:16 [model_loader.py:223] Loading model, implementation type=flax_nnx
+INFO 08-08 22:59:16 [model.py:60] Initializing abstract model for checkpoint loading.
+INFO 08-08 22:59:16 [llama3.py:138] Initializing Llama3 8B model variant.
+INFO 08-08 22:59:16 [llama3.py:157] Using the following config:
+INFO 08-08 22:59:16 [llama3.py:157] {
+INFO 08-08 22:59:16 [llama3.py:157]     "model": {
+INFO 08-08 22:59:16 [llama3.py:157]         "hidden_size": 4096,
+INFO 08-08 22:59:16 [llama3.py:157]         "num_layers": 32,
+INFO 08-08 22:59:16 [llama3.py:157]         "num_attention_heads": 32,
+INFO 08-08 22:59:16 [llama3.py:157]         "num_key_value_heads": 8,
+INFO 08-08 22:59:16 [llama3.py:157]         "intermediate_size": 14336,
+INFO 08-08 22:59:16 [llama3.py:157]         "dtype": "<class 'jax.numpy.bfloat16'>",
+INFO 08-08 22:59:16 [llama3.py:157]         "head_dim": 128,
+INFO 08-08 22:59:16 [llama3.py:157]         "rope_theta": 500000.0,
+INFO 08-08 22:59:16 [llama3.py:157]         "vocab_size": 128256,
+INFO 08-08 22:59:16 [llama3.py:157]         "rms_norm_eps": 1e-05,
+INFO 08-08 22:59:16 [llama3.py:157]         "emb": {
+INFO 08-08 22:59:16 [llama3.py:157]             "vocab_size": 128256,
+INFO 08-08 22:59:16 [llama3.py:157]             "hidden_size": 4096,
+INFO 08-08 22:59:16 [llama3.py:157]             "dtype": "<class 'jax.numpy.bfloat16'>",
+INFO 08-08 22:59:16 [llama3.py:157]             "normalize_embeddings": false
+INFO 08-08 22:59:16 [llama3.py:157]         },
+INFO 08-08 22:59:16 [llama3.py:157]         "layers": {
+INFO 08-08 22:59:16 [llama3.py:157]             "attention": {
+INFO 08-08 22:59:16 [llama3.py:157]                 "hidden_size": 4096,
+INFO 08-08 22:59:16 [llama3.py:157]                 "num_attention_heads": 32,
+INFO 08-08 22:59:16 [llama3.py:157]                 "num_key_value_heads": 8,
+INFO 08-08 22:59:16 [llama3.py:157]                 "head_dim": 128,
+INFO 08-08 22:59:16 [llama3.py:157]                 "rope_scaling": {},
+INFO 08-08 22:59:16 [llama3.py:157]                 "rope_theta": 500000.0,
+INFO 08-08 22:59:16 [llama3.py:157]                 "dtype": "<class 'jax.numpy.bfloat16'>",
+INFO 08-08 22:59:16 [llama3.py:157]                 "rope_input_ordering": "split",
+INFO 08-08 22:59:16 [llama3.py:157]                 "attention_chunk_size": null
+INFO 08-08 22:59:16 [llama3.py:157]             },
+INFO 08-08 22:59:16 [llama3.py:157]             "dense_ffw": {
+INFO 08-08 22:59:16 [llama3.py:157]                 "hidden_size": 4096,
+INFO 08-08 22:59:16 [llama3.py:157]                 "intermediate_size": 14336,
+INFO 08-08 22:59:16 [llama3.py:157]                 "hidden_act": "silu",
+INFO 08-08 22:59:16 [llama3.py:157]                 "dtype": "<class 'jax.numpy.bfloat16'>"
+INFO 08-08 22:59:16 [llama3.py:157]             },
+INFO 08-08 22:59:16 [llama3.py:157]             "rms_norm_eps": 1e-05,
+INFO 08-08 22:59:16 [llama3.py:157]             "moe": null
+INFO 08-08 22:59:16 [llama3.py:157]         }
+INFO 08-08 22:59:16 [llama3.py:157]     },
+INFO 08-08 22:59:16 [llama3.py:157]     "serving": {}
+INFO 08-08 22:59:16 [llama3.py:157] }
+INFO 08-08 22:59:16 [llama3.py:158] Using the following sharding overrides:
+INFO 08-08 22:59:16 [llama3.py:158]   Using Llama3ShardingRulesConfig logical rules.
+INFO 08-08 22:59:16 [llama3.py:158]   Sharding overrides:
+INFO 08-08 22:59:16 [llama3.py:158]     prefill logical_rule overrides:
+INFO 08-08 22:59:16 [llama3.py:158]     {}
+INFO 08-08 22:59:16 [llama3.py:158] 
+INFO 08-08 22:59:16 [llama3.py:158]     generate logical_rule overrides:
+INFO 08-08 22:59:16 [llama3.py:158]     {}
+INFO 08-08 22:59:16 [llama3.py:158] 
+INFO 08-08 22:59:16 [llama3.py:158] 
+WARNING 08-08 22:59:17 [weight_utils.py:98] Weights files are not downloaded to local disk at once due to insufficient disk space. They will be downloaded on the fly during loading.
+INFO 08-08 22:59:17 [weight_utils.py:106] Loading weights from meta-llama/Meta-Llama-3-8B-Instruct/model-00001-of-00004.safetensors
+INFO 08-08 22:59:21 [weight_utils.py:106] Loading weights from meta-llama/Meta-Llama-3-8B-Instruct/model-00002-of-00004.safetensors

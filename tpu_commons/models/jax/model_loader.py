@@ -160,9 +160,8 @@ def get_flax_model(
 ) -> nnx.Module:
     model_class = _get_model_architecture(vllm_config.model_config.hf_config)
     jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh)
-    kv_cache_sharding = NamedSharding(mesh, PartitionSpec("data", None, "model"))
-    hidden_states_sharding = NamedSharding(mesh, PartitionSpec("data",
-                                                               None))  # (T, D)
+    kv_cache_sharding = NamedSharding(mesh, PartitionSpec("data", None, None, "model"))
+    hidden_states_sharding = NamedSharding(mesh, PartitionSpec("data", None, None))  # (T, D)
 
     # For performance consideration, refer to:
     # https://flax.readthedocs.io/en/latest/guides/performance.html
@@ -180,7 +179,7 @@ def get_flax_model(
         model = nnx.merge(graphdef, state)
         return model(*args)
 
-    logits_sharding = NamedSharding(mesh, PartitionSpec("data", "model"))
+    logits_sharding = NamedSharding(mesh, PartitionSpec("data", None, "model"))
 
     @functools.partial(
         jax.jit,

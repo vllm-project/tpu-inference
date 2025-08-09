@@ -102,23 +102,23 @@ def update_kv_cache(k: jax.Array, v: jax.Array, kv_cache: jax.Array,
         v: (T, K, H)
         kv_cache: (L, S, K*2, H)
     """
-    L, S, K_2, H = kv_cache.shape
-    T, K, H = k.shape
+    D, L, S, K_2, H = kv_cache.shape
+    D, T, K, H = k.shape
 
     # (T, K*2, H)
     # NOTE(xiang): KV needs to be interleaved as required by kernel
-    kv = jnp.concat([k, v], axis=-1).reshape(T, K_2, H)
+    kv = jnp.concat([k, v], axis=-1).reshape(D, T, K_2, H)
 
-    kv_cache = kv_cache.reshape(-1, K_2, H)
+    kv_cache = kv_cache.reshape(D, -1, K_2, H)
     kv_cache = kv_cache_update(kv,
                                slices,
                                kv_cache,
                                num_slices,
                                page_size=S,
                                mesh=mesh,
-                               kv_cache_pspec=P("data", "model", None), 
-                               slices_spec=P(None, "data"),
+                               kv_cache_pspec=P("data", None, "model", None), 
+                               slices_spec=P("data", None, None),
                                num_slices_pspec=P("data"))
     jax.block_until_ready(kv_cache)
-    kv_cache = kv_cache.reshape(L, S, K_2, H)
+    kv_cache = kv_cache.reshape(D, L, S, K_2, H)
     return kv_cache

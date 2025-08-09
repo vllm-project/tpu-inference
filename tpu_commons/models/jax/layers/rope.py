@@ -37,7 +37,7 @@ def apply_rope(
     sinusoid_inp = positions[..., jnp.newaxis] * timescale[jnp.newaxis, :]
 
     # Broadcast over the 'heads' dimension, assuming shape (batch*seq, heads, head_dim)
-    sinusoid_inp = sinusoid_inp[:, jnp.newaxis, ...]
+    sinusoid_inp = sinusoid_inp[:, :, jnp.newaxis, :]
     sin = jnp.sin(sinusoid_inp)
     cos = jnp.cos(sinusoid_inp)
 

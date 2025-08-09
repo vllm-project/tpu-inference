@@ -61,9 +61,9 @@ class TPUSupportedSamplingMetadata:
                                   DEFAULT_SAMPLING_PARAMS["top_k"])
         top_p_tensor = fill_slice(input_batch.top_p_cpu,
                                   DEFAULT_SAMPLING_PARAMS["top_p"])
-        print("temp_tensor", temp_tensor)
-        print("top_k_tensor", top_k_tensor)
-        print("top_p_tensor", top_p_tensor)
+        # print("temp_tensor", temp_tensor)
+        # print("top_k_tensor", top_k_tensor)
+        # print("top_p_tensor", top_p_tensor)
         
         def _device_array(cpu_tensor):
             sharding = NamedSharding(mesh, PartitionSpec(None))
