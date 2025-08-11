@@ -9,8 +9,7 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.models.jax.common.attention.attention import (Attention,
-                                                               AttentionConfig)
+from tpu_commons.models.jax.common.attention.attention import Attention
 from tpu_commons.models.jax.common.base import ParamFactory
 
 KVCache = Tuple[jax.Array, jax.Array]
@@ -39,17 +38,6 @@ class TestAttention(unittest.TestCase):
         hidden_size = 1024
         num_attention_heads = 8
         head_dim = hidden_size // num_attention_heads
-
-        attention_config = AttentionConfig(
-            hidden_size=hidden_size,
-            num_attention_heads=num_attention_heads,
-            num_key_value_heads=num_attention_heads,
-            head_dim=head_dim,
-            rope_theta=10000.0,
-            rope_scaling={},
-            dtype=jnp.bfloat16,
-            vllm_config=None,
-        )
 
         dummy_sharding = NamedSharding(self.mesh, P())
 
@@ -114,7 +102,7 @@ class TestAttention(unittest.TestCase):
             attention_metadata=attention_metadata,
         )
 
-        self.assertEqual(output.shape, (seq_len, attention_config.hidden_size))
+        self.assertEqual(output.shape, (seq_len, hidden_size))
 
         self.assertEqual(new_kv_cache.shape, kv_cache.shape)
 

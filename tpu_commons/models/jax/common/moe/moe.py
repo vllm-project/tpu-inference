@@ -1,43 +1,16 @@
-from dataclasses import dataclass, field, make_dataclass
-from typing import Any, Union
+from dataclasses import dataclass
+from typing import Any
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding
-from jaxtyping import DTypeLike, Float
-from vllm.config import VllmConfig
+from jaxtyping import Float
 
-from tpu_commons.models.jax.common.base import Config, ParamFactory
-from tpu_commons.models.jax.common.constants import (HuggingFaceArgNames,
-                                                     RouterType)
+from tpu_commons.models.jax.common.base import ParamFactory
 from tpu_commons.models.jax.common.layers import FlaxUtils
-from tpu_commons.models.jax.common.moe.deepseek_moe import \
-    DeepSeekV3RoutingConfig
 
 modeling_flax_utils = FlaxUtils()
-
-RouterConfig = make_dataclass(
-    "RouterConfig",
-    [(HuggingFaceArgNames.HIDDEN_SIZE.value, int),
-     (HuggingFaceArgNames.NUM_LOCAL_EXPERTS.value, int),
-     (HuggingFaceArgNames.NUM_EXPERTS_PER_TOKEN.value, int),
-     ("router_type", RouterType), ("expert_capacity", int),
-     ("dtype", DTypeLike),
-     ("vllm_config", VllmConfig, field(repr=False, default=None)),
-     ("router_act", str, "softmax")],
-    bases=(Config, ))
-RouterConfig.__doc__ = f"""Configuration for the Router module.
-
-     Attributes:
-        {HuggingFaceArgNames.HIDDEN_SIZE.value}: The dimension of the model.
-        {HuggingFaceArgNames.NUM_LOCAL_EXPERTS.value}: The total number of experts.
-        {HuggingFaceArgNames.NUM_EXPERTS_PER_TOKEN.value}: The number of experts each token is routed to.
-         router_type: The type of router to use (e.g., 'top_k').
-         router_act: The activation function to use for normalizing router scores.
-         expert_capacity: The maximum number of tokens an expert can process. Defaults to -1 (no capacity limit).
-        dtype: The data type to use for computations.
-        vllm_config: The VLLM config containing any overrides to apply."""
 
 
 @dataclass
@@ -47,7 +20,6 @@ class Router(nnx.Module):
     This module determines which experts each token should be routed to based on the input.
 
     Attributes:
-        cfg: The RouterConfig object.
         mesh: The JAX device mesh for distributed computation.
         param_factory: A factory for creating and initializing model parameters.
         quant: Optional configuration for quantization.
@@ -95,30 +67,6 @@ class Router(nnx.Module):
             rngs, shape=shape, dtype=self.dtype, sharding=self.ed_sharding)
 
 
-MoEConfig = make_dataclass(
-    "MoEConfig",
-    [(HuggingFaceArgNames.HIDDEN_SIZE.value, int),
-     (HuggingFaceArgNames.INTERMEDIATE_SIZE_MOE.value, int),
-     (HuggingFaceArgNames.NUM_LOCAL_EXPERTS.value, int),
-     (HuggingFaceArgNames.HIDDEN_ACT.value, int),
-     ("apply_expert_weight_before_computation", bool),
-     ("router", Union[RouterConfig, DeepSeekV3RoutingConfig]),
-     ("dtype", DTypeLike),
-     ("vllm_config", VllmConfig, field(repr=False, default=None))],
-    bases=(Config, ))
-MoEConfig.__doc__ = f"""Configuration for the Mixture-of-Experts (MoE) layer.
-
-     Attributes:
-        {HuggingFaceArgNames.HIDDEN_SIZE.value}: The dimension of the model.
-        {HuggingFaceArgNames.INTERMEDIATE_SIZE_MOE.value}: The hidden size of each expert's MLP.
-        {HuggingFaceArgNames.NUM_LOCAL_EXPERTS.value}: The total number of experts.
-        {HuggingFaceArgNames.HIDDEN_ACT.value}: The activation function to use within the experts.
-        apply_expert_weight_before_computation: Whether to apply expert weights before computation. Defaults to False.
-        router: The config for the Router module.
-        dtype: The data type to use for computations.
-        vllm_config: The VLLM config containing any overrides to apply."""
-
-
 @dataclass
 class MoE(nnx.Module):
     """Mixture-of-Experts (MoE) Routed MLP Layer.
@@ -126,7 +74,6 @@ class MoE(nnx.Module):
     This module implements a MoE layer with a router and multiple expert MLPs.
 
     Attributes:
-        cfg: The MoEConfig object.
         mesh: The JAX mesh for device sharding.
         param_factory: A factory for creating and initializing model parameters.
         router: The Router module.

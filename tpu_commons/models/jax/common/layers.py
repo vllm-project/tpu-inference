@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field, make_dataclass
+from dataclasses import dataclass
 from typing import Any
 
 import jax
@@ -6,11 +6,9 @@ import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from jaxtyping import DTypeLike, Float, Int
-from vllm.config import VllmConfig
+from jaxtyping import Float, Int
 
-from tpu_commons.models.jax.common.base import Config, ParamFactory
-from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
+from tpu_commons.models.jax.common.base import ParamFactory
 
 
 # A dummy for modeling_flax_utils which might contain activation functions
@@ -56,7 +54,6 @@ class RMSNorm(nnx.Module):
         dims: The feature dimension to normalize over.
         mesh: The JAX device mesh for distributed computation.
         param_factory: A factory for creating and initializing model parameters.
-        sharding_cfg: Configuration for tensor sharding strategies.
         epsilon: A small float added to the variance to avoid division by zero.
         with_scale: If True, learns a multiplicative scale parameter.
         dtype: The data type for computations.
@@ -102,25 +99,6 @@ class RMSNorm(nnx.Module):
             dtype=self.dtype)
 
 
-DenseFFWConfig = make_dataclass(
-    "FFWConfig",
-    [(HuggingFaceArgNames.HIDDEN_SIZE.value, int),
-     (HuggingFaceArgNames.INTERMEDIATE_SIZE.value, int),
-     (HuggingFaceArgNames.HIDDEN_ACT.value, str), ("dtype", DTypeLike),
-     ("vllm_config", VllmConfig, field(repr=False, default=None))],
-    bases=(Config, ))
-
-DenseFFWConfig.__doc__ = f"""Configuration for the Dense Feed-Forward (FFW) layer.
-
-     Attributes:
-        {HuggingFaceArgNames.HIDDEN_SIZE.value}: The dimension of the model.
-        {HuggingFaceArgNames.INTERMEDIATE_SIZE.value}: The size of the intermediate hidden layer.
-        {HuggingFaceArgNames.HIDDEN_ACT.value}: The name of the activation function to use (e.g., 'silu').
-         dtype: The data type for computations.
-         vllm_config: The VLLM config containing any overrides to apply.
-     """
-
-
 @dataclass
 class DenseFFW(nnx.Module):
     """A Gated Feed-Forward Network (FFN) layer.
@@ -130,7 +108,6 @@ class DenseFFW(nnx.Module):
     up-projection, followed by a final downward projection.
 
     Attributes:
-        cfg: The `DenseFFWConfig` configuration object.
         mesh: The JAX device mesh.
         param_factory: The factory for creating parameters.
         sharding_cfg: The configuration for tensor sharding.
@@ -186,24 +163,6 @@ class DenseFFW(nnx.Module):
             rngs, shape=(F, D), dtype=self.dtype, sharding=self.fd_sharding)
 
 
-EmbedderConfig = make_dataclass(
-    "EmbedderConfig",
-    [(HuggingFaceArgNames.VOCAB_SIZE.value, int),
-     (HuggingFaceArgNames.HIDDEN_SIZE.value, int), ("dtype", DTypeLike),
-     ("normalize_embeddings", bool),
-     ("vllm_config", VllmConfig, field(repr=False, default=None))],
-    bases=(Config, ))
-EmbedderConfig.__doc__ = f"""Configuration for the Embedder module.
-
-     Attributes:
-         {HuggingFaceArgNames.VOCAB_SIZE.value}: The size of the vocabulary.
-         {HuggingFaceArgNames.HIDDEN_SIZE.value}: The hidden dimension of the model.
-         dtype: The data type for the embedding table.
-         normalize_embeddings: If True, scale embeddings by `sqrt(d_model)`.
-         vllm_config: The VLLM config containing any overrides to apply.
-     """
-
-
 @dataclass
 class Embedder(nnx.Module):
     """A module for token embedding and, optionally, decoding (tied embeddings).
@@ -213,10 +172,8 @@ class Embedder(nnx.Module):
     over the vocabulary.
 
     Attributes:
-        cfg: The `EmbedderConfig` configuration object.
         mesh: The JAX device mesh for distributed computation.
         param_factory: A factory for creating and initializing model parameters.
-        sharding_cfg: Configuration for tensor sharding strategies.
         quant: Optional configuration for quantization.
     """
     vocab_size: int

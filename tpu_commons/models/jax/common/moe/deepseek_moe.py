@@ -1,42 +1,13 @@
-from dataclasses import dataclass, field, make_dataclass
+from dataclasses import dataclass
 from typing import Any, Tuple
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding
-from jaxtyping import DTypeLike, Float
-from vllm.config import VllmConfig
+from jaxtyping import Float
 
-from tpu_commons.models.jax.common.base import Config, ParamFactory
-from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
-
-DeepSeekV3RoutingConfig = make_dataclass(
-    "RoutingConfig",
-    [
-        (HuggingFaceArgNames.HIDDEN_SIZE.value, int),
-        (HuggingFaceArgNames.NUM_ROUTED_EXPERTS.value, int),
-        (HuggingFaceArgNames.NUM_EXPERTS_PER_TOKEN.value, int),
-        (HuggingFaceArgNames.NUM_GROUPS.value, int),
-        (HuggingFaceArgNames.ROUTED_SCALING_FACTOR.value, float),
-        (HuggingFaceArgNames.TOPK_GROUP.value, int),
-        (HuggingFaceArgNames.NORM_TOPK_PROB.value, bool),
-        ("dtype", DTypeLike),
-        ("vllm_config", VllmConfig, field(repr=False, default=None)),
-    ],
-    bases=(Config, ),
-)
-
-DeepSeekV3RoutingConfig.__doc__ = f"""Configuration for the Router module.
-
-     Attributes:
-        {HuggingFaceArgNames.HIDDEN_SIZE.value}: The dimension of the model.
-        {HuggingFaceArgNames.NUM_ROUTED_EXPERTS.value}: The number of routed experts.
-        {HuggingFaceArgNames.NUM_EXPERTS_PER_TOKEN.value}: The number of experts each token is routed to.
-        {HuggingFaceArgNames.NUM_GROUPS.value}: The number of groups.
-        {HuggingFaceArgNames.ROUTED_SCALING_FACTOR.value}: The scaling factor for routed weights.
-        {HuggingFaceArgNames.TOPK_GROUP.value}: The number of top k groups to consider.
-        {HuggingFaceArgNames.NORM_TOPK_PROB.value}: Whether to normalize the top k groups."""
+from tpu_commons.models.jax.common.base import ParamFactory
 
 
 @dataclass
@@ -46,7 +17,6 @@ class DeepSeekV3Router(nnx.Module):
     This module determines which experts each token should be routed to based on the input.
 
     Attributes:
-        cfg: The RoutingConfig object.
         mesh: The JAX device mesh for distributed computation.
         param_factory: A factory for creating and initializing model parameters.
         quant: Optional configuration for quantization.
