@@ -22,6 +22,7 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             UtilityResult)
 from vllm.v1.engine.core import EngineCore as vLLMEngineCore
 from vllm.v1.engine.core import EngineCoreProc as vLLMEngineCoreProc
+from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import RequestStatus
 
 from tpu_commons.core import disagg_executor, disagg_utils
@@ -364,11 +365,19 @@ class _DisaggOrchestrator:
 class DisaggEngineCoreProc(vLLMEngineCoreProc):
     """The vLLM-facing adapter that handles process management and I/O."""
 
+    @staticmethod
+    def is_supported() -> bool:
+        """
+        Returns True if this engine can run in the current environment.
+        """
+        return disagg_utils.is_disagg_enabled()
+
     def __init__(
         self,
         vllm_config: VllmConfig,
         local_client: bool,
         handshake_address: str,
+        executor_class: type[Executor],
         log_stats: bool,
         engine_index: int = 0,
         **kwargs,
