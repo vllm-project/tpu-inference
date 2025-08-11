@@ -73,6 +73,14 @@ steps:
      commands:
        - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
 
+   - label: "tmp CI access check"
+     key: test_7
+     soft_fail: true
+     agents:
+       queue: tpu_v6e_queue
+     commands:
+       - echo "PASSED"
+
   # -----------------------------------------------------------------
   # NOTIFICATION STEP
   # -----------------------------------------------------------------
@@ -85,6 +93,7 @@ steps:
        - test_4
        - test_5
        - test_6
+       - test_7
      agents:
        queue: tpu_v6e_queue
-     commands: "bash .buildkite/scripts/check_results.sh 'TPU JAX Tests Failed' test_0 test_1 test_2 test_3 test_4 test_5 test_6"
+     commands: "bash .buildkite/scripts/check_results.sh 'TPU JAX Tests Failed' test_0 test_1 test_2 test_3 test_4 test_5 test_6 test_7"
