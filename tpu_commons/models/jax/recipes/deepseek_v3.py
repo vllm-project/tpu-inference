@@ -70,7 +70,7 @@ class DeepSeekV3(Model):
         rms_norm_eps: float = 1e-06
         first_k_dense_replace: int = 3  # replace the first few MOE layers to dense layer.
 
-        shared_experts = 1
+        num_shared_experts = 1
         rope_theta = 10000
         rope_scaling = {
             "beta_fast": 32,
@@ -162,7 +162,7 @@ class DeepSeekV3(Model):
 
         for i in range(first_k_dense_replace):
             block = TransformerBlock(
-                RMSNorm(
+                pre_attention_norm=RMSNorm(
                     dims=hidden_size,
                     mesh=self.mesh,
                     param_factory=self.param_factory,
@@ -245,7 +245,7 @@ class DeepSeekV3(Model):
                 dtype=dtype,
                 hidden_act=hidden_act,
                 hidden_size=hidden_size,
-                intermediate_size=shared_experts * moe_intermediate_size,
+                intermediate_size=num_shared_experts * moe_intermediate_size,
                 mesh=self.mesh,
                 param_factory=self.param_factory,
                 df_sharding=NamedSharding(self.mesh,
