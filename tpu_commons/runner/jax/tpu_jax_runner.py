@@ -92,7 +92,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         self.dtype = self.model_config.dtype
 
         # multi-modal related
-        self.is_multimodal_model = self.model_config.is_multimodal_model
+        self.is_multimodal_model = None  # Will get updated once the model is loaded.
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = self.model_config.uses_mrope
         encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
@@ -238,6 +238,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         )
         self.rng_params_for_sampling = nnx.Rngs(
             jax.random.key(self.model_config.seed)).params()
+        self.is_multimodal_model = (self.model_config.is_multimodal_model
+                                    and self.get_multimodal_embeddings_fn
+                                    is not None)
 
         logger.info(f"Init model | "
                     f"hbm={common_utils.hbm_usage_gb(self.devices)}Gb")
