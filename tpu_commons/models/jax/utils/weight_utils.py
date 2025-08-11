@@ -28,6 +28,7 @@ FULL_DOWNLOAD_DISK_RATIO = 0.9
 def print_param_info(param: nnx.Param, name: str):
     logger.warning(f"Global shape for {name}: {param.value.shape}")
     logger.warning(f"Sharding for {name}: {param.sharding}")
+    logger.warning(f"Dtype for {name}: {param.value.dtype}")
 
     logger.warning(
         f"Shape of {name} on a single device: {param.value.addressable_shards[0].data.shape}"

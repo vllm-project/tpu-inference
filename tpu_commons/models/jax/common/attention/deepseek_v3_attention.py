@@ -254,23 +254,12 @@ class MLA(nnx.Module):
 
         with jax.named_scope("q_proj"):
             # Query down projection.
-            w_q_down, s_q_down = self.kernel_q_down_proj_DA.value, self.kernel_q_down_proj_scale_DA.value
-            D, A = w_q_down.shape
-            sD, sA = s_q_down.shape
-            w_q_down_dequant = (w_q_down.reshape(sD, D // sD, sA, A // sA) *
-                                s_q_down.reshape(sD, 1, sA, 1)).reshape(D, A)
-            q_TA = jnp.einsum("TD,DA -> TA", x_q_TD, w_q_down_dequant)
-
+            q_TA = jnp.einsum("TD,DA -> TA", x_q_TD,
+                              self.kernel_q_down_proj_DA.value)
             q_TA = self.q_rms_norm(q_TA)
             # Query up projection.
-            w_q_up, s_q_up = self.kernel_q_up_proj_ANH.value, self.kernel_q_up_proj_scale_ANH.value
-            A, N, H = w_q_up.shape
-            sA, sN, sH = s_q_up.shape
-            w_q_up_dequant = (w_q_up.reshape(sA, A // sA, sN, 1, sH, H // sH) *
-                              s_q_up.reshape(sA, 1, sN, 1, sH, 1)).reshape(
-                                  A, N, H)
-            q_TNH = jnp.einsum("TA,ANH -> TNH", q_TA, w_q_up_dequant)
-
+            q_TNH = jnp.einsum("TA,ANH -> TNH", q_TA,
+                               self.kernel_q_up_proj_ANH.value)
             # Split the query into nope and rope.
             q_nope_TNH = q_TNH[..., :self.qk_nope_head_dim]
             q_rope_TNH = q_TNH[..., self.qk_nope_head_dim:]
@@ -283,14 +272,8 @@ class MLA(nnx.Module):
 
         with jax.named_scope("kv_proj"):
             # KV down projection.
-            w_kv_down, s_kv_down = self.kernel_kv_down_proj_DA.value, self.kernel_kv_down_proj_scale_DA.value
-            D, A = w_kv_down.shape
-            sD, sA = s_kv_down.shape
-            w_kv_down_dequant = (w_kv_down.reshape(sD, D // sD, sA, A // sA) *
-                                 s_kv_down.reshape(sD, 1, sA, 1)).reshape(
-                                     D, A)
-            kv_SA = jnp.einsum("SD,DA -> SA", x_SD, w_kv_down_dequant)
-
+            kv_SA = jnp.einsum("SD,DA -> SA", x_SD,
+                               self.kernel_kv_down_proj_DA.value)
             # Split the key and value into latent kv vector and k rope vector.
             k_rope_SH = kv_SA[..., self.kv_lora_rank:]
             # Reshape k_rope_BSH to include head dimension for RoPE application
