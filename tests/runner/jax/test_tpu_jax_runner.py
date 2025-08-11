@@ -872,5 +872,78 @@ class TestTPUJaxRunner(unittest.TestCase):
             self.assertEqual(call_kwargs["num_new_tokens"], 5)
 
 
+class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly(unittest.TestCase):
+
+    def setUp(self):
+        # Mock JAX dependencies
+        self.mock_devices = [MagicMock()] * 4
+        self.mock_mesh = MagicMock()
+        self.mock_rng_key = MagicMock()
+
+        # Setup the runner with the model_config.is_multimodal_model set to True but get_model returning None for get_multimodal_embeddings_fn and get_input_embeddings_fn.
+        with patch('jax.devices', return_value=self.mock_devices), \
+             patch('jax.make_mesh', return_value=self.mock_mesh), \
+             patch('jax.random.key', return_value=self.mock_rng_key), \
+             patch('tpu_commons.runner.jax.tpu_jax_runner.nnx.Rngs', return_value=self.mock_rng_key), \
+             patch('tpu_commons.runner.jax.tpu_jax_runner.get_model', return_value=self._model_get_model()):
+
+            model_config = ModelConfig(tokenizer_mode="auto",
+                                       trust_remote_code=False,
+                                       seed=0,
+                                       dtype='bfloat16')
+            # Set multimodal_config to not None, such that the is_multimodal_model property of model_config is True.
+            model_config.multimodal_config = MagicMock()
+
+            cache_config = CacheConfig(
+                block_size=16,
+                gpu_memory_utilization=0.9,
+                swap_space=4,
+                cache_dtype="auto",
+            )
+            scheduler_config = SchedulerConfig(max_num_seqs=16, )
+            parallel_config = ParallelConfig(
+                pipeline_parallel_size=1,
+                tensor_parallel_size=1,
+                worker_use_ray=False,
+            )
+            vllm_config = VllmConfig(
+                model_config=model_config,
+                cache_config=cache_config,
+                scheduler_config=scheduler_config,
+                parallel_config=parallel_config,
+                speculative_config=None,
+                observability_config=None,
+                additional_config={},
+            )
+
+            self.runner = TPUModelRunner(vllm_config,
+                                         devices=self.mock_devices)
+            self.runner.load_model()
+
+    def _model_get_model(self):
+        return (
+            MagicMock(),  # TPUModelRunner.model_fn
+            MagicMock(),  # TPUModelRunner.compute_logits_fn
+            None,  # TPUModelRunner.get_multimodal_embeddings_fn
+            None,  # TPUModelRunner.get_input_embeddings_fn
+            MagicMock(),  # TPUModelRunner.state (model params)
+        )
+
+    def test_is_multimodal_model(self):
+        # Precondition: make sure the model_config claims the model supports MM.
+        assert self.runner.model_config.is_multimodal_model
+
+        # Precondition: load the model and returns get_multimodal_embeddings_fn as None.
+        assert self.runner.get_multimodal_embeddings_fn is None
+
+        assert not self.runner.is_multimodal_model
+
+        self.runner.get_input_embeddings_fn = MagicMock()
+        dummy_input_ids = jnp.array([1, 2, 3])
+        dummy_mm_embeds = [jnp.ones((10, 128))]
+        _ = self.runner._get_input_ids_embeds(dummy_input_ids, dummy_mm_embeds)
+        self.runner.get_input_embeddings_fn.assert_not_called()
+
+
 if __name__ == '__main__':
     unittest.main()
