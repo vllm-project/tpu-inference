@@ -24,7 +24,6 @@ from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils import cdiv
-from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
@@ -95,13 +94,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         self.is_multimodal_model = None  # Will get updated once the model is loaded.
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = self.model_config.uses_mrope
-        encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
-            model_config=self.model_config,
-            scheduler_config=self.scheduler_config,
-            mm_registry=self.mm_registry,
-        )
-        self.max_num_encoder_input_tokens = encoder_compute_budget
-        self.encoder_cache_size = encoder_cache_size
 
         self._init_random()
         self._init_mesh()
