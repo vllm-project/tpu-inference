@@ -23,11 +23,11 @@ class AttentionMetadata(object):
     # (padded_total_num_scheduled_tokens,)
     input_positions: jax.Array
     # (3, padded_num_slices)
-    slot_mapping: jax.Array
+    slot_mapping: jax.Array = None
     # (max_num_seqs, max_num_blocks_per_req)
-    block_tables: jax.Array
+    block_tables: jax.Array = None
     # (max_num_seqs,)
-    seq_lens: jax.Array
+    seq_lens: jax.Array = None
     # (max_num_seqs + 1,)
     query_start_loc: jax.Array = None
     # (1,)
