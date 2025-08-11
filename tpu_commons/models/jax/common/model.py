@@ -1,5 +1,4 @@
 import abc
-from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import jax
@@ -10,21 +9,10 @@ from vllm.config import VllmConfig
 
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.common.attention.attention import AttentionMetadata
-from tpu_commons.models.jax.common.base import Config, ParamFactory
+from tpu_commons.models.jax.common.base import ParamFactory
 from tpu_commons.models.jax.common.constants import KVCacheType
-from tpu_commons.models.jax.common.layers import EmbedderConfig
-from tpu_commons.models.jax.common.transformer_block import \
-    TransformerBlockConfig
 
 logger = init_logger(__name__)
-
-
-@dataclass
-class ModelConfig(Config):
-    emb: EmbedderConfig
-    layers: TransformerBlockConfig
-    num_layers: int
-    vllm_config: VllmConfig
 
 
 class Model(nnx.Module, abc.ABC):

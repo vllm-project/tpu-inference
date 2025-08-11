@@ -1,5 +1,5 @@
-from dataclasses import dataclass, field, make_dataclass
-from typing import Any, Dict, Tuple
+from dataclasses import dataclass
+from typing import Any, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -7,8 +7,6 @@ from flax import nnx
 from jax.experimental import shard_map
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from jax.typing import DTypeLike
-from vllm.config import VllmConfig
 
 from tpu_commons.kernels.ragged_paged_attention.kernel import \
     ragged_paged_attention
@@ -20,50 +18,11 @@ from tpu_commons.kernels.ragged_paged_attention.v3.util import \
     get_dtype_packing
 from tpu_commons.models.jax.attention_interface import update_kv_cache
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.models.jax.common.base import Config, ParamFactory
-from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
+from tpu_commons.models.jax.common.base import ParamFactory
 from tpu_commons.models.jax.common.layers import RMSNorm
 from tpu_commons.models.jax.common.rope import DeepseekScalingRotaryEmbedding
 
 KVCache = Tuple[jax.Array, jax.Array]
-
-MLAConfig = make_dataclass(
-    "MLAConfig",
-    [
-        (HuggingFaceArgNames.HIDDEN_SIZE.value, int),
-        (HuggingFaceArgNames.NUM_ATTENTION_HEADS.value, int),
-        (HuggingFaceArgNames.NUM_KEY_VALUE_HEADS.value, int),
-        (HuggingFaceArgNames.ROPE_THETA.value, float),
-        (HuggingFaceArgNames.ROPE_SCALING.value, Dict[str, Any]),
-        (HuggingFaceArgNames.Q_LORA_RANK.value, int),
-        (HuggingFaceArgNames.KV_LORA_RANK.value, int),
-        (HuggingFaceArgNames.QK_NOPE_HEAD_DIM.value, int),
-        (HuggingFaceArgNames.QK_ROPE_HEAD_DIM.value, int),
-        (HuggingFaceArgNames.V_HEAD_DIM.value, int),
-        (HuggingFaceArgNames.RMS_NORM_EPS.value, float),
-        (
-            "dtype",
-            DTypeLike,
-        ),
-        ("vllm_config", VllmConfig, field(repr=False, default=None)),
-    ],
-    bases=(Config, ),
-)
-
-MLAConfig.__doc__ = f"""Configuration for the MLA module.
-         Attributes:
-        {HuggingFaceArgNames.HIDDEN_SIZE.value}: The dimension of the model.
-        {HuggingFaceArgNames.NUM_ATTENTION_HEADS.value}: The number of query heads.
-        {HuggingFaceArgNames.NUM_KEY_VALUE_HEADS.value}: The number of key/value heads.
-        {HuggingFaceArgNames.ROPE_THETA.value}: The base period for Rotary Position Embeddings.
-        {HuggingFaceArgNames.ROPE_SCALING.value}: Optional dictionary of scaling factors for RoPE.
-        {HuggingFaceArgNames.Q_LORA_RANK.value}: The dimension for the latent query vector.
-        {HuggingFaceArgNames.KV_LORA_RANK.value}: The dimension for the latent key/value vector.
-        {HuggingFaceArgNames.QK_NOPE_HEAD_DIM.value}: The dimension of the no rope portion of the qv tensor.
-        {HuggingFaceArgNames.QK_ROPE_HEAD_DIM.value}: The dimension of the rope portion of the qv tensor.
-        {HuggingFaceArgNames.V_HEAD_DIM.value}: The dimension of the value vector.
-        {HuggingFaceArgNames.RMS_NORM_EPS.value}: The epsilon for the RMS normalization.
-    """
 
 
 # TODO (wenxindongwork): Add MLA KV cache implementation. For now, cache complete KV vectors.

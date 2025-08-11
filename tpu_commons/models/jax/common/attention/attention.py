@@ -1,5 +1,5 @@
-from dataclasses import dataclass, field, make_dataclass
-from typing import Any, Dict, Tuple
+from dataclasses import dataclass
+from typing import Any, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -7,8 +7,6 @@ from flax import nnx
 from jax.experimental import shard_map
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from jax.typing import DTypeLike
-from vllm.config import VllmConfig
 
 from tpu_commons.kernels.ragged_paged_attention.kernel import \
     ragged_paged_attention
@@ -20,37 +18,10 @@ from tpu_commons.kernels.ragged_paged_attention.v3.util import \
     get_dtype_packing
 from tpu_commons.models.jax.attention_interface import update_kv_cache
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.models.jax.common.base import Config, ParamFactory
-from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
+from tpu_commons.models.jax.common.base import ParamFactory
 from tpu_commons.models.jax.layers.rope import apply_rope
 
 KVCache = Tuple[jax.Array, jax.Array]
-
-AttentionConfig = make_dataclass(
-    "AttentionConfig",
-    [(HuggingFaceArgNames.HIDDEN_SIZE.value, int),
-     (HuggingFaceArgNames.NUM_ATTENTION_HEADS.value, int),
-     (HuggingFaceArgNames.NUM_KEY_VALUE_HEADS.value, int),
-     (HuggingFaceArgNames.HEAD_DIM.value, int),
-     (HuggingFaceArgNames.ROPE_SCALING.value, Dict[str, Any]),
-     (HuggingFaceArgNames.ROPE_THETA.value, float), ("dtype", DTypeLike),
-     ("rope_input_ordering", str, "split"),
-     (HuggingFaceArgNames.ATTENTION_CHUNK_SIZE.value, int, None),
-     ("vllm_config", VllmConfig, field(repr=False, default=None))],
-    bases=(Config, ))
-AttentionConfig.__doc__ = f"""Configuration for the Attention module.
-         Attributes:
-        {HuggingFaceArgNames.HIDDEN_SIZE.value}: The dimension of the model.
-        {HuggingFaceArgNames.NUM_ATTENTION_HEADS.value}: The number of query heads.
-        {HuggingFaceArgNames.NUM_KEY_VALUE_HEADS.value}: The number of key/value heads.
-        {HuggingFaceArgNames.HEAD_DIM.value}: The dimension of each attention head.
-        {HuggingFaceArgNames.ROPE_SCALING.value}: Optional dictionary of scaling factors for RoPE.
-        {HuggingFaceArgNames.ROPE_THETA.value}: The base period for Rotary Position Embeddings.
-        {HuggingFaceArgNames.ATTENTION_CHUNK_SIZE.value}: The chunk size for sliding window attention.
-         dtype: The data type for computations (default: jnp.float32).
-         "rope_input_ordering": Whether the inputs to rotate should be adjacent, interleaved dimensions or first and second half of the dimensions.
-         vllm_config: The VLLM config containing any overrides to apply.
-    """
 
 
 @dataclass
@@ -64,10 +35,8 @@ class Attention(nnx.Module):
     (decode) modes and handles tensor sharding for distributed computation.
 
     Attributes:
-        cfg: The configuration object of type `AttentionConfig`.
         mesh: The JAX device mesh for distributed computation.
         param_factory: A factory for creating and initializing model parameters.
-        sharding_cfg: Configuration for tensor sharding strategies.
         quant: Optional configuration for quantization.
     """
     hidden_size: int

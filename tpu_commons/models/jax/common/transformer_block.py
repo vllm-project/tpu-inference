@@ -1,33 +1,14 @@
-from dataclasses import dataclass, field, make_dataclass
+from dataclasses import dataclass
 from typing import Any, Tuple
 
 # Flax and JAX sharding imports
 import jax
 from flax import nnx
-from vllm.config import VllmConfig
 
 from tpu_commons.models.jax.common.attention.attention import (
-    AttentionConfig, AttentionMetadata, KVCache)
-from tpu_commons.models.jax.common.base import Config
-from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
-from tpu_commons.models.jax.common.layers import DenseFFW, DenseFFWConfig
-from tpu_commons.models.jax.common.moe.moe import MoE, MoEConfig
-
-TransformerBlockConfig = make_dataclass(
-    "TransformerBlockConfig",
-    [("attention", AttentionConfig), ("dense_ffw", DenseFFWConfig),
-     (HuggingFaceArgNames.RMS_NORM_EPS.value, float),
-     ("moe", MoEConfig, field(default=None)),
-     ("vllm_config", VllmConfig, field(repr=False, default=None))],
-    bases=(Config, ))
-TransformerBlockConfig.__doc__ = f"""light weighted transformer config, which includes config for all sub-modules
-    it uses make() to create the live module from this config
-    Args:
-        attention: AttentionConfig config used to specify attention layer parameters.
-        dense_ffw: DenseFFWConfig config used to specify feed-forward layer parameters.
-        {HuggingFaceArgNames.RMS_NORM_EPS.value}: float The epsilon value for RMSNorm.
-        vllm_config: VllmConfig The VLLM config containing any overrides to apply.
-        """
+    AttentionMetadata, KVCache)
+from tpu_commons.models.jax.common.layers import DenseFFW
+from tpu_commons.models.jax.common.moe.moe import MoE
 
 
 @dataclass
@@ -68,22 +49,6 @@ class TransformerBlock(nnx.Module):
         self.custom_module.generate_kernel(rngs)
         self.pre_attention_norm.generate_kernel(rngs)
         self.pre_mlp_norm.generate_kernel(rngs)
-
-
-# Provide a variant that allows mixing and matching Dense & MoE layers.
-SharedExpertsTransformerBlockConfig = make_dataclass(
-    "SharedExpertsTransformerBlockConfig",
-    [(HuggingFaceArgNames.SHARED_EXPERTS.value, int)],
-    bases=(TransformerBlockConfig, ),
-    kw_only=True)
-
-SharedExpertsTransformerBlockConfig.__doc__ = f"""Transformer block with MoE block and shared experts block (i.e. Dense Block).
-Additional Args:
-  {HuggingFaceArgNames.SHARED_EXPERTS.value}: Number of experts to route all of the inputs to (essentially a dense layer).
-
-Inherits TransformerBlockConfig docstring:
-{TransformerBlockConfig.__doc__}
-"""
 
 
 @dataclass(kw_only=True)

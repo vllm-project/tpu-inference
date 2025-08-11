@@ -1,4 +1,4 @@
-from dataclasses import dataclass, make_dataclass
+from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
@@ -8,9 +8,7 @@ from jax.sharding import NamedSharding
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.common.attention.attention import (Attention,
-                                                               AttentionConfig,
                                                                KVCache)
-from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
 from tpu_commons.models.jax.layers.rope import apply_rope
 
 logger = init_logger(__name__)
@@ -30,26 +28,6 @@ class L2Norm(nnx.Module):
     def __call__(self, x):
         return x * jax.lax.rsqrt(
             jnp.mean(x**2, axis=-1, keepdims=True) + self.eps)
-
-
-Llama4AttentionConfig = make_dataclass(
-    "Llama4AttentionConfig",
-    [(HuggingFaceArgNames.USE_QK_NORM.value, bool),
-     (HuggingFaceArgNames.TEMPERATURE_TUNING.value, bool),
-     (HuggingFaceArgNames.TEMPERATURE_TUNING_SCALE.value, float),
-     (HuggingFaceArgNames.TEMPERATURE_TUNING_FLOOR_SCALE.value, float)],
-    bases=(AttentionConfig, ),
-    kw_only=True)
-Llama4AttentionConfig.__doc__ = f"""Llama4-specific attention layer which performs layer norm on the Query and Keys after RoPE.
-Additional Args:
-  {HuggingFaceArgNames.USE_QK_NORM.value}: bool whether to use Llama4 normalization of query & keys
-  {HuggingFaceArgNames.TEMPERATURE_TUNING.value}: bool whether to use temperature tuning
-  {HuggingFaceArgNames.TEMPERATURE_TUNING_SCALE.value}: float temperature tuning scale
-  {HuggingFaceArgNames.TEMPERATURE_TUNING_FLOOR_SCALE.value}: float temperature tuning floor scale
-
-Inherits AttentionConfig docstring:
-{AttentionConfig.__doc__}
-"""
 
 
 @dataclass(kw_only=True)
