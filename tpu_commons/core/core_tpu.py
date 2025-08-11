@@ -364,11 +364,19 @@ class _DisaggOrchestrator:
 class DisaggEngineCoreProc(vLLMEngineCoreProc):
     """The vLLM-facing adapter that handles process management and I/O."""
 
+    @staticmethod
+    def is_supported() -> bool:
+        """
+        Returns True if this engine can run in the current environment.
+        """
+        return disagg_utils.is_disagg_enabled()
+
     def __init__(
         self,
         vllm_config: VllmConfig,
         local_client: bool,
         handshake_address: str,
+        executor_class: "type[Executor]",
         log_stats: bool,
         engine_index: int = 0,
         **kwargs,
