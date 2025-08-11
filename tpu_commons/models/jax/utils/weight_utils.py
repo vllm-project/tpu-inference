@@ -305,6 +305,8 @@ def load_hf_weights_on_thread(vllm_config, params: nnx.State,
             hf_key = hf_key.removesuffix(".weight")
 
         # Find the corresponding model key using the HF key
+        is_gptq_layer = False
+        gptq_keywords = ["g_idx", "scales", "qzeros", "qweight"]
         if "layer" in hf_key:
             layer_num = re.search(r"layers\.(\d+)", hf_key).group(1)
             layer_key = re.sub(r"layers\.\d+", "layers.*", hf_key)
@@ -376,6 +378,7 @@ def load_hf_weights_on_thread(vllm_config, params: nnx.State,
             assert model_weight.value.shape == hf_weight.shape
 
         # Update the model weight
+        print(model_weight, model_weight.value)
         model_weight.value = shard(hf_weight, model_sharding)
 
 
