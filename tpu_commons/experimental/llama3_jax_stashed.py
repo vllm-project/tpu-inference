@@ -164,7 +164,6 @@ class LlamaForCausalLM(nnx.Module):
                               random_init=force_random_weights)
 
     def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):
-        self.rng = nnx.Rngs(rng)
         weight_loader = Llama3WeightLoader(
             vllm_config=self.vllm_config,
             hidden_size=self.hidden_size,
@@ -276,7 +275,6 @@ class Llama3WeightLoader:
             layer_num_match = re.search(r"layers\.(\d+)", loaded_key)
             if layer_num_match:
                 layer_num = layer_num_match.group(1)
-                # layer_num = 0
                 layer_key = re.sub(r"layers\.\d+", "layers.*", loaded_key)
                 mapped_key = self._loaded_to_standardized_keys.get(
                     layer_key, layer_key)
