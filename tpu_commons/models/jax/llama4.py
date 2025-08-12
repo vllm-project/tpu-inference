@@ -35,7 +35,7 @@ class Llama4ForCausalLM(Model):
                  vllm_config: VllmConfig,
                  rng: PRNGKey,
                  mesh: Mesh,
-                 param_factory: ParamFactory | None = None):
+                 force_random_weights: bool = False):
         assert mesh is not None
 
         self.vllm_config = vllm_config
@@ -43,7 +43,6 @@ class Llama4ForCausalLM(Model):
 
         self.rng = nnx.Rngs(rng)
         self.mesh = mesh
-        self.param_factory = param_factory
         self.is_verbose = getattr(self.vllm_config.additional_config,
                                   "is_verbose", False)
 
@@ -75,11 +74,10 @@ class Llama4ForCausalLM(Model):
 
         intermediate_size = 16384
 
-        if not self.param_factory:
-            self.param_factory = ParamFactory(
-                kernel_initializer=nnx.initializers.xavier_normal(),
-                scale_initializer=nnx.initializers.ones,
-                random_init=False)
+        self.param_factory = ParamFactory(
+            kernel_initializer=nnx.initializers.xavier_normal(),
+            scale_initializer=nnx.initializers.ones,
+            random_init=force_random_weights)
 
         self.embedder = Embedder(vocab_size=vocab_size,
                                  hidden_size=self.hidden_size,

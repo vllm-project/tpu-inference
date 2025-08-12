@@ -123,8 +123,10 @@ def _get_nnx_model(
         else:
 
             with mesh:
-                model = model_class.create_model_with_random_weights(
-                    vllm_config, rng, mesh)
+                model = model_class(vllm_config,
+                                    rng,
+                                    mesh,
+                                    force_random_weights=True)
                 jit_model = _apply_qwix_quantization(vllm_config, model, rng,
                                                      mesh)
     else:
@@ -138,8 +140,7 @@ def _get_nnx_model(
         #    a full model weights after random-init, then duplicate a layer during
         #    the load_weights. This would be easy to OOM if the layer is super large.
         if os.getenv("NEW_MODEL_DESIGN", False):
-            model = model_class.create_model_for_checkpoint_loading(
-                vllm_config, rng, mesh)
+            model = model_class(vllm_config, rng, mesh)
         else:
             model = nnx.eval_shape(lambda: model_class(vllm_config, rng, mesh))
         model.load_weights(rng)

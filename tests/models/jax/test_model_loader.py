@@ -46,16 +46,6 @@ class MockCausalLM(nnx.Module):
         logits = jnp.ones((batch_size, self.vocab_size))
         return logits * jnp.mean(self.w.value)  # Dummy op
 
-    @classmethod
-    def create_model_for_checkpoint_loading(cls, vllm_config, rng, mesh):
-        """Mocks creating a model for loading weights by returning an instance."""
-        return cls(vllm_config, rng, mesh)
-
-    @classmethod
-    def create_model_with_random_weights(cls, vllm_config, rng, mesh):
-        """Mocks creating a model with random weights by returning an instance."""
-        return cls(vllm_config, rng, mesh)
-
 
 @pytest.fixture(scope="session", autouse=True)
 def mock_dependencies(request):
