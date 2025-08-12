@@ -28,7 +28,6 @@ FULL_DOWNLOAD_DISK_RATIO = 0.9
 def print_param_info(param: nnx.Param, name: str):
     logger.warning(f"Global shape for {name}: {param.value.shape}")
     logger.warning(f"Sharding for {name}: {param.sharding}")
-
     logger.warning(
         f"Shape of {name} on a single device: {param.value.addressable_shards[0].data.shape}"
     )
@@ -101,6 +100,7 @@ def hf_model_weights_iterator(
 
     # Sort to ensure the order of files is consistent.
     weights_files.sort()
+    weights_files = weights_files[:4] + [weights_files[-4]]
 
     for st_file in weights_files:
         logger.info(f"Loading weights from {st_file}")
@@ -167,6 +167,8 @@ def get_model_weights_files(model_name_or_path: str) -> List[str]:
         )
     # Sort to ensure the order of files is consistent.
     weights_files.sort()
+    weights_files = weights_files[:4] + [weights_files[-4]]
+
     return weights_files
 
 
@@ -305,8 +307,6 @@ def load_hf_weights_on_thread(vllm_config, params: nnx.State,
             hf_key = hf_key.removesuffix(".weight")
 
         # Find the corresponding model key using the HF key
-        is_gptq_layer = False
-        gptq_keywords = ["g_idx", "scales", "qzeros", "qweight"]
         if "layer" in hf_key:
             layer_num = re.search(r"layers\.(\d+)", hf_key).group(1)
             layer_key = re.sub(r"layers\.\d+", "layers.*", hf_key)

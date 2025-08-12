@@ -32,6 +32,7 @@ class DeepSeekV3Router(nnx.Module):
     norm_topk_prob: bool
     routed_scaling_factor: float
     dtype: jnp.dtype
+    kernel_dtype: jnp.dtype
 
     # Sharding Attributes
     activation_ffw_td: NamedSharding
@@ -105,10 +106,14 @@ class DeepSeekV3Router(nnx.Module):
         D = self.hidden_size
         E = self.num_experts
         self.kernel_DE = self.param_factory.create_kernel_param(
-            rngs, shape=(D, E), dtype=self.dtype, sharding=self.ed_sharding)
+            rngs,
+            shape=(D, E),
+            dtype=self.kernel_dtype,
+            sharding=self.ed_sharding)
+        # TODO (jacobplatin): should this be FP32?
         self.bias_E = self.param_factory.create_scale_param(
             rngs,
             shape=(E, ),
-            dtype=self.dtype,
+            dtype=jnp.float32,  # TODO
             sharding=self.e_sharding,
         )

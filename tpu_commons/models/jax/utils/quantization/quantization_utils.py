@@ -113,6 +113,10 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
     # NOTE: this is 3 since slices it's a list of (kv_cache_start, new_kv_start, slice_len)
     slot_mapping_metadata = jax.random.randint(
         rng, (3, DEFAULT_NUM_TOKENS_FOR_MODEL_INPUTS), 0, 100, dtype=jnp.int32)
+    request_distribution_metadata = jax.random.randint(rng, (3, ),
+                                                       0,
+                                                       100,
+                                                       dtype=jnp.int32)
     num_slices = jax.random.randint(rng, (1, ), 0, 100, dtype=jnp.int32)
     block_tables = jax.random.randint(rng,
                                       (DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS,
@@ -143,15 +147,14 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
         "input_ids":
         input_ids,
         "attention_metadata":
-        AttentionMetadata(
-            input_positions=positions,
-            slot_mapping=slot_mapping_metadata,
-            block_tables=block_tables,
-            seq_lens=seq_lens,
-            query_start_loc=query_start_loc,
-            num_seqs=num_seqs,
-            num_slices=num_slices,
-        ),
+        AttentionMetadata(input_positions=positions,
+                          slot_mapping=slot_mapping_metadata,
+                          block_tables=block_tables,
+                          seq_lens=seq_lens,
+                          query_start_loc=query_start_loc,
+                          num_seqs=num_seqs,
+                          num_slices=num_slices,
+                          request_distribution=request_distribution_metadata),
     }
     model = qwix.quantize_model(model, qwix.PtqProvider(qwix_rules),
                                 **model_input)

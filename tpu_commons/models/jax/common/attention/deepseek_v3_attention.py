@@ -43,6 +43,7 @@ class MLA(nnx.Module):
     rope_theta: float
     rope_scaling: dict[str, Any]
     dtype: jnp.dtype
+    unquant_dtype: jnp.dtype
     mesh: Mesh
     param_factory: ParamFactory
 
@@ -131,7 +132,7 @@ class MLA(nnx.Module):
             activation_ffw_td=NamedSharding(self.mesh, P()),
             epsilon=self.rms_norm_eps,
             with_scale=True,
-            dtype=self.dtype,
+            dtype=self.unquant_dtype,
         )
         self.q_rms_norm.generate_kernel(rngs)
 
@@ -142,7 +143,7 @@ class MLA(nnx.Module):
             activation_ffw_td=NamedSharding(self.mesh, P()),
             epsilon=self.rms_norm_eps,
             with_scale=True,
-            dtype=self.dtype,
+            dtype=self.unquant_dtype,
         )
         self.kv_rms_norm.generate_kernel(rngs)
 

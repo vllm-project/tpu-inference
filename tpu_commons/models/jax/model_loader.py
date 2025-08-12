@@ -40,7 +40,8 @@ def _eval_qwix_quantization(vllm_config: VllmConfig, model: nnx.Module,
     if qwix_config:
         block_size = vllm_config.cache_config.block_size
         model_config = vllm_config.model_config
-        head_size = model_config.get_head_size()
+        # TODO: 192 -> 256
+        head_size = 256  #  model_config.get_head_size()
         num_kv_heads = model_config.get_total_num_kv_heads()
         # NOTE: it's REALLY important this is jitted, or else you'll run into hanging
         qwix_quantize_fn_for_eval = functools.partial(
