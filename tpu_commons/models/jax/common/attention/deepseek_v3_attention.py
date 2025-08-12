@@ -18,7 +18,7 @@ from tpu_commons.kernels.ragged_paged_attention.v3.util import \
     get_dtype_packing
 from tpu_commons.models.jax.attention_interface import update_kv_cache
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.models.jax.common.base import ParamFactory
+from tpu_commons.models.jax.common.base import create_param
 from tpu_commons.models.jax.common.layers import RMSNorm
 from tpu_commons.models.jax.common.rope import DeepseekScalingRotaryEmbedding
 
@@ -33,7 +33,6 @@ class MLA(nnx.Module):
 
     Attributes:
         mesh: The JAX device mesh for distributed computation.
-        param_factory: A factory for creating and initializing model parameters.
         quant: Optional configuration for quantization.
     """
     hidden_size: int
@@ -44,7 +43,6 @@ class MLA(nnx.Module):
     rope_scaling: dict[str, Any]
     dtype: jnp.dtype
     mesh: Mesh
-    param_factory: ParamFactory
 
     q_lora_rank: int
     kv_lora_rank: int
@@ -72,6 +70,7 @@ class MLA(nnx.Module):
     attn_o_ktnph: NamedSharding
     activation_attention_out_td: NamedSharding
 
+    random_init: bool = False
     attention_chunk_size: int | None = None
     rope_input_ordering: str = "split"
     quant: Any | None = None
@@ -100,45 +99,51 @@ class MLA(nnx.Module):
     def generate_kernel(self, rngs: nnx.Rngs):
         """Initializes the weight kernels."""
 
-        self.kernel_q_down_proj_DA = self.param_factory.create_kernel_param(
-            rngs, (self.D, self.q_lora_rank), self.q_da_sharding, self.dtype)
-        self.kernel_q_up_proj_ANH = self.param_factory.create_kernel_param(
+        self.kernel_q_down_proj_DA = create_param(rngs,
+                                                  (self.D, self.q_lora_rank),
+                                                  self.q_da_sharding,
+                                                  self.dtype,
+                                                  random_init=self.random_init)
+        self.kernel_q_up_proj_ANH = create_param(
             rngs,
             (self.q_lora_rank, self.N, self.qk_head_dim),
             self.anh_sharding,
             self.dtype,
+            random_init=self.random_init,
         )
-        self.kernel_kv_down_proj_DA = self.param_factory.create_kernel_param(
+        self.kernel_kv_down_proj_DA = create_param(
             rngs,
             (self.D, self.kv_lora_rank + self.qk_rope_head_dim),
             self.kv_da_sharding,
             self.dtype,
+            random_init=self.random_init,
         )
-        self.kernel_kv_up_proj_ANH = self.param_factory.create_kernel_param(
+        self.kernel_kv_up_proj_ANH = create_param(
             rngs,
             (self.kv_lora_rank, self.N,
              self.qk_nope_head_dim + self.v_head_dim),
             self.anh_sharding,
             self.dtype,
+            random_init=self.random_init,
         )
-        self.kernel_o_proj_NHD = self.param_factory.create_kernel_param(
+        self.kernel_o_proj_NHD = create_param(
             rngs, (self.N, self.v_head_dim, self.D), self.nhd_sharding,
             self.dtype)
         self.q_rms_norm = RMSNorm(
             dims=self.q_lora_rank,
             mesh=self.mesh,
-            param_factory=self.param_factory,
             activation_ffw_td=NamedSharding(self.mesh, P()),
             epsilon=self.rms_norm_eps,
             with_scale=True,
             dtype=self.dtype,
+            random_init=self.random_init,
         )
         self.q_rms_norm.generate_kernel(rngs)
 
         self.kv_rms_norm = RMSNorm(
             dims=self.kv_lora_rank,
             mesh=self.mesh,
-            param_factory=self.param_factory,
+            random_init=self.random_init,
             activation_ffw_td=NamedSharding(self.mesh, P()),
             epsilon=self.rms_norm_eps,
             with_scale=True,

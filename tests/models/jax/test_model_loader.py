@@ -17,7 +17,11 @@ from vllm.engine.arg_utils import EngineArgs
 class MockCausalLM(nnx.Module):
     """A mock nnx.Module that mimics the behavior of a causal language model."""
 
-    def __init__(self, vllm_config: VllmConfig, rng: jax.Array, mesh: Mesh):
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 rng: jax.Array,
+                 mesh: Mesh,
+                 force_random_weight: bool = False):
         """Initializes a dummy parameter."""
         # Using the inputs to show they are passed correctly
         self.config = vllm_config

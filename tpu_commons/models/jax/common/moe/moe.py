@@ -7,13 +7,13 @@ from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jaxtyping import Float
 
-from tpu_commons.models.jax.common.base import ParamFactory
+from tpu_commons.models.jax.common.base import create_param
 from tpu_commons.models.jax.common.layers import FlaxUtils
 
 modeling_flax_utils = FlaxUtils()
 
 
-@dataclass
+@dataclass(kw_only=True)
 class Router(nnx.Module):
     """Router module for Mixture-of-Experts (MoE) layers.
 
@@ -21,18 +21,17 @@ class Router(nnx.Module):
 
     Attributes:
         mesh: The JAX device mesh for distributed computation.
-        param_factory: A factory for creating and initializing model parameters.
         quant: Optional configuration for quantization.
     """
     mesh: Mesh
     dtype: jnp.dtype
     hidden_size: int
-    param_factory: ParamFactory
     num_experts: int
     num_experts_per_tok: int
     router_act: str
     activation_ffw_td: NamedSharding
     ed_sharding: NamedSharding
+    random_init: bool = False
     quant: Any | None = None
 
     def __call__(self, x_TD: Float):
@@ -63,11 +62,14 @@ class Router(nnx.Module):
     def generate_kernel(self, rngs: nnx.Rngs):
         """Generates the router kernel (weights) for routing."""
         shape = (self.hidden_size, self.num_experts)
-        self.kernel_DE = self.param_factory.create_kernel_param(
-            rngs, shape=shape, dtype=self.dtype, sharding=self.ed_sharding)
+        self.kernel_DE = create_param(rngs,
+                                      shape=shape,
+                                      dtype=self.dtype,
+                                      sharding=self.ed_sharding,
+                                      random_init=self.random_init)
 
 
-@dataclass
+@dataclass(kw_only=True)
 class MoE(nnx.Module):
     """Mixture-of-Experts (MoE) Routed MLP Layer.
 
@@ -75,12 +77,10 @@ class MoE(nnx.Module):
 
     Attributes:
         mesh: The JAX mesh for device sharding.
-        param_factory: A factory for creating and initializing model parameters.
         router: The Router module.
         quant: Optional configuration for quantization.
     """
     mesh: Mesh
-    param_factory: ParamFactory
     dtype: jnp.dtype
     num_local_experts: int
     apply_expert_weight_before_computation: bool
@@ -92,6 +92,7 @@ class MoE(nnx.Module):
     activation_ffw_ted: NamedSharding
     edf_sharding: NamedSharding
     efd_sharding: NamedSharding
+    random_init: bool = False
     quant: Any | None = None
 
     def __call__(self, x_TD: Float):
@@ -132,18 +133,21 @@ class MoE(nnx.Module):
         shape_up = (self.num_local_experts, D, F)
         shape_down = (self.num_local_experts, F, D)
 
-        self.kernel_gating_EDF = self.param_factory.create_kernel_param(
-            rngs,
-            shape=shape_gating,
-            dtype=self.dtype,
-            sharding=self.edf_sharding)
-        self.kernel_up_proj_EDF = self.param_factory.create_kernel_param(
-            rngs, shape=shape_up, dtype=self.dtype, sharding=self.edf_sharding)
-        self.kernel_down_proj_EFD = self.param_factory.create_kernel_param(
-            rngs,
-            shape=shape_down,
-            dtype=self.dtype,
-            sharding=self.efd_sharding)
+        self.kernel_gating_EDF = create_param(rngs,
+                                              shape=shape_gating,
+                                              dtype=self.dtype,
+                                              sharding=self.edf_sharding,
+                                              random_init=self.random_init)
+        self.kernel_up_proj_EDF = create_param(rngs,
+                                               shape=shape_up,
+                                               dtype=self.dtype,
+                                               sharding=self.edf_sharding,
+                                               random_init=self.random_init)
+        self.kernel_down_proj_EFD = create_param(rngs,
+                                                 shape=shape_down,
+                                                 dtype=self.dtype,
+                                                 sharding=self.efd_sharding,
+                                                 random_init=self.random_init)
 
     def _moe_fwd_preapply_router_weights(self, x_TD: jax.Array, weights_TE):
         """Performs the forward pass of the MoE experts with router weights pre-applied to the inputs.

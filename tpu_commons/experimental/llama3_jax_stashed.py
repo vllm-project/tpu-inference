@@ -14,7 +14,6 @@ from vllm.config import VllmConfig
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.common.attention.attention import (
     Attention, AttentionMetadata)
-from tpu_commons.models.jax.common.base import ParamFactory
 from tpu_commons.models.jax.common.constants import KVCacheType
 from tpu_commons.models.jax.common.layers import (DenseFFW, Embedder, LMhead,
                                                   RMSNorm)
@@ -69,15 +68,11 @@ class LlamaForCausalLM(Model):
         vocab_size = 128256
         rms_norm_eps = 1e-5
 
-        self.param_factory = ParamFactory(
-            kernel_initializer=nnx.initializers.xavier_normal(),
-            scale_initializer=nnx.initializers.ones,
-            random_init=force_random_weights)
         self.embedder = Embedder(vocab_size=vocab_size,
                                  hidden_size=self.hidden_size,
                                  dtype=dtype,
                                  mesh=self.mesh,
-                                 param_factory=self.param_factory,
+                                 random_init=force_random_weights,
                                  vd_sharding=NamedSharding(
                                      self.mesh, P("model", None)),
                                  prelogit_td=NamedSharding(self.mesh, P()))
@@ -88,7 +83,7 @@ class LlamaForCausalLM(Model):
                 pre_attention_norm=RMSNorm(
                     dims=self.hidden_size,
                     mesh=self.mesh,
-                    param_factory=self.param_factory,
+                    random_init=force_random_weights,
                     epsilon=rms_norm_eps,
                     activation_ffw_td=NamedSharding(self.mesh, P()),
                     with_scale=True,
@@ -97,7 +92,7 @@ class LlamaForCausalLM(Model):
                 pre_mlp_norm=RMSNorm(
                     dims=self.hidden_size,
                     mesh=self.mesh,
-                    param_factory=self.param_factory,
+                    random_init=force_random_weights,
                     activation_ffw_td=NamedSharding(self.mesh, P()),
                     epsilon=rms_norm_eps,
                     with_scale=True,
@@ -112,7 +107,7 @@ class LlamaForCausalLM(Model):
                     rope_scaling={},
                     dtype=dtype,
                     mesh=self.mesh,
-                    param_factory=self.param_factory,
+                    random_init=force_random_weights,
                     dnh_sharding=NamedSharding(self.mesh,
                                                P(None, "model", None)),
                     dkh_sharding=NamedSharding(self.mesh,
@@ -137,7 +132,7 @@ class LlamaForCausalLM(Model):
                     df_sharding=NamedSharding(self.mesh, P(None, "model")),
                     fd_sharding=NamedSharding(self.mesh, P("model", None)),
                     activation_ffw_td=NamedSharding(self.mesh, P()),
-                    param_factory=self.param_factory),
+                    random_init=force_random_weights),
             ) for _ in range(num_layers)
         ]
         for i in range(len(self.layers)):
@@ -146,7 +141,7 @@ class LlamaForCausalLM(Model):
         self.final_norm = RMSNorm(
             dims=self.hidden_size,
             mesh=self.mesh,
-            param_factory=self.param_factory,
+            random_init=force_random_weights,
             activation_ffw_td=NamedSharding(self.mesh, P()),
             epsilon=rms_norm_eps,
             with_scale=True,
@@ -162,7 +157,7 @@ class LlamaForCausalLM(Model):
                               vd_sharding=None,
                               dv_sharding=NamedSharding(
                                   self.mesh, P(None, 'model')),
-                              param_factory=self.param_factory)
+                              random_init=force_random_weights)
         self.lm_head.generate_kernel(self.rng)
 
     def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):

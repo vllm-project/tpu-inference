@@ -8,7 +8,7 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from jaxtyping import Float, Int
 
-from tpu_commons.models.jax.common.base import ParamFactory
+from tpu_commons.models.jax.common.base import create_param
 
 
 # A dummy for modeling_flax_utils which might contain activation functions
@@ -46,14 +46,13 @@ class RuntimeParams:
     quantization: Any = None
 
 
-@dataclass
+@dataclass(kw_only=True)
 class RMSNorm(nnx.Module):
     """An implementation of Root Mean Square Layer Normalization.
 
     Attributes:
         dims: The feature dimension to normalize over.
         mesh: The JAX device mesh for distributed computation.
-        param_factory: A factory for creating and initializing model parameters.
         epsilon: A small float added to the variance to avoid division by zero.
         with_scale: If True, learns a multiplicative scale parameter.
         dtype: The data type for computations.
@@ -61,8 +60,8 @@ class RMSNorm(nnx.Module):
     """
     dims: int
     mesh: Mesh
-    param_factory: ParamFactory
     activation_ffw_td: NamedSharding
+    random_init: bool = False
     epsilon: float = 1e-6
     with_scale: bool = True
     dtype: Any = jnp.float32
@@ -92,11 +91,11 @@ class RMSNorm(nnx.Module):
         return normed_x_TD.astype(self.dtype)
 
     def generate_kernel(self, rngs: nnx.Rngs):
-        self.scale = self.param_factory.create_scale_param(
-            rngs,
-            shape=(self.dims, ),
-            sharding=NamedSharding(self.mesh, P()),
-            dtype=self.dtype)
+        self.scale = create_param(rngs,
+                                  shape=(self.dims, ),
+                                  sharding=NamedSharding(self.mesh, P()),
+                                  dtype=self.dtype,
+                                  random_init=self.random_init)
 
 
 @dataclass
@@ -109,7 +108,6 @@ class DenseFFW(nnx.Module):
 
     Attributes:
         mesh: The JAX device mesh.
-        param_factory: The factory for creating parameters.
         sharding_cfg: The configuration for tensor sharding.
         quant: Optional configuration for quantization.
     """
@@ -118,10 +116,10 @@ class DenseFFW(nnx.Module):
     hidden_act: str
     hidden_size: int
     intermediate_size: int
-    param_factory: ParamFactory
     df_sharding: NamedSharding
     fd_sharding: NamedSharding
     activation_ffw_td: NamedSharding
+    random_init: bool = False
     quant: Any | None = None
 
     def __call__(self, x_TD):
@@ -155,15 +153,24 @@ class DenseFFW(nnx.Module):
         D = self.hidden_size
         F = self.intermediate_size
 
-        self.kernel_gating_DF = self.param_factory.create_kernel_param(
-            rngs, shape=(D, F), dtype=self.dtype, sharding=self.df_sharding)
-        self.kernel_up_proj_DF = self.param_factory.create_kernel_param(
-            rngs, shape=(D, F), dtype=self.dtype, sharding=self.df_sharding)
-        self.kernel_down_proj_FD = self.param_factory.create_kernel_param(
-            rngs, shape=(F, D), dtype=self.dtype, sharding=self.fd_sharding)
+        self.kernel_gating_DF = create_param(rngs,
+                                             shape=(D, F),
+                                             dtype=self.dtype,
+                                             sharding=self.df_sharding,
+                                             random_init=self.random_init)
+        self.kernel_up_proj_DF = create_param(rngs,
+                                              shape=(D, F),
+                                              dtype=self.dtype,
+                                              sharding=self.df_sharding,
+                                              random_init=self.random_init)
+        self.kernel_down_proj_FD = create_param(rngs,
+                                                shape=(F, D),
+                                                dtype=self.dtype,
+                                                sharding=self.fd_sharding,
+                                                random_init=self.random_init)
 
 
-@dataclass
+@dataclass(kw_only=True)
 class Embedder(nnx.Module):
     """A module for token embedding and, optionally, decoding (tied embeddings).
 
@@ -173,16 +180,15 @@ class Embedder(nnx.Module):
 
     Attributes:
         mesh: The JAX device mesh for distributed computation.
-        param_factory: A factory for creating and initializing model parameters.
         quant: Optional configuration for quantization.
     """
     vocab_size: int
     hidden_size: int
     dtype: jnp.dtype
     mesh: Mesh
-    param_factory: ParamFactory
     prelogit_td: NamedSharding
     vd_sharding: NamedSharding
+    random_init: bool = False
     normalize_embeddings: bool = False
 
     def __call__(self, x, decode=False):
@@ -203,11 +209,12 @@ class Embedder(nnx.Module):
             return self.encode(x)
 
     def generate_kernel(self, rngs: nnx.Rngs):
-        self.input_embedding_table_VD = self.param_factory.create_kernel_param(
+        self.input_embedding_table_VD = create_param(
             rngs,
             shape=(self.vocab_size, self.hidden_size),
             sharding=self.vd_sharding,
-            dtype=self.dtype)
+            dtype=self.dtype,
+            random_init=self.random_init)
 
     def decode(self, x_TD: Float) -> Float:
         """Projects hidden states to vocabulary logits.
@@ -261,11 +268,12 @@ class LMhead(Embedder):
     dv_sharding: NamedSharding
 
     def generate_kernel(self, rngs: nnx.Rngs):
-        self.input_embedding_table_DV = self.param_factory.create_kernel_param(
+        self.input_embedding_table_DV = create_param(
             rngs,
             shape=(self.hidden_size, self.vocab_size),
             sharding=self.dv_sharding,
-            dtype=self.dtype)
+            dtype=self.dtype,
+            random_init=self.random_init)
 
     def __call__(self, x):
         """Dispatches to decode method.
