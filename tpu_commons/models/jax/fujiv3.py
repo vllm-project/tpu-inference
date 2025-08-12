@@ -1,175 +1,280 @@
-# TODO: Update documentation
-
-import re
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh
+from transformers import LlamaConfig, modeling_flax_utils
 from vllm.config import VllmConfig
 
-import tpu_commons.models.jax.common.sharding as sharding
+from tpu_commons import utils
 from tpu_commons.logger import init_logger
-from tpu_commons.models.jax.common.attention.attention import (
-    AttentionConfig, AttentionMetadata)
-from tpu_commons.models.jax.common.base import ParamFactory
-from tpu_commons.models.jax.common.constants import KVCacheType
-from tpu_commons.models.jax.common.layers import (DenseFFWConfig, Embedder,
-                                                  LMhead, RMSNorm)
-from tpu_commons.models.jax.common.model import Model
-from tpu_commons.models.jax.common.sharding import (Sharding,
-                                                    ShardingRulesConfig)
-from tpu_commons.models.jax.common.transformer_block import (
-    TransformerBlock, TransformerBlockConfig)
-from tpu_commons.models.jax.layers.misc import shard_put
-from tpu_commons.models.jax.utils.weight_utils import (get_model_weights_files,
-                                                       get_param,
-                                                       model_weights_generator,
-                                                       reshape_params,
-                                                       transpose_params)
+from tpu_commons.models.jax.attention_interface import attention
+from tpu_commons.models.jax.attention_metadata import AttentionMetadata
+from tpu_commons.models.jax.layers.rope import apply_rope
+from tpu_commons.models.jax.utils.weight_utils import load_hf_weights
 
 logger = init_logger(__name__)
 
-
-@dataclass
-class Fujiv3ShardingRulesConfig(ShardingRulesConfig):
-    lm_head_dv: tuple = (None, sharding.MLP_TENSOR_AXIS_NAME)
+init_fn = nnx.initializers.uniform()
 
 
-class FujiForCausalLM(Model):
+class FujiMLP(nnx.Module):
+
+    def __init__(self, config: LlamaConfig, dtype: jnp.dtype, rng: nnx.Rngs):
+        hidden_size = config.hidden_size
+        intermediate_size = config.intermediate_size
+        act = config.hidden_act
+
+        self.gate_proj = nnx.Linear(
+            hidden_size,
+            intermediate_size,
+            use_bias=False,
+            param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
+            rngs=rng,
+        )
+        self.up_proj = nnx.Linear(
+            hidden_size,
+            intermediate_size,
+            use_bias=False,
+            param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
+            rngs=rng,
+        )
+        self.down_proj = nnx.Linear(
+            intermediate_size,
+            hidden_size,
+            use_bias=False,
+            param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
+            rngs=rng,
+        )
+        self.act_fn = modeling_flax_utils.ACT2FN[act]
+
+    def __call__(self, x: jax.Array) -> jax.Array:
+        gate = self.act_fn(self.gate_proj(x))
+        up = self.up_proj(x)
+        fuse = gate * up
+        result = self.down_proj(fuse)
+        return result
+
+
+class FujiAttention(nnx.Module):
+
+    def __init__(self, config: LlamaConfig, dtype: jnp.dtype, rng: nnx.Rngs,
+                 mesh: Mesh):
+        self.hidden_size = config.hidden_size
+        self.num_heads = config.num_attention_heads
+        self.num_kv_heads = config.num_key_value_heads
+        self.rope_theta = config.rope_theta
+        self.rope_scaling = getattr(config, "rope_scaling", None)
+
+        self.head_dim_original = getattr(config, "head_dim",
+                                         self.hidden_size // self.num_heads)
+        self.head_dim = utils.get_padded_head_dim(self.head_dim_original)
+
+        sharding_size = mesh.shape["model"]
+        self.num_heads = utils.get_padded_num_heads(self.num_heads,
+                                                    sharding_size)
+        self.num_kv_heads = utils.get_padded_num_heads(self.num_kv_heads,
+                                                       sharding_size)
+
+        self.mesh = mesh
+
+        self.q_proj = nnx.Einsum(
+            "TD,DNH->TNH",
+            (self.hidden_size, self.num_heads, self.head_dim),
+            param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
+            rngs=rng,
+        )
+        self.k_proj = nnx.Einsum(
+            "TD,DKH->TKH",
+            (self.hidden_size, self.num_kv_heads, self.head_dim),
+            param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
+            rngs=rng,
+        )
+        self.v_proj = nnx.Einsum(
+            "TD,DKH->TKH",
+            (self.hidden_size, self.num_kv_heads, self.head_dim),
+            param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
+            rngs=rng,
+        )
+        self.o_proj = nnx.Einsum(
+            "TNH,NHD->TD",
+            (self.num_heads, self.head_dim, self.hidden_size),
+            param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
+            rngs=rng,
+        )
+
+    def __call__(
+        self,
+        kv_cache: Optional[jax.Array],
+        x: jax.Array,
+        attention_metadata: AttentionMetadata,
+    ) -> Tuple[jax.Array, jax.Array]:
+        md = attention_metadata
+        # q: (T, N, H)
+        q = self.q_proj(x)
+        q = apply_rope(q, md.input_positions, self.head_dim_original,
+                       self.rope_theta, self.rope_scaling)
+        # k: (T, K, H)
+        k = self.k_proj(x)
+        k = apply_rope(k, md.input_positions, self.head_dim_original,
+                       self.rope_theta, self.rope_scaling)
+        # v: (T, K, H)
+        v = self.v_proj(x)
+        # o: (T, N, H)
+        new_kv_cache, outputs = attention(
+            kv_cache,
+            q,
+            k,
+            v,
+            attention_metadata,
+            self.mesh,
+            self.head_dim_original,
+        )
+        # (T, D)
+        o = self.o_proj(outputs)
+        return new_kv_cache, o
+
+
+class FujiDecoderLayer(nnx.Module):
+
+    def __init__(self, config: LlamaConfig, dtype: jnp.dtype, rng: nnx.Rngs,
+                 mesh: Mesh):
+        rms_norm_eps = config.rms_norm_eps
+        hidden_size = config.hidden_size
+
+        self.input_layernorm = nnx.RMSNorm(
+            hidden_size,
+            epsilon=rms_norm_eps,
+            param_dtype=dtype,
+            scale_init=nnx.with_partitioning(init_fn, (None, )),
+            rngs=rng,
+        )
+        self.self_attn = FujiAttention(config=config,
+                                       dtype=dtype,
+                                       rng=rng,
+                                       mesh=mesh)
+        self.post_attention_layernorm = nnx.RMSNorm(
+            hidden_size,
+            epsilon=rms_norm_eps,
+            param_dtype=dtype,
+            scale_init=nnx.with_partitioning(init_fn, (None, )),
+            rngs=rng,
+        )
+        self.mlp = FujiMLP(
+            config=config,
+            dtype=dtype,
+            rng=rng,
+        )
+
+    def __call__(
+        self,
+        kv_cache: jax.Array,
+        x: jax.Array,
+        attention_metadata: AttentionMetadata,
+    ) -> Tuple[jax.Array, jax.Array]:
+        hidden_states = self.input_layernorm(x)
+        kv_cache, attn_output = self.self_attn(
+            kv_cache,
+            hidden_states,
+            attention_metadata,
+        )
+        attn_output += x
+
+        residual = attn_output
+        attn_output = self.post_attention_layernorm(attn_output)
+        outputs = self.mlp(attn_output)
+        outputs = residual + outputs
+        return kv_cache, outputs
+
+
+class FujiModel(nnx.Module):
+
+    def __init__(self, vllm_config: VllmConfig, rng: nnx.Rngs,
+                 mesh: Mesh) -> None:
+        model_config = vllm_config.model_config
+        hf_config = model_config.hf_config
+        dtype = model_config.dtype
+        rms_norm_eps = hf_config.rms_norm_eps
+        hidden_size = hf_config.hidden_size
+
+        self.layers = [
+            FujiDecoderLayer(
+                config=hf_config,
+                dtype=dtype,
+                rng=rng,
+                mesh=mesh,
+            ) for _ in range(hf_config.num_hidden_layers)
+        ]
+        self.norm = nnx.RMSNorm(
+            hidden_size,
+            epsilon=rms_norm_eps,
+            param_dtype=dtype,
+            scale_init=nnx.with_partitioning(init_fn, (None, )),
+            rngs=rng,
+        )
+
+    def __call__(
+        self,
+        kv_caches: List[jax.Array],
+        x: jax.Array,
+        attention_metadata: AttentionMetadata,
+    ) -> Tuple[List[jax.Array], jax.Array]:
+        for i, layer in enumerate(self.layers):
+            kv_cache = kv_caches[i]
+            kv_cache, x = layer(
+                kv_cache,
+                x,
+                attention_metadata,
+            )
+            kv_caches[i] = kv_cache
+        x = self.norm(x)
+        return kv_caches, x
+
+
+class FujiForCausalLM(nnx.Module):
 
     def __init__(self,
                  vllm_config: VllmConfig,
-                 rng: jax.Array,
+                 rng_key: jax.Array,
                  mesh: Mesh,
-                 param_factory: ParamFactory | None = None):
-        assert mesh is not None
+                 force_random_weights: bool = False) -> None:
+        model_config = vllm_config.model_config
+        vocab_size = model_config.get_vocab_size()
+        hidden_size = model_config.get_hidden_size()
+        dtype = model_config.dtype
 
         self.vllm_config = vllm_config
-        self.rng = nnx.Rngs(rng)
+        self.rng = nnx.Rngs(rng_key)
         self.mesh = mesh
-        self.param_factory = param_factory
 
-        # Currently the runner will always set a mesh, so the custom default sharding (when
-        #  no sharding is set in vllm config) doesn't take effect.
-        # TODO(fhzhang): figure out whether we need to actually enable this.
-        #    strategy_dict = {"tensor_parallelism": 1}
-        #
-        # TODO: after all models are migrated to the new sharding,
-        # we need to only create sharding obj in TPU runner
-        sharding_config = Sharding(default_rules_cls=Fujiv3ShardingRulesConfig,
-                                   vllm_config=self.vllm_config).sharding_cfg
-
-        model_name = self.vllm_config.model_config.model.lower()
-        if "70b" in model_name:
-            logger.info("Initializing Fujiv3 70B model variant.")
-            self.hidden_size = 8192
-            num_layers = 80
-            self.num_attention_heads = 64
-            self.num_key_value_heads = 8
-            intermediate_size = 28672
-        elif "8b" in model_name:
-            logger.info("Initializing Fujiv3 8B model variant.")
-            self.hidden_size = 4096
-            num_layers = 32
-            self.num_attention_heads = 32
-            self.num_key_value_heads = 8
-            intermediate_size = 14336
-        else:
-            raise ValueError(
-                f"Could not determine Fujiv3 variant (8B or 70B) from model name: '{model_name}'. "
-                "Please ensure '8b' or '70b' is in the model path.")
-
-        dtype = jnp.bfloat16
-        self.head_dim = 128
-        rope_theta = 500000.0
-        vocab_size = 128256
-        rms_norm_eps = 1e-5
-
-        logger.info(f"Using the following config:\n {sharding_config}")
-
-        if not self.param_factory:
-            self.param_factory = ParamFactory(
-                kernel_initializer=nnx.initializers.xavier_normal(),
-                scale_initializer=nnx.initializers.ones,
-                random_init=False)
-        self.embedder = Embedder(
-            vocab_size=vocab_size,
-            hidden_size=self.hidden_size,
-            dtype=dtype,
-            generate_rules_prelogit_td=sharding_config.generate_rules.
-            prelogit_td,
-            generate_rules_vocab_vd=sharding_config.generate_rules.vocab_vd,
-            mesh=self.mesh,
-            param_factory=self.param_factory)
-        self.embedder.generate_kernel(self.rng)
-
-        layer_config = TransformerBlockConfig(
-            attention=AttentionConfig(
-                hidden_size=self.hidden_size,
-                num_attention_heads=self.num_attention_heads,
-                num_key_value_heads=self.num_key_value_heads,
-                head_dim=self.head_dim,
-                rope_theta=rope_theta,
-                rope_scaling={},
-                dtype=dtype,
-                vllm_config=self.vllm_config),
-            dense_ffw=DenseFFWConfig(hidden_size=self.hidden_size,
-                                     intermediate_size=intermediate_size,
-                                     hidden_act="silu",
-                                     dtype=dtype,
-                                     vllm_config=self.vllm_config),
-            rms_norm_eps=rms_norm_eps,
-            vllm_config=self.vllm_config)
-
-        self.layers = [
-            TransformerBlock(cfg=layer_config,
-                             block_type="dense",
-                             param_factory=self.param_factory,
-                             mesh=self.mesh,
-                             sharding_cfg=sharding_config)
-            for _ in range(num_layers)
-        ]
-        for i in range(len(self.layers)):
-            self.layers[i].generate_kernel(self.rng)
-
-        self.final_norm = RMSNorm(
-            dims=self.hidden_size,
-            mesh=self.mesh,
-            param_factory=self.param_factory,
-            prefill_rules=sharding_config.prefill_rules,
-            generate_rules=sharding_config.generate_rules,
-            epsilon=rms_norm_eps,
-            with_scale=True,
-            dtype=dtype,
+        self.embed = nnx.Embed(
+            num_embeddings=vocab_size,
+            features=hidden_size,
+            param_dtype=dtype,
+            embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
+            rngs=self.rng,
         )
-        self.final_norm.generate_kernel(self.rng)
+        self.model = FujiModel(
+            vllm_config=vllm_config,
+            rng=self.rng,
+            mesh=mesh,
+        )
 
-        self.lm_head = LMhead(
-            vocab_size=vocab_size,
-            hidden_size=self.hidden_size,
-            dtype=dtype,
-            generate_rules_prelogit_td=sharding_config.generate_rules.
-            prelogit_td,
-            generate_rules_vocab_vd=sharding_config.generate_rules.vocab_vd,
-            generate_rules_vocab_dv=sharding_config.generate_rules.vocab_dv,
-            mesh=self.mesh,
-            param_factory=self.param_factory)
-        self.lm_head.generate_kernel(self.rng)
-
-    def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):
-        self.rng = nnx.Rngs(rng)
-        weight_loader = Fujiv3WeightLoader(
-            vllm_config=self.vllm_config,
-            hidden_size=self.hidden_size,
-            attn_heads=self.num_attention_heads,
-            num_key_value_heads=self.num_key_value_heads,
-            attn_head_dim=self.head_dim)
-
-        weight_loader.load_weights(self)
+        if model_config.hf_config.tie_word_embeddings:
+            self.lm_head = self.embed.embedding
+        else:
+            self.lm_head = nnx.Param(
+                init_fn(self.rng.params(), (hidden_size, vocab_size), dtype),
+                sharding=(None, "model"),
+            )
 
     def __call__(
         self,
@@ -177,156 +282,57 @@ class FujiForCausalLM(Model):
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
         *args,
-    ) -> Tuple[List[KVCacheType], jax.Array]:
-        is_prefill = False
-        with jax.named_scope("fuji_embed_input"):  #Embedding
-            x_TD = self.embedder.encode(input_ids)
-
-        with jax.named_scope("fuji_model_transformer_blocks"):
-            for (i, layer) in enumerate(self.layers):
-                kv_cache = kv_caches[i]
-
-                # The first layer is unscoped to avoid JAX tracing issues.
-                # JAX's profiler may incorrectly apply the scope name from the first
-                # layer's kernel compilation to all subsequent layers. Skipping the
-                # first layer ensures distinct scope names for the remaining layers.
-                if i == 0:
-                    new_kv_cache, x_TD = layer(x_TD, is_prefill, kv_cache,
-                                               attention_metadata)
-                else:
-                    with jax.named_scope(f'layer_{i}'):
-                        new_kv_cache, x_TD = layer(x_TD, is_prefill, kv_cache,
-                                                   attention_metadata)
-
-                kv_caches[i] = new_kv_cache
-
-        with jax.named_scope(
-                "fuji_final_norm"):  #Norm after last transformer block
-            final_activation_TD = self.final_norm(x_TD)
-
-        return kv_caches, final_activation_TD
+    ) -> Tuple[List[jax.Array], jax.Array]:
+        print(f"Inside Fuji: {FujiForCausalLM=}")
+        x = self.embed(input_ids)
+        kv_caches, x = self.model(
+            kv_caches,
+            x,
+            attention_metadata,
+        )
+        return kv_caches, x
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        with jax.named_scope("fuji_lm_head_projection"
-                             ):  #LM head projection to produce logits
-            logits_TV = jnp.dot(hidden_states,
-                                self.lm_head.input_embedding_table_DV.value)
+        if self.vllm_config.model_config.hf_config.tie_word_embeddings:
+            logits = jnp.dot(hidden_states, self.lm_head.value.T)
+        else:
+            logits = jnp.dot(hidden_states, self.lm_head.value)
+        return logits
 
-        return logits_TV
+    def load_weights(self, rng_key: jax.Array):
+        # NOTE: Since we are using nnx.eval_shape to init the model,
+        # we have to pass dynamic arrays here for __call__'s usage.
+        self.rng = nnx.Rngs(rng_key)
 
-
-class Fujiv3WeightLoader:
-
-    def __init__(self, vllm_config: VllmConfig, hidden_size, attn_heads,
-                 num_key_value_heads, attn_head_dim):
-        self._transpose_map = {
-            "lm_head": (1, 0),
-            "gate_proj": (1, 0),
-            "up_proj": (1, 0),
-            "down_proj": (1, 0),
-            "q_proj": (2, 0, 1),
-            "k_proj": (2, 0, 1),
-            "v_proj": (2, 0, 1),
-            "o_proj": (1, 2, 0),
-        }
-        self._weight_shape_map = {
-            "q_proj": (attn_heads, -1, hidden_size),
-            "k_proj": (num_key_value_heads, -1, hidden_size),
-            "v_proj": (num_key_value_heads, -1, hidden_size),
-            "o_proj": (hidden_size, attn_heads, -1),
-        }
-        self._bias_shape_map = {
-            "q_proj.bias": (attn_heads, attn_head_dim),
-            "k_proj.bias": (num_key_value_heads, attn_head_dim),
-            "v_proj.bias": (num_key_value_heads, attn_head_dim)
-        }
-
-        # Set the mappings from loaded parameter keys to standardized names.
-        self._loaded_to_standardized_keys = {
-            "model.embed_tokens": "embedder.input_embedding_table_VD",
+        # Key: path to a HF layer weight
+        # Value: path to a nnx layer weight
+        mappings = {
+            "model.embed_tokens": "embed.embedding",
             "model.layers.*.input_layernorm":
-            "layers.*.pre_attention_norm.scale",
-            "model.layers.*.mlp.down_proj": "layers.*.mlp.kernel_down_proj_FD",
-            "model.layers.*.mlp.gate_proj": "layers.*.mlp.kernel_gating_DF",
-            "model.layers.*.mlp.up_proj": "layers.*.mlp.kernel_up_proj_DF",
+            "model.layers.*.input_layernorm.scale",
+            "model.layers.*.mlp.down_proj":
+            "model.layers.*.mlp.down_proj.kernel",
+            "model.layers.*.mlp.gate_proj":
+            "model.layers.*.mlp.gate_proj.kernel",
+            "model.layers.*.mlp.up_proj": "model.layers.*.mlp.up_proj.kernel",
             "model.layers.*.post_attention_layernorm":
-            "layers.*.pre_mlp_norm.scale",
+            "model.layers.*.post_attention_layernorm.scale",
             "model.layers.*.self_attn.k_proj":
-            "layers.*.attn.kernel_k_proj_DKH",
+            "model.layers.*.self_attn.k_proj.kernel",
             "model.layers.*.self_attn.o_proj":
-            "layers.*.attn.kernel_o_proj_NHD",
+            "model.layers.*.self_attn.o_proj.kernel",
             "model.layers.*.self_attn.q_proj":
-            "layers.*.attn.kernel_q_proj_DNH",
+            "model.layers.*.self_attn.q_proj.kernel",
             "model.layers.*.self_attn.v_proj":
-            "layers.*.attn.kernel_v_proj_DKH",
-            "model.norm": "final_norm.scale",
-            "lm_head": "lm_head.input_embedding_table_DV"
+            "model.layers.*.self_attn.v_proj.kernel",
+            "model.norm": "model.norm.scale",
         }
-        self.vllm_config = vllm_config
-
-    def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
-        # Find the corresponding model key using the HF key
-        if "layer" in loaded_key:
-            layer_num_match = re.search(r"layers\.(\d+)", loaded_key)
-            if layer_num_match:
-                layer_num = layer_num_match.group(1)
-                layer_key = re.sub(r"layers\.\d+", "layers.*", loaded_key)
-                mapped_key = self._loaded_to_standardized_keys.get(
-                    layer_key, layer_key)
-                mapped_key = re.sub(r"layers\.\*", f"layers.{layer_num}",
-                                    mapped_key)
-                return mapped_key
-
-        return self._loaded_to_standardized_keys.get(loaded_key, loaded_key)
-
-    def load_weights_single_thread(self, model_params, weights_file, mesh):
-        for loaded_name, loaded_weight in model_weights_generator(
-                weights_file, framework="flax"):
-            old_param_name = loaded_name
-            if loaded_name.endswith(".weight"):
-                loaded_name = loaded_name.removesuffix(".weight")
-            mapped_name = self.map_loaded_to_standardized_name(loaded_name)
-            model_weight = get_param(model_params, mapped_name)
-
-            if model_weight is None:
-                logger.warning(
-                    f"Could not find a matching model parameter for loaded weight: '{old_param_name}' (mapped to: '{mapped_name}')"
-                )
-                continue
-
-            logger.debug(
-                f"{old_param_name}: {loaded_weight.shape}  -->  {mapped_name}: {model_weight.value.shape}"
-            )
-            if loaded_name.endswith(".bias"):
-                loaded_weight = reshape_params(loaded_name, loaded_weight,
-                                               self._bias_shape_map)
-            else:
-                loaded_weight = reshape_params(loaded_name, loaded_weight,
-                                               self._weight_shape_map)
-                loaded_weight = transpose_params(loaded_name, loaded_weight,
-                                                 self._transpose_map)
-            if model_weight.value.shape != loaded_weight.shape:
-                raise ValueError(
-                    f"Loaded shape for {loaded_name}: {loaded_weight.shape} "
-                    f"does not match model shape for {mapped_name}: {model_weight.value.shape}!"
-                )
-            model_weight.value = shard_put(loaded_weight,
-                                           model_weight.sharding.spec,
-                                           mesh=mesh)
-
-    def load_weights(self, model_for_loading: nnx.Module):
-        model_params = nnx.state(model_for_loading)
-        model_path = self.vllm_config.model_config.model
-        weights_files = get_model_weights_files(model_path)
-        max_workers = min(64, len(weights_files))
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [
-                executor.submit(self.load_weights_single_thread, model_params,
-                                weights_file, model_for_loading.mesh)
-                for weights_file in weights_files
-            ]
-            for future in futures:
-                future.result()
-
-        # TODO: validate that all of the model_params were accounted for as well.
-        nnx.update(model_for_loading, model_params)
+        # Add lm_head mapping only if it's not tied to embeddings
+        if not self.vllm_config.model_config.hf_config.tie_word_embeddings:
+            mappings.update({
+                "lm_head": "lm_head",
+            })
+        load_hf_weights(vllm_config=self.vllm_config,
+                        model=self,
+                        mappings=mappings,
+                        mesh=self.mesh)
