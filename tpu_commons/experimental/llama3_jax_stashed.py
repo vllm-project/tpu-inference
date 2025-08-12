@@ -17,7 +17,6 @@ from tpu_commons.models.jax.common.attention.attention import (
 from tpu_commons.models.jax.common.constants import KVCacheType
 from tpu_commons.models.jax.common.layers import (DenseFFW, Embedder, LMhead,
                                                   RMSNorm)
-from tpu_commons.models.jax.common.model import Model
 from tpu_commons.models.jax.common.transformer_block import TransformerBlock
 from tpu_commons.models.jax.layers.misc import shard_put
 from tpu_commons.models.jax.utils.weight_utils import (get_model_weights_files,
@@ -29,7 +28,7 @@ from tpu_commons.models.jax.utils.weight_utils import (get_model_weights_files,
 logger = init_logger(__name__)
 
 
-class LlamaForCausalLM(Model):
+class LlamaForCausalLM(nnx.Module):
 
     def __init__(self,
                  vllm_config: VllmConfig,

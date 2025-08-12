@@ -18,7 +18,6 @@ from tpu_commons.models.jax.common.attention.deepseek_v3_attention import MLA
 from tpu_commons.models.jax.common.constants import KVCacheType
 from tpu_commons.models.jax.common.layers import (DenseFFW, Embedder, LMhead,
                                                   RMSNorm)
-from tpu_commons.models.jax.common.model import Model
 from tpu_commons.models.jax.common.moe.deepseek_moe import DeepSeekV3Router
 from tpu_commons.models.jax.common.moe.moe import MoE
 from tpu_commons.models.jax.common.transformer_block import (
@@ -31,7 +30,7 @@ logger = init_logger(__name__)
 
 
 @dataclass
-class DeepSeekV3(Model):
+class DeepSeekV3(nnx.Module):
 
     def __init__(self,
                  vllm_config: VllmConfig,
