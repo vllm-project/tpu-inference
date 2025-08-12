@@ -930,7 +930,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                     attn_metadata,
                     inputs_embeds,
                 )
-            self.maybe_wait_for_kv_save()
 
             hidden_states = self.select_hidden_states_fn(
                 hidden_states, logits_indices)
