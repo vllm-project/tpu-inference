@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.v1.engine import EngineCoreRequest, EngineCoreRequestType
+from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request
 
 from tpu_commons.core.adapters import (VllmConfigAdapter, VllmEngineAdapter,
@@ -94,6 +95,7 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
             vllm_config=self.mock_vllm_config,
             local_client=True,
             handshake_address="dummy_addr",
+            executor_class=MagicMock(spec=Executor),
             log_stats=False,
         )
 
@@ -115,6 +117,7 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
             vllm_config=self.mock_vllm_config,
             local_client=True,
             handshake_address="dummy_addr",
+            executor_class=MagicMock(spec=Executor),
             log_stats=False,
         )
 
@@ -146,6 +149,7 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
             vllm_config=self.mock_vllm_config,
             local_client=True,
             handshake_address="dummy_addr",
+            executor_class=MagicMock(spec=Executor),
             log_stats=False,
         )
 
@@ -159,6 +163,7 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
             vllm_config=self.mock_vllm_config,
             local_client=True,
             handshake_address="dummy_addr",
+            executor_class=MagicMock(spec=Executor),
             log_stats=False,
         )
         mock_request = MagicMock(spec=EngineCoreRequest)
@@ -180,6 +185,7 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
             vllm_config=self.mock_vllm_config,
             local_client=True,
             handshake_address="dummy_addr",
+            executor_class=MagicMock(spec=Executor),
             log_stats=False,
         )
 
@@ -192,6 +198,7 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
             vllm_config=self.mock_vllm_config,
             local_client=True,
             handshake_address="dummy_addr",
+            executor_class=MagicMock(spec=Executor),
             log_stats=False,
         )
         # Mock a method on the prefill engine instance
