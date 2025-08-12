@@ -854,9 +854,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         self,
         scheduler_output: "VllmSchedulerOutput",
     ) -> tuple[AttentionMetadata, ModelRunnerOutput]:
-        print("[jevin debug] calling _execute_model")
-        print(f"[jevin debug] {scheduler_output.num_scheduled_tokens=}")
-        print(f"[jevin debug] {scheduler_output.finished_req_ids=}")
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
             if has_kv_transfer_group():
@@ -1088,11 +1085,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
 
-        print(
-            f"[jevin debug] _prepare_inputs: {num_reqs=}, {total_num_scheduled_tokens=}"
-        )
-        print(
-            f"[jevin debug] _prepare_inputs: {len(self.input_batch.req_ids)=}")
+        # print(
+        #     f"[jevin debug] _prepare_inputs: {num_reqs=}, {total_num_scheduled_tokens=}"
+        # )
+        # print(
+        #     f"[jevin debug] _prepare_inputs: {len(self.input_batch.req_ids)=}")
 
         # Get the number of scheduled tokens for each request.
         num_scheduled_tokens_per_req = []
@@ -1370,7 +1367,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         batch_changed = len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
         # batch_reordered = self._reorder_batch(scheduler_output)
         # return batch_changed or batch_reordered
-        self._set_request_distribution(scheduler_output)
+        # self._set_request_distribution(scheduler_output)
+        self._reorder_batch(scheduler_output)
         return batch_changed
 
     def _sync_weights(
@@ -1418,96 +1416,49 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             num_decode, num_decode, self.input_batch.num_reqs
         ]
 
-    def _reorder_batch(self, scheduler_output: "VllmSchedulerOutput") -> bool:
-        """Reorder the requests in scheduler_output into the order of
-        - prefill: (chunked) prefill requests with same number of tokens
-        - mixed: prefill requests with different number of tokens
+    def _reorder_batch(self, scheduler_output: "VllmSchedulerOutput") -> int:
+        """ Reorder the sheduled requests to RPA kernel friendly distribution
+        (decode_only, fixed_chunked_prefill_only, mixed) and set the request
+        distribution accordingly.
 
         Returns:
-            True if there is an re-ordered request.
+            The number of swaps in requests.
         """
+        # Note(jevinjiang): currently we only consider decode_only.
+        num_reqs = self.input_batch.num_reqs
+        swap_cnt = 0
+        if num_reqs <= 0:
+            return swap_cnt
+        # Use two-pointer approach to reorder the decode requests to front.
+        i, j = 0, num_reqs - 1
+        while i < j:
+            i_req_id = self.input_batch.req_ids[i]
+            j_req_id = self.input_batch.req_ids[j]
 
-        decodes = []
-        non_decodes = {}  # length: [request index]
-        num_reqs = 0
-        for i, req_id in enumerate(self.input_batch.req_ids):
-            num_reqs += 1
-            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            if num_tokens == 1:
-                decodes.append(i)
+            if scheduler_output.num_scheduled_tokens[i_req_id] == 1:
+                # i is a decode request, move to the next one.
+                i += 1
+            elif scheduler_output.num_scheduled_tokens[j_req_id] > 1:
+                # j is a prefill request, move to the previous one.
+                j -= 1
             else:
-                if num_tokens not in non_decodes:
-                    non_decodes[num_tokens] = []
-                non_decodes[num_tokens].append(i)
-        assert num_reqs == self.input_batch.num_reqs
+                # Swap i and j.
+                self.input_batch.swap_states(i, j)
+                i += 1
+                j -= 1
+                swap_cnt += 1
 
-        # find the most frequent prefill length
-        most_freq_prefill_length = max(non_decodes,
-                                       key=lambda k: len(non_decodes[k]),
-                                       default=0)
-        max_prefill_cnt = len(non_decodes.get(most_freq_prefill_length, []))
+        if i >= len(self.input_batch.req_ids):
+            raise ValueError(
+                f"{i=}, {len(self.input_batch.req_ids)=}, {num_reqs=}")
 
-        # Find out requests that need to be swapped.
-        num_decode = len(decodes)
-        num_prefill = max_prefill_cnt
-        num_mixed = num_reqs - num_decode - num_prefill
+        num_decode = i + int(scheduler_output.num_scheduled_tokens[
+            self.input_batch.req_ids[i]] == 1)
+
         self.input_batch.request_distribution = [
-            num_decode, num_prefill, num_mixed
+            num_decode, num_decode, num_reqs
         ]
-        decode_in_prefill, prefill_in_decode = [], []
-        prefill_in_mixed, mixed_in_prefill = [], []
-        decode_in_mixed, mixed_in_decode = [], []
 
-        decode_index_set = set(decodes)
-        prefill_index_set = set(non_decodes[most_freq_prefill_length]
-                                ) if max_prefill_cnt != 0 else set()
-        modified_batch = False
-        for i in range(num_decode):
-            if i in prefill_index_set:
-                prefill_in_decode.append(i)
-                modified_batch = True
-            elif i in decode_index_set:
-                continue
-            else:
-                mixed_in_decode.append(i)
-                modified_batch = True
-        for i in range(num_decode, num_decode + num_prefill):
-            if i in prefill_index_set:
-                continue
-            elif i in decode_index_set:
-                decode_in_prefill.append(i)
-                modified_batch = True
-            else:
-                mixed_in_prefill.append(i)
-                modified_batch = True
-        for i in range(num_decode + num_prefill, num_reqs):
-            if i in prefill_index_set:
-                prefill_in_mixed.append(i)
-                modified_batch = True
-            elif i in decode_index_set:
-                decode_in_mixed.append(i)
-                modified_batch = True
-            else:
-                continue
+        print(f"[jevin debug] {num_reqs=}, {num_decode=}, {swap_cnt=}")
 
-        # 2 way swap
-        def two_way_swap(list1, list2):
-            while list1 and list2:
-                i, j = list1.pop(), list2.pop()
-                self.input_batch.swap_states(i, j)
-
-        two_way_swap(prefill_in_decode, decode_in_prefill)
-        two_way_swap(decode_in_mixed, mixed_in_decode)
-        two_way_swap(prefill_in_mixed, mixed_in_prefill)
-
-        # 3 way swap
-        def three_way_swap(list1, list2, list3):
-            while list1 and list2 and list3:
-                i, j, k = list1.pop(), list2.pop(), list3.pop()
-                self.input_batch.swap_states(i, j)
-                self.input_batch.swap_states(j, k)
-
-        three_way_swap(prefill_in_decode, decode_in_mixed, mixed_in_prefill)
-        three_way_swap(decode_in_prefill, prefill_in_mixed, mixed_in_decode)
-
-        return modified_batch
+        return swap_cnt
