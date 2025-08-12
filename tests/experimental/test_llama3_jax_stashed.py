@@ -120,8 +120,10 @@ class TestLlamaForCausalLM:
         """
         Tests that random weight initialization creates concrete, non-zero-variance arrays.
         """
-        model = LlamaForCausalLM.create_model_with_random_weights(
-            vllm_config=mock_vllm_config_8b, rng=rng, mesh=mesh)
+        model = LlamaForCausalLM(vllm_config=mock_vllm_config_8b,
+                                 rng=rng,
+                                 mesh=mesh,
+                                 force_random_weights=True)
 
         embedding_weight = model.embedder.input_embedding_table_VD.value
         attention_q_kernel = model.layers[0].attn.kernel_q_proj_DNH.value

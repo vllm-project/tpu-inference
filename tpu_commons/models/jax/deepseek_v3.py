@@ -38,12 +38,11 @@ class DeepSeekV3(Model):
                  vllm_config: VllmConfig,
                  rng: jax.Array,
                  mesh: Mesh,
-                 param_factory: ParamFactory | None = None):
+                 force_random_weights: bool = False):
         assert mesh is not None
 
         self.vllm_config = vllm_config
         self.rng = nnx.Rngs(rng)
-        self.param_factory = param_factory
 
         # Currently the runner will always set a mesh, so the custom default sharding (when
         #  no sharding is set in vllm config) doesn't take effect.
@@ -87,7 +86,7 @@ class DeepSeekV3(Model):
         qk_rope_head_dim = 64
         v_head_dim = 128
 
-        self.use_random_init = self.vllm_config.additional_config.get(
+        self.use_random_init = force_random_weights or self.vllm_config.additional_config.get(
             "random_weights", False)
         self.mesh = mesh
 
@@ -103,11 +102,10 @@ class DeepSeekV3(Model):
             v_head_dim=v_head_dim,
             num_local_experts=num_local_experts)
 
-        if not self.param_factory:
-            self.param_factory = ParamFactory(
-                kernel_initializer=nnx.initializers.xavier_normal(),
-                scale_initializer=nnx.initializers.ones,
-                random_init=self.use_random_init)
+        self.param_factory = ParamFactory(
+            kernel_initializer=nnx.initializers.xavier_normal(),
+            scale_initializer=nnx.initializers.ones,
+            random_init=self.use_random_init)
         self.embedder = Embedder(vocab_size=vocab_size,
                                  hidden_size=hidden_size,
                                  dtype=dtype,
@@ -308,29 +306,6 @@ class DeepSeekV3(Model):
             mesh=self.mesh,
             param_factory=self.param_factory)
         self.lm_head.generate_kernel(self.rng)
-
-        # TODO: Add MTP.
-    @classmethod
-    def create_model_with_random_weights(cls, vllm_config: VllmConfig,
-                                         rng: jax.Array, mesh: Mesh):
-        """to create a model with random weights."""
-        logger.info("Initializing model with random weights.")
-        param_factory = ParamFactory(
-            kernel_initializer=nnx.initializers.xavier_normal(),
-            scale_initializer=nnx.initializers.ones,
-            random_init=True)
-        return cls(vllm_config, rng, mesh, param_factory)
-
-    @classmethod
-    def create_model_for_checkpoint_loading(cls, vllm_config: VllmConfig,
-                                            rng: jax.Array, mesh: Mesh):
-        """to create a model with abstract shapes for checkpoint loading."""
-        logger.info("Initializing abstract model for checkpoint loading.")
-        param_factory = ParamFactory(
-            kernel_initializer=nnx.initializers.xavier_normal(),
-            scale_initializer=nnx.initializers.ones,
-            random_init=False)
-        return cls(vllm_config, rng, mesh, param_factory)
 
     # For compatibility with flax.
     def apply(self, variables, *args, **kwargs):
