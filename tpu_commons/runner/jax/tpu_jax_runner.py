@@ -1085,12 +1085,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
 
-        # print(
-        #     f"[jevin debug] _prepare_inputs: {num_reqs=}, {total_num_scheduled_tokens=}"
-        # )
-        # print(
-        #     f"[jevin debug] _prepare_inputs: {len(self.input_batch.req_ids)=}")
-
         # Get the number of scheduled tokens for each request.
         num_scheduled_tokens_per_req = []
         max_num_scheduled_tokens_all_reqs = 0
@@ -1391,31 +1385,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             transpose_keys=transpose_keys,
             shard=shard)
 
-    def _set_request_distribution(
-            self, scheduler_output: "VllmSchedulerOutput") -> None:
-        """Set the request distribution in the input batch based on the current
-        requests."""
-        num_decode = 0
-        for req_id in self.input_batch.req_ids:
-            if scheduler_output.num_scheduled_tokens[req_id] == 1:
-                num_decode += 1
-            else:
-                break
-        print("[jevin debug] num_decode=", num_decode)
-        print("[jevin debug] self.input_batch.req_ids=",
-              self.input_batch.req_ids)
-        print("[jevin debug] self.input_batch.req_tokens=", [
-            self.requests[req_id].num_tokens
-            for req_id in self.input_batch.req_ids
-        ])
-        print("[jevin debug] scheduler_output.num_scheduled_tokens=", [
-            scheduler_output.num_scheduled_tokens[req_id]
-            for req_id in self.input_batch.req_ids
-        ])
-        self.input_batch.request_distribution = [
-            num_decode, num_decode, self.input_batch.num_reqs
-        ]
-
     def _reorder_batch(self, scheduler_output: "VllmSchedulerOutput") -> int:
         """ Reorder the sheduled requests to RPA kernel friendly distribution
         (decode_only, fixed_chunked_prefill_only, mixed) and set the request
@@ -1458,7 +1427,5 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         self.input_batch.request_distribution = [
             num_decode, num_decode, num_reqs
         ]
-
-        print(f"[jevin debug] {num_reqs=}, {num_decode=}, {swap_cnt=}")
 
         return swap_cnt
