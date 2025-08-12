@@ -16,7 +16,6 @@ from tpu_commons.models.jax.common.attention.llama4_attention import \
 from tpu_commons.models.jax.common.constants import KVCacheType
 from tpu_commons.models.jax.common.layers import (DenseFFW, Embedder, LMhead,
                                                   RMSNorm)
-from tpu_commons.models.jax.common.model import Model
 from tpu_commons.models.jax.common.moe.moe import MoE, Router
 from tpu_commons.models.jax.common.transformer_block import \
     SharedExpertsTransformerBlock
@@ -28,7 +27,7 @@ from tpu_commons.models.jax.utils.weight_utils import (
 logger = init_logger(__name__)
 
 
-class Llama4ForCausalLM(Model):
+class Llama4ForCausalLM(nnx.Module):
 
     def __init__(self,
                  vllm_config: VllmConfig,
