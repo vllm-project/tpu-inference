@@ -1,7 +1,6 @@
 import os
 import unittest
 from dataclasses import dataclass, field
-from unittest.mock import MagicMock
 
 import chex
 
@@ -75,7 +74,6 @@ class Llama4AttentionTest(unittest.TestCase):
         hidden_size = 64
         num_attention_heads = 4
         head_dim = hidden_size // num_attention_heads
-        param_factory = MagicMock()
 
         # Create dummy sharding objects
         dummy_sharding = NamedSharding(self.mesh, P())
@@ -93,7 +91,7 @@ class Llama4AttentionTest(unittest.TestCase):
             temperature_tuning_scale=2.0,
             temperature_tuning_floor_scale=2.0,
             mesh=self.mesh,
-            param_factory=param_factory,
+            random_init=True,
             quant=None,
             activation_attention_td=dummy_sharding,
             activation_attention_out_td=dummy_sharding,

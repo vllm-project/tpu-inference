@@ -7,7 +7,6 @@ from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
-from tpu_commons.models.jax.common.base import ParamFactory
 from tpu_commons.models.jax.common.layers import DenseFFW, Embedder, RMSNorm
 
 
@@ -23,11 +22,6 @@ class TestLayers(unittest.TestCase):
                 "model",
             ),
         )
-        self.param_factory = ParamFactory(
-            kernel_initializer=nnx.initializers.xavier_normal(),
-            scale_initializer=nnx.initializers.ones,
-            random_init=True,
-        )
 
     def test_rmsnorm_forward_pass(self):
         """Tests the forward pass of the RMSNorm module."""
@@ -37,7 +31,7 @@ class TestLayers(unittest.TestCase):
         norm = RMSNorm(
             dims=dims,
             mesh=self.mesh,
-            param_factory=self.param_factory,
+            random_init=True,
             activation_ffw_td=NamedSharding(self.mesh, P()),
             epsilon=epsilon,
             dtype=jnp.float32,
@@ -62,7 +56,7 @@ class TestLayers(unittest.TestCase):
 
         ffw_layer = DenseFFW(
             mesh=self.mesh,
-            param_factory=self.param_factory,
+            random_init=True,
             dtype=jnp.bfloat16,
             hidden_act="silu",
             hidden_size=hidden_size,
@@ -92,7 +86,7 @@ class TestLayers(unittest.TestCase):
             hidden_size=hidden_size,
             dtype=dtype,
             mesh=self.mesh,
-            param_factory=self.param_factory,
+            random_init=True,
             prelogit_td=NamedSharding(self.mesh, P()),
             vd_sharding=NamedSharding(self.mesh, P()),
         )
@@ -123,7 +117,7 @@ class TestLayers(unittest.TestCase):
             dtype=jnp.float32,
             normalize_embeddings=True,
             mesh=self.mesh,
-            param_factory=self.param_factory,
+            random_init=True,
             prelogit_td=NamedSharding(self.mesh, P()),
             vd_sharding=NamedSharding(self.mesh, P()),
         )
@@ -134,7 +128,7 @@ class TestLayers(unittest.TestCase):
             hidden_size=hidden_size,
             dtype=jnp.float32,
             mesh=self.mesh,
-            param_factory=self.param_factory,
+            random_init=True,
             prelogit_td=NamedSharding(self.mesh, P()),
             vd_sharding=NamedSharding(self.mesh, P()),
         )

@@ -18,7 +18,7 @@ from tpu_commons.kernels.ragged_paged_attention.v3.util import \
     get_dtype_packing
 from tpu_commons.models.jax.attention_interface import update_kv_cache
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.models.jax.common.base import ParamFactory
+from tpu_commons.models.jax.common.base import create_param
 from tpu_commons.models.jax.layers.rope import apply_rope
 
 KVCache = Tuple[jax.Array, jax.Array]
@@ -36,7 +36,6 @@ class Attention(nnx.Module):
 
     Attributes:
         mesh: The JAX device mesh for distributed computation.
-        param_factory: A factory for creating and initializing model parameters.
         quant: Optional configuration for quantization.
     """
     hidden_size: int
@@ -47,7 +46,6 @@ class Attention(nnx.Module):
     rope_scaling: dict[str, Any]
     dtype: jnp.dtype
     mesh: Mesh
-    param_factory: ParamFactory
 
     dnh_sharding: NamedSharding
     dkh_sharding: NamedSharding
@@ -60,6 +58,7 @@ class Attention(nnx.Module):
     keyvalue_cache_lskh: NamedSharding
     attn_o_tnh: NamedSharding
 
+    random_init: bool = False
     attention_chunk_size: int | None = None
     rope_input_ordering: str = "split"
     quant: Any | None = None
@@ -71,14 +70,22 @@ class Attention(nnx.Module):
         D = self.hidden_size
         H = self.head_dim
 
-        self.kernel_q_proj_DNH = self.param_factory.create_kernel_param(
-            rngs, (D, N, H), self.dnh_sharding, self.dtype)
-        self.kernel_k_proj_DKH = self.param_factory.create_kernel_param(
-            rngs, (D, K, H), self.dkh_sharding, self.dtype)
-        self.kernel_v_proj_DKH = self.param_factory.create_kernel_param(
-            rngs, (D, K, H), self.dkh_sharding, self.dtype)
-        self.kernel_o_proj_NHD = self.param_factory.create_kernel_param(
-            rngs, (N, H, D), self.nhd_sharding, self.dtype)
+        self.kernel_q_proj_DNH = create_param(rngs, (D, N, H),
+                                              self.dnh_sharding,
+                                              self.dtype,
+                                              random_init=self.random_init)
+        self.kernel_k_proj_DKH = create_param(rngs, (D, K, H),
+                                              self.dkh_sharding,
+                                              self.dtype,
+                                              random_init=self.random_init)
+        self.kernel_v_proj_DKH = create_param(rngs, (D, K, H),
+                                              self.dkh_sharding,
+                                              self.dtype,
+                                              random_init=self.random_init)
+        self.kernel_o_proj_NHD = create_param(rngs, (N, H, D),
+                                              self.nhd_sharding,
+                                              self.dtype,
+                                              random_init=self.random_init)
 
     def __call__(self,
                  x,

@@ -9,7 +9,6 @@ from jax.sharding import PartitionSpec as P
 
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.common.attention.deepseek_v3_attention import MLA
-from tpu_commons.models.jax.common.base import ParamFactory
 
 
 class TestMLA(unittest.TestCase):
@@ -21,11 +20,6 @@ class TestMLA(unittest.TestCase):
                 "expert",
                 "model",
             ),
-        )
-        self.param_factory = ParamFactory(
-            kernel_initializer=nnx.initializers.xavier_normal(),
-            scale_initializer=nnx.initializers.ones,
-            random_init=True,
         )
 
     def test_mla_forward_pass(self):
@@ -62,7 +56,7 @@ class TestMLA(unittest.TestCase):
                 "type": "yarn",
             },
             mesh=self.mesh,
-            param_factory=self.param_factory,
+            random_init=True,
             quant=None,
             # Provide all required sharding objects
             nhd_sharding=dummy_sharding,

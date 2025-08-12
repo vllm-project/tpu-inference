@@ -15,7 +15,6 @@ from vllm.config import VllmConfig
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.common.attention.attention import AttentionMetadata
 from tpu_commons.models.jax.common.attention.deepseek_v3_attention import MLA
-from tpu_commons.models.jax.common.base import ParamFactory
 from tpu_commons.models.jax.common.constants import KVCacheType
 from tpu_commons.models.jax.common.layers import (DenseFFW, Embedder, LMhead,
                                                   RMSNorm)
@@ -86,7 +85,7 @@ class DeepSeekV3(Model):
         qk_rope_head_dim = 64
         v_head_dim = 128
 
-        self.use_random_init = force_random_weights or self.vllm_config.additional_config.get(
+        self.random_init = force_random_weights or self.vllm_config.additional_config.get(
             "random_weights", False)
         self.mesh = mesh
 
@@ -102,10 +101,6 @@ class DeepSeekV3(Model):
             v_head_dim=v_head_dim,
             num_local_experts=num_local_experts)
 
-        self.param_factory = ParamFactory(
-            kernel_initializer=nnx.initializers.xavier_normal(),
-            scale_initializer=nnx.initializers.ones,
-            random_init=self.use_random_init)
         self.embedder = Embedder(vocab_size=vocab_size,
                                  hidden_size=hidden_size,
                                  dtype=dtype,
@@ -114,7 +109,7 @@ class DeepSeekV3(Model):
                                      P(('data', 'expert', 'model'), None)),
                                  prelogit_td=NamedSharding(self.mesh, P()),
                                  mesh=self.mesh,
-                                 param_factory=self.param_factory)
+                                 random_init=self.random_init)
         self.embedder.generate_kernel(self.rng)
 
         self.layers = []
@@ -130,7 +125,7 @@ class DeepSeekV3(Model):
                 rms_norm_eps=rms_norm_eps,
                 v_head_dim=v_head_dim,
                 mesh=self.mesh,
-                param_factory=self.param_factory,
+                random_init=self.random_init,
                 hidden_size=hidden_size,
                 num_attention_heads=num_attention_heads,
                 num_key_value_heads=num_key_value_heads,
@@ -163,7 +158,7 @@ class DeepSeekV3(Model):
                 pre_attention_norm=RMSNorm(
                     dims=hidden_size,
                     mesh=self.mesh,
-                    param_factory=self.param_factory,
+                    random_init=self.random_init,
                     epsilon=rms_norm_eps,
                     activation_ffw_td=NamedSharding(self.mesh, P()),
                     with_scale=True,
@@ -172,7 +167,7 @@ class DeepSeekV3(Model):
                 pre_mlp_norm=RMSNorm(
                     dims=hidden_size,
                     mesh=self.mesh,
-                    param_factory=self.param_factory,
+                    random_init=self.random_init,
                     activation_ffw_td=NamedSharding(self.mesh, P()),
                     epsilon=rms_norm_eps,
                     with_scale=True,
@@ -190,7 +185,7 @@ class DeepSeekV3(Model):
                     fd_sharding=NamedSharding(self.mesh,
                                               P(('model', 'expert'), None)),
                     activation_ffw_td=NamedSharding(self.mesh, P()),
-                    param_factory=self.param_factory))
+                    random_init=self.random_init))
 
             self.layers.append(block)
 
@@ -198,7 +193,7 @@ class DeepSeekV3(Model):
             is_moe_layer = ((i + 1) % interleave_moe_layer_step == 0)
             router = DeepSeekV3Router(
                 mesh=self.mesh,
-                param_factory=self.param_factory,
+                random_init=self.random_init,
                 hidden_size=hidden_size,
                 num_experts=num_local_experts,
                 num_experts_per_tok=num_experts_per_token,
@@ -218,7 +213,7 @@ class DeepSeekV3(Model):
                 intermediate_size_moe=moe_intermediate_size,
                 hidden_act=hidden_act,
                 mesh=self.mesh,
-                param_factory=self.param_factory,
+                random_init=self.random_init,
                 activation_ffw_td=NamedSharding(self.mesh, P('data', None)),
                 activation_ffw_ted=NamedSharding(self.mesh,
                                                  P('data', 'expert', None)),
@@ -232,7 +227,7 @@ class DeepSeekV3(Model):
                     hidden_size=hidden_size,
                     intermediate_size=ffw_intermediate_size,
                     mesh=self.mesh,
-                    param_factory=self.param_factory,
+                    random_init=self.random_init,
                     df_sharding=NamedSharding(self.mesh,
                                               P(None, ('model', 'expert'))),
                     fd_sharding=NamedSharding(self.mesh,
@@ -245,7 +240,7 @@ class DeepSeekV3(Model):
                 hidden_size=hidden_size,
                 intermediate_size=num_shared_experts * moe_intermediate_size,
                 mesh=self.mesh,
-                param_factory=self.param_factory,
+                random_init=self.random_init,
                 df_sharding=NamedSharding(self.mesh,
                                           P(None, ('model', 'expert'))),
                 fd_sharding=NamedSharding(self.mesh,
@@ -255,7 +250,7 @@ class DeepSeekV3(Model):
             pre_attention_norm = RMSNorm(
                 dims=hidden_size,
                 mesh=self.mesh,
-                param_factory=self.param_factory,
+                random_init=self.random_init,
                 epsilon=rms_norm_eps,
                 activation_ffw_td=NamedSharding(self.mesh, P()),
                 with_scale=True,
@@ -265,7 +260,7 @@ class DeepSeekV3(Model):
             pre_mlp_norm = RMSNorm(
                 dims=hidden_size,
                 mesh=self.mesh,
-                param_factory=self.param_factory,
+                random_init=self.random_init,
                 activation_ffw_td=NamedSharding(self.mesh, P()),
                 epsilon=rms_norm_eps,
                 with_scale=True,
@@ -286,7 +281,7 @@ class DeepSeekV3(Model):
         self.final_norm = RMSNorm(
             dims=hidden_size,
             mesh=self.mesh,
-            param_factory=self.param_factory,
+            random_init=self.random_init,
             activation_ffw_td=NamedSharding(self.mesh, P()),
             epsilon=rms_norm_eps,
             with_scale=True,
@@ -304,7 +299,7 @@ class DeepSeekV3(Model):
             dv_sharding=NamedSharding(self.mesh,
                                       P(None, ('data', 'expert', 'model'))),
             mesh=self.mesh,
-            param_factory=self.param_factory)
+            random_init=self.random_init)
         self.lm_head.generate_kernel(self.rng)
 
     # For compatibility with flax.

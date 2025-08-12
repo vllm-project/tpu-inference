@@ -10,7 +10,6 @@ from jax.sharding import PartitionSpec as P
 
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.common.attention.attention import Attention
-from tpu_commons.models.jax.common.base import ParamFactory
 
 KVCache = Tuple[jax.Array, jax.Array]
 
@@ -26,11 +25,6 @@ class TestAttention(unittest.TestCase):
                 "expert",
                 "model",
             ),
-        )
-        self.param_factory = ParamFactory(
-            kernel_initializer=nnx.initializers.xavier_normal(),
-            scale_initializer=nnx.initializers.ones,
-            random_init=True,
         )
 
     def test_attention_forward_pass(self):
@@ -50,7 +44,7 @@ class TestAttention(unittest.TestCase):
             rope_scaling={},
             dtype=jnp.bfloat16,
             mesh=self.mesh,
-            param_factory=self.param_factory,
+            random_init=True,
             quant=None,
             dnh_sharding=dummy_sharding,
             dkh_sharding=dummy_sharding,
