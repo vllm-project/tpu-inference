@@ -129,6 +129,7 @@ def hf_model_weights_iterator(
 def model_weights_generator(
     weights_file: str,
     framework: str,
+    filter_regex: Optional[str] = None,
 ) -> Generator[tuple, Any, None]:
     """A generator that loads model weights from a single weights file."""
     logger.info(f"Loading weights from {weights_file}")
@@ -139,6 +140,9 @@ def model_weights_generator(
     with jax.default_device(jax.devices("cpu")[0]):
         with safe_open(weights_file, framework=framework) as f:
             for name in f.keys():
+                if filter_regex is not None and not re.match(
+                        filter_regex, name):
+                    continue
                 weight_tensor = f.get_tensor(name)
                 yield name, weight_tensor
 

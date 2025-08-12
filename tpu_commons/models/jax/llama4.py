@@ -1,4 +1,6 @@
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional, Tuple
 
 import jax
@@ -23,8 +25,8 @@ from tpu_commons.models.jax.common.transformer_block import \
     SharedExpertsTransformerBlock
 from tpu_commons.models.jax.layers.misc import shard_put
 from tpu_commons.models.jax.utils.weight_utils import (
-    get_param, hf_model_weights_iterator, print_param_info, reshape_params,
-    transpose_params)
+    get_model_weights_files, get_param, model_weights_generator,
+    print_param_info, reshape_params, transpose_params)
 
 logger = init_logger(__name__)
 
@@ -305,10 +307,6 @@ class Llama4WeightLoader:
 
     def __init__(self, vllm_config: VllmConfig, hidden_size, attn_heads,
                  num_key_value_heads, attn_head_dim):
-        self.names_and_weights_generator = hf_model_weights_iterator(
-            model_name_or_path=vllm_config.model_config.model,
-            framework="flax",
-            filter_regex="language_model")
         self.is_verbose = getattr(vllm_config.additional_config, "is_verbose",
                                   False)
         self._transpose_map = {
@@ -364,6 +362,8 @@ class Llama4WeightLoader:
             "layers.*.shared_experts.kernel_up_proj_DF",
         }
 
+        self.vllm_config = vllm_config
+
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
         # Find the corresponding model key using the HF key
         if "layer" in loaded_key:
@@ -378,9 +378,9 @@ class Llama4WeightLoader:
                 loaded_key, loaded_key)
         return mapped_key
 
-    def _map_llama4_gate_up_proj(self, model_for_loading: nnx.Module,
-                                 model_params: nnx.State, loaded_name: str,
-                                 loaded_weight: jax.Array):
+    def _map_llama4_gate_up_proj(self, model_params: nnx.State,
+                                 loaded_name: str, loaded_weight: jax.Array,
+                                 mesh: Mesh):
         """HF's gate_up_proj is a fused tensor of gate and up projections. It needs to be split."""
         # gate_proj is first & up_proj is second
         split_weights = jnp.split(loaded_weight, 2, axis=-1)
@@ -410,45 +410,67 @@ class Llama4WeightLoader:
                     f"does not match model shape for {mapped_name}: {mapped_model_weight.value.shape}!"
                 )
             mapped_model_weight.value = shard_put(
-                loaded_weight,
-                mapped_model_weight.sharding.spec,
-                mesh=model_for_loading.mesh)
+                loaded_weight, mapped_model_weight.sharding.spec, mesh=mesh)
             logger.info(
                 f"{split_loaded_name}: {loaded_weight.shape}  -->  {mapped_name}: {mapped_model_weight.value.shape}"
             )
             if self.is_verbose:
                 print_param_info(mapped_model_weight, mapped_name)
 
-    def load_weights(self, model_for_loading: nnx.Module):
-        model_params = nnx.state(model_for_loading)
-        with jax.default_device(jax.devices("cpu")[0]):
-            for loaded_name, loaded_weight in self.names_and_weights_generator:
-                if "gate_up_proj" in loaded_name:
-                    self._map_llama4_gate_up_proj(model_for_loading,
-                                                  model_params, loaded_name,
-                                                  loaded_weight)
-                    continue
-                mapped_name = self.map_loaded_to_standardized_name(loaded_name)
-                model_weight = get_param(model_params, mapped_name)
+    def load_weights_single_thread(self, model_params, weights_file, mesh):
+        for loaded_name, loaded_weight in model_weights_generator(
+                weights_file, framework="flax", filter_regex="language_model"):
 
-                if not loaded_name.endswith(".bias"):
-                    loaded_weight = reshape_params(loaded_name, loaded_weight,
-                                                   self._weight_shape_map)
-                    loaded_weight = transpose_params(loaded_name,
-                                                     loaded_weight,
-                                                     self._transpose_map)
-                if model_weight.value.shape != loaded_weight.shape:
-                    raise ValueError(
-                        f"Loaded shape for {loaded_name}: {loaded_weight.shape} "
-                        f"does not match model shape for {mapped_name}: {model_weight.value.shape}!"
-                    )
-                logger.info(
-                    f"Transformed parameter {loaded_name} to {mapped_name}: {loaded_weight.shape} --> {model_weight.value.shape}"
+            if "gate_up_proj" in loaded_name:
+                self._map_llama4_gate_up_proj(model_params, loaded_name,
+                                              loaded_weight, mesh)
+                continue
+            mapped_name = self.map_loaded_to_standardized_name(loaded_name)
+            model_weight = get_param(model_params, mapped_name)
+
+            if not loaded_name.endswith(".bias"):
+                loaded_weight = reshape_params(loaded_name, loaded_weight,
+                                               self._weight_shape_map)
+                loaded_weight = transpose_params(loaded_name, loaded_weight,
+                                                 self._transpose_map)
+
+            if model_weight.value.shape != loaded_weight.shape:
+                raise ValueError(
+                    f"Loaded shape for {loaded_name}: {loaded_weight.shape} "
+                    f"does not match model shape for {mapped_name}: {model_weight.value.shape}!"
                 )
-                model_weight.value = shard_put(loaded_weight,
-                                               model_weight.sharding.spec,
-                                               mesh=model_for_loading.mesh)
-                if self.is_verbose:
-                    print_param_info(model_weight, loaded_name)
+            logger.info(
+                f"Transformed parameter {loaded_name} to {mapped_name}: {loaded_weight.shape} --> {model_weight.value.shape}"
+            )
+            model_weight.value = shard_put(loaded_weight,
+                                           model_weight.sharding.spec,
+                                           mesh=mesh)
+            if self.is_verbose:
+                print_param_info(model_weight, loaded_name)
 
+    def load_weights(self, model_for_loading: nnx.Module):
+        start_time = time.perf_counter()
+        logger.info("Starting model weight loading with multiple threads...")
+
+        model_params = nnx.state(model_for_loading)
+        model_path = self.vllm_config.model_config.model
+        weights_files = get_model_weights_files(model_path)
+        max_workers = min(64, len(weights_files))
+
+        with jax.default_device(jax.devices("cpu")[0]):
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [
+                    executor.submit(self.load_weights_single_thread,
+                                    model_params, weights_file,
+                                    model_for_loading.mesh)
+                    for weights_file in weights_files
+                ]
+                for future in futures:
+                    future.result()
+
+        # TODO: validate that all of the model_params were accounted for as well.
         nnx.update(model_for_loading, model_params)
+
+        end_time = time.perf_counter()
+        duration = end_time - start_time
+        logger.info(f"Model loading finished in {duration:.2f} seconds.")
