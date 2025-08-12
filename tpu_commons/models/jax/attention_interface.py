@@ -69,8 +69,6 @@ def attention(
         head_dim_original = q.shape[-1]
 
     md = attention_metadata
-    # kv_cache = update_kv_cache(k, v, kv_cache, md.slot_mapping, md.num_slices,
-    #                            mesh)
 
     # (T, N, H)
     output, kv_cache = sharded_ragged_paged_attention(
