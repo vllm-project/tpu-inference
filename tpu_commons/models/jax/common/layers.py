@@ -61,6 +61,7 @@ class RMSNorm(nnx.Module):
     dims: int
     mesh: Mesh
     activation_ffw_td: NamedSharding
+    rngs: nnx.Rngs
     random_init: bool = False
     epsilon: float = 1e-6
     with_scale: bool = True
@@ -90,15 +91,15 @@ class RMSNorm(nnx.Module):
                                                    self.activation_ffw_td)
         return normed_x_TD.astype(self.dtype)
 
-    def generate_kernel(self, rngs: nnx.Rngs):
-        self.scale = create_param(rngs,
+    def __post_init__(self):
+        self.scale = create_param(self.rngs,
                                   shape=(self.dims, ),
                                   sharding=NamedSharding(self.mesh, P()),
                                   dtype=self.dtype,
                                   random_init=self.random_init)
 
 
-@dataclass
+@dataclass(kw_only=True)
 class DenseFFW(nnx.Module):
     """A Gated Feed-Forward Network (FFN) layer.
 
@@ -119,6 +120,7 @@ class DenseFFW(nnx.Module):
     df_sharding: NamedSharding
     fd_sharding: NamedSharding
     activation_ffw_td: NamedSharding
+    rngs: nnx.Rngs
     random_init: bool = False
     quant: Any | None = None
 
@@ -149,21 +151,21 @@ class DenseFFW(nnx.Module):
 
         return output_TD
 
-    def generate_kernel(self, rngs: nnx.Rngs):
+    def __post_init__(self):
         D = self.hidden_size
         F = self.intermediate_size
 
-        self.kernel_gating_DF = create_param(rngs,
+        self.kernel_gating_DF = create_param(self.rngs,
                                              shape=(D, F),
                                              dtype=self.dtype,
                                              sharding=self.df_sharding,
                                              random_init=self.random_init)
-        self.kernel_up_proj_DF = create_param(rngs,
+        self.kernel_up_proj_DF = create_param(self.rngs,
                                               shape=(D, F),
                                               dtype=self.dtype,
                                               sharding=self.df_sharding,
                                               random_init=self.random_init)
-        self.kernel_down_proj_FD = create_param(rngs,
+        self.kernel_down_proj_FD = create_param(self.rngs,
                                                 shape=(F, D),
                                                 dtype=self.dtype,
                                                 sharding=self.fd_sharding,
@@ -188,8 +190,17 @@ class Embedder(nnx.Module):
     mesh: Mesh
     prelogit_td: NamedSharding
     vd_sharding: NamedSharding
+    rngs: nnx.Rngs
     random_init: bool = False
     normalize_embeddings: bool = False
+
+    def __post_init__(self):
+        self.input_embedding_table_VD = create_param(
+            self.rngs,
+            shape=(self.vocab_size, self.hidden_size),
+            sharding=self.vd_sharding,
+            dtype=self.dtype,
+            random_init=self.random_init)
 
     def __call__(self, x, decode=False):
         """Dispatches to either the encode or decode method.
@@ -207,14 +218,6 @@ class Embedder(nnx.Module):
             return self.decode(x)
         else:
             return self.encode(x)
-
-    def generate_kernel(self, rngs: nnx.Rngs):
-        self.input_embedding_table_VD = create_param(
-            rngs,
-            shape=(self.vocab_size, self.hidden_size),
-            sharding=self.vd_sharding,
-            dtype=self.dtype,
-            random_init=self.random_init)
 
     def decode(self, x_TD: Float) -> Float:
         """Projects hidden states to vocabulary logits.
@@ -267,9 +270,9 @@ class LMhead(Embedder):
     """
     dv_sharding: NamedSharding
 
-    def generate_kernel(self, rngs: nnx.Rngs):
+    def __post_init__(self):
         self.input_embedding_table_DV = create_param(
-            rngs,
+            self.rngs,
             shape=(self.hidden_size, self.vocab_size),
             sharding=self.dv_sharding,
             dtype=self.dtype,

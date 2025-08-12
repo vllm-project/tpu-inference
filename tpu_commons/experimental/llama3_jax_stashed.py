@@ -71,11 +71,11 @@ class LlamaForCausalLM(nnx.Module):
                                  hidden_size=self.hidden_size,
                                  dtype=dtype,
                                  mesh=self.mesh,
+                                 rngs=self.rng,
                                  random_init=force_random_weights,
                                  vd_sharding=NamedSharding(
                                      self.mesh, P("model", None)),
                                  prelogit_td=NamedSharding(self.mesh, P()))
-        self.embedder.generate_kernel(self.rng)
 
         self.layers = [
             TransformerBlock(
@@ -84,6 +84,7 @@ class LlamaForCausalLM(nnx.Module):
                     mesh=self.mesh,
                     random_init=force_random_weights,
                     epsilon=rms_norm_eps,
+                    rngs=self.rng,
                     activation_ffw_td=NamedSharding(self.mesh, P()),
                     with_scale=True,
                     dtype=dtype,
@@ -91,6 +92,7 @@ class LlamaForCausalLM(nnx.Module):
                 pre_mlp_norm=RMSNorm(
                     dims=self.hidden_size,
                     mesh=self.mesh,
+                    rngs=self.rng,
                     random_init=force_random_weights,
                     activation_ffw_td=NamedSharding(self.mesh, P()),
                     epsilon=rms_norm_eps,
@@ -104,6 +106,7 @@ class LlamaForCausalLM(nnx.Module):
                     head_dim=self.head_dim,
                     rope_theta=rope_theta,
                     rope_scaling={},
+                    rngs=self.rng,
                     dtype=dtype,
                     mesh=self.mesh,
                     random_init=force_random_weights,
@@ -128,36 +131,35 @@ class LlamaForCausalLM(nnx.Module):
                     hidden_size=self.hidden_size,
                     intermediate_size=intermediate_size,
                     mesh=self.mesh,
+                    rngs=self.rng,
                     df_sharding=NamedSharding(self.mesh, P(None, "model")),
                     fd_sharding=NamedSharding(self.mesh, P("model", None)),
                     activation_ffw_td=NamedSharding(self.mesh, P()),
                     random_init=force_random_weights),
             ) for _ in range(num_layers)
         ]
-        for i in range(len(self.layers)):
-            self.layers[i].generate_kernel(self.rng)
 
         self.final_norm = RMSNorm(
             dims=self.hidden_size,
             mesh=self.mesh,
+            rngs=self.rng,
             random_init=force_random_weights,
             activation_ffw_td=NamedSharding(self.mesh, P()),
             epsilon=rms_norm_eps,
             with_scale=True,
             dtype=dtype,
         )
-        self.final_norm.generate_kernel(self.rng)
 
         self.lm_head = LMhead(vocab_size=vocab_size,
                               hidden_size=self.hidden_size,
                               dtype=dtype,
                               mesh=self.mesh,
+                              rngs=self.rng,
                               prelogit_td=NamedSharding(self.mesh, P()),
                               vd_sharding=None,
                               dv_sharding=NamedSharding(
                                   self.mesh, P(None, 'model')),
                               random_init=force_random_weights)
-        self.lm_head.generate_kernel(self.rng)
 
     def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):
         self.rng = nnx.Rngs(rng)

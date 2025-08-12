@@ -30,6 +30,7 @@ class DeepSeekV3Router(nnx.Module):
     norm_topk_prob: bool
     routed_scaling_factor: float
     dtype: jnp.dtype
+    rngs: nnx.Rngs
 
     # Sharding Attributes
     activation_ffw_td: NamedSharding
@@ -99,16 +100,16 @@ class DeepSeekV3Router(nnx.Module):
 
         return weights_TX, topk_indices_TX
 
-    def generate_kernel(self, rngs: nnx.Rngs):
+    def __post_init__(self):
         """Generates the router kernel (weights and bias) for routing."""
         D = self.hidden_size
         E = self.num_experts
-        self.kernel_DE = create_param(rngs,
+        self.kernel_DE = create_param(self.rngs,
                                       shape=(D, E),
                                       dtype=self.dtype,
                                       sharding=self.ed_sharding,
                                       random_init=self.random_init)
-        self.bias_E = create_param(rngs,
+        self.bias_E = create_param(self.rngs,
                                    shape=(E, ),
                                    dtype=self.dtype,
                                    sharding=self.e_sharding,

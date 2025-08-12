@@ -57,32 +57,33 @@ class Attention(nnx.Module):
 
     keyvalue_cache_lskh: NamedSharding
     attn_o_tnh: NamedSharding
+    rngs: nnx.Rngs
 
     random_init: bool = False
     attention_chunk_size: int | None = None
     rope_input_ordering: str = "split"
     quant: Any | None = None
 
-    def generate_kernel(self, rngs: nnx.Rngs):
+    def __post_init__(self):
         """Initializes the weight kernels for Q, K, V, and O projections."""
         N = self.num_attention_heads
         K = self.num_key_value_heads
         D = self.hidden_size
         H = self.head_dim
 
-        self.kernel_q_proj_DNH = create_param(rngs, (D, N, H),
+        self.kernel_q_proj_DNH = create_param(self.rngs, (D, N, H),
                                               self.dnh_sharding,
                                               self.dtype,
                                               random_init=self.random_init)
-        self.kernel_k_proj_DKH = create_param(rngs, (D, K, H),
+        self.kernel_k_proj_DKH = create_param(self.rngs, (D, K, H),
                                               self.dkh_sharding,
                                               self.dtype,
                                               random_init=self.random_init)
-        self.kernel_v_proj_DKH = create_param(rngs, (D, K, H),
+        self.kernel_v_proj_DKH = create_param(self.rngs, (D, K, H),
                                               self.dkh_sharding,
                                               self.dtype,
                                               random_init=self.random_init)
-        self.kernel_o_proj_NHD = create_param(rngs, (N, H, D),
+        self.kernel_o_proj_NHD = create_param(self.rngs, (N, H, D),
                                               self.nhd_sharding,
                                               self.dtype,
                                               random_init=self.random_init)
