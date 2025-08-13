@@ -217,9 +217,10 @@ class TestDisaggOrchestrator(unittest.TestCase):
 
     def setUp(self):
         self.mock_config = MagicMock(spec=IConfig)
-        self.mock_config.vllm_config.scheduler_config.max_num_seqs = 16
-        self.mock_config.vllm_config.device_config = MagicMock()
-        self.mock_config.vllm_config.cache_config.block_size = 5
+        self.mock_config.scheduler_config = MagicMock()
+        self.mock_config.scheduler_config.max_num_seqs = 16
+        self.mock_config.cache_config = MagicMock()
+        self.mock_config.cache_config.block_size = 5
 
         self.mock_output_queue = MagicMock()
         self.mock_prefill_engine = MagicMock(spec=IEngineCore)
