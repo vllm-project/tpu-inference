@@ -302,6 +302,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             query_start_loc = np.ones((self.max_num_reqs + 1, ),
                                       dtype=np.int32)
             request_distribution = np.array([0, 0, 0], dtype=np.int32)
+
+            # Convert block_tables to 1D on cpu.
+            block_tables = block_tables.reshape(-1)
+
             (input_ids, positions, block_tables, query_start_loc, seq_lens,
              request_distribution) = self._device_array(
                  (input_ids, positions, block_tables, query_start_loc,
