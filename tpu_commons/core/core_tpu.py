@@ -95,8 +95,7 @@ class _DisaggOrchestrator:
             queue.Queue(4) for i in range(len(self._prefill_engines))
         ]
         self._decode_backlogs = {
-            idx:
-            queue.Queue(self._config.vllm_config.scheduler_config.max_num_seqs)
+            idx: queue.Queue(self._config.scheduler_config.max_num_seqs)
             for idx, engine in enumerate(self._decode_engines)
         }
 
@@ -275,11 +274,11 @@ class _DisaggOrchestrator:
             while True:
                 # We need to check input batch as well as the request completion is delayed
                 # from scheduler to the runner.
-                if (sum(decode_engine.scheduler.get_request_counts()) >=
-                        self._config.vllm_config.scheduler_config.max_num_seqs
+                if (sum(decode_engine.scheduler.get_request_counts())
+                        >= self._config.scheduler_config.max_num_seqs
                         or decode_engine.model_executor.driver_worker.
-                        model_runner.input_batch.num_reqs >= self._config.
-                        vllm_config.scheduler_config.max_num_seqs):
+                        model_runner.input_batch.num_reqs
+                        >= self._config.scheduler_config.max_num_seqs):
                     break
 
                 try:
@@ -317,8 +316,7 @@ class _DisaggOrchestrator:
                 vllm_request.num_computed_tokens = prompt_tokens
                 new_block_ids = kv_cache_manager.get_block_ids(req_id)
                 assert (len(new_block_ids[0]) == math.ceil(
-                    prompt_tokens /
-                    self._config.vllm_config.cache_config.block_size))
+                    prompt_tokens / self._config.cache_config.block_size))
 
                 with LatencyTracker(f"KVCacheInsert-{len(new_block_ids[0])}"):
                     decode_engine.model_executor.driver_worker.model_runner.insert_request_with_kv_cache(

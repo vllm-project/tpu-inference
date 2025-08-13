@@ -1,7 +1,11 @@
 """
 Defines the abstract contract for a configuration object.
 """
-from typing import Any, Protocol
+from typing import Any, Optional, Protocol
+
+from .config_parts import (ICacheConfig, ICompilationConfig, IModelConfig,
+                           IParallelConfig, ISchedulerConfig,
+                           ISpeculativeConfig)
 
 
 class IConfig(Protocol):
@@ -13,17 +17,31 @@ class IConfig(Protocol):
     implementations that satisfy this contract.
     """
 
-    # Add methods and properties from vllm.config.VllmConfig that are
-    # actually used by the orchestration logic.
-    # For example:
     @property
-    def scheduler_config(self) -> object:
+    def cache_config(self) -> ICacheConfig:
         ...
 
     @property
-    def cache_config(self) -> object:
+    def compilation_config(self) -> ICompilationConfig:
         ...
 
+    @property
+    def model_config(self) -> Optional[IModelConfig]:
+        ...
+
+    @property
+    def parallel_config(self) -> IParallelConfig:
+        ...
+
+    @property
+    def scheduler_config(self) -> ISchedulerConfig:
+        ...
+
+    @property
+    def speculative_config(self) -> Optional[ISpeculativeConfig]:
+        ...
+
+    # Escape hatch for direct access when needed by the adapter.
     @property
     def vllm_config(self) -> Any:
         ...
