@@ -9,6 +9,8 @@ google-cloud-storage
 --find-links https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
 --find-links https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
 --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html
+jax==0.7.0
+libtpu==0.0.20
 jaxtyping
 flax
 torchax==0.0.5
