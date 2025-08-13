@@ -1177,6 +1177,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         if self.uses_mrope:
             positions = mrope_positions
 
+        # Convert block_tables to 1D on cpu.
+        block_tables = block_tables.reshape(-1)
+
         (input_ids, positions, block_tables, query_start_loc, seq_lens,
          logits_indices, request_distribution) = self._device_array(
              (input_ids, positions, block_tables, query_start_loc, seq_lens,

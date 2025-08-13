@@ -1301,8 +1301,7 @@ def ragged_paged_attention(
                 bkv_sz,
                 q.dtype,
                 kv_cache.dtype,
-            ) * 1.8)
-
+            ) * 2.1)  # TODO(jevinjiang): figure out why it is so inaccurate?
     grid = (distribution[2], )
 
     in_specs = [
