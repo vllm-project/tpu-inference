@@ -16,7 +16,7 @@ from tpu_commons.models.jax.attention_interface import update_kv_cache
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
-from tpu_commons.models.jax.common.sharding import ShardingConfig
+from tpu_commons.models.jax.common.sharding import Sharding
 from tpu_commons.models.jax.layers.rope import apply_rope
 
 KVCache = Tuple[jax.Array, jax.Array]
@@ -66,12 +66,13 @@ class Attention(nnx.Module):
         quant: Optional configuration for quantization.
     """
     cfg: AttentionConfig
-    mesh: Mesh
+    sharding: Sharding
     param_factory: ParamFactory
-    sharding_cfg: ShardingConfig
     quant: Any | None = None
 
     def __post_init__(self):
+        self.sharding_cfg = self.sharding.get_sharding_cfg()
+        self.mesh = self.sharding.get_mesh()
         self.create_sharding()
 
     def generate_kernel(self, rngs: nnx.Rngs):

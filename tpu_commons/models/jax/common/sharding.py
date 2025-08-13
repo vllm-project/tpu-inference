@@ -150,7 +150,8 @@ class ShardingConfig:
     def __init__(self,
                  prefill_rules=None,
                  generate_rules=None,
-                 default_rules_cls=ShardingRulesConfig):
+                 default_rules_cls=ShardingRulesConfig,
+                 sharding_strategy):
         """Initializes the ShardingConfig.
 
         Args:
@@ -256,6 +257,10 @@ class Sharding:
     def get_sharding_cfg(self) -> ShardingConfig:
         """Returns the generated sharding configuration."""
         return self.sharding_cfg
+
+    def get_mesh(self) -> Mesh:
+        """Returns the JAX device mesh."""
+        return self.mesh
 
     def build_mesh(self, strategy: ShardingStrategy) -> Mesh:
         """Constructs a JAX device mesh from a sharding strategy.

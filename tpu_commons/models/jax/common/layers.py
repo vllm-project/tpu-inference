@@ -11,7 +11,7 @@ from vllm.config import VllmConfig
 
 from tpu_commons.models.jax.common.base import Config, ParamFactory
 from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
-from tpu_commons.models.jax.common.sharding import ShardingConfig
+from tpu_commons.models.jax.common.sharding import Sharding
 
 
 # A dummy for modeling_flax_utils which might contain activation functions
@@ -28,27 +28,6 @@ class FlaxUtils:
 
 modeling_flax_utils = FlaxUtils()
 
-
-@dataclass
-class RuntimeParams:
-    """A container for runtime parameters needed by neural network blocks.
-
-    This dataclass acts as a flexible container to pass objects that are only
-    available at runtime (like a pre-allocated KV cache or dynamic sharding
-    configurations) into the initialization of stateful modules. This avoids
-    having to update the constructor signature of every module when a new
-    runtime dependency is introduced.
-
-    Attributes:
-        kv_cache: The key-value cache object for attention layers.
-        sharding_cfg: The configuration for tensor sharding.
-        quantization: Configuration for quantization schemes.
-    """
-    kv_cache: Any = None
-    sharding_cfg: Any = None
-    quantization: Any = None
-
-
 @dataclass
 class RMSNorm(nnx.Module):
     """An implementation of Root Mean Square Layer Normalization.
@@ -64,9 +43,8 @@ class RMSNorm(nnx.Module):
         quant: Optional configuration for quantization.
     """
     dims: int
-    mesh: Mesh
+    sharding: Sharding
     param_factory: ParamFactory
-    sharding_cfg: ShardingConfig
     epsilon: float = 1e-6
     with_scale: bool = True
     dtype: Any = jnp.float32
@@ -74,6 +52,8 @@ class RMSNorm(nnx.Module):
 
     def __post_init__(self):
         """Initializes the scale parameter."""
+        self.sharding_cfg = self.sharding.get_sharding_cfg()
+        self.mesh = self.sharding.get_mesh()
         self.create_sharding()
 
     def __call__(self, x: Float, op_mode='generate') -> Float:
@@ -166,13 +146,14 @@ class DenseFFW(nnx.Module):
         quant: Optional configuration for quantization.
     """
     cfg: DenseFFWConfig
-    mesh: Mesh
+    sharding: Sharding
     param_factory: ParamFactory
-    sharding_cfg: ShardingConfig
     quant: Any | None = None
 
     def __post_init__(self):
         """Initializes the weight kernels for the feed-forward layer."""
+        self.sharding_cfg = self.sharding.get_sharding_cfg()
+        self.mesh = self.sharding.get_mesh()
         self.create_sharding()
 
     def __call__(self, x, op_mode):
@@ -286,13 +267,14 @@ class Embedder(nnx.Module):
         quant: Optional configuration for quantization.
     """
     cfg: EmbedderConfig
-    mesh: Mesh
+    sharding: Sharding
     param_factory: ParamFactory
-    sharding_cfg: ShardingConfig
     quant: Any | None = None
 
     def __post_init__(self):
         """Initializes the embedding table."""
+        self.sharding_cfg = self.sharding.get_sharding_cfg()
+        self.mesh = self.sharding.get_mesh()
         self.create_sharding()
 
     def __call__(self, x, decode=False):

@@ -1,7 +1,9 @@
 from dataclasses import dataclass, field, make_dataclass
+import functools
 from typing import Any, Union
 
 import jax
+from jax.experimental import shard_map
 import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding
@@ -15,7 +17,8 @@ from tpu_commons.models.jax.common.constants import (HuggingFaceArgNames,
 from tpu_commons.models.jax.common.layers import FlaxUtils
 from tpu_commons.models.jax.common.moe.deepseek_moe import (
     DeepSeekV3Router, DeepSeekV3RoutingConfig)
-from tpu_commons.models.jax.common.sharding import ShardingConfig
+from tpu_commons.models.jax.common.sharding import (ShardingConfig,
+                                                    EXPERT_AXIS_NAME)
 
 modeling_flax_utils = FlaxUtils()
 
@@ -56,13 +59,14 @@ class Router(nnx.Module):
         quant: Optional configuration for quantization.
     """
     cfg: RouterConfig
-    mesh: Mesh
+    sharding: Sharding
     param_factory: ParamFactory
-    sharding_cfg: ShardingConfig
     quant: Any | None = None
 
     def __post_init__(self):
         """Initializes the Router module by creating sharding configurations and generating the router kernel."""
+        self.sharding_cfg = self.sharding.get_sharding_cfg()
+        self.mesh = self.sharding.mesh
         self.create_sharding()
 
     def __call__(self, x: Float, op_mode):
@@ -169,13 +173,21 @@ class MoE(nnx.Module):
         quant: Optional configuration for quantization.
     """
     cfg: MoEConfig
-    mesh: Mesh
+    sharding: Sharding
     param_factory: ParamFactory
-    sharding_cfg: ShardingConfig
     quant: Any | None = None
 
     def __post_init__(self):
         """Initializes the MoE module by creating sharding configurations and generating expert kernels."""
+        self.num_experts = getattr(
+            self.cfg, HuggingFaceArgNames.NUM_ROUTED_EXPERTS.value)
+        self.num_experts_per_tok = getattr(
+            self.cfg, HuggingFaceArgNames.NUM_EXPERTS_PER_TOKEN.value)
+        self.sharding_cfg = self.sharding.get_sharding_cfg()
+        self.mesh = self.sharding.get_mesh()
+        self.expert_parallelism = self.sharding.sharding_strategy.expert_parallelism
+        self.experts_per_group = self.num_experts // self.expert_parallelism
+
         router_cls = None
         if isinstance(self.cfg.router, RouterConfig):
             router_cls = Router
@@ -183,8 +195,8 @@ class MoE(nnx.Module):
             router_cls = DeepSeekV3Router
         else:
             raise NotImplementedError
-        self.router = router_cls(self.cfg.router, self.mesh,
-                                 self.param_factory, self.sharding_cfg)
+        self.router = router_cls(self.cfg.router, self.sharding,
+                                 self.param_factory)
         self.router.create_sharding()
         self.create_sharding()
 
@@ -199,7 +211,8 @@ class MoE(nnx.Module):
             Output array of shape (sequence_length, d_model) after passing through MoE.
         """
         x = jnp.asarray(x, self.cfg.dtype)
-        x_TD = nnx.with_sharding_constraint(x, self.activation_ffw_td[op_mode])
+        activation_sharding_rule = self.activation_ffw_td[op_mode]
+        x_TD = nnx.with_sharding_constraint(x, activation_sharding_rule)
         weights_TX, indices_TX = self.router(x_TD, op_mode)
         num_experts = getattr(self.cfg,
                               HuggingFaceArgNames.NUM_LOCAL_EXPERTS.value)
@@ -211,12 +224,21 @@ class MoE(nnx.Module):
 
         # Some models use the routing scores to weight the data instead of
         # weighting the expert outputs.
-        if self.cfg.apply_expert_weight_before_computation:
-            with jax.named_scope("pre_computing_weight"):
-                return self._moe_fwd_preapply_router_weights(
-                    x_TD, full_weights_TE, op_mode)
+        if self.expert_parallelism > 1:
+            shard_map_in_specs = (
+                # activation is sharded as ((data, expert), model)
+                ((activation_sharding_rule[0], self.num_experts), activation_sharding_rule[1]),
+                indices_TX.sharding,
+                weights_TX.sharding,
+            )
+            self._expert_routing_fwd(x_TD, weights_TX, indices_TX, op_mode)
         else:
-            return self._moe_fwd(x_TD, full_weights_TE, op_mode)
+            if self.cfg.apply_expert_weight_before_computation:
+                with jax.named_scope("pre_computing_weight"):
+                    return self._moe_fwd_preapply_router_weights(
+                        x_TD, full_weights_TE, op_mode)
+            else:
+                return self._moe_fwd(x_TD, full_weights_TE, op_mode)
 
     def generate_kernel(self, rngs: nnx.Rngs):
         """Generates the kernels (weights) for the router and experts (gating, up-projection, and down-projection layers)."""
@@ -315,6 +337,74 @@ class MoE(nnx.Module):
         with jax.named_scope("sum"):
             output_TD = jnp.einsum('TED,TE -> TD', down_proj_TED, weights)
         return output_TD.astype(self.cfg.dtype)
+
+    def prepare_ragged_all_to_all(self, sorted_routings: jnp.array):
+        # num_tokens = sorted_routings_TE.shape()
+        # expert_group_assignments = sorted_routings_TE.reshape(num_tokens, self.expert_parallelism, self.experts_per_group)
+
+        # Calculate the local group start indices
+        local_expert_counts = jnp.bincount(sorted_routings, length=self.num_experts)
+        local_expert_cumsum = jnp.cumsum(local_expert_counts)
+        local_group_start_idxs = jnp.concatenate([jnp.array([0]), local_expert_cumsum[:-1][::self.expert_parallelism]])
+
+        # Calculate the send sizes should count how many expert assignments there are per expert group.
+        local_send_sizes = jnp.reshape(local_expert_counts, (self.experts_per_group, self.expert_parallelism)).sum(-1)
+        # local_expert_sizes_GM = jnp.reshape(local_expert_sizes, (self.expert_parallelism, self.experts_per_group))
+
+        all_shard_send_sizes_EE = jax.lax.all_gather(local_send_sizes, EXPERT_AXIS_NAME)
+        # Calculate the receiving amount
+        shard_idx = jax.sharding.axis_index(EXPERT_AXIS_NAME)
+        local_recv_sizes = all_shard_send_sizes_EE[:, shard_idx]
+
+        # Calculate where to place each receiving packet
+        local_recv_start_indices = jnp.concatenate([jnp.array([0]), local_recv_sizes[:-1].cumsum()])
+
+        return (local_group_start_idxs, local_send_sizes, local_recv_start_indices, local_recv_sizes)        
+
+    def _expert_routing_fwd(self, x_TDE: jax.Array, assignments: jax.Array, weights_TE: jax.Array):
+        # 1. Sort each input using the expert indices (use the argosrt indices). Use argsort of argsort to return the IDs back to their original ordering.
+        #   * Also reshape the data to include G groups (so that you can use a shard_map on this dim)
+        # 2. Perform ragged all to all of the indices to their expert shards.
+        # 3. Perform a local permute so that the inputs are sorted in order by expert ID (for GMM computation)
+        # 4. Pass the permuted inputs to the GMM (or dense until Beinuo impelemnts).
+        # 5. Undo sorting by taking argsort of argsort.
+        # 6. Return the results from shard_map
+        # 7. Unpermute 
+        @functools.partial(
+            shard_map.shard_map(
+                mesh=self.mesh,
+                in_specs=shard_map_in_specs,
+                # The outputs are sharded the same as the input
+                out_specs=shard_map_in_specs[0]
+            )
+        )   
+        def _sharded_expert_routing_fwd(x_TD, assignments, weights):
+            num_tokens, hidden_size, num_experts = x_TD.shape
+            flattened_inputs = x_TDE.transpose((0, 2, 1)).reshape(-1, hidden_size)
+            flattened_inputs
+
+            # Maximum number of assignments for a given expert shard is if all tokens are assigned to it.
+            # But you need to consider experts per token as a limiting factor.
+            max_group_assignments_per_tok = min(self.experts_per_group, self.num_experts_per_tok)
+            expert_routing_input_buffer = jax.zeros((self.num_experts * max_group_assignments_per_tok * num_tokens, hidden_size))
+            expert_routing
+            send_start_idxs, send_sizes, recv_start_idxs, recv_sizes = self.prepare_ragged_all_to_all(assignments_TE)
+
+            # Perform ragged_all_to_all to shift the correct data points to the current expert shard
+            jax.lax.ragged_all_to_all(
+                x,
+                output_shape,
+                input_offsets,
+                send_sizes,
+                output_offsets,
+                recv_sizes,
+                axis_name=expert_axis_name,
+            )
+        return _sharded_expert_routing_fwd(x_TDE, assignments, weights_TE)
+)
+
+
+
 
     def get_cfg(self) -> MoEConfig:
         """Returns the configuration object for the MoE layer."""
