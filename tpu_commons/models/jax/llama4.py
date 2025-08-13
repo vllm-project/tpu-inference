@@ -166,9 +166,7 @@ class Llama4ForCausalLM(nnx.Module):
                                                         None)),
                 activation_attention_out_td=NamedSharding(
                     self.mesh, P('data', 'model')),
-                keyvalue_cache_lskh=NamedSharding(self.mesh,
-                                                  P(None, None, 'model',
-                                                    None)),
+                keyvalue_cache_lskh=NamedSharding(self.mesh, P()),
                 attn_o_tnh=NamedSharding(self.mesh, P('data', 'model', None)),
                 dnh_sharding=NamedSharding(self.mesh, P(None, 'model', None)),
                 dkh_sharding=NamedSharding(self.mesh, P(None, 'model', None)),
