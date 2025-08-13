@@ -80,8 +80,8 @@ class Llama4ForCausalLM(nnx.Module):
                                      self.mesh,
                                      P(('data', 'expert', 'model'), None)),
                                  mesh=self.mesh,
+                                 rngs=self.rng,
                                  random_init=force_random_weights)
-        self.embedder.generate_kernel(self.rng)
 
         self.layers = []
 
@@ -98,6 +98,7 @@ class Llama4ForCausalLM(nnx.Module):
                             num_experts=num_local_experts,
                             num_experts_per_tok=1,
                             router_act="sigmoid",
+                            rngs=self.rng,
                             activation_ffw_td=NamedSharding(
                                 self.mesh, P('data', None)),
                             ed_sharding=NamedSharding(self.mesh,
@@ -113,6 +114,7 @@ class Llama4ForCausalLM(nnx.Module):
                 intermediate_size_moe=intermediate_size_moe,
                 hidden_act=hidden_act,
                 router=router,
+                rngs=self.rng,
                 activation_ffw_td=NamedSharding(self.mesh, P('data', None)),
                 activation_ffw_ted=NamedSharding(self.mesh,
                                                  P('data', 'expert', None)),
@@ -128,6 +130,7 @@ class Llama4ForCausalLM(nnx.Module):
                 hidden_size=self.hidden_size,
                 intermediate_size=intermediate_size,
                 random_init=force_random_weights,
+                rngs=self.rng,
                 df_sharding=NamedSharding(self.mesh, P(None, 'model')),
                 fd_sharding=NamedSharding(self.mesh, P('model', None)),
                 activation_ffw_td=NamedSharding(self.mesh, P('data', None)))
@@ -146,6 +149,7 @@ class Llama4ForCausalLM(nnx.Module):
                     "high_freq_factor": 1.0,
                     "original_max_position_embeddings": 8192
                 },
+                rngs=self.rng,
                 rope_input_ordering="interleaved",
                 temperature_tuning=True,
                 temperature_tuning_scale=0.1,
@@ -177,6 +181,7 @@ class Llama4ForCausalLM(nnx.Module):
                 hidden_size=self.hidden_size,
                 intermediate_size=num_shared_experts * intermediate_size_moe,
                 mesh=self.mesh,
+                rngs=self.rng,
                 random_init=force_random_weights,
                 df_sharding=NamedSharding(self.mesh, P(None, 'model')),
                 fd_sharding=NamedSharding(self.mesh, P('model', None)),
@@ -187,6 +192,7 @@ class Llama4ForCausalLM(nnx.Module):
                 mesh=self.mesh,
                 random_init=force_random_weights,
                 epsilon=rms_norm_eps,
+                rngs=self.rng,
                 activation_ffw_td=NamedSharding(self.mesh, P()),
                 with_scale=True,
                 dtype=dtype,
@@ -197,6 +203,7 @@ class Llama4ForCausalLM(nnx.Module):
                 mesh=self.mesh,
                 activation_ffw_td=NamedSharding(self.mesh, P()),
                 epsilon=rms_norm_eps,
+                rngs=self.rng,
                 with_scale=True,
                 dtype=dtype,
                 random_init=force_random_weights,
@@ -211,24 +218,22 @@ class Llama4ForCausalLM(nnx.Module):
                 use_attention_rope=use_attention_rope)
             self.layers.append(block)
 
-        for i in range(len(self.layers)):
-            self.layers[i].generate_kernel(self.rng)
-
         self.final_norm = RMSNorm(
             dims=self.hidden_size,
             mesh=self.mesh,
             activation_ffw_td=NamedSharding(self.mesh, P()),
             epsilon=rms_norm_eps,
+            rngs=self.rng,
             with_scale=True,
             dtype=dtype,
             random_init=force_random_weights,
         )
-        self.final_norm.generate_kernel(self.rng)
 
         self.lm_head = LMhead(
             vocab_size=vocab_size,
             hidden_size=self.hidden_size,
             dtype=dtype,
+            rngs=self.rng,
             prelogit_td=NamedSharding(self.mesh, P()),
             vd_sharding=NamedSharding(self.mesh,
                                       P(('data', 'expert', 'model'), None)),
@@ -236,7 +241,6 @@ class Llama4ForCausalLM(nnx.Module):
                                       P(None, ('data', 'expert', 'model'))),
             mesh=self.mesh,
             random_init=force_random_weights)
-        self.lm_head.generate_kernel(self.rng)
         if self.is_verbose:
             self._print_model_architecture()
 

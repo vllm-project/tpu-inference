@@ -11,7 +11,7 @@ from tpu_commons.models.jax.common.layers import DenseFFW
 from tpu_commons.models.jax.common.moe.moe import MoE
 
 
-@dataclass
+@dataclass(kw_only=True)
 class TransformerBlock(nnx.Module):
     """
     A heavy weight module which serves as the stateful live blocks in serving
@@ -44,12 +44,6 @@ class TransformerBlock(nnx.Module):
         logits_TD += ffw_residual_TD
         return new_cache, logits_TD
 
-    def generate_kernel(self, rngs: nnx.Rngs):
-        self.attn.generate_kernel(rngs)
-        self.custom_module.generate_kernel(rngs)
-        self.pre_attention_norm.generate_kernel(rngs)
-        self.pre_mlp_norm.generate_kernel(rngs)
-
 
 @dataclass(kw_only=True)
 class SharedExpertsTransformerBlock(TransformerBlock):
@@ -80,7 +74,3 @@ class SharedExpertsTransformerBlock(TransformerBlock):
                 f"Invalid custom moduel type: {type(self.custom_module)}")
         logits_TD += ffw_residual_TD
         return new_cache, logits_TD
-
-    def generate_kernel(self, rngs: nnx.Rngs):
-        super().generate_kernel(rngs)
-        self.shared_experts.generate_kernel(rngs)

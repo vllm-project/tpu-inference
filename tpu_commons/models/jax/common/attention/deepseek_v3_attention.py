@@ -69,6 +69,7 @@ class MLA(nnx.Module):
     attn_o_tnh: NamedSharding
     attn_o_ktnph: NamedSharding
     activation_attention_out_td: NamedSharding
+    rngs: nnx.Rngs
 
     random_init: bool = False
     attention_chunk_size: int | None = None
@@ -96,30 +97,28 @@ class MLA(nnx.Module):
             mscale_all_dim=self.rope_scaling["mscale_all_dim"],
         )
 
-    def generate_kernel(self, rngs: nnx.Rngs):
-        """Initializes the weight kernels."""
-
-        self.kernel_q_down_proj_DA = create_param(rngs,
+        # Initializes the weight kernels
+        self.kernel_q_down_proj_DA = create_param(self.rngs,
                                                   (self.D, self.q_lora_rank),
                                                   self.q_da_sharding,
                                                   self.dtype,
                                                   random_init=self.random_init)
         self.kernel_q_up_proj_ANH = create_param(
-            rngs,
+            self.rngs,
             (self.q_lora_rank, self.N, self.qk_head_dim),
             self.anh_sharding,
             self.dtype,
             random_init=self.random_init,
         )
         self.kernel_kv_down_proj_DA = create_param(
-            rngs,
+            self.rngs,
             (self.D, self.kv_lora_rank + self.qk_rope_head_dim),
             self.kv_da_sharding,
             self.dtype,
             random_init=self.random_init,
         )
         self.kernel_kv_up_proj_ANH = create_param(
-            rngs,
+            self.rngs,
             (self.kv_lora_rank, self.N,
              self.qk_nope_head_dim + self.v_head_dim),
             self.anh_sharding,
@@ -127,7 +126,7 @@ class MLA(nnx.Module):
             random_init=self.random_init,
         )
         self.kernel_o_proj_NHD = create_param(
-            rngs, (self.N, self.v_head_dim, self.D), self.nhd_sharding,
+            self.rngs, (self.N, self.v_head_dim, self.D), self.nhd_sharding,
             self.dtype)
         self.q_rms_norm = RMSNorm(
             dims=self.q_lora_rank,
@@ -137,8 +136,8 @@ class MLA(nnx.Module):
             with_scale=True,
             dtype=self.dtype,
             random_init=self.random_init,
+            rngs=self.rngs,
         )
-        self.q_rms_norm.generate_kernel(rngs)
 
         self.kv_rms_norm = RMSNorm(
             dims=self.kv_lora_rank,
@@ -148,8 +147,8 @@ class MLA(nnx.Module):
             epsilon=self.rms_norm_eps,
             with_scale=True,
             dtype=self.dtype,
+            rngs=self.rngs,
         )
-        self.kv_rms_norm.generate_kernel(rngs)
 
     def __call__(self,
                  x,

@@ -34,9 +34,9 @@ class TestLayers(unittest.TestCase):
             random_init=True,
             activation_ffw_td=NamedSharding(self.mesh, P()),
             epsilon=epsilon,
+            rngs=nnx.Rngs(0),
             dtype=jnp.float32,
         )
-        norm.generate_kernel(nnx.Rngs(0))
 
         seq_len = 128
         x = jax.random.normal(jax.random.PRNGKey(42), (seq_len, dims))
@@ -64,8 +64,8 @@ class TestLayers(unittest.TestCase):
             df_sharding=NamedSharding(self.mesh, P()),
             fd_sharding=NamedSharding(self.mesh, P()),
             activation_ffw_td=NamedSharding(self.mesh, P()),
+            rngs=nnx.Rngs(0),
         )
-        ffw_layer.generate_kernel(nnx.Rngs(0))
 
         seq_len = 128
         x = jnp.ones((seq_len, hidden_size), dtype=jnp.bfloat16)
@@ -89,8 +89,8 @@ class TestLayers(unittest.TestCase):
             random_init=True,
             prelogit_td=NamedSharding(self.mesh, P()),
             vd_sharding=NamedSharding(self.mesh, P()),
+            rngs=nnx.Rngs(0),
         )
-        embedder.generate_kernel(nnx.Rngs(0))
 
         seq_len = 128
         token_ids = jnp.arange(seq_len, dtype=jnp.int32) % vocab_size
@@ -120,8 +120,8 @@ class TestLayers(unittest.TestCase):
             random_init=True,
             prelogit_td=NamedSharding(self.mesh, P()),
             vd_sharding=NamedSharding(self.mesh, P()),
+            rngs=rngs_1,
         )
-        embedder_norm.generate_kernel(rngs_1)
 
         embedder_no_norm = Embedder(
             vocab_size=vocab_size,
@@ -131,8 +131,8 @@ class TestLayers(unittest.TestCase):
             random_init=True,
             prelogit_td=NamedSharding(self.mesh, P()),
             vd_sharding=NamedSharding(self.mesh, P()),
+            rngs=rngs_2,
         )
-        embedder_no_norm.generate_kernel(rngs_2)
 
         token_ids = jnp.arange(10, dtype=jnp.int32)
 

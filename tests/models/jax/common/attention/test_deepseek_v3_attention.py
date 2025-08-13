@@ -46,6 +46,7 @@ class TestMLA(unittest.TestCase):
             qk_rope_head_dim,  # Half of DeepSeek v3's real values
             v_head_dim=64,  # Half of DeepSeek v3's real values
             rms_norm_eps=1e-5,
+            rngs=nnx.Rngs(42),
             rope_scaling={
                 "beta_fast": 32,
                 "beta_slow": 1,
@@ -74,7 +75,6 @@ class TestMLA(unittest.TestCase):
             attn_o_ktnph=dummy_sharding,
             activation_attention_out_td=dummy_sharding,
         )
-        mla.generate_kernel(nnx.Rngs(42))
 
         # Create input tensor
         seq_len = 32

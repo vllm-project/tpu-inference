@@ -54,8 +54,8 @@ class TestAttention(unittest.TestCase):
             keyvalue_skh=dummy_sharding,
             keyvalue_cache_lskh=dummy_sharding,
             attn_o_tnh=dummy_sharding,
+            rngs=nnx.Rngs(42),
         )
-        attention.generate_kernel(nnx.Rngs(42))
 
         seq_len = 64
         x = jnp.ones((seq_len, hidden_size), dtype=jnp.bfloat16)

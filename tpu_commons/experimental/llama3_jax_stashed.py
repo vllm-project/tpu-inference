@@ -71,96 +71,99 @@ class LlamaForCausalLM(nnx.Module):
                                  hidden_size=self.hidden_size,
                                  dtype=dtype,
                                  mesh=self.mesh,
+                                 rngs=self.rng,
                                  random_init=force_random_weights,
                                  vd_sharding=NamedSharding(
                                      self.mesh, P("model", None)),
                                  prelogit_td=NamedSharding(self.mesh, P()))
-        self.embedder.generate_kernel(self.rng)
 
-        self.layers = [
-            TransformerBlock(
-                pre_attention_norm=RMSNorm(
-                    dims=self.hidden_size,
-                    mesh=self.mesh,
-                    random_init=force_random_weights,
-                    epsilon=rms_norm_eps,
-                    activation_ffw_td=NamedSharding(self.mesh, P()),
-                    with_scale=True,
-                    dtype=dtype,
-                ),
-                pre_mlp_norm=RMSNorm(
-                    dims=self.hidden_size,
-                    mesh=self.mesh,
-                    random_init=force_random_weights,
-                    activation_ffw_td=NamedSharding(self.mesh, P()),
-                    epsilon=rms_norm_eps,
-                    with_scale=True,
-                    dtype=dtype,
-                ),
-                attn=Attention(
-                    hidden_size=self.hidden_size,
-                    num_attention_heads=self.num_attention_heads,
-                    num_key_value_heads=self.num_key_value_heads,
-                    head_dim=self.head_dim,
-                    rope_theta=rope_theta,
-                    rope_scaling={},
-                    dtype=dtype,
-                    mesh=self.mesh,
-                    random_init=force_random_weights,
-                    dnh_sharding=NamedSharding(self.mesh,
-                                               P(None, "model", None)),
-                    dkh_sharding=NamedSharding(self.mesh,
-                                               P(None, "model", None)),
-                    nhd_sharding=NamedSharding(self.mesh,
-                                               P("model", None, None)),
-                    activation_q_td=NamedSharding(self.mesh, P()),
-                    query_tnh=NamedSharding(self.mesh, P(None, "model", None)),
-                    keyvalue_skh=NamedSharding(self.mesh,
-                                               P(None, "model", None)),
-                    keyvalue_cache_lskh=NamedSharding(
-                        self.mesh, P(None, None, "model", None)),
-                    attn_o_tnh=NamedSharding(self.mesh, P(None, "model",
-                                                          None)),
-                ),
-                custom_module=DenseFFW(
-                    dtype=dtype,
-                    hidden_act="silu",
-                    hidden_size=self.hidden_size,
-                    intermediate_size=intermediate_size,
-                    mesh=self.mesh,
-                    df_sharding=NamedSharding(self.mesh, P(None, "model")),
-                    fd_sharding=NamedSharding(self.mesh, P("model", None)),
-                    activation_ffw_td=NamedSharding(self.mesh, P()),
-                    random_init=force_random_weights),
-            ) for _ in range(num_layers)
-        ]
-        for i in range(len(self.layers)):
-            self.layers[i].generate_kernel(self.rng)
+        self.layers = []
+        for _ in range(num_layers):
+            self.layers.append(
+                TransformerBlock(
+                    pre_attention_norm=RMSNorm(
+                        dims=self.hidden_size,
+                        mesh=self.mesh,
+                        random_init=force_random_weights,
+                        epsilon=rms_norm_eps,
+                        rngs=self.rng,
+                        activation_ffw_td=NamedSharding(self.mesh, P()),
+                        with_scale=True,
+                        dtype=dtype,
+                    ),
+                    pre_mlp_norm=RMSNorm(
+                        dims=self.hidden_size,
+                        mesh=self.mesh,
+                        rngs=self.rng,
+                        random_init=force_random_weights,
+                        activation_ffw_td=NamedSharding(self.mesh, P()),
+                        epsilon=rms_norm_eps,
+                        with_scale=True,
+                        dtype=dtype,
+                    ),
+                    attn=Attention(
+                        hidden_size=self.hidden_size,
+                        num_attention_heads=self.num_attention_heads,
+                        num_key_value_heads=self.num_key_value_heads,
+                        head_dim=self.head_dim,
+                        rope_theta=rope_theta,
+                        rope_scaling={},
+                        rngs=self.rng,
+                        dtype=dtype,
+                        mesh=self.mesh,
+                        random_init=force_random_weights,
+                        dnh_sharding=NamedSharding(self.mesh,
+                                                   P(None, "model", None)),
+                        dkh_sharding=NamedSharding(self.mesh,
+                                                   P(None, "model", None)),
+                        nhd_sharding=NamedSharding(self.mesh,
+                                                   P("model", None, None)),
+                        activation_q_td=NamedSharding(self.mesh, P()),
+                        query_tnh=NamedSharding(self.mesh,
+                                                P(None, "model", None)),
+                        keyvalue_skh=NamedSharding(self.mesh,
+                                                   P(None, "model", None)),
+                        keyvalue_cache_lskh=NamedSharding(
+                            self.mesh, P(None, None, "model", None)),
+                        attn_o_tnh=NamedSharding(self.mesh,
+                                                 P(None, "model", None)),
+                    ),
+                    custom_module=DenseFFW(
+                        dtype=dtype,
+                        hidden_act="silu",
+                        hidden_size=self.hidden_size,
+                        intermediate_size=intermediate_size,
+                        mesh=self.mesh,
+                        rngs=self.rng,
+                        df_sharding=NamedSharding(self.mesh, P(None, "model")),
+                        fd_sharding=NamedSharding(self.mesh, P("model", None)),
+                        activation_ffw_td=NamedSharding(self.mesh, P()),
+                        random_init=force_random_weights),
+                ))
 
         self.final_norm = RMSNorm(
             dims=self.hidden_size,
             mesh=self.mesh,
+            rngs=self.rng,
             random_init=force_random_weights,
             activation_ffw_td=NamedSharding(self.mesh, P()),
             epsilon=rms_norm_eps,
             with_scale=True,
             dtype=dtype,
         )
-        self.final_norm.generate_kernel(self.rng)
 
         self.lm_head = LMhead(vocab_size=vocab_size,
                               hidden_size=self.hidden_size,
                               dtype=dtype,
                               mesh=self.mesh,
+                              rngs=self.rng,
                               prelogit_td=NamedSharding(self.mesh, P()),
                               vd_sharding=None,
                               dv_sharding=NamedSharding(
                                   self.mesh, P(None, 'model')),
                               random_init=force_random_weights)
-        self.lm_head.generate_kernel(self.rng)
 
     def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):
-        self.rng = nnx.Rngs(rng)
         weight_loader = Llama3WeightLoader(
             vllm_config=self.vllm_config,
             hidden_size=self.hidden_size,

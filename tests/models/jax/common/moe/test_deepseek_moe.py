@@ -29,6 +29,7 @@ class TestDeepSeekV3Router(unittest.TestCase):
                                   routed_scaling_factor=1.0,
                                   dtype=jnp.bfloat16,
                                   quant=None,
+                                  rngs=nnx.Rngs(42),
                                   activation_ffw_td=dummy_sharding,
                                   ed_sharding=dummy_sharding,
                                   e_sharding=dummy_sharding)
@@ -55,6 +56,7 @@ class TestDeepSeekV3Router(unittest.TestCase):
                                   routed_scaling_factor=1.0,
                                   dtype=jnp.bfloat16,
                                   quant=None,
+                                  rngs=nnx.Rngs(42),
                                   activation_ffw_td=dummy_sharding,
                                   ed_sharding=dummy_sharding,
                                   e_sharding=dummy_sharding)
@@ -81,10 +83,10 @@ class TestDeepSeekV3Router(unittest.TestCase):
                                   routed_scaling_factor=1.0,
                                   dtype=jnp.bfloat16,
                                   quant=None,
+                                  rngs=nnx.Rngs(42),
                                   activation_ffw_td=dummy_sharding,
                                   ed_sharding=dummy_sharding,
                                   e_sharding=dummy_sharding)
-        router.generate_kernel(nnx.Rngs(42))
         x = jnp.ones((2, 512))
         weights, indices = router(x)
         self.assertEqual(weights.shape, (2, 2))
