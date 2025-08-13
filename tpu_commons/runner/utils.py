@@ -218,10 +218,10 @@ def create_kv_caches(
     # TODO(xiang): fix this together with get_kv_cache_spec
     # cache_dtype = kv_cache_spec.dtype
 
-    # Instead of sharding automatically, we manually calculate the kv cache for
-    # each shard because the padding logic for RPA's KV cache needs to know
-    # the exact head number on each shard. In other words, we can not determine
-    # the padding logics for kv cache globally.
+    # NOTE(jevinjiang): Instead of sharding automatically, we manually calculate
+    # the kv cache for each shard because the padding logic for RPA's KV cache
+    # needs to know the exact head number on each shard. In other words, we can
+    # not determine the padding logics for kv cache globally.
     shard_cnt = mesh.shape["model"]
     assert num_kv_heads % shard_cnt == 0
     cache_shape_per_shard = rpa.get_kv_cache_shape(num_blocks, block_size,
