@@ -33,6 +33,7 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         max_num_seq=8,
         sliding_window: int | None = None,
         soft_cap: float | None = None,
+        q_scale: float | None = None,
         k_scale: float | None = None,
         v_scale: float | None = None,
     ):
@@ -84,8 +85,8 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
                     kv_packing,
                     padded_head_dim,
                 ),
-                dtype=jnp.float32,
-            ).astype(kv_dtype)
+                dtype=kv_dtype,
+            )
             kv = jnp.pad(
                 kv,
                 (
@@ -151,6 +152,7 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         kwargs = {
             "sliding_window": sliding_window,
             "soft_cap": soft_cap,
+            "q_scale": q_scale,
             "k_scale": k_scale,
             "v_scale": v_scale,
         }
@@ -199,7 +201,7 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             num_pages,
         )
 
-    # TODO: support int4 and int8
+    # TODO: support integer (int8, int4) and fp4 kv cache
     @parameterized.product(
         q_dtype=[jnp.bfloat16],
         kv_dtype=[jnp.float8_e5m2, jnp.float8_e4m3fn],
@@ -224,6 +226,36 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             q_dtype,
             kv_dtype,
             num_pages,
+            k_scale=k_scale,
+            v_scale=v_scale,
+        )
+
+    @parameterized.product(
+        q_dtype=[jnp.float8_e5m2, jnp.float8_e4m3fn],
+        kv_dtype=[jnp.float8_e5m2, jnp.float8_e4m3fn],
+        q_scale=[0.5, None],
+        kv_scales=[(0.5, 0.5), (None, None)],
+    )
+    def test_ragged_paged_attention_quantized_attention(
+            self, q_dtype, kv_dtype, q_scale, kv_scales):
+        if not jtu.is_device_tpu_at_least(version=5):
+            self.skipTest("Expect TPUv5+")
+        seq_lens = [(192, 328), (128, 180), (64, 255)]
+        num_heads = (32, 8)
+        head_dim = 128
+        page_size = 16
+        num_pages = 1000
+        k_scale, v_scale = kv_scales
+
+        self._test_ragged_paged_attention(
+            seq_lens,
+            num_heads,
+            head_dim,
+            page_size,
+            q_dtype,
+            kv_dtype,
+            num_pages,
+            q_scale=q_scale,
             k_scale=k_scale,
             v_scale=v_scale,
         )
