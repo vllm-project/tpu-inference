@@ -1167,7 +1167,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         padded_num_reqs = runner_utils.get_padded_num_reqs_with_upper_limit(
             num_reqs, self.max_num_reqs)
         logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
-        # num_seqs = np.array([num_reqs])
         request_distribution = np.array(self.input_batch.request_distribution)
 
         # Put to device
@@ -1363,9 +1362,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             self.input_batch.condense(removed_req_indices)
 
         batch_changed = len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
-        # batch_reordered = self._reorder_batch(scheduler_output)
-        # return batch_changed or batch_reordered
-        # self._set_request_distribution(scheduler_output)
+        # TODO(jevinjiang): I assume we do not need to set batch_changed to true if just swapping requests.
         self._reorder_batch(scheduler_output)
         return batch_changed
 

@@ -77,7 +77,6 @@ class LlamaForCausalLM(nnx.Module):
                                      self.mesh, P("model", None)),
                                  prelogit_td=NamedSharding(self.mesh, P()))
 
-        print("[jevin debug] llama3 jax stashed")
         self.layers = []
         for _ in range(num_layers):
             self.layers.append(
