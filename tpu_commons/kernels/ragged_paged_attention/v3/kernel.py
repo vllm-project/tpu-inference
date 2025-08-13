@@ -657,12 +657,12 @@ def _ragged_paged_attention_kernel(
         if src.shape == shape:
             return src
         assert src.shape[:-1] == shape[:-1]
-        if shape[-1] < src.shape[-1]:
-            return src[..., :shape[-1]]
-        assert shape[-1] % src.shape[-1] == 0, f"{shape=} % {src.shape=}"
+        assert src.shape[-1] % 128 == 0
+        target_minor = align_to(shape[-1], src.shape[-1])
         # no-op concatenation.
         return jnp.concatenate(
-            [src for _ in range(shape[-1] // src.shape[-1])], axis=-1)
+            [src for _ in range(target_minor // src.shape[-1])],
+            axis=-1)[..., :shape[-1]]
 
     def process(static_q_len=None):
         num_bkv = cdiv(kv_len, bkv_sz)
