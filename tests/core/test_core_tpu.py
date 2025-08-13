@@ -124,7 +124,7 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
         mock_request = MagicMock(spec=EngineCoreRequest)
         mock_request.request_id = "test_req"
         mock_request.mm_hashes = None
-        mock_request.mm_inputs = []
+        mock_request.mm_kwargs = []
         mock_request.use_structured_output = False
         mock_request.pooling_params = None
         mock_request.sampling_params.guided_decoding = None
@@ -169,7 +169,7 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
         mock_request = MagicMock(spec=EngineCoreRequest)
         mock_request.request_id = "test_req"
         mock_request.mm_hashes = None
-        mock_request.mm_inputs = []
+        mock_request.mm_kwargs = []
         mock_request.use_structured_output = False
         mock_request.pooling_params = None
         mock_request.sampling_params.guided_decoding = None

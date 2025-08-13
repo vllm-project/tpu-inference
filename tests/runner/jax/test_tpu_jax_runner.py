@@ -6,7 +6,8 @@ import numpy as np
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, VllmConfig)
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
-from vllm.multimodal.inputs import MultiModalKwargs
+from vllm.multimodal.inputs import (MultiModalBatchedField,
+                                    MultiModalFieldElem, MultiModalKwargsItem)
 from vllm.sampling_params import SamplingType
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.request import PlaceholderRange, Request
@@ -192,7 +193,7 @@ class TestTPUJaxRunner(unittest.TestCase):
             block_ids=tuple([prefill_block_ids]),
             num_computed_tokens=0,
             lora_request=None,
-            mm_inputs=[],
+            mm_kwargs=[],
             mm_hashes=[],
             mm_positions=[],
             pooling_params=None,
@@ -240,7 +241,7 @@ class TestTPUJaxRunner(unittest.TestCase):
         decode_request.sampling_params = mock_sampling_params
 
         decode_request.lora_request = None
-        decode_request.mm_inputs, decode_request.mm_positions = [], []
+        decode_request.mm_kwargs, decode_request.mm_positions = [], []
         decode_request.pooling_params, decode_request.generator = None, None
 
         # Prepare the KV cache slices for insertion. They must be padded to the
@@ -320,7 +321,7 @@ class TestTPUJaxRunner(unittest.TestCase):
             block_ids=([1], ),
             num_computed_tokens=1,
             lora_request=None,
-            mm_inputs=[],
+            mm_kwargs=[],
             mm_hashes=[],
             mm_positions=[],
             pooling_params=None,
@@ -334,7 +335,7 @@ class TestTPUJaxRunner(unittest.TestCase):
             block_ids=([2], ),
             num_computed_tokens=1,
             lora_request=None,
-            mm_inputs=[],
+            mm_kwargs=[],
             mm_hashes=[],
             mm_positions=[],
             pooling_params=None,
@@ -348,7 +349,7 @@ class TestTPUJaxRunner(unittest.TestCase):
             block_ids=([3], ),
             num_computed_tokens=1,
             lora_request=None,
-            mm_inputs=[],
+            mm_kwargs=[],
             mm_hashes=[],
             mm_positions=[],
             pooling_params=None,
@@ -459,7 +460,7 @@ class TestTPUJaxRunner(unittest.TestCase):
                     block_ids=([1], ),
                     num_computed_tokens=1,
                     lora_request=None,
-                    mm_inputs=[],
+                    mm_kwargs=[],
                     mm_hashes=[],
                     mm_positions=[],
                     pooling_params=None,
@@ -522,10 +523,12 @@ class TestTPUJaxRunner(unittest.TestCase):
         # Mock request state
         dummy_pixel_values = torch.randn(3, 224, 224, dtype=torch.bfloat16)
         dummy_grid_thw = torch.tensor([[1, 1, 1]], dtype=torch.int64)
-        mm_kwargs = MultiModalKwargs({
-            "pixel_values": dummy_pixel_values,
-            "image_grid_thw": dummy_grid_thw,
-        })
+        mm_item = MultiModalKwargsItem.from_elems([
+            MultiModalFieldElem("image", "pixel_values", dummy_pixel_values,
+                                MultiModalBatchedField()),
+            MultiModalFieldElem("image", "image_grid_thw", dummy_grid_thw,
+                                MultiModalBatchedField())
+        ])
 
         req_state = CachedRequestState(
             req_id="req-1",
@@ -534,7 +537,7 @@ class TestTPUJaxRunner(unittest.TestCase):
             sampling_params=MagicMock(),
             block_ids=(),
             num_computed_tokens=0,
-            mm_inputs=[mm_kwargs],
+            mm_kwargs=[mm_item],
             mm_positions=[PlaceholderRange(offset=0, length=1)],
             lora_request=None,
             mm_hashes=[],
@@ -577,8 +580,8 @@ class TestTPUJaxRunner(unittest.TestCase):
         self.assertEqual(passed_pixel_values.dtype, jnp.bfloat16)
 
         # Convert torch tensor for comparison
-        expected_pixel_values = dummy_pixel_values.unsqueeze(0).to(
-            torch.float32).numpy().astype(jnp.bfloat16)
+        expected_pixel_values = dummy_pixel_values.unsqueeze(0).unsqueeze(
+            0).to(torch.float32).numpy().astype(jnp.bfloat16)
         np.testing.assert_array_equal(np.asarray(passed_pixel_values),
                                       expected_pixel_values)
 
@@ -601,10 +604,14 @@ class TestTPUJaxRunner(unittest.TestCase):
         # Mock request states
         px_1 = torch.randn(3, 224, 224, dtype=torch.bfloat16)
         grid_1 = torch.tensor([[1, 1, 1]], dtype=torch.int64)
-        mm_kwargs_1 = MultiModalKwargs({
-            "pixel_values": px_1,
-            "image_grid_thw": grid_1
-        })
+
+        mm_item_1 = MultiModalKwargsItem.from_elems([
+            MultiModalFieldElem("image", "pixel_values", px_1,
+                                MultiModalBatchedField()),
+            MultiModalFieldElem("image", "image_grid_thw", grid_1,
+                                MultiModalBatchedField())
+        ])
+
         req_state_1 = CachedRequestState(
             req_id="req-1",
             prompt_token_ids=[],
@@ -612,7 +619,7 @@ class TestTPUJaxRunner(unittest.TestCase):
             sampling_params=MagicMock(),
             block_ids=(),
             num_computed_tokens=0,
-            mm_inputs=[mm_kwargs_1],
+            mm_kwargs=[mm_item_1],
             mm_positions=[PlaceholderRange(offset=0, length=1)],
             lora_request=None,
             mm_hashes=[],
@@ -621,10 +628,13 @@ class TestTPUJaxRunner(unittest.TestCase):
 
         px_2 = torch.randn(3, 224, 224, dtype=torch.bfloat16)
         grid_2 = torch.tensor([[1, 2, 2]], dtype=torch.int64)
-        mm_kwargs_2 = MultiModalKwargs({
-            "pixel_values": px_2,
-            "image_grid_thw": grid_2
-        })
+        mm_item_2 = MultiModalKwargsItem.from_elems([
+            MultiModalFieldElem("image", "pixel_values", px_2,
+                                MultiModalBatchedField()),
+            MultiModalFieldElem("image", "image_grid_thw", grid_2,
+                                MultiModalBatchedField())
+        ])
+
         req_state_2 = CachedRequestState(
             req_id="req-2",
             prompt_token_ids=[],
@@ -632,7 +642,7 @@ class TestTPUJaxRunner(unittest.TestCase):
             sampling_params=MagicMock(),
             block_ids=(),
             num_computed_tokens=0,
-            mm_inputs=[mm_kwargs_2],
+            mm_kwargs=[mm_item_2],
             mm_positions=[PlaceholderRange(offset=0, length=1)],
             lora_request=None,
             mm_hashes=[],
@@ -669,10 +679,11 @@ class TestTPUJaxRunner(unittest.TestCase):
         self.assertIn("pixel_values", kwargs_arg)
 
         passed_pixel_values = kwargs_arg['pixel_values']
-        self.assertEqual(passed_pixel_values.shape, (2, 3, 224, 224))
+        self.assertEqual(passed_pixel_values.shape, (2, 1, 3, 224, 224))
 
-        expected_pixel_values = torch.stack([px_1, px_2], dim=0).to(
-            torch.float32).numpy().astype(jnp.bfloat16)
+        expected_pixel_values = torch.stack(
+            [px_1, px_2],
+            dim=0).unsqueeze(1).to(torch.float32).numpy().astype(jnp.bfloat16)
         np.testing.assert_array_equal(np.asarray(passed_pixel_values),
                                       expected_pixel_values)
 
@@ -707,7 +718,7 @@ class TestTPUJaxRunner(unittest.TestCase):
             sampling_params=mock_sampling_params,
             block_ids=([], ),
             num_computed_tokens=0,  # This will be updated per step
-            mm_inputs=[],
+            mm_kwargs=[],
             mm_positions=[PlaceholderRange(offset=10, length=56)],
             lora_request=None,
             mm_hashes=[],
@@ -830,7 +841,7 @@ class TestTPUJaxRunner(unittest.TestCase):
             sampling_params=mock_sampling_params,
             block_ids=([], ),
             num_computed_tokens=num_computed,
-            mm_inputs=[],
+            mm_kwargs=[],
             mm_positions=[],
             lora_request=None,
             mm_hashes=[],
