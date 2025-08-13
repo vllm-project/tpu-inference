@@ -12,6 +12,7 @@ import jax.numpy as jnp
 from jax._src.interpreters import pxla
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
+import tpu_commons.kernels.ragged_paged_attention.v3.kernel as rpa
 from tpu_commons import utils
 from tpu_commons.logger import init_logger
 
@@ -197,7 +198,7 @@ def create_kv_caches(
 ) -> List[jax.Array]:
     """
     Creates the KV caches, one per each decoder layer in the model, where the shape of each cache is
-    (num_blocks, block_size, num_kv_heads * 2 // packing, packing, head_size).
+    (num_blocks, block_size, cdiv(num_kv_heads * 2, packing), packing, head_size).
 
     Args:
         num_blocks: The number of blocks in the KV cache.
@@ -217,18 +218,18 @@ def create_kv_caches(
     # TODO(xiang): fix this together with get_kv_cache_spec
     # cache_dtype = kv_cache_spec.dtype
 
-    assert cache_dtype == jnp.bfloat16, "[jevin debug] Only bfloat16 KV cache is supported for now"
-
-    cache_shape = (
-        num_blocks,
-        block_size,
-        num_kv_heads * 2 // 2,
-        2,  # packing, always 2 for now
-        head_size,
-    )
-
     # Shard the num_kv_heads dim along the 'model' axis.
     sharding = NamedSharding(mesh, PartitionSpec(None, None, "model"))
+
+    # Instead of sharding automatically, we manually calculate the kv cache for
+    # each shard because the padding logic for RPA's KV cache needs to know
+    # the exact head number on each shard. In other words, we can not determine
+    # the padding logics for kv cache globally.
+    shard_cnt = mesh.shape["model"]
+    assert num_kv_heads % shard_cnt == 0
+    cache_shape = (shard_cnt, *rpa.get_kv_cache_shape(
+        num_blocks, block_size, num_kv_heads // shard_cnt, head_size,
+        cache_dtype))
 
     def _allocate() -> jax.Array:
         return jnp.empty(

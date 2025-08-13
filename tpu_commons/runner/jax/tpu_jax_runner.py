@@ -75,6 +75,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
     ):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
+        # TODO(jevinjiang): override block size based on RPA v3.
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
         self.load_config = vllm_config.load_config
@@ -1416,10 +1417,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                 i += 1
                 j -= 1
                 swap_cnt += 1
-
-        if i >= len(self.input_batch.req_ids):
-            raise ValueError(
-                f"{i=}, {len(self.input_batch.req_ids)=}, {num_reqs=}")
 
         num_decode = i + int(scheduler_output.num_scheduled_tokens[
             self.input_batch.req_ids[i]] == 1)

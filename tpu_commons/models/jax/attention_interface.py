@@ -14,17 +14,19 @@ def sharded_ragged_paged_attention(sm_scale: float,
                                    mesh: Mesh,
                                    attention_chunk_size: int | None = None):
     """Shards along KV heads."""
+    qkv_spec = P(None, "model", None)
+    kv_cache_spec = P("model", None, None, None, None, None)
     in_specs = (
-        P(None, "model", None),  # q
-        P(None, "model", None),  # k
-        P(None, "model", None),  # v
-        P(None, None, "model", None, None),  # kv cache
+        qkv_spec,  # q
+        qkv_spec,  # k
+        qkv_spec,  # v
+        kv_cache_spec,  # kv cache
         P(),  # kv_lens
         P(),  # page_indices
         P(),  # cu_q_lens
         P(),  # distribution
     )
-    out_specs = (P(None, "model", None), P(None, None, "model", None, None))
+    out_specs = (qkv_spec, kv_cache_spec)
 
     def _ragged_paged_attention(*args):
         return ragged_paged_attention(
@@ -60,10 +62,13 @@ def attention(
     # H: head_dim
     # L: num_blocks
     # S: block_size
+    # P: kv_packing = 32 // kv_bit_width
+    # Q: q_packing = 32 // q_bit_width
 
+    # TODO(jevinjiang, cuiq): transpose q weight offline.
     # q: (T, N, H)
     # k,v: (T, K, H)
-    # kv_cache: (L, S, 2 * K, H)
+    # kv_cache: (L, S, cidv(2 * K, P), P, H)
 
     if head_dim_original is None:
         head_dim_original = q.shape[-1]
