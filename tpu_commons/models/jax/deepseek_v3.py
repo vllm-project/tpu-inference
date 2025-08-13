@@ -313,7 +313,6 @@ class DeepSeekV3(nnx.Module):
         return self.__call__(*args, **kwargs)
 
     def load_weights(self, rng: PRNGKey, cache_dir: Optional[str] = None):
-        self.rng = nnx.Rngs(rng)
         self.weight_loader.load_weights(self)
 
     def __call__(

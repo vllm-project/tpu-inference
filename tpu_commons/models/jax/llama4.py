@@ -261,7 +261,6 @@ class Llama4ForCausalLM(nnx.Module):
         nnx.display(self.lm_head)
 
     def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):
-        self.rng = nnx.Rngs(rng)
         weight_loader = Llama4WeightLoader(
             vllm_config=self.vllm_config,
             hidden_size=self.hidden_size,
