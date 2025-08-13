@@ -3,7 +3,7 @@ import hashlib
 import os
 import shutil
 import subprocess
-from typing import List
+from typing import List, Optional
 
 import filelock
 import huggingface_hub.constants
@@ -82,12 +82,12 @@ class DisabledTqdm(tqdm):
         super().__init__(*args, **kwargs, disable=True)
 
 
-def download_model_weights_from_hf(model_path: str,
+def download_model_weights_from_hf(model_path: str, cache_dir: Optional[str],
                                    weights_format: str) -> str:
     with get_lock(model_path):
         local_dir = snapshot_download(
             model_path,
-            cache_dir=None,  # can be specified by HF_HOME or HF_HUB_CACHE
+            cache_dir=cache_dir,  # can be specified by HF_HOME or HF_HUB_CACHE
             allow_patterns=weights_format,
             tqdm_class=DisabledTqdm,
             local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,

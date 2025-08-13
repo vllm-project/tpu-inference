@@ -39,6 +39,7 @@ class MockVllmConfig:
                                             dtype="bfloat16",
                                             hf_overrides={},
                                             override_generation_config={})
+        self.load_config = MagicMock()
         self.additional_config = {
             "random_weights": random_weights,
             "sharding": {
