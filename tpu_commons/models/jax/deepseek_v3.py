@@ -138,17 +138,11 @@ class DeepSeekV3(nnx.Module):
                 keyvalue_skh=NamedSharding(self.mesh, P(None, 'model', None)),
                 activation_attention_out_td=NamedSharding(
                     self.mesh, P(None, 'model')),
-                keyvalue_cache_lskh=NamedSharding(self.mesh, P()),
                 attn_o_tnh=NamedSharding(self.mesh, P(None, 'model', None)),
                 q_da_sharding=NamedSharding(self.mesh, P(None, 'model')),
                 anh_sharding=NamedSharding(self.mesh, P(None, 'model', None)),
                 kv_da_sharding=NamedSharding(self.mesh, P(None, 'model')),
-                nhd_sharding=NamedSharding(self.mesh, P('model', None, None)),
-                query_ktnph=NamedSharding(self.mesh,
-                                          P('model', None, None, None, None)),
-                keyvalue_cache_nbkph=NamedSharding(self.mesh, P()),
-                attn_o_ktnph=NamedSharding(self.mesh,
-                                           P('model', None, None, None, None)))
+                nhd_sharding=NamedSharding(self.mesh, P('model', None, None)))
 
         for i in range(first_k_dense_replace):
             block = TransformerBlock(

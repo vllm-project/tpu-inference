@@ -8,6 +8,7 @@ from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
+from tpu_commons.models.jax.attention_interface import get_kv_cache_shape
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.common.attention.attention import Attention
 
@@ -52,7 +53,6 @@ class TestAttention(unittest.TestCase):
             activation_q_td=dummy_sharding,
             query_tnh=dummy_sharding,
             keyvalue_skh=dummy_sharding,
-            keyvalue_cache_lskh=dummy_sharding,
             attn_o_tnh=dummy_sharding,
             rngs=nnx.Rngs(42),
         )
@@ -62,31 +62,22 @@ class TestAttention(unittest.TestCase):
 
         block_size = 16
         num_blocks = 8
-        cache_shape = (
-            num_blocks,
-            block_size,
-            num_attention_heads * 2,
-            head_dim,
-        )
+        kv_dtype = jnp.bfloat16
+        cache_shape = get_kv_cache_shape(num_blocks, block_size,
+                                         num_attention_heads, head_dim,
+                                         kv_dtype)
 
-        kv_cache = jnp.zeros(cache_shape, dtype=jnp.bfloat16)
+        kv_cache = jnp.zeros(cache_shape, dtype=kv_dtype)
 
         num_required_blocks = seq_len // block_size
-        num_slices = 8
-
-        slot_mapping = jnp.zeros((3, num_slices), dtype=jnp.int32)
-        slot_mapping = slot_mapping.at[:, 0].set(jnp.array([0, 0, seq_len]))
 
         attention_metadata = AttentionMetadata(
             input_positions=jnp.arange(seq_len, dtype=jnp.int32),
-            slot_mapping=slot_mapping,
-            block_tables=jnp.array([list(range(num_required_blocks))],
+            block_tables=jnp.array(list(range(num_required_blocks)),
                                    dtype=jnp.int32),
             seq_lens=jnp.array([seq_len], dtype=jnp.int32),
-            num_seqs=jnp.array([1], dtype=jnp.int32),
             query_start_loc=jnp.array([0, seq_len], dtype=jnp.int32),
-            num_slices=jnp.array([1], dtype=jnp.int32),
-            request_distribution=None,
+            request_distribution=jnp.array([0, 0, 1], dtype=jnp.int32),
         )
 
         new_kv_cache, output = attention(

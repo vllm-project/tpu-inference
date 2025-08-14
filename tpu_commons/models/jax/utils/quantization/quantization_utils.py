@@ -110,13 +110,9 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
                                    0,
                                    100,
                                    dtype=jnp.int32)
-    # NOTE: this is 3 since slices it's a list of (kv_cache_start, new_kv_start, slice_len)
-    slot_mapping_metadata = jax.random.randint(
-        rng, (3, DEFAULT_NUM_TOKENS_FOR_MODEL_INPUTS), 0, 100, dtype=jnp.int32)
-    num_slices = jax.random.randint(rng, (1, ), 0, 100, dtype=jnp.int32)
     block_tables = jax.random.randint(rng,
-                                      (DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS,
-                                       DEFAULT_MAX_NUM_BLOCKS_PER_REQ),
+                                      (DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS *
+                                       DEFAULT_MAX_NUM_BLOCKS_PER_REQ, ),
                                       0,
                                       100,
                                       dtype=jnp.int32)
@@ -131,11 +127,12 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
                                   100,
                                   dtype=jnp.int32)
     num_seqs = jax.random.randint(rng, (1, ), 0, 100, dtype=jnp.int32)
+    request_distribution = jnp.array([0, 0, num_seqs[0]], dtype=jnp.int32)
 
-    (input_ids, positions, slot_mapping_metadata, num_slices, block_tables,
-     query_start_loc, seq_lens, num_seqs) = _device_array(
-         (input_ids, positions, slot_mapping_metadata, num_slices,
-          block_tables, query_start_loc, seq_lens, num_seqs))
+    (input_ids, positions, block_tables, query_start_loc, seq_lens,
+     request_distribution) = _device_array(
+         (input_ids, positions, block_tables, query_start_loc, seq_lens,
+          request_distribution))
 
     model_input = {
         "kv_caches":
@@ -143,15 +140,11 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
         "input_ids":
         input_ids,
         "attention_metadata":
-        AttentionMetadata(
-            input_positions=positions,
-            slot_mapping=slot_mapping_metadata,
-            block_tables=block_tables,
-            seq_lens=seq_lens,
-            query_start_loc=query_start_loc,
-            num_seqs=num_seqs,
-            num_slices=num_slices,
-        ),
+        AttentionMetadata(input_positions=positions,
+                          block_tables=block_tables,
+                          seq_lens=seq_lens,
+                          query_start_loc=query_start_loc,
+                          request_distribution=request_distribution),
     }
     model = qwix.quantize_model(model, qwix.PtqProvider(qwix_rules),
                                 **model_input)
