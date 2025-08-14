@@ -7,7 +7,7 @@ from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
-from tpu_commons.models.jax.attention_interface import get_kv_cache_shape
+from tpu_commons.models.jax.attention import get_kv_cache_shape
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.common.attention.deepseek_v3_attention import MLA
 
