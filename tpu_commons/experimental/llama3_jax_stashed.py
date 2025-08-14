@@ -123,8 +123,7 @@ class LlamaForCausalLM(nnx.Module):
                                                 P(None, "model", None)),
                         keyvalue_skh=NamedSharding(self.mesh,
                                                    P(None, "model", None)),
-                        keyvalue_cache_lskh=NamedSharding(
-                            self.mesh, P(None, None, "model", None)),
+                        keyvalue_cache_lskh=NamedSharding(self.mesh, P()),
                         attn_o_tnh=NamedSharding(self.mesh,
                                                  P(None, "model", None)),
                     ),
