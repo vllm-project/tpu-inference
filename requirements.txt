@@ -1,5 +1,5 @@
 tpu-info
-yapf == 0.43.0
+yapf==0.43.0
 pytest
 pytest-mock
 absl-py
