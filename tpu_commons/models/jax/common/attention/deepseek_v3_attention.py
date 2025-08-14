@@ -114,8 +114,10 @@ class MLA(nnx.Module):
             random_init=self.random_init,
         )
         self.kernel_o_proj_NHD = create_param(
-            self.rngs, (self.N, self.v_head_dim, self.D), self.nhd_sharding,
-            self.dtype)
+            self.rngs, (self.N, self.v_head_dim, self.D),
+            self.nhd_sharding,
+            self.dtype,
+            random_init=self.random_init)
         self.q_rms_norm = RMSNorm(
             dims=self.q_lora_rank,
             mesh=self.mesh,
@@ -236,6 +238,8 @@ class MLA(nnx.Module):
             outputs_TNH = outputs_TNH[..., :self.v_head_dim]
 
         with jax.named_scope("o_proj"):
+            print(f"[jevin debug] {outputs_TNH=}")
+            print(f"[jevin debug] {self.kernel_o_proj_NHD.value=}")
             o_TD = jnp.einsum("TNH,NHD -> TD", outputs_TNH,
                               self.kernel_o_proj_NHD.value)
             o_TD = nnx.with_sharding_constraint(
@@ -277,16 +281,16 @@ class MLA(nnx.Module):
         """
         md = attention_metadata
         in_specs = (
-            P(*self.query_tnh),  # q
-            P(*self.keyvalue_skh),  # k
-            P(*self.keyvalue_skh),  # v
+            self.query_tnh.spec,  # q
+            self.keyvalue_skh.spec,  # k
+            self.keyvalue_skh.spec,  # v
             P(),  # kv_cache: Replicated
             P(),  # md.seq_lens: Replicated
             P(),  # page_indices_flat: Replicated
             P(),  # query_start_loc: Replicated
             P(),  # distribution: Replicated
         )
-        out_specs = (P(*self.attn_o_tnh), P())
+        out_specs = (self.attn_o_tnh.spec, P())
 
         def _ragged_paged_attention(*args):
             return ragged_paged_attention(
