@@ -20,9 +20,11 @@ from tpu_commons.models.jax.common.moe.moe import MoE, Router
 from tpu_commons.models.jax.common.transformer_block import \
     SharedExpertsTransformerBlock
 from tpu_commons.models.jax.layers.misc import shard_put
-from tpu_commons.models.jax.utils.weight_utils import (
-    get_param, hf_model_weights_iterator, print_param_info, reshape_params,
-    transpose_params)
+from tpu_commons.models.jax.utils.weight_utils import (get_param,
+                                                       model_weights_generator,
+                                                       print_param_info,
+                                                       reshape_params,
+                                                       transpose_params)
 
 logger = init_logger(__name__)
 
@@ -297,7 +299,7 @@ class Llama4WeightLoader:
 
     def __init__(self, vllm_config: VllmConfig, hidden_size, attn_heads,
                  num_key_value_heads, attn_head_dim):
-        self.names_and_weights_generator = hf_model_weights_iterator(
+        self.names_and_weights_generator = model_weights_generator(
             model_name_or_path=vllm_config.model_config.model,
             framework="flax",
             filter_regex="language_model")

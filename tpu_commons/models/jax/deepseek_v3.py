@@ -23,8 +23,10 @@ from tpu_commons.models.jax.common.moe.moe import MoE
 from tpu_commons.models.jax.common.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
 from tpu_commons.models.jax.layers.misc import shard_put
-from tpu_commons.models.jax.utils.weight_utils import (
-    get_param, hf_model_weights_iterator, print_param_info, reshape_params)
+from tpu_commons.models.jax.utils.weight_utils import (get_param,
+                                                       model_weights_generator,
+                                                       print_param_info,
+                                                       reshape_params)
 
 logger = init_logger(__name__)
 
@@ -343,10 +345,8 @@ class DeepSeekV3WeightLoader:
                  qk_rope_head_dim, v_head_dim, num_local_experts):
 
         self.num_layers = num_layers
-        self.names_and_weights_generator = hf_model_weights_iterator(
-            model_name_or_path=vllm_config.model_config.model,
-            framework="pt",
-            filter_regex="")
+        self.names_and_weights_generator = model_weights_generator(
+            model_name_or_path=vllm_config.model_config.model, framework="pt")
         self.num_routed_experts = num_local_experts
 
         self._transpose_map = {

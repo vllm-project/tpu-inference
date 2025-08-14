@@ -194,19 +194,15 @@ class TestLlama3WeightLoader:
 
         # Original weight shape is (vocab_size, hidden_size)
         original_weight = jnp.ones((128, 32))
-        dummy_weights = [
-            ("model.embed_tokens.weight", original_weight),
-        ]
-        weight_loader.names_and_weights_generator = dummy_weights
 
         # Mock get_param to return a mock param with the target shape (hidden_size, vocab_size)
         mock_param = MockParam(shape=(128, 32))
 
-        with patch("tpu_commons.experimental.llama3_jax_stashed.model_weights_generator", return_value=dummy_weights), \
-            patch("tpu_commons.experimental.llama3_jax_stashed.get_param", return_value=mock_param), \
+        with patch("tpu_commons.experimental.llama3_jax_stashed.get_param", return_value=mock_param), \
             patch("tpu_commons.experimental.llama3_jax_stashed.shard_put", return_value=jnp.ones(mock_param.value.shape)) as mock_shard_put:
             # This will now pass after the code fix
-            weight_loader.load_weights_single_thread(model, [], mesh)
+            weight_loader.load_weights_single_thread(
+                model, "model.embed_tokens.weight", original_weight, mesh)
 
             # Assert that shard_put was called with the correctly transposed weight
             mock_shard_put.assert_called_once()
