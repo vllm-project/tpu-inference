@@ -38,6 +38,7 @@ def ref_ragged_paged_attention(
     sliding_window: int | None = None,
     soft_cap: float | None = None,
     mask_value: float | None = DEFAULT_MASK_VALUE,
+    q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
 ):
@@ -57,6 +58,7 @@ def ref_ragged_paged_attention(
         sliding_window=sliding_window,
         soft_cap=soft_cap,
         mask_value=mask_value,
+        q_scale=q_scale,
         k_scale=k_scale,
         v_scale=v_scale,
     )
@@ -108,17 +110,19 @@ def ref_ragged_paged_attention(
                 -1, actual_num_kv_heads, head_dim * 2)
         k = kv[:kv_len, :, :head_dim][:, :, :actual_head_dim]
         v = kv[:kv_len, :, head_dim:][:, :, :actual_head_dim]
-        if k_scale is not None:
-            k = (k * k_scale).astype(q.dtype)
-        if v_scale is not None:
-            v = (v * v_scale).astype(q.dtype)
         k = jnp.repeat(k, actual_num_q_heads_per_kv_head, axis=1)
         v = jnp.repeat(v, actual_num_q_heads_per_kv_head, axis=1)
+
         attn = jnp.einsum("qhd,khd->hqk",
                           q,
                           k,
                           preferred_element_type=jnp.float32)
         attn *= sm_scale
+        if k_scale is not None:
+            attn *= k_scale
+        if q_scale is not None:
+            attn *= q_scale
+
         q_span = (kv_len - q_len) + jax.lax.broadcasted_iota(
             jnp.int32, attn.shape, 1)
         kv_span = jax.lax.broadcasted_iota(jnp.int32, attn.shape, 2)
@@ -129,7 +133,11 @@ def ref_ragged_paged_attention(
             attn = soft_cap * jnp.tanh(attn / soft_cap)
         attn += jnp.where(mask, mask_value, 0.0)
         attn = jax.nn.softmax(attn, axis=-1).astype(v.dtype)
+
         out = jnp.einsum("hqk,khd->qhd", attn, v).astype(queries.dtype)
+        if v_scale is not None:
+            out *= v_scale
+
         outputs.append(out)
 
     result = jnp.concatenate(outputs, axis=0)
@@ -233,6 +241,7 @@ def _ragged_paged_attention_kernel(
     sliding_window: int | None = None,
     soft_cap: float | None = None,
     mask_value: float = DEFAULT_MASK_VALUE,
+    q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
     chunk_prefill_size: int | None = None,
@@ -322,9 +331,13 @@ def _ragged_paged_attention_kernel(
                              ref[...])
 
         # Follow FlashAttention-2 forward pass.
-        s = (
-            jnp.einsum("nd,md->nm", q, k, preferred_element_type=jnp.float32) *
-            sm_scale)
+        s = jnp.einsum("nd,md->nm", q, k, preferred_element_type=jnp.float32)
+        s *= sm_scale
+        if k_scale is not None:
+            s *= k_scale
+        if q_scale is not None:
+            s *= q_scale
+
         q_span = (kv_len - q_len + bq_idx * bq_sz +
                   lax.broadcasted_iota(jnp.int32, s.shape, 0) //
                   num_q_heads_per_kv_head)
@@ -342,7 +355,11 @@ def _ragged_paged_attention_kernel(
         m_curr = jnp.maximum(m_prev, s_rowmax)
         head_m_ref[...] = m_curr
         p = jnp.exp(s - broadcast_minor(m_curr, s.shape))
+
         pv = jnp.einsum("nm,md->nd", p, v, preferred_element_type=jnp.float32)
+        if v_scale is not None:
+            pv *= v_scale
+
         p_rowsum = jnp.sum(p, axis=1, keepdims=True)
         exp_m_diff = jnp.exp(m_prev - m_curr)
         l_prev = load_with_init(head_l_ref, 0.0)
@@ -631,17 +648,10 @@ def _ragged_paged_attention_kernel(
             v = pltpu.bitcast(v, kv_dtype)
             return (k, v)
 
-        def _dequantize_kv(k, v):
-            if k_scale is not None:
-                k = (k.astype(jnp.float32) * k_scale).astype(q_dtype)
-            if v_scale is not None:
-                v = (v.astype(jnp.float32) * v_scale).astype(q_dtype)
-            return (k, v)
-
         if kv_packing == 1:
             k = strided_load(kv_ref, start, step, dtype=kv_dtype)
             v = strided_load(kv_ref, start + 1, step, dtype=kv_dtype)
-            return [_dequantize_kv(*_mask_kv(k, v))]
+            return [_mask_kv(k, v)]
 
         kv = strided_load(kv_ref, start, step)
         bitwidth = 32 // kv_packing
@@ -650,7 +660,7 @@ def _ragged_paged_attention_kernel(
         for i in range(0, kv_packing, 2):
             k = (kv >> (i * bitwidth)).astype(repack_ty)
             v = (kv >> ((i + 1) * bitwidth)).astype(repack_ty)
-            lst.append(_dequantize_kv(*_mask_kv(k, v)))
+            lst.append(_mask_kv(k, v))
         return lst
 
     def broadcast_minor(src, shape):
@@ -954,6 +964,7 @@ def dynamic_validate_inputs(
     sliding_window: int | None = None,
     soft_cap: float | None = None,
     mask_value: float | None = DEFAULT_MASK_VALUE,
+    q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
     # Kernel optimization params.
@@ -979,6 +990,7 @@ def dynamic_validate_inputs(
         sliding_window=sliding_window,
         soft_cap=soft_cap,
         mask_value=mask_value,
+        q_scale=q_scale,
         k_scale=k_scale,
         v_scale=v_scale,
         chunk_prefill_size=chunk_prefill_size,
@@ -1042,6 +1054,7 @@ def static_validate_inputs(
     sliding_window: int | None = None,
     soft_cap: float | None = None,
     mask_value: float | None = DEFAULT_MASK_VALUE,
+    q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
     # Kernel optimization params.
@@ -1094,6 +1107,9 @@ def static_validate_inputs(
         raise ValueError(
             f"Expected {kv_cache.dtype=} to be equal to {k.dtype=} and {v.dtype=}."
         )
+    # Integer kv quantization is currently not supported.
+    if not jnp.issubdtype(kv_cache.dtype, jnp.floating):
+        raise ValueError(f"Expected {kv_cache.dtype=} to be a floating point.")
     if kv_packing != get_dtype_packing(kv_cache.dtype):
         raise ValueError(
             f"{kv_packing=} does not match with {kv_cache.dtype=}")
@@ -1152,6 +1168,7 @@ def static_validate_inputs(
     # No constraints for the following inputs.
     del sm_scale
     del mask_value
+    del q_scale
     del k_scale
     del v_scale
     del debug_mode
@@ -1164,6 +1181,7 @@ def static_validate_inputs(
         "sliding_window",
         "soft_cap",
         "mask_value",
+        "q_scale",
         "k_scale",
         "v_scale",
         "chunk_prefill_size",
@@ -1191,6 +1209,7 @@ def ragged_paged_attention(
     sliding_window: int | None = None,
     soft_cap: float | None = None,
     mask_value: float | None = DEFAULT_MASK_VALUE,
+    q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
     # Kernel optimization params.
@@ -1249,6 +1268,7 @@ def ragged_paged_attention(
         sliding_window=sliding_window,
         soft_cap=soft_cap,
         mask_value=mask_value,
+        q_scale=q_scale,
         k_scale=k_scale,
         v_scale=v_scale,
         chunk_prefill_size=chunk_prefill_size,
@@ -1373,6 +1393,7 @@ def ragged_paged_attention(
                 sliding_window=sliding_window,
                 soft_cap=soft_cap,
                 mask_value=mask_value,
+                q_scale=q_scale,
                 k_scale=k_scale,
                 v_scale=v_scale,
                 chunk_prefill_size=chunk_prefill_size,
