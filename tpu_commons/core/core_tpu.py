@@ -11,7 +11,7 @@ import traceback
 from typing import Any, Callable, Optional, TypeVar, Union
 
 import jax
-from vllm.config import VllmConfig
+from microbenchmark_utils import VllmConfig
 from vllm.logger import init_logger
 from vllm.tasks import POOLING_TASKS
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,

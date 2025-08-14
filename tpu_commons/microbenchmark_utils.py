@@ -16,25 +16,19 @@ import warnings
 from tpu_commons.models.jax.model_loader import _get_model_architecture
 import os
 import functools
+from model_loader import _apply_qwix_quantization
 
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore")
+# with warnings.catch_warnings():
+#     warnings.simplefilter("ignore")
 
-    # Import the class; all warnings will be suppressed
-    from vllm.config import ModelConfig
+#     # Import the class; all warnings will be suppressed
+#     from microbenchmark_utils import ModelConfig
 
 
 logger = init_logger(__name__)
 
 power_of_two = np.pow(2, np.arange(18))  # up to 128k seq lens
 
-
-@dataclass
-class VllmConfig():
-    additional_config: Mapping[str, Any] = field(default_factory=dict)
-    # Set default max_model_len to turn off warnings.
-    model_config: ModelConfig = field(
-        default_factory=lambda: ModelConfig(max_model_len=1024))
 
 
 @dataclass
@@ -52,6 +46,13 @@ class ModelConfig():
     hf_config: str = ""
     architectures: List[str] = field(default_factory=list)
     override_generation_config: dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class VllmConfig():
+    additional_config: Mapping[str, Any] = field(default_factory=dict)
+    # Set default max_model_len to turn off warnings.
+    model_config: ModelConfig = field(
+        default_factory=lambda: ModelConfig(max_model_len=1024))
 
 
 @dataclass
@@ -104,18 +105,13 @@ def _get_nnx_model_and_model_cfg(
     model=None,
 ) -> nnx.Module:
     if os.getenv("JAX_RANDOM_WEIGHTS", False):
-        # Create a sharded model with random inited weights.
-        @nnx.jit
-        def create_sharded_model():
-            random_model = model_class(vllm_config, rng, mesh)
-            state = nnx.state(random_model)
-            pspecs = nnx.get_partition_spec(state)
-            sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
-            nnx.update(model, sharded_state)
-            return random_model
-
         with mesh:
-            jit_model = create_sharded_model()
+            model = model_class.create_model_with_random_weights(
+                    vllm_config, rng, mesh)
+            model = _apply_qwix_quantization(vllm_config, model, rng,
+                                                     mesh)
+            
+            
     else:
         # We first create an abstract model without allocating any weights,
         # then fill in its weigths during load_weights from HF.
@@ -133,14 +129,14 @@ def _get_nnx_model_and_model_cfg(
         # Although the created model can already work, we still need to jit
         # the model creation again, otherwise the model forward will have
         # non-trivial overhead in PjitFunction.
-        @nnx.jit(donate_argnums=(0, ))
-        def create_jit_model(model):
-            state = nnx.state(model)
-            nnx.update(model, state)
-            return model
+    @nnx.jit(donate_argnums=(0, ))
+    def create_jit_model(model):
+        state = nnx.state(model)
+        nnx.update(model, state)
+        return model
 
-        with mesh:
-            jit_model = create_jit_model(model)
+    with mesh:
+        jit_model = create_jit_model(model)
     return jit_model
 
 

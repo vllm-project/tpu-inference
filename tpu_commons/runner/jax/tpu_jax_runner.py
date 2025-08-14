@@ -13,7 +13,7 @@ import numpy as np
 import vllm.envs as envs
 from flax import nnx
 from jax.sharding import NamedSharding, PartitionSpec
-from vllm.config import VllmConfig
+from microbenchmark_utils import VllmConfig
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.forward_context import set_forward_context

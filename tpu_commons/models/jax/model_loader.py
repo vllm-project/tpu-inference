@@ -6,7 +6,7 @@ import jax
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from transformers import PretrainedConfig
-from vllm.config import VllmConfig
+from microbenchmark_utils import VllmConfig
 
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.utils.quantization.quantization_utils import (

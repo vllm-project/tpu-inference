@@ -5,7 +5,7 @@ import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh
 from transformers import LlamaConfig, modeling_flax_utils
-from vllm.config import VllmConfig
+from microbenchmark_utils import VllmConfig
 
 from tpu_commons import utils
 from tpu_commons.logger import init_logger

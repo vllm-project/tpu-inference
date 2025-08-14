@@ -8,7 +8,7 @@ from jax.experimental import shard_map
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from jax.typing import DTypeLike
-from vllm.config import VllmConfig
+from microbenchmark_utils import VllmConfig
 
 from tpu_commons.kernels.ragged_paged_attention.kernel import \
     ragged_paged_attention

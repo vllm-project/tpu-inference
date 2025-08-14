@@ -27,7 +27,7 @@ with warnings.catch_warnings():
     warnings.simplefilter("ignore")
 
     # Import the class; all warnings will be suppressed
-    from vllm.config import ModelConfig
+    from microbenchmark_utils import ModelConfig
 
 
 logger = init_logger(__name__)

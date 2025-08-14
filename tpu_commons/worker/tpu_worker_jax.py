@@ -6,7 +6,7 @@ from typing import Callable, Dict, Optional, Tuple, Union
 import jax
 import jaxtyping
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from microbenchmark_utils import VllmConfig
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
                                           has_kv_transfer_group)
 from vllm.lora.request import LoRARequest

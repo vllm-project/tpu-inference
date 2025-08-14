@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from jax.sharding import Mesh
-from vllm.config import VllmConfig
+from microbenchmark_utils import VllmConfig
 
 BATCH_AXIS_NAME = 'data'
 SEQUENCE_AXIS_NAME = 'data'

@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh
-from vllm.config import VllmConfig
+from microbenchmark_utils import VllmConfig
 
 import tpu_commons.models.jax.common.sharding as sharding
 from tpu_commons.logger import init_logger
