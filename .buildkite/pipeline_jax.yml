@@ -68,7 +68,7 @@ steps:
        - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
 
 
-   - label: "[TEMP] for mm inference"
+   - label: "E2E offline inference test"
      key: test_6
      soft_fail: true
      agents:
