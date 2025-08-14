@@ -17,6 +17,7 @@ Follow this [guide](https://docs.vllm.ai/en/latest/getting_started/installation/
 cd ~
 git clone https://github.com/vllm-project/tpu_commons.git
 cd tpu_commons
+pip install -r requirements.txt
 pip install -e .
 ```
 
