@@ -60,18 +60,6 @@ def hf_model_weights_iterator(
         logger.info(f"Found weights from local: {model_name_or_path}")
         weights_files = glob.glob(
             os.path.join(model_name_or_path, HF_WEIGHTS_FORMAT))
-    elif file_utils.is_gcs_path(model_name_or_path):
-        local_free_disk_size = file_utils.get_free_disk_size()
-        model_size = file_utils.get_gcs_model_weights_size(
-            model_name_or_path, HF_WEIGHTS_FORMAT)
-        if model_size < local_free_disk_size * FULL_DOWNLOAD_DISK_RATIO:
-            logger.info(f"Downloading weights from GCS {model_name_or_path}")
-            weights_files = file_utils.download_model_weights_from_gcs(
-                model_name_or_path, HF_WEIGHTS_FORMAT)
-        else:
-            weights_files = file_utils.list_gcs_dir(model_name_or_path,
-                                                    HF_WEIGHTS_FORMAT)
-            weights_location = "gcs"
     elif file_utils.is_hf_repo(model_name_or_path):
         local_free_disk_size = file_utils.get_free_disk_size()
         model_size = file_utils.get_hf_model_weights_size(
@@ -86,7 +74,7 @@ def hf_model_weights_iterator(
             weights_location = "hf"
     else:
         raise ValueError(
-            f"{model_name_or_path} must be a local path, or a gcs path, or a HF model id."
+            f"{model_name_or_path} must be a local path, or a Huggingface model id."
         )
 
     if len(weights_files) == 0:
@@ -104,10 +92,7 @@ def hf_model_weights_iterator(
 
     for st_file in weights_files:
         logger.info(f"Loading weights from {st_file}")
-        if weights_location == "gcs":
-            st_file = file_utils.download_model_weights_from_gcs(
-                model_name_or_path, os.path.basename(st_file))[0]
-        elif weights_location == "hf":
+        if weights_location == "hf":
             st_file = file_utils.download_model_weights_from_hf(
                 model_name_or_path, os.path.basename(st_file))[0]
         # NOTE: We enforce loading tensors on CPU here.
@@ -150,15 +135,12 @@ def get_model_weights_files(model_name_or_path: str) -> List[str]:
         logger.info(f"Loading weights locally from: {model_name_or_path}")
         weights_files = glob.glob(
             os.path.join(model_name_or_path, HF_WEIGHTS_FORMAT))
-    elif file_utils.is_gcs_path(model_name_or_path):
-        weights_files = file_utils.download_model_weights_from_gcs(
-            model_name_or_path, HF_WEIGHTS_FORMAT)
     elif file_utils.is_hf_repo(model_name_or_path):
         weights_files = file_utils.download_model_weights_from_hf(
             model_name_or_path, HF_WEIGHTS_FORMAT)
     else:
         raise ValueError(
-            f"{model_name_or_path} must be a local path, or a gcs path, or a HF model id."
+            f"{model_name_or_path} must be a local path, or a Huggingface model id."
         )
 
     if len(weights_files) == 0:
