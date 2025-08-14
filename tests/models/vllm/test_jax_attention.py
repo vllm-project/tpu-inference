@@ -11,9 +11,10 @@ from vllm.attention import Attention as VllmAttention
 from vllm.config import set_current_vllm_config
 from vllm.engine.arg_utils import EngineArgs
 
-from tpu_commons import utils
-from tpu_commons.kernels.ragged_paged_attention.kernel import \
+from tpu_commons.kernels.ragged_paged_attention.v3.kernel import \
     ref_ragged_paged_attention
+from tpu_commons.models.jax.attention_interface import \
+    get_kv_cache_shape_with_mesh
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.vllm.jax_attention import JaxAttention
 from tpu_commons.models.vllm.vllm_model_wrapper_context import (
@@ -24,11 +25,6 @@ P = PartitionSpec
 
 def generate_attention_metadata(num_tokens, mesh) -> AttentionMetadata:
     input_positions = None  # not used in test, doesn't matter
-    slot_mapping = jnp.array(
-        [[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-         [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-         [num_tokens, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]],
-        dtype=jnp.int32)
     block_tables = jnp.array(
         [[1, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0],
          [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]],
@@ -36,16 +32,12 @@ def generate_attention_metadata(num_tokens, mesh) -> AttentionMetadata:
     seq_lens = jnp.array([num_tokens, 0, 0, 0, 0, 0, 0, 0], dtype=jnp.int32)
     query_start_loc = jnp.array([0, num_tokens, 1, 1, 1, 1, 1, 1, 1],
                                 dtype=jnp.int32)
-    num_seqs = jnp.array([1], dtype=jnp.int32)
-    num_slices = jnp.array([1], dtype=jnp.int32)
+    request_distribution = jnp.array([0, 0, 1], dtype=jnp.int32)
 
     input_positions = jax.device_put(input_positions,
                                      device=NamedSharding(
                                          mesh, PartitionSpec(None)))
-    slot_mapping = jax.device_put(slot_mapping,
-                                  device=NamedSharding(mesh,
-                                                       PartitionSpec(None)))
-    block_tables = jax.device_put(block_tables,
+    block_tables = jax.device_put(block_tables.reshape(-1),
                                   device=NamedSharding(mesh,
                                                        PartitionSpec(None)))
     seq_lens = jax.device_put(seq_lens,
@@ -53,32 +45,21 @@ def generate_attention_metadata(num_tokens, mesh) -> AttentionMetadata:
     query_start_loc = jax.device_put(query_start_loc,
                                      device=NamedSharding(
                                          mesh, PartitionSpec(None)))
-    num_seqs = jax.device_put(num_seqs,
-                              device=NamedSharding(mesh, PartitionSpec(None)))
-    num_slices = jax.device_put(num_slices,
-                                device=NamedSharding(mesh,
-                                                     PartitionSpec(None)))
 
     attention_metadata = AttentionMetadata(
         input_positions=input_positions,
-        slot_mapping=slot_mapping,
         block_tables=block_tables,
         seq_lens=seq_lens,
         query_start_loc=query_start_loc,
-        num_seqs=num_seqs,
-        num_slices=num_slices,
+        request_distribution=request_distribution,
     )
     return attention_metadata
 
 
 def generate_kv_caches(num_kv_heads, head_size, mesh, dtype):
-    cache_shape = (
-        1024,  # num_blocks
-        16,  # block_size
-        num_kv_heads * 2,
-        utils.get_padded_head_dim(head_size),
-    )
-    sharding = NamedSharding(mesh, PartitionSpec(None, None, "model", None))
+    cache_shape = get_kv_cache_shape_with_mesh(mesh, 1024, 16, num_kv_heads,
+                                               head_size, dtype)
+    sharding = NamedSharding(mesh, PartitionSpec())
 
     def _allocate():
         return jnp.empty(
@@ -158,22 +139,15 @@ def test_jax_attention(mesh, num_heads, head_size, num_kv_heads, num_tokens):
         vllm_model_wrapper_context = get_vllm_model_wrapper_context()
         kv_cache = vllm_model_wrapper_context.kv_caches[0]
 
-    if head_size % 128 != 0:
-        padded_head_size = utils.get_padded_head_dim(head_size)
-        pad_width = [(0, 0), (0, 0), (0, padded_head_size - head_size)]
-        q = jnp.pad(q,
-                    pad_width=pad_width,
-                    mode='constant',
-                    constant_values=0.0)
     ref_output = ref_ragged_paged_attention(q,
+                                            k,
+                                            v,
                                             kv_cache,
                                             md.seq_lens,
                                             md.block_tables,
                                             md.query_start_loc,
-                                            md.num_seqs,
+                                            md.request_distribution,
                                             sm_scale=scale)
-    if head_size % 128 != 0:
-        ref_output = ref_output[:, :, :head_size]
     ref_output = j2t(ref_output.astype(jnp.float32)).to(dtype)
 
     torch.testing.assert_close(ref_output, jax_output, atol=1e-2, rtol=1e-5)
