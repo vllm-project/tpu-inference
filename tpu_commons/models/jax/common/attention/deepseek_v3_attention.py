@@ -257,7 +257,7 @@ class MLA(Attention):
                                     (0, multiple_of_128 - self.qk_head_dim)))
             v_SNH = jnp.pad(v_SNH, ((0, 0), (0, 0),
                                     (0, multiple_of_128 - self.v_head_dim)))
-            new_kv_cache, outputs_TNH = self.attention(
+            new_kv_cache, outputs_TNH = self.attention_v3(
                 is_prefill,
                 kv_cache,
                 q_TNH,

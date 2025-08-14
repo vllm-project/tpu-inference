@@ -222,9 +222,9 @@ class TPUModelRunner():
             model_config.get_total_num_kv_heads(), self.mesh.shape["model"])
 
         # Pad head_dim to multiple of 128.
-        # head_size = model_config.get_head_size()
-        # head_size = common_utils.get_padded_head_dim(head_size)
-        head_size = 128
+        head_size = model_config.get_head_size()
+        head_size = common_utils.get_padded_head_dim(head_size)
+        # head_size = 128
 
         for i in range(model_config.get_num_layers(parallel_config)):
             kv_cache_spec[f"layers.{i}"] = FullAttentionSpec(
