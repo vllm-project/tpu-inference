@@ -54,6 +54,7 @@ steps:
      commands:
        - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
 
+
    - label: "E2E MLperf tests for Llama4 models"
      key: test_5
      soft_fail: true
@@ -64,6 +65,18 @@ steps:
        queue: tpu_v6e_8_queue
      commands:
        - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
+
+
+   - label: "[TEMP] for mm inference"
+     key: test_6
+     soft_fail: true
+     agents:
+       queue: tpu_v6e_queue
+     commands:
+       - |
+         .buildkite/scripts/run_in_docker.sh \
+           python3 -m pytest -s -v /workspace/tpu_commons/tests/e2e/test_multi_modal_inference.py
+
 
   # -----------------------------------------------------------------
   # NOTIFICATION STEP
@@ -76,6 +89,7 @@ steps:
        - test_3
        - test_4
        - test_5
+       - test_6
      agents:
        queue: tpu_v6e_queue
-     commands: "bash .buildkite/scripts/check_results.sh 'TPU JAX Tests Failed' test_0 test_1 test_2 test_3 test_4 test_5"
+     commands: "bash .buildkite/scripts/check_results.sh 'TPU JAX Tests Failed' test_0 test_1 test_2 test_3 test_4 test_5 test_6"
