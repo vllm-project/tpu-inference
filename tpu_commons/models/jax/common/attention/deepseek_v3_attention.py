@@ -238,8 +238,6 @@ class MLA(nnx.Module):
             outputs_TNH = outputs_TNH[..., :self.v_head_dim]
 
         with jax.named_scope("o_proj"):
-            print(f"[jevin debug] {outputs_TNH=}")
-            print(f"[jevin debug] {self.kernel_o_proj_NHD.value=}")
             o_TD = jnp.einsum("TNH,NHD -> TD", outputs_TNH,
                               self.kernel_o_proj_NHD.value)
             o_TD = nnx.with_sharding_constraint(
