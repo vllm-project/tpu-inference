@@ -71,11 +71,6 @@ class TestAttention(unittest.TestCase):
 
         num_required_blocks = seq_len // block_size
 
-        print(f"[jevin debug] {self.mesh=}")
-        print(f"[jevin debug] {cache_shape=}")
-        print(f"[jevin debug] {num_attention_heads=}")
-        print(f"[jevin debug] {attention.query_tnh=}")
-
         attention_metadata = AttentionMetadata(
             input_positions=jnp.arange(seq_len, dtype=jnp.int32),
             block_tables=jnp.array(list(range(num_required_blocks)),

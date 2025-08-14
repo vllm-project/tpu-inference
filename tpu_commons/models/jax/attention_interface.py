@@ -38,7 +38,6 @@ def sharded_ragged_paged_attention(sm_scale: float,
         P(),  # distribution
     )
     out_specs = (qkv_spec, kv_cache_spec)
-    print(f"[jevin debug] {mesh=}, {in_specs=}, {out_specs=}")
 
     def _ragged_paged_attention(*args):
         return ragged_paged_attention(

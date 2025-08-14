@@ -286,7 +286,7 @@ class MLA(nnx.Module):
             P(),  # query_start_loc: Replicated
             P(),  # distribution: Replicated
         )
-        out_specs = P(*self.attn_o_tnh)
+        out_specs = (P(*self.attn_o_tnh), P())
 
         def _ragged_paged_attention(*args):
             return ragged_paged_attention(
