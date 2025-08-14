@@ -9,7 +9,7 @@ from vllm.config import VllmConfig
 
 from tpu_commons import utils
 from tpu_commons.logger import init_logger
-from tpu_commons.models.jax.attention_interface import attention
+from tpu_commons.models.jax.attention import attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.layers.rope import apply_rope
 from tpu_commons.models.jax.utils.weight_utils import load_hf_weights
