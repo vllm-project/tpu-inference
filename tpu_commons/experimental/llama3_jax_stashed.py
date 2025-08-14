@@ -19,8 +19,7 @@ from tpu_commons.models.jax.common.layers import (DenseFFW, Embedder, LMhead,
                                                   RMSNorm)
 from tpu_commons.models.jax.common.transformer_block import TransformerBlock
 from tpu_commons.models.jax.layers.misc import shard_put
-from tpu_commons.models.jax.utils.weight_utils import (get_model_weights_files,
-                                                       get_param,
+from tpu_commons.models.jax.utils.weight_utils import (get_param,
                                                        model_weights_generator,
                                                        reshape_params,
                                                        transpose_params)
@@ -282,51 +281,51 @@ class Llama3WeightLoader:
 
         return self._loaded_to_standardized_keys.get(loaded_key, loaded_key)
 
-    def load_weights_single_thread(self, model_params, weights_file, mesh):
-        for loaded_name, loaded_weight in model_weights_generator(
-                weights_file, framework="flax"):
-            old_param_name = loaded_name
-            if loaded_name.endswith(".weight"):
-                loaded_name = loaded_name.removesuffix(".weight")
-            mapped_name = self.map_loaded_to_standardized_name(loaded_name)
-            model_weight = get_param(model_params, mapped_name)
+    def load_weights_single_thread(self, model_params, loaded_name,
+                                   loaded_weight, mesh):
+        old_param_name = loaded_name
+        if loaded_name.endswith(".weight"):
+            loaded_name = loaded_name.removesuffix(".weight")
+        mapped_name = self.map_loaded_to_standardized_name(loaded_name)
+        model_weight = get_param(model_params, mapped_name)
 
-            if model_weight is None:
-                logger.warning(
-                    f"Could not find a matching model parameter for loaded weight: '{old_param_name}' (mapped to: '{mapped_name}')"
-                )
-                continue
-
-            logger.debug(
-                f"{old_param_name}: {loaded_weight.shape}  -->  {mapped_name}: {model_weight.value.shape}"
+        if model_weight is None:
+            logger.warning(
+                f"Could not find a matching model parameter for loaded weight: '{old_param_name}' (mapped to: '{mapped_name}')"
             )
-            if loaded_name.endswith(".bias"):
-                loaded_weight = reshape_params(loaded_name, loaded_weight,
-                                               self._bias_shape_map)
-            else:
-                loaded_weight = reshape_params(loaded_name, loaded_weight,
-                                               self._weight_shape_map)
-                loaded_weight = transpose_params(loaded_name, loaded_weight,
-                                                 self._transpose_map)
-            if model_weight.value.shape != loaded_weight.shape:
-                raise ValueError(
-                    f"Loaded shape for {loaded_name}: {loaded_weight.shape} "
-                    f"does not match model shape for {mapped_name}: {model_weight.value.shape}!"
-                )
-            model_weight.value = shard_put(loaded_weight,
-                                           model_weight.sharding.spec,
-                                           mesh=mesh)
+            return
+
+        logger.debug(
+            f"{old_param_name}: {loaded_weight.shape}  -->  {mapped_name}: {model_weight.value.shape}"
+        )
+        if loaded_name.endswith(".bias"):
+            loaded_weight = reshape_params(loaded_name, loaded_weight,
+                                           self._bias_shape_map)
+        else:
+            loaded_weight = reshape_params(loaded_name, loaded_weight,
+                                           self._weight_shape_map)
+            loaded_weight = transpose_params(loaded_name, loaded_weight,
+                                             self._transpose_map)
+        if model_weight.value.shape != loaded_weight.shape:
+            raise ValueError(
+                f"Loaded shape for {loaded_name}: {loaded_weight.shape} "
+                f"does not match model shape for {mapped_name}: {model_weight.value.shape}!"
+            )
+        model_weight.value = shard_put(loaded_weight,
+                                       model_weight.sharding.spec,
+                                       mesh=mesh)
 
     def load_weights(self, model_for_loading: nnx.Module):
         model_params = nnx.state(model_for_loading)
         model_path = self.vllm_config.model_config.model
-        weights_files = get_model_weights_files(model_path)
-        max_workers = min(64, len(weights_files))
+        max_workers = 8
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
                 executor.submit(self.load_weights_single_thread, model_params,
-                                weights_file, model_for_loading.mesh)
-                for weights_file in weights_files
+                                loaded_name, loaded_weight,
+                                model_for_loading.mesh)
+                for loaded_name, loaded_weight in model_weights_generator(
+                    model_path, framework="flax")
             ]
             for future in futures:
                 future.result()

@@ -6,7 +6,7 @@ import math
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any, Dict, Generator, Optional
 
 import jax
 import jax.numpy as jnp
@@ -48,14 +48,13 @@ def reshape_params(param_key: str, param_tensor: jax.Array, shape_map):
     return param_tensor  # Base case / no-op
 
 
-# TODO: Update to use the multithreading approach.
-def hf_model_weights_iterator(
-    model_name_or_path: str,
-    framework: str,
-    filter_regex: Optional[str] = None,
-) -> Generator[tuple, Any, None]:
+def _get_model_weights_files(model_name_or_path: str) -> tuple[list[str], str]:
+    """
+    Helper to get weight files and their location.
+    """
     weights_files = []
     weights_location = "local"
+
     if os.path.isdir(model_name_or_path):
         logger.info(f"Found weights from local: {model_name_or_path}")
         weights_files = glob.glob(
@@ -77,24 +76,44 @@ def hf_model_weights_iterator(
             f"{model_name_or_path} must be a local path, or a Huggingface model id."
         )
 
-    if len(weights_files) == 0:
+    if not weights_files:
         raise RuntimeError(
             f"Cannot find any {HF_WEIGHTS_FORMAT} files in {model_name_or_path}."
         )
+
+    weights_files.sort()
+    return weights_files, weights_location
+
+
+def model_file_iterator(
+    model_name_or_path: str, ) -> Generator[str, None, None]:
+    weights_files, weights_location = _get_model_weights_files(
+        model_name_or_path)
 
     if weights_location != "local":
         logger.warning(
             "Weights files are not downloaded to local disk at once due to insufficient disk space. "
             "They will be downloaded on the fly during loading.")
 
-    # Sort to ensure the order of files is consistent.
-    weights_files.sort()
-
     for st_file in weights_files:
         logger.info(f"Loading weights from {st_file}")
         if weights_location == "hf":
             st_file = file_utils.download_model_weights_from_hf(
                 model_name_or_path, os.path.basename(st_file))[0]
+
+        yield st_file
+
+        if weights_location != "local":
+            file_utils.delete_file(st_file)
+
+
+def model_weights_generator(
+    model_name_or_path: str,
+    framework: str,
+    filter_regex: Optional[str] = None,
+) -> Generator[tuple, None, None]:
+    for st_file in model_file_iterator(model_name_or_path):
+        logger.info(f"Loading weights from {st_file}")
         # NOTE: We enforce loading tensors on CPU here.
         # Because otherwise the tensor will be loaded on TPU:0 by default,
         # although the tensor would eventually be sharded across multiple TPUs,
@@ -107,73 +126,6 @@ def hf_model_weights_iterator(
                         continue
                     weight_tensor = f.get_tensor(name)
                     yield name, weight_tensor
-        if weights_location != "local":
-            file_utils.delete_file(st_file)
-
-
-def model_weights_generator(
-    weights_file: str,
-    framework: str,
-) -> Generator[tuple, Any, None]:
-    """A generator that loads model weights from a single weights file."""
-    logger.info(f"Loading weights from {weights_file}")
-    # NOTE(xiang): We enforce loading tensors on CPU here.
-    # Because otherwise the tensor will be loaded on TPU:0 by default,
-    # although the tensor would eventually be sharded across multiple TPUs,
-    # it would lead to OOM on TPU:0 for large models.
-    with jax.default_device(jax.devices("cpu")[0]):
-        with safe_open(weights_file, framework=framework) as f:
-            for name in f.keys():
-                weight_tensor = f.get_tensor(name)
-                yield name, weight_tensor
-
-
-def get_model_weights_files(model_name_or_path: str) -> List[str]:
-    """Download and return all local model weights files."""
-    weights_files = []
-    if os.path.isdir(model_name_or_path):
-        logger.info(f"Loading weights locally from: {model_name_or_path}")
-        weights_files = glob.glob(
-            os.path.join(model_name_or_path, HF_WEIGHTS_FORMAT))
-    elif file_utils.is_hf_repo(model_name_or_path):
-        weights_files = file_utils.download_model_weights_from_hf(
-            model_name_or_path, HF_WEIGHTS_FORMAT)
-    else:
-        raise ValueError(
-            f"{model_name_or_path} must be a local path, or a Huggingface model id."
-        )
-
-    if len(weights_files) == 0:
-        raise RuntimeError(
-            f"Cannot find any {HF_WEIGHTS_FORMAT} files in {model_name_or_path}."
-        )
-    # Sort to ensure the order of files is consistent.
-    weights_files.sort()
-    return weights_files
-
-
-def get_num_kv_heads_by_tp(num_kv_heads: int, tp_size: int) -> int:
-    if tp_size <= num_kv_heads:
-        assert num_kv_heads % tp_size == 0
-        return num_kv_heads
-    else:
-        assert tp_size % num_kv_heads == 0
-        return tp_size
-
-
-def get_num_q_heads_by_tp(num_q_heads: int, num_kv_heads: int,
-                          tp_size: int) -> int:
-    num_kv_heads_by_tp = get_num_kv_heads_by_tp(num_kv_heads, tp_size)
-    kv_repeats = num_kv_heads_by_tp // num_kv_heads
-    q_repeats = 1
-    if num_q_heads % tp_size != 0:
-        if (num_q_heads * kv_repeats) % tp_size != 0:
-            raise ValueError(
-                f"Cannot make q_heads divisible by TP={tp_size} properly. Consider other padding strategies."
-            )
-        q_repeats = kv_repeats
-
-    return q_repeats * num_q_heads
 
 
 def get_param(params: nnx.State, path: str) -> nnx.State:
@@ -365,7 +317,7 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
                     mesh: Mesh):
     """Load weights from all model weights files to the model, run in multi threads."""
     model_path = vllm_config.model_config.model
-    weights_files = get_model_weights_files(model_path)
+    weights_files, _ = _get_model_weights_files(model_path)
     params = nnx.state(model)
     max_workers = min(64, len(weights_files))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
