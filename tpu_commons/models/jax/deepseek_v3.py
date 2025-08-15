@@ -22,11 +22,8 @@ from tpu_commons.models.jax.common.moe.deepseek_moe import DeepSeekV3Router
 from tpu_commons.models.jax.common.moe.moe import MoE
 from tpu_commons.models.jax.common.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
-from tpu_commons.models.jax.layers.misc import shard_put
-from tpu_commons.models.jax.utils.weight_utils import (get_param,
-                                                       model_weights_generator,
-                                                       print_param_info,
-                                                       reshape_params)
+from tpu_commons.models.jax.utils.weight_utils import (
+    get_param, hf_model_weights_iterator, print_param_info, reshape_params)
 
 logger = init_logger(__name__)
 
@@ -483,21 +480,29 @@ class DeepSeekV3WeightLoader:
         # Convert weights from torch into numpy
         # TODO: set cast_type based on model weight's type.
         cast_type = ml_dtypes.bfloat16
-        weight = weight.to(torch.float32).numpy().astype(cast_type)
+        weight_np = weight.to(torch.float32).numpy().astype(cast_type)
 
         # Reshape and transpose weights if necessary.
-        weight = reshape_params(name, weight, self._weight_shape_map)
-        weight = self._transpose_params(name, weight)
-        if model_weight.value.shape != weight.shape:
+        weight_np = reshape_params(name, weight_np, self._weight_shape_map)
+        weight_np = self._transpose_params(name, weight_np)
+
+        if model_weight.value.shape != weight_np.shape:
             raise ValueError(
-                f"Loaded shape for {name}: {weight.shape} "
+                f"Loaded shape for {name}: {weight_np.shape} "
                 f"does not match model shape for {mapped_name}: {model_weight.value.shape}!"
             )
-        model_weight.value = shard_put(weight,
-                                       model_weight.sharding.spec,
-                                       mesh=model_mesh)
+
+        def get_slice(index):
+            return weight_np[index]
+
+        sharded_array = jax.make_array_from_callback(
+            weight_np.shape, model_weight.sharding, get_slice)
+        
+        model_weight.value = sharded_array
+        
         model_weight.value.block_until_ready()
         del weight
+        del weight_np
         print_param_info(model_weight, name)
         return model_weight.value.nbytes / 1e9, model_weight.value.addressable_shards[
             0].data.nbytes / 1e9
