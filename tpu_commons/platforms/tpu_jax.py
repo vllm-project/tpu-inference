@@ -211,12 +211,15 @@ class TpuPlatform(Platform):
         # Validate additional config
         if additional_config := vllm_config.additional_config:
             # Try loading/parsing the quantization config so that we can fail fast
-            if quantization_file_name := additional_config.get("quantization"):
+            if quantization_config := additional_config.get("quantization"):
                 try:
-                    quantization_dict = quantization_config_file_path_to_dict(
-                        quantization_file_name)
+                    # NOTE: Qwix quantization supports two paths: 1. quantization config file (which we need to parse)
+                    #  2. quantization config JSON
+                    if isinstance(quantization_config, str):
+                        quantization_config = quantization_config_file_path_to_dict(
+                            quantization_config)
                     parse_qwix_config_to_rules(
-                        quantization_dict["qwix"]["rules"])
+                        quantization_config["qwix"]["rules"])
                 except Exception as e:
                     raise ValueError(
                         f"Invalid quantization config; please see README for details on quantization config: {e}"

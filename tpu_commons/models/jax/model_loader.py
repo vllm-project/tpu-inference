@@ -33,9 +33,11 @@ def _apply_qwix_quantization(vllm_config: VllmConfig, model: nnx.Module,
     # NOTE: we expect the value of "quantization" to be the name of a file in `tpu_commons/models/jax/utils/quantization/configs`
     # if given
     qwix_config = None
-    if vllm_config.additional_config.get("quantization"):
-        quantization_config = quantization_config_file_path_to_dict(
-            vllm_config.additional_config["quantization"])
+    if quantization_config := vllm_config.additional_config.get(
+            "quantization"):
+        if isinstance(quantization_config, str):
+            quantization_config = quantization_config_file_path_to_dict(
+                quantization_config)
         qwix_config = quantization_config.get("qwix").get("rules")
     if qwix_config:
         block_size = vllm_config.cache_config.block_size
