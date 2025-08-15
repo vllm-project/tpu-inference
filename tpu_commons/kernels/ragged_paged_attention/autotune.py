@@ -1,6 +1,8 @@
 """Autotune for ragged paged attention kernel."""
 
+import os
 import random
+import tempfile
 import time
 
 import jax
@@ -129,17 +131,25 @@ def autotune(
                 if str(e).startswith(
                         "Not implemented: num_combined_kv_heads=20 can not be XLA fully"
                         " tiled"):
-                    print(f"Not implemented error: {e}")
+                    print(
+                        f"{num_kv_pages_per_block=}, {num_q_per_block=} Not implemented error: {e}"
+                    )
                 else:
-                    print(f"ValueError: {e}")
+                    print(
+                        f"{num_kv_pages_per_block=}, {num_q_per_block=} ValueError: {e}"
+                    )
                 continue
             except error_handling.MosaicError as e:
-                print(f"Caught MosaicError: {e}")
+                print(
+                    f"{num_kv_pages_per_block=}, {num_q_per_block=} Caught MosaicError: {e}"
+                )
                 continue
             except _jax.XlaRuntimeError as e:
                 s = str(e)
                 line = s.splitlines()[0]
-                print(f"Caught XlaRuntimeError: {line}")
+                print(
+                    f"{num_kv_pages_per_block=}, {num_q_per_block=} Caught XlaRuntimeError: {line}"
+                )
                 continue
 
             start_time = time.perf_counter_ns()
@@ -259,8 +269,12 @@ class AutotuneTest(jtu.JaxTestCase):
 
         print("Finished autotuning.")
         print(rows)
-        with open("test_autotune_512pagesize.txt") as f:
+        with tempfile.NamedTemporaryFile(mode="w+",
+                                         encoding='utf-8',
+                                         delete=False,
+                                         dir=os.getcwd()) as f:
             print(rows, file=f)
+            print(f"Saved to file {f.name}")
 
     @parameterized.product(
         q_dtype=[jnp.bfloat16],
@@ -351,8 +365,12 @@ class AutotuneTest(jtu.JaxTestCase):
 
         print("Finished autotuning.")
         print(rows)
-        with open("test_autotune_1024pagesize.txt") as f:
+        with tempfile.NamedTemporaryFile(mode="w+",
+                                         encoding='utf-8',
+                                         delete=False,
+                                         dir=os.getcwd()) as f:
             print(rows, file=f)
+            print(f"Saved to file {f.name}")
 
 
 if __name__ == "__main__":
