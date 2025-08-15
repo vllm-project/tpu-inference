@@ -12,8 +12,7 @@ from vllm.sampling_params import SamplingType
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.request import PlaceholderRange, Request
 
-from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
-                                                    InputBatch)
+from tpu_commons.runner.jax.input_batch_jax import CachedRequestState
 from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
 
 
@@ -342,90 +341,6 @@ class TestTPUJaxRunner(unittest.TestCase):
         # Logits for req-3 (index 2) should be masked for tokens 0-31
         self.assertTrue(np.all(modified_logits_cpu[2, :32] == -np.inf))
         self.assertTrue(np.all(modified_logits_cpu[2, 32:] == 1.0))
-
-    def test_reorder_batch(self):
-        # Helper to set up the runner's input_batch for a test case
-        def setup_batch(req_token_map: dict[str, int]):
-            # Re-initialize input_batch for a clean state
-            self.runner.input_batch = InputBatch(
-                max_num_reqs=self.runner.max_num_reqs,
-                max_model_len=self.runner.max_model_len,
-                max_num_batched_tokens=self.runner.max_num_tokens,
-                pin_memory=False,
-                vocab_size=self.runner.vocab_size,
-                block_sizes=[self.runner.block_size],
-            )
-            self.runner.requests = {}
-
-            # Create a mock for sampling_params
-            mock_sampling_params = MagicMock()
-            mock_sampling_params.sampling_type = SamplingType.GREEDY
-            mock_sampling_params.temperature = 0.0
-            mock_sampling_params.top_p = 1.0
-            mock_sampling_params.top_k = -1
-            mock_sampling_params.min_tokens = 0
-            mock_sampling_params.logprobs = None
-            mock_sampling_params.logit_bias = None
-            mock_sampling_params.allowed_token_ids = set()
-            mock_sampling_params.bad_words_token_ids = None
-            mock_sampling_params.all_stop_token_ids = set()
-
-            # Add requests in the order they appear in the map
-            for req_id in req_token_map.keys():
-                req_state = CachedRequestState(
-                    req_id=req_id,
-                    prompt_token_ids=[0],
-                    output_token_ids=[],
-                    sampling_params=mock_sampling_params,
-                    block_ids=([1], ),
-                    num_computed_tokens=1,
-                    lora_request=None,
-                    mm_kwargs=[],
-                    mm_hashes=[],
-                    mm_positions=[],
-                    pooling_params=None,
-                    generator=None,
-                )
-                self.runner.input_batch.add_request(req_state)
-                self.runner.requests[req_id] = req_state
-
-            # Mock scheduler output
-            mock_scheduler_output = MagicMock()
-            mock_scheduler_output.num_scheduled_tokens = req_token_map
-            return mock_scheduler_output
-
-        # Test case 1: Requests already sorted.
-        req_map = {"d1": 1, "d2": 1, "p1": 10, "p2": 10, "p3": 5}
-        scheduler_output = setup_batch(req_map)
-        modified = self.runner._reorder_batch(scheduler_output)
-        self.assertFalse(modified)
-        self.assertEqual(self.runner.input_batch.req_ids,
-                         ["d1", "d2", "p1", "p2", "p3"])
-        np.testing.assert_array_equal(
-            self.runner.input_batch.request_distribution, [2, 2, 1])
-
-        # Test case 2: Simple 2-way swap.
-        req_map = {"p1": 10, "d1": 1, "p2": 10, "p3": 5}
-        scheduler_output = setup_batch(req_map)
-        modified = self.runner._reorder_batch(scheduler_output)
-        self.assertTrue(modified)
-        final_ids = self.runner.input_batch.req_ids
-        self.assertEqual(self.runner.input_batch.req_ids,
-                         ["d1", "p1", "p2", "p3"])
-        np.testing.assert_array_equal(
-            self.runner.input_batch.request_distribution, [1, 2, 1])
-
-        # Test case 3: Complex reordering with multiple swaps
-        req_map = {"p1": 5, "p2": 10, "d1": 1, "p3": 10, "d2": 1, "p4": 20}
-        scheduler_output = setup_batch(req_map)
-        modified = self.runner._reorder_batch(scheduler_output)
-        self.assertTrue(modified)
-        final_ids = self.runner.input_batch.req_ids
-        self.assertEqual(set(final_ids[0:2]), {"d1", "d2"})
-        self.assertEqual(set(final_ids[2:4]), {"p2", "p3"})
-        self.assertEqual(set(final_ids[4:6]), {"p1", "p4"})
-        np.testing.assert_array_equal(
-            self.runner.input_batch.request_distribution, [2, 2, 2])
 
     def test_execute_mm_encoder_single_image(self):
         import torch

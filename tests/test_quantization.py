@@ -155,8 +155,8 @@ class TestQwixQuantizeNnxModel(unittest.TestCase):
         assert attention_metadata.input_positions.shape == (
             DEFAULT_NUM_TOKENS_FOR_MODEL_INPUTS, )
         assert attention_metadata.block_tables.shape == (
-            DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS,
-            DEFAULT_MAX_NUM_BLOCKS_PER_REQ)
+            DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS *
+            DEFAULT_MAX_NUM_BLOCKS_PER_REQ, )
         assert attention_metadata.seq_lens.shape == (
             DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS, )
         assert attention_metadata.query_start_loc.shape == (
