@@ -72,9 +72,16 @@ class CompilationManager:
 
             inputs_embeds = None
             start = time.perf_counter()
-            kv_caches, hidden_states = self.runner.model_fn(
-                self.runner.state, self.runner.kv_caches, input_ids,
-                attention_metadata, inputs_embeds)
+            # kv_caches, hidden_states = self.runner.model_fn(
+            #     self.runner.state, self.runner.kv_caches, input_ids,
+            #     attention_metadata, inputs_embeds)
+            if os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower() == "vllm":
+                kv_caches, hidden_states = self.runner.model_fn(
+                    self.runner.state, self.runner.kv_caches, input_ids, attention_metadata,
+                    tuple(self.runner.layer_name_to_kvcache_index.items()), inputs_embeds)
+            else:
+                kv_caches, hidden_states = self.runner.model_fn(
+                    self.runner.state, self.runner.kv_caches, input_ids, attention_metadata, inputs_embeds)
             self.runner.kv_caches = kv_caches
             end = time.perf_counter()
             logger.info("Compilation finished in %.2f [secs].", end - start)

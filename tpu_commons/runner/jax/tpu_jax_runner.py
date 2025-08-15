@@ -249,6 +249,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         # See page 5 of https://arxiv.org/abs/2409.12191
         self.mrope_positions_cpu = np.zeros((3, self.max_num_tokens),
                                             dtype=np.int64)
+                            
 
     def load_model(self):
         self.model_fn, self.compute_logits_fn, self.get_multimodal_embeddings_fn, self.get_input_embeddings_fn, self.state = get_model(
@@ -342,13 +343,23 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                     scheduler_output) as kv_connector_output:
                 # NOTE(Wenlong): It takes both `input_ids` and `inputs_embeds`,
                 # but one of them would be `None`
-                self.kv_caches, hidden_states = self.model_fn(
-                    self.state,
-                    self.kv_caches,
-                    input_ids,
-                    attn_metadata,
-                    inputs_embeds,
-                )
+                if os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower() == "vllm":
+                    self.kv_caches, hidden_states = self.model_fn(
+                        self.state,
+                        self.kv_caches,
+                        input_ids,
+                        attn_metadata,
+                        tuple(self.layer_name_to_kvcache_index.items()),
+                        inputs_embeds,
+                    )
+                else:
+                    self.kv_caches, hidden_states = self.model_fn(
+                        self.state,
+                        self.kv_caches,
+                        input_ids,
+                        attn_metadata,
+                        inputs_embeds,
+                    )
 
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)

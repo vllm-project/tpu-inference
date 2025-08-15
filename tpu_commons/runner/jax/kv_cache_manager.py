@@ -1,19 +1,21 @@
 import functools
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Dict
 
 import jax
 import jax.numpy as jnp
 import torch
 from jax.sharding import NamedSharding, PartitionSpec
+from vllm.attention.backends.abstract import AttentionType
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheSpec)
+                                        KVCacheSpec, SlidingWindowSpec)
 
 from tpu_commons import utils as common_utils
 from tpu_commons.logger import init_logger
 from tpu_commons.runner import utils as runner_utils
-from tpu_commons.runner.jax.input_batch_jax import CachedRequestState
+from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
+                                                    InputBatch)
 
 if TYPE_CHECKING:
     from vllm.v1.request import Request
@@ -27,8 +29,13 @@ class KVCacheManager:
 
     def __init__(self, runner: "TPUModelRunner"):
         self.runner = runner
+        # Layer pairings for cross-layer KV sharing.
+        # If an Attention layer `layer_name` is in the keys of this dict, it
+        # means this layer will perform attention using the keys and values
+        # from the KV cache of `shared_kv_cache_layers[layer_name]`.
+        self.shared_kv_cache_layers: dict[str, str] = {}
 
-    def get_kv_cache_spec(self):
+    def get_kv_cache_spec1(self):
         # TODO(xiang): this hack tricks engine core to init successfully
         block_size = self.runner.vllm_config.cache_config.block_size
         kv_cache_spec: dict[str, KVCacheSpec] = {}
@@ -54,29 +61,147 @@ class KVCacheManager:
             )
 
         return kv_cache_spec
+    
+    def get_kv_cache_spec(self):
+        # TODO(xiang): this hack tricks engine core to init successfully
+        block_size = self.runner.cache_config.block_size
+        use_mla = self.runner.model_config.use_mla
+        kv_cache_spec: dict[str, KVCacheSpec] = {}
+
+        # If use pure jax (MODEL_IMPL_TYPE=flax_nnx), we don't register
+        # attention into compilation config.
+        # Use FullAttentionSpec for each layer
+        if len(self.runner.vllm_config.compilation_config.static_forward_context
+               ) == 0:
+            model_config = self.runner.model_config
+            parallel_config = self.runner.parallel_config
+            # Pad num_kv_heads to multiple of TP size.
+            num_kv_heads = common_utils.get_padded_num_heads(
+                model_config.get_total_num_kv_heads(),
+                self.mesh.shape["model"])
+            for i in range(model_config.get_num_layers(parallel_config)):
+                kv_cache_spec[f"layer.{i}"] = FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=num_kv_heads,
+                    head_size=model_config.get_head_size(),
+                    dtype=torch.bfloat16,
+                    use_mla=use_mla,
+                )
+        else:
+            # Else propagate attention info from compilation config.
+            from tpu_commons.models.vllm.sharding import AttentionInfo
+            for layer_name, attention_info in self.runner.vllm_config.compilation_config.static_forward_context.items(
+            ):
+                if not isinstance(attention_info, AttentionInfo):
+                    continue
+                if (kv_tgt_layer := attention_info.kv_sharing_target_layer_name
+                    ) is not None:
+                    # The layer doesn't need its own KV cache and will use that of
+                    # the target layer. We skip creating a KVCacheSpec for it, so
+                    # that KV cache management logic will act as this layer does
+                    # not exist, and doesn't allocate KV cache for the layer. This
+                    # enables the memory saving of cross-layer kv sharing, allowing
+                    # a given amount of memory to accommodate longer context lengths
+                    # or enable more requests to be processed simultaneously.
+                    self.runner.shared_kv_cache_layers[layer_name] = kv_tgt_layer
+                    continue
+                if attention_info.attn_type == AttentionType.DECODER:
+                    if attention_info.sliding_window is not None:
+                        kv_cache_spec[layer_name] = SlidingWindowSpec(
+                            block_size=block_size,
+                            num_kv_heads=attention_info.num_kv_heads,
+                            head_size=attention_info.head_size,
+                            dtype=torch.bfloat16,
+                            sliding_window=attention_info.sliding_window,
+                            use_mla=use_mla)
+                    else:
+                        kv_cache_spec[layer_name] = FullAttentionSpec(
+                            block_size=block_size,
+                            num_kv_heads=attention_info.num_kv_heads,
+                            head_size=attention_info.head_size,
+                            dtype=torch.bfloat16,
+                            use_mla=use_mla,
+                        )
+                elif attention_info.attn_type in (AttentionType.ENCODER,
+                                                  AttentionType.ENCODER_ONLY):
+                    # encoder-only attention does not need KV cache.
+                    continue
+                elif attention_info.attn_type == AttentionType.ENCODER_DECODER:
+                    raise NotImplementedError
+                else:
+                    raise ValueError(
+                        f"Unknown attention type: {attention_info.attn_type}")
+        return kv_cache_spec
+    
+    def maybe_reinitialize_input_batch(self,
+                                       kv_cache_config: KVCacheConfig) -> None:
+        block_sizes = [
+            kv_cache_group.kv_cache_spec.block_size
+            for kv_cache_group in kv_cache_config.kv_cache_groups
+        ]
+        if block_sizes != [self.runner.cache_config.block_size]:
+            assert self.cache_config.cpu_offload_gb == 0, (
+                "Cannot re-initialize the input batch when CPU weight "
+                "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
+                "for more details.")
+            self.runner.input_batch = InputBatch(
+                max_num_reqs=self.runner.max_num_reqs,
+                max_model_len=self.runner.max_model_len,
+                max_num_batched_tokens=self.runner.max_num_tokens,
+                pin_memory=False,
+                vocab_size=self.runner.model_config.get_vocab_size(),
+                block_sizes=block_sizes,
+            )
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         self.runner.kv_caches: List[jax.Array] = []
+        self.maybe_reinitialize_input_batch(kv_cache_config)
 
-        kv_cache_groups = kv_cache_config.kv_cache_groups
-        if len(kv_cache_groups) > 1:
-            raise NotImplementedError(
-                "Hybrid models with more than one KV cache type are not "
-                "supported yet.")
+        # kv_cache_groups = kv_cache_config.kv_cache_groups
+        # if len(kv_cache_groups) > 1:
+        #     raise NotImplementedError(
+        #         "Hybrid models with more than one KV cache type are not "
+        #         "supported yet.")
 
-        kv_cache_spec = kv_cache_groups[0].kv_cache_spec
-        layer_names = kv_cache_groups[0].layer_names
+        # kv_cache_spec = kv_cache_groups[0].kv_cache_spec
+        # layer_names = kv_cache_groups[0].layer_names
 
-        # NOTE: we'll multiply the num_kv_heads by 2 in the function
-        self.runner.kv_caches = runner_utils.create_kv_caches(
-            num_blocks=kv_cache_config.num_blocks,
-            block_size=kv_cache_spec.block_size,
-            num_kv_heads=kv_cache_spec.num_kv_heads,
-            head_size=kv_cache_spec.head_size,
-            mesh=self.runner.mesh,
-            layer_names=layer_names,
-            devices=self.runner.devices,
-        )
+        # # NOTE: we'll multiply the num_kv_heads by 2 in the function
+        # self.runner.kv_caches = runner_utils.create_kv_caches(
+        #     num_blocks=kv_cache_config.num_blocks,
+        #     block_size=kv_cache_spec.block_size,
+        #     num_kv_heads=kv_cache_spec.num_kv_heads,
+        #     head_size=kv_cache_spec.head_size,
+        #     mesh=self.runner.mesh,
+        #     layer_names=layer_names,
+        #     devices=self.runner.devices,
+        # )
+
+        # if has_kv_transfer_group():
+        #     get_kv_transfer_group().register_runner(self.runner)
+
+        # uniform page size.
+        representative_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
+        page_size_bytes = representative_spec.page_size_bytes
+        self.runner.layer_name_to_kvcache_index: Dict[str, int] = {}
+        # kv_caches_list: List[jax.Array] = []
+        for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
+            assert kv_cache_tensor.size % page_size_bytes == 0
+            kv_cache = runner_utils.create_kv_caches(
+                num_blocks=kv_cache_tensor.size // page_size_bytes,
+                block_size=representative_spec.block_size,
+                num_kv_heads=representative_spec.num_kv_heads,
+                head_size=representative_spec.head_size,
+                mesh=self.mesh,
+                layer_names=['kv_cache_tensor.{i}'],
+                devices=self.devices)[0]
+            self.runner.kv_caches.append(kv_cache)
+            for layer_name in kv_cache_tensor.shared_by:
+                self.runner.layer_name_to_kvcache_index[layer_name] = i
+        
+        if self.shared_kv_cache_layers:
+            for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
+                self.runner.layer_name_to_kvcache_index[layer_name] = self.runner.layer_name_to_kvcache_index[target_layer_name]
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_runner(self.runner)
