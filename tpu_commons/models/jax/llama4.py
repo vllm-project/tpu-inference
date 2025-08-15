@@ -301,7 +301,8 @@ class Llama4WeightLoader:
         self.names_and_weights_generator = model_weights_generator(
             model_name_or_path=vllm_config.model_config.model,
             framework="flax",
-            filter_regex="language_model")
+            filter_regex="language_model",
+            download_dir=vllm_config.load_config.download_dir)
         self.is_verbose = getattr(vllm_config.additional_config, "is_verbose",
                                   False)
         self._transpose_map = {

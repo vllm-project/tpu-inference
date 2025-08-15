@@ -5,8 +5,9 @@ import glob
 import math
 import os
 import re
+from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, Generator, Optional
+from typing import Any, Dict, Optional
 
 import jax
 import jax.numpy as jnp
@@ -51,9 +52,10 @@ def reshape_params(param_key: str, param_tensor: jax.Array, shape_map):
 
 
 def model_file_generator(
-    model_name_or_path: str, ) -> Generator[str, None, None]:
+        model_name_or_path: str,
+        download_dir: Optional[str]) -> Generator[str, None, None]:
     weights_files, weights_location = get_model_weights_files(
-        model_name_or_path)
+        model_name_or_path, download_dir)
 
     if weights_location != "local":
         logger.warning(
@@ -63,7 +65,7 @@ def model_file_generator(
     for st_file in weights_files:
         if weights_location == "hf":
             st_file = file_utils.download_model_weights_from_hf(
-                model_name_or_path, os.path.basename(st_file))[0]
+                model_name_or_path, download_dir, os.path.basename(st_file))[0]
 
         yield st_file
 
@@ -75,8 +77,9 @@ def model_weights_generator(
     model_name_or_path: str,
     framework: str,
     filter_regex: Optional[str] = None,
+    download_dir: Optional[str] = None,
 ) -> Generator[tuple, None, None]:
-    for st_file in model_file_generator(model_name_or_path):
+    for st_file in model_file_generator(model_name_or_path, download_dir):
         for name, weight_tensor in model_weights_single_file_generator(
                 st_file, framework, filter_regex):
             yield name, weight_tensor
@@ -85,7 +88,9 @@ def model_weights_generator(
 ############ Used by llama4, deepseek only for now END ############
 
 
-def get_model_weights_files(model_name_or_path: str) -> tuple[list[str], str]:
+def get_model_weights_files(
+        model_name_or_path: str,
+        download_dir: Optional[str]) -> tuple[list[str], str]:
     """
     Helper to get weight files and their location.
     """
@@ -103,7 +108,7 @@ def get_model_weights_files(model_name_or_path: str) -> tuple[list[str], str]:
         if model_size < local_free_disk_size * FULL_DOWNLOAD_DISK_RATIO:
             logger.info(f"Downloading weights from HF {model_name_or_path}")
             weights_files = file_utils.download_model_weights_from_hf(
-                model_name_or_path, HF_WEIGHTS_FORMAT)
+                model_name_or_path, download_dir, HF_WEIGHTS_FORMAT)
         else:
             weights_files = file_utils.list_hf_repo(model_name_or_path,
                                                     HF_WEIGHTS_FORMAT)
@@ -331,7 +336,8 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
                     mesh: Mesh):
     """Load weights from all model weights files to the model, run in multi threads."""
     model_path = vllm_config.model_config.model
-    weights_files, _ = get_model_weights_files(model_path)
+    weights_files, _ = get_model_weights_files(
+        model_path, vllm_config.load_config.download_dir)
     params = nnx.state(model)
     max_workers = min(64, len(weights_files))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
