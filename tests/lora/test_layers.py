@@ -1,16 +1,11 @@
 import random
-import tempfile
 from dataclasses import dataclass
 from typing import Optional
 
 import jax
 import pytest
 import torch
-from vllm.config import (LoRAConfig, get_current_vllm_config,
-                         set_current_vllm_config)
-from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
-                                             init_distributed_environment)
-from vllm.engine.arg_utils import EngineArgs
+from vllm.config import LoRAConfig
 # TODO(xiowei): Need to import and test ColumnParallelLinearWithShardedLoRA.
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -43,30 +38,28 @@ TOLERANCES = {
 pytestmark = pytest.mark.skipif(not current_platform.is_tpu(),
                                 reason="This test is only for TPU platform.")
 
-
-@pytest.fixture(autouse=True)
-def setup_environment():
-    # This is a fake config used for init dist env.
-    # RowParallelLinear needs dist env to be initialized.
-    engine_args = EngineArgs(
-        model="Qwen/Qwen2-1.5B-Instruct",
-        max_model_len=64,
-        max_num_batched_tokens=64,
-        max_num_seqs=4,
-    )
-
-    vllm_config = engine_args.create_engine_config()
-
-    with set_current_vllm_config(vllm_config):
-        temp_file = tempfile.mkstemp()[1]
-        init_distributed_environment(
-            1,
-            0,
-            local_rank=0,
-            distributed_init_method=f"file://{temp_file}",
-            backend="gloo")
-        ensure_model_parallel_initialized(1, 1)
-
+# @pytest.fixture(autouse=True)
+# def setup_environment():
+#     # This is a fake config used for init dist env.
+#     # RowParallelLinear needs dist env to be initialized.
+#     engine_args = EngineArgs(
+#         model="Qwen/Qwen2-1.5B-Instruct",
+#         max_model_len=64,
+#         max_num_batched_tokens=64,
+#         max_num_seqs=4,
+#     )
+#
+#     vllm_config = engine_args.create_engine_config()
+#
+#     with set_current_vllm_config(vllm_config):
+#         temp_file = tempfile.mkstemp()[1]
+#         init_distributed_environment(
+#             1,
+#             0,
+#             local_rank=0,
+#             distributed_init_method=f"file://{temp_file}",
+#             backend="gloo")
+#         ensure_model_parallel_initialized(1, 1)
 
 # TODO(xiowei): increase it to 6.
 NUM_RANDOM_SEEDS = 1
@@ -232,15 +225,15 @@ def create_random_inputs(
 # Let's work on single config first.
 
 
-@torch.inference_mode()
+# @torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [3])
 @pytest.mark.parametrize("repeats", [2])
 @pytest.mark.parametrize("fully_shard", [False])  # TODO(xiowei): add "True".
 @pytest.mark.parametrize("device", ["cpu"])
 @pytest.mark.parametrize("stage", [True])  # TODO(xiowei): add False
 @pytest.mark.parametrize("bias_enabled", [True])
-def test_column_parallel_packed(num_loras, repeats, fully_shard, device, stage,
-                                bias_enabled) -> None:
+def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
+                                device, stage, bias_enabled) -> None:
     max_loras = 8
     max_num_batched_tokens = 8192
     max_batches = 256
@@ -297,7 +290,7 @@ def test_column_parallel_packed(num_loras, repeats, fully_shard, device, stage,
             1, 1
         )  # TODO(xiowei): support multi-chip: mesh_shape = (1, len(jax.devices()))
         mesh = jax.make_mesh(mesh_shape, axis_names, devices=jax.devices())
-        vllm_config = get_current_vllm_config()
+        vllm_config = dist_init
         shard_parallel_layers_to_tpu(lora_linear, mesh, vllm_config)
 
         # Then we replace the LoRA wrapper with the torchax one.
