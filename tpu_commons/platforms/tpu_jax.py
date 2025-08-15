@@ -116,13 +116,14 @@ class TpuPlatform(Platform):
                 "VLLM_ENABLE_V1_MULTIPROCESSING must be 0 when using Pathways(JAX_PLATFORMS=proxy)"
             )
 
-        from vllm.config import CompilationLevel
+        from vllm.config import CompilationLevel, CUDAGraphMode
 
         cache_config = vllm_config.cache_config
         # For v0, the default block size is 16.
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = cast(BlockSize, 16)
         compilation_config = vllm_config.compilation_config
+        compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         # TPU only supports DYNAMO_ONCE compilation level
         # NOTE(xiang): the compilation_config is not used by jax.
