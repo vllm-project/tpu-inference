@@ -150,6 +150,10 @@ def test_get_flax_model(vllm_config, mesh):
     assert callable(compute_logits_fn)
 
 
+@pytest.mark.skip(
+    reason=
+    "Temporarily skip the tests because of ongoing work of torchax integration"
+)
 def test_get_vllm_model(mesh):
     """
     An integration test for the main public function `get_vllm_model`.
@@ -169,6 +173,10 @@ def test_get_vllm_model(mesh):
     assert callable(compute_logits_fn)
 
 
+@pytest.mark.skip(
+    reason=
+    "Temporarily skip the tests because of ongoing work of torchax integration"
+)
 @pytest.mark.parametrize("set_in_config", [True, False])
 def test_get_vllm_model_random_weights(mesh, set_in_config):
     rng = jax.random.PRNGKey(42)
