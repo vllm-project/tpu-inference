@@ -325,7 +325,9 @@ class Llama3WeightLoader:
                                 loaded_name, loaded_weight,
                                 model_for_loading.mesh)
                 for loaded_name, loaded_weight in model_weights_generator(
-                    model_path, framework="flax")
+                    model_path,
+                    framework="flax",
+                    download_dir=self.vllm_config.load_config.download_dir)
             ]
             for future in futures:
                 future.result()

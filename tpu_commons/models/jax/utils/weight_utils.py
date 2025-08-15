@@ -5,8 +5,9 @@ import glob
 import math
 import os
 import re
+from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, Generator, Optional
+from typing import Any, Dict, Optional
 
 import jax
 import jax.numpy as jnp
@@ -23,6 +24,8 @@ logger = init_logger(__name__)
 
 HF_WEIGHTS_FORMAT = "*.safetensors"
 FULL_DOWNLOAD_DISK_RATIO = 0.9
+
+############ Used by llama4, deepseek only for now START ############
 
 
 def print_param_info(param: nnx.Param, name: str):
@@ -48,7 +51,46 @@ def reshape_params(param_key: str, param_tensor: jax.Array, shape_map):
     return param_tensor  # Base case / no-op
 
 
-def _get_model_weights_files(model_name_or_path: str) -> tuple[list[str], str]:
+def model_file_generator(
+        model_name_or_path: str,
+        download_dir: Optional[str]) -> Generator[str, None, None]:
+    weights_files, weights_location = get_model_weights_files(
+        model_name_or_path, download_dir)
+
+    if weights_location != "local":
+        logger.warning(
+            "Weights files are not downloaded to local disk at once due to insufficient disk space. "
+            "They will be downloaded on the fly during loading.")
+
+    for st_file in weights_files:
+        if weights_location == "hf":
+            st_file = file_utils.download_model_weights_from_hf(
+                model_name_or_path, download_dir, os.path.basename(st_file))[0]
+
+        yield st_file
+
+        if weights_location != "local":
+            file_utils.delete_file(st_file)
+
+
+def model_weights_generator(
+    model_name_or_path: str,
+    framework: str,
+    filter_regex: Optional[str] = None,
+    download_dir: Optional[str] = None,
+) -> Generator[tuple, None, None]:
+    for st_file in model_file_generator(model_name_or_path, download_dir):
+        for name, weight_tensor in model_weights_single_file_generator(
+                st_file, framework, filter_regex):
+            yield name, weight_tensor
+
+
+############ Used by llama4, deepseek only for now END ############
+
+
+def get_model_weights_files(
+        model_name_or_path: str,
+        download_dir: Optional[str]) -> tuple[list[str], str]:
     """
     Helper to get weight files and their location.
     """
@@ -66,7 +108,7 @@ def _get_model_weights_files(model_name_or_path: str) -> tuple[list[str], str]:
         if model_size < local_free_disk_size * FULL_DOWNLOAD_DISK_RATIO:
             logger.info(f"Downloading weights from HF {model_name_or_path}")
             weights_files = file_utils.download_model_weights_from_hf(
-                model_name_or_path, HF_WEIGHTS_FORMAT)
+                model_name_or_path, download_dir, HF_WEIGHTS_FORMAT)
         else:
             weights_files = file_utils.list_hf_repo(model_name_or_path,
                                                     HF_WEIGHTS_FORMAT)
@@ -85,47 +127,24 @@ def _get_model_weights_files(model_name_or_path: str) -> tuple[list[str], str]:
     return weights_files, weights_location
 
 
-def model_file_iterator(
-    model_name_or_path: str, ) -> Generator[str, None, None]:
-    weights_files, weights_location = _get_model_weights_files(
-        model_name_or_path)
-
-    if weights_location != "local":
-        logger.warning(
-            "Weights files are not downloaded to local disk at once due to insufficient disk space. "
-            "They will be downloaded on the fly during loading.")
-
-    for st_file in weights_files:
-        logger.info(f"Loading weights from {st_file}")
-        if weights_location == "hf":
-            st_file = file_utils.download_model_weights_from_hf(
-                model_name_or_path, os.path.basename(st_file))[0]
-
-        yield st_file
-
-        if weights_location != "local":
-            file_utils.delete_file(st_file)
-
-
-def model_weights_generator(
-    model_name_or_path: str,
+def model_weights_single_file_generator(
+    weights_file: str,
     framework: str,
     filter_regex: Optional[str] = None,
 ) -> Generator[tuple, None, None]:
-    for st_file in model_file_iterator(model_name_or_path):
-        logger.info(f"Loading weights from {st_file}")
-        # NOTE: We enforce loading tensors on CPU here.
-        # Because otherwise the tensor will be loaded on TPU:0 by default,
-        # although the tensor would eventually be sharded across multiple TPUs,
-        # it would lead to OOM on TPU:0 for large models.
-        with jax.default_device(jax.devices("cpu")[0]):
-            with safe_open(st_file, framework=framework) as f:
-                for name in f.keys():
-                    if filter_regex is not None and not re.match(
-                            filter_regex, name):
-                        continue
-                    weight_tensor = f.get_tensor(name)
-                    yield name, weight_tensor
+    logger.info(f"Loading weights from {weights_file}")
+    # NOTE: We enforce loading tensors on CPU here.
+    # Because otherwise the tensor will be loaded on TPU:0 by default,
+    # although the tensor would eventually be sharded across multiple TPUs,
+    # it would lead to OOM on TPU:0 for large models.
+    with jax.default_device(jax.devices("cpu")[0]):
+        with safe_open(weights_file, framework=framework) as f:
+            for name in f.keys():
+                if filter_regex is not None and not re.match(
+                        filter_regex, name):
+                    continue
+                weight_tensor = f.get_tensor(name)
+                yield name, weight_tensor
 
 
 def get_param(params: nnx.State, path: str) -> nnx.State:
@@ -233,8 +252,8 @@ def load_hf_weights_on_thread(vllm_config, params: nnx.State,
     }
 
     shardings = nnx.get_named_sharding(params, mesh)
-    for hf_key, hf_weight in model_weights_generator(weights_file,
-                                                     framework="flax"):
+    for hf_key, hf_weight in model_weights_single_file_generator(
+            weights_file, framework="flax"):
         if hf_key.endswith(".weight"):
             hf_key = hf_key.removesuffix(".weight")
 
@@ -317,7 +336,8 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
                     mesh: Mesh):
     """Load weights from all model weights files to the model, run in multi threads."""
     model_path = vllm_config.model_config.model
-    weights_files, _ = _get_model_weights_files(model_path)
+    weights_files, _ = get_model_weights_files(
+        model_path, vllm_config.load_config.download_dir)
     params = nnx.state(model)
     max_workers = min(64, len(weights_files))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:

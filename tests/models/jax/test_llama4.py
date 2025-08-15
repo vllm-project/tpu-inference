@@ -37,6 +37,7 @@ class MockVllmConfig:
                  random_weights: bool = False,
                  tensor_parallelism: int = 1):
         self.model_config = MagicMock(spec=ModelConfig)
+        self.load_config = MagicMock()
 
         # Choose small amount of layers to avoid OOM.
         self.model_config.get_vocab_size.return_value = 202048

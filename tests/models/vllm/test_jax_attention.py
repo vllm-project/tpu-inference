@@ -13,8 +13,7 @@ from vllm.engine.arg_utils import EngineArgs
 
 from tpu_commons.kernels.ragged_paged_attention.v3.kernel import \
     ref_ragged_paged_attention
-from tpu_commons.models.jax.attention_interface import \
-    get_kv_cache_shape_with_mesh
+from tpu_commons.models.jax.attention import get_kv_cache_shape_with_mesh
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.vllm.jax_attention import JaxAttention
 from tpu_commons.models.vllm.vllm_model_wrapper_context import (

@@ -265,21 +265,21 @@ Currently, we support overall model weight/activation quantization through the [
 To enable quantization, you can do one of the following:
 
 #### Using a quantization config YAML
-Simply pass the name of quantization config found inside the quantization config directory (`tpu_commons/models/jax/utils/quantization/configs/`), for example:
+Simply pass the name of a quantization config found inside the quantization config directory (`tpu_commons/models/jax/utils/quantization/configs/`), for example:
 
 ```
 ... --additional_config='{"quantization": "int8_default.yaml"}'
 ```
 
 #### Using a quantization config JSON
-Alternatively, you can pass the explicit quantization configuration as JSON string, where you can configure the Qwix rules to your specification, for example:
+Alternatively, you can pass the explicit quantization configuration as JSON string, where each entry in `rules` corresponds to a Qwix rule (see below):
 
 ```
 { "qwix": { "rules": [{ "module_path": ".*", "weight_qtype": "int8", "act_qtype": "int8" }]}}
 ```
 
 ### Creating your own quantization config YAML
-To create your own quantization:
+To create your own quantization config YAML file:
 
 1. Add a new file to the quantization config directory (`tpu_commons/models/jax/utils/quantization/configs/`)
 2. For Qwix quantization, add a new entry to the file as follows:

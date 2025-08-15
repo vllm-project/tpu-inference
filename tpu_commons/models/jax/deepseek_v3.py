@@ -340,7 +340,9 @@ class DeepSeekV3WeightLoader:
 
         self.num_layers = num_layers
         self.names_and_weights_generator = model_weights_generator(
-            model_name_or_path=vllm_config.model_config.model, framework="pt")
+            model_name_or_path=vllm_config.model_config.model,
+            framework="pt",
+            download_dir=vllm_config.load_config.download_dir)
         self.num_routed_experts = num_local_experts
 
         self._transpose_map = {
