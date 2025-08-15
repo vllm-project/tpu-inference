@@ -67,21 +67,21 @@ def _apply_qwix_quantization(vllm_config: VllmConfig, model: nnx.Module,
     return model
 
 
-def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
-    # NOTE: Use inline imports here, otherwise the normal imports
-    # would cause JAX init failure when using multi hosts with Ray.
-    _MODEL_REGISTRY = {}
+# NOTE: Use inline imports here, otherwise the normal imports
+# would cause JAX init failure when using multi hosts with Ray.
+_MODEL_REGISTRY = {}
 
+
+def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     if os.getenv("NEW_MODEL_DESIGN", False):
         from tpu_commons.experimental.llama3_jax_stashed import \
             LlamaForCausalLM
         from tpu_commons.models.jax.deepseek_v3 import DeepSeekV3
-        from tpu_commons.models.jax.fujiv3 import FujiForCausalLM
         from tpu_commons.models.jax.llama4 import Llama4ForCausalLM
         _MODEL_REGISTRY["DeepSeekV3"] = DeepSeekV3
-        # _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
+        _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
         _MODEL_REGISTRY["Llama4ForCausalLM"] = Llama4ForCausalLM
-        _MODEL_REGISTRY["LlamaForCausalLM"] = FujiForCausalLM
+        # _MODEL_REGISTRY["LlamaForCausalLM"] = FujiForCausalLM
     else:
         from tpu_commons.models.jax.llama3 import LlamaForCausalLM
         from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
@@ -93,12 +93,31 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
             "Qwen2_5_VLForConditionalGeneration"] = Qwen2_5_VLForConditionalGeneration
 
     architectures = getattr(config, "architectures", [])
+    print(
+        f"************************** _get_model_architecture: {_MODEL_REGISTRY=}"
+    )
+    print(
+        f"************************** _get_model_architecture: {architectures=}"
+    )
     for arch in architectures:
         if arch in _MODEL_REGISTRY:
             return _MODEL_REGISTRY[arch]
     raise ValueError(
         f"Model architectures {architectures} are not supported for now. "
         f"Supported architectures: {list(_MODEL_REGISTRY.keys())}")
+
+
+def set_model_for_arch(arch: str, model: Any):
+    """
+    Registers a model class for a given architecture name.
+
+    Args:
+        arch: The name of the architecture (e.g., "LlamaForCausalLM").
+        model: The model class to register.
+    """
+    print("************************** set_model_for_arch called")
+    _MODEL_REGISTRY[arch] = model
+    print(f"************************** {_MODEL_REGISTRY=}")
 
 
 def _get_nnx_model(
@@ -169,6 +188,7 @@ def get_flax_model(
     mesh: Mesh,
 ) -> nnx.Module:
     model_class = _get_model_architecture(vllm_config.model_config.hf_config)
+    print(f"get_flax_model: {model_class=}")
     jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh)
     kv_cache_sharding = NamedSharding(mesh, PartitionSpec())  # replicated
     hidden_states_sharding = NamedSharding(mesh, PartitionSpec(None,
