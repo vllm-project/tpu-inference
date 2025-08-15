@@ -51,9 +51,13 @@ def shard_qkv_parallel_linear(layer: torch.nn.Module, mesh: Mesh,
 
 def shard_merged_column_parallel_linear(layer: torch.nn.Module, mesh: Mesh,
                                         vllm_config: VllmConfig):
+    fuse_matmuls = get_model_matmul_fusion_assignment(
+        vllm_config.model_config.model,
+        vllm_config.scheduler_config.max_num_batched_tokens,
+        vllm_config.parallel_config.tensor_parallel_size,
+        "MergedColumnParallelLinear")
     assert isinstance(layer, MergedColumnParallelLinear)
-    jax_layer = JaxMergedColumnParallelLinear(
-        layer, mesh, shard_merged_column_parallel_linear.fuse_matmuls)
+    jax_layer = JaxMergedColumnParallelLinear(layer, mesh, fuse_matmuls)
     return jax_layer
 
 
@@ -147,10 +151,6 @@ def shard_model_to_tpu(model: torch.nn.Module, mesh: Mesh,
         vllm_config.model_config.model,
         vllm_config.scheduler_config.max_num_batched_tokens, tp_size,
         "QKVParallelLinear")
-    shard_merged_column_parallel_linear.fuse_matmuls = get_model_matmul_fusion_assignment(
-        vllm_config.model_config.model,
-        vllm_config.scheduler_config.max_num_batched_tokens, tp_size,
-        "MergedColumnParallelLinear")
 
     with jax.default_device(jax.devices("cpu")[0]), torchax.default_env():
         shard_parallel_layers_to_tpu(model, mesh, vllm_config)
