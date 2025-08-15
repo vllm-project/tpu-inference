@@ -241,11 +241,8 @@ class FujiModel(nnx.Module):
 
 class FujiForCausalLM(nnx.Module):
 
-    def __init__(self,
-                 vllm_config: VllmConfig,
-                 rng_key: jax.Array,
-                 mesh: Mesh,
-                 force_random_weights: bool = False) -> None:
+    def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,
+                 mesh: Mesh) -> None:
         model_config = vllm_config.model_config
         vocab_size = model_config.get_vocab_size()
         hidden_size = model_config.get_hidden_size()
@@ -283,7 +280,6 @@ class FujiForCausalLM(nnx.Module):
         attention_metadata: AttentionMetadata,
         *args,
     ) -> Tuple[List[jax.Array], jax.Array]:
-        print(f"Inside Fuji: {FujiForCausalLM=}")
         x = self.embed(input_ids)
         kv_caches, x = self.model(
             kv_caches,

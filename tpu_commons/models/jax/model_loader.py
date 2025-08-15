@@ -77,12 +77,11 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
         from tpu_commons.experimental.llama3_jax_stashed import \
             LlamaForCausalLM
         from tpu_commons.models.jax.deepseek_v3 import DeepSeekV3
-        from tpu_commons.models.jax.fujiv3 import FujiForCausalLM
         from tpu_commons.models.jax.llama4 import Llama4ForCausalLM
         _MODEL_REGISTRY["DeepSeekV3"] = DeepSeekV3
-        # _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
+        _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
         _MODEL_REGISTRY["Llama4ForCausalLM"] = Llama4ForCausalLM
-        _MODEL_REGISTRY["LlamaForCausalLM"] = FujiForCausalLM
+        # _MODEL_REGISTRY["LlamaForCausalLM"] = FujiForCausalLM
     else:
         from tpu_commons.models.jax.llama3 import LlamaForCausalLM
         from tpu_commons.models.jax.phi3 import Phi3ForCausalLM
