@@ -185,109 +185,13 @@ class AutotuneTest(jtu.JaxTestCase):
         kv_dtype=[jnp.bfloat16],
         model_name=list(MODEL_CONFIGS.keys()),
         max_model_len=[5120],
-        max_num_batched_tokens=[1024, 2048, 4096],
+        max_num_batched_tokens=[16, 32, 64, 128, 512, 1024, 2048, 4096],
         max_num_seqs=[128, 256, 512],
         page_size=[512],
         block_kv_pages=[(4, 8, 16, 32, 64, 128, 256)],
         block_q_tokens=[(32, 64, 128, 256)],
     )
-    def test_autotune_512pagesize(
-        self,
-        q_dtype,
-        kv_dtype,
-        model_name,
-        max_model_len,
-        max_num_batched_tokens,
-        max_num_seqs,
-        page_size,
-        block_kv_pages,
-        block_q_tokens,
-    ):
-        # Currently we only use one example to autotune. If necessary, we can
-        # construct decode-heavy or prefill-heavy examples.
-        example = get_qkv_lens_example(
-            max_num_batched_tokens,
-            max_model_len,
-            actual_num_seqs=35,
-        )
-        print(f"[Debug] {example=}")
-        model = MODEL_CONFIGS[model_name]
-        head_dim = cdiv(model["head_dim"], 128) * 128
-        num_q_heads = model["num_q_heads"]
-        num_kv_heads = model["num_kv_heads"]
-        if max_model_len < page_size:
-            return
-        pages_per_seq = cdiv(max_model_len, page_size)
-        if pages_per_seq > tuned_block_sizes.MAX_PAGES_PER_SEQ:
-            return
-        rows = []
-        for num_devices in model["num_devices"]:
-            assert num_q_heads % num_devices == 0
-            assert (num_kv_heads % num_devices == 0
-                    ), f"{model_name=}, {num_kv_heads=}, {num_devices=}"
-            num_q_heads_per_device = num_q_heads // num_devices
-            num_kv_heads_per_device = num_kv_heads // num_devices
-            num_q_heads_per_blk, num_combined_kv_heads_per_blk = (
-                get_min_heads_per_blk(
-                    num_q_heads_per_device,
-                    num_kv_heads_per_device * 2,
-                    q_dtype,
-                    kv_dtype,
-                ))
-            # Based on how `jax.experimental.pallas.ops.tpu.ragged_paged_attention` is
-            # implemented, we only need to consider these params for autotuning:
-            # - q_dtype
-            # - kv_dtype
-            # - num_q_heads_per_blk
-            # - num_combined_kv_heads_per_blk
-            # - head_dim
-            # - page_size
-            # - max_num_batched_tokens
-            # - max_model_len = page_size * pages_per_seq
-            key = (
-                jnp.dtype(q_dtype).name,
-                jnp.dtype(kv_dtype).name,
-                num_q_heads_per_blk,
-                num_combined_kv_heads_per_blk // 2,
-                head_dim,
-                page_size,
-                max_num_batched_tokens,
-                page_size * pages_per_seq,
-            )
-
-            best_block_size = autotune(
-                example,
-                key,
-                max_num_seqs,
-                block_kv_pages,
-                block_q_tokens,
-                num_iterations=100,
-            )
-            if best_block_size is not None:
-                rows.append(f"{key}: {best_block_size},")
-                print(f"{key}: {best_block_size},")
-
-        print("Finished autotuning.")
-        print(rows)
-        with tempfile.NamedTemporaryFile(mode="w+",
-                                         encoding='utf-8',
-                                         delete=False,
-                                         dir=os.getcwd()) as f:
-            print(rows, file=f)
-            print(f"Saved to file {f.name}")
-
-    @parameterized.product(
-        q_dtype=[jnp.bfloat16],
-        kv_dtype=[jnp.bfloat16],
-        model_name=list(MODEL_CONFIGS.keys()),
-        max_model_len=[10240],
-        max_num_batched_tokens=[1024, 2048, 4096],
-        max_num_seqs=[128, 256, 512],
-        page_size=[1024],
-        block_kv_pages=[(4, 8, 16, 32, 64, 128, 256)],
-        block_q_tokens=[(32, 64, 128, 256)],
-    )
-    def test_autotune_1024pagesize(
+    def test_autotune(
         self,
         q_dtype,
         kv_dtype,
