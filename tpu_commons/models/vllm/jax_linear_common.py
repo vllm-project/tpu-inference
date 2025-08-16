@@ -1,56 +1,37 @@
-import functools
+from typing import Optional, Union
 
 import jax
 import jax.numpy as jnp
+import torch
 from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
+from torchax.interop import torch_view
+from torchax.ops.mappings import t2j
 
 from tpu_commons.kernels.quantized_matmul.kernel import quantized_matmul_kernel
 
-_quantized_matmul_kernel = functools.partial(quantized_matmul_kernel,
-                                             quantize_activation=True)
 
+def sharded_quantized_matmul(x: jax.Array, w_q: jax.Array, w_s: jax.Array,
+                             mesh: Mesh, weight_sharding: P):
+    out_axis, in_axis = weight_sharding
+    x_sharding = P(None, in_axis)
+    scale_sharding = P(out_axis, )
+    out_sharding = P(None, out_axis)
 
-def forward_unqunatized(x: jax.Array, w: jax.Array, b: jax.Array):
-    output = jnp.einsum('mn,pn->mp', x, w)
-    if b is not None:
-        output = output + b
-    return output
+    x = jax.lax.with_sharding_constraint(x, NamedSharding(mesh, x_sharding))
 
+    def wrapper(x, w_q, w_s):
+        output = quantized_matmul_kernel(x, w_q, w_s, quantize_activation=True)
+        if in_axis:
+            output = jax.lax.psum(output, axis_name=in_axis)
+        return output
 
-def forward_w8a8_int8_col_parallel(x: jax.Array, w: jax.Array, b: jax.Array,
-                                   w_s: jax.Array, mesh: Mesh):
-    x = jax.lax.with_sharding_constraint(x, NamedSharding(mesh, P()))
-    output = shard_map(_quantized_matmul_kernel,
-                       mesh=mesh,
-                       in_specs=(P(), P('model', None), P('model')),
-                       out_specs=(P(None, 'model')),
-                       check_rep=False)(x, w, w_s)
-    if b is not None:
-        output = output + b
-    return output
-
-
-def forward_w8a8_int8_row_parallel(x: jax.Array, w: jax.Array, b: jax.Array,
-                                   w_s: jax.Array, mesh: Mesh,
-                                   reduce_results: bool):
-    x = jax.lax.with_sharding_constraint(x,
-                                         NamedSharding(mesh, P(None, 'model')))
-    output = shard_map(_quantized_matmul_kernel,
-                       mesh=mesh,
-                       in_specs=(P(None, 'model'), P(None, 'model'), P()),
-                       out_specs=(P(None, 'model')),
-                       check_rep=False)(x, w, w_s)
-    if reduce_results:
-        output = shard_map(lambda x: jax.lax.psum(x, axis_name='model'),
-                           mesh=mesh,
-                           in_specs=P(None, 'model'),
-                           out_specs=P(),
-                           check_rep=False)(output)
-    if b is not None:
-        output = output + b
-    return output
+    return shard_map(wrapper,
+                     mesh=mesh,
+                     in_specs=(x_sharding, weight_sharding, scale_sharding),
+                     out_specs=(out_sharding),
+                     check_rep=False)(x, w_q, w_s)
 
 
 def reorder_concatenated_tensor_for_sharding(concatenated_tensor: jax.Array,
@@ -65,14 +46,12 @@ def reorder_concatenated_tensor_for_sharding(concatenated_tensor: jax.Array,
     The output is:
         AAABBCAAABBCAAABBCAAABBC
     In other words, it reorders the input tensor into 4 segements, with each segment corresponding to a shard and being AAABBC.
-
     Args:
         concatenated_tensor: the tensor, concatenated on the dimension specified by `dim`.
         split_sizes: each individual tensor's size on the dimension specified by `dim`.
         n_shards: num of shards.
         dim: the dimension on which the concatenated_tensor is concatenated.
     """
-
     # Split the concatenated tensor into individual tensors.
     split_tensors = []
     start_offset = 0
@@ -107,7 +86,6 @@ def slice_sharded_tensor_for_concatenation(sharded_tensor: jax.Array,
            C   |    C   |    C   |    C
         Shard0   Shard1   Shard2   Shard3
     In other words, each individual tensor is a slice of the input tensor with the same sharding.
-
     Args:
         sharded_tensor: the input tensor, sharded on the last dim.
         split_sizes: each individual tensor's size on the last dim.
@@ -130,3 +108,36 @@ def slice_sharded_tensor_for_concatenation(sharded_tensor: jax.Array,
         start_offset = end_offset
 
     return split_tensors
+
+
+def torch_to_jax_param(
+    tensor: torch.Tensor,
+    sharding: NamedSharding,
+    output_sizes: Optional[int],
+    n_shards: int,
+    fused: bool,
+) -> Union[torch.nn.Parameter, torch.nn.ParameterList]:
+    if output_sizes is None:
+        output_sizes = [tensor.shape[0]]
+
+    tensor = t2j(tensor, use_dlpack=False)
+    if fused:
+        tensor = reorder_concatenated_tensor_for_sharding(
+            tensor, output_sizes, n_shards, 0)
+        tensor = jax.device_put(tensor, sharding)
+        param = torch.nn.Parameter(torch_view(tensor), requires_grad=False)
+    else:
+        tensors = []
+        start_offset = 0
+        for size in output_sizes:
+            end_offset = start_offset + size
+
+            tensor_split = tensor[start_offset:end_offset]
+            tensor_split = jax.device_put(tensor_split, sharding)
+            tensor_split = torch.nn.Parameter(torch_view(tensor_split),
+                                              requires_grad=False)
+            tensors.append(tensor_split)
+
+            start_offset = end_offset
+        param = torch.nn.ParameterList(tensors)
+    return param
