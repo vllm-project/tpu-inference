@@ -13,10 +13,13 @@ from vllm.config import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils import cdiv, next_power_of_2
 
+from tpu_commons.kernels.ragged_paged_attention.v3.kernel import (
+    get_kv_cache_shape as v3_get_kv_cache_shape,
+)
 from tpu_commons.logger import init_logger
 # Register custom op dispatcher.
-from tpu_commons.models.torchax.torchax_wrapper import (kv_cache_update,
-                                                        ragged_paged_attention)
+from tpu_commons.models.torchax.torchax_wrapper import (
+    kv_cache_update, ragged_paged_attention)
 from tpu_commons.utils import TPU_HEAD_SIZE_ALIGNMENT
 
 logger = init_logger(__name__)
@@ -47,9 +50,13 @@ class PallasAttentionBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> tuple[int, ...]:
-        padded_head_size = cdiv(
-            head_size, TPU_HEAD_SIZE_ALIGNMENT) * TPU_HEAD_SIZE_ALIGNMENT
-        return (num_blocks, block_size, num_kv_heads * 2, padded_head_size)
+        return v3_get_kv_cache_shape(
+            total_num_pages=num_blocks,
+            page_size=block_size,
+            actual_num_kv_heads=num_kv_heads,
+            actual_head_dim=head_size,
+            kv_dtype=torch.bfloat16,
+        )
 
     @staticmethod
     def swap_blocks(
@@ -206,72 +213,34 @@ class PallasAttentionBackendImpl(AttentionImpl):
             value = torch.nn.functional.pad(
                 value, (0, padded_head_size - self.head_size), value=0.0)
 
-        if self.kv_sharing_target_layer_name is None and kv_cache.numel() > 0:
-            # Write input keys and values to the KV cache.
-            # Skip this if sharing KV cache with an earlier attention layer.
-            slot_mapping = attn_metadata.slot_mapping
-            kv_cache = write_to_kv_cache(key, value, kv_cache, slot_mapping,
-                                         attn_metadata.num_slices)
-            forward_context: ForwardContext = get_forward_context()
-            layer.kv_cache[forward_context.virtual_engine] = kv_cache
-
         ragged_paged_attention_op = ragged_paged_attention
 
-        output = ragged_paged_attention_op(
+        num_seqs = attn_metadata.num_seqs[0]
+        output, updated_kv_cache = ragged_paged_attention_op(
             query,
+            key,
+            value,
             kv_cache,
             attn_metadata.context_lens,
             attn_metadata.block_tables,
             attn_metadata.query_start_loc,
-            attn_metadata.num_seqs,
+            torch.tensor([0, 0, num_seqs], dtype=torch.int32),
             # By default, the system utilizes optimized block size and
             # vmem_limit_bytes parameters from the kernel repository. However,
             # these can be manually adjusted for debugging if necessary.
             num_kv_pages_per_block=None,
             num_queries_per_block=None,
             vmem_limit_bytes=100 * 1024 * 1024,
-            use_kernel=True,
             sm_scale=self.scale,
             sliding_window=self.sliding_window,
             soft_cap=self.logits_soft_cap,
         )
 
+        if self.kv_sharing_target_layer_name is None and kv_cache.numel() > 0:
+            forward_context: ForwardContext = get_forward_context()
+            layer.kv_cache[forward_context.virtual_engine] = updated_kv_cache
+
         if self.head_size % TPU_HEAD_SIZE_ALIGNMENT != 0:
             output = output[:, :, :self.head_size]
 
         return output.reshape(num_tokens, hidden_size)
-
-
-def write_to_kv_cache(key: torch.Tensor, value: torch.Tensor,
-                      kv_cache: torch.Tensor, slot_mapping: torch.Tensor,
-                      num_slices: torch.Tensor) -> torch.Tensor:
-    """ Write the key and values to the KV cache.
-
-    Args:
-        key: shape = [num_tokens, num_kv_heads * head_size]
-        value: shape = [num_tokens, num_kv_heads *  head_size]
-        kv_cache = [num_blocks, block_size, num_kv_heads * 2, head_size]
-        slot_mapping = [3, padded_num_slices]
-        num_slices = [1]
-
-    """
-    num_blocks, block_size, num_combined_kv_heads, head_size = kv_cache.shape
-    head_size = cdiv(head_size,
-                     TPU_HEAD_SIZE_ALIGNMENT) * TPU_HEAD_SIZE_ALIGNMENT
-    num_kv_heads = num_combined_kv_heads // 2
-
-    key = key.view(-1, num_kv_heads, head_size)
-    value = value.view(-1, num_kv_heads, head_size)
-    kv = torch.cat([key, value], axis=-1).reshape(-1, num_combined_kv_heads,
-                                                  head_size)
-
-    kv_cache = kv_cache.reshape(-1, num_combined_kv_heads, head_size)
-    kv_cache = call_jax(kv_cache_update,
-                        kv,
-                        slot_mapping,
-                        kv_cache,
-                        num_slices,
-                        page_size=block_size)
-    kv_cache = kv_cache.reshape(num_blocks, block_size, num_combined_kv_heads,
-                                head_size)
-    return kv_cache
