@@ -29,6 +29,7 @@ steps:
        - |
          .buildkite/scripts/run_in_docker.sh \
            python3 -m pytest -s -v /workspace/tpu_commons/tests/ \
+           --ignore=/workspace/tpu_commons/tests/models/vllm/test_pallas_torchax.py \
            --deselect=/workspace/tpu_commons/tests/models/jax/test_model_loader.py::test_get_vllm_model \
            --ignore=/workspace/tpu_commons/tests/models/vllm \
            --ignore=/workspace/tpu_commons/tests/e2e/test_multi_modal_inference.py \
