@@ -20,7 +20,7 @@ from tpu_commons.kernels.ragged_paged_attention.v3.kernel import (
 from tpu_commons.logger import init_logger
 # Register custom op dispatcher.
 from tpu_commons.models.torchax.torchax_wrapper import (
-    kv_cache_update, ragged_paged_attention)
+    ragged_paged_attention)
 from tpu_commons.utils import TPU_HEAD_SIZE_ALIGNMENT
 
 logger = init_logger(__name__)
