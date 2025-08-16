@@ -150,8 +150,6 @@ def _ragged_paged_attention(
         distribution,
     ):
         """Calls the ragged paged attention kernel."""
-        # TODO(cuiq): We should flatten page_indices in the caller.
-        page_indices = page_indices.flatten()
         return ragged_paged_attention_kernel(
             queries=queries,
             keys=keys,
