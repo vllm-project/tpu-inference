@@ -268,9 +268,8 @@ class TestTPUWorker:
         result = worker.take_draft_token_ids()
         worker.model_runner.take_draft_token_ids.assert_called_once()
         assert result == mock_draft_tokens
-
-    @patch(
-        'tpu_commons.worker.tpu_worker_torchax.adapt_lora_request_if_needed')
+    
+    @patch('tpu_commons.worker.tpu_worker_jax.adapt_lora_request_if_needed')
     def test_add_lora_not_implemented(self, mock_adapter_fn,
                                       mock_host_interface, mock_vllm_config):
         """Tests that add_lora raises NotImplementedError."""
@@ -291,8 +290,7 @@ class TestTPUWorker:
                 match="LoRA is not supported by the JAX worker yet."):
             worker.add_lora(mock_lora_request)
 
-    @patch(
-        'tpu_commons.worker.tpu_worker_torchax.adapt_lora_request_if_needed')
+    @patch('tpu_commons.worker.tpu_worker_jax.adapt_lora_request_if_needed')
     def test_add_lora_not_implemented_lora_request(self, mock_adapter_fn,
                                                    mock_host_interface,
                                                    mock_vllm_config):

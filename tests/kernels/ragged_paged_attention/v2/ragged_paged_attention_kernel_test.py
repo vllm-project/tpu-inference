@@ -5,7 +5,7 @@ import jax.numpy as jnp
 from absl.testing import absltest, parameterized
 from jax._src import test_util as jtu
 
-from tpu_commons.kernels.ragged_paged_attention.kernel import (
+from tpu_commons.kernels.ragged_paged_attention.v2.kernel import (
     dynamic_validate_inputs, ragged_paged_attention,
     ref_ragged_paged_attention)
 

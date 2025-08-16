@@ -6,7 +6,8 @@ from jax._src import test_util as jtu
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
-from tpu_commons.kernels.ragged_kv_cache_update import kv_cache_update
+from tpu_commons.kernels.ragged_paged_attention.v2.ragged_kv_cache_update import \
+    kv_cache_update
 
 
 def kv_cache_update_ref(new_kv, slot_mapping, kv_cache):
