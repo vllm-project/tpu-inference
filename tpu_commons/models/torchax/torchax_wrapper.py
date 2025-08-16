@@ -92,10 +92,10 @@ def get_mesh():
     return Mesh(jax.devices(), axis_names=('x', ))
 
 
+
 @functools.partial(
     jax.jit,
     static_argnames=[
-        "use_kernel",
         "sm_scale",
         "mask_value",
         "num_kv_pages_per_block",
@@ -103,83 +103,140 @@ def get_mesh():
         "vmem_limit_bytes",
         "sliding_window",
         "soft_cap",
+        "q_scale",
+        "k_scale",
+        "v_scale",
+        "chunk_prefill_size",
+        "debug_mode",
     ],
+    donate_argnames=("kv_cache",),
 )
 def _ragged_paged_attention(
     q: Array,  # [max_num_batched_tokens, num_q_heads, head_dim]
-    kv_pages: Array,  # [total_num_pages, page_size,
+    k: Array,  # [max_num_batched_tokens, num_kv_heads, head_dim]
+    v: Array,  # [max_num_batched_tokens, num_kv_heads, head_dim]
+    kv_cache: Array,  # [total_num_pages, page_size,
     #  num_combined_kv_heads, head_dim]
     kv_lens: Array,  # i32[max_num_seqs]
     page_indices: Array,  # i32[max_num_seqs, pages_per_seq]
     cu_q_lens: Array,  # i32[max_num_seqs + 1]
-    num_seqs: Array,  # i32[1]
-    use_kernel: bool = True,
+    distribution: Array,  # i32[3]
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
     soft_cap: float | None = None,
     mask_value: float | None = None,
+    q_scale: float | None = None,
+    k_scale: float | None = None,
+    v_scale: float | None = None,
+    chunk_prefill_size: int | None = None,
     num_kv_pages_per_block: int | None = None,
     num_queries_per_block: int | None = None,
     vmem_limit_bytes: int | None = None,
+    debug_mode: bool = False,
 ) -> Array:
 
-    assert use_kernel, "use_kernel must be True for torchax path."
+    from tpu_commons.kernels.ragged_paged_attention.v3.kernel import (
+        ragged_paged_attention as ragged_paged_attention_kernel,
+    )
 
-    from tpu_commons.kernels.ragged_paged_attention.kernel import \
-        ragged_paged_attention as ragged_paged_attention_kernel
-
-    def call_kernel(q, kv_pages, kv_lens, page_indices, cu_q_lens, num_seqs):
+    def call_kernel(
+        q,
+        k,
+        v,
+        kv_cache,
+        kv_lens,
+        page_indices,
+        cu_q_lens,
+        distribution,
+    ):
         """Calls the ragged paged attention kernel."""
+        # TODO(jevinjiang): We should flatten page_indices in the scheduling
+        # phase.
+        page_indices = page_indices.flatten()
         return ragged_paged_attention_kernel(
-            q=q,
-            kv_pages=kv_pages,
+            queries=q,
+            keys=k,
+            values=v,
+            kv_cache=kv_cache,
             kv_lens=kv_lens,
             page_indices=page_indices,
             cu_q_lens=cu_q_lens,
-            num_seqs=num_seqs,
+            distribution=distribution,
             sm_scale=sm_scale,
             sliding_window=sliding_window,
             soft_cap=soft_cap,
             mask_value=mask_value,
+            q_scale=q_scale,
+            k_scale=k_scale,
+            v_scale=v_scale,
+            chunk_prefill_size=chunk_prefill_size,
             num_kv_pages_per_block=num_kv_pages_per_block,
             num_queries_per_block=num_queries_per_block,
-            vmem_limit_bytes=vmem_limit_bytes)
+            vmem_limit_bytes=vmem_limit_bytes,
+            debug_mode=debug_mode,
+        )
 
     # Define sharding specifications for better readability
     attention_in_specs = (
-        P(None, 'x', None),  # q: shard on head dimension
-        P(None, None, 'x'),  # kv_pages: shard on kv_head dimension
+        P(None, "x", None),  # q: shard on head dimension
+        P(None, "x", None),  # k: shard on head dimension
+        P(None, "x", None),  # v: shard on head dimension
+        P(None, None, "x"),  # kv_cache: shard on kv_head dimension
         P(None),  # kv_lens: replicated
         P(None, None),  # page_indices: replicated
         P(None),  # cu_q_lens: replicated
-        P(None),  # num_seqs: replicated
+        P(None),  # distribution: replicated
     )
-    attention_out_specs = P(None, 'x', None)  # output: shard on head dimension
+    attention_out_specs = (
+        P(None, "x", None),  # output: shard on head dimension
+        P(None, None, "x"),  # kv_cache: shard on kv_head dimension
+    )
 
-    @functools.partial(jax.shard_map,
-                       mesh=get_mesh(),
-                       in_specs=attention_in_specs,
-                       out_specs=attention_out_specs,
-                       check_vma=False)
-    def wrap_shard_map(q, kv_pages, kv_lens, page_indices, cu_q_lens,
-                       num_seqs):
-        """Wraps the ragged paged attention kernel for sharding."""
-        return call_kernel(q, kv_pages, kv_lens, page_indices, cu_q_lens,
-                           num_seqs)
-
-    args = (
+    @functools.partial(
+        jax.shard_map,
+        mesh=get_mesh(),
+        in_specs=attention_in_specs,
+        out_specs=attention_out_specs,
+        check_vma=False,
+    )
+    def wrap_shard_map(
         q,
-        kv_pages,
+        k,
+        v,
+        kv_cache,
         kv_lens,
         page_indices,
         cu_q_lens,
-        num_seqs,
+        distribution,
+    ):
+        """Wraps the ragged paged attention kernel for sharding."""
+        return call_kernel(
+            q,
+            k,
+            v,
+            kv_cache,
+            kv_lens,
+            page_indices,
+            cu_q_lens,
+            distribution,
+        )
+
+    args = (
+        q,
+        k,
+        v,
+        kv_cache,
+        kv_lens,
+        page_indices,
+        cu_q_lens,
+        distribution,
     )
 
     if envs.VLLM_XLA_USE_SPMD:
         return wrap_shard_map(*args)
     else:
         return call_kernel(*args)
+
 
 
 ragged_paged_attention = functools.partial(call_jax, _ragged_paged_attention)

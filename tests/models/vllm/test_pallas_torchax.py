@@ -87,7 +87,7 @@ class TestPallasAttentionBackend:
         shape = PallasAttentionBackend.get_kv_cache_shape(
             num_blocks, block_size, num_kv_heads, head_size)
 
-        expected_shape = (num_blocks, block_size, num_kv_heads * 2, head_size)
+        expected_shape = (10, 16, 8, 2, 256)
         assert shape == expected_shape
 
     def test_get_kv_cache_shape_unaligned_head_size(self):
@@ -101,8 +101,7 @@ class TestPallasAttentionBackend:
 
         # 96 should be padded to 128
         padded_head_size = 128
-        expected_shape = (num_blocks, block_size, num_kv_heads * 2,
-                          padded_head_size)
+        expected_shape = (10, 16, 8, 2, padded_head_size)
         assert shape == expected_shape
 
     def test_swap_blocks_raises_error(self):
@@ -314,8 +313,7 @@ class TestPallasAttentionBackendImpl:
     @patch(
         'tpu_commons.attention.backends.pallas_torchax.ragged_paged_attention')
     @patch('tpu_commons.attention.backends.pallas_torchax.get_forward_context')
-    @patch('tpu_commons.attention.backends.pallas_torchax.write_to_kv_cache')
-    def test_forward_full_flow(self, mock_write_kv, mock_get_context,
+    def test_forward_full_flow(self, mock_get_context,
                                mock_attention):
         impl = PallasAttentionBackendImpl(
             num_heads=32,
@@ -340,7 +338,7 @@ class TestPallasAttentionBackendImpl:
         query = torch.randn(2, 4096)  # 2 tokens, 32 heads * 128 head_size
         key = torch.randn(2, 1024)  # 2 tokens, 8 kv_heads * 128 head_size
         value = torch.randn(2, 1024)
-        kv_cache = torch.randn(10, 16, 16, 128)  # Non-empty cache
+        kv_cache = torch.randn(10, 16, 8, 2, 128)  # Non-empty cache
 
         metadata = PallasMetadata(slot_mapping=torch.tensor([0, 1]),
                                   block_tables=torch.tensor([[0, 1]]),
@@ -349,16 +347,10 @@ class TestPallasAttentionBackendImpl:
                                   num_seqs=torch.tensor([1]),
                                   num_slices=torch.tensor([1]))
 
-        # Mock write_to_kv_cache to return the same cache
-        mock_write_kv.return_value = kv_cache
-
         # Mock attention output
-        mock_attention.return_value = torch.randn(2, 32, 128)
+        mock_attention.return_value = (torch.randn(2, 32, 128), kv_cache)
 
         result = impl.forward(layer, query, key, value, kv_cache, metadata)
-
-        # Verify write_to_kv_cache was called
-        mock_write_kv.assert_called_once()
 
         # Verify ragged_paged_attention was called
         mock_attention.assert_called_once()
@@ -389,7 +381,7 @@ class TestPallasAttentionBackendImpl:
         query = torch.randn(2, 4096)  # 2 tokens, 32 heads * 128 head_size
         key = torch.randn(2, 1024)  # 2 tokens, 8 kv_heads * 128 head_size
         value = torch.randn(2, 1024)
-        kv_cache = torch.randn(10, 16, 16, 128)
+        kv_cache = torch.randn(10, 16, 8, 2, 128)
 
         metadata = PallasMetadata(slot_mapping=torch.tensor([0, 1]),
                                   block_tables=torch.tensor([[0, 1]]),
@@ -398,7 +390,7 @@ class TestPallasAttentionBackendImpl:
                                   num_seqs=torch.tensor([1]),
                                   num_slices=torch.tensor([1]))
 
-        mock_attention.return_value = torch.randn(2, 32, 128)
+        mock_attention.return_value = (torch.randn(2, 32, 128), kv_cache)
 
         result = impl.forward(layer, query, key, value, kv_cache, metadata)
 
@@ -409,8 +401,7 @@ class TestPallasAttentionBackendImpl:
     @patch(
         'tpu_commons.attention.backends.pallas_torchax.ragged_paged_attention')
     @patch('tpu_commons.attention.backends.pallas_torchax.get_forward_context')
-    @patch('tpu_commons.attention.backends.pallas_torchax.write_to_kv_cache')
-    def test_forward_with_head_padding(self, mock_write_kv, mock_get_context,
+    def test_forward_with_head_padding(self, mock_get_context,
                                        mock_attention):
         impl = PallasAttentionBackendImpl(
             num_heads=8,
@@ -435,7 +426,7 @@ class TestPallasAttentionBackendImpl:
         query = torch.randn(2, 768)  # 2 tokens, 8 heads * 96 head_size
         key = torch.randn(2, 768)  # 2 tokens, 8 kv_heads * 96 head_size
         value = torch.randn(2, 768)
-        kv_cache = torch.randn(10, 16, 16, 128)  # Padded head size
+        kv_cache = torch.randn(10, 16, 8, 2, 128)  # Padded head size
 
         metadata = PallasMetadata(slot_mapping=torch.tensor([0, 1]),
                                   block_tables=torch.tensor([[0, 1]]),
@@ -444,9 +435,8 @@ class TestPallasAttentionBackendImpl:
                                   num_seqs=torch.tensor([1]),
                                   num_slices=torch.tensor([1]))
 
-        mock_write_kv.return_value = kv_cache
         # Return padded output that will be trimmed
-        mock_attention.return_value = torch.randn(2, 8, 128)
+        mock_attention.return_value = (torch.randn(2, 8, 128), kv_cache)
 
         result = impl.forward(layer, query, key, value, kv_cache, metadata)
 
@@ -454,55 +444,4 @@ class TestPallasAttentionBackendImpl:
         assert result.shape == (2, 768)  # 8 heads * 96 original head_size
 
 
-@patch('tpu_commons.attention.backends.pallas_torchax.call_jax')
-@patch('tpu_commons.attention.backends.pallas_torchax.kv_cache_update')
-def test_write_to_kv_cache(mock_kv_cache_update, mock_call_jax):
-    # Mock the JAX function call to return the same kv_cache
-    mock_call_jax.return_value = torch.randn(160, 16, 128)  # reshaped size
 
-    key = torch.randn(2, 8, 128)  # 2 tokens, 8 kv_heads, 128 head_size
-    value = torch.randn(2, 8, 128)  # 2 tokens, 8 kv_heads, 128 head_size
-    kv_cache = torch.randn(
-        10, 16, 16,
-        128)  # 10 blocks, 16 block_size, 16 kv_heads*2, 128 head_size
-    slot_mapping = torch.tensor([[0, 1, 0], [16, 17, 0], [0, 0, 0]])
-    num_slices = torch.tensor([1])
-
-    result = write_to_kv_cache(key, value, kv_cache, slot_mapping, num_slices)
-
-    # Verify the JAX function was called
-    mock_call_jax.assert_called_once()
-
-    # Check the result shape matches input kv_cache
-    assert result.shape == kv_cache.shape
-
-    # Verify kv_cache_update was passed to call_jax
-    args, kwargs = mock_call_jax.call_args
-    assert args[0] == mock_kv_cache_update
-    assert kwargs['page_size'] == 16
-
-
-def test_write_to_kv_cache_tensor_shapes():
-    # Create tensors with correct shapes: key/value should be flattened
-    key = torch.randn(3, 1024)  # 3 tokens, 8 kv_heads * 128 head_size
-    value = torch.randn(3, 1024)  # 3 tokens, 8 kv_heads * 128 head_size
-    kv_cache = torch.randn(
-        5, 8, 16, 128)  # 5 blocks, 8 block_size, 16 kv_heads*2, 128 head_size
-    slot_mapping = torch.tensor([[0, 1, 2], [8, 9, 10], [0, 0, 0]])
-    num_slices = torch.tensor([1])
-
-    with patch('tpu_commons.attention.backends.pallas_torchax.call_jax'
-               ) as mock_call_jax:
-        # Mock return value with correct shape
-        mock_call_jax.return_value = torch.randn(40, 16, 128)  # reshaped size
-
-        result = write_to_kv_cache(key, value, kv_cache, slot_mapping,
-                                   num_slices)
-
-        # Check input tensor shapes passed to JAX
-        args, kwargs = mock_call_jax.call_args
-        kv_input = args[1]  # The concatenated kv tensor
-
-        # kv should be [3 tokens, 16 combined_heads, 128 padded_head_size]
-        assert kv_input.shape == (3, 16, 128)
-        assert result.shape == kv_cache.shape
