@@ -6,8 +6,7 @@ from vllm.attention.backends.abstract import AttentionType
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
 
 from tpu_commons.attention.backends.pallas_torchax import (
-    PallasAttentionBackend, PallasAttentionBackendImpl, PallasMetadata,
-    write_to_kv_cache)
+    PallasAttentionBackend, PallasAttentionBackendImpl, PallasMetadata)
 
 
 class TestPallasMetadata:
