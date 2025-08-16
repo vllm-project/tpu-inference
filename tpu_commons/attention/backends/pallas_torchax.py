@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from typing import Optional
 
+import jax.numpy as jnp
 import torch
 from jax.tree_util import register_pytree_node_class
 from torchax.interop import call_jax
@@ -55,7 +56,7 @@ class PallasAttentionBackend(AttentionBackend):
             page_size=block_size,
             actual_num_kv_heads=num_kv_heads,
             actual_head_dim=head_size,
-            kv_dtype=torch.bfloat16,
+            kv_dtype=jnp.bfloat16,
         )
 
     @staticmethod
