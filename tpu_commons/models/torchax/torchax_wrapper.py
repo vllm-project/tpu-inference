@@ -112,9 +112,9 @@ def get_mesh():
     donate_argnames=("kv_cache",),
 )
 def _ragged_paged_attention(
-    q: Array,  # [max_num_batched_tokens, num_q_heads, head_dim]
-    k: Array,  # [max_num_batched_tokens, num_kv_heads, head_dim]
-    v: Array,  # [max_num_batched_tokens, num_kv_heads, head_dim]
+    queries: Array,   # [max_num_batched_tokens, num_q_heads, head_dim]
+    keys: Array,      # [max_num_batched_tokens, num_kv_heads, head_dim]
+    values: Array,    # [max_num_batched_tokens, num_kv_heads, head_dim]
     kv_cache: Array,  # [total_num_pages, page_size,
     #  num_combined_kv_heads, head_dim]
     kv_lens: Array,  # i32[max_num_seqs]
@@ -140,9 +140,9 @@ def _ragged_paged_attention(
     )
 
     def call_kernel(
-        q,
-        k,
-        v,
+        queries,
+        keys,
+        values,
         kv_cache,
         kv_lens,
         page_indices,
@@ -150,13 +150,12 @@ def _ragged_paged_attention(
         distribution,
     ):
         """Calls the ragged paged attention kernel."""
-        # TODO(jevinjiang): We should flatten page_indices in the scheduling
-        # phase.
+        # TODO(cuiq): We should flatten page_indices in the caller.
         page_indices = page_indices.flatten()
         return ragged_paged_attention_kernel(
-            queries=q,
-            keys=k,
-            values=v,
+            queries=queries,
+            keys=keys,
+            values=values,
             kv_cache=kv_cache,
             kv_lens=kv_lens,
             page_indices=page_indices,
@@ -170,26 +169,28 @@ def _ragged_paged_attention(
             k_scale=k_scale,
             v_scale=v_scale,
             chunk_prefill_size=chunk_prefill_size,
+            # Kernel tuning params.
             num_kv_pages_per_block=num_kv_pages_per_block,
             num_queries_per_block=num_queries_per_block,
             vmem_limit_bytes=vmem_limit_bytes,
+            # Debug params.
             debug_mode=debug_mode,
         )
 
     # Define sharding specifications for better readability
     attention_in_specs = (
-        P(None, "x", None),  # q: shard on head dimension
-        P(None, "x", None),  # k: shard on head dimension
-        P(None, "x", None),  # v: shard on head dimension
-        P(None, None, "x"),  # kv_cache: shard on kv_head dimension
+        P(None, "x", None),  # queries: shard on head dimension
+        P(None, "x", None),  # keys: shard on head dimension
+        P(None, "x", None),  # values: shard on head dimension
+        P(None, None, "x", None),  # kv_cache: shard on kv_head dimension
         P(None),  # kv_lens: replicated
-        P(None, None),  # page_indices: replicated
+        P(None),  # page_indices: replicated
         P(None),  # cu_q_lens: replicated
         P(None),  # distribution: replicated
     )
     attention_out_specs = (
         P(None, "x", None),  # output: shard on head dimension
-        P(None, None, "x"),  # kv_cache: shard on kv_head dimension
+        P(None, None, "x", None),  # kv_cache: shard on kv_head dimension
     )
 
     @functools.partial(
@@ -200,9 +201,9 @@ def _ragged_paged_attention(
         check_vma=False,
     )
     def wrap_shard_map(
-        q,
-        k,
-        v,
+        queries,
+        keys,
+        values,
         kv_cache,
         kv_lens,
         page_indices,
@@ -211,9 +212,9 @@ def _ragged_paged_attention(
     ):
         """Wraps the ragged paged attention kernel for sharding."""
         return call_kernel(
-            q,
-            k,
-            v,
+            queries,
+            keys,
+            values,
             kv_cache,
             kv_lens,
             page_indices,
@@ -222,9 +223,9 @@ def _ragged_paged_attention(
         )
 
     args = (
-        q,
-        k,
-        v,
+        queries,
+        keys,
+        values,
         kv_cache,
         kv_lens,
         page_indices,
