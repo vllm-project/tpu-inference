@@ -79,6 +79,7 @@ def ref_ragged_paged_attention(
     actual_num_q_heads_per_kv_head = actual_num_q_heads // actual_num_kv_heads
     max_num_seqs = kv_lens.shape[0]
     num_page_indices = page_indices.shape[0]
+    assert len(page_indices.shape) == 1
     assert num_page_indices % max_num_seqs == 0
     pages_per_seq = num_page_indices // max_num_seqs
     outputs = []

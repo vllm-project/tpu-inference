@@ -597,7 +597,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             torch.tensor([num_slices], dtype=torch.int32), self.mesh)
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping.jax(),
-            block_tables=block_tables.jax().flatten(),
+            block_tables=block_tables.flatten().jax(),
             context_lens=seq_lens.jax(),
             query_start_loc=query_start_loc.jax(),
             num_seqs=num_seqs.jax(),
