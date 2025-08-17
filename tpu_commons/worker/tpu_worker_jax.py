@@ -158,12 +158,6 @@ class TPUWorker(AbstractTpuWorker):
         self,
         lora_request: Union[AbstractLoRARequest, LoRARequest],
     ) -> bool:
-        # Adapt the input if necessary (temporary compatibility layer)
-        adapted_lora_request = adapt_lora_request_if_needed(lora_request)
-
-        # Unwrap the adapter to get the concrete vLLM object
-        vllm_lora_request = adapted_lora_request.vllm_lora_request  # noqa: F841
-
         raise NotImplementedError(
             "LoRA is not supported by the JAX worker yet.")
 
