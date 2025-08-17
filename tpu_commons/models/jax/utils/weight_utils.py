@@ -1,7 +1,6 @@
 """Utilities for downloading model weights from HuggingFace."""
 
 import functools
-import gc
 import glob
 import math
 import os
@@ -48,6 +47,11 @@ def print_param_info(param: nnx.Param, name: str):
     )
 
 
+def _hash(m):
+    shapes = jax.tree.map(jnp.shape, m)
+    return str(shapes)
+
+
 def annotated_module(anno_map: dict[Any, TpuCommonAnnotation],
                      m: Any,
                      transpose_param: tuple[int, ...] = (),
@@ -69,10 +73,9 @@ def annotated_module(anno_map: dict[Any, TpuCommonAnnotation],
     """
     assert m is not None
 
-    if isinstance(m, list):
-        m = tuple(m)
+    hashed_m = _hash(m)
 
-    anno_map[m] = TpuCommonAnnotation(
+    anno_map[hashed_m] = TpuCommonAnnotation(
         hf_name=hf_name,
         transpose_param=transpose_param,
         reshape_param=reshape_param,
@@ -459,18 +462,19 @@ def load_hf_weights_through_annotation(
         vllm_config, model: nnx.Module, mesh: Mesh,
         annotation_map: dict[Any, TpuCommonAnnotation]):
     """Load weights from all model weights files to the model, run in multi threads."""
-    model_class = model.__class__
+    # model_class = model.__class__
 
-    # Create a model to populate the annotation map.
-    logger.warning("Populate annotation map...")
-    _model = model_class(model.vllm_config, jax.random.key(0), model.mesh)
-    metadata_map = load_maps_from_annotations(_model, annotation_map)
+    # # Create a model to populate the annotation map.
+    # logger.warning("Populate annotation map...")
+    # _model = model_class(model.vllm_config, jax.random.key(0), model.mesh)
+    # metadata_map = load_maps_from_annotations(_model, annotation_map)
 
-    # Delete and force gc to release memory.
-    del _model
-    gc.collect()
-    logger.warning("Populate annotation map... done!")
+    # # Delete and force gc to release memory.
+    # del _model
+    # gc.collect()
+    # logger.warning("Populate annotation map... done!")
 
+    metadata_map = load_maps_from_annotations(model, annotation_map)
     model_path = vllm_config.model_config.model
     weights_files, _ = get_model_weights_files(
         model_path, vllm_config.load_config.download_dir)
@@ -585,8 +589,9 @@ def _build_annotation_map(module: nnx.Module,
         if isinstance(
                 m,
             (nnx.Linear, nnx.Einsum, nnx.RMSNorm, nnx.Embed, nnx.Param)):
-            if _is_annotated(anno_map, m):
-                anno = _get_annotation(anno_map, m)
+            hashed_m = _hash(m)
+            if _is_annotated(anno_map, hashed_m):
+                anno = _get_annotation(anno_map, hashed_m)
                 if isinstance(m, nnx.Param):
                     annotation_map[hf_prefix] = (model_prefix, anno)
                 else:  # It's a module with params
@@ -603,13 +608,16 @@ def _build_annotation_map(module: nnx.Module,
             return
 
         for name, value in vars(m).items():
-            if not _is_annotated(anno_map, value):
+            if not isinstance(value, (nnx.Module, nnx.Param, list)):
+                continue
+            hashed_value = _hash(value)
+            if not _is_annotated(anno_map, hashed_value):
                 continue
 
             current_model_prefix = f"{model_prefix}.{name}" if model_prefix else name
 
             child_hf_name = name
-            anno = _get_annotation(anno_map, value)
+            anno = _get_annotation(anno_map, hashed_value)
             if anno.hf_name:
                 child_hf_name = anno.hf_name
 
@@ -617,7 +625,7 @@ def _build_annotation_map(module: nnx.Module,
 
             if isinstance(value, (nnx.Module, nnx.Param)):
                 recurse(value, current_model_prefix, current_hf_prefix)
-            elif isinstance(value, tuple):
+            elif isinstance(value, list):
                 for i, item in enumerate(value):
                     if isinstance(item, (nnx.Module, nnx.Param)):
                         recurse(item, f"{current_model_prefix}.{i}",
@@ -632,6 +640,7 @@ def load_maps_from_annotations(
         anno_map: dict[Any, TpuCommonAnnotation]) -> _MetadataMap:
     """Load weights from all model weights files to the model using annotations."""
     annotation_map = _build_annotation_map(model, anno_map)
+    print(f"annotation_map={annotation_map}")
 
     name_map: dict[str, str] = {}
     transpose_map: dict[str, tuple[int, ...]] = {}
