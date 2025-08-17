@@ -1,4 +1,4 @@
-# 🔬 **IMPORTANT: EXPERIMENTAL AND NOT SUPPORTED** 🔬
+#  **IMPORTANT: EXPERIMENTAL AND NOT SUPPORTED**  
 
 This is an exploratory repository provided for informational and learning purposes only.
 The code is **not feature-complete** and **may not be stable**.
@@ -82,46 +82,13 @@ HF_TOKEN=<huggingface_token> python /workspace/tpu_commons/examples/offline_infe
     --max_model_len=1024
 ```
 
-### Run vLLM Pytorch models on the JAX path
-
-Run the vLLM's implementation of `Llama 3.1 8B`, which is in Pytorch. It is the same command as above with the extra env var `MODEL_IMPL_TYPE=vllm`:
-
-```
-export MODEL_IMPL_TYPE=vllm
-export HF_TOKEN=<huggingface_token>
-python tpu_commons/examples/offline_inference.py \
-    --model=meta-llama/Llama-3.1-8B \
-    --tensor_parallel_size=4 \
-    --max_model_len=1024
-```
-
-Run the vLLM Pytorch `Qwen3-30B-A3B` MoE model, use `--enable-expert-parallel` for expert parallelism, otherwise it defaults to tensor parallelism:
-
-```
-export MODEL_IMPL_TYPE=vllm
-export HF_TOKEN=<huggingface_token>
-python vllm/examples/offline_inference/basic/generate.py \
-    --model=Qwen/Qwen3-30B-A3B \
-    --tensor_parallel_size=4 \
-    --max_model_len=1024 \
-    --enable-expert-parallel
-```
-
 ### Relevant env
 
 To switch different backends (default is jax):
 
 ```
 TPU_BACKEND_TYPE=jax
-TPU_BACKEND_TYPE=torchax
 TPU_BACKEND_TYPE=pytorch_xla
-```
-
-To switch different model implementations (default is flax_nnx):
-
-```
-MODEL_IMPL_TYPE=flax_nnx
-MODEL_IMPL_TYPE=vllm
 ```
 
 To run JAX path without precompiling the model:
@@ -202,27 +169,6 @@ docker run \
   --model=meta-llama/Llama-3.1-8B \
   --tensor_parallel_size=4 \
   --max_model_len=1024 \
-```
-
-## Torchax Guide
-
-**NOTE**: This is under development so the run may fail.
-
-### Install dependencies
-
-#### Install `vLLM`
-
-Follow the above [step](#install-vllm-tpu) to install vllm for TPU backend.
-
-#### Install `tpu_commons`
-
-Follow the above step to install [tpu_commons](#install-tpu_commons)
-
-### Run example script
-
-```
-cd vllm
-TPU_BACKEND_TYPE=torchax VLLM_TORCHAX_ENABLED=1 VLLM_USE_V1=1 python examples/offline_inference/tpu.py
 ```
 
 ## How to test kernel?

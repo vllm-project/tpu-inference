@@ -250,10 +250,7 @@ class TestTPUWorker:
         mock_adapter_fn.assert_called_once_with(mock_scheduler_input)
         assert result is None
 
-    @patch(
-        'tpu_commons.worker.tpu_worker_torchax.adapt_lora_request_if_needed')
-    def test_add_lora_not_implemented(self, mock_adapter_fn,
-                                      mock_host_interface, mock_vllm_config):
+    def test_add_lora_not_implemented(self, mock_host_interface, mock_vllm_config):
         """Tests that add_lora raises NotImplementedError."""
         worker = TPUWorker(host_interface=mock_host_interface,
                            vllm_config=mock_vllm_config,
@@ -262,20 +259,12 @@ class TestTPUWorker:
                            distributed_init_method="test")
         mock_lora_request = MagicMock(spec=AbstractLoRARequest)
 
-        # The adapter function returns the adapted input
-        mock_adapter_fn.return_value = mock_lora_request
-        # The adapter has the vllm object
-        mock_lora_request.vllm_lora_request = "concrete_vllm_object"
-
         with pytest.raises(
                 NotImplementedError,
                 match="LoRA is not supported by the JAX worker yet."):
             worker.add_lora(mock_lora_request)
 
-    @patch(
-        'tpu_commons.worker.tpu_worker_torchax.adapt_lora_request_if_needed')
-    def test_add_lora_not_implemented_lora_request(self, mock_adapter_fn,
-                                                   mock_host_interface,
+    def test_add_lora_not_implemented_lora_request(self, mock_host_interface,
                                                    mock_vllm_config):
         """Tests that add_lora raises NotImplementedError."""
         worker = TPUWorker(host_interface=mock_host_interface,
@@ -284,11 +273,6 @@ class TestTPUWorker:
                            rank=0,
                            distributed_init_method="test")
         mock_lora_request = MagicMock(spec=LoRARequest)
-
-        # The adapter function returns the adapted input
-        mock_adapter_fn.return_value = mock_lora_request
-        # The adapter has the vllm object
-        mock_lora_request.vllm_lora_request = "concrete_vllm_object"
 
         with pytest.raises(
                 NotImplementedError,
