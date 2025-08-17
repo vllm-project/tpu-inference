@@ -1,11 +1,11 @@
 # TODO: create a BaseLayerWithLoRA class because the test uses it.
 # create TorchaxColumnParallelLinearWithLoRA
 
-from typing import TYPE_CHECKING, Optional, cast
+from typing import TYPE_CHECKING, Optional, Union, cast
 
 import torch
 import torch.nn as nn
-from jax.sharding import Mesh, PartitionSpec
+from jax.sharding import PartitionSpec
 from transformers import PretrainedConfig
 from vllm.config import LoRAConfig
 # yapf: enable
@@ -18,6 +18,26 @@ if TYPE_CHECKING:
 
 P = PartitionSpec
 
+"""
+Step1: create a base layer (e.g. MergedColumnParallelLinear) and a vLLM LoRA wrapper (via load_lora_model())
+Here, we add a LoRA wrapper so the model becomes:
+LinearWithLoRA {
+    base_layer: Linear
+}
+The lora weight and linear weight should have been initialized.
+Step2: shard_parallel_layers_to_tpu()
+Here we replace the linear layer with Torchax layer
+LinearWithLora {
+    base_layer: JaxLinear
+}
+then we load the linear weight, shard it, but keep it on CPU.
+Step3: move the linear weight to TPU.
+Step4: write a function to replace the LoRA wrapper with our own wrapper JaxLinearWithLoRA:
+JaxLinearWithLoRA {
+    base_layer: JaxLinear
+}
+Step5: load the lora weight, shard it, and send it to TPU.
+"""
 
 class TorchaxBaseLayerWithLoRA(nn.Module):
 
@@ -65,14 +85,19 @@ class TorchaxBaseLayerWithLoRA(nn.Module):
 
 class TorchaxBaseLinearLayerWithLoRA(TorchaxBaseLayerWithLoRA):
 
-    def __init__(self, base_lora_layer: BaseLayerWithLoRA, mesh: Mesh):
+    def __init__(self, base_lora_layer: BaseLayerWithLoRA):
         super().__init__()
         self.base_lora_layer = base_lora_layer
         self.base_layer = base_lora_layer.base_layer
-        self.input_size = self.base_layer.input_size
-        self.mesh = mesh
+        # self.input_size = self.base_layer.input_size
         # self.device = _get_lora_device(self.base_layer)  # do we need it?
-        self.lora_bias_stacked: Optional[tuple[torch.Tensor, ...]] = None
+
+        # self.lora_a_stacked, self.lora_b_stacked, self.lora_bias_stacked, self.lora_config are initialized in original LoRA wrapper's create_lora_weight().
+        self.lora_config = base_lora_layer.lora_config
+        self.lora_a_stacked = base_lora_layer.lora_a_stacked
+        self.lora_b_stacked = base_lora_layer.lora_b_stacked
+        if self.lora_config.bias_enabled:
+            self.lora_bias_stacked: Optional[tuple[torch.Tensor, ...]] = base_lora_layer.lora_bias_stacked
 
         self.output_slices: tuple[int, ...]
         self.output_size: int
@@ -121,7 +146,8 @@ class TorchaxBaseLinearLayerWithLoRA(TorchaxBaseLayerWithLoRA):
     def apply(self,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        output = self.base_layer(x)
+        # self.base_layer returns (output, output_bias), we only need the first one.
+        output = self.base_layer(x)[0]  # x:[128, 4096]
 
         # In transformers backend, x and output have extra batch dimension like
         # (1, seq_len, hidden_dim), while punica expects (seq_len, hidden_dim),
@@ -140,19 +166,24 @@ class TorchaxBaseLinearLayerWithLoRA(TorchaxBaseLayerWithLoRA):
 
         return output
 
-class TorchaxColumnParallelLinearWithLoRA(TorchaxBaseLinearLayerWithLoRA):
-    """
-    LoRA on top of ColumnParallelLinear layer.
-    LoRA B is sliced for tensor parallelism.
-    There are two types for the `base_layer`:
-    1. ColumnParallelLinear, e.g.`dense_h_to_4h` in `FalconForCausalLM`.
-    2. MergedColumnParallelLinear, e.g.`gate_up_proj` in `Phi3ForCausalLM`.
-    """
+    @property
+    def weight(self) -> torch.Tensor:
+        if hasattr(self.base_layer, "weight"):
+            return self.base_layer.weight
+        else:
+            raise ValueError(f"Unsupported base layer: {self.base_layer}")
 
-    def __init__(self, base_layer: torch.nn.Module, mesh: Mesh) -> None:
-        super().__init(base_layer, mesh)
+    @property
+    def bias(self) -> Optional[torch.Tensor]:
+        if hasattr(self.base_layer, "bias"):
+            return self.base_layer.bias
+        else:
+            return None
 
-class TorchaxMergedColumnParallelLinearWithLoRA(TorchaxColumnParallelLinearWithLoRA):
+
+# TODO(xiowei): consider creating a TorchaxColumnParallelLinearWithLoRA next.
+
+class TorchaxMergedColumnParallelLinearWithLoRA(TorchaxBaseLinearLayerWithLoRA):
     """ColumnParallelLinear layer that is composed of 2 sublayers (slices)
     packed together (eg. gate_proj + up_proj -> gate_up_proj).
 
@@ -161,11 +192,45 @@ class TorchaxMergedColumnParallelLinearWithLoRA(TorchaxColumnParallelLinearWithL
     Both slices must have the same size.
     """
 
-    def __init__(self, base_layer: torch.nn.Module, mesh: Mesh) -> None:
-        super().__init(base_layer, mesh)
-        output_sizes = base_layer.output_sizes
+    def __init__(self, base_lora_layer: BaseLayerWithLoRA) -> None:
+        # TODO(xiowei): add mesh to the __init__.
+        super().__init__(base_lora_layer)
+        output_sizes = self.base_layer.output_sizes
+        self.output_slices = output_sizes
         # how should I write self.output_slices if I don't know the tp_size?
         self.n_slices = len(output_sizes)
+
+    def forward(
+        self, input_: torch.Tensor
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[torch.Tensor]]]:
+        """Forward of ColumnParallelLinear
+
+        Args:
+            input_: Tensor whose last dimension is `input_size`.
+
+        Returns:
+            - output
+            - bias
+        """
+        bias = (self.base_layer.bias
+                if not self.base_layer.skip_bias_add else None)
+
+        # Matrix multiply.
+        output_parallel = self.apply(input_, bias)
+        if self.base_layer.gather_output:
+            # All-gather across the partitions.
+            # output = tensor_model_parallel_all_gather(output_parallel)
+            pass
+        else:
+            output = output_parallel
+
+        if not self.base_layer.return_bias:
+            return output
+
+        output_bias = (self.base_layer.bias
+                       if self.base_layer.skip_bias_add else None)
+        return output, output_bias
+
 
     def set_lora(
         self,

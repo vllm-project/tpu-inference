@@ -57,6 +57,7 @@ def shard_merged_column_parallel_linear(layer: torch.nn.Module, mesh: Mesh,
         vllm_config.parallel_config.tensor_parallel_size,
         "MergedColumnParallelLinear")
     assert isinstance(layer, MergedColumnParallelLinear)
+    print(f'xw32 line60 fuse_matmuls: {fuse_matmuls}')
     jax_layer = JaxMergedColumnParallelLinear(layer, mesh, fuse_matmuls)
     return jax_layer
 

@@ -5,8 +5,11 @@ from typing import Optional
 import jax
 import pytest
 import torch
+import torchax
+from jax.sharding import NamedSharding, PartitionSpec
+from torchax.interop import torch_view
+from torchax.ops.mappings import t2j
 from vllm.config import LoRAConfig
-# TODO(xiowei): Need to import and test ColumnParallelLinearWithShardedLoRA.
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.lora.layers import LoRAMapping, MergedColumnParallelLinearWithLoRA
@@ -17,6 +20,8 @@ from vllm.model_executor.layers.linear import MergedColumnParallelLinear
 from vllm.model_executor.utils import set_random_seed
 from vllm.platforms import current_platform
 
+from tpu_commons.distributed.tpu_distributed_utils import \
+    create_torchax_tensor_with_partition_spec
 from tpu_commons.lora.layers import (TorchaxBaseLayerWithLoRA,
                                      TorchaxMergedColumnParallelLinearWithLoRA)
 from tpu_commons.models.vllm.sharding import shard_parallel_layers_to_tpu
@@ -28,6 +33,8 @@ from .utils import DummyLoRAManager
 # TODO(xiowei):
 # - add equivalent test for ColumnParallelLinearWithShardedLoRA.
 # - add test for multi-chip.
+
+P = PartitionSpec
 
 TOLERANCES = {
     torch.float16: (5e-3, 5e-3),
@@ -153,12 +160,15 @@ def populate_loras(
             lora = PackedLoRALayerWeights.pack(
                 subloras) if repeats > 1 else subloras[0]
 
-            layer.set_lora(
-                slot_idx,
-                lora_a=lora.lora_a,
-                lora_b=lora.lora_b,
-                embeddings_tensor=lora.embeddings_tensor,
-            )
+            with torchax.default_env(), jax.default_device(
+                    jax.devices("tpu")[0]):
+                # Currently it fails with https://paste.googleplex.com/5430407952334848
+                layer.set_lora(
+                    slot_idx,
+                    lora_a=lora.lora_a,
+                    lora_b=lora.lora_b,
+                    embeddings_tensor=lora.embeddings_tensor,
+                )
 
             lora_dict[lora_id] = lora
             sublora_dict[lora_id] = subloras
@@ -225,8 +235,8 @@ def create_random_inputs(
 # Let's work on single config first.
 
 
-# @torch.inference_mode()
-@pytest.mark.parametrize("num_loras", [3])
+@torch.inference_mode()
+@pytest.mark.parametrize("num_loras", [4])
 @pytest.mark.parametrize("repeats", [2])
 @pytest.mark.parametrize("fully_shard", [False])  # TODO(xiowei): add "True".
 @pytest.mark.parametrize("device", ["cpu"])
@@ -241,8 +251,6 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
                                         max_batches,
                                         device,
                                         max_loras=max_loras)
-    # TODO: check punica_wrapper is the one for torchax+jax_runner.
-    print(f"punica_wrapper: {type(punica_wrapper)=}")
     assert check_punica_wrapper(punica_wrapper)
     lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
@@ -250,12 +258,21 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
                              lora_dtype=torch.float16,
                              bias_enabled=bias_enabled)
 
+    axis_names = ("data", "model")
+    mesh_shape = (
+        1, 1
+    )  # TODO(xiowei): support multi-chip: mesh_shape = (1, len(jax.devices()))
+    mesh = jax.make_mesh(mesh_shape, axis_names, devices=jax.devices())
+
     def create_column_parallel_packed_layer():
-        # First create a base layer (e.g. MergedColumnParallelLinear) and a LoRA wrapper.
+        # Step 1: create a base layer (e.g. MergedColumnParallelLinear) and a vLLM LoRA wrapper.
         if repeats == 2:
-            linear = MergedColumnParallelLinear(4096, [4096] * repeats,
-                                                bias=False,
-                                                params_dtype=torch.float16)
+            # xw32q: is the below linear and lora_linear on cpu or tpu?
+            linear = MergedColumnParallelLinear(
+                4096,
+                [4096] * repeats,  # input_size, output_size
+                bias=False,
+                params_dtype=torch.float16)
             linear.weight.data = torch.rand_like(linear.weight.data)
             lora_linear = MergedColumnParallelLinearWithLoRA(
                 linear
@@ -285,17 +302,16 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             assert lora_linear.lora_bias_stacked is None
 
         # Then we replace the base layer (e.g. MergedColumnParallelLinear) with the torchax one.
-        axis_names = ("data", "model")
-        mesh_shape = (
-            1, 1
-        )  # TODO(xiowei): support multi-chip: mesh_shape = (1, len(jax.devices()))
-        mesh = jax.make_mesh(mesh_shape, axis_names, devices=jax.devices())
-        vllm_config = dist_init
-        shard_parallel_layers_to_tpu(lora_linear, mesh, vllm_config)
+        with torchax.default_env(), jax.default_device(jax.devices("tpu")[0]):
+            # Step 2: replace the linear layer with Torchax layer
+            # Step 3: move the weight to TPU.
+            # print(f'xw32 {mesh=}') print Mesh(device_ids=array([[0]]), axis_names=('data', 'model'), axis_types=(Auto, Auto))
+            vllm_config = dist_init
+            shard_parallel_layers_to_tpu(lora_linear, mesh, vllm_config)
 
-        # Then we replace the LoRA wrapper with the torchax one.
-        torchax_lora_linear = TorchaxMergedColumnParallelLinearWithLoRA(
-            lora_linear)
+            # Step 4: replace the LoRA wrapper with our own wrapper JaxLinearWithLoRA:
+            torchax_lora_linear = TorchaxMergedColumnParallelLinearWithLoRA(
+                lora_linear)
 
         return linear, torchax_lora_linear
 
@@ -305,11 +321,15 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
         # create a lora slot index to lora id mapping.
         index_to_id = get_random_index_to_id(num_loras, max_loras)
         linear, lora_linear = create_column_parallel_packed_layer()
-        assert torch.equal(
-            linear.weight, lora_linear.weight
-        )  # BaseLinearLayerWithLoRA.weight property guarantees this.
+        # linear.weight has type torch.nn.Parameter, lora_linear.weight has type torchax.tensor.Tensor
+        with torchax.default_env():
+            assert torch.equal(
+                create_torchax_tensor_with_partition_spec(linear.weight.data),
+                lora_linear.weight
+            )  # BaseLinearLayerWithLoRA.weight property guarantees this.
         # Map the lora linear layer to the punica wrapper.
         lora_linear.set_mapping(punica_wrapper)
+        # Step 5: load the lora weight, shard it, and send it to TPU.
         lora_dict, sublora_dict = populate_loras(
             index_to_id,
             layer=lora_linear,
@@ -317,7 +337,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             repeats=repeats,
         )  # lora_dict: lora_id -> LoRALayerWeights|PackedLoRALayerWeights
 
-        # inputs: list[torch.Tensor] of size num_reqs.
+        # inputs: list[torch.Tensor] of size num_reqs. inputs[0].shape=[1, 4096]. len(inputs)=96
         # index_mapping: list[int]
         # prompt_mapping: list[int]
         inputs, index_mapping, prompt_mapping = create_random_inputs(
@@ -339,7 +359,15 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             lora_config.lora_extra_vocab_size,
         )
 
-        lora_result = lora_linear(torch.cat(inputs))[0]
+        jax_inputs = []
+        with torchax.default_env(), jax.default_device(jax.devices("tpu")[0]):
+            for input in inputs:
+                jax_input = torch_view(t2j(input))
+                jax_input.apply_jax_(jax.device_put,
+                                     NamedSharding(mesh, P(None, None)))
+                jax_inputs.append(jax_input)
+        with torchax.default_env():
+            lora_result = lora_linear(torch.cat(jax_inputs))[0]
 
         expected_results: list[torch.Tensor] = []
         for input_, lora_id in zip(inputs, prompt_mapping):
@@ -384,7 +412,8 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             lora_config.lora_extra_vocab_size,
         )
 
-        lora_result = lora_linear(torch.cat(inputs))[0]
+        with torchax.default_env():
+            lora_result = lora_linear(torch.cat(inputs))[0]
         expected_result = linear(torch.cat(inputs))[0]
 
         rtol, atol = TOLERANCES[lora_result.dtype]
