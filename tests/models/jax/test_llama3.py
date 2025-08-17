@@ -10,7 +10,7 @@ from jax.sharding import Mesh
 from transformers import LlamaConfig
 from vllm.config import VllmConfig
 
-from tpu_commons.models.jax.llama3 import LlamaForCausalLM
+from tpu_commons.models.jax.llama3 import LlamaForCausalLM, _annotation_map
 from tpu_commons.models.jax.utils.weight_utils import (TpuCommonAnnotation,
                                                        build_annotation_map)
 
@@ -41,7 +41,7 @@ class Llama3AnnotationMapTest(unittest.TestCase):
 
         model = LlamaForCausalLM(vllm_config, rng.params(), mesh)
 
-        annotation_map = build_annotation_map(model)
+        annotation_map = build_annotation_map(model, _annotation_map)
 
         anno_embed = TpuCommonAnnotation(hf_name="model.embed_tokens")
         anno_lm_head = TpuCommonAnnotation(hf_name="lm_head",
@@ -56,26 +56,26 @@ class Llama3AnnotationMapTest(unittest.TestCase):
                                           bias_reshape_param=(8, 32),
                                           transpose_param=(2, 0, 1),
                                           pad_param=(1, 1),
-                                          bias_pad_param=(1, 1))
+                                          bias_pad_param=(0, 1))
 
         anno_k_proj = TpuCommonAnnotation(hf_name="k_proj",
                                           reshape_param=(8, 32, 128),
                                           bias_reshape_param=(8, 32),
                                           transpose_param=(2, 0, 1),
                                           pad_param=(1, 1),
-                                          bias_pad_param=(1, 1))
+                                          bias_pad_param=(0, 1))
 
         anno_v_proj = TpuCommonAnnotation(hf_name="v_proj",
                                           reshape_param=(8, 32, 128),
                                           bias_reshape_param=(8, 32),
                                           transpose_param=(2, 0, 1),
                                           pad_param=(1, 1),
-                                          bias_pad_param=(1, 1))
+                                          bias_pad_param=(0, 1))
 
         anno_o_proj = TpuCommonAnnotation(hf_name="o_proj",
                                           reshape_param=(128, 8, 32),
                                           transpose_param=(1, 2, 0),
-                                          pad_param=(1, 1))
+                                          pad_param=(0, 1))
 
         anno_gate_proj = TpuCommonAnnotation(hf_name="gate_proj",
                                              transpose_param=(1, 0))
@@ -134,4 +134,4 @@ class Llama3AnnotationMapTest(unittest.TestCase):
             self.assertIn(hf_key, annotation_map)
             actual_model_path, actual_anno = annotation_map[hf_key]
             self.assertEqual(actual_model_path, model_path)
-            self.assertEqual(actual_anno, anno, f"{model_path}, {anno}")
+            self.assertEqual(actual_anno, anno, f"{actual_anno} v.s {anno}")

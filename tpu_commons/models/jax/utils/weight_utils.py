@@ -25,8 +25,6 @@ logger = init_logger(__name__)
 HF_WEIGHTS_FORMAT = "*.safetensors"
 FULL_DOWNLOAD_DISK_RATIO = 0.9
 
-############ Used by llama4, deepseek only for now START ############
-
 
 @dataclass
 class TpuCommonAnnotation:
@@ -38,21 +36,20 @@ class TpuCommonAnnotation:
     bias_pad_param: tuple[int, ...] = ()
 
 
-def print_param_info(param: nnx.Param, name: str):
-    logger.warning(f"Global shape for {name}: {param.value.shape}")
-    logger.warning(f"Sharding for {name}: {param.sharding}")
+def _hash_module(m) -> str:
+    """Hash the module by applying the jnp.shape transform.
 
-    logger.warning(
-        f"Shape of {name} on a single device: {param.value.addressable_shards[0].data.shape}"
-    )
-
-
-def _hash(m):
+    NOTE(xiang): This hash function is used for getting the hash key of
+    the annotation map. We can't use the `m` object directly as the key,
+    because the object would be different in before and after calling
+    `nnx.eval_shape`. Thus we rely on the shape/dtype/sharding information
+    of the object and covert it to a string as the hash key.
+    """
     shapes = jax.tree.map(jnp.shape, m)
     return str(shapes)
 
 
-def annotated_module(anno_map: dict[Any, TpuCommonAnnotation],
+def annotated_module(anno_map: dict[str, TpuCommonAnnotation],
                      m: Any,
                      transpose_param: tuple[int, ...] = (),
                      reshape_param: tuple[int, ...] = (),
@@ -73,7 +70,7 @@ def annotated_module(anno_map: dict[Any, TpuCommonAnnotation],
     """
     assert m is not None
 
-    hashed_m = _hash(m)
+    hashed_m = _hash_module(m)
 
     anno_map[hashed_m] = TpuCommonAnnotation(
         hf_name=hf_name,
@@ -102,63 +99,10 @@ def _get_annotation(anno_map: dict[Any, TpuCommonAnnotation],
     return anno_map[m]
 
 
-def transpose_params(param_key: str, param_tensor: jax.Array, transpose_map):
-    for key, value in transpose_map.items():
-        if key in param_key:
-            return jnp.transpose(param_tensor, value)
-    return param_tensor  # Base case / no-op
-
-
-def reshape_params(param_key: str, param_tensor: jax.Array, shape_map):
-    for key, new_shape in shape_map.items():
-        if key in param_key:
-            return jnp.reshape(param_tensor, new_shape)
-    return param_tensor  # Base case / no-op
-
-
-def model_file_generator(
-        model_name_or_path: str,
-        download_dir: Optional[str]) -> Generator[str, None, None]:
-    weights_files, weights_location = get_model_weights_files(
-        model_name_or_path, download_dir)
-
-    if weights_location != "local":
-        logger.warning(
-            "Weights files are not downloaded to local disk at once due to insufficient disk space. "
-            "They will be downloaded on the fly during loading.")
-
-    for st_file in weights_files:
-        if weights_location == "hf":
-            st_file = file_utils.download_model_weights_from_hf(
-                model_name_or_path, download_dir, os.path.basename(st_file))[0]
-
-        yield st_file
-
-        if weights_location != "local":
-            file_utils.delete_file(st_file)
-
-
-def model_weights_generator(
-    model_name_or_path: str,
-    framework: str,
-    filter_regex: Optional[str] = None,
-    download_dir: Optional[str] = None,
-) -> Generator[tuple, None, None]:
-    for st_file in model_file_generator(model_name_or_path, download_dir):
-        for name, weight_tensor in model_weights_single_file_generator(
-                st_file, framework, filter_regex):
-            yield name, weight_tensor
-
-
-############ Used by llama4, deepseek only for now END ############
-
-
 def get_model_weights_files(
         model_name_or_path: str,
         download_dir: Optional[str]) -> tuple[list[str], str]:
-    """
-    Helper to get weight files and their location.
-    """
+    """Helper to get weight files and their location."""
     weights_files = []
     weights_location = "local"
 
@@ -169,17 +113,9 @@ def get_model_weights_files(
         weights_files = glob.glob(
             os.path.join(model_name_or_path, HF_WEIGHTS_FORMAT))
     elif file_utils.is_hf_repo(model_name_or_path):
-        local_free_disk_size = file_utils.get_free_disk_size()
-        model_size = file_utils.get_hf_model_weights_size(
-            model_name_or_path, HF_WEIGHTS_FORMAT)
-        if model_size < local_free_disk_size * FULL_DOWNLOAD_DISK_RATIO:
-            logger.info(f"Downloading weights from HF {model_name_or_path}")
-            weights_files = file_utils.download_model_weights_from_hf(
-                model_name_or_path, download_dir, HF_WEIGHTS_FORMAT)
-        else:
-            weights_files = file_utils.list_hf_repo(model_name_or_path,
-                                                    HF_WEIGHTS_FORMAT)
-            weights_location = "hf"
+        logger.info(f"Downloading weights from HF {model_name_or_path}")
+        weights_files = file_utils.download_model_weights_from_hf(
+            model_name_or_path, download_dir, HF_WEIGHTS_FORMAT)
     else:
         raise ValueError(
             f"{model_name_or_path} must be a local path, or a Huggingface model id."
@@ -199,6 +135,7 @@ def model_weights_single_file_generator(
     framework: str,
     filter_regex: Optional[str] = None,
 ) -> Generator[tuple, None, None]:
+    """Generate weights by reading from a single file."""
     logger.info(f"Loading weights from {weights_file}")
     # NOTE: We enforce loading tensors on CPU here.
     # Because otherwise the tensor will be loaded on TPU:0 by default,
@@ -212,20 +149,6 @@ def model_weights_single_file_generator(
                     continue
                 weight_tensor = f.get_tensor(name)
                 yield name, weight_tensor
-
-
-def get_param(params: nnx.State, path: str) -> nnx.State:
-    keys = path.split(".")
-    plevel = params
-    for key in keys:
-        if key.isdigit():
-            plevel = plevel[int(key)]
-        else:
-            if key in plevel:
-                plevel = plevel[key]
-            else:
-                raise ValueError(f"{path} is not a valid param path")
-    return plevel
 
 
 def get_param_and_sharding(params: nnx.State, shardings: Any,
@@ -264,6 +187,206 @@ class _MetadataMap:
     bias_pad_map: dict[str, tuple[int, ...]] = field(default_factory=dict)
 
 
+def load_hf_weights_through_annotation(
+        vllm_config, model: nnx.Module, mesh: Mesh,
+        annotation_map: dict[Any, TpuCommonAnnotation]):
+    """Load weights from all model weights files to the model, run in multi threads."""
+    metadata_map = load_maps_from_annotations(model, annotation_map)
+    model_path = vllm_config.model_config.model
+    weights_files, _ = get_model_weights_files(
+        model_path, vllm_config.load_config.download_dir)
+    params = nnx.state(model)
+    max_workers = min(64, len(weights_files))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(_load_hf_weights_on_thread, vllm_config, params,
+                            metadata_map, mesh, weights_file)
+            for weights_file in weights_files
+        ]
+        for future in futures:
+            future.result()
+    nnx.update(model, params)
+
+
+def build_annotation_map(module: nnx.Module,
+                         anno_map: dict[Any, TpuCommonAnnotation]) -> dict:
+    """Builds a map from HF weight names to a tuple of (model_param_path, annotation).
+
+    This function recursively traverses an nnx.Module, reads the TPU_COMMONS_*
+    annotations, and constructs a dictionary that maps the HuggingFace weight
+    name to the corresponding parameter path in the model and its annotation.
+
+    Args:
+        module: The nnx.Module to traverse.
+
+    Returns:
+        A dictionary mapping HF keys to (model_path, annotation).
+    """
+    annotation_map = {}
+
+    def recurse(m: Any, model_prefix: str, hf_prefix: str):
+        # Check for leaf modules/params with parameters
+        if isinstance(
+                m,
+            (nnx.Linear, nnx.Einsum, nnx.RMSNorm, nnx.Embed, nnx.Param)):
+            hashed_m = _hash_module(m)
+            if _is_annotated(anno_map, hashed_m):
+                anno = _get_annotation(anno_map, hashed_m)
+                if isinstance(m, nnx.Param):
+                    annotation_map[hf_prefix] = (model_prefix, anno)
+                else:  # It's a module with params
+                    state = nnx.state(m)
+                    for param_path, _ in state.flat_state():
+                        param_name = param_path[-1]
+                        model_path = f"{model_prefix}.{'.'.join(param_path)}"
+
+                        hf_key = hf_prefix
+                        if param_name == "bias":
+                            hf_key += ".bias"
+
+                        annotation_map[hf_key] = (model_path, anno)
+            return
+
+        for name, value in vars(m).items():
+            if not isinstance(value, (nnx.Module, nnx.Param, list)):
+                continue
+            hashed_value = _hash_module(value)
+            if not _is_annotated(anno_map, hashed_value):
+                continue
+
+            current_model_prefix = f"{model_prefix}.{name}" if model_prefix else name
+
+            child_hf_name = name
+            anno = _get_annotation(anno_map, hashed_value)
+            if anno.hf_name:
+                child_hf_name = anno.hf_name
+
+            current_hf_prefix = f"{hf_prefix}.{child_hf_name}" if hf_prefix else child_hf_name
+
+            if isinstance(value, (nnx.Module, nnx.Param)):
+                recurse(value, current_model_prefix, current_hf_prefix)
+            elif isinstance(value, list):
+                for i, item in enumerate(value):
+                    if isinstance(item, (nnx.Module, nnx.Param)):
+                        recurse(item, f"{current_model_prefix}.{i}",
+                                f"{current_hf_prefix}.{i}")
+
+    recurse(module, "", "")
+    return annotation_map
+
+
+def load_maps_from_annotations(
+        model: nnx.Module,
+        anno_map: dict[Any, TpuCommonAnnotation]) -> _MetadataMap:
+    """Load weights from all model weights files to the model using annotations."""
+    annotation_map = build_annotation_map(model, anno_map)
+
+    name_map: dict[str, str] = {}
+    transpose_map: dict[str, tuple[int, ...]] = {}
+    reshape_map: dict[str, tuple[int, ...]] = {}
+    bias_reshape_map: dict[str, tuple[int, ...]] = {}
+    pad_map: dict[str, tuple[int, ...]] = {}
+    bias_pad_map: dict[str, tuple[int, ...]] = {}
+
+    for name, (model_name, anno) in annotation_map.items():
+        if anno.transpose_param:
+            transpose_map[name] = anno.transpose_param
+        if anno.reshape_param:
+            reshape_map[name] = anno.reshape_param
+        if anno.bias_reshape_param:
+            bias_reshape_map[f"{name}.bias"] = anno.bias_reshape_param
+        if anno.pad_param:
+            pad_map[name] = anno.pad_param
+        if anno.bias_pad_param:
+            bias_pad_map[f"{name}.bias"] = anno.bias_pad_param
+
+        if "layers" in name:
+            name = re.sub(r"layers\.\d+", "layers.*", name)
+            model_name = re.sub(r"layers\.\d+", "layers.*", model_name)
+
+        name_map[name] = model_name
+
+    logger.debug(f"The name map is {name_map}\n"
+                 f"The transpose map is {transpose_map}\n"
+                 f"The reshape map is {reshape_map}\n"
+                 f"The bias_reshape map is {bias_reshape_map}\n"
+                 f"The pad map is {pad_map}\n"
+                 f"The bias_pad map is {bias_pad_map}")
+
+    return _MetadataMap(name_map=name_map,
+                        reshape_map=reshape_map,
+                        bias_reshape_map=bias_reshape_map,
+                        transpose_map=transpose_map,
+                        pad_map=pad_map,
+                        bias_pad_map=bias_pad_map)
+
+
+############ START Used by llama4, deepseek only for now START ############
+
+
+def print_param_info(param: nnx.Param, name: str):
+    logger.info(f"Global shape for {name}: {param.value.shape}")
+    logger.info(f"Sharding for {name}: {param.sharding}")
+    logger.info(
+        f"Shape of {name} on a single device: {param.value.addressable_shards[0].data.shape}"
+    )
+
+
+def transpose_params(param_key: str, param_tensor: jax.Array, transpose_map):
+    for key, value in transpose_map.items():
+        if key in param_key:
+            return jnp.transpose(param_tensor, value)
+    return param_tensor  # Base case / no-op
+
+
+def reshape_params(param_key: str, param_tensor: jax.Array, shape_map):
+    for key, new_shape in shape_map.items():
+        if key in param_key:
+            return jnp.reshape(param_tensor, new_shape)
+    return param_tensor  # Base case / no-op
+
+
+def model_file_generator(
+        model_name_or_path: str,
+        download_dir: Optional[str]) -> Generator[str, None, None]:
+    weights_files, weights_location = get_model_weights_files(
+        model_name_or_path, download_dir)
+    assert weights_location == "local"
+    for st_file in weights_files:
+        yield st_file
+
+
+def model_weights_generator(
+    model_name_or_path: str,
+    framework: str,
+    filter_regex: Optional[str] = None,
+    download_dir: Optional[str] = None,
+) -> Generator[tuple, None, None]:
+    for st_file in model_file_generator(model_name_or_path, download_dir):
+        for name, weight_tensor in model_weights_single_file_generator(
+                st_file, framework, filter_regex):
+            yield name, weight_tensor
+
+
+def get_param(params: nnx.State, path: str) -> nnx.State:
+    keys = path.split(".")
+    plevel = params
+    for key in keys:
+        if key.isdigit():
+            plevel = plevel[int(key)]
+        else:
+            if key in plevel:
+                plevel = plevel[key]
+            else:
+                raise ValueError(f"{path} is not a valid param path")
+    return plevel
+
+
+############ END Used by llama4, deepseek only for now END ############
+
+############ START Used by qwen only, will be deprecated START ############
+
+
 def _get_maps(vllm_config, mesh: Mesh, name_map: dict[str,
                                                       str]) -> _MetadataMap:
     """Load weights from one model weights file to the model, run on single thread."""
@@ -286,14 +409,14 @@ def _get_maps(vllm_config, mesh: Mesh, name_map: dict[str,
         "o_proj": (hidden_size, num_heads, head_dim_original),
     }
 
-    logger.warning(f"reshape_keys={reshape_keys}")
+    logger.debug(f"reshape_keys={reshape_keys}")
 
     bias_reshape_keys: dict[str, tuple[int, ...]] = {
         "q_proj.bias": (num_heads, head_dim_original),
         "k_proj.bias": (num_kv_heads, head_dim_original),
         "v_proj.bias": (num_kv_heads, head_dim_original)
     }
-    logger.warning(f"bias_reshape_keys={bias_reshape_keys}")
+    logger.debug(f"bias_reshape_keys={bias_reshape_keys}")
     transpose_keys: dict[str, tuple[int, ...]] = {
         "lm_head": (1, 0),
         "gate_proj": (1, 0),
@@ -314,7 +437,7 @@ def _get_maps(vllm_config, mesh: Mesh, name_map: dict[str,
             "visual.merger.mlp": (1, 0),
             "visual.patch_embed.proj": (2, 3, 4, 1, 0),
         })
-    logger.warning(f"transpose_keys={transpose_keys}")
+    logger.debug(f"transpose_keys={transpose_keys}")
 
     # key: (padding_dim, padding_size)
     pad_keys: dict[str, tuple[int, ...]] = {
@@ -323,13 +446,13 @@ def _get_maps(vllm_config, mesh: Mesh, name_map: dict[str,
         "v_proj": (1, sharding_size // num_kv_heads),
         "o_proj": (0, sharding_size // num_heads),
     }
-    logger.warning(f"pad_keys={pad_keys}")
+    logger.debug(f"pad_keys={pad_keys}")
     bias_pad_keys: dict[str, tuple[int, ...]] = {
         "q_proj.bias": (0, sharding_size // num_heads),
         "k_proj.bias": (0, sharding_size // num_kv_heads),
         "v_proj.bias": (0, sharding_size // num_kv_heads),
     }
-    logger.warning(f"bias_pad_keys={bias_pad_keys}")
+    logger.debug(f"bias_pad_keys={bias_pad_keys}")
 
     return _MetadataMap(name_map=name_map,
                         reshape_map=reshape_keys,
@@ -458,37 +581,9 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
     nnx.update(model, params)
 
 
-def load_hf_weights_through_annotation(
-        vllm_config, model: nnx.Module, mesh: Mesh,
-        annotation_map: dict[Any, TpuCommonAnnotation]):
-    """Load weights from all model weights files to the model, run in multi threads."""
-    # model_class = model.__class__
+############ END Used by qwen only, will be deprecated END ############
 
-    # # Create a model to populate the annotation map.
-    # logger.warning("Populate annotation map...")
-    # _model = model_class(model.vllm_config, jax.random.key(0), model.mesh)
-    # metadata_map = load_maps_from_annotations(_model, annotation_map)
-
-    # # Delete and force gc to release memory.
-    # del _model
-    # gc.collect()
-    # logger.warning("Populate annotation map... done!")
-
-    metadata_map = load_maps_from_annotations(model, annotation_map)
-    model_path = vllm_config.model_config.model
-    weights_files, _ = get_model_weights_files(
-        model_path, vllm_config.load_config.download_dir)
-    params = nnx.state(model)
-    max_workers = min(64, len(weights_files))
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [
-            executor.submit(_load_hf_weights_on_thread, vllm_config, params,
-                            metadata_map, mesh, weights_file)
-            for weights_file in weights_files
-        ]
-        for future in futures:
-            future.result()
-    nnx.update(model, params)
+############ START Used by RL frameworks START ############
 
 
 def build_flat_dict(flat_state, mappings):
@@ -568,115 +663,4 @@ def transfer_state_with_mappings(src_state,
     return tgt_state
 
 
-def _build_annotation_map(module: nnx.Module,
-                          anno_map: dict[Any, TpuCommonAnnotation]) -> dict:
-    """Builds a map from HF weight names to a tuple of (model_param_path, annotation).
-
-    This function recursively traverses an nnx.Module, reads the TPU_COMMONS_*
-    annotations, and constructs a dictionary that maps the HuggingFace weight
-    name to the corresponding parameter path in the model and its annotation.
-
-    Args:
-        module: The nnx.Module to traverse.
-
-    Returns:
-        A dictionary mapping HF keys to (model_path, annotation).
-    """
-    annotation_map = {}
-
-    def recurse(m: Any, model_prefix: str, hf_prefix: str):
-        # Check for leaf modules/params with parameters
-        if isinstance(
-                m,
-            (nnx.Linear, nnx.Einsum, nnx.RMSNorm, nnx.Embed, nnx.Param)):
-            hashed_m = _hash(m)
-            if _is_annotated(anno_map, hashed_m):
-                anno = _get_annotation(anno_map, hashed_m)
-                if isinstance(m, nnx.Param):
-                    annotation_map[hf_prefix] = (model_prefix, anno)
-                else:  # It's a module with params
-                    state = nnx.state(m)
-                    for param_path, _ in state.flat_state():
-                        param_name = param_path[-1]
-                        model_path = f"{model_prefix}.{'.'.join(param_path)}"
-
-                        hf_key = hf_prefix
-                        if param_name == "bias":
-                            hf_key += ".bias"
-
-                        annotation_map[hf_key] = (model_path, anno)
-            return
-
-        for name, value in vars(m).items():
-            if not isinstance(value, (nnx.Module, nnx.Param, list)):
-                continue
-            hashed_value = _hash(value)
-            if not _is_annotated(anno_map, hashed_value):
-                continue
-
-            current_model_prefix = f"{model_prefix}.{name}" if model_prefix else name
-
-            child_hf_name = name
-            anno = _get_annotation(anno_map, hashed_value)
-            if anno.hf_name:
-                child_hf_name = anno.hf_name
-
-            current_hf_prefix = f"{hf_prefix}.{child_hf_name}" if hf_prefix else child_hf_name
-
-            if isinstance(value, (nnx.Module, nnx.Param)):
-                recurse(value, current_model_prefix, current_hf_prefix)
-            elif isinstance(value, list):
-                for i, item in enumerate(value):
-                    if isinstance(item, (nnx.Module, nnx.Param)):
-                        recurse(item, f"{current_model_prefix}.{i}",
-                                f"{current_hf_prefix}.{i}")
-
-    recurse(module, "", "")
-    return annotation_map
-
-
-def load_maps_from_annotations(
-        model: nnx.Module,
-        anno_map: dict[Any, TpuCommonAnnotation]) -> _MetadataMap:
-    """Load weights from all model weights files to the model using annotations."""
-    annotation_map = _build_annotation_map(model, anno_map)
-    print(f"annotation_map={annotation_map}")
-
-    name_map: dict[str, str] = {}
-    transpose_map: dict[str, tuple[int, ...]] = {}
-    reshape_map: dict[str, tuple[int, ...]] = {}
-    bias_reshape_map: dict[str, tuple[int, ...]] = {}
-    pad_map: dict[str, tuple[int, ...]] = {}
-    bias_pad_map: dict[str, tuple[int, ...]] = {}
-
-    for name, (model_name, anno) in annotation_map.items():
-        if anno.transpose_param:
-            transpose_map[name] = anno.transpose_param
-        if anno.reshape_param:
-            reshape_map[name] = anno.reshape_param
-        if anno.bias_reshape_param:
-            bias_reshape_map[f"{name}.bias"] = anno.bias_reshape_param
-        if anno.pad_param:
-            pad_map[name] = anno.pad_param
-        if anno.bias_pad_param:
-            bias_pad_map[f"{name}.bias"] = anno.bias_pad_param
-
-        if "layers" in name:
-            name = re.sub(r"layers\.\d+", "layers.*", name)
-            model_name = re.sub(r"layers\.\d+", "layers.*", model_name)
-
-        name_map[name] = model_name
-
-    logger.warning(f"The name map is {name_map}")
-    logger.warning(f"The transpose map is {transpose_map}")
-    logger.warning(f"The reshape map is {reshape_map}")
-    logger.warning(f"The bias_reshape map is {bias_reshape_map}")
-    logger.warning(f"The pad map is {pad_map}")
-    logger.warning(f"The bias_pad map is {bias_pad_map}")
-
-    return _MetadataMap(name_map=name_map,
-                        reshape_map=reshape_map,
-                        bias_reshape_map=bias_reshape_map,
-                        transpose_map=transpose_map,
-                        pad_map=pad_map,
-                        bias_pad_map=bias_pad_map)
+############ END Used by RL frameworks END ############
