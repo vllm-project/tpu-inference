@@ -158,6 +158,7 @@ class TpuPlatform(Platform):
                 vllm_config.model_config.dtype.dtype)
 
         if envs.VLLM_USE_V1:
+            # TODO(cuiq): remove this dependency.
             from vllm.v1.attention.backends.pallas import \
                 PallasAttentionBackend
             cache_config.block_size = PallasAttentionBackend.get_page_size(
