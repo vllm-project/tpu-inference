@@ -181,6 +181,8 @@ def get_vmem_estimate_bytes(
     head_dim = align_to(actual_head_dim, 128)
 
     total_bits = (
+        # s_ref
+        (bq_sz * num_q_heads_per_kv_head * bkv_sz) * 32 +
         # bkv_x2_ref
         (2 * bkv_sz * num_kv_heads_x2 * head_dim) * (32 // kv_packing) +
         # bq_x2_ref + bo_x2_ref
@@ -1322,7 +1324,7 @@ def ragged_paged_attention(
                 bkv_sz,
                 q.dtype,
                 kv_cache.dtype,
-            ) * 2.4)  # TODO(jevinjiang): figure out why it is so inaccurate?
+            ) * 1.1)
     grid = (distribution[2], )
 
     in_specs = [
