@@ -191,7 +191,7 @@ class Attention(nnx.Module):
             P(),  # query_start_loc: Replicated
             P(),  # distribution: Replicated
         )
-        out_specs = (self.attn_o_tnh.spec, P())
+        out_specs = self.attn_o_tnh.spec
 
         def _ragged_paged_attention(*args):
             return ragged_paged_attention(
