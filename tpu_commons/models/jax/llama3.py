@@ -12,7 +12,8 @@ from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention import attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.layers.rope import apply_rope
-from tpu_commons.models.jax.utils.weight_utils import load_hf_weights
+from tpu_commons.models.jax.utils.weight_utils import (get_default_maps,
+                                                       load_hf_weights)
 
 logger = init_logger(__name__)
 
@@ -328,7 +329,9 @@ class LlamaForCausalLM(nnx.Module):
             mappings.update({
                 "lm_head": "lm_head",
             })
+
+        metadata_map = get_default_maps(self.vllm_config, self.mesh, mappings)
         load_hf_weights(vllm_config=self.vllm_config,
                         model=self,
-                        mappings=mappings,
+                        metadata_map=metadata_map,
                         mesh=self.mesh)

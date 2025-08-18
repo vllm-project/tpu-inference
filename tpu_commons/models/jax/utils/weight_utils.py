@@ -7,7 +7,8 @@ import os
 import re
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, Optional
+from dataclasses import dataclass, field
+from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
@@ -26,6 +27,16 @@ HF_WEIGHTS_FORMAT = "*.safetensors"
 FULL_DOWNLOAD_DISK_RATIO = 0.9
 
 ############ Used by llama4, deepseek only for now START ############
+
+
+@dataclass
+class MetadataMap:
+    name_map: dict[str, str] = field(default_factory=dict)
+    transpose_map: dict[str, tuple[int, ...]] = field(default_factory=dict)
+    reshape_map: dict[str, tuple[int, ...]] = field(default_factory=dict)
+    bias_reshape_map: dict[str, tuple[int, ...]] = field(default_factory=dict)
+    pad_map: dict[str, tuple[int, ...]] = field(default_factory=dict)
+    bias_pad_map: dict[str, tuple[int, ...]] = field(default_factory=dict)
 
 
 def print_param_info(param: nnx.Param, name: str):
@@ -97,7 +108,9 @@ def get_model_weights_files(
     weights_files = []
     weights_location = "local"
 
-    if os.path.isdir(model_name_or_path):
+    if os.path.isfile(model_name_or_path):
+        weights_files = [model_name_or_path]
+    elif os.path.isdir(model_name_or_path):
         logger.info(f"Found weights from local: {model_name_or_path}")
         weights_files = glob.glob(
             os.path.join(model_name_or_path, HF_WEIGHTS_FORMAT))
@@ -187,12 +200,10 @@ def shard_put(x: jax.Array, sharding: P, mesh: jax.sharding.Mesh) -> jax.Array:
     return jax.device_put(x, sharding)
 
 
-def load_hf_weights_on_thread(vllm_config, params: nnx.State,
-                              mappings: Dict[str, str], mesh: Mesh,
-                              weights_file: str):
+def get_default_maps(vllm_config, mesh: Mesh,
+                     name_map: dict[str, str]) -> MetadataMap:
     """Load weights from one model weights file to the model, run on single thread."""
     sharding_size = mesh.shape["model"]
-    shard = functools.partial(shard_put, mesh=mesh)
 
     model_config = vllm_config.model_config
     hf_config = model_config.hf_config
@@ -203,21 +214,19 @@ def load_hf_weights_on_thread(vllm_config, params: nnx.State,
 
     # Pad head_dim for kernel performance.
     head_dim_original = model_config.get_head_size()
-    head_dim = utils.get_padded_head_dim(head_dim_original)
-    head_dim_pad = head_dim - head_dim_original
 
-    reshape_keys = {
+    reshape_keys: dict[str, tuple[int, ...]] = {
         "q_proj": (num_heads, head_dim_original, hidden_size),
         "k_proj": (num_kv_heads, head_dim_original, hidden_size),
         "v_proj": (num_kv_heads, head_dim_original, hidden_size),
         "o_proj": (hidden_size, num_heads, head_dim_original),
     }
-    bias_reshape_keys = {
+    bias_reshape_keys: dict[str, tuple[int, ...]] = {
         "q_proj.bias": (num_heads, head_dim_original),
         "k_proj.bias": (num_kv_heads, head_dim_original),
         "v_proj.bias": (num_kv_heads, head_dim_original)
     }
-    transpose_keys = {
+    transpose_keys: dict[str, tuple[int, ...]] = {
         "lm_head": (1, 0),
         "gate_proj": (1, 0),
         "up_proj": (1, 0),
@@ -239,17 +248,44 @@ def load_hf_weights_on_thread(vllm_config, params: nnx.State,
         })
 
     # key: (padding_dim, padding_size)
-    pad_keys = {
+    pad_keys: dict[str, tuple[int, ...]] = {
         "q_proj": (1, sharding_size // num_heads),
         "k_proj": (1, sharding_size // num_kv_heads),
         "v_proj": (1, sharding_size // num_kv_heads),
         "o_proj": (0, sharding_size // num_heads),
     }
-    bias_pad_keys = {
+    bias_pad_keys: dict[str, tuple[int, ...]] = {
         "q_proj.bias": (0, sharding_size // num_heads),
         "k_proj.bias": (0, sharding_size // num_kv_heads),
         "v_proj.bias": (0, sharding_size // num_kv_heads),
     }
+
+    return MetadataMap(name_map=name_map,
+                       reshape_map=reshape_keys,
+                       bias_reshape_map=bias_reshape_keys,
+                       transpose_map=transpose_keys,
+                       pad_map=pad_keys,
+                       bias_pad_map=bias_pad_keys)
+
+
+def _load_hf_weights_on_thread(vllm_config, params: nnx.State,
+                               metadata_map: MetadataMap, mesh: Mesh,
+                               weights_file: str):
+    name_map = metadata_map.name_map
+    reshape_keys = metadata_map.reshape_map
+    bias_reshape_keys = metadata_map.bias_reshape_map
+    transpose_keys = metadata_map.transpose_map
+    pad_keys = metadata_map.pad_map
+    bias_pad_keys = metadata_map.bias_pad_map
+
+    shard = functools.partial(shard_put, mesh=mesh)
+
+    model_config = vllm_config.model_config
+
+    # Pad head_dim for kernel performance.
+    head_dim_original = model_config.get_head_size()
+    head_dim = utils.get_padded_head_dim(head_dim_original)
+    head_dim_pad = head_dim - head_dim_original
 
     shardings = nnx.get_named_sharding(params, mesh)
     for hf_key, hf_weight in model_weights_single_file_generator(
@@ -261,15 +297,15 @@ def load_hf_weights_on_thread(vllm_config, params: nnx.State,
         if "layer" in hf_key:
             layer_num = re.search(r"layers\.(\d+)", hf_key).group(1)
             layer_key = re.sub(r"layers\.\d+", "layers.*", hf_key)
-            model_key = mappings[layer_key]
+            model_key = name_map[layer_key]
             model_key = re.sub(r"layers\.\*", f"layers.{layer_num}", model_key)
         elif "blocks" in hf_key:
             layer_num = re.search(r"blocks\.(\d+)", hf_key).group(1)
             layer_key = re.sub(r"blocks\.\d+", "blocks.*", hf_key)
-            model_key = mappings[layer_key]
+            model_key = name_map[layer_key]
             model_key = re.sub(r"blocks\.\*", f"blocks.{layer_num}", model_key)
         else:
-            model_key = mappings[hf_key]
+            model_key = name_map[hf_key]
         model_weight, model_sharding = get_param_and_sharding(
             params, shardings, model_key)
 
@@ -326,13 +362,13 @@ def load_hf_weights_on_thread(vllm_config, params: nnx.State,
         )
 
         if head_dim_pad == 0:
-            assert model_weight.value.shape == hf_weight.shape
+            assert model_weight.value.shape == hf_weight.shape, f"{hf_key}: {model_weight.value.shape} != {hf_weight.shape}"
 
         # Update the model weight
         model_weight.value = shard(hf_weight, model_sharding)
 
 
-def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
+def load_hf_weights(vllm_config, model: nnx.Module, metadata_map: MetadataMap,
                     mesh: Mesh):
     """Load weights from all model weights files to the model, run in multi threads."""
     model_path = vllm_config.model_config.model
@@ -342,8 +378,8 @@ def load_hf_weights(vllm_config, model: nnx.Module, mappings: Dict[str, str],
     max_workers = min(64, len(weights_files))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
-            executor.submit(load_hf_weights_on_thread, vllm_config, params,
-                            mappings, mesh, weights_file)
+            executor.submit(_load_hf_weights_on_thread, vllm_config, params,
+                            metadata_map, mesh, weights_file)
             for weights_file in weights_files
         ]
         for future in futures:
