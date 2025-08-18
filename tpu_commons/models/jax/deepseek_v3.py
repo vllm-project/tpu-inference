@@ -21,8 +21,9 @@ from tpu_commons.models.jax.common.moe.deepseek_moe import DeepSeekV3Router
 from tpu_commons.models.jax.common.moe.moe import MoE
 from tpu_commons.models.jax.common.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
-from tpu_commons.models.jax.utils.weight_utils import (
-    get_param, hf_model_weights_iterator, reshape_params)
+from tpu_commons.models.jax.utils.weight_utils import (get_param,
+                                                       model_weights_generator,
+                                                       reshape_params)
 from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
