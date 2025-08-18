@@ -1324,7 +1324,7 @@ def ragged_paged_attention(
                 bkv_sz,
                 q.dtype,
                 kv_cache.dtype,
-            ) * 1.1)
+            ) * 1.2)
     grid = (distribution[2], )
 
     in_specs = [
