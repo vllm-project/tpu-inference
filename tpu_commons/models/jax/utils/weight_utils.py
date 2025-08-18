@@ -287,7 +287,11 @@ def _load_hf_weights_on_thread(vllm_config, params: nnx.State,
     head_dim = utils.get_padded_head_dim(head_dim_original)
     head_dim_pad = head_dim - head_dim_original
 
-    shardings = nnx.get_named_sharding(params, mesh)
+    try:
+        shardings = nnx.get_named_sharding(params, mesh)
+    except TypeError:
+        shardings = params
+
     for hf_key, hf_weight in model_weights_single_file_generator(
             weights_file, framework="flax"):
         if hf_key.endswith(".weight"):

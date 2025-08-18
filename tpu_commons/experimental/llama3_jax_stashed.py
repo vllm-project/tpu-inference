@@ -1,7 +1,5 @@
 # TODO: Update documentation
 
-import re
-from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional, Tuple
 
 import jax
@@ -18,11 +16,8 @@ from tpu_commons.models.jax.common.constants import KVCacheType
 from tpu_commons.models.jax.common.layers import (DenseFFW, Embedder, LMhead,
                                                   RMSNorm)
 from tpu_commons.models.jax.common.transformer_block import TransformerBlock
-from tpu_commons.models.jax.layers.misc import shard_put
-from tpu_commons.models.jax.utils.weight_utils import (get_param,
-                                                       model_weights_generator,
-                                                       reshape_params,
-                                                       transpose_params)
+from tpu_commons.models.jax.utils.weight_utils import (MetadataMap,
+                                                       load_hf_weights)
 
 logger = init_logger(__name__)
 
@@ -266,71 +261,16 @@ class Llama3WeightLoader:
         }
         self.vllm_config = vllm_config
 
-    def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
-        # Find the corresponding model key using the HF key
-        if "layer" in loaded_key:
-            layer_num_match = re.search(r"layers\.(\d+)", loaded_key)
-            if layer_num_match:
-                layer_num = layer_num_match.group(1)
-                layer_key = re.sub(r"layers\.\d+", "layers.*", loaded_key)
-                mapped_key = self._loaded_to_standardized_keys.get(
-                    layer_key, layer_key)
-                mapped_key = re.sub(r"layers\.\*", f"layers.{layer_num}",
-                                    mapped_key)
-                return mapped_key
-
-        return self._loaded_to_standardized_keys.get(loaded_key, loaded_key)
-
-    def load_weights_single_thread(self, model_params, loaded_name,
-                                   loaded_weight, mesh):
-        old_param_name = loaded_name
-        if loaded_name.endswith(".weight"):
-            loaded_name = loaded_name.removesuffix(".weight")
-        mapped_name = self.map_loaded_to_standardized_name(loaded_name)
-        model_weight = get_param(model_params, mapped_name)
-
-        if model_weight is None:
-            logger.warning(
-                f"Could not find a matching model parameter for loaded weight: '{old_param_name}' (mapped to: '{mapped_name}')"
-            )
-            return
-
-        logger.debug(
-            f"{old_param_name}: {loaded_weight.shape}  -->  {mapped_name}: {model_weight.value.shape}"
-        )
-        if loaded_name.endswith(".bias"):
-            loaded_weight = reshape_params(loaded_name, loaded_weight,
-                                           self._bias_shape_map)
-        else:
-            loaded_weight = reshape_params(loaded_name, loaded_weight,
-                                           self._weight_shape_map)
-            loaded_weight = transpose_params(loaded_name, loaded_weight,
-                                             self._transpose_map)
-        if model_weight.value.shape != loaded_weight.shape:
-            raise ValueError(
-                f"Loaded shape for {loaded_name}: {loaded_weight.shape} "
-                f"does not match model shape for {mapped_name}: {model_weight.value.shape}!"
-            )
-        model_weight.value = shard_put(loaded_weight,
-                                       model_weight.sharding.spec,
-                                       mesh=mesh)
-
     def load_weights(self, model_for_loading: nnx.Module):
         model_params = nnx.state(model_for_loading)
-        model_path = self.vllm_config.model_config.model
-        max_workers = 8
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [
-                executor.submit(self.load_weights_single_thread, model_params,
-                                loaded_name, loaded_weight,
-                                model_for_loading.mesh)
-                for loaded_name, loaded_weight in model_weights_generator(
-                    model_path,
-                    framework="flax",
-                    download_dir=self.vllm_config.load_config.download_dir)
-            ]
-            for future in futures:
-                future.result()
+        metadata_map = MetadataMap(name_map=self._loaded_to_standardized_keys,
+                                   reshape_map=self._weight_shape_map,
+                                   bias_reshape_map=self._bias_shape_map,
+                                   transpose_map=self._transpose_map)
+        load_hf_weights(vllm_config=self.vllm_config,
+                        model=model_for_loading,
+                        metadata_map=metadata_map,
+                        mesh=model_for_loading.mesh)
 
         # TODO: validate that all of the model_params were accounted for as well.
         nnx.update(model_for_loading, model_params)
