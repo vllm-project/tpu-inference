@@ -10,7 +10,6 @@ from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from vllm.config import VllmConfig
 
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.common.attention.attention import AttentionMetadata
@@ -23,7 +22,8 @@ from tpu_commons.models.jax.common.moe.moe import MoE
 from tpu_commons.models.jax.common.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
 from tpu_commons.models.jax.utils.weight_utils import (
-    get_param, hf_model_weights_iterator, print_param_info, reshape_params)
+    get_param, hf_model_weights_iterator, reshape_params)
+from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -456,16 +456,20 @@ class DeepSeekV3WeightLoader:
 
     def _process_moe_weights(self, loaded_name, loaded_weight, weights_dict):
         layer_num = re.search(r"layers\.(\d+)", loaded_name).group(1)
-        expert_num = re.search(r"experts\.(\d+)", loaded_name).group(1)
+        expert_num_str = re.search(r"experts\.(\d+)", loaded_name).group(1)
+        expert_idx = int(expert_num_str)
+
         if layer_num not in weights_dict:
-            weights_dict[layer_num] = {}
-        weights_dict[layer_num][expert_num] = loaded_weight
-        # Stack all the weights from the expert in this layer
-        if len(weights_dict[layer_num]) == self.num_routed_experts:
-            weight_list = []
-            for expert_index in range(self.num_routed_experts):
-                weight_list.append(weights_dict[layer_num][str(expert_index)])
-            stacked_weights = torch.stack(weight_list, axis=0)
+            weights_dict[layer_num] = ([None] * self.num_routed_experts, 0)
+
+        expert_list, count = weights_dict[layer_num]
+
+        expert_list[expert_idx] = loaded_weight
+        count += 1
+        weights_dict[layer_num] = (expert_list, count)
+
+        if count == self.num_routed_experts:
+            stacked_weights = torch.stack(expert_list, axis=0)
             del weights_dict[layer_num]
             return stacked_weights
         return None
@@ -495,15 +499,15 @@ class DeepSeekV3WeightLoader:
         def get_slice(index):
             return weight_np[index]
 
-        sharded_array = jax.make_array_from_callback(
-            weight_np.shape, model_weight.sharding, get_slice)
-        
+        sharded_array = jax.make_array_from_callback(weight_np.shape,
+                                                     model_weight.sharding,
+                                                     get_slice)
+
         model_weight.value = sharded_array
-        
-        model_weight.value.block_until_ready()
+
+        #model_weight.value.block_until_ready()
         del weight
-        del weight_np
-        print_param_info(model_weight, name)
+        #print_param_info(model_weight, name)
         return model_weight.value.nbytes / 1e9, model_weight.value.addressable_shards[
             0].data.nbytes / 1e9
 
@@ -569,10 +573,10 @@ class DeepSeekV3WeightLoader:
                             model_for_loading.mesh)
                         cumulative_global_memory += weight_bytes
                         cumulative_local_memory += weight_shards
-                        logger.info(
+                        logger.debug(
                             f"Cumulative global memory: {cumulative_global_memory} GB"
                         )
-                        logger.info(
+                        logger.debug(
                             f"Cumulative local memory: {cumulative_local_memory} GB"
                         )
                 else:
@@ -581,10 +585,10 @@ class DeepSeekV3WeightLoader:
                         model_for_loading.mesh)
                     cumulative_global_memory += weight_bytes
                     cumulative_local_memory += weight_shards
-                    logger.info(
+                    logger.debug(
                         f"Cumulative global memory: {cumulative_global_memory} GB"
                     )
-                    logger.info(
+                    logger.debug(
                         f"Cumulative local memory: {cumulative_local_memory} GB"
                     )
 
@@ -603,17 +607,34 @@ def weights_dequant_cpu(x: torch.Tensor,
     M, N = x.shape
 
     x = x.to(torch.float32)
-    y = torch.empty_like(x, dtype=torch.get_default_dtype())
+    s = s.to(torch.float32)
+    y = torch.empty_like(x)
 
-    for i in range(0, M, block_size):
+    M_main = (M // block_size) * block_size
+    N_main = (N // block_size) * block_size
+
+    if M_main > 0 and N_main > 0:
+        x_main = x[:M_main, :N_main]
+        s_main = s[:(M // block_size), :(N // block_size)]
+
+        x_reshaped = x_main.view(M // block_size, block_size, N // block_size,
+                                 block_size).permute(0, 2, 1, 3)
+        s_reshaped = s_main.view(M // block_size, N // block_size, 1, 1)
+        y_main = (x_reshaped * s_reshaped).permute(0, 2, 1,
+                                                   3).reshape(M_main, N_main)
+
+        y[:M_main, :N_main] = y_main
+
+    if N_main < N:
+        for i in range(0, M_main, block_size):
+            block = x[i:i + block_size, N_main:N]
+            scale = s[i // block_size, N // block_size]
+            y[i:i + block_size, N_main:N] = block * scale
+
+    if M_main < M:
         for j in range(0, N, block_size):
-            row_start = i
-            row_end = min(i + block_size, M)
-            col_start = j
-            col_end = min(j + block_size, N)
-            block = x[row_start:row_end, col_start:col_end]
-            scale = s[i // block_size, j // block_size]
-            y[row_start:row_end, col_start:col_end] = (block * scale).to(
-                torch.get_default_dtype())
+            block = x[M_main:M, j:j + block_size]
+            scale = s[M // block_size, j // block_size]
+            y[M_main:M, j:j + block_size] = block * scale
 
-    return y
+    return y.to(torch.get_default_dtype())
