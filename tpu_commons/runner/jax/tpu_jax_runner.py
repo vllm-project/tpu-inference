@@ -29,6 +29,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.request import Request
+from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.worker.kv_connector_model_runner_mixin import \
     KVConnectorModelRunnerMixin
 from vllm.v1.worker.utils import (gather_mm_placeholders,
@@ -39,6 +40,8 @@ from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.common.sharding import build_mesh
 from tpu_commons.models.jax.layers.misc import shard_put
+from tpu_commons.models.jax.layers.sample.rejection_sampler import \
+    RejectionSampler
 from tpu_commons.models.jax.layers.sample.sampling import (compute_logprobs,
                                                            gather_logprobs,
                                                            sample)
@@ -52,6 +55,7 @@ from tpu_commons.models.jax.utils.weight_utils import \
 from tpu_commons.runner import utils as runner_utils
 from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
                                                     InputBatch)
+from tpu_commons.runner.jax.metadata import SpecDecodeMetadata
 
 logger = init_logger(__name__)
 
@@ -93,6 +97,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         self.is_multimodal_model = None  # Will get updated once the model is loaded.
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = self.model_config.uses_mrope
+
+        # Set up speculative decoding.
+        if self.speculative_config:
+            if self.speculative_config.method == "ngram":
+                self.drafter = NgramProposer(self.vllm_config)
+            else:
+                raise NotImplementedError(
+                    "Unsupported speculative decoding method: "
+                    f"{self.speculative_config.method}")
+            self.rejection_sampler = RejectionSampler()
 
         self._init_random()
         self._init_mesh()
@@ -174,6 +188,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             pin_memory=False,
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[self.block_size],
+            is_spec_decode=bool(self.vllm_config.speculative_config),
         )
 
         self.input_ids_cpu = np.zeros(self.max_num_tokens, dtype=np.int32)
@@ -877,8 +892,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                 #     "Should not schedule a request that does nothing!")
             return DUMMY_METADATA, EMPTY_MODEL_RUNNER_OUTPUT,
 
-        (input_ids, attn_metadata, sampling_metadata,
-         logits_indices) = self._prepare_inputs(scheduler_output)
+        (input_ids, attn_metadata, sampling_metadata, logits_indices,
+         spec_decode_metadata) = self._prepare_inputs(scheduler_output)
 
         # multi-modal support
         if self.is_multimodal_model:
@@ -936,12 +951,34 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                     arange,
                 )
             tpu_sampling_metadata = sampling_metadata
-            next_tokens = sample(
-                self.rng_params_for_sampling,
-                self.mesh,
-                logits,
-                tpu_sampling_metadata,
-            )
+            if spec_decode_metadata is None:
+                next_tokens = sample(
+                    self.rng_params_for_sampling,
+                    self.mesh,
+                    logits,
+                    tpu_sampling_metadata,
+                )
+            else:
+                bonus_logits = logits[
+                    spec_decode_metadata.bonus_logits_indices]
+                bonus_token_ids = sample(
+                    self.rng_params_for_sampling,
+                    self.mesh,
+                    bonus_logits,
+                    tpu_sampling_metadata,
+                )
+                target_logits = logits[
+                    spec_decode_metadata.target_logits_indices]
+                next_tokens = self.rejection_sampler(
+                    draft_token_ids=spec_decode_metadata.draft_token_ids,
+                    num_draft_tokens=spec_decode_metadata.draft_lengths,
+                    max_spec_len=spec_decode_metadata.max_spec_len,
+                    draft_probs=None,
+                    target_probs=target_logits,
+                    bonus_token_ids=bonus_token_ids,
+                    sampling_metadata=tpu_sampling_metadata,
+                )
+
             if tpu_sampling_metadata.logprobs:
                 logprobs = self._compute_and_gather_logprobs(
                     logits, next_tokens, self.model_config.max_logprobs)
@@ -982,35 +1019,103 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         for req_id in self.input_batch.req_ids[:num_reqs]:
             prompt_logprobs_dict[req_id] = None
 
-        next_tokens = np.asarray(jax.device_get(next_tokens))
-        selected_token_ids = np.expand_dims(next_tokens[:num_reqs], 1)
-        valid_sampled_token_ids = selected_token_ids.tolist()
+        if spec_decode_metadata is None:
+            next_tokens = np.asarray(jax.device_get(next_tokens))
+            selected_token_ids = np.expand_dims(next_tokens[:num_reqs], 1)
+            valid_sampled_token_ids = selected_token_ids.tolist()
+        else:
+            valid_sampled_token_ids = self.rejection_sampler.parse_output(
+                next_tokens, self.input_batch.vocab_size,
+                spec_decode_metadata.draft_lengths, num_reqs,
+                spec_decode_metadata.draft_token_ids.shape[0])
+
         # Mask out the sampled tokens that should not be sampled.
         for i in discard_sampled_tokens_req_indices:
             valid_sampled_token_ids[i].clear()
         # Append sampled tokens
-        for i, req_state, seq_len in request_seq_lens:
-            token_id = valid_sampled_token_ids[i][0]
-            self.input_batch.token_ids_cpu[i, seq_len] = token_id
-            req_state.output_token_ids.append(token_id)
-            self.input_batch.num_tokens[i] += 1
+        for req_idx, req_state, _ in request_seq_lens:
+            sampled_ids = valid_sampled_token_ids[req_idx]
+            if not sampled_ids:
+                continue
+
+            start_idx = self.input_batch.num_tokens_no_spec[req_idx]
+            end_idx = start_idx + len(sampled_ids)
+            assert end_idx <= self.max_model_len, (
+                "Sampled token IDs exceed the max model length. "
+                f"Total number of tokens: {end_idx} > max_model_len: "
+                f"{self.max_model_len}")
+
+            self.input_batch.token_ids_cpu[req_idx,
+                                           start_idx:end_idx] = sampled_ids
+            self.input_batch.num_tokens_no_spec[req_idx] = end_idx
+            self.input_batch.num_tokens[req_idx] = end_idx
+            req_state.output_token_ids.extend(sampled_ids)
 
         if logprobs is not None:
             logprobs_lists = logprobs.tolists()
         else:
             logprobs_lists = None
 
+        if not self.speculative_config:
+            # Speculative decoding is not enabled.
+            spec_token_ids = None
+        else:
+            spec_token_ids = self.propose_draft_token_ids(
+                valid_sampled_token_ids)
+
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=valid_sampled_token_ids,
-            spec_token_ids=None,
+            spec_token_ids=spec_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             pooler_output=[],
             kv_connector_output=kv_connector_output,
         )
         return attn_metadata, model_runner_output
+
+    def propose_draft_token_ids(
+        self,
+        sampled_token_ids: list[list[int]],
+    ) -> list[list[int]]:
+        spec_token_ids = self.propose_ngram_draft_token_ids(sampled_token_ids)
+        return spec_token_ids
+
+    def propose_ngram_draft_token_ids(
+        self,
+        sampled_token_ids: list[list[int]],
+    ) -> list[list[int]]:
+        assert isinstance(self.drafter, NgramProposer)
+        draft_token_ids: list[list[int]] = []
+        num_reqs = self.input_batch.num_reqs
+        for i, sampled_ids in enumerate(sampled_token_ids[:num_reqs]):
+            num_sampled_ids = len(sampled_ids)
+            if not num_sampled_ids:
+                # Skip speculative decoding.
+                draft_token_ids.append([])
+                continue
+
+            # Skip requests that require sampling parameters that are not
+            # supported with speculative decoding.
+            req_id = self.input_batch.req_ids[i]
+            if req_id in self.input_batch.spec_decode_unsupported_reqs:
+                draft_token_ids.append([])
+                continue
+
+            num_tokens = self.input_batch.num_tokens_no_spec[i]
+            if num_tokens >= self.max_model_len:
+                # Skip requests that have already reached the max model length.
+                draft_token_ids.append([])
+                continue
+
+            drafter_output = self.drafter.propose(
+                self.input_batch.token_ids_cpu[i, :num_tokens])
+            if drafter_output is None or len(drafter_output) == 0:
+                draft_token_ids.append([])
+            else:
+                draft_token_ids.append(drafter_output.tolist())
+        return draft_token_ids
 
     @functools.partial(jax.jit, static_argnums=(0, ))
     def structured_decode_fn(self, require_struct_decoding: jax.Array,
@@ -1083,6 +1188,98 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
              self.structured_decode_arange))
 
         return require_structured_out_cpu, grammar_bitmask_cpu, structured_decode_arange
+
+    def _get_spec_decode_metadata(
+            self, num_draft_tokens: np.ndarray,
+            cu_num_scheduled_tokens: np.ndarray) -> SpecDecodeMetadata:
+        # Inputs:
+        # cu_num_scheduled_tokens:  [  4, 104, 107, 207, 209]
+        # num_draft_tokens:         [  3,   0,   2,   0,   1]
+        # Outputs:
+        # cu_num_draft_tokens:      [  3,   3,   5,   5,   6]
+        # logits_indices:           [  0,   1,   2,   3, 103, 104, 105, 106,
+        #                            206, 207, 208]
+        # target_logits_indices:    [  0,   1,   2,   5,   6,   9]
+        # bonus_logits_indices:     [  3,   4,   7,   8,  10]
+
+        # Compute the logits indices.
+        # [4, 1, 3, 1, 2]
+        num_sampled_tokens = num_draft_tokens + 1
+        max_spec_len = np.max(num_draft_tokens)
+
+        # Step 1. cu_num_sampled_tokens: [4, 5, 8, 9, 11]
+        # arange: [0, 1, 2, 3, 0, 0, 1, 2, 0, 0, 1]
+        cu_num_sampled_tokens = np.cumsum(num_sampled_tokens)
+        arange = np.concatenate(
+            [self.arange_cpu[:n] for n in num_sampled_tokens])
+        # Step 2. [0, 0, 0, 0, 103, 104, 104, 104, 206, 207, 207]
+        logits_indices = np.repeat(
+            cu_num_scheduled_tokens - num_sampled_tokens, num_sampled_tokens)
+        # Step 3. [0, 1, 2, 3, 103, 104, 105, 106, 206, 207, 208]
+        logits_indices += arange
+
+        # Compute the bonus logits indices.
+        bonus_logits_indices = cu_num_sampled_tokens - 1
+
+        # Compute the draft logits indices.
+        # arange: [0, 1, 2, 0, 1, 0]
+        arange = np.concatenate(
+            [self.arange_cpu[:n] for n in num_draft_tokens])
+        # [0, 0, 0, 5, 5, 9]
+        target_logits_indices = np.repeat(
+            cu_num_sampled_tokens - num_sampled_tokens, num_draft_tokens)
+        # [0, 1, 2, 5, 6, 9]
+        target_logits_indices += arange
+
+        # Compute the draft token ids.
+        # draft_token_indices:      [  1,   2,   3, 105, 106, 208]
+        draft_token_ids = self.input_ids_cpu[logits_indices]
+        draft_token_ids = draft_token_ids[target_logits_indices + 1]
+        padded_logits_length = runner_utils.get_padded_token_len(
+            self.num_reqs_paddings, logits_indices.shape[0])
+        padded_logits_indices = np.concatenate([
+            logits_indices,
+            np.zeros(padded_logits_length - logits_indices.shape[0],
+                     dtype=np.int32)
+        ])
+        padded_bonus_logits_indices = np.concatenate([
+            bonus_logits_indices,
+            np.zeros(padded_logits_length - bonus_logits_indices.shape[0],
+                     dtype=np.int32)
+        ])
+        padded_num_draft_tokens = np.concatenate([
+            num_draft_tokens,
+            np.zeros(padded_logits_length - num_draft_tokens.shape[0],
+                     dtype=np.int32)
+        ])
+        padded_draft_token_ids = np.concatenate([
+            draft_token_ids,
+            np.zeros(padded_logits_length - draft_token_ids.shape[0],
+                     dtype=np.int32)
+        ])
+        padded_target_logits_indices = np.concatenate([
+            target_logits_indices,
+            np.zeros(padded_logits_length - target_logits_indices.shape[0],
+                     dtype=np.int32)
+        ])
+
+        # CPU -> TPU copy.
+        (padded_num_draft_tokens, padded_draft_token_ids,
+         padded_logits_indices, padded_target_logits_indices,
+         padded_bonus_logits_indices) = self._device_array(
+             (padded_num_draft_tokens, padded_draft_token_ids,
+              padded_logits_indices, padded_target_logits_indices,
+              padded_bonus_logits_indices))
+
+        metadata = SpecDecodeMetadata(
+            draft_token_ids=padded_draft_token_ids,
+            draft_lengths=padded_num_draft_tokens,
+            target_logits_indices=padded_target_logits_indices,
+            bonus_logits_indices=padded_bonus_logits_indices,
+            final_logits_indices=padded_logits_indices,
+            max_spec_len=max_spec_len,
+        )
+        return metadata
 
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -1170,12 +1367,28 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         seq_lens = self.seq_lens_cpu[:self.max_num_reqs]
         padded_num_reqs = runner_utils.get_padded_num_reqs_with_upper_limit(
             num_reqs, self.max_num_reqs)
-        logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
         request_distribution = np.array(self.input_batch.request_distribution)
+
+        use_spec_decode = len(
+            scheduler_output.scheduled_spec_decode_tokens) > 0
+        if not use_spec_decode:
+            logits_indices = self.query_start_loc_cpu[1:padded_num_reqs +
+                                                      1] - 1
+            spec_decode_metadata = None
+        else:
+            num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
+            for req_id, draft_token_ids in (
+                    scheduler_output.scheduled_spec_decode_tokens.items()):
+                req_idx = self.input_batch.req_id_to_index[req_id]
+                num_draft_tokens[req_idx] = len(draft_token_ids)
+
+            spec_decode_metadata = self._get_spec_decode_metadata(
+                num_draft_tokens, self.query_start_loc_cpu[1:num_reqs + 1])
+            logits_indices = spec_decode_metadata.final_logits_indices
 
         # Put to device
         sampling_metadata = TPUSupportedSamplingMetadata.\
-            from_input_batch(self.mesh, self.input_batch, padded_num_reqs)
+            from_input_batch(self.mesh, self.input_batch, logits_indices.shape[0])
 
         if self.uses_mrope:
             positions = mrope_positions
@@ -1199,6 +1412,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             ),
             sampling_metadata,
             logits_indices,
+            spec_decode_metadata,
         )
 
     def _device_array(self, *args, sharding=None, **kwargs) -> jax.Array:
@@ -1347,6 +1561,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             self.input_batch.num_computed_tokens_cpu[req_index] = (
                 num_computed_tokens)
             self.input_batch.block_table.append_row(new_block_ids, req_index)
+
+            # Add spec_token_ids to token_ids_cpu.
+            spec_token_ids = (
+                scheduler_output.scheduled_spec_decode_tokens.get(req_id, ()))
+            if spec_token_ids:
+                num_spec_tokens = len(spec_token_ids)
+                start_index = self.input_batch.num_tokens_no_spec[req_index]
+                end_token_index = start_index + num_spec_tokens
+                self.input_batch.token_ids_cpu[
+                    req_index, start_index:end_token_index] = spec_token_ids
+                # NOTE(woosuk): `num_tokens` here may include spec tokens.
+                self.input_batch.num_tokens[req_index] += num_spec_tokens
 
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
