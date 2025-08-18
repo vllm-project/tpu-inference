@@ -10,6 +10,7 @@ from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
+from vllm.config import VllmConfig
 
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.common.attention.attention import AttentionMetadata
@@ -24,7 +25,6 @@ from tpu_commons.models.jax.common.transformer_block import (
 from tpu_commons.models.jax.utils.weight_utils import (get_param,
                                                        model_weights_generator,
                                                        reshape_params)
-from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
