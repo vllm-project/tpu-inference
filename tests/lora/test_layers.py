@@ -236,12 +236,12 @@ def create_random_inputs(
 
 
 @torch.inference_mode()
-@pytest.mark.parametrize("num_loras", [4])
+@pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
 @pytest.mark.parametrize("repeats", [2])
 @pytest.mark.parametrize("fully_shard", [False])  # TODO(xiowei): add "True".
 @pytest.mark.parametrize("device", ["cpu"])
-@pytest.mark.parametrize("stage", [True])  # TODO(xiowei): add False
-@pytest.mark.parametrize("bias_enabled", [True])
+@pytest.mark.parametrize("stage", [True, False])  # TODO(xiowei): add False
+@pytest.mark.parametrize("bias_enabled", [True, False])
 def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
                                 device, stage, bias_enabled) -> None:
     max_loras = 8

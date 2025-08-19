@@ -99,6 +99,7 @@ class TorchaxBaseLinearLayerWithLoRA(TorchaxBaseLayerWithLoRA):
         self.lora_config = base_lora_layer.lora_config
         self.lora_a_stacked = tuple(create_torchax_tensor_with_partition_spec(lora_a) for lora_a in base_lora_layer.lora_a_stacked)
         self.lora_b_stacked = tuple(create_torchax_tensor_with_partition_spec(lora_b) for lora_b in base_lora_layer.lora_b_stacked)
+        self.lora_bias_stacked: Optional[tuple[torch.Tensor, ...]] = None
         if self.lora_config.bias_enabled:
             self.lora_bias_stacked: Optional[tuple[torch.Tensor, ...]] = tuple(create_torchax_tensor_with_partition_spec(lora_bias) for lora_bias in base_lora_layer.lora_bias_stacked)
 
