@@ -44,6 +44,9 @@ class MockModelConfig:
     def get_hidden_size(self):
         return self.hf_config.hidden_size
 
+    def get_head_size(self):
+        return self.hf_config.hidden_size // self.hf_config.num_attention_heads
+
 
 class MockVllmConfig:
     """A mock VllmConfig sufficient for testing the Qwen2.5 VL model."""
