@@ -24,6 +24,7 @@ from tpu_commons.models.vllm.quantization.unquantized import (
     JaxUnquantizedConfig, JaxUnquantizedLinearMethod)
 
 P = PartitionSpec
+MODELS = ["Qwen/Qwen2-1.5B-Instruct"]
 
 
 @pytest.fixture(autouse=True)
@@ -31,7 +32,7 @@ def setup_environment():
     # This is a fake config used for init dist env.
     # RowParallelLinear needs dist env to be initialized.
     engine_args = EngineArgs(
-        model="Qwen/Qwen2-1.5B-Instruct",
+        model=MODELS[0],
         max_model_len=64,
         max_num_batched_tokens=64,
         max_num_seqs=4,
@@ -50,14 +51,15 @@ def setup_environment():
         ensure_model_parallel_initialized(1, 1)
 
 
+@pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("mesh", [
     test_utils.get_spmd_mesh(1),
     test_utils.get_spmd_mesh(jax.local_device_count())
 ])
-def test_quant_override(mesh):
+def test_quant_override(model, mesh):
 
     engine_args = EngineArgs(
-        model="Qwen/Qwen2-1.5B-Instruct",
+        model=model,
         max_model_len=64,
         max_num_batched_tokens=64,
         max_num_seqs=4,
@@ -71,7 +73,7 @@ def test_quant_override(mesh):
     assert quant_config.mesh == mesh
 
 
-@pytest.mark.parametrize("model", ["Qwen/Qwen2-1.5B-Instruct"])
+@pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("mesh", [
     test_utils.get_spmd_mesh(1),
     test_utils.get_spmd_mesh(jax.local_device_count())
@@ -95,17 +97,18 @@ def test_loading_model(model, mesh):
         assert isinstance(layer.quant_method, JaxUnquantizedLinearMethod)
 
 
+@pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize("mesh", [
     test_utils.get_spmd_mesh(1),
     test_utils.get_spmd_mesh(jax.local_device_count())
 ])
 @pytest.mark.parametrize("enable_sp", [False, True])
-def test_jax_row_parallel_linear(bias, mesh, enable_sp):
+def test_jax_row_parallel_linear(model, bias, mesh, enable_sp):
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(
-        model="Qwen/Qwen2-1.5B-Instruct",
+        model=model,
         max_model_len=64,
         max_num_batched_tokens=64,
         max_num_seqs=4,
@@ -167,17 +170,18 @@ def test_jax_row_parallel_linear(bias, mesh, enable_sp):
     torch.testing.assert_close(output, jax_output)
 
 
+@pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize("mesh", [
     test_utils.get_spmd_mesh(1),
     test_utils.get_spmd_mesh(jax.local_device_count())
 ])
 @pytest.mark.parametrize("enable_sp", [False, True])
-def test_jax_column_parallel_linear(bias, mesh, enable_sp):
+def test_jax_column_parallel_linear(model, bias, mesh, enable_sp):
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(
-        model="Qwen/Qwen2-1.5B-Instruct",
+        model=model,
         max_model_len=64,
         max_num_batched_tokens=64,
         max_num_seqs=4,
@@ -238,6 +242,7 @@ def test_jax_column_parallel_linear(bias, mesh, enable_sp):
     torch.testing.assert_close(output, jax_output)
 
 
+@pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize("mesh", [
     test_utils.get_spmd_mesh(1),
@@ -245,11 +250,11 @@ def test_jax_column_parallel_linear(bias, mesh, enable_sp):
 ])
 @pytest.mark.parametrize("enable_sp", [False, True])
 @pytest.mark.parametrize("fuse_matmuls", [False, True])
-def test_jax_qkv_parallel_linear(bias, mesh, enable_sp, fuse_matmuls):
+def test_jax_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(
-        model="Qwen/Qwen2-1.5B-Instruct",
+        model=model,
         max_model_len=64,
         max_num_batched_tokens=64,
         max_num_seqs=4,
@@ -315,6 +320,7 @@ def test_jax_qkv_parallel_linear(bias, mesh, enable_sp, fuse_matmuls):
     torch.testing.assert_close(output, jax_output)
 
 
+@pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize("mesh", [
     test_utils.get_spmd_mesh(1),
@@ -322,12 +328,12 @@ def test_jax_qkv_parallel_linear(bias, mesh, enable_sp, fuse_matmuls):
 ])
 @pytest.mark.parametrize("fuse_matmuls", [False, True])
 @pytest.mark.parametrize("enable_sp", [False, True])
-def test_jax_merged_column_parallel_linear(bias, mesh, fuse_matmuls,
+def test_jax_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
                                            enable_sp):
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(
-        model="Qwen/Qwen2-1.5B-Instruct",
+        model=model,
         max_model_len=64,
         max_num_batched_tokens=64,
         max_num_seqs=4,

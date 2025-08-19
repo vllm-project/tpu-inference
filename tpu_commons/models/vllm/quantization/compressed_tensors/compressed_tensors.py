@@ -4,6 +4,7 @@ import torch
 from jax.sharding import PartitionSpec
 from vllm.attention.layer import Attention
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
@@ -17,6 +18,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer)
 
 from tpu_commons.models.vllm.quantization.common import JaxCommonConfig
+from tpu_commons.models.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import \
+    JaxCompressedTensorsW8A8Fp8
 from tpu_commons.models.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_int8 import \
     JaxCompressedTensorsW8A8Int8
 from tpu_commons.models.vllm.quantization.unquantized import \
@@ -77,7 +80,13 @@ class JaxCompressedTensorsConfig(CompressedTensorsConfig, JaxCommonConfig):
             self.quant_format)
 
         linear_config = self.get_linear_config(layer)
-        # TODO(kyuyeunk): Add support for FP8 w8a8.
+        if self._is_fp8_w8a8(weight_quant, input_quant):
+            is_static_input_scheme = input_quant and not input_quant.dynamic
+            return JaxCompressedTensorsW8A8Fp8(
+                strategy=weight_quant.strategy,
+                is_static_input_scheme=is_static_input_scheme,
+                jax_config=linear_config,
+            )
         if self._is_dynamic_token_w8a8(weight_quant, input_quant):
             return JaxCompressedTensorsW8A8Int8(
                 strategy=weight_quant.strategy,
@@ -104,6 +113,9 @@ class JaxCompressedTensorsConfig(CompressedTensorsConfig, JaxCommonConfig):
                     self, layer, prefix)
             layer.scheme = scheme
             return CompressedTensorsLinearMethod(self)
+        if isinstance(layer, FusedMoE):
+            raise NotImplementedError(
+                "FusedMoE quantization is currently not supported.")
         if isinstance(layer, Attention):
             return CompressedTensorsKVCacheMethod(self)
         return None
