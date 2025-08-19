@@ -41,6 +41,15 @@ class MockModelConfig:
         self.trust_remote_code = True
         self.seed = 0
 
+    def is_multimodal_model(self):
+        return True
+
+    def get_hidden_size(self):
+        return self.hf_config.hidden_size
+
+    def get_head_size(self):
+        return self.hf_config.hidden_size // self.hf_config.num_attention_heads
+
 
 class MockVllmConfig:
     """A mock VllmConfig sufficient for testing the Qwen2.5 VL model."""
@@ -66,6 +75,8 @@ class MockVllmConfig:
             hidden_size=16,
             num_hidden_layers=2,
             num_attention_heads=2,
+            num_key_value_heads=2,
+            intermediate_size=32,
             rms_norm_eps=1e-6,
             image_token_id=200000,
             video_token_id=200001,
@@ -546,9 +557,9 @@ class TestQwen2_5_VLForConditionalGeneration:
         kwargs = mock_load_weights.call_args.kwargs
         assert kwargs['vllm_config'] == mock_vllm_config
         assert kwargs['model'] is model
-        assert "model.embed_tokens" in kwargs['mappings']
+        assert "model.embed_tokens" in kwargs['metadata_map'].name_map
         assert "lm_head" in kwargs[
-            'mappings']  # Should be present when not tied
+            'metadata_map'].name_map  # Should be present when not tied
         assert kwargs['mesh'] is mesh
         assert isinstance(model.rng, nnx.Rngs)
         assert model.language_model.rng is model.rng
@@ -565,4 +576,4 @@ class TestQwen2_5_VLForConditionalGeneration:
         model.load_weights(rng)
         mock_load_weights.assert_called_once()
         kwargs = mock_load_weights.call_args.kwargs
-        assert "lm_head" not in kwargs['mappings']
+        assert "lm_head" not in kwargs['metadata_map'].name_map
