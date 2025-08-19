@@ -85,8 +85,10 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
         from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
         from tpu_commons.models.jax.qwen2_5_vl import \
             Qwen2_5_VLForConditionalGeneration
+        from tpu_commons.models.jax.qwen3 import Qwen3ForCausalLM
         _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
         _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
+        _MODEL_REGISTRY["Qwen3ForCausalLM"] = Qwen3ForCausalLM
         _MODEL_REGISTRY[
             "Qwen2_5_VLForConditionalGeneration"] = Qwen2_5_VLForConditionalGeneration
 

@@ -10,7 +10,7 @@ from jax.sharding import Mesh
 from vllm.config import ModelConfig
 
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.models.jax.llama3 import LlamaForCausalLM
+from tpu_commons.models.jax.qwen3 import Qwen3ForCausalLM
 from tpu_commons.runner import utils as runner_utils
 
 
@@ -25,7 +25,7 @@ class MockVllmConfig:
 
 @pytest.fixture
 def mock_vllm_config() -> MockVllmConfig:
-    return MockVllmConfig(model="meta-llama/Llama-3.2-1B")
+    return MockVllmConfig(model="Qwen/Qwen3-0.6B")
 
 
 @pytest.fixture(scope="module")
@@ -76,14 +76,13 @@ def rng() -> PRNGKey:
     return jax.random.PRNGKey(42)
 
 
-class TestLlamaForCausalLM:
-    """Tests for the main LlamaForCausalLM model class."""
+class TestQwen3ForCausalLM:
 
-    def test_llama32_1b(self, mock_vllm_config, rng, mesh, mock_model_inputs):
-        """Tests model init and model forward for the 8B model variant."""
+    def test_qwen3_600M(self, mock_vllm_config, rng, mesh, mock_model_inputs):
+        """Tests model init and model forward for the 0.6B model variant."""
 
         # Test model init
-        model = LlamaForCausalLM(mock_vllm_config, rng, mesh)
+        model = Qwen3ForCausalLM(mock_vllm_config, rng, mesh)
 
         model_config = mock_vllm_config.model_config
         hf_config = model_config.hf_config
