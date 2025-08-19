@@ -527,21 +527,25 @@ class DeepSeekV3WeightLoader:
         """
         TODO
         """
+        # scale = None
         mapped_name = self.map_loaded_to_standardized_name(name)
         model_weight = get_param(model_params, mapped_name)
         test_weight = model_weight.array.qvalue.value if hasattr(
             model_weight, "array") else model_weight.value
 
-        logger.debug(
-            f"{name}: {weight.shape}  -->  {mapped_name}: {test_weight.shape}")
-
+        logger.info(
+            f"{name}: {weight.shape}  -->  {mapped_name}: {test_weight.shape} -->  {weight.dtype} {test_weight.dtype}"
+        )
         # Convert weights from torch into numpy
         # TODO: set cast_type based on model weight's type.
         cast_type = test_weight.dtype
         weight = weight.to(torch.float32).numpy().astype(cast_type)
         if scale is not None:
             # TODO
+            old_scale_dtype = scale.dtype
             scale = scale.to(torch.float32).numpy().astype(jnp.float32)
+            logger.info(
+                f"Loaded scale for {name}: {scale.dtype} {old_scale_dtype}")
 
         # Reshape and transpose weights if necessary.
         weight = reshape_params(name, weight, self._weight_shape_map)
@@ -565,7 +569,9 @@ class DeepSeekV3WeightLoader:
             #                        weight.dtype)
             # sharded_value.qvalue.block_until_ready()
             # TODO: put as well?
-            model_weight.array.scale.value = 1 / scale
+            print(sharded_value.dtype, sharded_value.shape)
+            model_weight.array.scale.value = jnp.ones_like(
+                sharded_value)  #  * 1 / scale
             model_weight.array.qvalue.value = sharded_value
         else:
             # TODO: support none quant path
