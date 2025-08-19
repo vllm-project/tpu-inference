@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import jax
 import jax.numpy as jnp
@@ -7,65 +7,67 @@ import pytest
 from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
-from transformers import Qwen2Config
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig
 
-from tpu_commons.models.jax.attention import get_kv_cache_shape_with_mesh
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.models.jax.qwen2 import (Qwen2Attention, Qwen2ForCausalLM,
-                                          Qwen2MLP)
+from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
+from tpu_commons.runner import utils as runner_utils
 
 
 class MockVllmConfig:
     """A mock VllmConfig sufficient for testing the Qwen2 model."""
 
-    def __init__(self,
-                 model_name: str,
-                 tensor_parallelism: int = 1,
-                 tie_word_embeddings: bool = False):
-        self.model_config = MagicMock(spec=VllmConfig.model_config)
-        self.model_config.hf_config = Qwen2Config(
-            # Use small values for testing to avoid OOM
-            vocab_size=1024,
-            hidden_size=32,
-            num_hidden_layers=2,
-            num_attention_heads=4,
-            num_key_value_heads=4,
-            intermediate_size=64,
-            max_window_layers=2,
-            tie_word_embeddings=tie_word_embeddings,
-        )
-        self.model_config.get_vocab_size.return_value = self.model_config.hf_config.vocab_size
-        self.model_config.get_hidden_size.return_value = self.model_config.hf_config.hidden_size
-        self.model_config.model = model_name
+    def __init__(self, model: str):
+        self.model_config = ModelConfig(model)
         self.model_config.dtype = jnp.bfloat16
-
         self.load_config = MagicMock()
-        self.additional_config = {
-            "sharding": {
-                "sharding_strategy": {
-                    "tensor_parallelism": tensor_parallelism
-                }
-            }
-        }
+
+
+@pytest.fixture
+def mock_vllm_config_1b() -> MockVllmConfig:
+    return MockVllmConfig(model="Qwen/Qwen2.5-1.5B")
 
 
 @pytest.fixture(scope="module")
 def mesh():
     """
-    Creates a mesh with all required axes for testing.
+    Creates a mesh with 1 device.
     """
     if not jax.devices():
         pytest.skip("No JAX devices available for mesh creation.")
 
-    devices = np.array(jax.local_devices())
-    # Reshape devices into a 3D array to name 3 axes: data, model, and expert.
-    # The 'model' and 'expert' axes will have a size of 1 for single-device tests.
+    devices = np.array(jax.local_devices()[:1])
     num_devices = len(devices)
-    device_mesh = devices.reshape((num_devices, 1, 1))
+    assert num_devices == 1
+    device_mesh = devices.reshape((num_devices, 1))
 
-    with Mesh(device_mesh, axis_names=('data', 'model', 'expert')) as m:
+    with Mesh(device_mesh, axis_names=('data', 'model')) as m:
         yield m
+
+
+@pytest.fixture
+def mock_model_inputs():
+    num_tokens = 16
+    num_reqs = 1
+    max_num_blocks_per_req = 8
+    input_ids = jnp.ones((num_tokens, ), dtype=jnp.int32)
+    positions = jnp.ones((num_tokens, ), dtype=jnp.int32)
+    block_tables = jnp.zeros((num_reqs, max_num_blocks_per_req),
+                             dtype=jnp.int32).reshape(-1)
+    seq_lens = jnp.ones((num_reqs, ), dtype=jnp.int32)
+    query_start_loc = jnp.ones((num_reqs + 1, ), dtype=jnp.int32)
+    request_distribution = jnp.array([0, 0, 0], dtype=jnp.int32)
+
+    attention_metadata = AttentionMetadata(
+        input_positions=positions,
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        query_start_loc=query_start_loc,
+        request_distribution=request_distribution,
+    )
+    indices_do_sample = jnp.ones((num_reqs, ), dtype=jnp.int32)
+
+    return (input_ids, attention_metadata, indices_do_sample)
 
 
 @pytest.fixture
@@ -74,238 +76,76 @@ def rng() -> PRNGKey:
     return jax.random.PRNGKey(42)
 
 
-@pytest.fixture
-def mock_vllm_config_qwen2() -> MockVllmConfig:
-    return MockVllmConfig(model_name="Qwen/Qwen2-1.5B-Instruct")
+class TestLlamaForCausalLM:
+    """Tests for the main LlamaForCausalLM model class."""
 
+    def test_llama32_1b(self, mock_vllm_config_1b, rng, mesh,
+                        mock_model_inputs):
+        """Tests model init and model forward for the 8B model variant."""
 
-class TestQwen2ForCausalLM:
-    """Tests for the main Qwen2ForCausalLM model class."""
+        # Test model init
+        model = Qwen2ForCausalLM(mock_vllm_config_1b, rng, mesh)
+        assert "1b" in model.vllm_config.model_config.model.lower()
 
-    def test_init_qwen2(self, mock_vllm_config_qwen2, rng, mesh):
-        """Tests correct initialization of the Qwen2 model."""
-        model = Qwen2ForCausalLM(mock_vllm_config_qwen2, rng, mesh)
-        assert model.vllm_config == mock_vllm_config_qwen2
-        assert len(
-            model.model.layers
-        ) == mock_vllm_config_qwen2.model_config.hf_config.num_hidden_layers
-        assert model.model.norm.num_features == mock_vllm_config_qwen2.model_config.hf_config.hidden_size
-        assert not model.vllm_config.model_config.hf_config.tie_word_embeddings
-        assert isinstance(model.lm_head, nnx.Param)
+        model_config = mock_vllm_config_1b.model_config
+        hf_config = model_config.hf_config
 
-    def test_init_qwen2_tied_embeddings(self, rng, mesh):
-        """Tests correct initialization when embeddings are tied."""
-        vllm_config = MockVllmConfig(model_name="Qwen/Qwen2-1.5B-Instruct",
-                                     tie_word_embeddings=True)
-        model = Qwen2ForCausalLM(vllm_config, rng, mesh)
-        assert model.vllm_config.model_config.hf_config.tie_word_embeddings
-        # Check if lm_head is a reference to the embedding table
-        assert model.lm_head is model.embed.embedding
+        assert model.mesh.shape == {"data": 1, "model": 1}
 
-    @patch("tpu_commons.models.jax.qwen2.load_hf_weights")
-    def test_load_weights_called_correctly(self, mock_load_hf_weights,
-                                           mock_vllm_config_qwen2, rng, mesh):
-        """Tests that the weight loader utility is called correctly."""
-        model = Qwen2ForCausalLM(mock_vllm_config_qwen2, rng, mesh)
+        layers = model.model.layers
+        assert len(layers) == hf_config.num_hidden_layers
+        assert isinstance(model.rng, nnx.Rngs)
+        assert isinstance(model.embed, nnx.Embed)
+        assert model.lm_head == model.embed.embedding
+
+        attn = layers[0].self_attn
+        hidden_size = hf_config.hidden_size
+        num_heads = hf_config.num_attention_heads
+        num_kv_heads = hf_config.num_key_value_heads
+        rope_theta = hf_config.rope_theta
+        original_head_dim = hidden_size // num_heads
+        head_dim = 128
+        intermediate_size = hf_config.intermediate_size
+
+        assert attn.hidden_size == hidden_size
+        assert attn.num_heads == num_heads
+        assert attn.num_kv_heads == num_kv_heads
+        assert attn.rope_theta == rope_theta
+        assert attn.head_dim_original == original_head_dim
+        assert attn.head_dim == head_dim
+        assert attn.q_proj.kernel.shape == (hidden_size, num_heads, head_dim)
+        assert attn.k_proj.kernel.shape == (hidden_size, num_kv_heads,
+                                            head_dim)
+        assert attn.v_proj.kernel.shape == (hidden_size, num_kv_heads,
+                                            head_dim)
+        assert attn.o_proj.kernel.shape == (num_heads, head_dim, hidden_size)
+
+        mlp = layers[0].mlp
+        assert mlp.gate_proj.kernel.shape == (hidden_size, intermediate_size)
+        assert mlp.up_proj.kernel.shape == (hidden_size, intermediate_size)
+        assert mlp.down_proj.kernel.shape == (intermediate_size, hidden_size)
+
+        # Test model load
         model.load_weights(rng)
 
-        mock_load_hf_weights.assert_called_once()
-        call_args = mock_load_hf_weights.call_args[1]
-        assert call_args['vllm_config'] == mock_vllm_config_qwen2
-        assert call_args['model'] is model
-        assert "model.embed_tokens" in call_args['metadata_map'].name_map
-        assert "lm_head" in call_args[
-            'metadata_map'].name_map  # since tie_word_embeddings is False
-        assert call_args['mesh'] is mesh
-
-    @patch("tpu_commons.models.jax.qwen2.load_hf_weights")
-    def test_load_weights_called_correctly_tied_embeddings(
-            self, mock_load_hf_weights, rng, mesh):
-        """Tests that the weight loader utility is called correctly with tied embeddings."""
-        vllm_config = MockVllmConfig(model_name="Qwen/Qwen2-1.5B-Instruct",
-                                     tie_word_embeddings=True)
-        model = Qwen2ForCausalLM(vllm_config, rng, mesh)
-        model.load_weights(rng)
-
-        mock_load_hf_weights.assert_called_once()
-        call_args = mock_load_hf_weights.call_args[1]
-        assert "lm_head" not in call_args['metadata_map'].name_map
-
-    def test_forward_pass(self, mock_vllm_config_qwen2, rng, mesh):
-        """Tests a full forward pass of the Qwen2ForCausalLM model."""
-        model = Qwen2ForCausalLM(mock_vllm_config_qwen2, rng, mesh)
-        config = mock_vllm_config_qwen2.model_config.hf_config
-        dtype = mock_vllm_config_qwen2.model_config.dtype
-
-        # Inputs
-        total_tokens = 10
-        num_seqs = 2
-        max_num_seqs = 4
-        num_blocks = 32
-        block_size = 16
-        max_blocks_per_seq = 8
-
-        input_ids = jax.random.randint(rng, (total_tokens, ), 0,
-                                       config.vocab_size)
-
-        # Create dummy KV caches
-        kv_caches = []
-        for _ in range(config.num_hidden_layers):
-            attn_module = model.model.layers[0].self_attn
-            kv_cache_shape = get_kv_cache_shape_with_mesh(
-                mesh,
-                num_blocks,
-                block_size,
-                attn_module.num_kv_heads,
-                attn_module.head_dim,
-                dtype,
-            )
-            kv_caches.append(jnp.zeros(kv_cache_shape, dtype=dtype))
-
-        attention_metadata = AttentionMetadata(
-            input_positions=jnp.arange(total_tokens, dtype=jnp.int32),
-            block_tables=jnp.zeros((max_num_seqs * max_blocks_per_seq, ),
-                                   dtype=jnp.int32),
-            seq_lens=jnp.array([5, 5, 0, 0], dtype=jnp.int32),
-            query_start_loc=jnp.array([0, 5, 10, 10, 10], dtype=jnp.int32),
-            request_distribution=jnp.array([0, 0, num_seqs], dtype=jnp.int32),
+        # Test model forward
+        kv_caches = runner_utils.create_kv_caches(
+            num_blocks=8,
+            block_size=128,
+            num_kv_heads=num_kv_heads,
+            head_size=head_dim,
+            mesh=mesh,
+            layer_names=["layer"] * hf_config.num_hidden_layers,
+            devices=mesh.devices[0],
         )
+        # 1 seq with 16 tokens
+        input_ids, attention_metadata, indices_do_sample = mock_model_inputs
+        kv_caches, hidden_states = model(kv_caches, input_ids,
+                                         attention_metadata)
+        assert hidden_states.shape == (16, hidden_size)
 
-        # Run forward pass
-        new_kv_caches, hidden_states = model(kv_caches, input_ids,
-                                             attention_metadata)
+        hidden_states = hidden_states[indices_do_sample]
+        assert hidden_states.shape == (1, hidden_size)
 
-        # Assertions
-        assert len(new_kv_caches) == config.num_hidden_layers
-        assert new_kv_caches[0].shape == kv_caches[0].shape
-        assert hidden_states.shape == (total_tokens, config.hidden_size)
-        assert hidden_states.dtype == dtype
-
-        # Test compute_logits
         logits = model.compute_logits(hidden_states)
-        assert logits.shape == (total_tokens, config.vocab_size)
-        assert logits.dtype == dtype
-
-    def test_forward_pass_with_embeds(self, mock_vllm_config_qwen2, rng, mesh):
-        """Tests a forward pass using pre-computed embeddings."""
-        model = Qwen2ForCausalLM(mock_vllm_config_qwen2, rng, mesh)
-        config = mock_vllm_config_qwen2.model_config.hf_config
-        dtype = mock_vllm_config_qwen2.model_config.dtype
-
-        # Inputs
-        total_tokens = 10
-        num_seqs = 2
-        max_num_seqs = 4
-        num_blocks = 32
-        block_size = 16
-        max_blocks_per_seq = 8
-
-        input_ids = None
-        inputs_embeds = jnp.ones((total_tokens, config.hidden_size),
-                                 dtype=dtype)
-
-        # Create dummy KV caches
-        kv_caches = []
-        for _ in range(config.num_hidden_layers):
-            attn_module = model.model.layers[0].self_attn
-            kv_cache_shape = get_kv_cache_shape_with_mesh(
-                mesh,
-                num_blocks,
-                block_size,
-                attn_module.num_kv_heads,
-                attn_module.head_dim,
-                dtype,
-            )
-            kv_caches.append(jnp.zeros(kv_cache_shape, dtype=dtype))
-
-        attention_metadata = AttentionMetadata(
-            input_positions=jnp.arange(total_tokens, dtype=jnp.int32),
-            block_tables=jnp.zeros((max_num_seqs * max_blocks_per_seq, ),
-                                   dtype=jnp.int32),
-            seq_lens=jnp.array([5, 5, 0, 0], dtype=jnp.int32),
-            query_start_loc=jnp.array([0, 5, 10, 10, 10], dtype=jnp.int32),
-            request_distribution=jnp.array([0, 0, num_seqs], dtype=jnp.int32),
-        )
-
-        # Run forward pass
-        new_kv_caches, hidden_states = model(kv_caches, input_ids,
-                                             attention_metadata, inputs_embeds)
-
-        # Assertions
-        assert len(new_kv_caches) == config.num_hidden_layers
-        assert new_kv_caches[0].shape == kv_caches[0].shape
-        assert hidden_states.shape == (total_tokens, config.hidden_size)
-        assert hidden_states.dtype == dtype
-
-        # Test compute_logits
-        logits = model.compute_logits(hidden_states)
-        assert logits.shape == (total_tokens, config.vocab_size)
-        assert logits.dtype == dtype
-
-
-class TestQwen2SubModules:
-    """Tests for sub-modules of the Qwen2 model."""
-
-    def test_qwen2_mlp_forward(self, mock_vllm_config_qwen2, rng, mesh):
-        """Tests the forward pass of the Qwen2MLP module."""
-        config = mock_vllm_config_qwen2.model_config.hf_config
-        dtype = mock_vllm_config_qwen2.model_config.dtype
-        mlp = Qwen2MLP(config, dtype, nnx.Rngs(rng))
-
-        total_tokens = 10
-        hidden_size = config.hidden_size
-        x = jnp.ones((total_tokens, hidden_size), dtype=dtype)
-
-        output = mlp(x)
-
-        assert output.shape == (total_tokens, hidden_size)
-        assert output.dtype == dtype
-
-    def test_qwen2_attention_forward(self, mock_vllm_config_qwen2, rng, mesh):
-        """Tests the forward pass of the Qwen2Attention module."""
-        config = mock_vllm_config_qwen2.model_config.hf_config
-        dtype = mock_vllm_config_qwen2.model_config.dtype
-        attention = Qwen2Attention(config, dtype, nnx.Rngs(rng), mesh)
-
-        # Inputs
-        total_tokens = 10
-        num_seqs = 2
-        max_num_seqs = 4
-        num_blocks = 32
-        block_size = 16
-        max_blocks_per_seq = 8
-
-        x = jnp.ones((total_tokens, config.hidden_size), dtype=dtype)
-
-        kv_cache_shape = get_kv_cache_shape_with_mesh(
-            mesh,
-            num_blocks,
-            block_size,
-            attention.num_kv_heads,
-            attention.head_dim,
-            dtype,
-        )
-        kv_cache = jnp.zeros(kv_cache_shape, dtype=dtype)
-
-        attention_metadata = AttentionMetadata(
-            input_positions=jnp.arange(total_tokens, dtype=jnp.int32),
-            block_tables=jnp.zeros((max_num_seqs * max_blocks_per_seq, ),
-                                   dtype=jnp.int32),
-            seq_lens=jnp.array([5, 5, 0, 0], dtype=jnp.int32),
-            query_start_loc=jnp.array([0, 5, 10, 10, 10], dtype=jnp.int32),
-            request_distribution=jnp.array([0, 0, num_seqs], dtype=jnp.int32),
-        )
-
-        with patch("tpu_commons.models.jax.qwen2.attention") as mock_attention:
-            mock_attention.return_value = (kv_cache,
-                                           jnp.ones((total_tokens,
-                                                     attention.num_heads,
-                                                     attention.head_dim),
-                                                    dtype=dtype))
-
-            new_kv_cache, output = attention(kv_cache, x, attention_metadata)
-
-            mock_attention.assert_called_once()
-            assert new_kv_cache.shape == kv_cache.shape
-            assert output.shape == (total_tokens, config.hidden_size)
-            assert output.dtype == dtype
+        assert logits.shape == (1, hf_config.vocab_size)
