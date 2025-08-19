@@ -341,6 +341,8 @@ class DeepSeekV3WeightLoader:
             model_name_or_path=vllm_config.model_config.model,
             framework="pt",
             download_dir=vllm_config.load_config.download_dir)
+        self.is_verbose = getattr(vllm_config.additional_config, "is_verbose",
+                                  False)
         self.num_routed_experts = num_local_experts
 
         self._transpose_map = {
@@ -506,9 +508,9 @@ class DeepSeekV3WeightLoader:
 
         model_weight.value = sharded_array
 
-        #model_weight.value.block_until_ready()
         del weight
-        #print_param_info(model_weight, name)
+        if self.is_verbose:
+            print_param_info(model_weight, name)
         return model_weight.value.nbytes / 1e9, model_weight.value.addressable_shards[
             0].data.nbytes / 1e9
 
@@ -572,26 +574,28 @@ class DeepSeekV3WeightLoader:
                         weight_bytes, weight_shards = self._load_individual_weight(
                             loaded_name, stacked_weights, model_params,
                             model_for_loading.mesh)
-                        cumulative_global_memory += weight_bytes
-                        cumulative_local_memory += weight_shards
-                        logger.debug(
-                            f"Cumulative global memory: {cumulative_global_memory} GB"
-                        )
-                        logger.debug(
-                            f"Cumulative local memory: {cumulative_local_memory} GB"
-                        )
+                        if self.is_verbose:
+                            cumulative_global_memory += weight_bytes
+                            cumulative_local_memory += weight_shards
+                            logger.info(
+                                f"Cumulative global memory: {cumulative_global_memory} GB"
+                            )
+                            logger.info(
+                                f"Cumulative local memory: {cumulative_local_memory} GB"
+                            )
                 else:
                     weight_bytes, weight_shards = self._load_individual_weight(
                         loaded_name, loaded_weight, model_params,
                         model_for_loading.mesh)
-                    cumulative_global_memory += weight_bytes
-                    cumulative_local_memory += weight_shards
-                    logger.debug(
-                        f"Cumulative global memory: {cumulative_global_memory} GB"
-                    )
-                    logger.debug(
-                        f"Cumulative local memory: {cumulative_local_memory} GB"
-                    )
+                    if self.is_verbose:
+                        cumulative_global_memory += weight_bytes
+                        cumulative_local_memory += weight_shards
+                        logger.info(
+                            f"Cumulative global memory: {cumulative_global_memory} GB"
+                        )
+                        logger.info(
+                            f"Cumulative local memory: {cumulative_local_memory} GB"
+                        )
 
         del mlp_experts_gate_proj_weights
         del mlp_experts_up_proj_weights
