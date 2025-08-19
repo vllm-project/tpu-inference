@@ -45,7 +45,7 @@ class JaxMergedColumnParallelLinearCore(torch.nn.Module):
                           CompressedTensorsW8A8Int8):
             self.w8q8_int8_quant = True
 
-        if self.fuse_matmuls:
+        if self.fuse_matmuls:  # True in my case.
             self._load_weights_from_merged_linear_fused(vllm_col_par_linear)
             self._shard_weight_fused(mesh)
         else:

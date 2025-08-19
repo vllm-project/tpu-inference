@@ -291,6 +291,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             num_attention_heads = 32
 
         n_slices = repeats
+        # create_lora_weights creates global shape weight.
         lora_linear.create_lora_weights(max_loras,
                                         lora_config,
                                         model_config=FakeConfig())
@@ -414,6 +415,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             lora_config.lora_extra_vocab_size,
         )
 
+        jax_inputs = []
         with torchax.default_env(), jax.default_device(jax.devices("tpu")[0]):
             for input in inputs:
                 # xw32q: why do we need to do `torch_view(t2j(input))` instead of just `input`?

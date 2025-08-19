@@ -150,7 +150,7 @@ class TorchaxBaseLinearLayerWithLoRA(TorchaxBaseLayerWithLoRA):
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         # self.base_layer returns (output, output_bias), we only need the first one.
-        output = self.base_layer(x)[0]  # x:[128, 4096]
+        output = self.base_layer(x)[0]  # x:[128, 4096], eg self.base_layer is JaxMergedColumnParallelLinear
 
         # In transformers backend, x and output have extra batch dimension like
         # (1, seq_len, hidden_dim), while punica expects (seq_len, hidden_dim),
@@ -220,6 +220,7 @@ class TorchaxMergedColumnParallelLinearWithLoRA(TorchaxBaseLinearLayerWithLoRA):
 
         # Matrix multiply.
         output_parallel = self.apply(input_, bias)
+        # print(f"{self.base_layer.gather_output=}, {self.base_layer.return_bias=}") print False and False
         if self.base_layer.gather_output:
             # All-gather across the partitions.
             # output = tensor_model_parallel_all_gather(output_parallel)
