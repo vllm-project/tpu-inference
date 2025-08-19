@@ -1,6 +1,3 @@
-# TODO: create a BaseLayerWithLoRA class because the test uses it.
-# create TorchaxColumnParallelLinearWithLoRA
-
 from typing import TYPE_CHECKING, Optional, Union, cast
 
 import torch
@@ -44,16 +41,6 @@ Step5: load the lora weight, shard it, and send it to TPU.
 
 class TorchaxBaseLayerWithLoRA(nn.Module):
 
-    # We don't need this because we get the initalized weight from base lora layer.
-    # def create_lora_weights(
-    #     self,
-    #     max_loras: int,
-    #     lora_config: LoRAConfig,
-    #     model_config: Optional[PretrainedConfig] = None,
-    # ) -> None:
-    #     """Initializes lora matrices. But I don't think I need it."""
-    #     ...
-
     def reset_lora(self, index: int):
         """Resets the lora weights at index back to 0."""
         ...
@@ -86,14 +73,14 @@ class TorchaxBaseLayerWithLoRA(nn.Module):
         """Returns True if the layer can be replaced by this LoRA layer."""
         raise NotImplementedError
 
+    # create_lora_weights is not needed because we get the initalized weight from base lora layer.
+
 class TorchaxBaseLinearLayerWithLoRA(TorchaxBaseLayerWithLoRA):
 
     def __init__(self, base_lora_layer: BaseLayerWithLoRA):
         super().__init__()
         self.base_lora_layer = base_lora_layer
         self.base_layer = base_lora_layer.base_layer
-        # self.input_size = self.base_layer.input_size
-        # self.device = _get_lora_device(self.base_layer)  # do we need it?
 
         # self.lora_a_stacked, self.lora_b_stacked, self.lora_bias_stacked, self.lora_config are initialized in original LoRA wrapper's create_lora_weight().
         self.lora_config = base_lora_layer.lora_config
@@ -104,7 +91,6 @@ class TorchaxBaseLinearLayerWithLoRA(TorchaxBaseLayerWithLoRA):
             self.lora_bias_stacked: Optional[tuple[torch.Tensor, ...]] = tuple(create_torchax_tensor_with_partition_spec(lora_bias) for lora_bias in base_lora_layer.lora_bias_stacked)
 
         self.output_slices: tuple[int, ...]
-        self.output_size: int  # xiowei: remove it.
         self.n_slices: int
 
     def reset_lora(self, index: int):
@@ -118,45 +104,16 @@ class TorchaxBaseLinearLayerWithLoRA(TorchaxBaseLayerWithLoRA):
                                               self.lora_bias_stacked)
                 self.lora_bias_stacked[s_index][index] = 0
 
-    # def set_lora(
-    #     self,
-    #     index: int,
-    #     lora_a: torch.Tensor,
-    #     lora_b: torch.Tensor,
-    #     embeddings_tensor: Optional[torch.Tensor],
-    #     lora_bias: Optional[torch.Tensor] = None,
-    # ):
-    #     # Except for QKVParallelLinearWithLoRA and
-    #     # MergedColumnParallelLinearWithLoRA, all other linear LoRA layers
-    #     # store weights in a tuple of size 1. These two layers will
-    #     # override this function.
-    #     assert (len(self.lora_a_stacked) == len(self.lora_b_stacked) ==
-    #             self.n_slices == 1)
-
-    #     self.reset_lora(index)
-    #     self.lora_a_stacked[0][index, 0].copy_(lora_a.T, non_blocking=True)
-    #     self.lora_a_stacked[0].apply_jax_(jax.device_put, NamedSharding(self.mesh, P()))
-    #     self.lora_b_stacked[0][index, 0].copy_(lora_b, non_blocking=True)
-    #     self.lora_b_stacked[0].apply_jax_(jax.device_put, NamedSharding(self.mesh, P()))
-
-    #     if lora_bias is not None:
-    #         self.lora_bias_stacked = cast(tuple[torch.Tensor, ...],
-    #                                       self.lora_bias_stacked)
-    #         assert len(self.lora_bias_stacked)
-    #         self.lora_bias_stacked[0][index, 0].copy_(lora_bias.T, non_blocking=True)
-    #         self.lora_bias.stacked[0].apply_jax_(jax.device_put, NamedSharding(self.mesh, P()))
-    #     # continue
-
     def apply(self,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        # self.base_layer returns (output, output_bias), we only need the first one.
-        output = self.base_layer(x)[0]  # x:[128, 4096], eg self.base_layer is JaxMergedColumnParallelLinear
+        # self.base_layer (JaxMergedColumnParallelLinear) returns (output, output_bias), we only need the first one.
+        # x: [*, in_features]
+        output = self.base_layer(x)[0]
 
         # In transformers backend, x and output have extra batch dimension like
         # (1, seq_len, hidden_dim), while punica expects (seq_len, hidden_dim),
         # therefore we need to flatten the batch dimensions.
-        # TODO(xiowei): check if this is still needed.
         if x.ndim == 3 and output.ndim == 3:
             output = output.flatten(0, 1)
             x = x.flatten(0, 1)
@@ -185,8 +142,6 @@ class TorchaxBaseLinearLayerWithLoRA(TorchaxBaseLayerWithLoRA):
             return None
 
 
-# TODO(xiowei): consider creating a TorchaxColumnParallelLinearWithLoRA next.
-
 class TorchaxMergedColumnParallelLinearWithLoRA(TorchaxBaseLinearLayerWithLoRA):
     """ColumnParallelLinear layer that is composed of 2 sublayers (slices)
     packed together (eg. gate_proj + up_proj -> gate_up_proj).
@@ -201,7 +156,6 @@ class TorchaxMergedColumnParallelLinearWithLoRA(TorchaxBaseLinearLayerWithLoRA):
         super().__init__(base_lora_layer)
         output_sizes = self.base_layer.output_sizes
         self.output_slices = output_sizes
-        # how should I write self.output_slices if I don't know the tp_size?
         self.n_slices = len(output_sizes)
 
     def forward(
@@ -225,7 +179,7 @@ class TorchaxMergedColumnParallelLinearWithLoRA(TorchaxBaseLinearLayerWithLoRA):
         if self.base_layer.gather_output:
             # All-gather across the partitions.
             # output = tensor_model_parallel_all_gather(output_parallel)
-            pass
+            raise NotImplementedError("NYI: TorchaxMergedColumnParallelLinearWithLoRA.forward when self.base_layer.gather_output is true.")
         else:
             output = output_parallel
 
@@ -252,7 +206,6 @@ class TorchaxMergedColumnParallelLinearWithLoRA(TorchaxBaseLinearLayerWithLoRA):
                 self.lora_a_stacked[i][
                     index, 0, :lora_a_i.shape[1], :lora_a_i.shape[0]].copy_(
                         lora_a_i.T, non_blocking=True)
-                # self.lora_a_stacked[i].apply_jax_(jax.device_put, NamedSharding(self.mesh, P(None, )))
             lora_b_i = create_torchax_tensor_with_partition_spec(lora_b[i])
             if lora_b_i is not None:
                 self.lora_b_stacked[i][

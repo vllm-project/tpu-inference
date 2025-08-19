@@ -30,8 +30,7 @@ def bgmv_torch(
         loras,  # [num_loras, lora_rank, hidden_size]
         idxs,  # [num_tokens]
 ):  # [num_tokens, lora_rank]
-    # TODO(xiowei): use this more natural impl once we upgrade torchax so
-    # that we can use https://github.com/pytorch/xla/pull/9523.
+    # TODO(xiowei): use the below one_hot impl (added in https://github.com/pytorch/xla/pull/9523) after we upgrade torchax version.
     # if len(loras.shape) == 4:
     #     loras = loras.squeeze(axis=1)
     # loras = create_torchax_tensor_with_partition_spec(loras)
@@ -42,6 +41,7 @@ def bgmv_torch(
     #     torch.nn.functional.one_hot(idxs.long(), loras.shape[0]),
     #     loras,
     # )  # [num_tokens, lora_rank]
+
     # # naive ref impl.
     # if len(loras.shape) == 4:
     #     loras = loras.squeeze(axis=1)
@@ -54,46 +54,6 @@ def bgmv_torch(
     loras = create_torchax_tensor_with_partition_spec(loras)
     idxs = create_torchax_tensor_with_partition_spec(idxs)
     return call_jax(bgmv_jax, inputs, loras, idxs)
-
-
-def bgmv_expand(
-    inputs: torch.Tensor,
-    lora_b_weights: torch.Tensor,
-    output_tensor: torch.Tensor,
-    lora_indices_tensor: torch.Tensor,
-    add_inputs: bool = True,
-):
-    """
-    Args:
-        inputs (torch.Tensor): Input tensor of shape [num_tokens, hidden_size].
-
-        lora_b_weights (torch.Tensor): LoRA weights of shape
-            [num_loras, lora_rank, hidden_size].
-
-        output_tensor (torch.Tensor): output tensor of shape
-            [num_tokens, hidden_size * num_slices].
-
-        lora_indices_tensor (torch.Tensor): Tensor of shape [num_tokens]
-            indicating which LoRA matrix to use for each token.
-        add_inputs (bool): Whether or not to add the input tensor to the output
-            tensor.
-    """
-
-    raise NotImplementedError("Not used for now")
-    outputs = bgmv_torch(inputs, lora_b_weights, lora_indices_tensor)
-
-    limit = output_tensor.shape[0]
-    if outputs.shape[0] == 1 and output_tensor.shape[0] != 1:
-        limit = 1
-
-    if output_tensor.shape[1] > outputs.shape[1]:
-        outputs = F.pad(outputs,
-                        (0, output_tensor.shape[1] - outputs.shape[1], 0, 0))
-
-    if add_inputs:
-        return output_tensor + outputs[:limit, :output_tensor.shape[1]]
-    else:
-        return outputs[:limit, :output_tensor.shape[1]]
 
 
 def bgmv_shrink(

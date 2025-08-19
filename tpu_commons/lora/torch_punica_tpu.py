@@ -6,13 +6,10 @@ from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 import torch.nn.functional as F
-# from vllm.lora.ops.xla_ops import bgmv_expand, bgmv_expand_slice, bgmv_shrink
 from vllm.lora.punica_wrapper.utils import convert_mapping
 
 from tpu_commons.distributed.tpu_distributed_utils import \
     create_torchax_tensor_with_partition_spec
-
-# import torch_xla.core.xla_model as xm
 
 if TYPE_CHECKING:
     # avoid circuit import
@@ -20,11 +17,9 @@ if TYPE_CHECKING:
 
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
-from tpu_commons.lora.torch_lora_ops import (bgmv_expand, bgmv_expand_slice,
-                                             bgmv_shrink)
+from tpu_commons.lora.torch_lora_ops import bgmv_expand_slice, bgmv_shrink
 
 
-# Need to create a separate torch_punica_tpu.py and torch_lora_ops.py because the ones in vLLM uses torch_xla stuff (custom ops) which couldn't work in tpu_commons.
 class PunicaWrapperTPU(PunicaWrapperBase):
     """
     PunicaWrapperTPU is designed to manage and provide metadata for the punica
@@ -57,9 +52,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         specifically for VocabParallelEmbeddingWithLoRA.
         """
         raise NotImplementedError(
-            "torch_punica_tpu.PunicaWrapperTPU.embeddings_indices shouldn't be used by now."
-        )
-        return self._embeddings_indices[:]
+            "NYI: torch_punica_tpu.PunicaWrapperTPU.embeddings_indices.")
 
     @property
     def sampler_indices_padded(self) -> torch.Tensor:
@@ -67,9 +60,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         This property provides access to padded sampler indices.
         """
         raise NotImplementedError(
-            "torch_punica_tpu.PunicaWrapperTPU.sampler_indices_padded shouldn't be used by now."
-        )
-        return self._sampler_indices_padded[:]
+            "NYI: torch_punica_tpu.PunicaWrapperTPU.sampler_indices_padded.")
 
     def shrink(
         self,
@@ -82,10 +73,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
     def expand(self, y: torch.Tensor, x: torch.Tensor, w_t_all: torch.Tensor,
                add_inputs: bool):
         raise NotImplementedError(
-            "torch_punica_tpu.PunicaWrapperTPU.expand shouldn't be used by now."
-        )
-        return bgmv_expand(x, w_t_all, y, self._get_token_lora_indices(x),
-                           add_inputs)
+            "NYI: torch_punica_tpu.PunicaWrapperTPU.expand.")
 
     def expand_slice(self, y: torch.Tensor, x: torch.Tensor,
                      w_t_all: torch.Tensor, y_offset: int, y_slice_size: int,
@@ -146,7 +134,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             output_slices (tuple[int, ...]): Every slice's size
             add_inputs (bool):  Defaults to True.
         """
-        y_org = y
+        y_orig = y
         y = y.view(-1, y.shape[-1])
         offset_left = 0
 
@@ -161,7 +149,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                                   output_slices[slice_idx],
                                   add_inputs=add_inputs)
             offset_left += output_slices[slice_idx]
-        return y.view(y_org.shape)
+        return y.view(y_orig.shape)
 
     def add_lora_embedding(self,
                            y: torch.Tensor,
@@ -182,11 +170,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             add_inputs (bool): Default to True.
         """
         raise NotImplementedError(
-            "torch_punica_tpu.PunicaWrapperTPU.add_lora_embedding shouldn't be used by now."
-        )
-
-        # Embedding layer only needs the expand op
-        return self.expand(y, x, lora_b_stacked, add_inputs)
+            "NYI: torch_punica_tpu.PunicaWrapperTPU.add_lora_embedding.")
 
     def add_lora_linear(self,
                         y: torch.Tensor,
@@ -270,20 +254,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             buffer (Optional[torch.Tensor]):Default to None.
         """
         raise NotImplementedError(
-            "torch_punica_tpu.PunicaWrapperTPU.add_lora_logits shouldn't be used by now."
-        )
-        y_org = y
-        y = y.view(-1, y.shape[-1])
-        x = x.view(-1, x.shape[-1])
-
-        sampler_indices = torch.narrow(self._sampler_indices, 0, 0, x.size(0))
-        buffer = bgmv_shrink(x, lora_a_stacked, sampler_indices, scale)
-        y = bgmv_expand(buffer,
-                        lora_b_stacked,
-                        y,
-                        sampler_indices,
-                        add_inputs=True)
-        return y.view_as(y_org)
+            "NYI: torch_punica_tpu.PunicaWrapperTPU.add_lora_logits.")
 
     def _apply_bias(
         self,
@@ -301,7 +272,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             output_slices:     n-1 element tuple of (slice_size...),
                             where n is number of slices
         """
-        org_output = output
+        orig_output = output
         output = output.view(-1, output.shape[-1])
         indices = indices.view(-1)
 
@@ -319,8 +290,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                 output += bias
             offset_left += slice
 
-        # return output.view_as(org_output)  # I don't know why this doesn't work.
-        return output.view(org_output.shape)
+        return output.view(orig_output.shape)
 
     # This performs the same tensor ops as the base method, except it does them
     # on the CPU then transfers the results to the TPU
