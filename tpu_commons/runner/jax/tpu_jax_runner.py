@@ -27,7 +27,8 @@ from vllm.utils import cdiv
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
+from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, DraftTokenIds,
+                             ModelRunnerOutput)
 from vllm.v1.request import Request
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.worker.kv_connector_model_runner_mixin import \
@@ -114,6 +115,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
 
         self.maybe_forbid_compile = runner_utils.ForbidCompile(
         ) if envs.VLLM_XLA_CHECK_RECOMPILATION else nullcontext()
+
+        # Cached draft tokens.
+        self._draft_token_ids: Optional[list[list[int]]] = None
 
     def _verify_chunked_prefill_config(self):
         if (self.scheduler_config.max_num_batched_tokens
@@ -1056,11 +1060,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         else:
             logprobs_lists = None
 
-        if not self.speculative_config:
-            # Speculative decoding is not enabled.
-            spec_token_ids = None
-        else:
-            spec_token_ids = self.propose_draft_token_ids(
+        if self.speculative_config:
+            self._draft_token_ids = self.propose_draft_token_ids(
                 valid_sampled_token_ids)
 
         model_runner_output = ModelRunnerOutput(
@@ -1073,6 +1074,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             kv_connector_output=kv_connector_output,
         )
         return attn_metadata, model_runner_output
+
+    def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
+        if self._draft_token_ids is None:
+            return None
+        req_ids = self.input_batch.req_ids
+        draft_token_ids = self._draft_token_ids
+        self._draft_token_ids = None
+        return DraftTokenIds(req_ids, draft_token_ids)
 
     def propose_draft_token_ids(
         self,

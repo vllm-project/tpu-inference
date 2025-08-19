@@ -10,6 +10,7 @@ from vllm.multimodal.inputs import (MultiModalBatchedField,
                                     MultiModalFieldElem, MultiModalKwargsItem)
 from vllm.sampling_params import SamplingType
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
+from vllm.v1.outputs import DraftTokenIds
 from vllm.v1.request import PlaceholderRange, Request
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
@@ -853,6 +854,87 @@ class TestTPUJaxRunner(unittest.TestCase):
             any(
                 np.array_equal(arg, expected_tokens_req4)
                 for arg in called_with_tokens))
+
+    def test_take_draft_token_ids(self):
+        """Tests the take_draft_token_ids method for speculative decoding."""
+        # Case 1: No draft tokens are available.
+        self.runner._draft_token_ids = None
+        result = self.runner.take_draft_token_ids()
+        self.assertIsNone(result)
+
+        # Case 2: Draft tokens are available.
+        mock_req_ids = ["req-1", "req-2"]
+        mock_draft_ids = [[10, 11], [20, 21, 22]]
+
+        # Re-initialize input_batch for a clean state for this specific test
+        self.runner.input_batch = InputBatch(
+            max_num_reqs=self.runner.max_num_reqs,
+            max_model_len=self.runner.max_model_len,
+            max_num_batched_tokens=self.runner.max_num_tokens,
+            pin_memory=False,
+            vocab_size=self.runner.vocab_size,
+            block_sizes=[self.runner.block_size],
+            is_spec_decode=True,
+        )
+
+        # Add some requests to populate `input_batch.req_ids`
+        mock_sampling_params = MagicMock()
+        mock_sampling_params.sampling_type = SamplingType.GREEDY
+        mock_sampling_params.top_k = -1
+        mock_sampling_params.top_p = 1.0
+        mock_sampling_params.temperature = 0.0
+        mock_sampling_params.min_tokens = 0
+        mock_sampling_params.logprobs = None
+        mock_sampling_params.logit_bias = None
+        mock_sampling_params.allowed_token_ids = set()
+        mock_sampling_params.bad_words_token_ids = None
+        mock_sampling_params.all_stop_token_ids = set()
+
+        req1 = CachedRequestState(req_id="req-1",
+                                  prompt_token_ids=[1],
+                                  output_token_ids=[],
+                                  sampling_params=mock_sampling_params,
+                                  block_ids=([1], ),
+                                  num_computed_tokens=1,
+                                  lora_request=None,
+                                  mm_kwargs=[],
+                                  mm_hashes=[],
+                                  mm_positions=[],
+                                  pooling_params=None,
+                                  generator=None)
+        req2 = CachedRequestState(req_id="req-2",
+                                  prompt_token_ids=[2],
+                                  output_token_ids=[],
+                                  sampling_params=mock_sampling_params,
+                                  block_ids=([2], ),
+                                  num_computed_tokens=1,
+                                  lora_request=None,
+                                  mm_kwargs=[],
+                                  mm_hashes=[],
+                                  mm_positions=[],
+                                  pooling_params=None,
+                                  generator=None)
+        self.runner.input_batch.add_request(req1)
+        self.runner.input_batch.add_request(req2)
+
+        # Set the draft tokens to be taken
+        self.runner._draft_token_ids = mock_draft_ids
+
+        # Call the method to be tested
+        result = self.runner.take_draft_token_ids()
+
+        # Assertions for the returned object
+        self.assertIsNotNone(result)
+        self.assertIsInstance(result, DraftTokenIds)
+        self.assertEqual(result.req_ids, mock_req_ids)
+        self.assertEqual(result.draft_token_ids, mock_draft_ids)
+
+        # Assert that the internal state is reset
+        self.assertIsNone(self.runner._draft_token_ids)
+
+        # Case 3: Call again after taking, should return None
+        result_after = self.runner.take_draft_token_ids()
+        self.assertIsNone(result_after)
 
     def test_get_spec_decode_metadata(self):
         """Tests the _get_spec_decode_metadata function with a sample case."""
