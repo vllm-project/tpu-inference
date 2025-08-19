@@ -24,9 +24,6 @@ from tpu_commons.models.jax.utils import file_utils
 logger = init_logger(__name__)
 
 HF_WEIGHTS_FORMAT = "*.safetensors"
-FULL_DOWNLOAD_DISK_RATIO = 0.9
-
-############ Used by llama4, deepseek only for now START ############
 
 
 @dataclass
@@ -37,6 +34,9 @@ class MetadataMap:
     bias_reshape_map: dict[str, tuple[int, ...]] = field(default_factory=dict)
     pad_map: dict[str, tuple[int, ...]] = field(default_factory=dict)
     bias_pad_map: dict[str, tuple[int, ...]] = field(default_factory=dict)
+
+
+############ START Used by llama4, deepseek only for now START ############
 
 
 def print_param_info(param: nnx.Param, name: str):
@@ -65,23 +65,9 @@ def reshape_params(param_key: str, param_tensor: jax.Array, shape_map):
 def model_file_generator(
         model_name_or_path: str,
         download_dir: Optional[str]) -> Generator[str, None, None]:
-    weights_files, weights_location = get_model_weights_files(
-        model_name_or_path, download_dir)
-
-    if weights_location != "local":
-        logger.warning(
-            "Weights files are not downloaded to local disk at once due to insufficient disk space. "
-            "They will be downloaded on the fly during loading.")
-
+    weights_files = get_model_weights_files(model_name_or_path, download_dir)
     for st_file in weights_files:
-        if weights_location == "hf":
-            st_file = file_utils.download_model_weights_from_hf(
-                model_name_or_path, download_dir, os.path.basename(st_file))[0]
-
         yield st_file
-
-        if weights_location != "local":
-            file_utils.delete_file(st_file)
 
 
 def model_weights_generator(
@@ -96,7 +82,7 @@ def model_weights_generator(
             yield name, weight_tensor
 
 
-############ Used by llama4, deepseek only for now END ############
+############ END Used by llama4, deepseek only for now END ############
 
 
 def get_model_weights_files(
@@ -105,30 +91,18 @@ def get_model_weights_files(
     """
     Helper to get weight files and their location.
     """
-    weights_files = []
-    weights_location = "local"
 
-    if os.path.isfile(model_name_or_path):
-        weights_files = [model_name_or_path]
-    elif os.path.isdir(model_name_or_path):
+    if os.path.isdir(model_name_or_path):
         logger.info(f"Found weights from local: {model_name_or_path}")
         weights_files = glob.glob(
             os.path.join(model_name_or_path, HF_WEIGHTS_FORMAT))
     elif file_utils.is_hf_repo(model_name_or_path):
-        local_free_disk_size = file_utils.get_free_disk_size()
-        model_size = file_utils.get_hf_model_weights_size(
-            model_name_or_path, HF_WEIGHTS_FORMAT)
-        if model_size < local_free_disk_size * FULL_DOWNLOAD_DISK_RATIO:
-            logger.info(f"Downloading weights from HF {model_name_or_path}")
-            weights_files = file_utils.download_model_weights_from_hf(
-                model_name_or_path, download_dir, HF_WEIGHTS_FORMAT)
-        else:
-            weights_files = file_utils.list_hf_repo(model_name_or_path,
-                                                    HF_WEIGHTS_FORMAT)
-            weights_location = "hf"
+        logger.info(f"Downloading weights from HF {model_name_or_path}")
+        weights_files = file_utils.download_model_weights_from_hf(
+            model_name_or_path, download_dir, HF_WEIGHTS_FORMAT)
     else:
         raise ValueError(
-            f"{model_name_or_path} must be a local path, or a Huggingface model id."
+            f"{model_name_or_path} must be a local directory, or a Huggingface model id."
         )
 
     if not weights_files:
@@ -137,7 +111,7 @@ def get_model_weights_files(
         )
 
     weights_files.sort()
-    return weights_files, weights_location
+    return weights_files
 
 
 def model_weights_single_file_generator(
@@ -380,7 +354,7 @@ def load_hf_weights(vllm_config, model: nnx.Module, metadata_map: MetadataMap,
                     mesh: Mesh):
     """Load weights from all model weights files to the model, run in multi threads."""
     model_path = vllm_config.model_config.model
-    weights_files, _ = get_model_weights_files(
+    weights_files = get_model_weights_files(
         model_path, vllm_config.load_config.download_dir)
     params = nnx.state(model)
     max_workers = min(64, len(weights_files))
