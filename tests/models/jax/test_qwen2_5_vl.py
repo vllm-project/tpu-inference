@@ -53,7 +53,7 @@ class MockVllmConfig:
             "image_size": 28,
             "temporal_patch_size": 2,
             "in_channels": 3,
-            "window_size": (28, 28),
+            "window_size": 28,
             "spatial_merge_size": 2,
             "fullatt_block_indexes": [0],
             "out_hidden_size": 24,
