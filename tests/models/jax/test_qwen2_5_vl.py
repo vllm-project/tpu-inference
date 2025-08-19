@@ -41,6 +41,9 @@ class MockModelConfig:
         self.trust_remote_code = True
         self.seed = 0
 
+    def get_hidden_size(self):
+        return self.hf_config.hidden_size
+
 
 class MockVllmConfig:
     """A mock VllmConfig sufficient for testing the Qwen2.5 VL model."""
