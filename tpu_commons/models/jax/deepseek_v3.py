@@ -24,6 +24,7 @@ from tpu_commons.models.jax.common.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
 from tpu_commons.models.jax.utils.weight_utils import (get_param,
                                                        model_weights_generator,
+                                                       print_param_info,
                                                        reshape_params)
 
 logger = init_logger(__name__)
