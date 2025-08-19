@@ -41,7 +41,6 @@ class MockModelConfig:
         self.trust_remote_code = True
         self.seed = 0
 
-    @property
     def is_multimodal_model(self):
         return self.multimodal_config is not None
 
