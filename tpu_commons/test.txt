@@ -1,3 +1,0 @@
-copybara test
-
-copybara test2
