@@ -13,6 +13,9 @@ from vllm.lora.layers import BaseLayerWithLoRA
 # yapf: disable
 from vllm.platforms import current_platform
 
+from tpu_commons.distributed.tpu_distributed_utils import \
+    create_torchax_tensor_with_partition_spec
+
 if TYPE_CHECKING:
     from vllm.lora.punica_wrapper import PunicaWrapperBase
 
@@ -94,10 +97,10 @@ class TorchaxBaseLinearLayerWithLoRA(TorchaxBaseLayerWithLoRA):
 
         # self.lora_a_stacked, self.lora_b_stacked, self.lora_bias_stacked, self.lora_config are initialized in original LoRA wrapper's create_lora_weight().
         self.lora_config = base_lora_layer.lora_config
-        self.lora_a_stacked = base_lora_layer.lora_a_stacked
-        self.lora_b_stacked = base_lora_layer.lora_b_stacked
+        self.lora_a_stacked = tuple(create_torchax_tensor_with_partition_spec(lora_a) for lora_a in base_lora_layer.lora_a_stacked)
+        self.lora_b_stacked = tuple(create_torchax_tensor_with_partition_spec(lora_b) for lora_b in base_lora_layer.lora_b_stacked)
         if self.lora_config.bias_enabled:
-            self.lora_bias_stacked: Optional[tuple[torch.Tensor, ...]] = base_lora_layer.lora_bias_stacked
+            self.lora_bias_stacked: Optional[tuple[torch.Tensor, ...]] = tuple(create_torchax_tensor_with_partition_spec(lora_bias) for lora_bias in base_lora_layer.lora_bias_stacked)
 
         self.output_slices: tuple[int, ...]
         self.output_size: int
@@ -242,12 +245,14 @@ class TorchaxMergedColumnParallelLinearWithLoRA(TorchaxBaseLinearLayerWithLoRA):
     ):
         self.reset_lora(index)
         for i in range(self.n_slices):
-            if (lora_a_i := lora_a[i]) is not None:
+            lora_a_i = create_torchax_tensor_with_partition_spec(lora_a[i])
+            if lora_a_i is not None:
                 self.lora_a_stacked[i][
                     index, 0, :lora_a_i.shape[1], :lora_a_i.shape[0]].copy_(
                         lora_a_i.T, non_blocking=True)
                 # self.lora_a_stacked[i].apply_jax_(jax.device_put, NamedSharding(self.mesh, P(None, )))
-            if (lora_b_i := lora_b[i]) is not None:
+            lora_b_i = create_torchax_tensor_with_partition_spec(lora_b[i])
+            if lora_b_i is not None:
                 self.lora_b_stacked[i][
                     index, 0, :lora_b_i.shape[1], :lora_b_i.shape[0]].copy_(
                         lora_b_i.T, non_blocking=True)
@@ -256,7 +261,8 @@ class TorchaxMergedColumnParallelLinearWithLoRA(TorchaxBaseLinearLayerWithLoRA):
             self.lora_bias_stacked = cast(tuple[torch.Tensor, ...],
                                           self.lora_bias_stacked)
             for i in range(self.n_slices):
-                if (lora_bias_i := lora_bias[i]) is not None:
+                lora_bias_i = create_torchax_tensor_with_partition_spec(lora_bias[i])
+                if lora_bias_i is not None:
                     self.lora_bias_stacked[i][index,
                                               0, :lora_bias_i.shape[0]].copy_(
                                                   lora_bias_i.T,

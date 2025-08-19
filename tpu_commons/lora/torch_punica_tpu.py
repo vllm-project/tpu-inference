@@ -9,6 +9,9 @@ import torch.nn.functional as F
 # from vllm.lora.ops.xla_ops import bgmv_expand, bgmv_expand_slice, bgmv_shrink
 from vllm.lora.punica_wrapper.utils import convert_mapping
 
+from tpu_commons.distributed.tpu_distributed_utils import \
+    create_torchax_tensor_with_partition_spec
+
 # import torch_xla.core.xla_model as xm
 
 if TYPE_CHECKING:
@@ -44,7 +47,8 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             dtype=torch.int32)
 
     def _get_token_lora_indices(self, x: torch.Tensor) -> torch.IntTensor:
-        return torch.narrow(self._token_lora_indices, 0, 0, x.size(0))
+        return create_torchax_tensor_with_partition_spec(
+            torch.narrow(self._token_lora_indices, 0, 0, x.size(0)))
 
     @property
     def embeddings_indices(self) -> torch.Tensor:
@@ -157,7 +161,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                                   output_slices[slice_idx],
                                   add_inputs=add_inputs)
             offset_left += output_slices[slice_idx]
-        return y.view_as(y_org)
+        return y.view(y_org.shape)
 
     def add_lora_embedding(self,
                            y: torch.Tensor,
@@ -315,7 +319,8 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                 output += bias
             offset_left += slice
 
-        return output.view_as(org_output)
+        # return output.view_as(org_output)  # I don't know why this doesn't work.
+        return output.view(org_output.shape)
 
     # This performs the same tensor ops as the base method, except it does them
     # on the CPU then transfers the results to the TPU

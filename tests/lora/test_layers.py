@@ -8,7 +8,7 @@ import torch
 import torchax
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.interop import torch_view
-from torchax.ops.mappings import t2j
+from torchax.ops.mappings import j2t, t2j
 from vllm.config import LoRAConfig
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -362,12 +362,14 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
         jax_inputs = []
         with torchax.default_env(), jax.default_device(jax.devices("tpu")[0]):
             for input in inputs:
+                # xw32q: why do we need to do `torch_view(t2j(input))` instead of just `input`?
                 jax_input = torch_view(t2j(input))
                 jax_input.apply_jax_(jax.device_put,
                                      NamedSharding(mesh, P(None, None)))
                 jax_inputs.append(jax_input)
         with torchax.default_env():
             lora_result = lora_linear(torch.cat(jax_inputs))[0]
+            lora_result = j2t(lora_result)
 
         expected_results: list[torch.Tensor] = []
         for input_, lora_id in zip(inputs, prompt_mapping):
@@ -412,8 +414,16 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             lora_config.lora_extra_vocab_size,
         )
 
+        with torchax.default_env(), jax.default_device(jax.devices("tpu")[0]):
+            for input in inputs:
+                # xw32q: why do we need to do `torch_view(t2j(input))` instead of just `input`?
+                jax_input = torch_view(t2j(input))
+                jax_input.apply_jax_(jax.device_put,
+                                     NamedSharding(mesh, P(None, None)))
+                jax_inputs.append(jax_input)
         with torchax.default_env():
-            lora_result = lora_linear(torch.cat(inputs))[0]
+            lora_result = lora_linear(torch.cat(jax_inputs))[0]
+            lora_result = j2t(lora_result)
         expected_result = linear(torch.cat(inputs))[0]
 
         rtol, atol = TOLERANCES[lora_result.dtype]
