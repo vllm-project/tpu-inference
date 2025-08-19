@@ -11,6 +11,7 @@ from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingType
 from vllm.utils import swap_dict_values
 from vllm.v1.core.sched.output import NewRequestData
+from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 
 from tpu_commons.runner.jax.block_table_jax import MultiGroupBlockTable
 
@@ -51,7 +52,9 @@ class InputBatch:
         pin_memory: bool,
         vocab_size: int,
         block_sizes: list[int],
+        is_spec_decode: bool = False,
     ):
+        self.is_spec_decode = is_spec_decode
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
         self.max_num_batched_tokens = max_num_batched_tokens
@@ -70,6 +73,7 @@ class InputBatch:
             dtype=np.int32,
         )
         self.num_tokens = np.zeros(max_num_reqs, dtype=np.int32)
+        self.num_tokens_no_spec = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_prompt_tokens = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_computed_tokens_cpu = np.zeros(
             (max_num_reqs, ),
@@ -93,6 +97,9 @@ class InputBatch:
         self.top_p_cpu = np.empty((max_num_reqs, ), dtype=np.float32)
 
         self.top_k_cpu = np.empty((max_num_reqs, ), dtype=np.int32)
+
+        # IDs of requests which do not support spec decoding
+        self.spec_decode_unsupported_reqs: set[str] = set()
 
         # req_index -> (min_tokens, stop_token_ids)
         self.min_tokens: dict[int, tuple[int, set[int]]] = {}
@@ -162,11 +169,18 @@ class InputBatch:
         # Number of token ids in token_ids_cpu.
         # NOTE(woosuk): This may include spec decode tokens.
         self.num_tokens[req_index] = request.num_tokens
+        # Number of tokens without spec decode tokens.
+        self.num_tokens_no_spec[req_index] = request.num_tokens
 
         self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens
         self.block_table.add_row(request.block_ids, req_index)
 
         sampling_params = request.sampling_params
+
+        if (self.is_spec_decode
+                and is_spec_decode_unsupported(sampling_params)):
+            self.spec_decode_unsupported_reqs.add(req_id)
+
         if sampling_params.sampling_type == SamplingType.GREEDY:
             # Avoid later division by zero.
             self.temperature_cpu[req_index] = -1.0
@@ -238,6 +252,7 @@ class InputBatch:
 
         self.greedy_reqs.discard(req_id)
         self.random_reqs.discard(req_id)
+        self.spec_decode_unsupported_reqs.discard(req_id)
         self.min_tokens.pop(req_index, None)
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
@@ -271,6 +286,8 @@ class InputBatch:
             self.req_id_to_index[old_id_i2], self.req_id_to_index[old_id_i1]
         self.num_tokens[i1], self.num_tokens[i2] =\
             self.num_tokens[i2], self.num_tokens[i1]
+        self.num_tokens_no_spec[i1], self.num_tokens_no_spec[i2] =\
+            self.num_tokens_no_spec[i2], self.num_tokens_no_spec[i1]
         self.num_prompt_tokens[i1], self.num_prompt_tokens[i2] =\
             self.num_prompt_tokens[i2], self.num_prompt_tokens[i1]
         self.num_computed_tokens_cpu[i1], self.num_computed_tokens_cpu[i2] =\
@@ -342,6 +359,8 @@ class InputBatch:
             self.token_ids_cpu[empty_index, :num_tokens] = self.token_ids_cpu[
                 last_req_index, :num_tokens]
             self.num_tokens[empty_index] = num_tokens
+            self.num_tokens_no_spec[empty_index] = self.num_tokens_no_spec[
+                last_req_index]
             self.num_prompt_tokens[empty_index] = self.num_prompt_tokens[
                 last_req_index]
             self.num_computed_tokens_cpu[

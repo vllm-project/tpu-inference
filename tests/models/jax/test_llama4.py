@@ -37,6 +37,8 @@ class MockVllmConfig:
                  random_weights: bool = False,
                  tensor_parallelism: int = 1):
         self.model_config = MagicMock(spec=ModelConfig)
+        self.load_config = MagicMock()
+        self.load_config.download_dir = None
 
         # Choose small amount of layers to avoid OOM.
         self.model_config.get_vocab_size.return_value = 202048
@@ -96,8 +98,10 @@ class TestLlama4ForCausalLM:
         """
         Tests that random weight initialization creates concrete, non-zero-variance arrays.
         """
-        model = Llama4ForCausalLM.create_model_with_random_weights(
-            vllm_config=mock_vllm_config_llama4, rng=rng, mesh=mesh)
+        model = Llama4ForCausalLM(vllm_config=mock_vllm_config_llama4,
+                                  rng=rng,
+                                  mesh=mesh,
+                                  force_random_weights=True)
         embedding_weight = model.embedder.input_embedding_table_VD.value
         attention_q_kernel = model.layers[0].attn.kernel_q_proj_DNH.value
         final_norm_scale = model.final_norm.scale.value

@@ -8,17 +8,10 @@ from jax.experimental import shard_map
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
-from tpu_commons.kernels.ragged_paged_attention.kernel import \
-    ragged_paged_attention
-from tpu_commons.kernels.ragged_paged_attention.v3.kernel import (
-    prepare_inputs, prepare_outputs)
 from tpu_commons.kernels.ragged_paged_attention.v3.kernel import \
-    ragged_paged_attention as ragged_paged_attention_v3
-from tpu_commons.kernels.ragged_paged_attention.v3.util import \
-    get_dtype_packing
-from tpu_commons.models.jax.attention_interface import update_kv_cache
+    ragged_paged_attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.models.jax.common.base import ParamFactory
+from tpu_commons.models.jax.common.base import create_param
 from tpu_commons.models.jax.layers.rope import apply_rope
 
 KVCache = Tuple[jax.Array, jax.Array]
@@ -36,7 +29,6 @@ class Attention(nnx.Module):
 
     Attributes:
         mesh: The JAX device mesh for distributed computation.
-        param_factory: A factory for creating and initializing model parameters.
         quant: Optional configuration for quantization.
     """
     hidden_size: int
@@ -47,7 +39,6 @@ class Attention(nnx.Module):
     rope_scaling: dict[str, Any]
     dtype: jnp.dtype
     mesh: Mesh
-    param_factory: ParamFactory
 
     dnh_sharding: NamedSharding
     dkh_sharding: NamedSharding
@@ -57,28 +48,37 @@ class Attention(nnx.Module):
     query_tnh: NamedSharding
     keyvalue_skh: NamedSharding
 
-    keyvalue_cache_lskh: NamedSharding
     attn_o_tnh: NamedSharding
+    rngs: nnx.Rngs
 
+    random_init: bool = False
     attention_chunk_size: int | None = None
     rope_input_ordering: str = "split"
     quant: Any | None = None
 
-    def generate_kernel(self, rngs: nnx.Rngs):
+    def __post_init__(self):
         """Initializes the weight kernels for Q, K, V, and O projections."""
         N = self.num_attention_heads
         K = self.num_key_value_heads
         D = self.hidden_size
         H = self.head_dim
 
-        self.kernel_q_proj_DNH = self.param_factory.create_kernel_param(
-            rngs, (D, N, H), self.dnh_sharding, self.dtype)
-        self.kernel_k_proj_DKH = self.param_factory.create_kernel_param(
-            rngs, (D, K, H), self.dkh_sharding, self.dtype)
-        self.kernel_v_proj_DKH = self.param_factory.create_kernel_param(
-            rngs, (D, K, H), self.dkh_sharding, self.dtype)
-        self.kernel_o_proj_NHD = self.param_factory.create_kernel_param(
-            rngs, (N, H, D), self.nhd_sharding, self.dtype)
+        self.kernel_q_proj_DNH = create_param(self.rngs, (D, N, H),
+                                              self.dnh_sharding,
+                                              self.dtype,
+                                              random_init=self.random_init)
+        self.kernel_k_proj_DKH = create_param(self.rngs, (D, K, H),
+                                              self.dkh_sharding,
+                                              self.dtype,
+                                              random_init=self.random_init)
+        self.kernel_v_proj_DKH = create_param(self.rngs, (D, K, H),
+                                              self.dkh_sharding,
+                                              self.dtype,
+                                              random_init=self.random_init)
+        self.kernel_o_proj_NHD = create_param(self.rngs, (N, H, D),
+                                              self.nhd_sharding,
+                                              self.dtype,
+                                              random_init=self.random_init)
 
     def __call__(self,
                  x,
@@ -173,7 +173,6 @@ class Attention(nnx.Module):
             attention_metadata: Metadata containing sequence lengths.
             mesh: The JAX device mesh (unused in this specific function but
                 kept for potential future use or API consistency).
-            attention_chunk_size: The chunk size during sliding window attention.
 
         Returns:
             A tuple containing:
@@ -182,36 +181,25 @@ class Attention(nnx.Module):
                   `(seq, num_q_heads, head_dim)`.
         """
         md = attention_metadata
-        kv_cache = update_kv_cache(k_SKH, v_SKH, kv_cache, md.slot_mapping,
-                                   md.num_slices, mesh)
-
-        H = q_TNH.shape[-1]
-        #TODO: we use generate_rules as the default sharding for ragged_paged_attention,
-        # but it could be configurable based on the op_mode.
         in_specs = (
-            self.query_tnh.spec,  # q_TNH
-            self.keyvalue_cache_lskh.spec,  # kv_cache:
+            self.query_tnh.spec,  # q
+            self.keyvalue_skh.spec,  # k
+            self.keyvalue_skh.spec,  # v
+            P(),  # kv_cache: Replicated
             P(),  # md.seq_lens: Replicated
-            P(),  # md.block_tables: Replicated
-            P(),  # md.query_start_loc: Replicated
-            P(),  # md.num_seqs: Replicated
+            P(),  # page_indices_flat: Replicated
+            P(),  # query_start_loc: Replicated
+            P(),  # distribution: Replicated
         )
-        out_specs = self.attn_o_tnh.spec  # output_TNH: Shard the 'model' dimension
+        out_specs = self.attn_o_tnh.spec
 
         def _ragged_paged_attention(*args):
             return ragged_paged_attention(
                 *args,
-                sm_scale=H**-0.5,
-                soft_cap=None,
-                mask_value=None,
-                # NOTE(xiang): v6e chip has 128M VMEM capacity,
-                # set this to 64M to avoid VMEM OOM,
-                # otherwise the default value is 16M.
-                sliding_window=self.attention_chunk_size,
-                vmem_limit_bytes=64 * 1024 * 1024,
+                sm_scale=q_TNH.shape[-1]**-0.5,
             )
 
-        output_TNH = jax.jit(
+        output_TNH, kv_cache = jax.jit(
             shard_map.shard_map(
                 _ragged_paged_attention,
                 mesh=mesh,
@@ -220,98 +208,12 @@ class Attention(nnx.Module):
                 check_rep=False,
             ))(
                 q_TNH,
+                k_SKH,
+                v_SKH,
                 kv_cache,
                 md.seq_lens,
                 md.block_tables,
                 md.query_start_loc,
-                md.num_seqs,
+                md.request_distribution,
             )
-
-        return kv_cache, output_TNH
-
-    def attention_v3(
-        self,
-        is_prefill: bool,
-        kv_cache: KVCache,
-        q_TNH: jax.Array,
-        k_SKH: jax.Array,
-        v_SKH: jax.Array,
-        attention_metadata: AttentionMetadata,
-        mesh: Mesh,
-    ) -> Tuple[KVCache, jax.Array]:
-        """Performs scaled dot-product attention and updates the KV cache.
-
-        This function handles the core attention logic, which varies between
-        prefill and generation modes. In prefill, it computes self-attention
-        over the input sequence with a causal mask. In generation, it attends
-        to the full history of keys and values stored in the cache.
-
-        Args:
-            is_prefill: A boolean indicating if the mode is 'prefill'.
-            kv_cache: The key-value cache to be updated and used.
-            q_TNH: Query tensor of shape `(query_seq, num_attention_heads, head_dim)`.
-            k_SKH: Key tensor of shape `(kv_seq, num_key_value_heads, head_dim)`.
-            v_SKH: Value tensor of shape `(kv_seq, num_key_value_heads, head_dim)`.
-            attention_metadata: Metadata containing sequence lengths.
-            mesh: The JAX device mesh (unused in this specific function but
-                kept for potential future use or API consistency).
-
-        Returns:
-            A tuple containing:
-                - The updated KV cache.
-                - The attention output tensor of shape
-                  `(seq, num_q_heads, head_dim)`.
-        """
-        md = attention_metadata
-        kv_cache = update_kv_cache(k_SKH, v_SKH, kv_cache, md.slot_mapping,
-                                   md.num_slices, mesh)
-        q_transformed, actual_num_q_heads_per_kv_head, actual_head_dim = prepare_inputs(
-            q_TNH, self.K)
-        kv_packing = get_dtype_packing(
-            kv_cache.dtype)  # 2 for bf16, 4 for fp8.
-        L, S, K_2, H = kv_cache.shape
-        kv_cache_transformed = kv_cache.reshape(L, S, K_2 // kv_packing,
-                                                kv_packing, H)
-        page_indices_flat = md.block_tables.flatten()
-
-        num_decode, num_prefill, _ = md.request_distribution
-        distribution = jnp.array(
-            [num_decode, num_decode + num_prefill, md.num_seqs[0]])
-        in_specs = (
-            P(*self.query_ktnph),  # q_transformed
-            P(*self.keyvalue_cache_nbkph),  # kv_cache_transformed
-            P(),  # md.seq_lens: Replicated
-            P(),  # page_indices_flat: Replicated
-            P(),  # query_start_loc: Replicated
-            P(),  # distribution: Replicated
-        )
-        out_specs = P(*self.attn_o_ktnph)  #output_transformed
-
-        def _ragged_paged_attention(*args):
-            return ragged_paged_attention_v3(
-                *args,
-                sm_scale=q_TNH.shape[-1]**-0.5,
-                sliding_window=None,
-                soft_cap=None,
-                vmem_limit_bytes=64 * 1024 * 1024,
-            )
-
-        output_transformed = jax.jit(
-            shard_map.shard_map(
-                _ragged_paged_attention,
-                mesh=mesh,
-                in_specs=in_specs,
-                out_specs=out_specs,
-                check_rep=False,
-            ))(
-                q_transformed,
-                kv_cache_transformed,
-                md.seq_lens,
-                page_indices_flat,
-                md.query_start_loc,
-                distribution,
-            )
-        output_TNH = prepare_outputs(output_transformed,
-                                     actual_num_q_heads_per_kv_head,
-                                     actual_head_dim)
         return kv_cache, output_TNH

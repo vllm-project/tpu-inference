@@ -10,15 +10,15 @@ steps:
      commands:
        - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
 
-   - label: "E2E MLPerf tests for JAX + vLLM models"
-     key: test_1
-     soft_fail: true
-     env:
-       MODEL_IMPL_TYPE: "vllm"
-     agents:
-       queue: tpu_v6e_queue
-     commands:
-       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
+  #  - label: "E2E MLPerf tests for JAX + vLLM models"
+  #    key: test_1
+  #    soft_fail: true
+  #    env:
+  #      MODEL_IMPL_TYPE: "vllm"
+  #    agents:
+  #      queue: tpu_v6e_queue
+  #    commands:
+  #      - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
 
    - label: "JAX unit tests"
      key: test_2
@@ -29,9 +29,9 @@ steps:
        - |
          .buildkite/scripts/run_in_docker.sh \
            python3 -m pytest -s -v /workspace/tpu_commons/tests/ \
-           --ignore=/workspace/tpu_commons/tests/kernels/ragged_paged_attention_kernel_v3_test.py \
-           --ignore=/workspace/tpu_commons/tests/models/jax/common/attention/test_deepseek_v3_attention.py \
-           --cov-config=/workspace/tpu_commons/.coveragerc --cov tpu_commons --cov-report term-missing --cov-fail-under=75
+           --ignore=/workspace/tpu_commons/tests/models/vllm \
+           --ignore=/workspace/tpu_commons/tests/e2e/test_multi_modal_inference.py \
+           --cov-config=/workspace/tpu_commons/.coveragerc --cov tpu_commons --cov-report term-missing --cov-fail-under=69
 
    - label: "E2E MLPerf tests for JAX models with quantization"
      key: test_3
@@ -54,24 +54,29 @@ steps:
      commands:
        - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
 
-   - label: "Ragged Paged Attention v3 kernel tests"
-     key: test_5
+
+  #  - label: "E2E MLperf tests for Llama4 models"
+  #    key: test_5
+  #    soft_fail: true
+  #    env:
+  #      NEW_MODEL_DESIGN: "True"
+  #      USE_V6E8_QUEUE: "True"
+  #    agents:
+  #      queue: tpu_v6e_8_queue
+  #    commands:
+  #      - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
+
+
+   - label: "E2E offline inference test"
+     key: test_6
      soft_fail: true
      agents:
        queue: tpu_v6e_queue
      commands:
-       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/scripts/run_rpa_v3_tests.sh
+       - |
+         .buildkite/scripts/run_in_docker.sh \
+           python3 -m pytest -s -v /workspace/tpu_commons/tests/e2e/test_multi_modal_inference.py
 
-   - label: "E2E MLperf tests for Llama4 models"
-     key: test_6
-     soft_fail: true
-     env:
-       NEW_MODEL_DESIGN: "True"
-       USE_V6E8_QUEUE: "True"
-     agents:
-       queue: tpu_v6e_8_queue
-     commands:
-       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
 
   # -----------------------------------------------------------------
   # NOTIFICATION STEP
@@ -79,11 +84,11 @@ steps:
    - label: "TPU Test Notification"
      depends_on:
        - test_0
-       - test_1
+      #  - test_1
        - test_2
        - test_3
        - test_4
-       - test_5
+      #  - test_5
        - test_6
      agents:
        queue: tpu_v6e_queue

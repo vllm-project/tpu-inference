@@ -23,6 +23,7 @@ def input_batch():
         pin_memory=False,
         vocab_size=VOCAB_SIZE,
         block_sizes=BLOCK_SIZES,
+        is_spec_decode=True,
     )
 
 
@@ -47,7 +48,7 @@ def create_dummy_request(req_id: str,
     return CachedRequestState(
         req_id=req_id,
         prompt_token_ids=prompt_token_ids,
-        mm_inputs=[],
+        mm_kwargs=[],
         mm_hashes=[],
         mm_positions=[],
         sampling_params=sampling_params,
@@ -66,6 +67,7 @@ def test_initialization(input_batch: InputBatch):
     assert len(input_batch.req_ids) == 0
     assert not input_batch.req_id_to_index
     assert input_batch.all_greedy
+    assert input_batch.is_spec_decode
 
 
 def test_add_request(input_batch: InputBatch):
@@ -77,10 +79,12 @@ def test_add_request(input_batch: InputBatch):
     assert "req-1" in input_batch.req_id_to_index
     assert input_batch.req_id_to_index["req-1"] == 0
     assert input_batch.req_ids == ["req-1"]
+    assert len(input_batch.spec_decode_unsupported_reqs) == 0
 
     # Verify token data
     assert input_batch.num_prompt_tokens[0] == 20
     assert input_batch.num_tokens[0] == 24
+    assert input_batch.num_tokens_no_spec[0] == 24
     expected_tokens = np.array(req.prompt_token_ids + req.output_token_ids)
     np.testing.assert_array_equal(input_batch.token_ids_cpu[0, :24],
                                   expected_tokens)
@@ -105,6 +109,8 @@ def test_add_multiple_requests(input_batch: InputBatch):
     assert input_batch.req_id_to_index["req-2"] == 1
     assert input_batch.num_tokens[1] == len(req2.prompt_token_ids) + len(
         req2.output_token_ids)
+    assert input_batch.num_tokens_no_spec[1] == len(
+        req2.prompt_token_ids) + len(req2.output_token_ids)
 
 
 def test_remove_request(input_batch: InputBatch):
@@ -152,6 +158,8 @@ def test_condense(input_batch: InputBatch):
     # Check if a property was moved correctly
     assert input_batch.num_tokens[0] == len(reqs[2].prompt_token_ids) + len(
         reqs[2].output_token_ids)
+    assert input_batch.num_tokens_no_spec[0] == len(
+        reqs[2].prompt_token_ids) + len(reqs[2].output_token_ids)
 
 
 def test_swap_states(input_batch: InputBatch):

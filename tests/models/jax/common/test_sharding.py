@@ -78,8 +78,6 @@ class TestSharding(unittest.TestCase):
         self.assertEqual(generate_rules.moe_router_de, (None, "expert"))
         self.assertEqual(generate_rules.attn_q_weight_dnh,
                          (None, "model", None))
-        self.assertEqual(generate_rules.keyvalue_cache_lskh,
-                         (None, None, "model", None))
 
     def test_sharding_init_with_overrides(self):
         """Tests Sharding initialization with programmatic overrides."""

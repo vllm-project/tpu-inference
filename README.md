@@ -17,6 +17,7 @@ Follow this [guide](https://docs.vllm.ai/en/latest/getting_started/installation/
 cd ~
 git clone https://github.com/vllm-project/tpu_commons.git
 cd tpu_commons
+pip install -r requirements.txt
 pip install -e .
 ```
 
@@ -261,14 +262,24 @@ You might need to run the benchmark client *twice* to make sure all compilations
 ### Overview
 Currently, we support overall model weight/activation quantization through the [Qwix](https://github.com/google/qwix?tab=readme-ov-file#quantization-config) framework.
 
-To enable quantization, you can specify a quantization config filename found inside the quantization config directory (`tpu_commons/models/jax/utils/quantization/configs/`), for example:
+To enable quantization, you can do one of the following:
+
+#### Using a quantization config YAML
+Simply pass the name of a quantization config found inside the quantization config directory (`tpu_commons/models/jax/utils/quantization/configs/`), for example:
 
 ```
 ... --additional_config='{"quantization": "int8_default.yaml"}'
 ```
 
-### Creating your own quantization config
-To create your own quantization:
+#### Using a quantization config JSON
+Alternatively, you can pass the explicit quantization configuration as JSON string, where each entry in `rules` corresponds to a Qwix rule (see below):
+
+```
+{ "qwix": { "rules": [{ "module_path": ".*", "weight_qtype": "int8", "act_qtype": "int8" }]}}
+```
+
+### Creating your own quantization config YAML
+To create your own quantization config YAML file:
 
 1. Add a new file to the quantization config directory (`tpu_commons/models/jax/utils/quantization/configs/`)
 2. For Qwix quantization, add a new entry to the file as follows:

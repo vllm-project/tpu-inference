@@ -7,7 +7,7 @@ from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jaxtyping import Float
 
-from tpu_commons.models.jax.common.base import ParamFactory
+from tpu_commons.models.jax.common.base import create_param
 
 
 @dataclass
@@ -18,12 +18,10 @@ class DeepSeekV3Router(nnx.Module):
 
     Attributes:
         mesh: The JAX device mesh for distributed computation.
-        param_factory: A factory for creating and initializing model parameters.
         quant: Optional configuration for quantization.
     """
 
     mesh: Mesh
-    param_factory: ParamFactory
     hidden_size: int
     num_experts: int
     num_experts_per_tok: int
@@ -32,12 +30,14 @@ class DeepSeekV3Router(nnx.Module):
     norm_topk_prob: bool
     routed_scaling_factor: float
     dtype: jnp.dtype
+    rngs: nnx.Rngs
 
     # Sharding Attributes
     activation_ffw_td: NamedSharding
     ed_sharding: NamedSharding
     e_sharding: NamedSharding
 
+    random_init: bool = False
     quant: Any | None = None
 
     def get_topk_indices(self, scores_TE: Float) -> Float:
@@ -100,15 +100,17 @@ class DeepSeekV3Router(nnx.Module):
 
         return weights_TX, topk_indices_TX
 
-    def generate_kernel(self, rngs: nnx.Rngs):
+    def __post_init__(self):
         """Generates the router kernel (weights and bias) for routing."""
         D = self.hidden_size
         E = self.num_experts
-        self.kernel_DE = self.param_factory.create_kernel_param(
-            rngs, shape=(D, E), dtype=self.dtype, sharding=self.ed_sharding)
-        self.bias_E = self.param_factory.create_scale_param(
-            rngs,
-            shape=(E, ),
-            dtype=self.dtype,
-            sharding=self.e_sharding,
-        )
+        self.kernel_DE = create_param(self.rngs,
+                                      shape=(D, E),
+                                      dtype=self.dtype,
+                                      sharding=self.ed_sharding,
+                                      random_init=self.random_init)
+        self.bias_E = create_param(self.rngs,
+                                   shape=(E, ),
+                                   dtype=self.dtype,
+                                   sharding=self.e_sharding,
+                                   random_init=self.random_init)

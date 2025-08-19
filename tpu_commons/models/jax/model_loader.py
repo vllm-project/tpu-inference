@@ -97,9 +97,11 @@ def _apply_qwix_quantization(vllm_config: VllmConfig, model: nnx.Module,
     # NOTE: we expect the value of "quantization" to be the name of a file in `tpu_commons/models/jax/utils/quantization/configs`
     # if given
     qwix_config = None
-    if vllm_config.additional_config.get("quantization"):
-        quantization_config = quantization_config_file_path_to_dict(
-            vllm_config.additional_config["quantization"])
+    if quantization_config := vllm_config.additional_config.get(
+            "quantization"):
+        if isinstance(quantization_config, str):
+            quantization_config = quantization_config_file_path_to_dict(
+                quantization_config)
         qwix_config = quantization_config.get("qwix").get("rules")
     if qwix_config:
         block_size = vllm_config.cache_config.block_size
@@ -147,8 +149,10 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
         from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
         from tpu_commons.models.jax.qwen2_5_vl import \
             Qwen2_5_VLForConditionalGeneration
+        from tpu_commons.models.jax.qwen3 import Qwen3ForCausalLM
         _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
         _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
+        _MODEL_REGISTRY["Qwen3ForCausalLM"] = Qwen3ForCausalLM
         _MODEL_REGISTRY[
             "Qwen2_5_VLForConditionalGeneration"] = Qwen2_5_VLForConditionalGeneration
 
@@ -187,8 +191,10 @@ def _get_nnx_model(
         else:
 
             with mesh:
-                model = model_class.create_model_with_random_weights(
-                    vllm_config, rng, mesh)
+                model = model_class(vllm_config,
+                                    rng,
+                                    mesh,
+                                    force_random_weights=True)
                 jit_model = _apply_qwix_quantization(vllm_config, model, rng,
                                                      mesh)
     else:
@@ -202,8 +208,7 @@ def _get_nnx_model(
         #    a full model weights after random-init, then duplicate a layer during
         #    the load_weights. This would be easy to OOM if the layer is super large.
         if os.getenv("NEW_MODEL_DESIGN", False):
-            model = model_class.create_model_for_checkpoint_loading(
-                vllm_config, rng, mesh)
+            model = model_class(vllm_config, rng, mesh)
         else:
             model = nnx.eval_shape(lambda: model_class(vllm_config, rng, mesh))
         model = _eval_qwix_quantization(vllm_config, model, rng, mesh)
@@ -230,7 +235,7 @@ def get_flax_model(
 ) -> nnx.Module:
     model_class = _get_model_architecture(vllm_config.model_config.hf_config)
     jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh)
-    kv_cache_sharding = NamedSharding(mesh, PartitionSpec(None, None, "model"))
+    kv_cache_sharding = NamedSharding(mesh, PartitionSpec())  # replicated
     hidden_states_sharding = NamedSharding(mesh, PartitionSpec(None,
                                                                None))  # (T, D)
 
