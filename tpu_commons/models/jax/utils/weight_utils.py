@@ -309,6 +309,10 @@ def _load_hf_weights_on_thread(vllm_config, params: nnx.State,
             model_key = name_map[layer_key]
             model_key = re.sub(r"blocks\.\*", f"blocks.{layer_num}", model_key)
         else:
+            if hf_key not in name_map and hf_key == "lm_head":
+                logger.warning(
+                    f"Skip loading {hf_key} due to tie_word_embeddings")
+                continue
             model_key = name_map[hf_key]
         model_weight, model_sharding = get_param_and_sharding(
             params, shardings, model_key)
@@ -388,7 +392,18 @@ def load_hf_weights(vllm_config, model: nnx.Module, metadata_map: MetadataMap,
         ]
         for future in futures:
             future.result()
+    check_all_loaded(params)
     nnx.update(model, params)
+
+
+def check_all_loaded(params: nnx.State):
+
+    def _check(x: Any):
+        if isinstance(x, nnx.Param) and isinstance(x.value,
+                                                   jax.ShapeDtypeStruct):
+            raise ValueError(f"The param does not load weights: {x}")
+
+    jax.tree.map(_check, params)
 
 
 def build_flat_dict(flat_state, mappings):
