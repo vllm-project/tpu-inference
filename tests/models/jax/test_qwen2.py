@@ -24,7 +24,7 @@ class MockVllmConfig:
 
 
 @pytest.fixture
-def mock_vllm_config_1b() -> MockVllmConfig:
+def mock_vllm_config_1_5b() -> MockVllmConfig:
     return MockVllmConfig(model="Qwen/Qwen2.5-1.5B")
 
 
@@ -76,18 +76,18 @@ def rng() -> PRNGKey:
     return jax.random.PRNGKey(42)
 
 
-class TestLlamaForCausalLM:
-    """Tests for the main LlamaForCausalLM model class."""
+class TestQwen2ForCausalLM:
+    """Tests for the main Qwen2ForCausalLM model class."""
 
-    def test_llama32_1b(self, mock_vllm_config_1b, rng, mesh,
-                        mock_model_inputs):
+    def test_qwen25_1_5b(self, mock_vllm_config_1_5b, rng, mesh,
+                         mock_model_inputs):
         """Tests model init and model forward for the 8B model variant."""
 
         # Test model init
-        model = Qwen2ForCausalLM(mock_vllm_config_1b, rng, mesh)
-        assert "1b" in model.vllm_config.model_config.model.lower()
+        model = Qwen2ForCausalLM(mock_vllm_config_1_5b, rng, mesh)
+        assert "1.5b" in model.vllm_config.model_config.model.lower()
 
-        model_config = mock_vllm_config_1b.model_config
+        model_config = mock_vllm_config_1_5b.model_config
         hf_config = model_config.hf_config
 
         assert model.mesh.shape == {"data": 1, "model": 1}
