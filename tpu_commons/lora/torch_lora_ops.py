@@ -66,7 +66,7 @@ def bgmv_shrink(
     Args:
         inputs (torch.Tensor): Input tensor of shape [num_tokens, hidden_size].
         lora_b_weights (torch.Tensor): LoRA weights of shape
-            [num_loras, lora_rank, hidden_size].
+            [max_loras, 1, max_lora_rank, hidden_size].
         output_tensor (torch.Tensor): (Unused) output tensor (placeholder).
         lora_indices_tensor (torch.Tensor): Tensor of shape [num_tokens]
             indicating which LoRA matrix to use for each token.
@@ -86,13 +86,13 @@ def bgmv_expand_slice(
 ):
     """
     Args:
-        inputs (torch.Tensor): Input tensor of shape [num_tokens, hidden_size].
+        inputs (torch.Tensor): Input tensor of shape [num_tokens, lora_rank].
 
         lora_b_weights (torch.Tensor): LoRA weights of shape
-            [num_loras, lora_rank, hidden_size].
+            [num_loras, 1, out_features, lora_rank].
 
         output_tensor (torch.Tensor): output tensor of shape
-            [num_tokens, hidden_size * num_slices].
+            [num_tokens, out_features * num_slices].
 
         lora_indices_tensor (torch.Tensor): Tensor of shape [num_tokens]
             indicating which LoRA matrix to use for each token.

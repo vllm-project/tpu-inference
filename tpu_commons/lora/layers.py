@@ -108,7 +108,7 @@ class TorchaxBaseLinearLayerWithLoRA(TorchaxBaseLayerWithLoRA):
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         # self.base_layer (JaxMergedColumnParallelLinear) returns (output, output_bias), we only need the first one.
-        # x: [*, in_features]
+        # x: [bs, in_features]
         output = self.base_layer(x)[0]
 
         # In transformers backend, x and output have extra batch dimension like

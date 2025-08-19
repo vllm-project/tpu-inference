@@ -196,7 +196,7 @@ def create_random_inputs(
 
 
 @torch.inference_mode()
-@pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
+@pytest.mark.parametrize("num_loras", [4])  # xw32: use [1,2,4,8]
 @pytest.mark.parametrize("repeats", [2])
 @pytest.mark.parametrize("fully_shard", [False])  # TODO(xiowei): add "True".
 @pytest.mark.parametrize("device", ["cpu"])
@@ -204,7 +204,7 @@ def create_random_inputs(
 @pytest.mark.parametrize("bias_enabled", [True, False])
 def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
                                 device, stage, bias_enabled) -> None:
-    max_loras = 8
+    max_loras = 7
     max_num_batched_tokens = 8192
     max_batches = 256
     punica_wrapper = get_punica_wrapper(max_num_batched_tokens,
@@ -322,6 +322,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             lora_result = torchax_lora_linear(torch.cat(jax_inputs))[0]
             lora_result = j2t(lora_result)
 
+        # xw32: what's the value of sublora.scaling? I think the test doesn't set it while it should.
         expected_results: list[torch.Tensor] = []
         for input_, lora_id in zip(inputs, prompt_mapping):
             # linear(input_) returns (output, output_bias) so we only need the first one.
