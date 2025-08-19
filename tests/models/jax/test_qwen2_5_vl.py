@@ -557,9 +557,9 @@ class TestQwen2_5_VLForConditionalGeneration:
         kwargs = mock_load_weights.call_args.kwargs
         assert kwargs['vllm_config'] == mock_vllm_config
         assert kwargs['model'] is model
-        assert "model.embed_tokens" in kwargs['mappings']
+        assert "model.embed_tokens" in kwargs['metadata_map'].name_map
         assert "lm_head" in kwargs[
-            'mappings']  # Should be present when not tied
+            'metadata_map'].name_map  # Should be present when not tied
         assert kwargs['mesh'] is mesh
         assert isinstance(model.rng, nnx.Rngs)
         assert model.language_model.rng is model.rng
@@ -576,4 +576,4 @@ class TestQwen2_5_VLForConditionalGeneration:
         model.load_weights(rng)
         mock_load_weights.assert_called_once()
         kwargs = mock_load_weights.call_args.kwargs
-        assert "lm_head" not in kwargs['mappings']
+        assert "lm_head" not in kwargs['metadata_map'].name_map
