@@ -41,6 +41,10 @@ class MockModelConfig:
         self.trust_remote_code = True
         self.seed = 0
 
+    @property
+    def is_multimodal_model(self):
+        return self.multimodal_config is not None
+
     def get_hidden_size(self):
         return self.hf_config.hidden_size
 
