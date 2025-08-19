@@ -66,6 +66,8 @@ class MockVllmConfig:
             hidden_size=16,
             num_hidden_layers=2,
             num_attention_heads=2,
+            num_key_value_heads=2,
+            intermediate_size=32,
             rms_norm_eps=1e-6,
             image_token_id=200000,
             video_token_id=200001,

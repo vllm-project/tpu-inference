@@ -113,9 +113,9 @@ class TestQwen2ForCausalLM:
         call_args = mock_load_hf_weights.call_args[1]
         assert call_args['vllm_config'] == mock_vllm_config_qwen2
         assert call_args['model'] is model
-        assert "model.embed_tokens" in call_args['mappings']
+        assert "model.embed_tokens" in call_args['metadata_map']
         assert "lm_head" in call_args[
-            'mappings']  # since tie_word_embeddings is False
+            'metadata_map']  # since tie_word_embeddings is False
         assert call_args['mesh'] is mesh
 
     @patch("tpu_commons.models.jax.qwen2.load_hf_weights")
@@ -129,7 +129,7 @@ class TestQwen2ForCausalLM:
 
         mock_load_hf_weights.assert_called_once()
         call_args = mock_load_hf_weights.call_args[1]
-        assert "lm_head" not in call_args['mappings']
+        assert "lm_head" not in call_args['metadata_map']
 
     def test_forward_pass(self, mock_vllm_config_qwen2, rng, mesh):
         """Tests a full forward pass of the Qwen2ForCausalLM model."""
