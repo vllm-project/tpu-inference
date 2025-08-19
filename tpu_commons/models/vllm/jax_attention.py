@@ -51,23 +51,7 @@ def _jax_attn_func(
     k = k.reshape(k_len, num_kv_heads, head_size)
     v = v.reshape(k_len, num_kv_heads, head_size)
 
-    # Some models, like Phi-3, have the head_size not multiples of 128, we so pad it before the attention kernel can support them.
-    if head_size % 128 != 0:
-        padded_head_size = cdiv(head_size, 128) * 128
-        pad_width = [(0, 0), (0, 0), (0, padded_head_size - head_size)]
-        q = jnp.pad(q,
-                    pad_width=pad_width,
-                    mode='constant',
-                    constant_values=0.0)
-        k = jnp.pad(k,
-                    pad_width=pad_width,
-                    mode='constant',
-                    constant_values=0.0)
-        v = jnp.pad(v,
-                    pad_width=pad_width,
-                    mode='constant',
-                    constant_values=0.0)
-
+    assert 0 , "place 1"
     new_kv_cache, outputs = attention(
         kv_cache,
         q,
@@ -76,10 +60,8 @@ def _jax_attn_func(
         attention_metadata,
         mesh,
     )
-
-    if head_size % 128 != 0:
-        outputs = outputs[:, :, :head_size]
-
+    
+    assert 0 , "place 2"
     # Convert the shape back to vLLM's convention
     assert outputs.shape[0] == q_len
     assert outputs.shape[1] == num_heads
