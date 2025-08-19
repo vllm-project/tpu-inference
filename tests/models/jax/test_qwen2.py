@@ -21,10 +21,11 @@ class MockVllmConfig:
         self.model_config = ModelConfig(model)
         self.model_config.dtype = jnp.bfloat16
         self.load_config = MagicMock()
+        self.load_config.download_dir = None
 
 
 @pytest.fixture
-def mock_vllm_config_1_5b() -> MockVllmConfig:
+def mock_vllm_config() -> MockVllmConfig:
     return MockVllmConfig(model="Qwen/Qwen2.5-1.5B")
 
 
@@ -47,9 +48,9 @@ def mesh():
 
 @pytest.fixture
 def mock_model_inputs():
-    num_tokens = 16
+    num_tokens = 8
     num_reqs = 1
-    max_num_blocks_per_req = 8
+    max_num_blocks_per_req = 4
     input_ids = jnp.ones((num_tokens, ), dtype=jnp.int32)
     positions = jnp.ones((num_tokens, ), dtype=jnp.int32)
     block_tables = jnp.zeros((num_reqs, max_num_blocks_per_req),
@@ -79,15 +80,14 @@ def rng() -> PRNGKey:
 class TestQwen2ForCausalLM:
     """Tests for the main Qwen2ForCausalLM model class."""
 
-    def test_qwen25_1_5b(self, mock_vllm_config_1_5b, rng, mesh,
-                         mock_model_inputs):
+    def test_qwen25_1_5b(self, mock_vllm_config, rng, mesh, mock_model_inputs):
         """Tests model init and model forward for the 8B model variant."""
 
         # Test model init
-        model = Qwen2ForCausalLM(mock_vllm_config_1_5b, rng, mesh)
+        model = Qwen2ForCausalLM(mock_vllm_config, rng, mesh)
         assert "1.5b" in model.vllm_config.model_config.model.lower()
 
-        model_config = mock_vllm_config_1_5b.model_config
+        model_config = mock_vllm_config.model_config
         hf_config = model_config.hf_config
 
         assert model.mesh.shape == {"data": 1, "model": 1}
@@ -103,7 +103,7 @@ class TestQwen2ForCausalLM:
         num_heads = hf_config.num_attention_heads
         num_kv_heads = hf_config.num_key_value_heads
         rope_theta = hf_config.rope_theta
-        original_head_dim = hidden_size // num_heads
+        original_head_dim = hf_config.head_dim
         head_dim = 128
         intermediate_size = hf_config.intermediate_size
 
@@ -130,8 +130,8 @@ class TestQwen2ForCausalLM:
 
         # Test model forward
         kv_caches = runner_utils.create_kv_caches(
-            num_blocks=8,
-            block_size=128,
+            num_blocks=4,
+            block_size=32,
             num_kv_heads=num_kv_heads,
             head_size=head_dim,
             mesh=mesh,
@@ -142,7 +142,7 @@ class TestQwen2ForCausalLM:
         input_ids, attention_metadata, indices_do_sample = mock_model_inputs
         kv_caches, hidden_states = model(kv_caches, input_ids,
                                          attention_metadata)
-        assert hidden_states.shape == (16, hidden_size)
+        assert hidden_states.shape == (8, hidden_size)
 
         hidden_states = hidden_states[indices_do_sample]
         assert hidden_states.shape == (1, hidden_size)
