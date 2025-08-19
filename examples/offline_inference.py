@@ -110,6 +110,7 @@ if __name__ == "__main__":
     args: dict = vars(parser.parse_args())
 
     if not disagg_utils.is_disagg_enabled():
+        args.pop("enable_prompt_adapter")
         main(args)
     else:
         from unittest.mock import patch

@@ -20,6 +20,8 @@ from safetensors import safe_open
 from tpu_commons import utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.utils import file_utils
+from tpu_commons.models.jax.utils.quantization.quantization_utils import \
+    load_and_unpack_gptq_int4
 
 logger = init_logger(__name__)
 
@@ -189,6 +191,7 @@ def get_param_and_sharding(params: nnx.State, shardings: Any,
                 slevel = slevel[key]
             else:
                 raise ValueError(f"{path} is not a valid param path")
+    slevel = slevel.array.qvalue if hasattr(slevel, "array") else slevel
     return plevel, slevel.value
 
 
@@ -292,15 +295,28 @@ def _load_hf_weights_on_thread(vllm_config, params: nnx.State,
     except TypeError:
         shardings = params
 
+    gptq_dict = {"g_idx": [], "qzeros": [], "qweight": []}
+    qwix_weight = False
+
     for hf_key, hf_weight in model_weights_single_file_generator(
             weights_file, framework="flax"):
         if hf_key.endswith(".weight"):
             hf_key = hf_key.removesuffix(".weight")
 
         # Find the corresponding model key using the HF key
-        is_gptq_layer = False
         gptq_keywords = ["g_idx", "scales", "qzeros", "qweight"]
-        print(hf_key, any(hf_key.endswith(k) for k in gptq_keywords))
+        is_gptq_layer = any(hf_key.endswith(k) for k in gptq_keywords)
+
+        # scales is always last
+        if is_gptq_layer:
+            gptq_dict[hf_key.split(".")[-1]] = hf_weight
+            print(hf_key.split(".")[-1], hf_weight.shape, hf_key)
+            if hf_key.endswith("scales"):
+                qwix_weight = True
+                hf_key = hf_key.removesuffix(".scales")
+            else:
+                continue
+
         if "layer" in hf_key:
             layer_num = re.search(r"layers\.(\d+)", hf_key).group(1)
             layer_key = re.sub(r"layers\.\d+", "layers.*", hf_key)
@@ -320,11 +336,16 @@ def _load_hf_weights_on_thread(vllm_config, params: nnx.State,
         model_weight, model_sharding = get_param_and_sharding(
             params, shardings, model_key)
 
+        test_model_weight = model_weight
+        if qwix_weight:
+            test_model_weight = model_weight.array.qvalue
+
         logger.debug(
             "before transform | "
-            f"{hf_key}: {hf_weight.shape}  -->  {model_key}: {model_weight.value.shape} {model_sharding}"
+            f"{hf_key}: {hf_weight.shape}  -->  {model_key}: {test_model_weight.value.shape} {model_sharding}"
         )
 
+        # TODO: GPTQ
         if hf_key.endswith(".bias"):
             for key in bias_reshape_keys:
                 if key in hf_key:
@@ -337,6 +358,14 @@ def _load_hf_weights_on_thread(vllm_config, params: nnx.State,
             for key in reshape_keys:
                 if key in hf_key:
                     hf_weight = jnp.reshape(hf_weight, reshape_keys[key])
+                    if qwix_weight:
+                        gptq_dict["qweight"] = jnp.reshape(
+                            gptq_dict["qweight"], reshape_keys[key])
+                        gptq_dict["scales"] = jnp.reshape(
+                            gptq_dict["scales"], reshape_keys[key])
+                        gptq_dict["qzeros"] = jnp.reshape(
+                            gptq_dict["qzeros"], reshape_keys[key])
+                    # TODO: GPTQ
                     if head_dim_pad > 0:
                         if "o_proj" in key:
                             hf_weight = jnp.pad(hf_weight, ((0, 0), (0, 0),
@@ -347,11 +376,25 @@ def _load_hf_weights_on_thread(vllm_config, params: nnx.State,
                                                  (0, 0)))
                     break
             for key in transpose_keys:
+                print(key, hf_key, key in hf_key)
                 if key in hf_key:
-                    hf_weight = jnp.transpose(hf_weight, transpose_keys[key])
+                    if qwix_weight:
+                        assert all([
+                            value is not None for value in gptq_dict.values()
+                        ])
+                        gptq_dict["qweight"] = jnp.transpose(
+                            gptq_dict["qweight"], transpose_keys[key])
+                        gptq_dict["qzeros"] = jnp.transpose(
+                            gptq_dict["qzeros"], transpose_keys[key])
+                        gptq_dict["scales"] = jnp.transpose(
+                            gptq_dict["scales"], transpose_keys[key])
+                    else:
+                        hf_weight = jnp.transpose(hf_weight,
+                                                  transpose_keys[key])
                     break
 
         # Pad num-kv-heads
+        # TODO: GPTQ
         if hf_key.endswith(".bias"):
             for key, value in bias_pad_keys.items():
                 dim = value[0]
@@ -369,15 +412,29 @@ def _load_hf_weights_on_thread(vllm_config, params: nnx.State,
 
         logger.debug(
             "after transform | "
-            f"{hf_key}: {hf_weight.shape}  -->  {model_key}: {model_weight.value.shape} {model_sharding}"
+            f"{hf_key}: {hf_weight.shape}  -->  {model_key}: {test_model_weight.value.shape} {model_sharding}"
         )
 
         if head_dim_pad == 0:
-            assert model_weight.value.shape == hf_weight.shape, f"{hf_key}: {model_weight.value.shape} != {hf_weight.shape}"
+            if qwix_weight:
+                # TODO: make more extensive
+                print(test_model_weight.shape, gptq_dict["qweight"].shape,
+                      hf_weight.shape, gptq_dict["qzeros"].shape)
+                # assert test_model_weight.value.shape == gptq_dict["qweight"].shape, f"{hf_key}: {test_model_weight.value.shape} != {gptq_dict["qweight"].shape}"
+            else:
+                assert test_model_weight.value.shape == hf_weight.shape, f"{hf_key}: {test_model_weight.value.shape} != {hf_weight.shape}"
 
         # Update the model weight
-        print(model_weight, model_weight.value)
-        model_weight.value = shard(hf_weight, model_sharding)
+        # print(model_weight, model_weight.value)
+        if qwix_weight:
+            # sharded_weight = shard(qwix_weight.qvalue, model_sharding)
+            # scale = qwix_weight.scale
+            # TODO: shard
+            print(model_weight)
+            raise ValueError(model_weight.array.__dict__)
+            model_weight.array = load_and_unpack_gptq_int4(gptq_dict)
+        else:
+            model_weight.value = shard(hf_weight, model_sharding)
 
 
 def load_hf_weights(vllm_config, model: nnx.Module, metadata_map: MetadataMap,

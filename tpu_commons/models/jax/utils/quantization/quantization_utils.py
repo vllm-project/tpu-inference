@@ -9,6 +9,7 @@ import qwix
 import yaml
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from qwix import pallas as qpl
 
 from tpu_commons import utils
 from tpu_commons.logger import init_logger
@@ -183,3 +184,48 @@ def quantization_config_file_path_to_dict(
     raise ValueError(
         f"Could not find quantization config file with name '{quantization_config_file_path}' in 'tpu_commons/models/jax/utils/quantization/configs."
     )
+
+
+def load_and_unpack_gptq_int4(weight_dict):
+    """
+  TODO
+  """
+    g_idx = weight_dict['g_idx']
+    qweight = weight_dict['qweight']
+    qzeros = weight_dict['qzeros']
+    scales = weight_dict['scales']
+
+    # g_idx is always even.
+    tile_count = scales.shape[0]
+    assert jnp.all(
+        g_idx.reshape(tile_count, -1) == jnp.arange(tile_count).reshape(
+            tile_count, 1))
+
+    # .transpose()
+    qvalue = qweight.view(jnp.int4) - 8
+    # .transpose()
+    zp = qzeros.view(jnp.int4) - 7
+    if jnp.all(zp == 0):
+        zp = None
+    scale = scales.astype(jnp.float32)  # .transpose()
+    return qpl.QArray(qvalue, scale, zp, jnp.int4)
+
+
+def load_and_unpack_gptq_int8(weight_dict):
+    g_idx = weight_dict['g_idx']
+    qweight = weight_dict['qweight']
+    qzeros = weight_dict['qzeros']
+    scales = weight_dict['scales']
+
+    # g_idx is always even.
+    tile_count = scales.shape[0]
+    assert jnp.all(
+        g_idx.reshape(tile_count, -1) == jnp.arange(tile_count).reshape(
+            tile_count, 1))
+
+    qvalue = qweight.transpose().view(jnp.int8) - 128
+    zp = qzeros.view(jnp.int8).transpose() - 127
+    if jnp.all(zp == 0):
+        zp = None
+    scale = scales.astype(jnp.float32).transpose()
+    return qpl.QArray(qvalue, scale, zp, jnp.int8)
