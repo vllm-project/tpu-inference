@@ -284,6 +284,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             # TODO(xiowei): add test for this case.
             raise NotImplementedError("NYI: for QKVParallelLinear case")
 
+        # xiowei: remove it.
         @dataclass
         class FakeConfig:
             hidden_size = 4096
@@ -321,6 +322,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
 
         # create a lora slot index to lora id mapping.
         index_to_id = get_random_index_to_id(num_loras, max_loras)
+        # xiowei: rename lora_linear to torchax_lora_linear
         linear, lora_linear = create_column_parallel_packed_layer()
         # linear.weight has type torch.nn.Parameter, lora_linear.weight has type torchax.tensor.Tensor
         with torchax.default_env():
@@ -374,7 +376,9 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
 
         expected_results: list[torch.Tensor] = []
         for input_, lora_id in zip(inputs, prompt_mapping):
-            result = linear(input_)[0]  # what's the shape of linear(input_)?
+            result = linear(
+                input_
+            )[0]  # what's the shape of linear(input_)? linear(input_) returns (output, output_bias) so we only need the first one.
             subloras = sublora_dict[lora_id]
             for i, sublora in enumerate(subloras):
                 result[:, sublora.lora_b.shape[1] * i:sublora.lora_b.shape[1] *
@@ -433,3 +437,25 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
                                    expected_result,
                                    rtol=rtol,
                                    atol=atol)
+
+
+def test_play_MergedColumnParallelLinear(dist_init):
+    repeats = 2
+    linear = MergedColumnParallelLinear(
+        4096,
+        [4096] * repeats,  # input_size, output_size
+        bias=False,
+        params_dtype=torch.bfloat16)
+    linear.weight.data = torch.rand_like(linear.weight.data)
+
+    inputs: list[torch.Tensor] = []
+    num_inputs = 5
+    for _ in range(num_inputs):
+        inputs.append(torch.rand(size=(1, 4096), dtype=torch.bfloat16))
+
+    results: list[torch.Tensor] = []
+    for input in inputs:
+        result = linear(input)
+        results.append(result[0])
+    results = torch.cat(results)
+    print(f'xw32 test completed. {results.shape=}')

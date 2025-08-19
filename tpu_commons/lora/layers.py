@@ -103,7 +103,7 @@ class TorchaxBaseLinearLayerWithLoRA(TorchaxBaseLayerWithLoRA):
             self.lora_bias_stacked: Optional[tuple[torch.Tensor, ...]] = tuple(create_torchax_tensor_with_partition_spec(lora_bias) for lora_bias in base_lora_layer.lora_bias_stacked)
 
         self.output_slices: tuple[int, ...]
-        self.output_size: int
+        self.output_size: int  # xiowei: remove it.
         self.n_slices: int
 
     def reset_lora(self, index: int):
