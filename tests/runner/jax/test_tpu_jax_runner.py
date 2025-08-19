@@ -3,6 +3,11 @@ from unittest.mock import MagicMock, patch
 
 import jax.numpy as jnp
 import numpy as np
+
+from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
+                                                    InputBatch)
+from tpu_commons.runner.jax.metadata import SpecDecodeMetadata
+from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
@@ -13,11 +18,6 @@ from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.outputs import DraftTokenIds
 from vllm.v1.request import PlaceholderRange, Request
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
-
-from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
-                                                    InputBatch)
-from tpu_commons.runner.jax.metadata import SpecDecodeMetadata
-from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
 
 
 class TestTPUJaxRunner(unittest.TestCase):
@@ -949,68 +949,169 @@ class TestTPUJaxRunner(unittest.TestCase):
         # Let's make input_ids_cpu just a sequence of numbers for easy verification
         self.runner.input_ids_cpu = np.arange(1024, dtype=np.int32) * 10
         self.runner.num_tokens_paddings = [16, 32, 64, 128, 256, 512, 1024]
-        # Mock runner_utils which is used inside the function
-        with patch('tpu_commons.runner.jax.tpu_jax_runner.runner_utils'
-                   ) as mock_runner_utils:
-            mock_runner_utils.get_padded_token_len.return_value = 16
 
-            # Mock the _device_array function to just return the numpy arrays
-            def mock_device_array(*args, **kwargs):
-                if len(args) == 1 and isinstance(args[0], tuple):
-                    return args[0]
-                return args
+        # Mock the _device_array function to just return the numpy arrays
+        def mock_device_array(*args, **kwargs):
+            if len(args) == 1 and isinstance(args[0], tuple):
+                return args[0]
+            return args
 
-            self.runner._device_array = mock_device_array
+        self.runner._device_array = mock_device_array
 
-            # 2. ===== Act =====
-            metadata = self.runner._get_spec_decode_metadata(
-                num_draft_tokens, cu_num_scheduled_tokens)
+        # 2. ===== Act =====
+        padded_num_reqs = 8
+        metadata = self.runner._get_spec_decode_metadata(
+            num_draft_tokens,
+            cu_num_scheduled_tokens,
+            padded_num_reqs=padded_num_reqs)
 
-            # 3. ===== Assert =====
-            self.assertIsInstance(metadata, SpecDecodeMetadata)
-            self.assertEqual(metadata.max_spec_len, 3)
+        # 3. ===== Assert =====
+        self.assertIsInstance(metadata, SpecDecodeMetadata)
+        self.assertEqual(metadata.max_spec_len, 3)
 
-            # final_logits_indices are the indices of all tokens (sampled + draft)
-            # in the flattened input_ids buffer, padded to a bucket size.
-            expected_logits_indices = np.array(
-                [0, 1, 2, 3, 103, 104, 105, 106, 206, 207, 208],
-                dtype=np.int32)
-            padded_len = 16
-            expected_padded_logits_indices = np.pad(
-                expected_logits_indices,
-                (0, padded_len - len(expected_logits_indices)))
-            np.testing.assert_array_equal(
-                np.asarray(metadata.final_logits_indices),
-                expected_padded_logits_indices)
+        # final_logits_indices are the indices of all tokens (sampled + draft)
+        # in the flattened input_ids buffer, padded to a bucket size.
+        expected_logits_indices = np.array(
+            [0, 1, 2, 3, 103, 104, 105, 106, 206, 207, 208], dtype=np.int32)
+        padded_len = 16
+        expected_padded_logits_indices = np.pad(
+            expected_logits_indices,
+            (0, padded_len - len(expected_logits_indices)))
+        np.testing.assert_array_equal(
+            np.asarray(metadata.final_logits_indices),
+            expected_padded_logits_indices)
 
-            # bonus_logits_indices are the indices of the bonus tokens.
-            expected_bonus_logits_indices = np.array(
-                [3, 4, 7, 8, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                dtype=np.int32)
-            np.testing.assert_array_equal(
-                np.asarray(metadata.bonus_logits_indices),
-                expected_bonus_logits_indices)
+        # bonus_logits_indices are the indices of the bonus tokens.
+        expected_bonus_logits_indices = np.array([3, 4, 7, 8, 10, 0, 0, 0],
+                                                 dtype=np.int32)
+        np.testing.assert_array_equal(
+            np.asarray(metadata.bonus_logits_indices),
+            expected_bonus_logits_indices)
 
-            # target_logits_indices are the indices of the draft tokens' logits.
-            expected_target_logits_indices = np.array(
-                [0, 1, 2, 5, 6, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                dtype=np.int32)
-            np.testing.assert_array_equal(
-                np.asarray(metadata.target_logits_indices),
-                expected_target_logits_indices)
+        # target_logits_indices are the indices of the draft tokens' logits.
+        expected_target_logits_indices = np.array(
+            [0, 1, 2, 5, 6, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], dtype=np.int32)
+        np.testing.assert_array_equal(
+            np.asarray(metadata.target_logits_indices),
+            expected_target_logits_indices)
 
-            # draft_token_ids are the actual token ids of the draft tokens.
-            expected_draft_token_ids = np.array(
-                [10, 20, 30, 1050, 1060, 2080, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                dtype=np.int32)
-            np.testing.assert_array_equal(np.asarray(metadata.draft_token_ids),
-                                          expected_draft_token_ids)
+        # draft_token_ids are the actual token ids of the draft tokens.
+        expected_draft_token_ids = np.array(
+            [10, 20, 30, 1050, 1060, 2080, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            dtype=np.int32)
+        np.testing.assert_array_equal(np.asarray(metadata.draft_token_ids),
+                                      expected_draft_token_ids)
 
-            # draft_lengths are the number of draft tokens per request.
-            expected_num_draft_tokens = np.pad(
-                num_draft_tokens, (0, padded_len - len(num_draft_tokens)))
-            np.testing.assert_array_equal(np.asarray(metadata.draft_lengths),
-                                          expected_num_draft_tokens)
+        # draft_lengths are the number of draft tokens per request.
+        expected_num_draft_tokens = np.pad(
+            num_draft_tokens, (0, padded_num_reqs - len(num_draft_tokens)))
+        np.testing.assert_array_equal(np.asarray(metadata.draft_lengths),
+                                      expected_num_draft_tokens)
+
+    def test_get_spec_decode_metadata_high_speculative_tokens(self):
+        """Tests _get_spec_decode_metadata when sum of speculative tokens exceeds padded_num_reqs.
+
+        This test covers the edge case that previously had a bug where the total number
+        of speculative tokens across all requests exceeds the padded number of requests.
+        """
+        # 1. ===== Setup =====
+        # Use parameters where sum(num_draft_tokens) > padded_num_reqs
+        num_draft_tokens = np.array([5, 3, 4, 2, 1],
+                                    dtype=np.int32)  # sum = 15
+        cu_num_scheduled_tokens = np.array([6, 10, 18, 22, 26], dtype=np.int32)
+
+        # Mock runner attributes needed by the function
+        self.runner.arange_cpu = np.arange(1024, dtype=np.int64)
+        # Make input_ids_cpu a sequence of numbers for easy verification
+        self.runner.input_ids_cpu = np.arange(1024, dtype=np.int32) * 10
+        self.runner.num_tokens_paddings = [16, 32, 64, 128, 256, 512, 1024]
+
+        # Mock the _device_array function to just return the numpy arrays
+        def mock_device_array(*args, **kwargs):
+            if len(args) == 1 and isinstance(args[0], tuple):
+                return args[0]
+            return args
+
+        self.runner._device_array = mock_device_array
+
+        # 2. ===== Act =====
+        padded_num_reqs = 8  # This is less than sum(num_draft_tokens) = 15
+        metadata = self.runner._get_spec_decode_metadata(
+            num_draft_tokens,
+            cu_num_scheduled_tokens,
+            padded_num_reqs=padded_num_reqs)
+
+        # 3. ===== Assert =====
+        self.assertIsInstance(metadata, SpecDecodeMetadata)
+        self.assertEqual(metadata.max_spec_len, 5)  # max(num_draft_tokens)
+
+        # Calculate expected values manually
+        num_sampled_tokens = num_draft_tokens + 1  # [6, 4, 5, 3, 2]
+        cu_num_sampled_tokens = np.cumsum(
+            num_sampled_tokens)  # [6, 10, 15, 18, 20]
+
+        # Build expected logits indices
+        expected_logits_indices = []
+        for i, n_sampled in enumerate(num_sampled_tokens):
+            start_pos = cu_num_scheduled_tokens[i] - n_sampled
+            expected_logits_indices.extend(
+                range(start_pos, start_pos + n_sampled))
+
+        expected_logits_indices = np.array(expected_logits_indices,
+                                           dtype=np.int32)
+        # [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 13, 14, 15, 16, 17, 19, 20, 21, 24, 25]
+
+        padded_len = 32  # Should be padded to next bucket size
+        expected_padded_logits_indices = np.pad(
+            expected_logits_indices,
+            (0, padded_len - len(expected_logits_indices)))
+        np.testing.assert_array_equal(
+            np.asarray(metadata.final_logits_indices),
+            expected_padded_logits_indices)
+
+        # bonus_logits_indices are the indices of the bonus tokens (last sampled token per request)
+        expected_bonus_logits_indices = cu_num_sampled_tokens - 1  # [5, 9, 14, 17, 19]
+        expected_bonus_logits_indices = np.pad(
+            expected_bonus_logits_indices,
+            (0, padded_num_reqs - len(expected_bonus_logits_indices)))
+        np.testing.assert_array_equal(
+            np.asarray(metadata.bonus_logits_indices),
+            expected_bonus_logits_indices)
+
+        # target_logits_indices are the indices of the draft tokens' logits
+        expected_target_logits_indices = []
+        for i, n_draft in enumerate(num_draft_tokens):
+            start_pos = cu_num_sampled_tokens[i] - num_sampled_tokens[i]
+            expected_target_logits_indices.extend(
+                range(start_pos, start_pos + n_draft))
+
+        expected_target_logits_indices = np.array(
+            expected_target_logits_indices, dtype=np.int32)
+        # [0, 1, 2, 3, 4, 6, 7, 8, 10, 11, 12, 13, 15, 16, 18]
+        expected_target_logits_indices = np.pad(
+            expected_target_logits_indices,
+            (0, padded_len - len(expected_target_logits_indices)))
+        np.testing.assert_array_equal(
+            np.asarray(metadata.target_logits_indices),
+            expected_target_logits_indices)
+
+        # draft_token_ids calculation - follow exact same algorithm as original test
+        # The algorithm: draft_token_ids = input_ids_cpu[logits_indices][target_logits_indices + 1]
+        draft_token_ids = self.runner.input_ids_cpu[expected_logits_indices]
+        expected_draft_token_ids = draft_token_ids[
+            expected_target_logits_indices[:15] +
+            1]  # 15 = sum(num_draft_tokens)
+        expected_draft_token_ids = np.pad(
+            expected_draft_token_ids,
+            (0, padded_len - len(expected_draft_token_ids)))
+        np.testing.assert_array_equal(np.asarray(metadata.draft_token_ids),
+                                      expected_draft_token_ids)
+
+        # draft_lengths are the number of draft tokens per request
+        expected_num_draft_tokens = np.pad(
+            num_draft_tokens, (0, padded_num_reqs - len(num_draft_tokens)))
+        np.testing.assert_array_equal(np.asarray(metadata.draft_lengths),
+                                      expected_num_draft_tokens)
 
 
 class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly(unittest.TestCase):
