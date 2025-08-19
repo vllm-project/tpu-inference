@@ -103,7 +103,7 @@ class TestQwen2ForCausalLM:
         num_heads = hf_config.num_attention_heads
         num_kv_heads = hf_config.num_key_value_heads
         rope_theta = hf_config.rope_theta
-        original_head_dim = hf_config.head_dim
+        original_head_dim = hidden_size // num_heads
         head_dim = 128
         intermediate_size = hf_config.intermediate_size
 
