@@ -131,6 +131,11 @@ class TPUWorker(AbstractTpuWorker):
         total_hbm_free = sum(hbm_free)
         taxed_hbm = total_hbm_free * self.cache_config.gpu_memory_utilization
         return taxed_hbm
+    def execute_dummy_batch(self):
+        pass
+        # if hasattr(self, 'model_runner') and self.model_runner is not None:
+        # # Call the model runner's dummy execution method
+        # self.model_runner._dummy_run()
 
     def execute_model(
         self,
