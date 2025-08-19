@@ -192,20 +192,55 @@ class TestQwen2ForCausalLM:
         config = mock_vllm_config_qwen2.model_config.hf_config
         dtype = mock_vllm_config_qwen2.model_config.dtype
 
+        # Inputs
         total_tokens = 10
+        num_seqs = 2
+        max_num_seqs = 4
+        num_blocks = 32
+        block_size = 16
+        max_blocks_per_seq = 8
+
+        input_ids = None
         inputs_embeds = jnp.ones((total_tokens, config.hidden_size),
                                  dtype=dtype)
 
-        # Run forward pass with embeds
-        _, hidden_states = model(
-            kv_caches=[],
-            input_ids=None,
-            attention_metadata=MagicMock(spec=AttentionMetadata),
-            inputs_embeds=inputs_embeds)
+        # Create dummy KV caches
+        kv_caches = []
+        for _ in range(config.num_hidden_layers):
+            attn_module = model.model.layers[0].self_attn
+            kv_cache_shape = get_kv_cache_shape_with_mesh(
+                mesh,
+                num_blocks,
+                block_size,
+                attn_module.num_kv_heads,
+                attn_module.head_dim,
+                dtype,
+            )
+            kv_caches.append(jnp.zeros(kv_cache_shape, dtype=dtype))
+
+        attention_metadata = AttentionMetadata(
+            input_positions=jnp.arange(total_tokens, dtype=jnp.int32),
+            block_tables=jnp.zeros((max_num_seqs * max_blocks_per_seq, ),
+                                   dtype=jnp.int32),
+            seq_lens=jnp.array([5, 5, 0, 0], dtype=jnp.int32),
+            query_start_loc=jnp.array([0, 5, 10, 10, 10], dtype=jnp.int32),
+            request_distribution=jnp.array([0, 0, num_seqs], dtype=jnp.int32),
+        )
+
+        # Run forward pass
+        new_kv_caches, hidden_states = model(kv_caches, input_ids,
+                                             attention_metadata, inputs_embeds)
 
         # Assertions
+        assert len(new_kv_caches) == config.num_hidden_layers
+        assert new_kv_caches[0].shape == kv_caches[0].shape
         assert hidden_states.shape == (total_tokens, config.hidden_size)
         assert hidden_states.dtype == dtype
+
+        # Test compute_logits
+        logits = model.compute_logits(hidden_states)
+        assert logits.shape == (total_tokens, config.vocab_size)
+        assert logits.dtype == dtype
 
 
 class TestQwen2SubModules:
@@ -265,7 +300,8 @@ class TestQwen2SubModules:
             mock_attention.return_value = (kv_cache,
                                            jnp.ones((total_tokens,
                                                      attention.num_heads,
-                                                     attention.head_dim)))
+                                                     attention.head_dim),
+                                                    dtype=dtype))
 
             new_kv_cache, output = attention(kv_cache, x, attention_metadata)
 

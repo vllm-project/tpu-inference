@@ -516,8 +516,10 @@ class Qwen2_5_VisionTransformer(nnx.Module):
         return rotary_pos_emb
 
     def get_window_index_thw(self, grid_t, grid_h, grid_w):
-        vit_merger_window_size = (self.window_size //
-                                  self.spatial_merge_size // self.patch_size)
+        vit_merger_window_size_h = (self.window_size[0] //
+                                    self.spatial_merge_size // self.patch_size)
+        vit_merger_window_size_w = (self.window_size[1] //
+                                    self.spatial_merge_size // self.patch_size)
 
         llm_grid_h = grid_h // self.spatial_merge_size
         llm_grid_w = grid_w // self.spatial_merge_size
@@ -525,20 +527,22 @@ class Qwen2_5_VisionTransformer(nnx.Module):
         index = jnp.arange(grid_t * llm_grid_h * llm_grid_w).reshape(
             grid_t, llm_grid_h, llm_grid_w)
 
-        pad_h = vit_merger_window_size - llm_grid_h % vit_merger_window_size
-        pad_w = vit_merger_window_size - llm_grid_w % vit_merger_window_size
-        num_windows_h = (llm_grid_h + pad_h) // vit_merger_window_size
-        num_windows_w = (llm_grid_w + pad_w) // vit_merger_window_size
+        pad_h = (vit_merger_window_size_h - llm_grid_h %
+                 vit_merger_window_size_h) % vit_merger_window_size_h
+        pad_w = (vit_merger_window_size_w - llm_grid_w %
+                 vit_merger_window_size_w) % vit_merger_window_size_w
+        num_windows_h = (llm_grid_h + pad_h) // vit_merger_window_size_h
+        num_windows_w = (llm_grid_w + pad_w) // vit_merger_window_size_w
 
         index_padded = jnp.pad(index, ((0, 0), (0, pad_h), (0, pad_w)),
                                constant_values=-100)
         index_padded = index_padded.reshape(grid_t, num_windows_h,
-                                            vit_merger_window_size,
+                                            vit_merger_window_size_h,
                                             num_windows_w,
-                                            vit_merger_window_size)
+                                            vit_merger_window_size_w)
         index_padded = jnp.transpose(index_padded, (0, 1, 3, 2, 4)).reshape(
-            grid_t, num_windows_h * num_windows_w, vit_merger_window_size,
-            vit_merger_window_size)
+            grid_t, num_windows_h * num_windows_w, vit_merger_window_size_h,
+            vit_merger_window_size_w)
         seqlens = (index_padded != -100).sum([2, 3]).reshape(-1)
         index_padded = index_padded.reshape(-1)
         # The number of valid indices is static because grid_t, grid_h, grid_w
