@@ -284,7 +284,6 @@ def jax_fused_moe_func(
     reduce_results: bool,
     mesh: Mesh,
     use_ep: bool,
-    print_x_value: bool,
 ):
     """
     Args:
@@ -339,10 +338,6 @@ def jax_fused_moe_func(
                                    mesh=mesh)
 
     x = jax.nn.silu(x[..., :intermediate_size]) * x[..., intermediate_size:]
-    if print_x_value:
-        jax.debug.print("x = {x}", x=x)
-    x = jax.lax.with_sharding_constraint(x,
-                                         NamedSharding(mesh, P(None, 'model')))
 
     if use_ep:
         x = expert_sharded_gmm(x,
@@ -353,6 +348,8 @@ def jax_fused_moe_func(
                                num_experts=global_num_experts,
                                ep_size=ep_size)
     else:
+        x = jax.lax.with_sharding_constraint(
+            x, NamedSharding(mesh, P(None, 'model')))
         x = tensor_sharded_gmm_2nd(x,
                                    w2,
                                    group_sizes,
@@ -373,7 +370,7 @@ def jax_fused_moe_func_padded(hidden_states: jax.Array, w1: jax.Array,
                               w2: jax.Array, gating_output: jax.Array,
                               topk: int, global_num_experts: int,
                               renormalize: bool, reduce_results: bool,
-                              mesh: Mesh, use_ep: bool, print_x_value: bool):
+                              mesh: Mesh, use_ep: bool):
     # TODO(fanhongmin@google.com): Once the jax runner pads the input, we no longer need this.
     hidden_size = hidden_states.shape[-1]
     num_tokens = hidden_states.size // hidden_size
@@ -391,14 +388,13 @@ def jax_fused_moe_func_padded(hidden_states: jax.Array, w1: jax.Array,
         expanded_x = jax_fused_moe_func(expanded_hidden_states, w1, w2,
                                         expanded_gating_output, topk,
                                         global_num_experts, renormalize,
-                                        reduce_results, mesh, use_ep,
-                                        print_x_value)
+                                        reduce_results, mesh, use_ep)
         x = expanded_x[:hidden_states.shape[0]]
         return x
     else:
         return jax_fused_moe_func(hidden_states, w1, w2, gating_output, topk,
                                   global_num_experts, renormalize,
-                                  reduce_results, mesh, use_ep, print_x_value)
+                                  reduce_results, mesh, use_ep)
 
 
 class JaxFusedMoE(torch.nn.Module):
@@ -414,9 +410,6 @@ class JaxFusedMoE(torch.nn.Module):
         self.renormalize = fused_moe.renormalize
         self.reduce_results = fused_moe.reduce_results
         self.use_ep = vllm_parallel_config.enable_expert_parallel
-
-        self.layer_name = fused_moe.layer_name
-        print(f"{self.layer_name=}")
 
         self.w13_weight: Parameter
         self.w2_weight: Parameter
@@ -453,16 +446,14 @@ class JaxFusedMoE(torch.nn.Module):
             jax.jit(jax_fused_moe_func_padded,
                     static_argnames=[
                         "topk", "global_num_experts", "renormalize",
-                        "reduce_results", "mesh", "use_ep", "print_x_value"
+                        "reduce_results", "mesh", "use_ep"
                     ]),
             topk=self.top_k,
             global_num_experts=self.global_num_experts,
             renormalize=self.renormalize,
             reduce_results=self.reduce_results,
             mesh=self.mesh,
-            use_ep=self.use_ep,
-            print_x_value=(
-                self.layer_name == 'model.layers.0.block_sparse_moe.experts'))
+            use_ep=self.use_ep)
 
         output = _fused_moe_func(
             jax_view(hidden_states),
