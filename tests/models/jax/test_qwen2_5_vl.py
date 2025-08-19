@@ -42,7 +42,7 @@ class MockModelConfig:
         self.seed = 0
 
     def is_multimodal_model(self):
-        return self.multimodal_config is not None
+        return True
 
     def get_hidden_size(self):
         return self.hf_config.hidden_size
