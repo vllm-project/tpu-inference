@@ -2,11 +2,17 @@ from unittest.mock import MagicMock, patch
 
 import jax.numpy as jnp
 import numpy as np
+import torch
+from vllm.attention.backends.abstract import AttentionType
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
 from vllm.sampling_params import SamplingType
 from vllm.v1.request import Request
 
+from tpu_commons.models.vllm.sharding import AttentionInfo
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
+                                        KVCacheGroupSpec, KVCacheTensor,
+                                        SlidingWindowSpec)
 from tpu_commons.runner.jax.input_batch_jax import CachedRequestState
 from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
 
@@ -193,3 +199,151 @@ class TestKVCacheManager:
                                             mode='constant')
             np.testing.assert_array_equal(updated_block_content,
                                           expected_padded_slice)
+    def test_get_kv_cache_spec_with_compilation_cfg(self):
+        # tests we create kv cache spec from compilation config
+        # create a static forward context with
+        # 10 full attention layers +
+        # 10 sliding window attention layers
+        # 1 layer with shared kv cache.
+        num_kv_heads = 8
+        head_size = 16
+        attn_type = AttentionType.DECODER
+        sliding_window = 10
+        static_forward_context = {}
+        for i in range(10):
+            layer_name = f'layer.{i}'
+            static_forward_context[layer_name] = AttentionInfo(
+                layer_name=layer_name,
+                num_kv_heads=num_kv_heads,
+                head_size=head_size,
+                attn_type=attn_type,
+            )
+        for i in range(10, 20):
+            layer_name = f'layer.{i}'
+            static_forward_context[layer_name] = AttentionInfo(
+                layer_name=layer_name,
+                num_kv_heads=num_kv_heads,
+                head_size=head_size,
+                attn_type=attn_type,
+                sliding_window=sliding_window,
+            )
+        static_forward_context['layer.20'] = AttentionInfo(
+            layer_name=layer_name,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            attn_type=attn_type,
+            kv_sharing_target_layer_name='layer.0')
+        self.runner.vllm_config.compilation_config.static_forward_context = \
+            static_forward_context
+
+        kv_cache_spec = self.runner.get_kv_cache_spec()
+
+        expected_full_attn_spec = FullAttentionSpec(
+            block_size=self.runner.vllm_config.cache_config.block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=torch.bfloat16,
+            use_mla=self.runner.vllm_config.model_config.use_mla,
+        )
+        expected_sliding_window_spec = SlidingWindowSpec(
+            block_size=self.runner.vllm_config.cache_config.block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=torch.bfloat16,
+            sliding_window=sliding_window,
+            use_mla=self.runner.vllm_config.model_config.use_mla,
+        )
+        self.assertEqual(len(kv_cache_spec), 20)
+        for i in range(10):
+            self.assertEqual(kv_cache_spec[f'layer.{i}'],
+                             expected_full_attn_spec)
+        for i in range(10, 20):
+            self.assertEqual(kv_cache_spec[f'layer.{i}'],
+                             expected_sliding_window_spec)
+        self.assertFalse('layer.20' in kv_cache_spec)
+        self.assertEqual(self.runner.shared_kv_cache_layers,
+                         {'layer.20': 'layer.0'})
+
+    def test_get_kv_cache_spec_without_compilation_cfg(self):
+        # tests if there's no compilation config, we use full attention kv
+        # cache for each layer.
+        model_config = self.runner.vllm_config.model_config
+        parallel_config = self.runner.vllm_config.parallel_config
+        head_size = model_config.get_head_size()
+        num_kv_heads = model_config.get_total_num_kv_heads()
+        num_layers = model_config.get_num_layers(parallel_config)
+
+        self.runner.vllm_config.compilation_config.static_forward_context = {}
+        kv_cache_spec = self.runner.get_kv_cache_spec()
+
+        self.assertEqual(len(kv_cache_spec), num_layers)
+        expected_full_attn_spec = FullAttentionSpec(
+            block_size=self.runner.vllm_config.cache_config.block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=torch.bfloat16,
+            use_mla=self.runner.vllm_config.model_config.use_mla,
+        )
+        for i in range(num_layers):
+            self.assertEqual(kv_cache_spec[f'layer.{i}'],
+                             expected_full_attn_spec)
+        self.assertEqual(self.runner.shared_kv_cache_layers, {})
+    
+    def test_initialize_kv_cache(self):
+        # create a kv cache config with 10 layers full attention and 10 layers
+        # sliding window attention.
+        block_size = self.runner.vllm_config.cache_config.block_size
+        num_kv_heads = 8
+        head_size = 128
+        use_mla = False
+        sliding_window = 100
+        num_blocks = 100
+        kv_packing = 2  #bf16
+        sliding_window_spec = SlidingWindowSpec(
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=torch.bfloat16,
+            sliding_window=sliding_window,
+            use_mla=use_mla,
+        )
+        full_attn_spec = FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=torch.bfloat16,
+            use_mla=use_mla,
+        )
+        kv_cache_groups = [
+            KVCacheGroupSpec(layer_names=[f'layer.{i}' for i in range(10)],
+                             kv_cache_spec=full_attn_spec),
+            KVCacheGroupSpec(layer_names=[f'layer.{i}' for i in range(10, 20)],
+                             kv_cache_spec=sliding_window_spec),
+        ]
+        kv_cache_tensors = []
+        page_size_bytes = full_attn_spec.page_size_bytes
+        for i in range(10):
+            kv_cache_tensors.append(
+                KVCacheTensor(
+                    size=num_blocks * page_size_bytes,
+                    shared_by=[f'layer.{i}', f'layer.{i+10}'],
+                ))
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=kv_cache_tensors,
+            kv_cache_groups=kv_cache_groups,
+        )
+
+        original_input_batch = self.runner.input_batch
+        self.runner.initialize_kv_cache(kv_cache_config)
+
+        # assert kv cache config with multiple kv cache groups will reinit
+        # input batch.
+        self.assertNotEqual(original_input_batch, self.runner.input_batch)
+        self.assertEqual(len(self.runner.kv_caches), 20)
+        # each tensor is shared by 2 layers.
+        num_blocks_per_layer = num_blocks // 2
+        for i in range(20):
+            self.assertEqual(self.runner.kv_caches[i].shape,
+                             (num_blocks_per_layer, block_size, num_kv_heads *
+                              2 // kv_packing, kv_packing, head_size))

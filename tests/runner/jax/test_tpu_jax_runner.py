@@ -1,5 +1,6 @@
 from unittest.mock import MagicMock, patch
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
@@ -13,8 +14,14 @@ class TestTPUJaxRunner:
     def setup_method(self):
         # Mock JAX dependencies
         self.mock_devices = [MagicMock()] * 4
-        self.mock_mesh = MagicMock()
         self.mock_rng_key = MagicMock()
+
+        # create 1x1 mesh
+        devices = np.asarray(jax.devices()[:1])
+        axis_names = ('data', 'model')
+        mesh_shape = (1, 1)
+        self.mock_mesh = jax.sharding.Mesh(devices.reshape(mesh_shape),
+                                           axis_names)
 
         with patch('jax.devices', return_value=self.mock_devices), \
              patch('jax.make_mesh', return_value=self.mock_mesh), \
