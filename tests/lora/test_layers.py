@@ -125,6 +125,8 @@ def populate_loras(
                     )
                 sublora.lora_b = sublora.lora_b[:, (sublora_len *
                                                     i):(sublora_len * (i + 1))]
+                sublora.bias = sublora.bias[(sublora_len * i):(sublora_len *
+                                                               (i + 1))]
                 sublora.optimize()
                 subloras.append(sublora)
 
@@ -138,6 +140,7 @@ def populate_loras(
                     lora_a=lora.lora_a,
                     lora_b=lora.lora_b,
                     embeddings_tensor=lora.embeddings_tensor,
+                    lora_bias=lora.bias,
                 )
 
             lora_dict[lora_id] = lora
@@ -322,7 +325,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             lora_result = torchax_lora_linear(torch.cat(jax_inputs))[0]
             lora_result = j2t(lora_result)
 
-        # xw32: what's the value of sublora.scaling? I think the test doesn't set it while it should.
+        # xw32: what's the value of sublora.scaling? I think the test doesn't set it while it should. sublora.scaling seems to be wrong.
         expected_results: list[torch.Tensor] = []
         for input_, lora_id in zip(inputs, prompt_mapping):
             # linear(input_) returns (output, output_bias) so we only need the first one.
@@ -332,6 +335,9 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
                 result[:, sublora.lora_b.shape[1] * i:sublora.lora_b.shape[1] *
                        (i + 1)] += (input_ @ sublora.lora_a @ sublora.lora_b *
                                     sublora.scaling)
+                if bias_enabled:
+                    result[:, sublora.lora_b.shape[1] *
+                           i:sublora.lora_b.shape[1] * (i + 1)] += sublora.bias
             expected_results.append(result)
         expected_result = torch.cat(expected_results)
 
@@ -340,6 +346,8 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
                                    expected_result,
                                    rtol=rtol,
                                    atol=atol)
+        # print(f'Output max diff: {torch.max(torch.abs(expected_result - lora_result))}')
+        # print(f'Output mean diff: {torch.mean(torch.abs(expected_result - lora_result))}')
 
         # Check that resetting the lora weights succeeds
         for slot_idx in range(max_loras):

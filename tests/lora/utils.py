@@ -39,6 +39,9 @@ class DummyLoRAManager:
             lora_b=torch.rand([rank, weight.shape[0]],
                               dtype=weight.dtype,
                               device=self._device),
+            bias=torch.rand([weight.shape[0]],
+                            dtype=weight.dtype,
+                            device=self._device),
         )
         if generate_embeddings_tensor:
             lora.embeddings_tensor = torch.rand(

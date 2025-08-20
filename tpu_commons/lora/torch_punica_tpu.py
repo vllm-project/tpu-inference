@@ -144,9 +144,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         y = y.view(-1, y.shape[-1])
         offset_left = 0
 
-        if lora_bias_stacked is not None:
-            y = self._apply_bias(self._get_token_lora_indices(y), y,
-                                 output_slices, lora_bias_stacked)
         for slice_idx in range(len(lora_b_stacked)):
             y = self.expand_slice(y,
                                   x[slice_idx],
