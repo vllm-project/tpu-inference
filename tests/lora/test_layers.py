@@ -327,7 +327,6 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             lora_result = torchax_lora_linear(torch.cat(jax_inputs))[0]
             lora_result = j2t(lora_result)
 
-        # xw32: what's the value of sublora.scaling? I think the test doesn't set it while it should. sublora.scaling seems to be wrong.
         expected_results: list[torch.Tensor] = []
         for input_, lora_id in zip(inputs, prompt_mapping):
             # linear(input_) returns (output, output_bias) so we only need the first one.
