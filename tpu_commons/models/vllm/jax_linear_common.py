@@ -97,6 +97,50 @@ def reorder_concatenated_tensor_for_sharding(concatenated_tensor: jax.Array,
     return reordered_tensor
 
 
+def reorder_concatenated_tensor_for_sharding_on_1st_dim(
+        concatenated_tensor: jax.Array, split_sizes: list[int], n_shards: int):
+    """
+    Reorder a replicated concatenated tensor such that when sharded on multiple chips, each shard is a concatenation of the shards of the individual tensors.
+    For example, let the concatenated_tensor be:
+        AAAAAAAAAAAABBBBBBBBCCCC
+            12 As     8 Bs  4 Cs
+    and let the split_sizes = [12, 8, 4] and n_shards = 4.
+    The output is:
+        AAABBCAAABBCAAABBCAAABBC
+    In other words, it reorders the input tensor into 4 segements, with each segment corresponding to a shard and being AAABBC.
+
+    Args:
+        concatenated_tensor: the tensor, concatenated on the 0-th dim.
+        split_sizes: each individual tensor's size on the 0-th dim.
+        n_shards: num of shards.
+    """
+
+    # Split the concatenated tensor into individual tensors.
+    split_tensors = []
+    start_offset = 0
+    for i, split_size in enumerate(split_sizes):
+        split_tensor = concatenated_tensor[:, start_offset:start_offset +
+                                           split_size, :]
+        split_tensors.append(split_tensor)
+        start_offset += split_size
+
+    # For each shard, collect the portion of each split tensor that should be on this shard.
+    reordered_tensor_shards = []
+    for j in range(n_shards):
+        split_tensors_for_this_shard = []
+        for i, split_size in enumerate(split_sizes):
+            assert split_size % n_shards == 0
+            sz = split_size // n_shards  # size of this split tensor per shard
+            split_tensor = split_tensors[i]
+            t = split_tensor[:, j * sz:(j + 1) * sz, :]
+            split_tensors_for_this_shard.append(t)
+        tensor_shard = jnp.concatenate(split_tensors_for_this_shard, axis=1)
+        reordered_tensor_shards.append(tensor_shard)
+
+    reordered_tensor = jnp.concatenate(reordered_tensor_shards, axis=1)
+    return reordered_tensor
+
+
 def slice_sharded_tensor_for_concatenation(sharded_tensor: jax.Array,
                                            split_sizes: list[int],
                                            n_shards: int, mesh: Mesh):

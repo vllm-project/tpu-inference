@@ -12,6 +12,9 @@ from torchax.ops.mappings import t2j
 from vllm.config import ParallelConfig
 from vllm.model_executor.layers.fused_moe import FusedMoE
 
+from tpu_commons.models.vllm.jax_linear_common import \
+    reorder_concatenated_tensor_for_sharding_on_1st_dim
+
 P = PartitionSpec
 
 
@@ -432,12 +435,26 @@ class JaxFusedMoE(torch.nn.Module):
                 jax.device_put, NamedSharding(mesh, P(None, None, 'model')))
 
     def _load_weights_from_vllm_layer(self, fused_moe: torch.nn.Module):
-        w13_weight = torch_view(t2j(fused_moe.w13_weight.data))
         w2_weight = torch_view(t2j(fused_moe.w2_weight.data))
-        w13_weight = Parameter(w13_weight, requires_grad=False)
         w2_weight = Parameter(w2_weight, requires_grad=False)
-        self.register_parameter("w13_weight", w13_weight)
         self.register_parameter("w2_weight", w2_weight)
+
+        if self.use_ep:
+            w13_weight = torch_view(t2j(fused_moe.w13_weight.data))
+            w13_weight = Parameter(w13_weight, requires_grad=False)
+            self.register_parameter("w13_weight", w13_weight)
+        else:
+            w13_weight = t2j(fused_moe.w13_weight.data)
+            intermediate_size = w13_weight.shape[1] // 2
+            print(f"load_weight {w13_weight.shape=}, {intermediate_size=}")
+            assert intermediate_size == w2_weight.shape[-1]
+            output_sizes = [intermediate_size, intermediate_size]
+            n_shards = self.mesh.shape['model']
+            assert intermediate_size % n_shards == 0
+            w13_weight = reorder_concatenated_tensor_for_sharding_on_1st_dim(
+                w13_weight, output_sizes, n_shards)
+            w13_weight = Parameter(torch_view(w13_weight), requires_grad=False)
+            self.register_parameter("w13_weight", w13_weight)
 
     def forward(self, hidden_states: torch.Tensor,
                 router_logits: torch.Tensor):
