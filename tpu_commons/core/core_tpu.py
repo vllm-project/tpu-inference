@@ -207,8 +207,6 @@ class _DisaggOrchestrator:
                             request)
 
                         prefill_engine.scheduler.kv_cache_manager.free(request)
-                        prefill_engine.scheduler.kv_cache_manager.free_block_hashes(
-                            request)
 
                         prefill_engine.scheduler.requests.pop(req_id)
 

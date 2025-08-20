@@ -526,13 +526,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         new_kv_caches = []
         # Assuming block numbers are non-negative and sorted.
         for i, layer_kv_cache_slices in enumerate(kv_cache_slices):
-            _, num_kv_heads, head_dim = layer_kv_cache_slices.shape
+            padded_seq_len, packing_div, packing, head_dim = layer_kv_cache_slices.shape
             padding_config = ((0, block_numbers.shape[0] * block_size -
-                               layer_kv_cache_slices.shape[0]), (0, 0), (0, 0))
+                               padded_seq_len), (0, 0), (0, 0), (0, 0))
             layer_kv_cache_slices = jnp.pad(layer_kv_cache_slices,
                                             pad_width=padding_config)
             layer_kv_cache_slices = layer_kv_cache_slices.reshape(
-                -1, block_size, num_kv_heads, head_dim)
+                -1, block_size, packing_div, packing, head_dim)
             updated_cache = kv_caches[i].at[block_numbers].set(
                 layer_kv_cache_slices)
             new_kv_caches.append(updated_cache)
@@ -561,7 +561,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
 
         indices_to_gather_jnp = jnp.array(all_indices_to_gather,
                                           dtype=jnp.int32)
-
         with runner_utils.LatencyTracker("BatchedGatherKVSlices-for-blocks"):
             batched_kv_cache_per_layer = self._jitted_gather_kv_cache(
                 self.kv_caches, indices_to_gather_jnp)
@@ -589,7 +588,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         # The KV cache slices have a shape of (num_tokens, num_kv_heads * 2, head_size).
         # We shard along the num_kv_heads dimension (axis=1), which corresponds
         # to the "model" axis of the mesh for tensor parallelism.
-        sharding = NamedSharding(self.mesh, PartitionSpec(None, "model", None))
+        sharding = NamedSharding(self.mesh, PartitionSpec())
         transferred_kv_cache = jax.device_put(kv_cache_slices, sharding)
         for cache in transferred_kv_cache:
             cache.block_until_ready()
