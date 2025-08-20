@@ -133,7 +133,7 @@ def populate_loras(
             lora = PackedLoRALayerWeights.pack(
                 subloras) if repeats > 1 else subloras[0]
 
-            # xiowei: why do we need the below 2 lines?
+            # Some of the layer.lora is torchax tensor so it can only do math (slice op) in the torchax env.
             with torchax.default_env(), jax.default_device(
                     jax.devices("tpu")[0]):
                 layer.set_lora(
