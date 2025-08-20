@@ -76,13 +76,12 @@ done
 if $did_find_ready_message; then
     echo "Starting the benchmark for $model_name..."
     echo "Current working directory: $(pwd)"
-    python benchmarks/benchmark_serving.py \
+    python /workspace/vllm/benchmarks/benchmark_serving.py \
     --backend vllm-chat \
     --model "$model_name" \
     --dataset-name "$dataset_name" \
     --dataset-path "$dataset_path" \
-    --num-prompts "$num_prompts" \
-    --run_eval 2>&1 | tee -a "$BENCHMARK_LOG_FILE"
+    --num-prompts "$num_prompts" 2>&1 | tee -a "$BENCHMARK_LOG_FILE"
 else
     echo "vLLM server did not start successfully."
     exit_code=1
