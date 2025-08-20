@@ -27,7 +27,7 @@ def bgmv_jax(
 
 def bgmv_torch(
         inputs,  # [num_tokens, hidden_size]
-        loras,  # [num_loras, lora_rank, hidden_size]
+        loras,  # [num_loras, 1, lora_rank, hidden_size]
         idxs,  # [num_tokens]
 ):  # [num_tokens, lora_rank]
     # TODO(xiowei): use the below one_hot impl (added in https://github.com/pytorch/xla/pull/9523) after we upgrade torchax version.
@@ -41,13 +41,6 @@ def bgmv_torch(
     #     torch.nn.functional.one_hot(idxs.long(), loras.shape[0]),
     #     loras,
     # )  # [num_tokens, lora_rank]
-
-    # # naive ref impl.
-    # if len(loras.shape) == 4:
-    #     loras = loras.squeeze(axis=1)
-    # selected_loras = loras[idxs]
-    # selected_loras = create_torchax_tensor_with_partition_spec(selected_loras)
-    # return torch.einsum('td,tld->tl', inputs, selected_loras)
 
     if len(loras.shape) == 4:
         loras = loras.squeeze(axis=1)
