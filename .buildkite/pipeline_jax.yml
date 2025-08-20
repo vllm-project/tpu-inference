@@ -61,8 +61,8 @@ steps:
      commands:
        - |
          .buildkite/scripts/run_in_docker.sh \
-           "python3 -m pytest -s -v -x /workspace/tpu_commons/tests/e2e/test_multi_modal_inference.py && \
-           bash /workspace/tpu_commons/tests/e2e/benchmarking/mm_bench.sh"
+           bash -c 'python3 -m pytest -s -v -x /workspace/tpu_commons/tests/e2e/test_multi_modal_inference.py && \
+            bash /workspace/tpu_commons/tests/e2e/benchmarking/mm_bench.sh'
 
    - label: "E2E offline inference test"
      key: test_6
