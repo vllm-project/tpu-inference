@@ -80,8 +80,7 @@ class TpuPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        # TODO(xiowei): import CUDAGraphMode before merge.
-        from vllm.config import CompilationLevel
+        from vllm.config import CompilationLevel, CUDAGraphMode
 
         cache_config = vllm_config.cache_config
         # For v0, the default block size is 16.
@@ -89,8 +88,7 @@ class TpuPlatform(Platform):
             cache_config.block_size = cast(BlockSize, 16)
         compilation_config = vllm_config.compilation_config
         compilation_config.level = CompilationLevel.NO_COMPILATION
-        # TODO(xiowei): import CUDAGraphMode before merge.
-        # compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         assert vllm_config.speculative_config is None, \
             "TPU does not support speculative decoding"

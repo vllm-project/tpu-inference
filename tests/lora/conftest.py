@@ -28,5 +28,5 @@ def dist_init():
             distributed_init_method=f"file://{temp_file}",
             backend="gloo")
         ensure_model_parallel_initialized(1, 1)
-    yield vllm_config
+        yield vllm_config
     cleanup_dist_env_and_memory(shutdown_ray=True)
