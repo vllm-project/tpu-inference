@@ -48,7 +48,7 @@ cleanUp() {
 }
 
 echo "Spinning up the vLLM server..."
-(vllm serve "$model_name" --max-model-len=1024 --disable-log-requests --max-num-batched-tokens "$max_batched_tokens" 2>&1 | tee -a "$LOG_FILE") &
+(vllm serve "$model_name" --max-model-len=98304 --disable-log-requests --max-num-batched-tokens "$max_batched_tokens" 2>&1 | tee -a "$LOG_FILE") &
 
 
 # Run a busy loop to block until the server is ready to receive requests
