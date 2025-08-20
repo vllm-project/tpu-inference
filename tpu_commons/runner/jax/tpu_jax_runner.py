@@ -777,6 +777,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
 
             image_grid_thw = ()
             for key, value in batched_mm_inputs.items():
+                print(f"key: {key}, value: {value}")
                 if isinstance(value, torch.Tensor):
                     if key == 'image_grid_thw':
                         # change it to tuple of tuples to make it hashable for JIT
