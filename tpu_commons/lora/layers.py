@@ -212,6 +212,8 @@ class TorchaxMergedColumnParallelLinearWithLoRA(TorchaxBaseLinearLayerWithLoRA):
                     index, 0, :lora_b_i.shape[1], :lora_b_i.shape[0]].copy_(
                         lora_b_i.T, non_blocking=True)
 
+        if not self.lora_config.bias_enabled:
+            assert lora_bias is None, "lora_bias is not None but the lora bias is disabled."
         if lora_bias is not None:
             self.lora_bias_stacked = cast(tuple[torch.Tensor, ...],
                                           self.lora_bias_stacked)

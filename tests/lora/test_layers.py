@@ -87,6 +87,7 @@ def populate_loras(
     layer_weights: torch.Tensor,
     generate_embeddings_tensor: int = 0,
     repeats: int = 1,
+    bias_enabled: bool = False,
 ) -> tuple[dict[int, LoRALayerWeights], dict[int, list[LoRALayerWeights]]]:
     """This method populates the lora layers (TorchaxBaseLayerWithLoRA) with lora weights.
 
@@ -140,7 +141,7 @@ def populate_loras(
                     lora_a=lora.lora_a,
                     lora_b=lora.lora_b,
                     embeddings_tensor=lora.embeddings_tensor,
-                    lora_bias=lora.bias,
+                    lora_bias=lora.bias if bias_enabled else None,
                 )
 
             lora_dict[lora_id] = lora
@@ -199,7 +200,7 @@ def create_random_inputs(
 
 
 @torch.inference_mode()
-@pytest.mark.parametrize("num_loras", [4])  # xw32: use [1,2,4,8]
+@pytest.mark.parametrize("num_loras", [1, 2, 4, 9])
 @pytest.mark.parametrize("repeats", [2])
 @pytest.mark.parametrize("fully_shard", [False])  # TODO(xiowei): add "True".
 @pytest.mark.parametrize("device", ["cpu"])
@@ -207,7 +208,7 @@ def create_random_inputs(
 @pytest.mark.parametrize("bias_enabled", [True, False])
 def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
                                 device, stage, bias_enabled) -> None:
-    max_loras = 7
+    max_loras = 9
     max_num_batched_tokens = 8192
     max_batches = 256
     punica_wrapper = get_punica_wrapper(max_num_batched_tokens,
@@ -288,6 +289,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             layer=torchax_lora_linear,
             layer_weights=linear.weight,
             repeats=repeats,
+            bias_enabled=bias_enabled,
         )
 
         # inputs: list[torch.Tensor] of size num_inputs. inputs[0].shape=[1, 4096].
@@ -346,8 +348,12 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
                                    expected_result,
                                    rtol=rtol,
                                    atol=atol)
-        # print(f'Output max diff: {torch.max(torch.abs(expected_result - lora_result))}')
-        # print(f'Output mean diff: {torch.mean(torch.abs(expected_result - lora_result))}')
+        print(
+            f'Output max diff: {torch.max(torch.abs(expected_result - lora_result))}'
+        )
+        print(
+            f'Output mean diff: {torch.mean(torch.abs(expected_result - lora_result))}'
+        )
 
         # Check that resetting the lora weights succeeds
         for slot_idx in range(max_loras):
@@ -391,3 +397,9 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
                                    expected_result,
                                    rtol=rtol,
                                    atol=atol)
+        print(
+            f'Output max diff: {torch.max(torch.abs(expected_result - lora_result))}'
+        )
+        print(
+            f'Output mean diff: {torch.mean(torch.abs(expected_result - lora_result))}'
+        )
