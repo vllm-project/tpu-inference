@@ -215,8 +215,15 @@ def _get_nnx_model(
         else:
             model = nnx.eval_shape(lambda: model_class(vllm_config, rng, mesh))
         model = _eval_qwix_quantization(vllm_config, model, rng, mesh)
+
+        # flat_state_items = list(nnx.state(model).flat_state())
+
+        # # 3. Iterate through the flattened list with an index.
+        # for i, path, in enumerate(flat_state_items):
+
+        #     print(i, path)
+
         model.load_weights(rng)
-        print(model)
         # Although the created model can already work, we still need to jit
         # the model creation again, otherwise the model forward will have
         # non-trivial overhead in PjitFunction.

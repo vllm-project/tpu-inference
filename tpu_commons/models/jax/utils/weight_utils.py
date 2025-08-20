@@ -42,6 +42,7 @@ class MetadataMap:
 def print_param_info(param: nnx.Param, name: str):
     logger.warning(f"Global shape for {name}: {param.value.shape}")
     logger.warning(f"Sharding for {name}: {param.sharding}")
+
     logger.warning(
         f"Shape of {name} on a single device: {param.value.addressable_shards[0].data.shape}"
     )
@@ -110,7 +111,6 @@ def get_model_weights_files(
         )
 
     weights_files.sort()
-    weights_files = weights_files[:4] + [weights_files[-4]]
     return weights_files
 
 
@@ -347,7 +347,6 @@ def _load_hf_weights_on_thread(vllm_config, params: nnx.State,
             assert model_weight.value.shape == hf_weight.shape, f"{hf_key}: {model_weight.value.shape} != {hf_weight.shape}"
 
         # Update the model weight
-        print(model_weight, model_weight.value)
         model_weight.value = shard(hf_weight, model_sharding)
 
 

@@ -23,7 +23,6 @@ from tpu_commons.models.jax.common.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
 from tpu_commons.models.jax.utils.weight_utils import (get_param,
                                                        model_weights_generator,
-                                                       print_param_info,
                                                        reshape_params)
 
 logger = init_logger(__name__)
@@ -50,13 +49,14 @@ class DeepSeekV3(nnx.Module):
         #        "expert_parallelism": 2
         #    }  # todo: update this.
 
-        num_layers: int = 4
+        num_layers: int = 61
         num_local_experts: int = 256
 
         vocab_size: int = 129280
         hidden_size: int = 7168
         dtype: jnp.dtype = jnp.bfloat16
         unquant_dtype: jnp.dtype = jnp.bfloat16
+        scale_dtype: jnp.dtype = jnp.float32
         num_attention_heads: int = 128
         num_key_value_heads: int = 128
         ffw_intermediate_size: int = 18432
@@ -99,7 +99,8 @@ class DeepSeekV3(nnx.Module):
             qk_nope_head_dim=qk_nope_head_dim,
             qk_rope_head_dim=qk_rope_head_dim,
             v_head_dim=v_head_dim,
-            num_local_experts=num_local_experts)
+            num_local_experts=num_local_experts,
+            scale_dtype=scale_dtype)
 
         self.embedder = Embedder(vocab_size=vocab_size,
                                  hidden_size=hidden_size,
@@ -307,6 +308,7 @@ class DeepSeekV3(nnx.Module):
         return self.__call__(*args, **kwargs)
 
     def load_weights(self, rng: PRNGKey, cache_dir: Optional[str] = None):
+        self.rng = nnx.Rngs(rng)
         self.weight_loader.load_weights(self)
 
     def __call__(
@@ -337,15 +339,15 @@ class DeepSeekV3WeightLoader:
 
     def __init__(self, vllm_config: VllmConfig, num_layers, hidden_size,
                  q_lora_rank, kv_lora_rank, attn_heads, qk_nope_head_dim,
-                 qk_rope_head_dim, v_head_dim, num_local_experts):
+                 qk_rope_head_dim, v_head_dim, num_local_experts, scale_dtype):
 
         self.num_layers = num_layers
         self.names_and_weights_generator = model_weights_generator(
             model_name_or_path=vllm_config.model_config.model,
             framework="pt",
             download_dir=vllm_config.load_config.download_dir)
-        self.is_verbose = getattr(vllm_config.additional_config, "is_verbose",
-                                  False)
+        self.is_verbose = vllm_config.additional_config.get(
+            "is_verbose", None) is not None
         self.num_routed_experts = num_local_experts
 
         self._transpose_map = {
@@ -442,6 +444,8 @@ class DeepSeekV3WeightLoader:
             "layers.*.shared_experts.kernel_up_proj_DF",
         }
 
+        self.scale_dtype = scale_dtype
+
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
         # Find the corresponding model key using the HF key
         if "layer" in loaded_key:
@@ -467,11 +471,7 @@ class DeepSeekV3WeightLoader:
                 return jnp.transpose(param_tensor, value)
         return param_tensor  # Base case / no-op
 
-    def _process_moe_weights(self,
-                             loaded_name,
-                             loaded_weight,
-                             weights_dict,
-                             scale=None):
+    def _process_moe_weights(self, loaded_name, loaded_weight, weights_dict):
         layer_num = re.search(r"layers\.(\d+)", loaded_name).group(1)
         expert_num_str = re.search(r"experts\.(\d+)", loaded_name).group(1)
         expert_idx = int(expert_num_str)
@@ -515,11 +515,10 @@ class DeepSeekV3WeightLoader:
         weight_np = weight.to(torch.float32).numpy().astype(cast_type)
 
         if scale is not None:
-            # TODO
-            old_scale_dtype = scale.dtype
-            scale = scale.to(torch.float32).numpy().astype(jnp.float32)
+            scale = scale.to(torch.float32).numpy().astype(self.scale_dtype)
             logger.info(
-                f"Loaded scale for {name}: {scale.dtype} {old_scale_dtype}")
+                f"Loaded scale for {name}: {scale.shape} --> {mapped_name} {scale.dtype}"
+            )
 
         # Reshape and transpose weights if necessary.
         weight_np = reshape_params(name, weight_np, self._weight_shape_map)
@@ -540,6 +539,10 @@ class DeepSeekV3WeightLoader:
         def get_slice(index):
             return weight_np[index]
 
+        def get_slice_scale(index):
+            # ruff: noqa: F821
+            return scale[index]
+
         sharding = model_weight.array.qvalue.sharding if hasattr(
             model_weight, "array") else model_weight.sharding
         sharded_array = jax.make_array_from_callback(weight_np.shape, sharding,
@@ -550,8 +553,15 @@ class DeepSeekV3WeightLoader:
             #                        weight.dtype)
             # sharded_value.qvalue.block_until_ready()
             # TODO: put as well?
-            model_weight.array.scale.value = jnp.ones_like(
-                sharded_array)  #  * 1 / scale
+            maybe_sharded_scale = scale
+            try:
+                maybe_sharded_scale = jax.make_array_from_callback(
+                    scale.shape, sharding, get_slice_scale)
+            except ValueError:
+                logger.warning(
+                    f"Could not create sharded scale for {name} with shape {scale.shape} and sharding {sharding}, skipping..."
+                )
+            model_weight.array.scale.value = 1 / maybe_sharded_scale
             model_weight.array.qvalue.value = sharded_array
         else:
             # TODO: support none quant path
@@ -559,12 +569,15 @@ class DeepSeekV3WeightLoader:
             # sharded_value.qvalue.block_until_ready()
             model_weight.value = sharded_array
 
-        del weight
-        if self.is_verbose:
-            # TODO
-            print_param_info(model_weight, name)
+        del weight, scale
         value = model_weight.array.qvalue.value if hasattr(
             model_weight, "array") else model_weight.value
+        from tpu_commons import utils
+        logger.info(f"Memory usage before applying quantization of params: "
+                    f"hbm={utils.hbm_usage_gb(jax.local_devices())}Gb")
+        # if self.is_verbose:
+        #     # TODO
+        #     print_param_info(value, name)
         return value.nbytes / 1e9, value.addressable_shards[0].data.nbytes / 1e9
 
     def load_weights(self, model_for_loading: nnx.Module):
@@ -581,6 +594,7 @@ class DeepSeekV3WeightLoader:
         mlp_experts_down_proj_weights = {}
         mlp_experts_down_proj_scales = {}
         fp8_weights = {}
+        fp8_scales = {}
         with jax.default_device(jax.devices("cpu")[0]):
             for loaded_name, loaded_weight in self.names_and_weights_generator:
                 # Skip if the model has fewer layers than original.
@@ -601,17 +615,27 @@ class DeepSeekV3WeightLoader:
                         del loaded_weight
                         continue
                 if loaded_weight.dtype == torch.float8_e4m3fn:
-                    fp8_weights[loaded_name] = loaded_weight
-                    continue
+                    scale_name = loaded_name.replace(".weight",
+                                                     ".weight_scale_inv")
+                    if scale_name in fp8_scales:
+                        scale = fp8_scales[scale_name]
+                        del fp8_scales[scale_name]
+                    else:
+                        fp8_weights[loaded_name] = loaded_weight
+                        continue
                 scale = None
                 if loaded_name.endswith(".weight_scale_inv"):
                     # assuming weights are loaded before scales.
                     weight_name = loaded_name.replace(".weight_scale_inv",
                                                       ".weight")
-                    scale = loaded_weight
-                    loaded_weight = fp8_weights[weight_name]
-                    loaded_name = weight_name
-                    del fp8_weights[weight_name]
+                    if weight_name in fp8_weights:
+                        scale = loaded_weight
+                        loaded_weight = fp8_weights[weight_name]
+                        loaded_name = weight_name
+                        del fp8_weights[weight_name]
+                    else:
+                        fp8_scales[loaded_name] = loaded_weight
+                        continue
                 # concat mlp.experts weights
                 if "mlp.experts" in loaded_name:
                     if "down_proj" in loaded_name:

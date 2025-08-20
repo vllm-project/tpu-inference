@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from typing import Any, Tuple
 
 import jax
@@ -58,14 +58,14 @@ class MLA(nnx.Module):
 
     attn_o_tnh: NamedSharding
     activation_attention_out_td: NamedSharding
-    rngs: nnx.Rngs
+    rngs: InitVar[nnx.Rngs]
 
     random_init: bool = False
     attention_chunk_size: int | None = None
     rope_input_ordering: str = "split"
     quant: Any | None = None
 
-    def __post_init__(self):
+    def __post_init__(self, rngs):
         self.N = self.num_attention_heads
         self.K = self.num_key_value_heads
         self.D = self.hidden_size
@@ -87,27 +87,27 @@ class MLA(nnx.Module):
         )
 
         # Initializes the weight kernels
-        self.kernel_q_down_proj_DA = create_param(self.rngs,
+        self.kernel_q_down_proj_DA = create_param(rngs,
                                                   (self.D, self.q_lora_rank),
                                                   self.q_da_sharding,
                                                   self.dtype,
                                                   random_init=self.random_init)
         self.kernel_q_up_proj_ANH = create_param(
-            self.rngs,
+            rngs,
             (self.q_lora_rank, self.N, self.qk_head_dim),
             self.anh_sharding,
             self.dtype,
             random_init=self.random_init,
         )
         self.kernel_kv_down_proj_DA = create_param(
-            self.rngs,
+            rngs,
             (self.D, self.kv_lora_rank + self.qk_rope_head_dim),
             self.kv_da_sharding,
             self.dtype,
             random_init=self.random_init,
         )
         self.kernel_kv_up_proj_ANH = create_param(
-            self.rngs,
+            rngs,
             (self.kv_lora_rank, self.N,
              self.qk_nope_head_dim + self.v_head_dim),
             self.anh_sharding,
@@ -115,7 +115,7 @@ class MLA(nnx.Module):
             random_init=self.random_init,
         )
         self.kernel_o_proj_NHD = create_param(
-            self.rngs, (self.N, self.v_head_dim, self.D),
+            rngs, (self.N, self.v_head_dim, self.D),
             self.nhd_sharding,
             self.dtype,
             random_init=self.random_init)
@@ -127,7 +127,7 @@ class MLA(nnx.Module):
             with_scale=True,
             dtype=self.unquant_dtype,
             random_init=self.random_init,
-            rngs=self.rngs,
+            rngs=rngs,
         )
 
         self.kv_rms_norm = RMSNorm(
@@ -138,7 +138,7 @@ class MLA(nnx.Module):
             epsilon=self.rms_norm_eps,
             with_scale=True,
             dtype=self.unquant_dtype,
-            rngs=self.rngs,
+            rngs=rngs,
         )
 
     def __call__(self,

@@ -108,6 +108,7 @@ if __name__ == "__main__":
 
     parser = create_parser()
     args: dict = vars(parser.parse_args())
+    args.pop("enable_prompt_adapter")
 
     if not disagg_utils.is_disagg_enabled():
         main(args)
