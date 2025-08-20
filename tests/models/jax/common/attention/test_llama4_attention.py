@@ -1,7 +1,6 @@
 import os
 import unittest
 from dataclasses import dataclass, field
-from unittest.mock import MagicMock
 
 import chex
 
@@ -9,6 +8,7 @@ os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=8'
 
 import jax
 import jax.numpy as jnp
+from flax import nnx
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
 
@@ -75,7 +75,6 @@ class Llama4AttentionTest(unittest.TestCase):
         hidden_size = 64
         num_attention_heads = 4
         head_dim = hidden_size // num_attention_heads
-        param_factory = MagicMock()
 
         # Create dummy sharding objects
         dummy_sharding = NamedSharding(self.mesh, P())
@@ -93,7 +92,7 @@ class Llama4AttentionTest(unittest.TestCase):
             temperature_tuning_scale=2.0,
             temperature_tuning_floor_scale=2.0,
             mesh=self.mesh,
-            param_factory=param_factory,
+            random_init=True,
             quant=None,
             activation_attention_td=dummy_sharding,
             activation_attention_out_td=dummy_sharding,
@@ -103,21 +102,15 @@ class Llama4AttentionTest(unittest.TestCase):
             activation_q_td=dummy_sharding,
             query_tnh=dummy_sharding,
             keyvalue_skh=dummy_sharding,
-            keyvalue_cache_lskh=dummy_sharding,
             attn_o_tnh=dummy_sharding,
+            rngs=nnx.Rngs(42),
         )
 
         seq_len = 8
         input_arr_TNH = jnp.ones((seq_len, num_attention_heads, head_dim),
                                  dtype=jnp.bfloat16)
-        attention_metadata = AttentionMetadata(input_positions=jnp.arange(
-            seq_len, dtype=jnp.int32),
-                                               slot_mapping=None,
-                                               block_tables=None,
-                                               seq_lens=None,
-                                               num_slices=None,
-                                               num_seqs=None,
-                                               query_start_loc=None)
+        attention_metadata = AttentionMetadata(
+            input_positions=jnp.arange(seq_len, dtype=jnp.int32))
         expected_scales = jnp.array(
             [1, 2.375, 2.375, 3.20312, 3.20312, 3.76562, 3.76562, 4.21875],
             dtype=jnp.bfloat16)

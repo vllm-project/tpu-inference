@@ -61,14 +61,10 @@ class ShardingRulesConfig:
     activation_q_td: tuple = (None, None)
     # Attention Out activation after projection: (Batch * Sequence, NumHeads, HeadDim)
     attn_o_tnh: tuple = (None, None, None)
-    # Ragged attention v3 Out: (actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim)
-    attn_o_ktnph: tuple = (None, None, None, None, None)
     # Q vector: (Batch * Sequence, NumHeads, HeadDim)
     query_tnh: tuple = (None, None, None)
     # K/V vector: (Batch * Sequence, NumKVHeads, HeadDim)
     keyvalue_skh: tuple = (None, None, None)
-    # query for ragged attention v3 kernel: (actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim)
-    query_ktnph: tuple = (None, None, None, None, None)
 
     # Attention Q weight: (Dim, NumHeads, HeadDim)
     attn_q_weight_dnh: tuple = (None, None, None)
@@ -78,11 +74,6 @@ class ShardingRulesConfig:
     attn_v_weight_dkh: tuple = (None, None, None)
     # Attention Out weight: (NumHeads, HeadDim, Dim)
     attn_o_weight_nhd: tuple = (None, None, None)
-
-    # K/V cache for generation: (NumKVHeads, Batch * Sequence, HeadDim)
-    keyvalue_cache_lskh: tuple = (None, None, None)
-    # K/V cache for ragged attention v3 kernel: (total_num_pages, page_size, num_kv_heads_x2 // kv_packing, kv_packing, head_dim)
-    keyvalue_cache_nbkph: tuple = (None, None, None, None, None)
 
     # Activation for ffw input: (Batch * Sequence, Dim)
     activation_ffw_td: tuple = (None, None)
@@ -318,8 +309,6 @@ class Sharding:
         prefill_rules.query_tnh = (DATA_AXIS_NAME, ATTN_HEAD_AXIS_NAME, None)
         prefill_rules.keyvalue_skh = (DATA_AXIS_NAME, ATTN_HEAD_AXIS_NAME,
                                       None)
-        prefill_rules.keyvalue_cache_lskh = (None, None, ATTN_HEAD_AXIS_NAME,
-                                             None)
 
         # Populate Generate (Decode) Config
         # During decode, batch size is the large dimension, so we shard along the batch axis.
@@ -335,9 +324,6 @@ class Sharding:
         generate_rules.query_tnh = (DATA_AXIS_NAME, ATTN_HEAD_AXIS_NAME, None)
         generate_rules.keyvalue_skh = (DATA_AXIS_NAME, ATTN_HEAD_AXIS_NAME,
                                        None)
-        # The KV Cache is of shape (L, S, 2 * K, H), we shard on the head dim, but need to optimize on 2*K dim
-        generate_rules.keyvalue_cache_lskh = (None, None, ATTN_HEAD_AXIS_NAME,
-                                              None)
         generate_rules.attn_q_weight_dnh = (None, ATTN_HEAD_AXIS_NAME,
                                             ATTN_TENSOR_AXIS_NAME)
         generate_rules.attn_k_weight_dkh = (None, ATTN_HEAD_AXIS_NAME,

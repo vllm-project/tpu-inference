@@ -1,14 +1,16 @@
 tpu-info
-yapf == 0.43.0
+yapf==0.43.0
 pytest
 pytest-mock
 absl-py
 numpy
 google-cloud-storage
 --pre
---find-links https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
---find-links https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
+--index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
 --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html
+jax==0.7.1.dev20250813
+jaxlib==0.7.1.dev20250813
+libtpu==0.0.21.dev20250813+nightly
 jaxtyping
 flax
 torchax==0.0.5

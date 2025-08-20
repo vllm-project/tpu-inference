@@ -22,6 +22,7 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             UtilityResult)
 from vllm.v1.engine.core import EngineCore as vLLMEngineCore
 from vllm.v1.engine.core import EngineCoreProc as vLLMEngineCoreProc
+from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import RequestStatus
 
 from tpu_commons.core import disagg_executor, disagg_utils
@@ -94,8 +95,7 @@ class _DisaggOrchestrator:
             queue.Queue(4) for i in range(len(self._prefill_engines))
         ]
         self._decode_backlogs = {
-            idx:
-            queue.Queue(self._config.vllm_config.scheduler_config.max_num_seqs)
+            idx: queue.Queue(self._config.scheduler_config.max_num_seqs)
             for idx, engine in enumerate(self._decode_engines)
         }
 
@@ -207,8 +207,6 @@ class _DisaggOrchestrator:
                             request)
 
                         prefill_engine.scheduler.kv_cache_manager.free(request)
-                        prefill_engine.scheduler.kv_cache_manager.free_block_hashes(
-                            request)
 
                         prefill_engine.scheduler.requests.pop(req_id)
 
@@ -274,11 +272,11 @@ class _DisaggOrchestrator:
             while True:
                 # We need to check input batch as well as the request completion is delayed
                 # from scheduler to the runner.
-                if (sum(decode_engine.scheduler.get_request_counts()) >=
-                        self._config.vllm_config.scheduler_config.max_num_seqs
+                if (sum(decode_engine.scheduler.get_request_counts())
+                        >= self._config.scheduler_config.max_num_seqs
                         or decode_engine.model_executor.driver_worker.
-                        model_runner.input_batch.num_reqs >= self._config.
-                        vllm_config.scheduler_config.max_num_seqs):
+                        model_runner.input_batch.num_reqs
+                        >= self._config.scheduler_config.max_num_seqs):
                     break
 
                 try:
@@ -316,8 +314,7 @@ class _DisaggOrchestrator:
                 vllm_request.num_computed_tokens = prompt_tokens
                 new_block_ids = kv_cache_manager.get_block_ids(req_id)
                 assert (len(new_block_ids[0]) == math.ceil(
-                    prompt_tokens /
-                    self._config.vllm_config.cache_config.block_size))
+                    prompt_tokens / self._config.cache_config.block_size))
 
                 with LatencyTracker(f"KVCacheInsert-{len(new_block_ids[0])}"):
                     decode_engine.model_executor.driver_worker.model_runner.insert_request_with_kv_cache(
@@ -364,11 +361,19 @@ class _DisaggOrchestrator:
 class DisaggEngineCoreProc(vLLMEngineCoreProc):
     """The vLLM-facing adapter that handles process management and I/O."""
 
+    @staticmethod
+    def is_supported() -> bool:
+        """
+        Returns True if this engine can run in the current environment.
+        """
+        return disagg_utils.is_disagg_enabled()
+
     def __init__(
         self,
         vllm_config: VllmConfig,
         local_client: bool,
         handshake_address: str,
+        executor_class: type[Executor],
         log_stats: bool,
         engine_index: int = 0,
         **kwargs,
@@ -483,6 +488,8 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
             prefill_slice_sizes=prefill_slice_sizes,
             decode_slice_sizes=decode_slice_sizes,
         )
+
+        self.request_block_hasher = None
 
     @staticmethod
     def _create_engine_cores(

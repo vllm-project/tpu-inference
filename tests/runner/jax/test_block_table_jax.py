@@ -28,10 +28,6 @@ class BlockTable:
         self.block_table_cpu = np.zeros((max_num_reqs, max_num_blocks_per_req),
                                         dtype=np.int32)
         self.num_blocks_per_row = np.zeros(max_num_reqs, dtype=np.int32)
-        # Note: slot_mapping is not directly tested as its methods are not provided
-        self.slot_mapping_cpu = np.zeros(max_num_batched_tokens,
-                                         dtype=np.int64)
-        self.slot_mapping = jnp.zeros(max_num_batched_tokens, dtype=jnp.int64)
 
     def append_row(self, block_ids: list[int], row_idx: int) -> None:
         if not block_ids:

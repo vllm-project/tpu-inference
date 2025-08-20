@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.v1.engine import EngineCoreRequest, EngineCoreRequestType
+from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request
 
 from tpu_commons.core.adapters import (VllmConfigAdapter, VllmEngineAdapter,
@@ -94,6 +95,7 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
             vllm_config=self.mock_vllm_config,
             local_client=True,
             handshake_address="dummy_addr",
+            executor_class=MagicMock(spec=Executor),
             log_stats=False,
         )
 
@@ -115,13 +117,14 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
             vllm_config=self.mock_vllm_config,
             local_client=True,
             handshake_address="dummy_addr",
+            executor_class=MagicMock(spec=Executor),
             log_stats=False,
         )
 
         mock_request = MagicMock(spec=EngineCoreRequest)
         mock_request.request_id = "test_req"
         mock_request.mm_hashes = None
-        mock_request.mm_inputs = []
+        mock_request.mm_kwargs = []
         mock_request.use_structured_output = False
         mock_request.pooling_params = None
         mock_request.sampling_params.guided_decoding = None
@@ -146,6 +149,7 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
             vllm_config=self.mock_vllm_config,
             local_client=True,
             handshake_address="dummy_addr",
+            executor_class=MagicMock(spec=Executor),
             log_stats=False,
         )
 
@@ -159,12 +163,13 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
             vllm_config=self.mock_vllm_config,
             local_client=True,
             handshake_address="dummy_addr",
+            executor_class=MagicMock(spec=Executor),
             log_stats=False,
         )
         mock_request = MagicMock(spec=EngineCoreRequest)
         mock_request.request_id = "test_req"
         mock_request.mm_hashes = None
-        mock_request.mm_inputs = []
+        mock_request.mm_kwargs = []
         mock_request.use_structured_output = False
         mock_request.pooling_params = None
         mock_request.sampling_params.guided_decoding = None
@@ -180,6 +185,7 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
             vllm_config=self.mock_vllm_config,
             local_client=True,
             handshake_address="dummy_addr",
+            executor_class=MagicMock(spec=Executor),
             log_stats=False,
         )
 
@@ -192,6 +198,7 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
             vllm_config=self.mock_vllm_config,
             local_client=True,
             handshake_address="dummy_addr",
+            executor_class=MagicMock(spec=Executor),
             log_stats=False,
         )
         # Mock a method on the prefill engine instance
@@ -210,9 +217,10 @@ class TestDisaggOrchestrator(unittest.TestCase):
 
     def setUp(self):
         self.mock_config = MagicMock(spec=IConfig)
-        self.mock_config.vllm_config.scheduler_config.max_num_seqs = 16
-        self.mock_config.vllm_config.device_config = MagicMock()
-        self.mock_config.vllm_config.cache_config.block_size = 5
+        self.mock_config.scheduler_config = MagicMock()
+        self.mock_config.scheduler_config.max_num_seqs = 16
+        self.mock_config.cache_config = MagicMock()
+        self.mock_config.cache_config.block_size = 5
 
         self.mock_output_queue = MagicMock()
         self.mock_prefill_engine = MagicMock(spec=IEngineCore)

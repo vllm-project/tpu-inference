@@ -13,29 +13,29 @@ from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.common.attention.attention import AttentionMetadata
 from tpu_commons.models.jax.common.attention.llama4_attention import \
     Llama4Attention
-from tpu_commons.models.jax.common.base import ParamFactory
 from tpu_commons.models.jax.common.constants import KVCacheType
 from tpu_commons.models.jax.common.layers import (DenseFFW, Embedder, LMhead,
                                                   RMSNorm)
-from tpu_commons.models.jax.common.model import Model
 from tpu_commons.models.jax.common.moe.moe import MoE, Router
 from tpu_commons.models.jax.common.transformer_block import \
     SharedExpertsTransformerBlock
 from tpu_commons.models.jax.layers.misc import shard_put
-from tpu_commons.models.jax.utils.weight_utils import (
-    get_param, hf_model_weights_iterator, print_param_info, reshape_params,
-    transpose_params)
+from tpu_commons.models.jax.utils.weight_utils import (get_param,
+                                                       model_weights_generator,
+                                                       print_param_info,
+                                                       reshape_params,
+                                                       transpose_params)
 
 logger = init_logger(__name__)
 
 
-class Llama4ForCausalLM(Model):
+class Llama4ForCausalLM(nnx.Module):
 
     def __init__(self,
                  vllm_config: VllmConfig,
                  rng: PRNGKey,
                  mesh: Mesh,
-                 param_factory: ParamFactory | None = None):
+                 force_random_weights: bool = False):
         assert mesh is not None
 
         self.vllm_config = vllm_config
@@ -43,7 +43,6 @@ class Llama4ForCausalLM(Model):
 
         self.rng = nnx.Rngs(rng)
         self.mesh = mesh
-        self.param_factory = param_factory
         self.is_verbose = getattr(self.vllm_config.additional_config,
                                   "is_verbose", False)
 
@@ -75,12 +74,6 @@ class Llama4ForCausalLM(Model):
 
         intermediate_size = 16384
 
-        if not self.param_factory:
-            self.param_factory = ParamFactory(
-                kernel_initializer=nnx.initializers.xavier_normal(),
-                scale_initializer=nnx.initializers.ones,
-                random_init=False)
-
         self.embedder = Embedder(vocab_size=vocab_size,
                                  hidden_size=self.hidden_size,
                                  dtype=dtype,
@@ -89,8 +82,8 @@ class Llama4ForCausalLM(Model):
                                      self.mesh,
                                      P(('data', 'expert', 'model'), None)),
                                  mesh=self.mesh,
-                                 param_factory=self.param_factory)
-        self.embedder.generate_kernel(self.rng)
+                                 rngs=self.rng,
+                                 random_init=force_random_weights)
 
         self.layers = []
 
@@ -101,21 +94,21 @@ class Llama4ForCausalLM(Model):
                             self.interleave_moe_layer_step == 0
             use_attention_rope = (i + 1) % self.no_rope_layer_interval != 0
 
-            router = Router(
-                mesh=self.mesh,
-                dtype=dtype,
-                hidden_size=self.hidden_size,
-                param_factory=self.param_factory,
-                num_experts=num_local_experts,
-                num_experts_per_tok=1,
-                router_act="sigmoid",
-                activation_ffw_td=NamedSharding(self.mesh, P('data', None)),
-                ed_sharding=NamedSharding(self.mesh, P(None, 'expert')),
-            )
+            router = Router(mesh=self.mesh,
+                            dtype=dtype,
+                            hidden_size=self.hidden_size,
+                            num_experts=num_local_experts,
+                            num_experts_per_tok=1,
+                            router_act="sigmoid",
+                            rngs=self.rng,
+                            activation_ffw_td=NamedSharding(
+                                self.mesh, P('data', None)),
+                            ed_sharding=NamedSharding(self.mesh,
+                                                      P(None, 'expert')),
+                            random_init=force_random_weights)
 
             custom_module = MoE(
                 mesh=self.mesh,
-                param_factory=self.param_factory,
                 dtype=dtype,
                 num_local_experts=num_local_experts,
                 apply_expert_weight_before_computation=True,
@@ -123,6 +116,7 @@ class Llama4ForCausalLM(Model):
                 intermediate_size_moe=intermediate_size_moe,
                 hidden_act=hidden_act,
                 router=router,
+                rngs=self.rng,
                 activation_ffw_td=NamedSharding(self.mesh, P('data', None)),
                 activation_ffw_ted=NamedSharding(self.mesh,
                                                  P('data', 'expert', None)),
@@ -130,13 +124,15 @@ class Llama4ForCausalLM(Model):
                     'expert', None, 'model')),
                 efd_sharding=NamedSharding(self.mesh, P(
                     'expert', 'model', None)),
+                random_init=force_random_weights
             ) if is_moe_layer else DenseFFW(
                 mesh=self.mesh,
-                param_factory=self.param_factory,
                 dtype=dtype,
                 hidden_act=hidden_act,
                 hidden_size=self.hidden_size,
                 intermediate_size=intermediate_size,
+                random_init=force_random_weights,
+                rngs=self.rng,
                 df_sharding=NamedSharding(self.mesh, P(None, 'model')),
                 fd_sharding=NamedSharding(self.mesh, P('model', None)),
                 activation_ffw_td=NamedSharding(self.mesh, P('data', None)))
@@ -155,6 +151,7 @@ class Llama4ForCausalLM(Model):
                     "high_freq_factor": 1.0,
                     "original_max_position_embeddings": 8192
                 },
+                rngs=self.rng,
                 rope_input_ordering="interleaved",
                 temperature_tuning=True,
                 temperature_tuning_scale=0.1,
@@ -162,7 +159,7 @@ class Llama4ForCausalLM(Model):
                 use_qk_norm=True,
                 attention_chunk_size=None if use_attention_rope else 8192,
                 mesh=self.mesh,
-                param_factory=self.param_factory,
+                random_init=force_random_weights,
                 activation_attention_td=NamedSharding(self.mesh,
                                                       P('data', 'model')),
                 activation_q_td=NamedSharding(self.mesh, P('data', 'model')),
@@ -171,9 +168,6 @@ class Llama4ForCausalLM(Model):
                                                         None)),
                 activation_attention_out_td=NamedSharding(
                     self.mesh, P('data', 'model')),
-                keyvalue_cache_lskh=NamedSharding(self.mesh,
-                                                  P(None, None, 'model',
-                                                    None)),
                 attn_o_tnh=NamedSharding(self.mesh, P('data', 'model', None)),
                 dnh_sharding=NamedSharding(self.mesh, P(None, 'model', None)),
                 dkh_sharding=NamedSharding(self.mesh, P(None, 'model', None)),
@@ -186,7 +180,8 @@ class Llama4ForCausalLM(Model):
                 hidden_size=self.hidden_size,
                 intermediate_size=num_shared_experts * intermediate_size_moe,
                 mesh=self.mesh,
-                param_factory=self.param_factory,
+                rngs=self.rng,
+                random_init=force_random_weights,
                 df_sharding=NamedSharding(self.mesh, P(None, 'model')),
                 fd_sharding=NamedSharding(self.mesh, P('model', None)),
                 activation_ffw_td=NamedSharding(self.mesh, P('data', None)))
@@ -194,8 +189,9 @@ class Llama4ForCausalLM(Model):
             pre_attention_norm = RMSNorm(
                 dims=self.hidden_size,
                 mesh=self.mesh,
-                param_factory=self.param_factory,
+                random_init=force_random_weights,
                 epsilon=rms_norm_eps,
+                rngs=self.rng,
                 activation_ffw_td=NamedSharding(self.mesh, P()),
                 with_scale=True,
                 dtype=dtype,
@@ -204,11 +200,12 @@ class Llama4ForCausalLM(Model):
             pre_mlp_norm = RMSNorm(
                 dims=self.hidden_size,
                 mesh=self.mesh,
-                param_factory=self.param_factory,
                 activation_ffw_td=NamedSharding(self.mesh, P()),
                 epsilon=rms_norm_eps,
+                rngs=self.rng,
                 with_scale=True,
                 dtype=dtype,
+                random_init=force_random_weights,
             )
 
             block = SharedExpertsTransformerBlock(
@@ -220,32 +217,29 @@ class Llama4ForCausalLM(Model):
                 use_attention_rope=use_attention_rope)
             self.layers.append(block)
 
-        for i in range(len(self.layers)):
-            self.layers[i].generate_kernel(self.rng)
-
         self.final_norm = RMSNorm(
             dims=self.hidden_size,
             mesh=self.mesh,
-            param_factory=self.param_factory,
             activation_ffw_td=NamedSharding(self.mesh, P()),
             epsilon=rms_norm_eps,
+            rngs=self.rng,
             with_scale=True,
             dtype=dtype,
+            random_init=force_random_weights,
         )
-        self.final_norm.generate_kernel(self.rng)
 
         self.lm_head = LMhead(
             vocab_size=vocab_size,
             hidden_size=self.hidden_size,
             dtype=dtype,
+            rngs=self.rng,
             prelogit_td=NamedSharding(self.mesh, P()),
             vd_sharding=NamedSharding(self.mesh,
                                       P(('data', 'expert', 'model'), None)),
             dv_sharding=NamedSharding(self.mesh,
                                       P(None, ('data', 'expert', 'model'))),
             mesh=self.mesh,
-            param_factory=self.param_factory)
-        self.lm_head.generate_kernel(self.rng)
+            random_init=force_random_weights)
         if self.is_verbose:
             self._print_model_architecture()
 
@@ -266,7 +260,6 @@ class Llama4ForCausalLM(Model):
         nnx.display(self.lm_head)
 
     def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):
-        self.rng = nnx.Rngs(rng)
         weight_loader = Llama4WeightLoader(
             vllm_config=self.vllm_config,
             hidden_size=self.hidden_size,
@@ -305,10 +298,11 @@ class Llama4WeightLoader:
 
     def __init__(self, vllm_config: VllmConfig, hidden_size, attn_heads,
                  num_key_value_heads, attn_head_dim):
-        self.names_and_weights_generator = hf_model_weights_iterator(
+        self.names_and_weights_generator = model_weights_generator(
             model_name_or_path=vllm_config.model_config.model,
             framework="flax",
-            filter_regex="language_model")
+            filter_regex="language_model",
+            download_dir=vllm_config.load_config.download_dir)
         self.is_verbose = getattr(vllm_config.additional_config, "is_verbose",
                                   False)
         self._transpose_map = {

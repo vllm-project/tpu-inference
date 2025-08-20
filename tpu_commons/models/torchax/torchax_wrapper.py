@@ -4,8 +4,11 @@ import functools
 import jax
 import numpy as np
 import torch
+import torch.nn.functional as F
 import torchax
 from jax import Array
+from jax.experimental.pallas.ops.tpu.flash_attention import \
+    flash_attention as flash_attention_kernel
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from torch.nn.utils import stateless as torch_stateless
@@ -52,13 +55,17 @@ def wrap_model(m, vllm_config, static_forward_context):
                                  num_tokens=num_tokens):
             for layer_name, attn in static_forward_context.items():
                 attn.kv_cache = [kv_caches[layer_name]]
+            kwargs = {
+                "input_ids": inputs[0],
+                "positions": inputs[1],
+            }
+            if vllm_config.model_config.is_multimodal_model and len(
+                    inputs) > 1:
+                kwargs["inputs_embeds"] = inputs[2]
             # TODO: some buffers are tied, investigate how it works.
             res = torch.func.functional_call(m,
                                              weights,
-                                             kwargs={
-                                                 "input_ids": inputs[0],
-                                                 "positions": inputs[1],
-                                             },
+                                             kwargs=kwargs,
                                              tie_weights=False)
             new_kv_cache = dict()
             for layer_name, attn in static_forward_context.items():
@@ -223,3 +230,80 @@ def _kv_cache_update(
 
 
 kv_cache_update = functools.partial(call_jax, _kv_cache_update)
+
+
+@functools.partial(
+    jax.jit,
+    static_argnames=["causal", "sm_scale"],
+)
+def _flash_attention(
+    q: Array,  # [batch, num_heads, seq_len, head_dim]
+    k: Array,  # [batch, num_heads, seq_len, head_dim]
+    v: Array,  # [batch, num_heads, seq_len, head_dim]
+    causal: bool = False,
+    sm_scale: float = 1.0,
+) -> Array:
+
+    def call_kernel(q, k, v):
+        """Calls the flash attention kernel."""
+        return flash_attention_kernel(q=q,
+                                      k=k,
+                                      v=v,
+                                      causal=causal,
+                                      sm_scale=sm_scale)
+
+    # if SPMD enabled, shard by heads
+    attention_in_specs = (
+        P(None, 'x', None, None),  # q
+        P(None, 'x', None, None),  # k
+        P(None, 'x', None, None),  # v
+    )
+    attention_out_specs = P(None, 'x', None, None)
+
+    @functools.partial(jax.shard_map,
+                       mesh=get_mesh(),
+                       in_specs=attention_in_specs,
+                       out_specs=attention_out_specs,
+                       check_vma=False)
+    def wrap_shard_map(q, k, v):
+        return call_kernel(q, k, v)
+
+    args = (
+        q,
+        k,
+        v,
+    )
+
+    if envs.VLLM_XLA_USE_SPMD:
+        return wrap_shard_map(*args)
+    else:
+        return call_kernel(*args)
+
+
+flash_attention_jax = functools.partial(call_jax, _flash_attention)
+
+
+def flash_attention(
+        q: torch.Tensor,  # [batch, num_heads, seq_len, head_dim]
+        k: torch.Tensor,  # [batch, num_heads, seq_len, head_dim]
+        v: torch.Tensor,  # [batch, num_heads, seq_len, head_dim]
+        q_len: int,
+        kv_len: int,
+        causal: bool = False,
+        sm_scale: float = 1.0,
+        block_size=128):
+
+    pad_q_len = (block_size - q_len % block_size) % block_size
+    if pad_q_len > 0:
+        q = F.pad(q, (0, 0, 0, pad_q_len))
+
+    pad_kv_len = (block_size - kv_len % block_size) % block_size
+    if pad_kv_len > 0:
+        k = F.pad(k, (0, 0, 0, pad_kv_len))
+        v = F.pad(v, (0, 0, 0, pad_kv_len))
+
+    out = flash_attention_jax(q, k, v, causal, sm_scale)
+    out = out.transpose(1, 2)
+    if pad_q_len > 0:
+        out = out[:, :q_len]
+    return out

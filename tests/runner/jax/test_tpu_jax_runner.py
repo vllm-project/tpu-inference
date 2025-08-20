@@ -3,17 +3,21 @@ from unittest.mock import MagicMock, patch
 
 import jax.numpy as jnp
 import numpy as np
-from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig, VllmConfig)
-from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
-from vllm.multimodal.inputs import MultiModalKwargs
-from vllm.sampling_params import SamplingType
-from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
-from vllm.v1.request import PlaceholderRange, Request
 
 from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
                                                     InputBatch)
+from tpu_commons.runner.jax.metadata import SpecDecodeMetadata
 from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
+from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
+                         SchedulerConfig, SpeculativeConfig, VllmConfig)
+from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
+from vllm.multimodal.inputs import (MultiModalBatchedField,
+                                    MultiModalFieldElem, MultiModalKwargsItem)
+from vllm.sampling_params import SamplingType
+from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
+from vllm.v1.outputs import DraftTokenIds
+from vllm.v1.request import PlaceholderRange, Request
+from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
 
 class TestTPUJaxRunner(unittest.TestCase):
@@ -45,98 +49,23 @@ class TestTPUJaxRunner(unittest.TestCase):
                 tensor_parallel_size=1,
                 worker_use_ray=False,
             )
+            speculative_config = SpeculativeConfig(
+                model='ngram',
+                num_speculative_tokens=5,
+                prompt_lookup_max=4,
+            )
             vllm_config = VllmConfig(
                 model_config=model_config,
                 cache_config=cache_config,
                 scheduler_config=scheduler_config,
                 parallel_config=parallel_config,
-                speculative_config=None,
+                speculative_config=speculative_config,
                 observability_config=None,
                 additional_config={},
             )
 
             self.runner = TPUModelRunner(vllm_config,
                                          devices=self.mock_devices)
-
-    def test_get_slot_mapping_metadata_multiple_requests(self):
-        # Setup test case with two requests
-        num_reqs = 2
-        num_scheduled_tokens_per_req = np.array([10, 30], dtype=np.int32)
-
-        # Configure the runner's state
-        self.runner.block_size = 16
-        self.runner.max_num_blocks_per_req = 16  # 256 / 16
-
-        # Mock input_batch state
-        # Request 0 starts from 0, Request 1 starts from 10
-        self.runner.input_batch.num_computed_tokens_cpu = np.array(
-            [0, 10], dtype=np.int32)
-
-        block_table = np.zeros(
-            (self.runner.max_num_reqs, self.runner.max_num_blocks_per_req),
-            dtype=np.int32)
-        # Request 0 uses 1 block, id 100
-        block_table[0, 0] = 100
-        # Request 1 uses 3 blocks, ids 200, 201, 202
-        block_table[1, 0:3] = [200, 201, 202]
-
-        self.runner.input_batch.block_table[0].block_table_cpu = block_table
-
-        # Expected output
-        expected_metadata = np.array(
-            [
-                [1600, 0, 10],  # Req 0, block 0 (id 100), 10 tokens
-                [3210, 10, 6],  # Req 1, block 0 (id 200), 6 tokens (10..15)
-                [3216, 16, 16],  # Req 1, block 1 (id 201), 16 tokens (16..31)
-                [3232, 32, 8]  # Req 1, block 2 (id 202), 8 tokens (32..39)
-            ],
-            dtype=np.int64)
-        print(expected_metadata)
-
-        # Call the function
-        result = self.runner._get_slot_mapping_metadata(
-            num_reqs, num_scheduled_tokens_per_req)
-
-        # Assertions
-        self.assertIsInstance(result, np.ndarray)
-        np.testing.assert_array_equal(result, expected_metadata)
-
-    def test_get_slot_mapping_metadata_single_request_crossing_blocks(self):
-        # Setup test case for a single request that crosses block boundaries
-        num_reqs = 1
-        num_scheduled_tokens_per_req = np.array([20], dtype=np.int32)
-
-        # Configure the runner's state
-        self.runner.block_size = 16
-        self.runner.max_num_blocks_per_req = 16
-
-        # Mock input_batch state
-        # Request starts from token 5
-        self.runner.input_batch.num_computed_tokens_cpu = np.array(
-            [5], dtype=np.int32)
-
-        block_table = np.zeros(
-            (self.runner.max_num_reqs, self.runner.max_num_blocks_per_req),
-            dtype=np.int32)
-        # Request uses 2 blocks, ids 50, 51
-        block_table[0, 0:2] = [50, 51]
-
-        self.runner.input_batch.block_table[0].block_table_cpu = block_table
-
-        # Expected output
-        expected_metadata = np.array(
-            [
-                [805, 0, 11],  # Req 0, block 0 (id 50), 11 tokens (5..15)
-                [816, 11, 9]  # Req 0, block 1 (id 51), 9 tokens (16..24)
-            ],
-            dtype=np.int64)
-
-        # Call the function
-        result = self.runner._get_slot_mapping_metadata(
-            num_reqs, num_scheduled_tokens_per_req)
-
-        # Assertions
-        np.testing.assert_array_equal(result, expected_metadata)
 
     def test_insert_request_with_kv_cache(self):
         # This test refines the insertion test by first extracting a KV cache
@@ -192,7 +121,7 @@ class TestTPUJaxRunner(unittest.TestCase):
             block_ids=tuple([prefill_block_ids]),
             num_computed_tokens=0,
             lora_request=None,
-            mm_inputs=[],
+            mm_kwargs=[],
             mm_hashes=[],
             mm_positions=[],
             pooling_params=None,
@@ -240,7 +169,7 @@ class TestTPUJaxRunner(unittest.TestCase):
         decode_request.sampling_params = mock_sampling_params
 
         decode_request.lora_request = None
-        decode_request.mm_inputs, decode_request.mm_positions = [], []
+        decode_request.mm_kwargs, decode_request.mm_positions = [], []
         decode_request.pooling_params, decode_request.generator = None, None
 
         # Prepare the KV cache slices for insertion. They must be padded to the
@@ -320,7 +249,7 @@ class TestTPUJaxRunner(unittest.TestCase):
             block_ids=([1], ),
             num_computed_tokens=1,
             lora_request=None,
-            mm_inputs=[],
+            mm_kwargs=[],
             mm_hashes=[],
             mm_positions=[],
             pooling_params=None,
@@ -334,7 +263,7 @@ class TestTPUJaxRunner(unittest.TestCase):
             block_ids=([2], ),
             num_computed_tokens=1,
             lora_request=None,
-            mm_inputs=[],
+            mm_kwargs=[],
             mm_hashes=[],
             mm_positions=[],
             pooling_params=None,
@@ -348,7 +277,7 @@ class TestTPUJaxRunner(unittest.TestCase):
             block_ids=([3], ),
             num_computed_tokens=1,
             lora_request=None,
-            mm_inputs=[],
+            mm_kwargs=[],
             mm_hashes=[],
             mm_positions=[],
             pooling_params=None,
@@ -422,90 +351,6 @@ class TestTPUJaxRunner(unittest.TestCase):
         self.assertTrue(np.all(modified_logits_cpu[2, :32] == -np.inf))
         self.assertTrue(np.all(modified_logits_cpu[2, 32:] == 1.0))
 
-    def test_reorder_batch(self):
-        # Helper to set up the runner's input_batch for a test case
-        def setup_batch(req_token_map: dict[str, int]):
-            # Re-initialize input_batch for a clean state
-            self.runner.input_batch = InputBatch(
-                max_num_reqs=self.runner.max_num_reqs,
-                max_model_len=self.runner.max_model_len,
-                max_num_batched_tokens=self.runner.max_num_tokens,
-                pin_memory=False,
-                vocab_size=self.runner.vocab_size,
-                block_sizes=[self.runner.block_size],
-            )
-            self.runner.requests = {}
-
-            # Create a mock for sampling_params
-            mock_sampling_params = MagicMock()
-            mock_sampling_params.sampling_type = SamplingType.GREEDY
-            mock_sampling_params.temperature = 0.0
-            mock_sampling_params.top_p = 1.0
-            mock_sampling_params.top_k = -1
-            mock_sampling_params.min_tokens = 0
-            mock_sampling_params.logprobs = None
-            mock_sampling_params.logit_bias = None
-            mock_sampling_params.allowed_token_ids = set()
-            mock_sampling_params.bad_words_token_ids = None
-            mock_sampling_params.all_stop_token_ids = set()
-
-            # Add requests in the order they appear in the map
-            for req_id in req_token_map.keys():
-                req_state = CachedRequestState(
-                    req_id=req_id,
-                    prompt_token_ids=[0],
-                    output_token_ids=[],
-                    sampling_params=mock_sampling_params,
-                    block_ids=([1], ),
-                    num_computed_tokens=1,
-                    lora_request=None,
-                    mm_inputs=[],
-                    mm_hashes=[],
-                    mm_positions=[],
-                    pooling_params=None,
-                    generator=None,
-                )
-                self.runner.input_batch.add_request(req_state)
-                self.runner.requests[req_id] = req_state
-
-            # Mock scheduler output
-            mock_scheduler_output = MagicMock()
-            mock_scheduler_output.num_scheduled_tokens = req_token_map
-            return mock_scheduler_output
-
-        # Test case 1: Requests already sorted.
-        req_map = {"d1": 1, "d2": 1, "p1": 10, "p2": 10, "p3": 5}
-        scheduler_output = setup_batch(req_map)
-        modified = self.runner._reorder_batch(scheduler_output)
-        self.assertFalse(modified)
-        self.assertEqual(self.runner.input_batch.req_ids,
-                         ["d1", "d2", "p1", "p2", "p3"])
-        np.testing.assert_array_equal(
-            self.runner.input_batch.request_distribution, [2, 2, 1])
-
-        # Test case 2: Simple 2-way swap.
-        req_map = {"p1": 10, "d1": 1, "p2": 10, "p3": 5}
-        scheduler_output = setup_batch(req_map)
-        modified = self.runner._reorder_batch(scheduler_output)
-        self.assertTrue(modified)
-        final_ids = self.runner.input_batch.req_ids
-        self.assertEqual(self.runner.input_batch.req_ids,
-                         ["d1", "p1", "p2", "p3"])
-        np.testing.assert_array_equal(
-            self.runner.input_batch.request_distribution, [1, 2, 1])
-
-        # Test case 3: Complex reordering with multiple swaps
-        req_map = {"p1": 5, "p2": 10, "d1": 1, "p3": 10, "d2": 1, "p4": 20}
-        scheduler_output = setup_batch(req_map)
-        modified = self.runner._reorder_batch(scheduler_output)
-        self.assertTrue(modified)
-        final_ids = self.runner.input_batch.req_ids
-        self.assertEqual(set(final_ids[0:2]), {"d1", "d2"})
-        self.assertEqual(set(final_ids[2:4]), {"p2", "p3"})
-        self.assertEqual(set(final_ids[4:6]), {"p1", "p4"})
-        np.testing.assert_array_equal(
-            self.runner.input_batch.request_distribution, [2, 2, 2])
-
     def test_execute_mm_encoder_single_image(self):
         import torch
         """Tests _execute_mm_encoder with a single request and a single image."""
@@ -522,10 +367,12 @@ class TestTPUJaxRunner(unittest.TestCase):
         # Mock request state
         dummy_pixel_values = torch.randn(3, 224, 224, dtype=torch.bfloat16)
         dummy_grid_thw = torch.tensor([[1, 1, 1]], dtype=torch.int64)
-        mm_kwargs = MultiModalKwargs({
-            "pixel_values": dummy_pixel_values,
-            "image_grid_thw": dummy_grid_thw,
-        })
+        mm_item = MultiModalKwargsItem.from_elems([
+            MultiModalFieldElem("image", "pixel_values", dummy_pixel_values,
+                                MultiModalBatchedField()),
+            MultiModalFieldElem("image", "image_grid_thw", dummy_grid_thw,
+                                MultiModalBatchedField())
+        ])
 
         req_state = CachedRequestState(
             req_id="req-1",
@@ -534,7 +381,7 @@ class TestTPUJaxRunner(unittest.TestCase):
             sampling_params=MagicMock(),
             block_ids=(),
             num_computed_tokens=0,
-            mm_inputs=[mm_kwargs],
+            mm_kwargs=[mm_item],
             mm_positions=[PlaceholderRange(offset=0, length=1)],
             lora_request=None,
             mm_hashes=[],
@@ -577,8 +424,8 @@ class TestTPUJaxRunner(unittest.TestCase):
         self.assertEqual(passed_pixel_values.dtype, jnp.bfloat16)
 
         # Convert torch tensor for comparison
-        expected_pixel_values = dummy_pixel_values.unsqueeze(0).to(
-            torch.float32).numpy().astype(jnp.bfloat16)
+        expected_pixel_values = dummy_pixel_values.unsqueeze(0).unsqueeze(
+            0).to(torch.float32).numpy().astype(jnp.bfloat16)
         np.testing.assert_array_equal(np.asarray(passed_pixel_values),
                                       expected_pixel_values)
 
@@ -601,10 +448,14 @@ class TestTPUJaxRunner(unittest.TestCase):
         # Mock request states
         px_1 = torch.randn(3, 224, 224, dtype=torch.bfloat16)
         grid_1 = torch.tensor([[1, 1, 1]], dtype=torch.int64)
-        mm_kwargs_1 = MultiModalKwargs({
-            "pixel_values": px_1,
-            "image_grid_thw": grid_1
-        })
+
+        mm_item_1 = MultiModalKwargsItem.from_elems([
+            MultiModalFieldElem("image", "pixel_values", px_1,
+                                MultiModalBatchedField()),
+            MultiModalFieldElem("image", "image_grid_thw", grid_1,
+                                MultiModalBatchedField())
+        ])
+
         req_state_1 = CachedRequestState(
             req_id="req-1",
             prompt_token_ids=[],
@@ -612,7 +463,7 @@ class TestTPUJaxRunner(unittest.TestCase):
             sampling_params=MagicMock(),
             block_ids=(),
             num_computed_tokens=0,
-            mm_inputs=[mm_kwargs_1],
+            mm_kwargs=[mm_item_1],
             mm_positions=[PlaceholderRange(offset=0, length=1)],
             lora_request=None,
             mm_hashes=[],
@@ -621,10 +472,13 @@ class TestTPUJaxRunner(unittest.TestCase):
 
         px_2 = torch.randn(3, 224, 224, dtype=torch.bfloat16)
         grid_2 = torch.tensor([[1, 2, 2]], dtype=torch.int64)
-        mm_kwargs_2 = MultiModalKwargs({
-            "pixel_values": px_2,
-            "image_grid_thw": grid_2
-        })
+        mm_item_2 = MultiModalKwargsItem.from_elems([
+            MultiModalFieldElem("image", "pixel_values", px_2,
+                                MultiModalBatchedField()),
+            MultiModalFieldElem("image", "image_grid_thw", grid_2,
+                                MultiModalBatchedField())
+        ])
+
         req_state_2 = CachedRequestState(
             req_id="req-2",
             prompt_token_ids=[],
@@ -632,7 +486,7 @@ class TestTPUJaxRunner(unittest.TestCase):
             sampling_params=MagicMock(),
             block_ids=(),
             num_computed_tokens=0,
-            mm_inputs=[mm_kwargs_2],
+            mm_kwargs=[mm_item_2],
             mm_positions=[PlaceholderRange(offset=0, length=1)],
             lora_request=None,
             mm_hashes=[],
@@ -669,10 +523,11 @@ class TestTPUJaxRunner(unittest.TestCase):
         self.assertIn("pixel_values", kwargs_arg)
 
         passed_pixel_values = kwargs_arg['pixel_values']
-        self.assertEqual(passed_pixel_values.shape, (2, 3, 224, 224))
+        self.assertEqual(passed_pixel_values.shape, (2, 1, 3, 224, 224))
 
-        expected_pixel_values = torch.stack([px_1, px_2], dim=0).to(
-            torch.float32).numpy().astype(jnp.bfloat16)
+        expected_pixel_values = torch.stack(
+            [px_1, px_2],
+            dim=0).unsqueeze(1).to(torch.float32).numpy().astype(jnp.bfloat16)
         np.testing.assert_array_equal(np.asarray(passed_pixel_values),
                                       expected_pixel_values)
 
@@ -707,7 +562,7 @@ class TestTPUJaxRunner(unittest.TestCase):
             sampling_params=mock_sampling_params,
             block_ids=([], ),
             num_computed_tokens=0,  # This will be updated per step
-            mm_inputs=[],
+            mm_kwargs=[],
             mm_positions=[PlaceholderRange(offset=10, length=56)],
             lora_request=None,
             mm_hashes=[],
@@ -830,7 +685,7 @@ class TestTPUJaxRunner(unittest.TestCase):
             sampling_params=mock_sampling_params,
             block_ids=([], ),
             num_computed_tokens=num_computed,
-            mm_inputs=[],
+            mm_kwargs=[],
             mm_positions=[],
             lora_request=None,
             mm_hashes=[],
@@ -870,6 +725,466 @@ class TestTPUJaxRunner(unittest.TestCase):
             self.assertEqual(call_kwargs["mrope_position_delta"], mrope_delta)
             self.assertEqual(call_kwargs["context_len"], prompt_len)
             self.assertEqual(call_kwargs["num_new_tokens"], 5)
+
+    def test_propose_draft_token_ids_wrong_drafter_type(self):
+        """Tests that an assertion is raised if the drafter is not an NgramProposer."""
+        # The default drafter is NgramProposer, so we replace it with a generic mock
+        self.runner.drafter = MagicMock()
+        with self.assertRaises(AssertionError):
+            self.runner.propose_draft_token_ids([[1]])
+
+    def test_propose_ngram_draft_token_ids(self):
+        """Tests the logic for proposing N-gram draft tokens under various conditions."""
+        # 1. ===== Setup =====
+        # Mock the NgramProposer
+        self.runner.drafter = MagicMock(spec=NgramProposer)
+
+        # Re-initialize input_batch for a clean state for this specific test
+        self.runner.input_batch = InputBatch(
+            max_num_reqs=self.runner.max_num_reqs,
+            max_model_len=self.runner.max_model_len,
+            max_num_batched_tokens=self.runner.max_num_tokens,
+            pin_memory=False,
+            vocab_size=self.runner.vocab_size,
+            block_sizes=[self.runner.block_size],
+            is_spec_decode=True,
+        )
+
+        # Patch is_spec_decode_unsupported to control which requests are marked
+        # as unsupported for speculative decoding.
+        with patch(
+                'tpu_commons.runner.jax.input_batch_jax.is_spec_decode_unsupported'
+        ) as mock_is_unsupported:
+            # We want req-2 to be unsupported. Let's use a simple condition.
+            mock_is_unsupported.return_value = False
+
+            # Setup input_batch with 5 requests for different scenarios
+            for i in range(5):
+                mock_sampling_params = MagicMock()
+                mock_sampling_params.sampling_type = SamplingType.GREEDY
+                # This will trigger the mock for req-2
+                mock_sampling_params.top_k = -1
+                mock_sampling_params.top_p = 1.0
+                mock_sampling_params.temperature = 0.0
+                mock_sampling_params.min_tokens = 0
+                mock_sampling_params.logprobs = None
+                mock_sampling_params.logit_bias = None
+                mock_sampling_params.allowed_token_ids = set()
+                mock_sampling_params.bad_words_token_ids = None
+                mock_sampling_params.all_stop_token_ids = set()
+                req_state = CachedRequestState(
+                    req_id=f"req-{i}",
+                    prompt_token_ids=[i] * 10,  # Give some content to tokens
+                    output_token_ids=[],
+                    sampling_params=mock_sampling_params,
+                    block_ids=([1], ),
+                    num_computed_tokens=10,
+                    lora_request=None,
+                    mm_hashes=[],
+                    mm_kwargs=[],
+                    mm_positions=[],
+                    pooling_params=None,
+                    generator=None,
+                )
+                self.runner.input_batch.add_request(req_state)
+
+        # Configure other individual requests for different test cases
+        # req-0: Normal case, should propose tokens.
+        # req-1: No sampled tokens provided, should propose nothing.
+        # req-2: Unsupported for spec decode (handled by mock).
+        self.runner.input_batch.spec_decode_unsupported_reqs.add("req-2")
+        # req-3: Max length reached, should propose nothing.
+        self.runner.input_batch.num_tokens_no_spec[
+            3] = self.runner.max_model_len
+
+        # req-4: Drafter returns None, should propose nothing.
+
+        # Mock the drafter's propose method to handle different cases
+        def propose_side_effect(tokens):
+            # Identify request by its unique token id
+            if tokens[0] == 0:  # req-0
+                return np.array([10, 11, 12])
+            if tokens[0] == 4:  # req-4
+                return None
+            # Should not be called for other requests
+            return np.array([])
+
+        self.runner.drafter.propose.side_effect = propose_side_effect
+
+        # Input to the function being tested
+        sampled_token_ids = [
+            [100],  # req-0: has a new token
+            [],  # req-1: has no new tokens
+            [102],  # req-2: has a new token
+            [103],  # req-3: has a new token
+            [104],  # req-4: has a new token
+        ]
+
+        # 2. ===== Act =====
+        result = self.runner.propose_ngram_draft_token_ids(sampled_token_ids)
+
+        # 3. ===== Assert =====
+        expected_result = [
+            [10, 11, 12],  # req-0: normal proposal
+            [],  # req-1: no sampled tokens
+            [],  # req-2: unsupported
+            [],  # req-3: max length
+            [],  # req-4: drafter returns None
+        ]
+        self.assertEqual(result, expected_result)
+
+        # Verify that drafter.propose was called for the correct requests (req-0 and req-4)
+        self.assertEqual(self.runner.drafter.propose.call_count, 2)
+
+        # Get the tokens passed to the mock
+        called_with_tokens = [
+            call.args[0] for call in self.runner.drafter.propose.call_args_list
+        ]
+
+        # Check that one call was for req-0's tokens
+        expected_tokens_req0 = self.runner.input_batch.token_ids_cpu[0, :10]
+        self.assertTrue(
+            any(
+                np.array_equal(arg, expected_tokens_req0)
+                for arg in called_with_tokens))
+
+        # Check that one call was for req-4's tokens
+        expected_tokens_req4 = self.runner.input_batch.token_ids_cpu[4, :10]
+        self.assertTrue(
+            any(
+                np.array_equal(arg, expected_tokens_req4)
+                for arg in called_with_tokens))
+
+    def test_take_draft_token_ids(self):
+        """Tests the take_draft_token_ids method for speculative decoding."""
+        # Case 1: No draft tokens are available.
+        self.runner._draft_token_ids = None
+        result = self.runner.take_draft_token_ids()
+        self.assertIsNone(result)
+
+        # Case 2: Draft tokens are available.
+        mock_req_ids = ["req-1", "req-2"]
+        mock_draft_ids = [[10, 11], [20, 21, 22]]
+
+        # Re-initialize input_batch for a clean state for this specific test
+        self.runner.input_batch = InputBatch(
+            max_num_reqs=self.runner.max_num_reqs,
+            max_model_len=self.runner.max_model_len,
+            max_num_batched_tokens=self.runner.max_num_tokens,
+            pin_memory=False,
+            vocab_size=self.runner.vocab_size,
+            block_sizes=[self.runner.block_size],
+            is_spec_decode=True,
+        )
+
+        # Add some requests to populate `input_batch.req_ids`
+        mock_sampling_params = MagicMock()
+        mock_sampling_params.sampling_type = SamplingType.GREEDY
+        mock_sampling_params.top_k = -1
+        mock_sampling_params.top_p = 1.0
+        mock_sampling_params.temperature = 0.0
+        mock_sampling_params.min_tokens = 0
+        mock_sampling_params.logprobs = None
+        mock_sampling_params.logit_bias = None
+        mock_sampling_params.allowed_token_ids = set()
+        mock_sampling_params.bad_words_token_ids = None
+        mock_sampling_params.all_stop_token_ids = set()
+
+        req1 = CachedRequestState(req_id="req-1",
+                                  prompt_token_ids=[1],
+                                  output_token_ids=[],
+                                  sampling_params=mock_sampling_params,
+                                  block_ids=([1], ),
+                                  num_computed_tokens=1,
+                                  lora_request=None,
+                                  mm_kwargs=[],
+                                  mm_hashes=[],
+                                  mm_positions=[],
+                                  pooling_params=None,
+                                  generator=None)
+        req2 = CachedRequestState(req_id="req-2",
+                                  prompt_token_ids=[2],
+                                  output_token_ids=[],
+                                  sampling_params=mock_sampling_params,
+                                  block_ids=([2], ),
+                                  num_computed_tokens=1,
+                                  lora_request=None,
+                                  mm_kwargs=[],
+                                  mm_hashes=[],
+                                  mm_positions=[],
+                                  pooling_params=None,
+                                  generator=None)
+        self.runner.input_batch.add_request(req1)
+        self.runner.input_batch.add_request(req2)
+
+        # Set the draft tokens to be taken
+        self.runner._draft_token_ids = mock_draft_ids
+
+        # Call the method to be tested
+        result = self.runner.take_draft_token_ids()
+
+        # Assertions for the returned object
+        self.assertIsNotNone(result)
+        self.assertIsInstance(result, DraftTokenIds)
+        self.assertEqual(result.req_ids, mock_req_ids)
+        self.assertEqual(result.draft_token_ids, mock_draft_ids)
+
+        # Assert that the internal state is reset
+        self.assertIsNone(self.runner._draft_token_ids)
+
+        # Case 3: Call again after taking, should return None
+        result_after = self.runner.take_draft_token_ids()
+        self.assertIsNone(result_after)
+
+    def test_get_spec_decode_metadata(self):
+        """Tests the _get_spec_decode_metadata function with a sample case."""
+        # 1. ===== Setup =====
+        # Use the example from the function's docstring
+        num_draft_tokens = np.array([3, 0, 2, 0, 1], dtype=np.int32)
+        cu_num_scheduled_tokens = np.array([4, 104, 107, 207, 209],
+                                           dtype=np.int32)
+
+        # Mock runner attributes needed by the function
+        self.runner.arange_cpu = np.arange(1024, dtype=np.int64)
+        # Let's make input_ids_cpu just a sequence of numbers for easy verification
+        self.runner.input_ids_cpu = np.arange(1024, dtype=np.int32) * 10
+        self.runner.num_tokens_paddings = [16, 32, 64, 128, 256, 512, 1024]
+
+        # Mock the _device_array function to just return the numpy arrays
+        def mock_device_array(*args, **kwargs):
+            if len(args) == 1 and isinstance(args[0], tuple):
+                return args[0]
+            return args
+
+        self.runner._device_array = mock_device_array
+
+        # 2. ===== Act =====
+        padded_num_reqs = 8
+        metadata = self.runner._get_spec_decode_metadata(
+            num_draft_tokens,
+            cu_num_scheduled_tokens,
+            padded_num_reqs=padded_num_reqs)
+
+        # 3. ===== Assert =====
+        self.assertIsInstance(metadata, SpecDecodeMetadata)
+        self.assertEqual(metadata.max_spec_len, 3)
+
+        # final_logits_indices are the indices of all tokens (sampled + draft)
+        # in the flattened input_ids buffer, padded to a bucket size.
+        expected_logits_indices = np.array(
+            [0, 1, 2, 3, 103, 104, 105, 106, 206, 207, 208], dtype=np.int32)
+        padded_len = 16
+        expected_padded_logits_indices = np.pad(
+            expected_logits_indices,
+            (0, padded_len - len(expected_logits_indices)))
+        np.testing.assert_array_equal(
+            np.asarray(metadata.final_logits_indices),
+            expected_padded_logits_indices)
+
+        # bonus_logits_indices are the indices of the bonus tokens.
+        expected_bonus_logits_indices = np.array([3, 4, 7, 8, 10, 0, 0, 0],
+                                                 dtype=np.int32)
+        np.testing.assert_array_equal(
+            np.asarray(metadata.bonus_logits_indices),
+            expected_bonus_logits_indices)
+
+        # target_logits_indices are the indices of the draft tokens' logits.
+        expected_target_logits_indices = np.array(
+            [0, 1, 2, 5, 6, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], dtype=np.int32)
+        np.testing.assert_array_equal(
+            np.asarray(metadata.target_logits_indices),
+            expected_target_logits_indices)
+
+        # draft_token_ids are the actual token ids of the draft tokens.
+        expected_draft_token_ids = np.array(
+            [10, 20, 30, 1050, 1060, 2080, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            dtype=np.int32)
+        np.testing.assert_array_equal(np.asarray(metadata.draft_token_ids),
+                                      expected_draft_token_ids)
+
+        # draft_lengths are the number of draft tokens per request.
+        expected_num_draft_tokens = np.pad(
+            num_draft_tokens, (0, padded_num_reqs - len(num_draft_tokens)))
+        np.testing.assert_array_equal(np.asarray(metadata.draft_lengths),
+                                      expected_num_draft_tokens)
+
+    def test_get_spec_decode_metadata_high_speculative_tokens(self):
+        """Tests _get_spec_decode_metadata when sum of speculative tokens exceeds padded_num_reqs.
+
+        This test covers the edge case that previously had a bug where the total number
+        of speculative tokens across all requests exceeds the padded number of requests.
+        """
+        # 1. ===== Setup =====
+        # Use parameters where sum(num_draft_tokens) > padded_num_reqs
+        num_draft_tokens = np.array([5, 3, 4, 2, 1],
+                                    dtype=np.int32)  # sum = 15
+        cu_num_scheduled_tokens = np.array([6, 10, 18, 22, 26], dtype=np.int32)
+
+        # Mock runner attributes needed by the function
+        self.runner.arange_cpu = np.arange(1024, dtype=np.int64)
+        # Make input_ids_cpu a sequence of numbers for easy verification
+        self.runner.input_ids_cpu = np.arange(1024, dtype=np.int32) * 10
+        self.runner.num_tokens_paddings = [16, 32, 64, 128, 256, 512, 1024]
+
+        # Mock the _device_array function to just return the numpy arrays
+        def mock_device_array(*args, **kwargs):
+            if len(args) == 1 and isinstance(args[0], tuple):
+                return args[0]
+            return args
+
+        self.runner._device_array = mock_device_array
+
+        # 2. ===== Act =====
+        padded_num_reqs = 8  # This is less than sum(num_draft_tokens) = 15
+        metadata = self.runner._get_spec_decode_metadata(
+            num_draft_tokens,
+            cu_num_scheduled_tokens,
+            padded_num_reqs=padded_num_reqs)
+
+        # 3. ===== Assert =====
+        self.assertIsInstance(metadata, SpecDecodeMetadata)
+        self.assertEqual(metadata.max_spec_len, 5)  # max(num_draft_tokens)
+
+        # Calculate expected values manually
+        num_sampled_tokens = num_draft_tokens + 1  # [6, 4, 5, 3, 2]
+        cu_num_sampled_tokens = np.cumsum(
+            num_sampled_tokens)  # [6, 10, 15, 18, 20]
+
+        # Build expected logits indices
+        expected_logits_indices = []
+        for i, n_sampled in enumerate(num_sampled_tokens):
+            start_pos = cu_num_scheduled_tokens[i] - n_sampled
+            expected_logits_indices.extend(
+                range(start_pos, start_pos + n_sampled))
+
+        expected_logits_indices = np.array(expected_logits_indices,
+                                           dtype=np.int32)
+        # [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 13, 14, 15, 16, 17, 19, 20, 21, 24, 25]
+
+        padded_len = 32  # Should be padded to next bucket size
+        expected_padded_logits_indices = np.pad(
+            expected_logits_indices,
+            (0, padded_len - len(expected_logits_indices)))
+        np.testing.assert_array_equal(
+            np.asarray(metadata.final_logits_indices),
+            expected_padded_logits_indices)
+
+        # bonus_logits_indices are the indices of the bonus tokens (last sampled token per request)
+        expected_bonus_logits_indices = cu_num_sampled_tokens - 1  # [5, 9, 14, 17, 19]
+        expected_bonus_logits_indices = np.pad(
+            expected_bonus_logits_indices,
+            (0, padded_num_reqs - len(expected_bonus_logits_indices)))
+        np.testing.assert_array_equal(
+            np.asarray(metadata.bonus_logits_indices),
+            expected_bonus_logits_indices)
+
+        # target_logits_indices are the indices of the draft tokens' logits
+        expected_target_logits_indices = []
+        for i, n_draft in enumerate(num_draft_tokens):
+            start_pos = cu_num_sampled_tokens[i] - num_sampled_tokens[i]
+            expected_target_logits_indices.extend(
+                range(start_pos, start_pos + n_draft))
+
+        expected_target_logits_indices = np.array(
+            expected_target_logits_indices, dtype=np.int32)
+        # [0, 1, 2, 3, 4, 6, 7, 8, 10, 11, 12, 13, 15, 16, 18]
+        expected_target_logits_indices = np.pad(
+            expected_target_logits_indices,
+            (0, padded_len - len(expected_target_logits_indices)))
+        np.testing.assert_array_equal(
+            np.asarray(metadata.target_logits_indices),
+            expected_target_logits_indices)
+
+        # draft_token_ids calculation - follow exact same algorithm as original test
+        # The algorithm: draft_token_ids = input_ids_cpu[logits_indices][target_logits_indices + 1]
+        draft_token_ids = self.runner.input_ids_cpu[expected_logits_indices]
+        expected_draft_token_ids = draft_token_ids[
+            expected_target_logits_indices[:15] +
+            1]  # 15 = sum(num_draft_tokens)
+        expected_draft_token_ids = np.pad(
+            expected_draft_token_ids,
+            (0, padded_len - len(expected_draft_token_ids)))
+        np.testing.assert_array_equal(np.asarray(metadata.draft_token_ids),
+                                      expected_draft_token_ids)
+
+        # draft_lengths are the number of draft tokens per request
+        expected_num_draft_tokens = np.pad(
+            num_draft_tokens, (0, padded_num_reqs - len(num_draft_tokens)))
+        np.testing.assert_array_equal(np.asarray(metadata.draft_lengths),
+                                      expected_num_draft_tokens)
+
+
+class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly(unittest.TestCase):
+
+    def setUp(self):
+        # Mock JAX dependencies
+        self.mock_devices = [MagicMock()] * 4
+        self.mock_mesh = MagicMock()
+        self.mock_rng_key = MagicMock()
+
+        # Setup the runner with the model_config.is_multimodal_model set to True but get_model returning None for get_multimodal_embeddings_fn and get_input_embeddings_fn.
+        with patch('jax.devices', return_value=self.mock_devices), \
+             patch('jax.make_mesh', return_value=self.mock_mesh), \
+             patch('jax.random.key', return_value=self.mock_rng_key), \
+             patch('tpu_commons.runner.jax.tpu_jax_runner.nnx.Rngs', return_value=self.mock_rng_key), \
+             patch('tpu_commons.runner.jax.tpu_jax_runner.get_model', return_value=self._model_get_model()):
+
+            model_config = ModelConfig(tokenizer_mode="auto",
+                                       trust_remote_code=False,
+                                       seed=0,
+                                       dtype='bfloat16')
+            # Set multimodal_config to not None, such that the is_multimodal_model property of model_config is True.
+            model_config.multimodal_config = MagicMock()
+
+            cache_config = CacheConfig(
+                block_size=16,
+                gpu_memory_utilization=0.9,
+                swap_space=4,
+                cache_dtype="auto",
+            )
+            scheduler_config = SchedulerConfig(max_num_seqs=16, )
+            parallel_config = ParallelConfig(
+                pipeline_parallel_size=1,
+                tensor_parallel_size=1,
+                worker_use_ray=False,
+            )
+            vllm_config = VllmConfig(
+                model_config=model_config,
+                cache_config=cache_config,
+                scheduler_config=scheduler_config,
+                parallel_config=parallel_config,
+                speculative_config=None,
+                observability_config=None,
+                additional_config={},
+            )
+
+            self.runner = TPUModelRunner(vllm_config,
+                                         devices=self.mock_devices)
+            self.runner.load_model()
+
+    def _model_get_model(self):
+        return (
+            MagicMock(),  # TPUModelRunner.model_fn
+            MagicMock(),  # TPUModelRunner.compute_logits_fn
+            None,  # TPUModelRunner.get_multimodal_embeddings_fn
+            None,  # TPUModelRunner.get_input_embeddings_fn
+            MagicMock(),  # TPUModelRunner.state (model params)
+        )
+
+    def test_is_multimodal_model(self):
+        # Precondition: make sure the model_config claims the model supports MM.
+        assert self.runner.model_config.is_multimodal_model
+
+        # Precondition: load the model and returns get_multimodal_embeddings_fn as None.
+        assert self.runner.get_multimodal_embeddings_fn is None
+
+        assert not self.runner.is_multimodal_model
+
+        self.runner.get_input_embeddings_fn = MagicMock()
+        dummy_input_ids = jnp.array([1, 2, 3])
+        dummy_mm_embeds = [jnp.ones((10, 128))]
+        _ = self.runner._get_input_ids_embeds(dummy_input_ids, dummy_mm_embeds)
+        self.runner.get_input_embeddings_fn.assert_not_called()
 
 
 if __name__ == '__main__':

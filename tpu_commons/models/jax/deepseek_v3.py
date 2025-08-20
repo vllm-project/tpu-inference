@@ -14,35 +14,33 @@ from vllm.config import VllmConfig
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.common.attention.attention import AttentionMetadata
 from tpu_commons.models.jax.common.attention.deepseek_v3_attention import MLA
-from tpu_commons.models.jax.common.base import ParamFactory
 from tpu_commons.models.jax.common.constants import KVCacheType
 from tpu_commons.models.jax.common.layers import (DenseFFW, Embedder, LMhead,
                                                   RMSNorm)
-from tpu_commons.models.jax.common.model import Model
 from tpu_commons.models.jax.common.moe.deepseek_moe import DeepSeekV3Router
 from tpu_commons.models.jax.common.moe.moe import MoE
 from tpu_commons.models.jax.common.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
-from tpu_commons.models.jax.layers.misc import shard_put
-from tpu_commons.models.jax.utils.weight_utils import (
-    get_param, hf_model_weights_iterator, print_param_info, reshape_params)
+from tpu_commons.models.jax.utils.weight_utils import (get_param,
+                                                       model_weights_generator,
+                                                       print_param_info,
+                                                       reshape_params)
 
 logger = init_logger(__name__)
 
 
 @dataclass
-class DeepSeekV3(Model):
+class DeepSeekV3(nnx.Module):
 
     def __init__(self,
                  vllm_config: VllmConfig,
                  rng: jax.Array,
                  mesh: Mesh,
-                 param_factory: ParamFactory | None = None):
+                 force_random_weights: bool = False):
         assert mesh is not None
 
         self.vllm_config = vllm_config
         self.rng = nnx.Rngs(rng)
-        self.param_factory = param_factory
 
         # Currently the runner will always set a mesh, so the custom default sharding (when
         #  no sharding is set in vllm config) doesn't take effect.
@@ -87,7 +85,7 @@ class DeepSeekV3(Model):
         qk_rope_head_dim = 64
         v_head_dim = 128
 
-        self.use_random_init = self.vllm_config.additional_config.get(
+        self.random_init = force_random_weights or self.vllm_config.additional_config.get(
             "random_weights", False)
         self.mesh = mesh
 
@@ -103,21 +101,16 @@ class DeepSeekV3(Model):
             v_head_dim=v_head_dim,
             num_local_experts=num_local_experts)
 
-        if not self.param_factory:
-            self.param_factory = ParamFactory(
-                kernel_initializer=nnx.initializers.xavier_normal(),
-                scale_initializer=nnx.initializers.ones,
-                random_init=self.use_random_init)
         self.embedder = Embedder(vocab_size=vocab_size,
                                  hidden_size=hidden_size,
                                  dtype=unquant_dtype,
+                                 rngs=self.rng,
                                  vd_sharding=NamedSharding(
                                      self.mesh,
                                      P(('data', 'expert', 'model'), None)),
                                  prelogit_td=NamedSharding(self.mesh, P()),
                                  mesh=self.mesh,
-                                 param_factory=self.param_factory)
-        self.embedder.generate_kernel(self.rng)
+                                 random_init=self.random_init)
 
         self.layers = []
 
@@ -132,13 +125,14 @@ class DeepSeekV3(Model):
                 rms_norm_eps=rms_norm_eps,
                 v_head_dim=v_head_dim,
                 mesh=self.mesh,
-                param_factory=self.param_factory,
+                random_init=self.random_init,
                 hidden_size=hidden_size,
                 num_attention_heads=num_attention_heads,
                 num_key_value_heads=num_key_value_heads,
                 head_dim=v_head_dim,  # MLA uses v_head_dim as head_dim
                 dtype=dtype,
                 unquant_dtype=unquant_dtype,
+                rngs=self.rng,
                 activation_attention_td=NamedSharding(self.mesh,
                                                       P(None, 'model')),
                 activation_q_td=NamedSharding(self.mesh, P(None, 'model')),
@@ -146,40 +140,33 @@ class DeepSeekV3(Model):
                 keyvalue_skh=NamedSharding(self.mesh, P(None, 'model', None)),
                 activation_attention_out_td=NamedSharding(
                     self.mesh, P(None, 'model')),
-                keyvalue_cache_lskh=NamedSharding(self.mesh,
-                                                  P(None, None, 'model',
-                                                    None)),
                 attn_o_tnh=NamedSharding(self.mesh, P(None, 'model', None)),
                 q_da_sharding=NamedSharding(self.mesh, P(None, 'model')),
                 anh_sharding=NamedSharding(self.mesh, P(None, 'model', None)),
                 kv_da_sharding=NamedSharding(self.mesh, P(None, 'model')),
-                nhd_sharding=NamedSharding(self.mesh, P('model', None, None)),
-                query_ktnph=NamedSharding(self.mesh,
-                                          P('model', None, None, None, None)),
-                keyvalue_cache_nbkph=NamedSharding(
-                    self.mesh, P(None, None, 'model', None, None)),
-                attn_o_ktnph=NamedSharding(self.mesh,
-                                           P('model', None, None, None, None)))
+                nhd_sharding=NamedSharding(self.mesh, P('model', None, None)))
 
         for i in range(first_k_dense_replace):
             block = TransformerBlock(
                 pre_attention_norm=RMSNorm(
                     dims=hidden_size,
                     mesh=self.mesh,
-                    param_factory=self.param_factory,
+                    random_init=self.random_init,
                     epsilon=rms_norm_eps,
                     activation_ffw_td=NamedSharding(self.mesh, P()),
                     with_scale=True,
                     dtype=unquant_dtype,
+                    rngs=self.rng,
                 ),
                 pre_mlp_norm=RMSNorm(
                     dims=hidden_size,
                     mesh=self.mesh,
-                    param_factory=self.param_factory,
+                    random_init=self.random_init,
                     activation_ffw_td=NamedSharding(self.mesh, P()),
                     epsilon=rms_norm_eps,
                     with_scale=True,
                     dtype=unquant_dtype,
+                    rngs=self.rng,
                 ),
                 attn=_create_mla(),
                 custom_module=DenseFFW(
@@ -188,12 +175,13 @@ class DeepSeekV3(Model):
                     hidden_size=hidden_size,
                     intermediate_size=ffw_intermediate_size,
                     mesh=self.mesh,
+                    rngs=self.rng,
                     df_sharding=NamedSharding(self.mesh,
                                               P(None, ('model', 'expert'))),
                     fd_sharding=NamedSharding(self.mesh,
                                               P(('model', 'expert'), None)),
                     activation_ffw_td=NamedSharding(self.mesh, P()),
-                    param_factory=self.param_factory))
+                    random_init=self.random_init))
 
             self.layers.append(block)
 
@@ -201,13 +189,14 @@ class DeepSeekV3(Model):
             is_moe_layer = ((i + 1) % interleave_moe_layer_step == 0)
             router = DeepSeekV3Router(
                 mesh=self.mesh,
-                param_factory=self.param_factory,
+                random_init=self.random_init,
                 hidden_size=hidden_size,
                 num_experts=num_local_experts,
                 num_experts_per_tok=num_experts_per_token,
                 n_groups=n_group,
                 topk_groups=4,
                 norm_topk_prob=True,
+                rngs=self.rng,
                 routed_scaling_factor=2.5,
                 dtype=dtype,
                 kernel_dtype=unquant_dtype,
@@ -222,7 +211,8 @@ class DeepSeekV3(Model):
                 intermediate_size_moe=moe_intermediate_size,
                 hidden_act=hidden_act,
                 mesh=self.mesh,
-                param_factory=self.param_factory,
+                rngs=self.rng,
+                random_init=self.random_init,
                 activation_ffw_td=NamedSharding(self.mesh, P('data', None)),
                 activation_ffw_ted=NamedSharding(self.mesh,
                                                  P('data', 'expert', None)),
@@ -236,7 +226,8 @@ class DeepSeekV3(Model):
                     hidden_size=hidden_size,
                     intermediate_size=ffw_intermediate_size,
                     mesh=self.mesh,
-                    param_factory=self.param_factory,
+                    rngs=self.rng,
+                    random_init=self.random_init,
                     df_sharding=NamedSharding(self.mesh,
                                               P(None, ('model', 'expert'))),
                     fd_sharding=NamedSharding(self.mesh,
@@ -249,7 +240,8 @@ class DeepSeekV3(Model):
                 hidden_size=hidden_size,
                 intermediate_size=num_shared_experts * moe_intermediate_size,
                 mesh=self.mesh,
-                param_factory=self.param_factory,
+                rngs=self.rng,
+                random_init=self.random_init,
                 df_sharding=NamedSharding(self.mesh,
                                           P(None, ('model', 'expert'))),
                 fd_sharding=NamedSharding(self.mesh,
@@ -259,7 +251,8 @@ class DeepSeekV3(Model):
             pre_attention_norm = RMSNorm(
                 dims=hidden_size,
                 mesh=self.mesh,
-                param_factory=self.param_factory,
+                rngs=self.rng,
+                random_init=self.random_init,
                 epsilon=rms_norm_eps,
                 activation_ffw_td=NamedSharding(self.mesh, P()),
                 with_scale=True,
@@ -269,7 +262,8 @@ class DeepSeekV3(Model):
             pre_mlp_norm = RMSNorm(
                 dims=hidden_size,
                 mesh=self.mesh,
-                param_factory=self.param_factory,
+                rngs=self.rng,
+                random_init=self.random_init,
                 activation_ffw_td=NamedSharding(self.mesh, P()),
                 epsilon=rms_norm_eps,
                 with_scale=True,
@@ -284,62 +278,35 @@ class DeepSeekV3(Model):
                 shared_experts=shared_experts)
             self.layers.append(block)
 
-        for i in range(len(self.layers)):
-            self.layers[i].generate_kernel(self.rng)
-
         self.final_norm = RMSNorm(
             dims=hidden_size,
             mesh=self.mesh,
-            param_factory=self.param_factory,
+            rngs=self.rng,
+            random_init=self.random_init,
             activation_ffw_td=NamedSharding(self.mesh, P()),
             epsilon=rms_norm_eps,
             with_scale=True,
             dtype=unquant_dtype,
         )
-        self.final_norm.generate_kernel(self.rng)
 
         self.lm_head = LMhead(
             vocab_size=vocab_size,
             hidden_size=hidden_size,
             dtype=unquant_dtype,
+            rngs=self.rng,
             prelogit_td=NamedSharding(self.mesh, P()),
             vd_sharding=NamedSharding(self.mesh,
                                       P(('data', 'expert', 'model'), None)),
             dv_sharding=NamedSharding(self.mesh,
                                       P(None, ('data', 'expert', 'model'))),
             mesh=self.mesh,
-            param_factory=self.param_factory)
-        self.lm_head.generate_kernel(self.rng)
-
-        # TODO: Add MTP.
-    @classmethod
-    def create_model_with_random_weights(cls, vllm_config: VllmConfig,
-                                         rng: jax.Array, mesh: Mesh):
-        """to create a model with random weights."""
-        logger.info("Initializing model with random weights.")
-        param_factory = ParamFactory(
-            kernel_initializer=nnx.initializers.xavier_normal(),
-            scale_initializer=nnx.initializers.ones,
-            random_init=True)
-        return cls(vllm_config, rng, mesh, param_factory)
-
-    @classmethod
-    def create_model_for_checkpoint_loading(cls, vllm_config: VllmConfig,
-                                            rng: jax.Array, mesh: Mesh):
-        """to create a model with abstract shapes for checkpoint loading."""
-        logger.info("Initializing abstract model for checkpoint loading.")
-        param_factory = ParamFactory(
-            kernel_initializer=nnx.initializers.xavier_normal(),
-            scale_initializer=nnx.initializers.ones,
-            random_init=False)
-        return cls(vllm_config, rng, mesh, param_factory)
+            random_init=self.random_init)
 
     # For compatibility with flax.
     def apply(self, variables, *args, **kwargs):
         return self.__call__(*args, **kwargs)
 
     def load_weights(self, rng: PRNGKey, cache_dir: Optional[str] = None):
-        self.rng = nnx.Rngs(rng)
         self.weight_loader.load_weights(self)
 
     def __call__(
@@ -373,10 +340,12 @@ class DeepSeekV3WeightLoader:
                  qk_rope_head_dim, v_head_dim, num_local_experts):
 
         self.num_layers = num_layers
-        self.names_and_weights_generator = hf_model_weights_iterator(
+        self.names_and_weights_generator = model_weights_generator(
             model_name_or_path=vllm_config.model_config.model,
             framework="pt",
-            filter_regex="")
+            download_dir=vllm_config.load_config.download_dir)
+        self.is_verbose = getattr(vllm_config.additional_config, "is_verbose",
+                                  False)
         self.num_routed_experts = num_local_experts
 
         self._transpose_map = {
@@ -504,16 +473,20 @@ class DeepSeekV3WeightLoader:
                              weights_dict,
                              scale=None):
         layer_num = re.search(r"layers\.(\d+)", loaded_name).group(1)
-        expert_num = re.search(r"experts\.(\d+)", loaded_name).group(1)
+        expert_num_str = re.search(r"experts\.(\d+)", loaded_name).group(1)
+        expert_idx = int(expert_num_str)
+
         if layer_num not in weights_dict:
-            weights_dict[layer_num] = {}
-        weights_dict[layer_num][expert_num] = loaded_weight
-        # Stack all the weights from the expert in this layer
-        if len(weights_dict[layer_num]) == self.num_routed_experts:
-            weight_list = []
-            for expert_index in range(self.num_routed_experts):
-                weight_list.append(weights_dict[layer_num][str(expert_index)])
-            stacked_weights = torch.stack(weight_list, axis=0)
+            weights_dict[layer_num] = ([None] * self.num_routed_experts, 0)
+
+        expert_list, count = weights_dict[layer_num]
+
+        expert_list[expert_idx] = loaded_weight
+        count += 1
+        weights_dict[layer_num] = (expert_list, count)
+
+        if count == self.num_routed_experts:
+            stacked_weights = torch.stack(expert_list, axis=0)
             del weights_dict[layer_num]
             return stacked_weights
         return None
@@ -539,7 +512,8 @@ class DeepSeekV3WeightLoader:
         # Convert weights from torch into numpy
         # TODO: set cast_type based on model weight's type.
         cast_type = test_weight.dtype
-        weight = weight.to(torch.float32).numpy().astype(cast_type)
+        weight_np = weight.to(torch.float32).numpy().astype(cast_type)
+
         if scale is not None:
             # TODO
             old_scale_dtype = scale.dtype
@@ -548,43 +522,47 @@ class DeepSeekV3WeightLoader:
                 f"Loaded scale for {name}: {scale.dtype} {old_scale_dtype}")
 
         # Reshape and transpose weights if necessary.
-        weight = reshape_params(name, weight, self._weight_shape_map)
+        weight_np = reshape_params(name, weight_np, self._weight_shape_map)
         if scale is not None:
             scale = reshape_params(name, scale, self._scale_shape_map)
-        weight = self._transpose_params(name, weight)
+        weight_np = self._transpose_params(name, weight_np)
         if scale is not None:
             scale = self._transpose_params(name, scale)
             if "attn.kernel_kv_down_proj_DA" in mapped_name:
                 scale = scale.repeat(128, axis=1)[:, :576]
-        if test_weight.shape != weight.shape:
+
+        if test_weight.shape != weight_np.shape:
             raise ValueError(
-                f"Loaded shape for {name}: {weight.shape} "
+                f"Loaded shape for {name}: {weight_np.shape} "
                 f"does not match model shape for {mapped_name}: {test_weight.shape}!"
             )
-        sharding_spec = model_weight.array.qvalue.sharding.spec if hasattr(
-            model_weight, "array") else model_weight.sharding.spec
-        sharded_value = shard_put(weight, sharding_spec, mesh=model_mesh)
+
+        def get_slice(index):
+            return weight_np[index]
+
+        sharding = model_weight.array.qvalue.sharding if hasattr(
+            model_weight, "array") else model_weight.sharding
+        sharded_array = jax.make_array_from_callback(weight_np.shape, sharding,
+                                                     get_slice)
+
         if scale is not None:
             # sharded_value = QArray(sharded_value, 1 / scale, None,
             #                        weight.dtype)
             # sharded_value.qvalue.block_until_ready()
             # TODO: put as well?
-            print(sharded_value.dtype, sharded_value.shape)
             model_weight.array.scale.value = jnp.ones_like(
-                sharded_value)  #  * 1 / scale
-            model_weight.array.qvalue.value = sharded_value
+                sharded_array)  #  * 1 / scale
+            model_weight.array.qvalue.value = sharded_array
         else:
             # TODO: support none quant path
             # sharded_value = QArray(sharded_value, None, None, weight.dtype)
             # sharded_value.qvalue.block_until_ready()
-            model_weight.value = sharded_value
-        # model_weight.value = sharded_value
-        # TODO (jacobplatin): delete sharded_value?
+            model_weight.value = sharded_array
+
         del weight
-        print_param_info(
-            model_weight.array.qvalue
-            if hasattr(model_weight, "array") else model_weight, name)
-        #TODO (jacobplatin)
+        if self.is_verbose:
+            # TODO
+            print_param_info(model_weight, name)
         value = model_weight.array.qvalue.value if hasattr(
             model_weight, "array") else model_weight.value
         return value.nbytes / 1e9, value.addressable_shards[0].data.nbytes / 1e9
@@ -661,6 +639,23 @@ class DeepSeekV3WeightLoader:
                             model_params,
                             model_for_loading.mesh,
                             scale=stacked_scales)
+                        if self.is_verbose:
+                            cumulative_global_memory += weight_bytes
+                            cumulative_local_memory += weight_shards
+                            logger.info(
+                                f"Cumulative global memory: {cumulative_global_memory} GB"
+                            )
+                            logger.info(
+                                f"Cumulative local memory: {cumulative_local_memory} GB"
+                            )
+                else:
+                    weight_bytes, weight_shards = self._load_individual_weight(
+                        loaded_name,
+                        loaded_weight,
+                        model_params,
+                        model_for_loading.mesh,
+                        scale=scale)
+                    if self.is_verbose:
                         cumulative_global_memory += weight_bytes
                         cumulative_local_memory += weight_shards
                         logger.info(
@@ -669,21 +664,6 @@ class DeepSeekV3WeightLoader:
                         logger.info(
                             f"Cumulative local memory: {cumulative_local_memory} GB"
                         )
-                else:
-                    weight_bytes, weight_shards = self._load_individual_weight(
-                        loaded_name,
-                        loaded_weight,
-                        model_params,
-                        model_for_loading.mesh,
-                        scale=scale)
-                    cumulative_global_memory += weight_bytes
-                    cumulative_local_memory += weight_shards
-                    logger.info(
-                        f"Cumulative global memory: {cumulative_global_memory} GB"
-                    )
-                    logger.info(
-                        f"Cumulative local memory: {cumulative_local_memory} GB"
-                    )
 
         del mlp_experts_gate_proj_weights
         del mlp_experts_up_proj_weights
@@ -700,17 +680,34 @@ def weights_dequant_cpu(x: torch.Tensor,
     M, N = x.shape
 
     x = x.to(torch.float32)
-    y = torch.empty_like(x, dtype=torch.get_default_dtype())
+    s = s.to(torch.float32)
+    y = torch.empty_like(x)
 
-    for i in range(0, M, block_size):
+    M_main = (M // block_size) * block_size
+    N_main = (N // block_size) * block_size
+
+    if M_main > 0 and N_main > 0:
+        x_main = x[:M_main, :N_main]
+        s_main = s[:(M // block_size), :(N // block_size)]
+
+        x_reshaped = x_main.view(M // block_size, block_size, N // block_size,
+                                 block_size).permute(0, 2, 1, 3)
+        s_reshaped = s_main.view(M // block_size, N // block_size, 1, 1)
+        y_main = (x_reshaped * s_reshaped).permute(0, 2, 1,
+                                                   3).reshape(M_main, N_main)
+
+        y[:M_main, :N_main] = y_main
+
+    if N_main < N:
+        for i in range(0, M_main, block_size):
+            block = x[i:i + block_size, N_main:N]
+            scale = s[i // block_size, N // block_size]
+            y[i:i + block_size, N_main:N] = block * scale
+
+    if M_main < M:
         for j in range(0, N, block_size):
-            row_start = i
-            row_end = min(i + block_size, M)
-            col_start = j
-            col_end = min(j + block_size, N)
-            block = x[row_start:row_end, col_start:col_end]
-            scale = s[i // block_size, j // block_size]
-            y[row_start:row_end, col_start:col_end] = (block * scale).to(
-                torch.get_default_dtype())
+            block = x[M_main:M, j:j + block_size]
+            scale = s[M // block_size, j // block_size]
+            y[M_main:M, j:j + block_size] = block * scale
 
-    return y
+    return y.to(torch.get_default_dtype())
