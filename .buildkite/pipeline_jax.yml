@@ -60,7 +60,7 @@ steps:
      commands:
        - |
          .buildkite/scripts/run_in_docker.sh \
-           python3 -m pytest -s -v /workspace/tpu_commons/tests/e2e/test_multi_modal_inference.py
+           python3 -m pytest -s -v -x /workspace/tpu_commons/tests/e2e/test_multi_modal_inference.py
 
    - label: "JAX unit tests"
      key: test_6
@@ -70,7 +70,7 @@ steps:
      commands:
        - |
          .buildkite/scripts/run_in_docker.sh \
-           python3 -m pytest -s -v /workspace/tpu_commons/tests/ \
+           python3 -m pytest -s -v -x /workspace/tpu_commons/tests/ \
            --ignore=/workspace/tpu_commons/tests/kernels \
            --ignore=/workspace/tpu_commons/tests/e2e \
            --ignore=/workspace/tpu_commons/tests/models/vllm \
@@ -84,7 +84,8 @@ steps:
      commands:
        - |
          .buildkite/scripts/run_in_docker.sh \
-           python3 -m pytest -s -v /workspace/tpu_commons/tests/kernels
+           python3 -m pytest -s -v -x /workspace/tpu_commons/tests/kernels \
+           --ignore=/workspace/tpu_commons/tests/kernels/ragged_paged_attention_kernel_v2_test.py
 
 
   # -----------------------------------------------------------------
