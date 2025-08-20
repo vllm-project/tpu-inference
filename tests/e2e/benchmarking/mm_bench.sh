@@ -81,7 +81,8 @@ if $did_find_ready_message; then
     --model "$model_name" \
     --dataset-name "$dataset_name" \
     --dataset-path "$dataset_path" \
-    --num-prompts "$num_prompts" 2>&1 | tee -a "$BENCHMARK_LOG_FILE"
+    --num-prompts "$num_prompts" \
+    --endpoint /v1/chat/completions 2>&1 | tee -a "$BENCHMARK_LOG_FILE"
 else
     echo "vLLM server did not start successfully."
     exit_code=1
