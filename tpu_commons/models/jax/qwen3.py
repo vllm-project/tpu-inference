@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh
-from transformers import LlamaConfig, modeling_flax_utils
+from transformers import Qwen3Config
 from vllm.config import VllmConfig
 
 from tpu_commons import utils
@@ -12,6 +12,9 @@ from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention import attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.layers.rope import apply_rope
+from tpu_commons.models.jax.qwen2 import Qwen2DecoderLayer
+from tpu_commons.models.jax.qwen2 import Qwen2MLP as Qwen3MLP
+from tpu_commons.models.jax.qwen2 import Qwen2Model
 from tpu_commons.models.jax.utils.weight_utils import (get_default_maps,
                                                        load_hf_weights)
 
@@ -20,56 +23,16 @@ logger = init_logger(__name__)
 init_fn = nnx.initializers.uniform()
 
 
-class LlamaMLP(nnx.Module):
+class Qwen3Attention(nnx.Module):
 
-    def __init__(self, config: LlamaConfig, dtype: jnp.dtype, rng: nnx.Rngs):
-        hidden_size = config.hidden_size
-        intermediate_size = config.intermediate_size
-        act = config.hidden_act
-
-        self.gate_proj = nnx.Linear(
-            hidden_size,
-            intermediate_size,
-            use_bias=False,
-            param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
-            rngs=rng,
-        )
-        self.up_proj = nnx.Linear(
-            hidden_size,
-            intermediate_size,
-            use_bias=False,
-            param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
-            rngs=rng,
-        )
-        self.down_proj = nnx.Linear(
-            intermediate_size,
-            hidden_size,
-            use_bias=False,
-            param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
-            rngs=rng,
-        )
-        self.act_fn = modeling_flax_utils.ACT2FN[act]
-
-    def __call__(self, x: jax.Array) -> jax.Array:
-        gate = self.act_fn(self.gate_proj(x))
-        up = self.up_proj(x)
-        fuse = gate * up
-        result = self.down_proj(fuse)
-        return result
-
-
-class LlamaAttention(nnx.Module):
-
-    def __init__(self, config: LlamaConfig, dtype: jnp.dtype, rng: nnx.Rngs,
+    def __init__(self, config: Qwen3Config, dtype: jnp.dtype, rng: nnx.Rngs,
                  mesh: Mesh):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
         self.rope_theta = config.rope_theta
         self.rope_scaling = getattr(config, "rope_scaling", None)
+        self.rms_norm_eps = config.rms_norm_eps
 
         self.head_dim_original = getattr(config, "head_dim",
                                          self.hidden_size // self.num_heads)
@@ -90,11 +53,25 @@ class LlamaAttention(nnx.Module):
             kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             rngs=rng,
         )
+        self.q_norm = nnx.RMSNorm(
+            self.head_dim,
+            epsilon=self.rms_norm_eps,
+            param_dtype=dtype,
+            scale_init=nnx.with_partitioning(init_fn, (None, )),
+            rngs=rng,
+        )
         self.k_proj = nnx.Einsum(
             "TD,DKH->TKH",
             (self.hidden_size, self.num_kv_heads, self.head_dim),
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
+            rngs=rng,
+        )
+        self.k_norm = nnx.RMSNorm(
+            self.head_dim,
+            epsilon=self.rms_norm_eps,
+            param_dtype=dtype,
+            scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
         )
         self.v_proj = nnx.Einsum(
@@ -121,12 +98,16 @@ class LlamaAttention(nnx.Module):
         md = attention_metadata
         # q: (T, N, H)
         q = self.q_proj(x)
+        q = self.q_norm(q)
         q = apply_rope(q, md.input_positions, self.head_dim_original,
                        self.rope_theta, self.rope_scaling)
+
         # k: (T, K, H)
         k = self.k_proj(x)
+        k = self.k_norm(k)
         k = apply_rope(k, md.input_positions, self.head_dim_original,
                        self.rope_theta, self.rope_scaling)
+
         # v: (T, K, H)
         v = self.v_proj(x)
         # o: (T, N, H)
@@ -144,9 +125,9 @@ class LlamaAttention(nnx.Module):
         return new_kv_cache, o
 
 
-class LlamaDecoderLayer(nnx.Module):
+class Qwen3DecoderLayer(Qwen2DecoderLayer):
 
-    def __init__(self, config: LlamaConfig, dtype: jnp.dtype, rng: nnx.Rngs,
+    def __init__(self, config: Qwen3Config, dtype: jnp.dtype, rng: nnx.Rngs,
                  mesh: Mesh):
         rms_norm_eps = config.rms_norm_eps
         hidden_size = config.hidden_size
@@ -158,7 +139,7 @@ class LlamaDecoderLayer(nnx.Module):
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
         )
-        self.self_attn = LlamaAttention(config=config,
+        self.self_attn = Qwen3Attention(config=config,
                                         dtype=dtype,
                                         rng=rng,
                                         mesh=mesh)
@@ -169,34 +150,14 @@ class LlamaDecoderLayer(nnx.Module):
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
         )
-        self.mlp = LlamaMLP(
+        self.mlp = Qwen3MLP(
             config=config,
             dtype=dtype,
             rng=rng,
         )
 
-    def __call__(
-        self,
-        kv_cache: jax.Array,
-        x: jax.Array,
-        attention_metadata: AttentionMetadata,
-    ) -> Tuple[jax.Array, jax.Array]:
-        hidden_states = self.input_layernorm(x)
-        kv_cache, attn_output = self.self_attn(
-            kv_cache,
-            hidden_states,
-            attention_metadata,
-        )
-        attn_output += x
 
-        residual = attn_output
-        attn_output = self.post_attention_layernorm(attn_output)
-        outputs = self.mlp(attn_output)
-        outputs = residual + outputs
-        return kv_cache, outputs
-
-
-class LlamaModel(nnx.Module):
+class Qwen3Model(Qwen2Model):
 
     def __init__(self, vllm_config: VllmConfig, rng: nnx.Rngs,
                  mesh: Mesh) -> None:
@@ -215,7 +176,7 @@ class LlamaModel(nnx.Module):
             rngs=rng,
         )
         self.layers = [
-            LlamaDecoderLayer(
+            Qwen3DecoderLayer(
                 config=hf_config,
                 dtype=dtype,
                 rng=rng,
@@ -237,26 +198,8 @@ class LlamaModel(nnx.Module):
                 sharding=(None, "model"),
             )
 
-    def __call__(
-        self,
-        kv_caches: List[jax.Array],
-        input_ids: jax.Array,
-        attention_metadata: AttentionMetadata,
-    ) -> Tuple[List[jax.Array], jax.Array]:
-        x = self.embed(input_ids)
-        for i, layer in enumerate(self.layers):
-            kv_cache = kv_caches[i]
-            kv_cache, x = layer(
-                kv_cache,
-                x,
-                attention_metadata,
-            )
-            kv_caches[i] = kv_cache
-        x = self.norm(x)
-        return kv_caches, x
 
-
-class LlamaForCausalLM(nnx.Module):
+class Qwen3ForCausalLM(nnx.Module):
 
     def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,
                  mesh: Mesh) -> None:
@@ -264,7 +207,7 @@ class LlamaForCausalLM(nnx.Module):
         self.rng = nnx.Rngs(rng_key)
         self.mesh = mesh
 
-        self.model = LlamaModel(
+        self.model = Qwen3Model(
             vllm_config=vllm_config,
             rng=self.rng,
             mesh=mesh,
@@ -309,16 +252,21 @@ class LlamaForCausalLM(nnx.Module):
             "model.layers.*.mlp.up_proj": "model.layers.*.mlp.up_proj.kernel",
             "model.layers.*.post_attention_layernorm":
             "model.layers.*.post_attention_layernorm.scale",
+            "model.layers.*.self_attn.k_norm":
+            "model.layers.*.self_attn.k_norm.scale",
             "model.layers.*.self_attn.k_proj":
             "model.layers.*.self_attn.k_proj.kernel",
             "model.layers.*.self_attn.o_proj":
             "model.layers.*.self_attn.o_proj.kernel",
+            "model.layers.*.self_attn.q_norm":
+            "model.layers.*.self_attn.q_norm.scale",
             "model.layers.*.self_attn.q_proj":
             "model.layers.*.self_attn.q_proj.kernel",
             "model.layers.*.self_attn.v_proj":
             "model.layers.*.self_attn.v_proj.kernel",
             "model.norm": "model.norm.scale",
         }
+
         # Add lm_head mapping only if it's not tied to embeddings
         if not self.vllm_config.model_config.hf_config.tie_word_embeddings:
             mappings.update({

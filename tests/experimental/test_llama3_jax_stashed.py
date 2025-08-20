@@ -169,22 +169,6 @@ class TestLlama3WeightLoader:
                                   num_key_value_heads=2,
                                   attn_head_dim=8)
 
-    @pytest.mark.parametrize("hf_key, expected", [
-        ("model.layers.15.self_attn.q_proj",
-         "layers.15.attn.kernel_q_proj_DNH"),
-        ("model.layers.0.mlp.down_proj",
-         "layers.0.custom_module.kernel_down_proj_FD"),
-        ("model.embed_tokens", "embedder.input_embedding_table_VD"),
-        ("model.norm", "final_norm.scale"),
-        ("lm_head", "lm_head.input_embedding_table_DV"),
-        ("unmapped.key.name", "unmapped.key.name"),
-    ])
-    def test_map_loaded_to_standardized_name(self, weight_loader, hf_key,
-                                             expected):
-        """Tests the mapping from HuggingFace key names to internal names."""
-        assert weight_loader.map_loaded_to_standardized_name(
-            hf_key) == expected
-
     def test_load_weights_transformation(self, weight_loader, rng, mesh):
         """Tests that weights are correctly reshaped, transposed, and loaded."""
         vllm_config = MockVllmConfig("llama3-8b-small-test",
@@ -193,23 +177,11 @@ class TestLlama3WeightLoader:
         # Create a model instance but override its config for the test.
         model = LlamaForCausalLM(vllm_config, rng, mesh)
 
-        # Original weight shape is (vocab_size, hidden_size)
-        original_weight = jnp.ones((128, 32))
-
-        # Mock get_param to return a mock param with the target shape (hidden_size, vocab_size)
-        mock_param = MockParam(shape=(128, 32))
-
-        with patch("tpu_commons.experimental.llama3_jax_stashed.get_param", return_value=mock_param), \
-            patch("tpu_commons.experimental.llama3_jax_stashed.shard_put", return_value=jnp.ones(mock_param.value.shape)) as mock_shard_put:
+        with patch(
+                "tpu_commons.experimental.llama3_jax_stashed.load_hf_weights"
+        ) as mock_load:
             # This will now pass after the code fix
-            weight_loader.load_weights_single_thread(
-                model, "model.embed_tokens.weight", original_weight, mesh)
+            weight_loader.load_weights(model)
 
             # Assert that shard_put was called with the correctly transposed weight
-            mock_shard_put.assert_called_once()
-
-            # Get the actual array passed to shard_put
-            called_with_weight = mock_shard_put.call_args[0][0]
-
-            # Check if the shape of the array passed to shard_put matches the model's expected shape.
-            assert called_with_weight.shape == mock_param.value.shape
+            mock_load.assert_called_once()

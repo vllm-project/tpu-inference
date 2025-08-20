@@ -135,9 +135,6 @@ class TpuPlatform(Platform):
         if compilation_config.backend == "":
             compilation_config.backend = "openxla"
 
-        assert vllm_config.speculative_config is None, \
-            "TPU does not support speculative decoding"
-
         # If we use vLLM's model implementation in PyTorch, we should set it with torch version of the dtype.
         impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
 
@@ -195,9 +192,6 @@ class TpuPlatform(Platform):
                 f"Unknown TPU multihost backend: {multihost_backend}. "
                 "Using uniproc_executor.")
             parallel_config.distributed_executor_backend = "uni"
-
-        assert not vllm_config.speculative_config, (
-            "Speculative decoding is not yet supported for TPU backend")
 
         if scheduler_config.is_multimodal_model and not \
             scheduler_config.disable_chunked_mm_input:

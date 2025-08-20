@@ -491,6 +491,8 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
             decode_slice_sizes=decode_slice_sizes,
         )
 
+        self.request_block_hasher = None
+
     @staticmethod
     def _create_engine_cores(
         slice_sizes: tuple[int, ...],

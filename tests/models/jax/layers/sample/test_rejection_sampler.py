@@ -430,7 +430,9 @@ class RejectionSamplerTestHelper:
         parsed_output = rejection_sampler.parse_output(
             output,
             vocab_size=vocab_size,
-            num_draft_tokens_cpu=np.asarray(num_draft_tokens))
+            num_draft_tokens_cpu=np.asarray(num_draft_tokens),
+            batch_size=len(num_draft_tokens),
+            padded_tokens_length=int(sum(num_draft_tokens)))
 
         assert parsed_output == test_case.expected, \
             f"Test '{test_case.name}': Expected {test_case.expected}, got {parsed_output}"
@@ -504,7 +506,9 @@ class TestRejectionSampler:
         parsed_output = rejection_sampler.parse_output(
             output_token_ids,
             vocab_size,
-            num_draft_tokens_cpu=np.asarray(num_draft_tokens))
+            num_draft_tokens_cpu=np.asarray(num_draft_tokens),
+            batch_size=len(num_draft_tokens),
+            padded_tokens_length=int(sum(num_draft_tokens)))
 
         expected = [[10, 20, 30, 40], [50, 60, 70]]
         assert parsed_output == expected, f"Expected {expected}, got {parsed_output}"
@@ -525,7 +529,9 @@ class TestRejectionSampler:
         parsed_output = rejection_sampler.parse_output(
             output_token_ids,
             vocab_size,
-            num_draft_tokens_cpu=np.asarray(num_draft_tokens))
+            num_draft_tokens_cpu=np.asarray(num_draft_tokens),
+            batch_size=len(num_draft_tokens),
+            padded_tokens_length=int(sum(num_draft_tokens)))
 
         expected = [[10], [20, 30, 40]]
         assert parsed_output == expected, f"Expected {expected}, got {parsed_output}"
@@ -544,7 +550,9 @@ class TestRejectionSampler:
         parsed_output = rejection_sampler.parse_output(
             output_token_ids,
             vocab_size,
-            num_draft_tokens_cpu=np.asarray(num_draft_tokens))
+            num_draft_tokens_cpu=np.asarray(num_draft_tokens),
+            batch_size=len(num_draft_tokens),
+            padded_tokens_length=int(sum(num_draft_tokens)))
 
         expected = [[10, 20]]  # Invalid tokens filtered out
         assert parsed_output == expected, f"Expected {expected}, got {parsed_output}"
@@ -563,7 +571,9 @@ class TestRejectionSampler:
         parsed_output = rejection_sampler.parse_output(
             output_token_ids,
             vocab_size,
-            num_draft_tokens_cpu=np.asarray(num_draft_tokens))
+            num_draft_tokens_cpu=np.asarray(num_draft_tokens),
+            batch_size=len(num_draft_tokens),
+            padded_tokens_length=int(sum(num_draft_tokens)))
 
         expected = [[50], [60]]  # Only bonus tokens
         assert parsed_output == expected, f"Expected {expected}, got {parsed_output}"
@@ -618,7 +628,9 @@ class TestRejectionSampler:
         parsed_output = rejection_sampler.parse_output(
             output,
             VOCAB_SIZE,
-            num_draft_tokens_cpu=np.asarray(num_draft_tokens))
+            num_draft_tokens_cpu=np.asarray(num_draft_tokens),
+            batch_size=len(num_draft_tokens),
+            padded_tokens_length=int(sum(num_draft_tokens)))
 
         expected = [[1, 5]]  # Should ignore all padding
         assert parsed_output == expected, f"Expected {expected}, got {parsed_output}"
@@ -763,7 +775,9 @@ class TestRejectionSampler:
         parsed_output = rejection_sampler.parse_output(
             output,
             VOCAB_SIZE,
-            num_draft_tokens_cpu=np.asarray(num_draft_tokens))
+            num_draft_tokens_cpu=np.asarray(num_draft_tokens),
+            batch_size=len(num_draft_tokens),
+            padded_tokens_length=int(sum(num_draft_tokens)))
 
         expected = [list(range(1, 28)) + [99]]  # Tokens up to mismatch point
         assert parsed_output == expected, f"Expected {expected}, got {parsed_output}"

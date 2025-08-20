@@ -14,7 +14,7 @@ from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 
 from tpu_commons import utils
 from tpu_commons.di.abstracts import (AbstractKVCacheConfig,
@@ -153,6 +153,9 @@ class TPUWorker(AbstractTpuWorker):
             return output
 
         return output if self.is_driver_worker else None
+
+    def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
+        return self.model_runner.take_draft_token_ids()
 
     def add_lora(
         self,

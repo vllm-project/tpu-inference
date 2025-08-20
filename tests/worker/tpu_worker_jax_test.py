@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from vllm.lora.request import LoRARequest
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.outputs import DraftTokenIds
 
 # Import the abstract classes and interfaces for mocking
 from tpu_commons.di.abstracts import (AbstractKVCacheConfig,
@@ -249,6 +250,24 @@ class TestTPUWorker:
 
         mock_adapter_fn.assert_called_once_with(mock_scheduler_input)
         assert result is None
+
+    def test_take_draft_token_ids(self, mock_host_interface, mock_vllm_config):
+        """Tests that take_draft_token_ids correctly passes through from the runner."""
+        worker = TPUWorker(host_interface=mock_host_interface,
+                           vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test")
+        worker.model_runner = MagicMock()
+
+        # Case 1: Runner returns a DraftTokenIds object
+        mock_draft_tokens = DraftTokenIds(req_ids=["req1"],
+                                          draft_token_ids=[[1, 2]])
+        worker.model_runner.take_draft_token_ids.return_value = mock_draft_tokens
+
+        result = worker.take_draft_token_ids()
+        worker.model_runner.take_draft_token_ids.assert_called_once()
+        assert result == mock_draft_tokens
 
     @patch(
         'tpu_commons.worker.tpu_worker_torchax.adapt_lora_request_if_needed')
