@@ -82,6 +82,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
         _MODEL_REGISTRY["Llama4ForCausalLM"] = Llama4ForCausalLM
     else:
         from tpu_commons.models.jax.llama3 import LlamaForCausalLM
+        from tpu_commons.models.jax.phi3 import Phi3ForCausalLM
         from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
         from tpu_commons.models.jax.qwen2_5_vl import \
             Qwen2_5_VLForConditionalGeneration
@@ -91,6 +92,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
         _MODEL_REGISTRY["Qwen3ForCausalLM"] = Qwen3ForCausalLM
         _MODEL_REGISTRY[
             "Qwen2_5_VLForConditionalGeneration"] = Qwen2_5_VLForConditionalGeneration
+        _MODEL_REGISTRY["Phi3ForCausalLM"] = Phi3ForCausalLM
 
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
