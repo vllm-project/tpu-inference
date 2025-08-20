@@ -767,7 +767,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         encoder_outputs = []
         for _, num_items, mm_kwargs_group in group_mm_kwargs_by_modality(
                 mm_kwargs):
-            print(f"mm_kwargs_group: {mm_kwargs_group}")
             batched_mm_inputs = mm_kwargs_group
             # Convert torch tensors to numpy arrays that JAX can handle.
             if "pixel_values" in batched_mm_inputs and isinstance(
@@ -777,7 +776,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
 
             image_grid_thw = ()
             for key, value in batched_mm_inputs.items():
-                print(f"key: {key}, value: {value}")
                 if isinstance(value, torch.Tensor):
                     if key == 'image_grid_thw':
                         # change it to tuple of tuples to make it hashable for JIT
