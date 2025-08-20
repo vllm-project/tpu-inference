@@ -10,31 +10,9 @@ import jax
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
+import vllm.envs as envs
 from flax import nnx
 from jax.sharding import NamedSharding, PartitionSpec
-
-import vllm.envs as envs
-from tpu_commons import utils as common_utils
-from tpu_commons.logger import init_logger
-from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.models.jax.common.sharding import build_mesh
-from tpu_commons.models.jax.layers.misc import shard_put
-from tpu_commons.models.jax.layers.sample.rejection_sampler import \
-    RejectionSampler
-from tpu_commons.models.jax.layers.sample.sampling import (compute_logprobs,
-                                                           gather_logprobs,
-                                                           sample)
-from tpu_commons.models.jax.layers.sample.sampling_metadata import \
-    TPUSupportedSamplingMetadata
-from tpu_commons.models.jax.model_loader import get_model
-from tpu_commons.models.jax.utils.multi_modal_utils import \
-    sanity_check_mm_encoder_outputs
-from tpu_commons.models.jax.utils.weight_utils import \
-    transfer_state_with_mappings
-from tpu_commons.runner import utils as runner_utils
-from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
-                                                    InputBatch)
-from tpu_commons.runner.jax.metadata import SpecDecodeMetadata
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
@@ -57,6 +35,29 @@ from vllm.v1.worker.kv_connector_model_runner_mixin import \
     KVConnectorModelRunnerMixin
 from vllm.v1.worker.utils import (gather_mm_placeholders,
                                   scatter_mm_placeholders)
+
+from tpu_commons import utils as common_utils
+from tpu_commons.logger import init_logger
+from tpu_commons.models.jax.attention_metadata import AttentionMetadata
+from tpu_commons.models.jax.common.sharding import build_mesh
+from tpu_commons.models.jax.layers.misc import shard_put
+from tpu_commons.models.jax.layers.sample.rejection_sampler import \
+    RejectionSampler
+from tpu_commons.models.jax.layers.sample.sampling import (compute_logprobs,
+                                                           gather_logprobs,
+                                                           sample)
+from tpu_commons.models.jax.layers.sample.sampling_metadata import \
+    TPUSupportedSamplingMetadata
+from tpu_commons.models.jax.model_loader import get_model
+from tpu_commons.models.jax.utils.multi_modal_utils import \
+    sanity_check_mm_encoder_outputs
+from tpu_commons.models.jax.utils.weight_utils import \
+    transfer_state_with_mappings
+from tpu_commons.runner import utils as runner_utils
+from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
+                                                    InputBatch)
+from tpu_commons.runner.jax.metadata import SpecDecodeMetadata
+from tpu_commons.utils import make_optimized_mesh
 
 logger = init_logger(__name__)
 
@@ -156,9 +157,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             axis_names = ("data", "model")
             mesh_shape = (dp, tp)
 
-            self.mesh = jax.make_mesh(mesh_shape,
-                                      axis_names,
-                                      devices=self.devices)
+            self.mesh = make_optimized_mesh(mesh_shape,
+                                            axis_names,
+                                            devices=self.devices)
         logger.info(f"Init mesh | mesh={self.mesh}")
 
     def _init_inputs(self) -> None:
