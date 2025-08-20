@@ -62,31 +62,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         raise NotImplementedError(
             "NYI: torch_punica_tpu.PunicaWrapperTPU.sampler_indices_padded.")
 
-    def shrink(
-        self,
-        x: torch.Tensor,  # (T, in_features)
-        w_t_all: torch.Tensor,  # (max_lora, 1, r, in_features)
-        scale: float,
-    ):
-        return bgmv_shrink(x, w_t_all, self._get_token_lora_indices(x), scale)
-
-    def expand(self, y: torch.Tensor, x: torch.Tensor, w_t_all: torch.Tensor,
-               add_inputs: bool):
-        raise NotImplementedError(
-            "NYI: torch_punica_tpu.PunicaWrapperTPU.expand.")
-
-    def expand_slice(
-            self,
-            y: torch.Tensor,  # (T, output_size)
-            x: torch.Tensor,  # (T, r)
-            w_t_all: torch.Tensor,  # (max_lora, 1, out_features, r)
-            y_offset: int,
-            y_slice_size: int,
-            add_inputs: bool) -> torch.Tensor:
-        return bgmv_expand_slice(x, w_t_all, y,
-                                 self._get_token_lora_indices(x), y_offset,
-                                 y_slice_size, add_inputs)
-
     def add_shrink(self, y: Union[tuple[torch.Tensor, ...], torch.Tensor],
                    x: torch.Tensor, lora_a_stacked: tuple[torch.Tensor, ...],
                    scale: float, **kwargs) -> Optional[torch.Tensor]:
@@ -108,7 +83,8 @@ class PunicaWrapperTPU(PunicaWrapperBase):
 
         for slice_idx in range(len(lora_a_stacked)):
             lora_s = lora_a_stacked[slice_idx]
-            y_s = self.shrink(x, lora_s, scale)
+            y_s = bgmv_shrink(x, lora_s, self._get_token_lora_indices(x),
+                              scale)
             y[slice_idx, :, :] = y_s  # type: ignore[index]
         return y
 
@@ -145,12 +121,10 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         offset_left = 0
 
         for slice_idx in range(len(lora_b_stacked)):
-            y = self.expand_slice(y,
-                                  x[slice_idx],
-                                  lora_b_stacked[slice_idx],
-                                  offset_left,
-                                  output_slices[slice_idx],
-                                  add_inputs=add_inputs)
+            y = bgmv_expand_slice(x[slice_idx], lora_b_stacked[slice_idx], y,
+                                  self._get_token_lora_indices(x[slice_idx]),
+                                  offset_left, output_slices[slice_idx],
+                                  add_inputs)
             offset_left += output_slices[slice_idx]
         return y.view(y_orig.shape)
 
