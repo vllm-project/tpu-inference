@@ -2,34 +2,34 @@ steps:
   # -----------------------------------------------------------------
   # TEST STEPS - Calling wrapper
   # -----------------------------------------------------------------
-  #  - label: "E2E MLPerf tests for JAX models"
-  #    key: test_0
-  #    soft_fail: true
-  #    agents:
-  #      queue: tpu_v6e_queue
-  #    commands:
-  #      - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
+   - label: "E2E MLPerf tests for JAX models"
+     key: test_0
+     soft_fail: true
+     agents:
+       queue: tpu_v6e_queue
+     commands:
+       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
 
-  #  - label: "E2E MLPerf tests for JAX models with quantization"
-  #    key: test_1
-  #    soft_fail: true
-  #    env:
-  #      TPU_BACKEND_TYPE: "jax"
-  #      QUANTIZATION: "True"
-  #    agents:
-  #      queue: tpu_v6e_queue
-  #    commands:
-  #      - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
+   - label: "E2E MLPerf tests for JAX models with quantization"
+     key: test_1
+     soft_fail: true
+     env:
+       TPU_BACKEND_TYPE: "jax"
+       QUANTIZATION: "True"
+     agents:
+       queue: tpu_v6e_queue
+     commands:
+       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
 
-  #  - label: "E2E MLPerf tests for JAX new models"
-  #    key: test_2
-  #    soft_fail: true
-  #    env:
-  #      NEW_MODEL_DESIGN: "True"
-  #    agents:
-  #      queue: tpu_v6e_queue
-  #    commands:
-  #      - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
+   - label: "E2E MLPerf tests for JAX new models"
+     key: test_2
+     soft_fail: true
+     env:
+       NEW_MODEL_DESIGN: "True"
+     agents:
+       queue: tpu_v6e_queue
+     commands:
+       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
 
   #  - label: "E2E MLPerf tests for JAX + vLLM models"
   #    key: test_3
@@ -53,7 +53,7 @@ steps:
   #      - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
 
 
-   - label: "E2E offline inference test"
+   - label: "E2E multi-modal test"
      key: test_5
      soft_fail: true
      agents:
@@ -64,39 +64,30 @@ steps:
            bash -c 'python3 -m pytest -s -v -x /workspace/tpu_commons/tests/e2e/test_multi_modal_inference.py && \
             bash /workspace/tpu_commons/tests/e2e/benchmarking/mm_bench.sh'
 
-   - label: "E2E offline inference test"
+
+   - label: "JAX unit tests"
      key: test_6
      soft_fail: true
      agents:
        queue: tpu_v6e_queue
      commands:
        - |
-         .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mm_bench.sh
+         .buildkite/scripts/run_in_docker.sh \
+           python3 -m pytest -s -v /workspace/tpu_commons/tests/ \
+           --ignore=/workspace/tpu_commons/tests/kernels \
+           --ignore=/workspace/tpu_commons/tests/models/vllm \
+           --ignore=/workspace/tpu_commons/tests/e2e/test_multi_modal_inference.py \
+           --cov-config=/workspace/tpu_commons/.coveragerc --cov tpu_commons --cov-report term-missing --cov-fail-under=69
 
-
-  #  - label: "JAX unit tests"
-  #    key: test_6
-  #    soft_fail: true
-  #    agents:
-  #      queue: tpu_v6e_queue
-  #    commands:
-  #      - |
-  #        .buildkite/scripts/run_in_docker.sh \
-  #          python3 -m pytest -s -v /workspace/tpu_commons/tests/ \
-  #          --ignore=/workspace/tpu_commons/tests/kernels \
-  #          --ignore=/workspace/tpu_commons/tests/models/vllm \
-  #          --ignore=/workspace/tpu_commons/tests/e2e/test_multi_modal_inference.py \
-  #          --cov-config=/workspace/tpu_commons/.coveragerc --cov tpu_commons --cov-report term-missing --cov-fail-under=69
-
-  #  - label: "JAX unit tests - kernels"
-  #    key: test_7
-  #    soft_fail: true
-  #    agents:
-  #      queue: tpu_v6e_queue
-  #    commands:
-  #      - |
-  #        .buildkite/scripts/run_in_docker.sh \
-  #          python3 -m pytest -s -v /workspace/tpu_commons/tests/kernels
+   - label: "JAX unit tests - kernels"
+     key: test_7
+     soft_fail: true
+     agents:
+       queue: tpu_v6e_queue
+     commands:
+       - |
+         .buildkite/scripts/run_in_docker.sh \
+           python3 -m pytest -s -v /workspace/tpu_commons/tests/kernels
 
 
   # -----------------------------------------------------------------
@@ -104,14 +95,14 @@ steps:
   # -----------------------------------------------------------------
    - label: "TPU Test Notification"
      depends_on:
-      #  - test_0
-      #  - test_1
-      #  - test_2
+       - test_0
+       - test_1
+       - test_2
       #  - test_3
       #  - test_4
        - test_5
        - test_6
-      #  - test_7
+       - test_7
      agents:
        queue: tpu_v6e_queue
      commands:
