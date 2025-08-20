@@ -816,7 +816,7 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             multimodal_embeddings: Optional[MultiModalEmbeddings]
     ) -> jax.Array:
 
-        inputs_embeds = self.language_model.embed(input_ids)
+        inputs_embeds = self.language_model.model.embed(input_ids)
 
 
         if multimodal_embeddings is not None \
@@ -856,7 +856,7 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         # Value: a tuple of (path to a nnx layer weight, nnx weight sharding)
 
         mappings = {
-            "model.embed_tokens": "language_model.embed.embedding",
+            "model.embed_tokens": "language_model.model.embed.embedding",
             "model.layers.*.input_layernorm":
             "language_model.model.layers.*.input_layernorm.scale",
             "model.layers.*.mlp.down_proj":
@@ -913,7 +913,7 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         hf_config = self.vllm_config.model_config.hf_config
         if not hf_config.tie_word_embeddings:
             mappings.update({
-                "lm_head": "lm_head",
+                "lm_head": "language_model.model.lm_head",
             })
 
         metadata_map = get_default_maps(self.vllm_config, self.mesh, mappings)
