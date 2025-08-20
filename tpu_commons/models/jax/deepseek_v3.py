@@ -22,7 +22,6 @@ from tpu_commons.models.jax.common.moe.deepseek_moe import DeepSeekV3Router
 from tpu_commons.models.jax.common.moe.moe import MoE
 from tpu_commons.models.jax.common.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
-from tpu_commons.models.jax.layers.misc import shard_put
 from tpu_commons.models.jax.utils.weight_utils import (get_param,
                                                        model_weights_generator,
                                                        print_param_info,
@@ -343,6 +342,8 @@ class DeepSeekV3WeightLoader:
             model_name_or_path=vllm_config.model_config.model,
             framework="pt",
             download_dir=vllm_config.load_config.download_dir)
+        self.is_verbose = getattr(vllm_config.additional_config, "is_verbose",
+                                  False)
         self.num_routed_experts = num_local_experts
 
         self._transpose_map = {
@@ -459,16 +460,20 @@ class DeepSeekV3WeightLoader:
 
     def _process_moe_weights(self, loaded_name, loaded_weight, weights_dict):
         layer_num = re.search(r"layers\.(\d+)", loaded_name).group(1)
-        expert_num = re.search(r"experts\.(\d+)", loaded_name).group(1)
+        expert_num_str = re.search(r"experts\.(\d+)", loaded_name).group(1)
+        expert_idx = int(expert_num_str)
+
         if layer_num not in weights_dict:
-            weights_dict[layer_num] = {}
-        weights_dict[layer_num][expert_num] = loaded_weight
-        # Stack all the weights from the expert in this layer
-        if len(weights_dict[layer_num]) == self.num_routed_experts:
-            weight_list = []
-            for expert_index in range(self.num_routed_experts):
-                weight_list.append(weights_dict[layer_num][str(expert_index)])
-            stacked_weights = torch.stack(weight_list, axis=0)
+            weights_dict[layer_num] = ([None] * self.num_routed_experts, 0)
+
+        expert_list, count = weights_dict[layer_num]
+
+        expert_list[expert_idx] = loaded_weight
+        count += 1
+        weights_dict[layer_num] = (expert_list, count)
+
+        if count == self.num_routed_experts:
+            stacked_weights = torch.stack(expert_list, axis=0)
             del weights_dict[layer_num]
             return stacked_weights
         return None
@@ -483,22 +488,30 @@ class DeepSeekV3WeightLoader:
         # Convert weights from torch into numpy
         # TODO: set cast_type based on model weight's type.
         cast_type = ml_dtypes.bfloat16
-        weight = weight.to(torch.float32).numpy().astype(cast_type)
+        weight_np = weight.to(torch.float32).numpy().astype(cast_type)
 
         # Reshape and transpose weights if necessary.
-        weight = reshape_params(name, weight, self._weight_shape_map)
-        weight = self._transpose_params(name, weight)
-        if model_weight.value.shape != weight.shape:
+        weight_np = reshape_params(name, weight_np, self._weight_shape_map)
+        weight_np = self._transpose_params(name, weight_np)
+
+        if model_weight.value.shape != weight_np.shape:
             raise ValueError(
-                f"Loaded shape for {name}: {weight.shape} "
+                f"Loaded shape for {name}: {weight_np.shape} "
                 f"does not match model shape for {mapped_name}: {model_weight.value.shape}!"
             )
-        model_weight.value = shard_put(weight,
-                                       model_weight.sharding.spec,
-                                       mesh=model_mesh)
-        model_weight.value.block_until_ready()
+
+        def get_slice(index):
+            return weight_np[index]
+
+        sharded_array = jax.make_array_from_callback(weight_np.shape,
+                                                     model_weight.sharding,
+                                                     get_slice)
+
+        model_weight.value = sharded_array
+
         del weight
-        print_param_info(model_weight, name)
+        if self.is_verbose:
+            print_param_info(model_weight, name)
         return model_weight.value.nbytes / 1e9, model_weight.value.addressable_shards[
             0].data.nbytes / 1e9
 
@@ -562,6 +575,20 @@ class DeepSeekV3WeightLoader:
                         weight_bytes, weight_shards = self._load_individual_weight(
                             loaded_name, stacked_weights, model_params,
                             model_for_loading.mesh)
+                        if self.is_verbose:
+                            cumulative_global_memory += weight_bytes
+                            cumulative_local_memory += weight_shards
+                            logger.info(
+                                f"Cumulative global memory: {cumulative_global_memory} GB"
+                            )
+                            logger.info(
+                                f"Cumulative local memory: {cumulative_local_memory} GB"
+                            )
+                else:
+                    weight_bytes, weight_shards = self._load_individual_weight(
+                        loaded_name, loaded_weight, model_params,
+                        model_for_loading.mesh)
+                    if self.is_verbose:
                         cumulative_global_memory += weight_bytes
                         cumulative_local_memory += weight_shards
                         logger.info(
@@ -570,18 +597,6 @@ class DeepSeekV3WeightLoader:
                         logger.info(
                             f"Cumulative local memory: {cumulative_local_memory} GB"
                         )
-                else:
-                    weight_bytes, weight_shards = self._load_individual_weight(
-                        loaded_name, loaded_weight, model_params,
-                        model_for_loading.mesh)
-                    cumulative_global_memory += weight_bytes
-                    cumulative_local_memory += weight_shards
-                    logger.info(
-                        f"Cumulative global memory: {cumulative_global_memory} GB"
-                    )
-                    logger.info(
-                        f"Cumulative local memory: {cumulative_local_memory} GB"
-                    )
 
         del mlp_experts_gate_proj_weights
         del mlp_experts_up_proj_weights
@@ -598,17 +613,34 @@ def weights_dequant_cpu(x: torch.Tensor,
     M, N = x.shape
 
     x = x.to(torch.float32)
-    y = torch.empty_like(x, dtype=torch.get_default_dtype())
+    s = s.to(torch.float32)
+    y = torch.empty_like(x)
 
-    for i in range(0, M, block_size):
+    M_main = (M // block_size) * block_size
+    N_main = (N // block_size) * block_size
+
+    if M_main > 0 and N_main > 0:
+        x_main = x[:M_main, :N_main]
+        s_main = s[:(M // block_size), :(N // block_size)]
+
+        x_reshaped = x_main.view(M // block_size, block_size, N // block_size,
+                                 block_size).permute(0, 2, 1, 3)
+        s_reshaped = s_main.view(M // block_size, N // block_size, 1, 1)
+        y_main = (x_reshaped * s_reshaped).permute(0, 2, 1,
+                                                   3).reshape(M_main, N_main)
+
+        y[:M_main, :N_main] = y_main
+
+    if N_main < N:
+        for i in range(0, M_main, block_size):
+            block = x[i:i + block_size, N_main:N]
+            scale = s[i // block_size, N // block_size]
+            y[i:i + block_size, N_main:N] = block * scale
+
+    if M_main < M:
         for j in range(0, N, block_size):
-            row_start = i
-            row_end = min(i + block_size, M)
-            col_start = j
-            col_end = min(j + block_size, N)
-            block = x[row_start:row_end, col_start:col_end]
-            scale = s[i // block_size, j // block_size]
-            y[row_start:row_end, col_start:col_end] = (block * scale).to(
-                torch.get_default_dtype())
+            block = x[M_main:M, j:j + block_size]
+            scale = s[M // block_size, j // block_size]
+            y[M_main:M, j:j + block_size] = block * scale
 
-    return y
+    return y.to(torch.get_default_dtype())
