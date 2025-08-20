@@ -52,7 +52,9 @@ def setup_environment():
 @pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize("mesh", [test_utils.get_spmd_mesh()])
 @pytest.mark.parametrize("fuse_matmuls", [False, True])
-def test_jax_merged_column_parallel_linear(bias, mesh, fuse_matmuls):
+@pytest.mark.parametrize("enable_sp", [False, True])
+def test_jax_merged_column_parallel_linear(bias, mesh, fuse_matmuls,
+                                           enable_sp):
     dtype = torch.bfloat16
 
     merged_column_linear = MergedColumnParallelLinear(
@@ -78,7 +80,10 @@ def test_jax_merged_column_parallel_linear(bias, mesh, fuse_matmuls):
     # Set jax default device to workaround a layout bug in JAX 0.7.0 and earlier
     with torchax.default_env(), jax.default_device(jax.devices("tpu")[0]):
         jax_merged_column_linear = JaxMergedColumnParallelLinear(
-            merged_column_linear, mesh, fuse_matmuls)
+            merged_column_linear,
+            mesh,
+            fuse_matmuls,
+            enable_sequence_parallelism=enable_sp)
         jax_input_tensor = torch_view(t2j(input_tensor))
         jax_input_tensor.apply_jax_(jax.device_put,
                                     NamedSharding(mesh, P(None, None)))
