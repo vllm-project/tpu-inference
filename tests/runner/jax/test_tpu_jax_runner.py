@@ -3,11 +3,6 @@ from unittest.mock import MagicMock, patch
 
 import jax.numpy as jnp
 import numpy as np
-
-from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
-                                                    InputBatch)
-from tpu_commons.runner.jax.metadata import SpecDecodeMetadata
-from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
@@ -18,6 +13,11 @@ from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.outputs import DraftTokenIds
 from vllm.v1.request import PlaceholderRange, Request
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+
+from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
+                                                    InputBatch)
+from tpu_commons.runner.jax.metadata import SpecDecodeMetadata
+from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
 
 
 class TestTPUJaxRunner(unittest.TestCase):
@@ -87,7 +87,7 @@ class TestTPUJaxRunner(unittest.TestCase):
         # Populate a source KV cache with data. This represents the state
         # of the prefill runner's KV cache.
         source_kv_cache_shape = (num_blocks, self.runner.block_size,
-                                 2 * num_kv_heads, head_size)
+                                 2 * num_kv_heads // 2, 2, head_size)
         prod_val = int(np.prod(source_kv_cache_shape))
         source_kv_caches = [
             jnp.arange(prod_val,
@@ -152,7 +152,7 @@ class TestTPUJaxRunner(unittest.TestCase):
 
         # Initialize destination KV caches with zeros.
         dest_kv_cache_shape = (num_blocks, self.runner.block_size,
-                               2 * num_kv_heads, head_size)
+                               2 * num_kv_heads // 2, 2, head_size)
         self.runner.kv_caches = [
             jnp.zeros(dest_kv_cache_shape, dtype=jnp.bfloat16)
             for _ in range(num_layers)
@@ -198,7 +198,7 @@ class TestTPUJaxRunner(unittest.TestCase):
             # The extracted slice should be padded to the block size.
             padding_size = self.runner.block_size - prompt_len
             expected_padded_slice = jnp.pad(extracted_kv_cache_slices[i],
-                                            ((0, padding_size), (0, 0),
+                                            ((0, padding_size), (0, 0), (0, 0),
                                              (0, 0)),
                                             mode='constant')
             np.testing.assert_array_equal(updated_block_content,
