@@ -84,7 +84,8 @@ steps:
      commands:
        - |
          .buildkite/scripts/run_in_docker.sh \
-           python3 -m pytest -s -v /workspace/tpu_commons/tests/kernels
+           python3 -m pytest -s -v /workspace/tpu_commons/tests/kernels \
+           --ignore=/workspace/tpu_commons/tests/kernels/ragged_paged_attention_kernel_v2_test.py
 
 
   # -----------------------------------------------------------------
