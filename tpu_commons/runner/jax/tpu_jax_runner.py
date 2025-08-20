@@ -10,9 +10,31 @@ import jax
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
-import vllm.envs as envs
 from flax import nnx
 from jax.sharding import NamedSharding, PartitionSpec
+
+import vllm.envs as envs
+from tpu_commons import utils as common_utils
+from tpu_commons.logger import init_logger
+from tpu_commons.models.jax.attention_metadata import AttentionMetadata
+from tpu_commons.models.jax.common.sharding import build_mesh
+from tpu_commons.models.jax.layers.misc import shard_put
+from tpu_commons.models.jax.layers.sample.rejection_sampler import \
+    RejectionSampler
+from tpu_commons.models.jax.layers.sample.sampling import (compute_logprobs,
+                                                           gather_logprobs,
+                                                           sample)
+from tpu_commons.models.jax.layers.sample.sampling_metadata import \
+    TPUSupportedSamplingMetadata
+from tpu_commons.models.jax.model_loader import get_model
+from tpu_commons.models.jax.utils.multi_modal_utils import \
+    sanity_check_mm_encoder_outputs
+from tpu_commons.models.jax.utils.weight_utils import \
+    transfer_state_with_mappings
+from tpu_commons.runner import utils as runner_utils
+from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
+                                                    InputBatch)
+from tpu_commons.runner.jax.metadata import SpecDecodeMetadata
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
@@ -35,28 +57,6 @@ from vllm.v1.worker.kv_connector_model_runner_mixin import \
     KVConnectorModelRunnerMixin
 from vllm.v1.worker.utils import (gather_mm_placeholders,
                                   scatter_mm_placeholders)
-
-from tpu_commons import utils as common_utils
-from tpu_commons.logger import init_logger
-from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.models.jax.common.sharding import build_mesh
-from tpu_commons.models.jax.layers.misc import shard_put
-from tpu_commons.models.jax.layers.sample.rejection_sampler import \
-    RejectionSampler
-from tpu_commons.models.jax.layers.sample.sampling import (compute_logprobs,
-                                                           gather_logprobs,
-                                                           sample)
-from tpu_commons.models.jax.layers.sample.sampling_metadata import \
-    TPUSupportedSamplingMetadata
-from tpu_commons.models.jax.model_loader import get_model
-from tpu_commons.models.jax.utils.multi_modal_utils import \
-    sanity_check_mm_encoder_outputs
-from tpu_commons.models.jax.utils.weight_utils import \
-    transfer_state_with_mappings
-from tpu_commons.runner import utils as runner_utils
-from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
-                                                    InputBatch)
-from tpu_commons.runner.jax.metadata import SpecDecodeMetadata
 
 logger = init_logger(__name__)
 
@@ -208,6 +208,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         self.arange_cpu = np.arange(self.max_num_tokens, dtype=np.int64)
         self.num_reqs_paddings = runner_utils.get_req_paddings(
             min_req_size=MIN_NUM_SEQS, max_req_size=self.max_num_reqs)
+
+        # Padding for logits. Without speculative decoding, each request has one position to select from.
+        # With speculative decoding, each request has multiple positions to select from.
+        max_logits_per_req = 1
+        if self.speculative_config:
+            max_logits_per_req = self.speculative_config.num_speculative_tokens + 1  # Including bonus token
+            self.num_logits_paddings = runner_utils.get_token_paddings(
+                min_token_size=MIN_NUM_SEQS,
+                max_token_size=self.max_num_reqs * max_logits_per_req,
+                padding_gap=0)
+        else:
+            self.num_logits_paddings = None
 
         self.temperatures_cpu = np.zeros(self.max_num_tokens, dtype=np.float32)
         self.top_ps_cpu = np.zeros(self.max_num_tokens, dtype=np.float32)
@@ -1197,8 +1209,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         return require_structured_out_cpu, grammar_bitmask_cpu, structured_decode_arange
 
     def _get_spec_decode_metadata(
-            self, num_draft_tokens: np.ndarray,
-            cu_num_scheduled_tokens: np.ndarray) -> SpecDecodeMetadata:
+        self,
+        num_draft_tokens: np.ndarray,
+        cu_num_scheduled_tokens: np.ndarray,
+        padded_num_reqs: int,
+    ) -> SpecDecodeMetadata:
         # Inputs:
         # cu_num_scheduled_tokens:  [  4, 104, 107, 207, 209]
         # num_draft_tokens:         [  3,   0,   2,   0,   1]
@@ -1224,7 +1239,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             cu_num_scheduled_tokens - num_sampled_tokens, num_sampled_tokens)
         # Step 3. [0, 1, 2, 3, 103, 104, 105, 106, 206, 207, 208]
         logits_indices += arange
-
         # Compute the bonus logits indices.
         bonus_logits_indices = cu_num_sampled_tokens - 1
 
@@ -1243,20 +1257,25 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         draft_token_ids = self.input_ids_cpu[logits_indices]
         draft_token_ids = draft_token_ids[target_logits_indices + 1]
         padded_logits_length = runner_utils.get_padded_token_len(
-            self.num_reqs_paddings, logits_indices.shape[0])
+            self.num_logits_paddings, logits_indices.shape[0])
         padded_logits_indices = np.concatenate([
             logits_indices,
             np.zeros(padded_logits_length - logits_indices.shape[0],
                      dtype=np.int32)
         ])
+
+        assert bonus_logits_indices.shape[0] <= padded_num_reqs, (
+            f"bonus_logits_indices.shape[0]={bonus_logits_indices.shape[0]} "
+            f"padded_num_reqs={padded_num_reqs}")
+
         padded_bonus_logits_indices = np.concatenate([
             bonus_logits_indices,
-            np.zeros(padded_logits_length - bonus_logits_indices.shape[0],
+            np.zeros(padded_num_reqs - bonus_logits_indices.shape[0],
                      dtype=np.int32)
         ])
         padded_num_draft_tokens = np.concatenate([
             num_draft_tokens,
-            np.zeros(padded_logits_length - num_draft_tokens.shape[0],
+            np.zeros(padded_num_reqs - num_draft_tokens.shape[0],
                      dtype=np.int32)
         ])
         padded_draft_token_ids = np.concatenate([
@@ -1372,10 +1391,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             self.input_batch.block_table[0].get_cpu_tensor()[:num_reqs])
         query_start_loc = self.query_start_loc_cpu[:self.max_num_reqs + 1]
         seq_lens = self.seq_lens_cpu[:self.max_num_reqs]
+        request_distribution = np.array(self.input_batch.request_distribution)
         padded_num_reqs = runner_utils.get_padded_num_reqs_with_upper_limit(
             num_reqs, self.max_num_reqs)
-        request_distribution = np.array(self.input_batch.request_distribution)
-
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
@@ -1390,13 +1408,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                 num_draft_tokens[req_idx] = len(draft_token_ids)
 
             spec_decode_metadata = self._get_spec_decode_metadata(
-                num_draft_tokens, self.query_start_loc_cpu[1:num_reqs + 1])
+                num_draft_tokens, self.query_start_loc_cpu[1:num_reqs + 1],
+                padded_num_reqs)
             logits_indices = spec_decode_metadata.final_logits_indices
 
         # Put to device
-        sampling_metadata = TPUSupportedSamplingMetadata.\
-            from_input_batch(self.mesh, self.input_batch, logits_indices.shape[0])
-
+        sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
+            self.mesh, self.input_batch, logits_indices.shape[0])
         if self.uses_mrope:
             positions = mrope_positions
 
