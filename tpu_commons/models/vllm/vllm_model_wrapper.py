@@ -138,6 +138,12 @@ class VllmModelWrapper:
         @functools.partial(
             jax.jit,
             donate_argnums=(1, ),  # donate kv_cache
+            compiler_options={
+                "xla_tpu_all_gather_collective_matmul_mode":
+                "post_spmd_conservative",
+                "xla_tpu_reduce_scatter_collective_matmul_mode":
+                "post_spmd_conservative"
+            },
         )
         def step_fun(
             params_and_buffers,  # this has been wrapped into a torchax TorchValue

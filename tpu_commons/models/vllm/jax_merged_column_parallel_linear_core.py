@@ -14,6 +14,7 @@ from tpu_commons.models.vllm.jax_linear_common import (
     forward_unqunatized, forward_w8a8_int8_col_parallel,
     reorder_concatenated_tensor_for_sharding,
     slice_sharded_tensor_for_concatenation)
+from tpu_commons.utils import TPU_SECOND_LAST_MINOR
 
 P = PartitionSpec
 
@@ -22,7 +23,7 @@ class JaxMergedColumnParallelLinearCore(torch.nn.Module):
     """ A common class to implement Column Parallel Linear layer whose weight are merged from a list of smaller weight tensors, e.g. vLLM's MergedColumnParallelLinear and QKVParallelLinear layer. """
 
     def __init__(self, vllm_col_par_linear: torch.nn.Module, mesh: Mesh,
-                 name: str, fuse_matmuls: bool):
+                 name: str, fuse_matmuls: bool, enable_sequence_parallelism):
         super().__init__()
 
         self.gather_output = vllm_col_par_linear.gather_output
@@ -33,6 +34,7 @@ class JaxMergedColumnParallelLinearCore(torch.nn.Module):
         self.name = name
         self.fuse_matmuls = fuse_matmuls
         self.has_bias = vllm_col_par_linear.bias is not None
+        self.enable_sequence_parallelism = enable_sequence_parallelism
         self.n_matmuls = len(self.output_sizes)
         assert vllm_col_par_linear.tp_size == 1, (
             "The model has to be loaded with TP== 1 in order to run in Jax SPMD."
@@ -230,7 +232,14 @@ class JaxMergedColumnParallelLinearCore(torch.nn.Module):
 
     def forward(self, input: torch.Tensor):
         with jax.named_scope(self.name):
+            if self.enable_sequence_parallelism:
+                token_num = input.shape[0]
+                # NOTE(chengjiyao): make sure the sharded token_num is larger than TPU_SECOND_LAST_MINOR
+                if token_num // self.mesh.shape[
+                        'model'] >= TPU_SECOND_LAST_MINOR:
+                    input.shard_(NamedSharding(self.mesh, P('model', None)))
             if self.fuse_matmuls:
-                return self.forward_fused(input)
+                output, output_bias = self.forward_fused(input)
             else:
-                return self.forward_split(input)
+                output, output_bias = self.forward_split(input)
+            return output, output_bias

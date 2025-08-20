@@ -57,6 +57,7 @@ from tpu_commons.runner import utils as runner_utils
 from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
                                                     InputBatch)
 from tpu_commons.runner.jax.metadata import SpecDecodeMetadata
+from tpu_commons.utils import make_optimized_mesh
 
 logger = init_logger(__name__)
 
@@ -156,9 +157,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             axis_names = ("data", "model")
             mesh_shape = (dp, tp)
 
-            self.mesh = jax.make_mesh(mesh_shape,
-                                      axis_names,
-                                      devices=self.devices)
+            self.mesh = make_optimized_mesh(mesh_shape,
+                                            axis_names,
+                                            devices=self.devices)
         logger.info(f"Init mesh | mesh={self.mesh}")
 
     def _init_inputs(self) -> None:
