@@ -40,7 +40,6 @@ from tpu_commons import utils as common_utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.common.sharding import build_mesh
-from tpu_commons.models.jax.layers.misc import shard_put
 from tpu_commons.models.jax.layers.sample.rejection_sampler import \
     RejectionSampler
 from tpu_commons.models.jax.layers.sample.sampling import (compute_logprobs,
@@ -51,8 +50,8 @@ from tpu_commons.models.jax.layers.sample.sampling_metadata import \
 from tpu_commons.models.jax.model_loader import get_model
 from tpu_commons.models.jax.utils.multi_modal_utils import \
     sanity_check_mm_encoder_outputs
-from tpu_commons.models.jax.utils.weight_utils import \
-    transfer_state_with_mappings
+from tpu_commons.models.jax.utils.weight_utils import (
+    shard_put, transfer_state_with_mappings)
 from tpu_commons.runner import utils as runner_utils
 from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
                                                     InputBatch)
