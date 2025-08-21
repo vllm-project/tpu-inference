@@ -10,13 +10,15 @@ generation. Supported dataset types include:
     - MLPerfDataset
 """
 
+import json
 import logging
 import os
 import random
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Optional, Union
+from typing import Any, List, Optional, Union
 
+import numpy as np
 import pandas as pd
 from transformers import PreTrainedTokenizerBase
 from vllm.lora.request import LoRARequest
@@ -41,6 +43,24 @@ class SampleRequest:
     multi_modal_data: Optional[Union[MultiModalDataDict, dict]] = None
     lora_request: Optional[LoRARequest] = None
     completion: Optional[str] = None
+
+
+def sampled_dataset_statistics_info(data: List[SampleRequest]):
+    """
+    Print statistics about the sampled dataset.
+
+    Args:
+        data (List[SampleRequest]): A list of SampleRequest objects representing the sampled dataset.
+    """
+    prompt_lens = np.array([data[i].prompt_len for i in range(len(data))])
+    output_lens = np.array(
+        [data[i].expected_output_len for i in range(len(data))])
+
+    print("Input length distribution:")
+    print(f"Number of samples: {len(prompt_lens)}")
+    print(f"Total input tokens: {np.sum(prompt_lens)}")
+    print(f"Mean input tokens per request: {np.mean(prompt_lens):.2f}")
+    print(f"Mean output tokens per request: {np.mean(output_lens):.2f}")
 
 
 # -----------------------------------------------------------------------------
@@ -300,6 +320,7 @@ class MMLUDataset(BenchmarkDataset):
                     completion=completion,
                 ))
         self.maybe_oversample_requests(samples, num_requests)
+        sampled_dataset_statistics_info(samples)
         return samples
 
 
@@ -371,4 +392,61 @@ class MLPerfDataset(BenchmarkDataset):
                     completion=completion,
                 ))
         self.maybe_oversample_requests(samples, num_requests)
+        sampled_dataset_statistics_info(samples)
+        return samples
+
+
+# -----------------------------------------------------------------------------
+# Math500 Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class Math500Dataset(BenchmarkDataset):
+    """
+    Implements the Math500 dataset.
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.load_data()
+
+    def load_data(self) -> None:
+        with open(self.dataset_path, "r", encoding="utf-8") as f:
+            dataset = json.load(f)
+        # NOTE: each "data" entry also has a "solution" key that we don't
+        # seem to use (in JetStream)
+        self.data = [(data["problem"], data["answer"]) for data in dataset]
+        print(f"Loaded {len(self.data)} data from math500 dataset")
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        input_len: Optional[int] = None,
+        output_len: Optional[int] = None,
+        **kwargs,
+    ) -> list:
+        samples: list = []
+        for prompt, completion in self.data:
+            if len(samples) >= num_requests:
+                break
+
+            prompt_ids = tokenizer(prompt).input_ids
+            completion_ids = tokenizer(completion).input_ids
+            prompt_len = len(prompt_ids)
+            new_output_len = len(
+                completion_ids) if output_len is None else output_len
+            if input_len is not None and input_len <= prompt_len:
+                raise ValueError(
+                    f"prompt is too short: prompt_len is {prompt_len} but input_len is {input_len}"
+                )
+            samples.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=new_output_len or new_output_len,
+                    completion=completion,
+                ))
+        self.maybe_oversample_requests(samples, num_requests)
+        sampled_dataset_statistics_info(samples)
         return samples

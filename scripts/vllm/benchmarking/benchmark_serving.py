@@ -52,7 +52,8 @@ except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
 # yapf: disable
-from benchmark_dataset import MLPerfDataset, MMLUDataset, SampleRequest
+from benchmark_dataset import (Math500Dataset, MLPerfDataset, MMLUDataset,
+                               SampleRequest)
 # yapf: disable
 from benchmark_utils import (eval_benchmark_dataset_result,
                              sample_warmup_requests)
@@ -561,6 +562,14 @@ def main(args: argparse.Namespace):
                                     input_len=args.mlperf_input_len,
                                     output_len=args.mlperf_output_len,
                                 ),
+        "math500":
+        lambda: Math500Dataset(random_seed=args.seed,
+                                dataset_path=args.dataset_path).sample(
+                                    tokenizer=tokenizer,
+                                    num_requests=args.num_prompts,
+                                    input_len=args.math500_input_len,
+                                    output_len=args.math500_output_len,
+                                ),
     }
 
     try:
@@ -655,7 +664,7 @@ if __name__ == "__main__":
         default="sharegpt",
         choices=[
             "sharegpt", "burstgpt", "sonnet", "random", "hf", "custom", "mmlu",
-            "mlperf"
+            "mlperf", "math500"
         ],
         help="Name of the dataset to benchmark on.",
     )
@@ -827,6 +836,21 @@ if __name__ == "__main__":
         "from the MLPerf dataset.",
     )
 
+    math500_group = parser.add_argument_group("math500 dataset options")
+    math500_group.add_argument(
+        "--math500-input-len",
+        type=int,
+        default=None,
+        help="Input prompt length for each request",
+    )
+    math500_group.add_argument(
+        "--math500-output-len",
+        type=int,
+        default=None,
+        help="Output length for each request. Overrides the output length "
+        "from the Math500 dataset.",
+    )
+
     sampling_group = parser.add_argument_group("sampling parameters")
     sampling_group.add_argument(
         "--top-p",
@@ -883,7 +907,7 @@ if __name__ == "__main__":
         "--run-eval",
         action="store_true",
         help=
-        "Whether to run evaluation script on the saved outputs (for MMLU and MLPerf datasets)",
+        "Whether to run evaluation script on the saved outputs (for MMLU, MLPerf, and Math500 datasets)",
     )
     parser.add_argument(
         "--warmup-mode",
