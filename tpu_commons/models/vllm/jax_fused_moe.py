@@ -13,7 +13,7 @@ from vllm.config import ParallelConfig
 from vllm.model_executor.layers.fused_moe import FusedMoE
 
 from tpu_commons.models.vllm.jax_linear_common import (
-    reorder_concatenated_tensor_for_sharding_on_1st_dim,
+    reorder_concatenated_tensor_for_sharding,
     slice_sharded_tensor_for_concatenation)
 
 P = PartitionSpec
@@ -84,9 +84,9 @@ def _get_tiling_size_for_gmm_kernel(m: int, k: int, n: int,
     return tm, tk, tn
 
 
-def tensor_sharded_gmm_1st(lhs: jax.Array, rhs: jax.Array,
-                           group_sizes: jax.Array, transpose_rhs: bool,
-                           mesh: Mesh, intermediate_size: int) -> jax.Array:
+def tensor_sharded_gmm_merged_column_parallel(
+        lhs: jax.Array, rhs: jax.Array, group_sizes: jax.Array,
+        transpose_rhs: bool, mesh: Mesh, intermediate_size: int) -> jax.Array:
     # adapted from https://github.com/pytorch/xla/blob/1d409399474197c484894be90b75d9855393dda5/torch_xla/experimental/custom_kernel.py#L1401
     m, k, g = lhs.shape[0], lhs.shape[1], rhs.shape[0]
     n = rhs.shape[1] if transpose_rhs else rhs.shape[2]
@@ -115,7 +115,7 @@ def tensor_sharded_gmm_1st(lhs: jax.Array, rhs: jax.Array,
                                                   n_shards, mesh)
 
 
-def tensor_sharded_gmm_2nd(
+def tensor_sharded_gmm_row_parallel(
     lhs: jax.Array,
     rhs: jax.Array,
     group_sizes: jax.Array,
@@ -338,12 +338,13 @@ def jax_fused_moe_func(
                                ep_size=ep_size)
         x1, x2 = x[..., :intermediate_size], x[..., intermediate_size:]
     else:
-        x1, x2 = tensor_sharded_gmm_1st(x,
-                                        w1,
-                                        group_sizes,
-                                        transpose_rhs=True,
-                                        mesh=mesh,
-                                        intermediate_size=intermediate_size)
+        x1, x2 = tensor_sharded_gmm_merged_column_parallel(
+            x,
+            w1,
+            group_sizes,
+            transpose_rhs=True,
+            mesh=mesh,
+            intermediate_size=intermediate_size)
 
     x = jax.nn.silu(x1) * x2
 
@@ -358,11 +359,11 @@ def jax_fused_moe_func(
     else:
         x = jax.lax.with_sharding_constraint(
             x, NamedSharding(mesh, P(None, 'model')))
-        x = tensor_sharded_gmm_2nd(x,
-                                   w2,
-                                   group_sizes,
-                                   transpose_rhs=True,
-                                   mesh=mesh)
+        x = tensor_sharded_gmm_row_parallel(x,
+                                            w2,
+                                            group_sizes,
+                                            transpose_rhs=True,
+                                            mesh=mesh)
 
     x = x[topk_argsort_revert_indices].reshape(-1, topk, hidden_size)
     x = x * jnp.expand_dims(topk_weights, axis=-1)
@@ -451,13 +452,14 @@ class JaxFusedMoE(torch.nn.Module):
         else:
             w13_weight = t2j(fused_moe.w13_weight.data)
             intermediate_size = w13_weight.shape[1] // 2
-            print(f"load_weight {w13_weight.shape=}, {intermediate_size=}")
             assert intermediate_size == w2_weight.shape[-1]
             output_sizes = [intermediate_size, intermediate_size]
             n_shards = self.mesh.shape['model']
             assert intermediate_size % n_shards == 0
-            w13_weight = reorder_concatenated_tensor_for_sharding_on_1st_dim(
-                w13_weight, output_sizes, n_shards)
+            w13_weight = reorder_concatenated_tensor_for_sharding(w13_weight,
+                                                                  output_sizes,
+                                                                  n_shards,
+                                                                  dim=1)
             w13_weight = Parameter(torch_view(w13_weight), requires_grad=False)
             self.register_parameter("w13_weight", w13_weight)
 
