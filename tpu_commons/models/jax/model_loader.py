@@ -81,6 +81,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
         _MODEL_REGISTRY["DeepSeekV3"] = DeepSeekV3
         _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
         _MODEL_REGISTRY["Llama4ForCausalLM"] = Llama4ForCausalLM
+        # _MODEL_REGISTRY["LlamaForCausalLM"] = FujiForCausalLM
     else:
         from tpu_commons.models.jax.llama3 import LlamaForCausalLM
         from tpu_commons.models.jax.phi3 import Phi3ForCausalLM
