@@ -75,6 +75,13 @@ class MLA(nnx.Module):
 
         assert self.N == self.K, "N and K must be equal for MLA"
 
+        if self.rope_scaling["factor"] <= 1.0:
+            yarn_mscale = 1.0
+        else:
+            yarn_mscale = 0.1 * self.rope_mscale_all_dim * math.log(
+                self.rope_scaling["factor"]) + 1.0
+        self.scale = self.qk_head_dim**-0.5 * yarn_mscale**2
+
         self.rope = DeepseekScalingRotaryEmbedding(
             self.qk_rope_head_dim,
             self.rope_theta,
@@ -290,17 +297,11 @@ class MLA(nnx.Module):
             P(),  # distribution: Replicated
         )
         out_specs = (self.attn_o_tnh.spec, P())
-        if self.rope_scaling["factor"] <= 1.0:
-            yarn_mscale = 1.0
-        else:
-            yarn_mscale = 0.1 * self.rope_mscale_all_dim * math.log(
-                self.rope_scaling["factor"]) + 1.0
-        scale = self.qk_head_dim**-0.5 * yarn_mscale**2
 
         def _ragged_paged_attention(*args):
             return ragged_paged_attention(
                 *args,
-                sm_scale=scale,
+                sm_scale=self.scale,
             )
 
         output_TNH, kv_cache = jax.jit(
