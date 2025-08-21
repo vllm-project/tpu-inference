@@ -19,8 +19,6 @@ from vllm.model_executor.layers.linear import MergedColumnParallelLinear
 from vllm.model_executor.utils import set_random_seed
 from vllm.platforms import current_platform
 
-from tpu_commons.distributed.tpu_distributed_utils import \
-    create_torchax_tensor_with_partition_spec
 from tpu_commons.lora.layers import (TorchaxBaseLayerWithLoRA,
                                      TorchaxMergedColumnParallelLinearWithLoRA)
 from tpu_commons.models.vllm.sharding import shard_parallel_layers_to_tpu
@@ -258,7 +256,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
 
             # replace the LoRA wrapper with our own wrapper  (e.g. TorchaxMergedColumnParallelLinearWithLoRA)
             torchax_lora_linear = TorchaxMergedColumnParallelLinearWithLoRA(
-                lora_linear)
+                lora_linear, mesh)
 
         return linear, torchax_lora_linear
 
@@ -268,9 +266,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
     # linear.weight has type torch.nn.Parameter, lora_linear.weight has type torchax.tensor.Tensor
     # BaseLinearLayerWithLoRA.weight property guarantees this.
     with torchax.default_env():
-        assert torch.equal(
-            create_torchax_tensor_with_partition_spec(linear.weight.data),
-            torchax_lora_linear.weight)
+        assert torch.equal(linear.weight.data, j2t(torchax_lora_linear.weight))
 
     max_num_batched_tokens = 8192
     max_batches = 256
@@ -305,13 +301,15 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
         device=device)
     lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
 
-    punica_wrapper.update_metadata(
-        lora_mapping,
-        index_to_id,
-        max_loras,
-        512,
-        lora_config.lora_extra_vocab_size,
-    )
+    with torchax.default_env(), jax.default_device(jax.devices("tpu")[0]):
+        punica_wrapper.update_metadata(
+            lora_mapping,
+            index_to_id,
+            max_loras,
+            512,
+            lora_config.lora_extra_vocab_size,
+        )
+        punica_wrapper.move_to_device(mesh)
 
     jax_inputs = []
     with torchax.default_env(), jax.default_device(jax.devices("tpu")[0]):
@@ -367,13 +365,15 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
         device=device)
     lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
 
-    punica_wrapper.update_metadata(
-        lora_mapping,
-        index_to_id,
-        max_loras,
-        512,
-        lora_config.lora_extra_vocab_size,
-    )
+    with torchax.default_env(), jax.default_device(jax.devices("tpu")[0]):
+        punica_wrapper.update_metadata(
+            lora_mapping,
+            index_to_id,
+            max_loras,
+            512,
+            lora_config.lora_extra_vocab_size,
+        )
+        punica_wrapper.move_to_device(mesh)
 
     jax_inputs = []
     with torchax.default_env(), jax.default_device(jax.devices("tpu")[0]):

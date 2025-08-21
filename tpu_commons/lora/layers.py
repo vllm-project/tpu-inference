@@ -1,17 +1,17 @@
 from typing import TYPE_CHECKING, Optional, Union, cast
 
+import jax
 import torch
 import torch.nn as nn
-from jax.sharding import PartitionSpec
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from torchax.interop import torch_view
+from torchax.ops.mappings import t2j
 from transformers import PretrainedConfig
 from vllm.config import LoRAConfig
 # yapf: enable
 from vllm.lora.layers import BaseLayerWithLoRA
 # yapf: disable
 from vllm.platforms import current_platform
-
-from tpu_commons.distributed.tpu_distributed_utils import \
-    create_torchax_tensor_with_partition_spec
 
 if TYPE_CHECKING:
     from vllm.lora.punica_wrapper import PunicaWrapperBase
@@ -77,18 +77,19 @@ class TorchaxBaseLayerWithLoRA(nn.Module):
 
 class TorchaxBaseLinearLayerWithLoRA(TorchaxBaseLayerWithLoRA):
 
-    def __init__(self, base_lora_layer: BaseLayerWithLoRA):
+    def __init__(self, base_lora_layer: BaseLayerWithLoRA, mesh: Mesh):
         super().__init__()
         self.base_lora_layer = base_lora_layer
         self.base_layer = base_lora_layer.base_layer
+        self.mesh = mesh
 
         # self.lora_a_stacked, self.lora_b_stacked, self.lora_bias_stacked, self.lora_config are initialized in original LoRA wrapper's create_lora_weight().
         self.lora_config = base_lora_layer.lora_config
-        self.lora_a_stacked = tuple(create_torchax_tensor_with_partition_spec(lora_a) for lora_a in base_lora_layer.lora_a_stacked)
-        self.lora_b_stacked = tuple(create_torchax_tensor_with_partition_spec(lora_b) for lora_b in base_lora_layer.lora_b_stacked)
+        self.lora_a_stacked = tuple(torch_view(t2j(lora_a)) for lora_a in base_lora_layer.lora_a_stacked)
+        self.lora_b_stacked = tuple(torch_view(t2j(lora_b)) for lora_b in base_lora_layer.lora_b_stacked)
         self.lora_bias_stacked: Optional[tuple[torch.Tensor, ...]] = None
         if self.lora_config.bias_enabled:
-            self.lora_bias_stacked: Optional[tuple[torch.Tensor, ...]] = tuple(create_torchax_tensor_with_partition_spec(lora_bias) for lora_bias in base_lora_layer.lora_bias_stacked)
+            self.lora_bias_stacked: Optional[tuple[torch.Tensor, ...]] = tuple(torch_view(t2j(lora_bias)) for lora_bias in base_lora_layer.lora_bias_stacked)
 
         self.output_slices: tuple[int, ...]
         self.n_slices: int
@@ -151,9 +152,9 @@ class TorchaxMergedColumnParallelLinearWithLoRA(TorchaxBaseLinearLayerWithLoRA):
     Both slices must have the same size.
     """
 
-    def __init__(self, base_lora_layer: BaseLayerWithLoRA) -> None:
+    def __init__(self, base_lora_layer: BaseLayerWithLoRA, mesh: Mesh) -> None:
         # TODO(xiowei): add mesh to the __init__.
-        super().__init__(base_lora_layer)
+        super().__init__(base_lora_layer, mesh)
         output_sizes = self.base_layer.output_sizes
         self.output_slices = output_sizes
         self.n_slices = len(output_sizes)
@@ -194,23 +195,28 @@ class TorchaxMergedColumnParallelLinearWithLoRA(TorchaxBaseLinearLayerWithLoRA):
     def set_lora(
         self,
         index: int,
-        lora_a: torch.Tensor,
+        lora_a: torch.Tensor,  # tuple of (max_loras, 1, max_lora_rank, in_features)
         lora_b: torch.Tensor,
         embeddings_tensor: Optional[torch.Tensor],
         lora_bias: Optional[torch.Tensor] = None,
     ):
         self.reset_lora(index)
         for i in range(self.n_slices):
-            lora_a_i = create_torchax_tensor_with_partition_spec(lora_a[i])
+            self.lora_a_stacked[i].apply_jax_(jax.device_put, NamedSharding(self.mesh, P()))
+            self.lora_b_stacked[i].apply_jax_(jax.device_put, NamedSharding(self.mesh, P()))
+
+            lora_a_i = torch_view(t2j(lora_a[i])).apply_jax_(jax.device_put, NamedSharding(self.mesh, P()))
             if lora_a_i is not None:
                 self.lora_a_stacked[i][
                     index, 0, :lora_a_i.shape[1], :lora_a_i.shape[0]].copy_(
                         lora_a_i.T, non_blocking=True)
-            lora_b_i = create_torchax_tensor_with_partition_spec(lora_b[i])
+
+            lora_b_i = torch_view(t2j(lora_b[i])).apply_jax_(jax.device_put, NamedSharding(self.mesh, P()))
             if lora_b_i is not None:
                 self.lora_b_stacked[i][
                     index, 0, :lora_b_i.shape[1], :lora_b_i.shape[0]].copy_(
                         lora_b_i.T, non_blocking=True)
+
 
         if not self.lora_config.bias_enabled:
             assert lora_bias is None, "lora_bias is not None but the lora bias is disabled."
@@ -218,7 +224,8 @@ class TorchaxMergedColumnParallelLinearWithLoRA(TorchaxBaseLinearLayerWithLoRA):
             self.lora_bias_stacked = cast(tuple[torch.Tensor, ...],
                                           self.lora_bias_stacked)
             for i in range(self.n_slices):
-                lora_bias_i = create_torchax_tensor_with_partition_spec(lora_bias[i])
+                self.lora_bias_stacked[i].apply_jax_(jax.device_put, NamedSharding(self.mesh, P()))
+                lora_bias_i = torch_view(t2j(lora_bias[i])).apply_jax_(jax.device_put, NamedSharding(self.mesh, P()))
                 if lora_bias_i is not None:
                     self.lora_bias_stacked[i][index,
                                               0, :lora_bias_i.shape[0]].copy_(

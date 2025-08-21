@@ -4,12 +4,12 @@
 import math
 from typing import TYPE_CHECKING, Optional, Union
 
+import jax
 import torch
 import torch.nn.functional as F
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
 from vllm.lora.punica_wrapper.utils import convert_mapping
-
-from tpu_commons.distributed.tpu_distributed_utils import \
-    create_torchax_tensor_with_partition_spec
 
 if TYPE_CHECKING:
     # avoid circuit import
@@ -42,8 +42,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             dtype=torch.int32)
 
     def _get_token_lora_indices(self, x: torch.Tensor) -> torch.IntTensor:
-        return create_torchax_tensor_with_partition_spec(
-            torch.narrow(self._token_lora_indices, 0, 0, x.size(0)))
+        return torch.narrow(self._token_lora_indices, 0, 0, x.size(0))
 
     @property
     def embeddings_indices(self) -> torch.Tensor:
@@ -313,6 +312,23 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             embeddings_indices, self._embeddings_indices.shape,
             dims=2).to(self.device)
         self.indices_len[:] = indices_len
+
+    def move_to_device(self, mesh: Mesh):
+        self._token_lora_indices = self._token_lora_indices.to('jax')
+        self._token_lora_indices.apply_jax_(jax.device_put,
+                                            NamedSharding(mesh, P(None)))
+
+        self._sampler_indices = self._sampler_indices.to('jax')
+        self._sampler_indices.apply_jax_(jax.device_put,
+                                         NamedSharding(mesh, P(None)))
+
+        self._sampler_indices_padded = self._sampler_indices_padded.to('jax')
+        self._sampler_indices_padded.apply_jax_(jax.device_put,
+                                                NamedSharding(mesh, P(None)))
+
+        self._embeddings_indices = self._embeddings_indices.to('jax')
+        self._embeddings_indices.apply_jax_(jax.device_put,
+                                            NamedSharding(mesh, P(None)))
 
     def _update_prefill_metadata(self,
                                  token_lora_tensor: torch.Tensor) -> None:

@@ -7,9 +7,6 @@ import torch
 import torch.nn.functional as F
 from torchax.interop import call_jax
 
-from tpu_commons.distributed.tpu_distributed_utils import \
-    create_torchax_tensor_with_partition_spec
-
 
 @jax.jit
 def bgmv_jax(
@@ -33,8 +30,6 @@ def bgmv_torch(
     # TODO(xiowei): use the below one_hot impl (added in https://github.com/pytorch/xla/pull/9523) after we upgrade torchax version.
     # if len(loras.shape) == 4:
     #     loras = loras.squeeze(axis=1)
-    # loras = create_torchax_tensor_with_partition_spec(loras)
-    # idxs = create_torchax_tensor_with_partition_spec(idxs)
     # return torch.einsum(
     #     "td,tX,Xld->tl",
     #     inputs,
@@ -44,8 +39,6 @@ def bgmv_torch(
 
     if len(loras.shape) == 4:
         loras = loras.squeeze(axis=1)
-    loras = create_torchax_tensor_with_partition_spec(loras)
-    idxs = create_torchax_tensor_with_partition_spec(idxs)
     return call_jax(bgmv_jax, inputs, loras, idxs)
 
 
