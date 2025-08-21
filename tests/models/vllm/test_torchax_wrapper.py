@@ -50,6 +50,8 @@ def test_with_torchax_global_exception_handling():
         mock_disable.assert_called_once()
 
 
+@pytest.mark.skip(
+    reason="b/440250062. Delete the test when deleting torchax-pt path.")
 @pytest.mark.parametrize("tensor_dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("use_mesh", [True, False])
 def test_get_cpu_tensor_from_torchax_tensor(tensor_dtype, use_mesh):
