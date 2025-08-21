@@ -1046,7 +1046,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         else:
             valid_sampled_token_ids = self.rejection_sampler.parse_output(
                 next_tokens, self.input_batch.vocab_size,
-                spec_decode_metadata.draft_lengths, num_reqs,
+                spec_decode_metadata.draft_lengths_cpu, num_reqs,
                 spec_decode_metadata.draft_token_ids.shape[0])
 
         # Mask out the sampled tokens that should not be sampled.
@@ -1294,6 +1294,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                      dtype=np.int32)
         ])
 
+        padded_num_draft_tokens_cpu = padded_num_draft_tokens
         # CPU -> TPU copy.
         (padded_num_draft_tokens, padded_draft_token_ids,
          padded_logits_indices, padded_target_logits_indices,
@@ -1305,6 +1306,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         metadata = SpecDecodeMetadata(
             draft_token_ids=padded_draft_token_ids,
             draft_lengths=padded_num_draft_tokens,
+            draft_lengths_cpu=padded_num_draft_tokens_cpu,
             target_logits_indices=padded_target_logits_indices,
             bonus_logits_indices=padded_bonus_logits_indices,
             final_logits_indices=padded_logits_indices,
