@@ -219,6 +219,12 @@ class TPUWorker(AbstractTpuWorker):
         vllm_kv_cache_config = adapted_kv_cache_config.vllm_kv_cache_config
         self.model_runner.initialize_kv_cache(vllm_kv_cache_config)
 
+        # debug
+        hbm_usage = utils.hbm_usage_bytes(self.devices)
+        hbm_free = [limit - used for used, limit in hbm_usage]
+        total_hbm_free = sum(hbm_free)
+        print(f'[debug] after initialize kv cache hbm memory: {total_hbm_free}')
+
     def check_health(self) -> None:
         # worker will always be healthy as long as it's running.
         return
