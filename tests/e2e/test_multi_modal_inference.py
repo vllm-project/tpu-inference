@@ -31,7 +31,7 @@ def test_multi_modal_inference(monkeypatch):
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
     # --- Configuration ---
-    model = "Qwen/Qwen2.5-VL-3B-Instruct"
+    model = "Qwen/Qwen2.5-VL-7B-Instruct"
     tensor_parallel_size = 1
     temperature = 0.0
     max_tokens = 64

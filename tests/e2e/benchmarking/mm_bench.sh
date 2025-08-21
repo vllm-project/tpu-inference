@@ -12,7 +12,7 @@
 #   --max_num_batched_tokens 98304
 
 # Spin up the vLLM server
-model_name="Qwen/Qwen2.5-VL-3B-Instruct"
+model_name="Qwen/Qwen2.5-VL-7B-Instruct"
 max_batched_tokens=98304
 max_model_len=98304
 dataset_name="hf"
