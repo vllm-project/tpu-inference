@@ -979,16 +979,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                     tpu_sampling_metadata,
                 )
             else:
-                bonus_logits = logits[
-                    spec_decode_metadata.bonus_logits_indices]
+                bonus_logits = self.select_hidden_states_fn(
+                    logits, spec_decode_metadata.bonus_logits_indices)
                 bonus_token_ids = sample(
                     self.rng_params_for_sampling,
                     self.mesh,
                     bonus_logits,
                     tpu_sampling_metadata,
                 )
-                target_logits = logits[
-                    spec_decode_metadata.target_logits_indices]
+                target_logits = self.select_hidden_states_fn(
+                    logits, spec_decode_metadata.target_logits_indices)
                 next_tokens = self.rejection_sampler(
                     draft_token_ids=spec_decode_metadata.draft_token_ids,
                     num_draft_tokens=spec_decode_metadata.draft_lengths,
