@@ -87,6 +87,9 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
         self.mock_vllm_config = MagicMock(spec=VllmConfig)
         self.mock_vllm_config.parallel_config = MagicMock(spec=ParallelConfig)
         self.mock_vllm_config.device_config = MagicMock()
+        self.mock_vllm_config.cache_config = MagicMock()
+        self.mock_vllm_config.cache_config.prefix_caching_hash_algo = "builtin"
+        self.mock_vllm_config.cache_config.block_size = 5
         self.mock_vllm_config.__post_init__ = MagicMock()
 
     def test_initialization(self):
@@ -128,6 +131,7 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
         mock_request.use_structured_output = False
         mock_request.pooling_params = None
         mock_request.sampling_params.guided_decoding = None
+        mock_request.block_hashes = []
 
         mock_engine_request, _ = proc.preprocess_add_request(mock_request)
 
@@ -173,6 +177,7 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
         mock_request.use_structured_output = False
         mock_request.pooling_params = None
         mock_request.sampling_params.guided_decoding = None
+        mock_request.block_hashes = []
         mock_request = proc.preprocess_add_request(mock_request)
 
         proc._handle_client_request(EngineCoreRequestType.ADD, mock_request)
@@ -330,7 +335,7 @@ class TestDisaggOrchestrator(unittest.TestCase):
         orchestrator.live = True
 
         # Mock kv cache map
-        mock_kv_cache_map = {"test_req": [MagicMock()]}
+        mock_kv_cache_map = {"test_req": ([MagicMock()], [])}
         orchestrator._transfer_backlogs[0].put(mock_kv_cache_map)
         orchestrator._transfer_backlogs[0].put(
             None)  # Sentinel to stop the loop
@@ -354,7 +359,11 @@ class TestDisaggOrchestrator(unittest.TestCase):
         orchestrator.live = True
 
         # Mock prefill output
-        mock_prefill_output = {"req_id": "test_req", "cache": [MagicMock()]}
+        mock_prefill_output = {
+            "req_id": "test_req",
+            "cache": [MagicMock()],
+            "block_hashes": []
+        }
         orchestrator._decode_backlogs[0].put(mock_prefill_output)
         orchestrator._decode_backlogs[0].put(None)  # Sentinel to stop the loop
 
