@@ -8,7 +8,7 @@ import signal
 import threading
 import time
 import traceback
-from typing import Any, Callable, Optional, TypeVar, Union
+from typing import Any, Callable, Optional, Tuple, TypeVar, Union
 
 import jax
 # ======================================================================================
@@ -17,6 +17,9 @@ import jax
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.tasks import POOLING_TASKS
+from vllm.utils import get_hash_fn_by_name
+from vllm.v1.core.kv_cache_utils import (get_request_block_hasher,
+                                         init_none_hash)
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput,
                             UtilityResult)
@@ -173,7 +176,7 @@ class _DisaggOrchestrator:
             if scheduler_output.total_num_scheduled_tokens > 0:
                 logger.debug(f"Prefill result: {model_output}")
 
-                kv_cache_map: dict[str, list[jax.Array]] = {}
+                kv_cache_map: dict[str, Tuple(list[jax.Array], list[Any])] = {}
                 for req_id, idx in model_output.req_id_to_index.items():
                     if len(model_output.sampled_token_ids[idx]) > 0:
                         request = self._requests[req_id]
@@ -185,7 +188,7 @@ class _DisaggOrchestrator:
                             kv_cache_map[req_id] = (
                                 prefill_engine.model_executor.driver_worker.
                                 model_runner.get_kv_cache_for_block_ids(
-                                    block_ids[0]))
+                                    block_ids[0]), request.block_hashes)
                         logger.debug(f"prefill done: for {req_id}")
                 transfer_backlog.put(kv_cache_map, block=True)
 
@@ -196,6 +199,9 @@ class _DisaggOrchestrator:
                 for req_id, idx in model_output.req_id_to_index.items():
                     if len(model_output.sampled_token_ids[idx]) > 0:
                         request = self._requests[req_id].vllm_request
+                        logger.debug(
+                            f"request block_hashes at prefill: {request.block_hashes}"
+                        )
                         logger.debug(
                             f"request-{req_id}: tokens={request.all_token_ids} after prefill"
                         )
@@ -229,7 +235,7 @@ class _DisaggOrchestrator:
             )
 
             push_targets = []
-            for req_id, kv_cache in kv_cachce_map.items():
+            for req_id, (kv_cache, block_hashes) in kv_cachce_map.items():
                 target_idx = -1
                 cnt = 9999999
                 for i, e in enumerate(self._decode_engines):
@@ -248,6 +254,7 @@ class _DisaggOrchestrator:
                 prefill_output = {
                     "cache": kv_cache,
                     "req_id": req_id,
+                    "block_hashes": block_hashes,
                 }
                 push_targets.append((target_idx, prefill_output))
 
@@ -313,6 +320,8 @@ class _DisaggOrchestrator:
                 )
                 vllm_request.num_computed_tokens = prompt_tokens
                 new_block_ids = kv_cache_manager.get_block_ids(req_id)
+                logger.warning(
+                    f"decoding {req_id} new_block_ids {new_block_ids}")
                 assert (len(new_block_ids[0]) == math.ceil(
                     prompt_tokens / self._config.cache_config.block_size))
 
@@ -321,6 +330,8 @@ class _DisaggOrchestrator:
                         vllm_request, kv_cache, new_block_ids)
 
                 vllm_request.status = RequestStatus.RUNNING
+                block_hashes = prefill_output["block_hashes"]
+                vllm_request.block_hashes = block_hashes
                 decode_engine.scheduler.running.append(vllm_request)
                 decode_engine.scheduler.requests[req_id] = vllm_request
 
@@ -476,6 +487,17 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
             if addresses.coordinator_input is not None:
                 logger.info("Waiting for READY message from DP Coordinator...")
 
+        if (self.vllm_config.cache_config.enable_prefix_caching
+                or self.scheduler.get_kv_connector() is not None):
+
+            block_size = vllm_config.cache_config.block_size
+            caching_hash_fn = get_hash_fn_by_name(
+                vllm_config.cache_config.prefix_caching_hash_algo)
+            init_none_hash(caching_hash_fn)
+
+            self.request_block_hasher = get_request_block_hasher(
+                block_size, caching_hash_fn)
+
         self._orchestrator = _DisaggOrchestrator(
             config=VllmConfigAdapter(vllm_config),
             output_queue=self.output_queue,
@@ -488,8 +510,6 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
             prefill_slice_sizes=prefill_slice_sizes,
             decode_slice_sizes=decode_slice_sizes,
         )
-
-        self.request_block_hasher = None
 
     @staticmethod
     def _create_engine_cores(
@@ -532,7 +552,6 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
     def _handle_client_request(self, request_type: EngineCoreRequestType,
                                request: Any) -> None:
         """Dispatch request from client."""
-
         if request_type == EngineCoreRequestType.ADD:
             req, request_wave = request
             self.add_request(req)
