@@ -9,8 +9,6 @@ from tpu_commons.logger import init_logger
 
 logger = init_logger(__name__)
 
-DEFAULT_KV_CACHE_DTYPE = jnp.bfloat16
-
 
 def create_kv_caches(
     num_blocks: int,
@@ -19,6 +17,7 @@ def create_kv_caches(
     head_size: int,
     mesh: Mesh,
     layer_names: List[str],
+    cache_dtype: jnp.dtype = jnp.bfloat16,
 ) -> List[jax.Array]:
     """
     Creates the KV caches, a list of arrays, each array is for one attention layer.
@@ -39,8 +38,6 @@ def create_kv_caches(
         A list of KV caches, one per each decoder layer in the model.
 
     """
-    # TODO (jacobplatin): update this for quantized KV cache
-    cache_dtype = DEFAULT_KV_CACHE_DTYPE
     # TODO(xiang): fix this together with get_kv_cache_spec
     # cache_dtype = kv_cache_spec.dtype
 
