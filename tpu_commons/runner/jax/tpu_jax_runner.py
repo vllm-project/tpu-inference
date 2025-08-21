@@ -1421,7 +1421,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
 
         # Put to device
         sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
-            self.mesh, self.input_batch, logits_indices.shape[0])
+            self.mesh, self.input_batch, padded_num_reqs)
         if self.uses_mrope:
             positions = mrope_positions
 
