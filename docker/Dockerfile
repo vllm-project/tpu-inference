@@ -15,12 +15,14 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /workspace/vllm
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 RUN git clone $VLLM_REPO /workspace/vllm
+
 RUN pip install -r requirements/tpu.txt
 RUN VLLM_TARGET_DEVICE="tpu" pip install -e .
 
 # Install test dependencies
 RUN python3 -m pip install -e tests/vllm_test_utils
-RUN python3 -m pip install --no-cache-dir git+https://github.com/thuml/depyf.git pytest pytest-asyncio tpu-info datasets 'lm_eval[api]==0.4.4'
+RUN python3 -m pip install --no-cache-dir git+https://github.com/thuml/depyf.git pytest pytest-asyncio tpu-info datasets
+RUN python3 -m pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d#egg=lm-eval[api]
 RUN python3 -m pip install pytest-cov
 RUN python3 -m pip install numba
 

@@ -110,6 +110,43 @@ steps:
          .buildkite/scripts/run_in_docker.sh \
            bash -c 'SKIP_JAX_PRECOMPILE=1 MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_commons/tests/lora/test_lora.py'
 
+   - label: "Integration Test llama-3.1-8B on TPU"
+     key: integration_test_llama_3_1_8B_tpu
+     depends_on:
+       - test_0
+       - test_1
+       - test_2
+       - test_3
+       - test_4
+       - test_5
+       - test_6
+       - test_7
+       - test_8
+       - test_9
+     soft_fail: true
+     agents:
+       queue: tpu_v6e_queue
+     commands:
+       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/test_accuracy.sh -t 1 -m "meta-llama/Llama-3.1-8B-Instruct"
+
+   - label: "Integration Test llama-3.1-70B on TPU"
+     key: integration_test_llama_3_1_70B_tpu
+     depends_on:
+       - test_0
+       - test_1
+       - test_2
+       - test_3
+       - test_4
+       - test_5
+       - test_6
+       - test_7
+       - test_8
+       - test_9
+     soft_fail: true
+     agents:
+       queue: tpu_v6e_8_queue
+     commands:
+       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/test_accuracy.sh -t 8 -m "meta-llama/Llama-3.1-70B-Instruct"
 
   # -----------------------------------------------------------------
   # NOTIFICATION STEP
@@ -126,9 +163,12 @@ steps:
        - test_7
        - test_8
        - test_9
+       - integration_test_llama_3_1_8B_tpu
+       - integration_test_llama_3_1_70B_tpu
      agents:
        queue: tpu_v6e_queue
      commands:
        - |
          .buildkite/scripts/check_results.sh \
-           "TPU JAX Tests Failed" test_0 test_1 test_2 test_3 test_4 test_5 test_6 test_7 test_8 test_9
+           "TPU JAX Tests Failed" test_0 test_1 test_2 test_3 test_4 test_5 test_6 test_7 test_8 test_9 \
+           integration_test_llama_3_1_8B_tpu integration_test_llama_3_1_70B_tpu

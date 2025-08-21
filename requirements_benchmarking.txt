@@ -5,3 +5,6 @@ evaluate
 datasets
 rouge-score
 scikit-learn
+openai
+lm_eval
+pytest

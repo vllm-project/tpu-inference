@@ -11,6 +11,36 @@ if [ "$#" -eq 0 ]; then
   exit 1
 fi
 
+MOUNT_EXPECT_RESULT="False"
+OTHER_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --mount-expect-result)
+            MOUNT_EXPECT_RESULT="True"
+            shift 1
+            ;;
+        *)
+            OTHER_ARGS+=("$@")
+            break
+            ;;
+    esac
+done
+
+# TBD: To support the functionality of connecting GPU and TPU expected values in the future
+EXPECT_VOLUME=()
+EXPECT_ENV=()
+if [ "$MOUNT_EXPECT_RESULT" = "True" ]; then
+    touch "$EXPECT_VALUES_FILENAME"
+    echo "[DEBUG] Path: $EXPECT_VALUES_PATH, Filename: $EXPECT_VALUES_FILENAME, "
+
+    EXPECT_VOLUME=(-v "$(pwd)/$EXPECT_VALUES_FILENAME":"$EXPECT_VALUES_PATH$EXPECT_VALUES_FILENAME")
+    echo "docker -v cmd: ${EXPECT_VOLUME[@]}"
+
+    EXPECT_ENV=(-e EXPECT_VALUES_PATH="$EXPECT_VALUES_PATH" -e EXPECT_VALUES_FILENAME="$EXPECT_VALUES_FILENAME")
+    echo "docker -e cmd: ${EXPECT_ENV[@]}"
+fi
+
 if ! grep -q "^HF_TOKEN=" /etc/environment; then
   gcloud secrets versions access latest --secret=bm-agent-hf-token --quiet | \
   sudo tee -a /etc/environment > /dev/null <<< "HF_TOKEN=$(cat)"
@@ -46,6 +76,9 @@ else
 fi
 DOCKER_HF_HOME="/tmp/hf_home"
 
+# Prune older images on the host to save space.
+docker system prune -a -f --filter "until=3h"
+
 # (TODO): Consider creating a remote registry to cache and share between agents.
 # Subsequent builds on the same host should be cached.
 
@@ -76,7 +109,10 @@ fi
 
 echo "Cleanup complete."
 
-docker build --no-cache -f docker/Dockerfile -t "vllm-tpu:${BUILDKITE_COMMIT}" .
+IMAGE_NAME="vllm-tpu"
+docker build --no-cache -f docker/Dockerfile -t "${IMAGE_NAME}:${BUILDKITE_COMMIT}" .
+
+echo "Execute Cmd: $@ on Image: ${IMAGE_NAME}:${BUILDKITE_COMMIT}"
 
 exec docker run \
   --privileged \
@@ -84,6 +120,8 @@ exec docker run \
   --shm-size=16G \
   --rm \
   -v "$LOCAL_HF_HOME":"$DOCKER_HF_HOME" \
+  "${EXPECT_VOLUME[@]}" \
+  "${EXPECT_ENV[@]}" \
   -e HF_HOME="$DOCKER_HF_HOME" \
   -e MODEL_IMPL_TYPE="$MODEL_IMPL_TYPE" \
   -e HF_TOKEN="$HF_TOKEN" \
@@ -93,5 +131,5 @@ exec docker run \
   ${QUANTIZATION:+-e QUANTIZATION="$QUANTIZATION"} \
   ${NEW_MODEL_DESIGN:+-e NEW_MODEL_DESIGN="$NEW_MODEL_DESIGN"} \
   ${USE_V6E8_QUEUE:+-e USE_V6E8_QUEUE="$USE_V6E8_QUEUE"} \
-  "vllm-tpu:${BUILDKITE_COMMIT}" \
+  "${IMAGE_NAME}:${BUILDKITE_COMMIT}" \
   "$@" # Pass all script arguments as the command to run in the container
