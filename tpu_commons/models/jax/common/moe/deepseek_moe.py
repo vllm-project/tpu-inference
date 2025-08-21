@@ -4,7 +4,8 @@ from typing import Any, Tuple
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from jax.sharding import Mesh, NamedSharding
+from flax.typing import Sharding
+from jax.sharding import Mesh
 from jaxtyping import Float
 
 from tpu_commons.models.jax.common.base import create_param
@@ -33,9 +34,9 @@ class DeepSeekV3Router(nnx.Module):
     rngs: nnx.Rngs
 
     # Sharding Attributes
-    activation_ffw_td: NamedSharding
-    ed_sharding: NamedSharding
-    e_sharding: NamedSharding
+    activation_ffw_td: Sharding = ()
+    ed_sharding: Sharding = ()
+    e_sharding: Sharding = ()
 
     random_init: bool = False
     quant: Any | None = None

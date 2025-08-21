@@ -127,7 +127,7 @@ def _get_nnx_model(
             with mesh:
                 jit_model = create_sharded_model()
         else:
-
+            jax.set_mesh(mesh)
             with mesh:
                 model = model_class(vllm_config,
                                     rng,

@@ -5,7 +5,7 @@ from typing import List, Optional, Tuple
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from jax.sharding import Mesh, NamedSharding
+from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from vllm.config import VllmConfig
 
@@ -64,12 +64,9 @@ class LlamaForCausalLM(nnx.Module):
         self.embedder = Embedder(vocab_size=vocab_size,
                                  hidden_size=self.hidden_size,
                                  dtype=dtype,
-                                 mesh=self.mesh,
                                  rngs=self.rng,
                                  random_init=force_random_weights,
-                                 vd_sharding=NamedSharding(
-                                     self.mesh, P("model", None)),
-                                 prelogit_td=NamedSharding(self.mesh, P()))
+                                 vd_sharding=("model", None))
 
         self.layers = []
         for _ in range(num_layers):
@@ -77,20 +74,16 @@ class LlamaForCausalLM(nnx.Module):
                 TransformerBlock(
                     pre_attention_norm=RMSNorm(
                         dims=self.hidden_size,
-                        mesh=self.mesh,
                         random_init=force_random_weights,
                         epsilon=rms_norm_eps,
                         rngs=self.rng,
-                        activation_ffw_td=NamedSharding(self.mesh, P()),
                         with_scale=True,
                         dtype=dtype,
                     ),
                     pre_mlp_norm=RMSNorm(
                         dims=self.hidden_size,
-                        mesh=self.mesh,
                         rngs=self.rng,
                         random_init=force_random_weights,
-                        activation_ffw_td=NamedSharding(self.mesh, P()),
                         epsilon=rms_norm_eps,
                         with_scale=True,
                         dtype=dtype,
@@ -106,39 +99,27 @@ class LlamaForCausalLM(nnx.Module):
                         dtype=dtype,
                         mesh=self.mesh,
                         random_init=force_random_weights,
-                        dnh_sharding=NamedSharding(self.mesh,
-                                                   P(None, "model", None)),
-                        dkh_sharding=NamedSharding(self.mesh,
-                                                   P(None, "model", None)),
-                        nhd_sharding=NamedSharding(self.mesh,
-                                                   P("model", None, None)),
-                        activation_q_td=NamedSharding(self.mesh, P()),
-                        query_tnh=NamedSharding(self.mesh,
-                                                P(None, "model", None)),
-                        keyvalue_skh=NamedSharding(self.mesh,
-                                                   P(None, "model", None)),
-                        attn_o_tnh=NamedSharding(self.mesh,
-                                                 P(None, "model", None)),
+                        dnh_sharding=(None, "model", None),
+                        dkh_sharding=(None, "model", None),
+                        nhd_sharding=("model", None, None),
+                        query_tnh=P(None, "model", None),
+                        keyvalue_skh=P(None, "model", None),
+                        attn_o_tnh=P(None, "model", None),
                     ),
-                    custom_module=DenseFFW(
-                        dtype=dtype,
-                        hidden_act="silu",
-                        hidden_size=self.hidden_size,
-                        intermediate_size=intermediate_size,
-                        mesh=self.mesh,
-                        rngs=self.rng,
-                        df_sharding=NamedSharding(self.mesh, P(None, "model")),
-                        fd_sharding=NamedSharding(self.mesh, P("model", None)),
-                        activation_ffw_td=NamedSharding(self.mesh, P()),
-                        random_init=force_random_weights),
+                    custom_module=DenseFFW(dtype=dtype,
+                                           hidden_act="silu",
+                                           hidden_size=self.hidden_size,
+                                           intermediate_size=intermediate_size,
+                                           rngs=self.rng,
+                                           df_sharding=(None, "model"),
+                                           fd_sharding=("model", None),
+                                           random_init=force_random_weights),
                 ))
 
         self.final_norm = RMSNorm(
             dims=self.hidden_size,
-            mesh=self.mesh,
             rngs=self.rng,
             random_init=force_random_weights,
-            activation_ffw_td=NamedSharding(self.mesh, P()),
             epsilon=rms_norm_eps,
             with_scale=True,
             dtype=dtype,
@@ -147,12 +128,8 @@ class LlamaForCausalLM(nnx.Module):
         self.lm_head = LMhead(vocab_size=vocab_size,
                               hidden_size=self.hidden_size,
                               dtype=dtype,
-                              mesh=self.mesh,
                               rngs=self.rng,
-                              prelogit_td=NamedSharding(self.mesh, P()),
-                              vd_sharding=None,
-                              dv_sharding=NamedSharding(
-                                  self.mesh, P(None, 'model')),
+                              dv_sharding=(None, 'model'),
                               random_init=force_random_weights)
 
     def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):

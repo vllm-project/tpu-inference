@@ -4,8 +4,9 @@ from typing import Any, Tuple
 import jax
 import jax.numpy as jnp
 from flax import nnx
+from flax.typing import Sharding
 from jax.experimental import shard_map
-from jax.sharding import Mesh, NamedSharding
+from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
 from tpu_commons.kernels.ragged_paged_attention.v3.kernel import \
@@ -45,18 +46,18 @@ class MLA(nnx.Module):
     rms_norm_eps: float
 
     # Sharding attributes
-    nhd_sharding: NamedSharding
-    q_da_sharding: NamedSharding
-    anh_sharding: NamedSharding
-    kv_da_sharding: NamedSharding
+    nhd_sharding: Sharding = ()
+    q_da_sharding: Sharding = ()
+    anh_sharding: Sharding = ()
+    kv_da_sharding: Sharding = ()
 
-    activation_attention_td: NamedSharding
-    activation_q_td: NamedSharding
-    query_tnh: NamedSharding
-    keyvalue_skh: NamedSharding
+    activation_attention_td: Sharding = ()
+    activation_q_td: Sharding = ()
+    query_tnh: P = P()
+    keyvalue_skh: P = P()
 
-    attn_o_tnh: NamedSharding
-    activation_attention_out_td: NamedSharding
+    attn_o_tnh: P = P()
+    activation_attention_out_td: Sharding = ()
     rngs: nnx.Rngs
 
     random_init: bool = False
@@ -120,8 +121,6 @@ class MLA(nnx.Module):
             random_init=self.random_init)
         self.q_rms_norm = RMSNorm(
             dims=self.q_lora_rank,
-            mesh=self.mesh,
-            activation_ffw_td=NamedSharding(self.mesh, P()),
             epsilon=self.rms_norm_eps,
             with_scale=True,
             dtype=self.dtype,
@@ -131,9 +130,7 @@ class MLA(nnx.Module):
 
         self.kv_rms_norm = RMSNorm(
             dims=self.kv_lora_rank,
-            mesh=self.mesh,
             random_init=self.random_init,
-            activation_ffw_td=NamedSharding(self.mesh, P()),
             epsilon=self.rms_norm_eps,
             with_scale=True,
             dtype=self.dtype,
@@ -279,16 +276,16 @@ class MLA(nnx.Module):
         """
         md = attention_metadata
         in_specs = (
-            self.query_tnh.spec,  # q
-            self.keyvalue_skh.spec,  # k
-            self.keyvalue_skh.spec,  # v
+            self.query_tnh,  # q
+            self.keyvalue_skh,  # k
+            self.keyvalue_skh,  # v
             P(),  # kv_cache: Replicated
             P(),  # md.seq_lens: Replicated
             P(),  # page_indices_flat: Replicated
             P(),  # query_start_loc: Replicated
             P(),  # distribution: Replicated
         )
-        out_specs = (self.attn_o_tnh.spec, P())
+        out_specs = (self.attn_o_tnh, P())
 
         def _ragged_paged_attention(*args):
             return ragged_paged_attention(
