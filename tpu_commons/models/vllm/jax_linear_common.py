@@ -75,7 +75,7 @@ def reorder_concatenated_tensor_for_sharding(concatenated_tensor: jax.Array,
     # Split the concatenated tensor into individual tensors.
     split_tensors = []
     start_offset = 0
-    for i, split_size in enumerate(split_sizes):
+    for _, split_size in enumerate(split_sizes):
         split_tensor = concatenated_tensor[start_offset:start_offset +
                                            split_size]
         split_tensors.append(split_tensor)
@@ -118,7 +118,7 @@ def reorder_concatenated_tensor_for_sharding_on_1st_dim(
     # Split the concatenated tensor into individual tensors.
     split_tensors = []
     start_offset = 0
-    for i, split_size in enumerate(split_sizes):
+    for _, split_size in enumerate(split_sizes):
         split_tensor = concatenated_tensor[:, start_offset:start_offset +
                                            split_size, :]
         split_tensors.append(split_tensor)
@@ -171,7 +171,7 @@ def slice_sharded_tensor_for_concatenation(sharded_tensor: jax.Array,
 
     split_tensors = []
     start_offset = 0
-    for i, split_size in enumerate(split_sizes):
+    for _, split_size in enumerate(split_sizes):
         sz = split_size // n_shards  # size of this split tensor per shard
         end_offset = start_offset + sz
         _get_slice_on_shard_bound = functools.partial(
