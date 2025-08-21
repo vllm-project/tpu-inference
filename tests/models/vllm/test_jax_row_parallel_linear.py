@@ -98,7 +98,8 @@ def test_jax_row_parallel_linear(bias, mesh, enable_sp):
 
 @pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize("mesh", [test_utils.get_spmd_mesh()])
-def test_jax_row_parallel_linear_w8a8_int8(bias, mesh):
+@pytest.mark.parametrize("enable_sp", [False, True])
+def test_jax_row_parallel_linear_w8a8_int8(bias, mesh, enable_sp):
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(
@@ -142,7 +143,8 @@ def test_jax_row_parallel_linear_w8a8_int8(bias, mesh):
 
     # Set jax default device to workaround a layout bug in JAX 0.7.0 and earlier
     with torchax.default_env(), jax.default_device(jax.devices("tpu")[0]):
-        jax_row_linear = JaxRowParallelLinear(row_linear, mesh=mesh)
+        jax_row_linear = JaxRowParallelLinear(
+            row_linear, mesh=mesh, enable_sequence_parallelism=enable_sp)
         jax_input_tensor = torch_view(t2j(input_tensor, use_dlpack=False))
         jax_input_tensor.apply_jax_(jax.device_put,
                                     NamedSharding(mesh, P(None, None)))
