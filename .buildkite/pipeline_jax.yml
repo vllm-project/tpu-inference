@@ -77,6 +77,7 @@ steps:
            --ignore=/workspace/tpu_commons/tests/kernels \
            --ignore=/workspace/tpu_commons/tests/e2e \
            --ignore=/workspace/tpu_commons/tests/models/vllm \
+           --ignore=/workspace/tpu_commons/tpu_commons/mock \
            --cov-config=/workspace/tpu_commons/.coveragerc --cov tpu_commons --cov-report term-missing --cov-fail-under=69
 
    - label: "JAX unit tests - kernels"
