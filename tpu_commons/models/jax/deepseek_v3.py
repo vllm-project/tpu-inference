@@ -561,7 +561,9 @@ class DeepSeekV3WeightLoader:
                 logger.warning(
                     f"Could not create sharded scale for {name} with shape {scale.shape} and sharding {sharding}, skipping..."
                 )
-            model_weight.array.scale.value = 1 / maybe_sharded_scale
+            # NOTE: Despite the fact that scale has the name `scale_inv` in it, we don't need to
+            # inverse it
+            model_weight.array.scale.value = maybe_sharded_scale
             model_weight.array.qvalue.value = sharded_array
         else:
             # TODO: support none quant path
