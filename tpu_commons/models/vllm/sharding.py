@@ -44,8 +44,12 @@ def shard_attention(layer: torch.nn.Module, mesh: Mesh,
 def shard_qkv_parallel_linear(layer: torch.nn.Module, mesh: Mesh,
                               vllm_config: VllmConfig):
     assert isinstance(layer, QKVParallelLinear)
-    jax_layer = JaxQKVParallelLinear(layer, mesh,
-                                     shard_qkv_parallel_linear.fuse_matmuls)
+    jax_layer = JaxQKVParallelLinear(
+        layer,
+        mesh,
+        shard_qkv_parallel_linear.fuse_matmuls,
+        enable_sequence_parallelism=vllm_config.compilation_config.pass_config.
+        enable_sequence_parallelism)
     return jax_layer
 
 
@@ -57,7 +61,12 @@ def shard_merged_column_parallel_linear(layer: torch.nn.Module, mesh: Mesh,
         vllm_config.parallel_config.tensor_parallel_size,
         "MergedColumnParallelLinear")
     assert isinstance(layer, MergedColumnParallelLinear)
-    jax_layer = JaxMergedColumnParallelLinear(layer, mesh, fuse_matmuls)
+    jax_layer = JaxMergedColumnParallelLinear(
+        layer,
+        mesh,
+        fuse_matmuls,
+        enable_sequence_parallelism=vllm_config.compilation_config.pass_config.
+        enable_sequence_parallelism)
     return jax_layer
 
 
@@ -77,7 +86,11 @@ def shard_column_parallel_linear(layer: torch.nn.Module, mesh: Mesh,
 def shard_row_parallel_linear(layer: torch.nn.Module, mesh: Mesh,
                               vllm_config: VllmConfig):
     assert isinstance(layer, RowParallelLinear)
-    jax_layer = JaxRowParallelLinear(layer, mesh)
+    jax_layer = JaxRowParallelLinear(
+        layer,
+        mesh,
+        enable_sequence_parallelism=vllm_config.compilation_config.pass_config.
+        enable_sequence_parallelism)
     return jax_layer
 
 

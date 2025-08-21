@@ -13,7 +13,7 @@ from typing import Any, Optional
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from safetensors import safe_open
 
@@ -149,7 +149,7 @@ def get_param(params: nnx.State, path: str) -> nnx.State:
 
 
 def get_param_and_sharding(params: nnx.State, shardings: Any,
-                           path: str) -> nnx.State:
+                           path: str) -> tuple[nnx.State, nnx.State]:
     keys = path.split(".")
     plevel = params
     slevel = shardings
@@ -166,12 +166,13 @@ def get_param_and_sharding(params: nnx.State, shardings: Any,
     return plevel, slevel.value
 
 
-def shard_put(x: jax.Array, sharding: P, mesh: jax.sharding.Mesh) -> jax.Array:
+def shard_put(x: jax.Array, sharding_names: tuple[str, ...],
+              mesh: jax.sharding.Mesh) -> jax.Array:
     # Single device sharding requires this special handling
     # to avoid the recursive jit error.
     if math.prod(mesh.axis_sizes) == 1:
         return jax.device_put(x, mesh.devices.flatten()[0])
-    return jax.device_put(x, sharding)
+    return jax.device_put(x, NamedSharding(mesh, P(*sharding_names)))
 
 
 def get_default_maps(vllm_config, mesh: Mesh,
@@ -242,9 +243,12 @@ def get_default_maps(vllm_config, mesh: Mesh,
                        bias_pad_map=bias_pad_keys)
 
 
-def _load_hf_weights_on_thread(vllm_config, params: nnx.State,
-                               metadata_map: MetadataMap, mesh: Mesh,
-                               weights_file: str):
+def _load_hf_weights_on_thread(vllm_config,
+                               params: nnx.State,
+                               metadata_map: MetadataMap,
+                               mesh: Mesh,
+                               weights_file: str,
+                               filter_regex: str | None = None):
     name_map = metadata_map.name_map
     reshape_keys = metadata_map.reshape_map
     bias_reshape_keys = metadata_map.bias_reshape_map
@@ -267,7 +271,7 @@ def _load_hf_weights_on_thread(vllm_config, params: nnx.State,
         shardings = params
 
     for hf_key, hf_weight in model_weights_single_file_generator(
-            weights_file, framework="flax"):
+            weights_file, framework="flax", filter_regex=filter_regex):
         if hf_key.endswith(".weight"):
             hf_key = hf_key.removesuffix(".weight")
 
@@ -287,7 +291,7 @@ def _load_hf_weights_on_thread(vllm_config, params: nnx.State,
                 logger.warning(
                     f"Skip loading {hf_key} due to tie_word_embeddings")
                 continue
-            model_key = name_map[hf_key]
+            model_key = name_map.get(hf_key, hf_key)
         model_weight, model_sharding = get_param_and_sharding(
             params, shardings, model_key)
 
@@ -347,11 +351,16 @@ def _load_hf_weights_on_thread(vllm_config, params: nnx.State,
             assert model_weight.value.shape == hf_weight.shape, f"{hf_key}: {model_weight.value.shape} != {hf_weight.shape}"
 
         # Update the model weight
-        model_weight.value = shard(hf_weight, model_sharding)
+        spec = model_weight.sharding.spec if isinstance(
+            model_weight.sharding, NamedSharding) else model_weight.sharding
+        model_weight.value = shard(hf_weight, spec)
 
 
-def load_hf_weights(vllm_config, model: nnx.Module, metadata_map: MetadataMap,
-                    mesh: Mesh):
+def load_hf_weights(vllm_config,
+                    model: nnx.Module,
+                    metadata_map: MetadataMap,
+                    mesh: Mesh,
+                    filter_regex: str | None = None):
     """Load weights from all model weights files to the model, run in multi threads."""
     model_path = vllm_config.model_config.model
     weights_files = get_model_weights_files(
@@ -360,8 +369,13 @@ def load_hf_weights(vllm_config, model: nnx.Module, metadata_map: MetadataMap,
     max_workers = min(64, len(weights_files))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
-            executor.submit(_load_hf_weights_on_thread, vllm_config, params,
-                            metadata_map, mesh, weights_file)
+            executor.submit(_load_hf_weights_on_thread,
+                            vllm_config,
+                            params,
+                            metadata_map,
+                            mesh,
+                            weights_file,
+                            filter_regex=filter_regex)
             for weights_file in weights_files
         ]
         for future in futures:

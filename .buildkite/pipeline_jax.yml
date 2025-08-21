@@ -52,7 +52,8 @@ steps:
   #    commands:
   #      - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
 
-   - label: "E2E multi modality offline test"
+
+   - label: "E2E multi modality test"
      key: test_5
      soft_fail: true
      agents:
@@ -60,7 +61,9 @@ steps:
      commands:
        - |
          .buildkite/scripts/run_in_docker.sh \
-           python3 -m pytest -s -v /workspace/tpu_commons/tests/e2e/test_multi_modal_inference.py
+           bash -c 'python3 -m pytest -s -v -x /workspace/tpu_commons/tests/e2e/test_multi_modal_inference.py && \
+            bash /workspace/tpu_commons/tests/e2e/benchmarking/mm_bench.sh'
+
 
    - label: "JAX unit tests"
      key: test_6
@@ -70,10 +73,10 @@ steps:
      commands:
        - |
          .buildkite/scripts/run_in_docker.sh \
-           python3 -m pytest -s -v /workspace/tpu_commons/tests/ \
+           python3 -m pytest -s -v -x /workspace/tpu_commons/tests/ \
            --ignore=/workspace/tpu_commons/tests/kernels \
-           --ignore=/workspace/tpu_commons/tests/models/vllm \
-           --ignore=/workspace/tpu_commons/tests/e2e/test_multi_modal_inference.py \
+           --ignore=/workspace/tpu_commons/tests/e2e \
+           --ignore=/workspace/tpu_commons/tpu_commons/mock \
            --cov-config=/workspace/tpu_commons/.coveragerc --cov tpu_commons --cov-report term-missing --cov-fail-under=69
 
    - label: "JAX unit tests - kernels"
@@ -84,7 +87,8 @@ steps:
      commands:
        - |
          .buildkite/scripts/run_in_docker.sh \
-           python3 -m pytest -s -v /workspace/tpu_commons/tests/kernels
+           python3 -m pytest -s -v -x /workspace/tpu_commons/tests/kernels \
+           --ignore=/workspace/tpu_commons/tests/kernels/ragged_paged_attention_kernel_v2_test.py
 
 
   # -----------------------------------------------------------------

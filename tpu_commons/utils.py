@@ -1,16 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 import os
 from collections import defaultdict
+from collections.abc import Sequence
 from typing import Any, List, Tuple
 
 import jax
+import numpy as np
 from jax._src import dtypes
+from jax._src import mesh as mesh_lib
+from jax._src import xla_bridge as xb
+from jax._src.lib import xla_client as xc
 from vllm import envs
 
 from tpu_commons.logger import init_logger
 
 GBYTES = 1024 * 1024 * 1024
 TPU_HEAD_SIZE_ALIGNMENT = 128
+TPU_SECOND_LAST_MINOR = 8
 
 _megacore = False
 logger = init_logger(__name__)
@@ -106,3 +112,62 @@ def get_padded_num_heads(num_heads: int, sharding_size: int) -> int:
 def get_dtype_packing(dtype):
     bits = dtypes.bit_width(dtype)
     return 32 // bits
+
+
+def make_optimized_mesh(axis_shapes: Sequence[int],
+                        axis_names: Sequence[str],
+                        *,
+                        devices: Sequence[xc.Device] | None = None):
+    if devices is None:
+        devices = xb.devices()
+
+    def _is_1D(axis_shapes):
+        return sum(x > 1 for x in axis_shapes) == 1
+
+    if _is_1D(axis_shapes):
+        dev_kind = devices[0].device_kind
+        device_num = len(devices)
+        if dev_kind == "TPU v6 lite":
+            ordered_devices = None
+            # NOTE(chengjiyao):
+            # The coords of v6e-8 are
+            # (0,0,0)
+            # (1,0,0)
+            # (0,1,0)
+            # (1,1,0)
+            # (0,2,0)
+            # (1,2,0)
+            # (0,3,0)
+            # (1,3,0)
+            if device_num == 8:
+                ordered_devices = np.array([
+                    devices[0],
+                    devices[2],
+                    devices[4],
+                    devices[6],
+                    devices[7],
+                    devices[5],
+                    devices[3],
+                    devices[1],
+                ])
+            # NOTE(chengjiyao):
+            # The coords of v6e-4 are
+            # (0,0,0)
+            # (1,0,0)
+            # (0,1,0)
+            # (1,1,0)
+            elif device_num == 4:
+                ordered_devices = np.array([
+                    devices[0],
+                    devices[2],
+                    devices[3],
+                    devices[1],
+                ])
+            if ordered_devices is not None:
+                ordered_devices = np.array(ordered_devices)
+                ordered_devices = ordered_devices.reshape(axis_shapes)
+                mesh = mesh_lib.Mesh(ordered_devices, axis_names)
+                logger.info("Use customized mesh: %s", mesh)
+                return mesh
+
+    return jax.make_mesh(axis_shapes, axis_names, devices=devices)
