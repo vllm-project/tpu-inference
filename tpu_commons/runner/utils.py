@@ -352,7 +352,7 @@ def determine_phase_from_batch_composition_stats(
     total_num_scheduled_tokens = batch_composition_stats[
         "total_num_scheduled_tokens"]
     prefill_ratio_for_batch = num_prefill_tokens / total_num_scheduled_tokens
-    if prefill_ratio_for_batch > PREFILL_HEAVY_RATIO_THRESHOLD:
+    if prefill_ratio_for_batch >= PREFILL_HEAVY_RATIO_THRESHOLD:
         return InferencePhase.PREFILL_HEAVY
     elif prefill_ratio_for_batch <= DECODE_HEAVY_RATIO_THRESHOLD:
         return InferencePhase.DECODE_HEAVY
