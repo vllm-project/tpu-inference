@@ -462,11 +462,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             return
         logger.info("Precompile all the subgraphs with possible input shapes.")
 
-        # TODO: wenlong: skip precompiling for mm models
-        # because the model requires input_embeds
-        if self.is_multimodal_model:
-            logger.info("[TEMP] skip precompiling for multi-modal models")
-            return
+        # TODO: add pre-compilation for encoder
 
         self._precompile_backbone()
         self._precompile_select_hidden_states()
@@ -932,11 +928,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         input_ids, inputs_embeds = self._get_input_ids_embeds(
             input_ids, mm_embeds)
 
-        # TODO: Disable this for now
-        if self.is_multimodal_model:
-            self.maybe_forbid_compile = nullcontext()
-
-        # TODO: make _get_input_ids_embeds within this context
+        # TODO: make the encoder within this context.
         # NOTE: right now, mm model will use embeddings as the input,
         # but text-only model will use input_ids
         with self.maybe_forbid_compile:
