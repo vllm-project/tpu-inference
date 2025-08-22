@@ -186,6 +186,10 @@ class Attention(nnx.Module):
             self.keyvalue_skh,  # k
             self.keyvalue_skh,  # v
             kv_cache_spec,  # kv_cache
+            P(),  # md.seq_lens: Replicated
+            P(),  # page_indices_flat: Replicated
+            P(),  # query_start_loc: Replicated
+            P(),  # distribution: Replicated
         )
 
         out_specs = (self.attn_o_tnh, kv_cache_spec)
