@@ -94,6 +94,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         self.devices = devices
         self.dtype = self.model_config.dtype
 
+        self.phased_profiling_dir = os.getenv("PHASED_PROFILING_DIR", "")
+        self.phase_based_profiler = None
+        if self.phased_profiling_dir:
+            self.phase_based_profiler = runner_utils.PhasedBasedProfiler(
+                self.phased_profiling_dir)
+
         # multi-modal related
         self.is_multimodal_model = None  # Will get updated once the model is loaded.
         self.mm_registry = MULTIMODAL_REGISTRY
@@ -1387,6 +1393,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         # Zero out to avoid spurious values from prev iteration (last cp chunk)
         self.input_ids_cpu[
             total_num_scheduled_tokens:padded_total_num_scheduled_tokens] = 0
+
+        # Please see runner_utils.PhasedBasedProfiler for details
+        if self.phase_based_profiler:
+            batch_composition_stats = runner_utils.get_batch_composition_stats(
+                self.input_batch, total_num_scheduled_tokens, num_reqs,
+                padded_total_num_scheduled_tokens, scheduler_output)
+
+            self.phase_based_profiler.step(batch_composition_stats)
 
         # Inputs
         input_ids = self.input_ids_cpu[:padded_total_num_scheduled_tokens]
