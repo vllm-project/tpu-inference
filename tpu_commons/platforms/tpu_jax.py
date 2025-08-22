@@ -170,7 +170,7 @@ class TpuPlatform(Platform):
                 cache_config.block_size = min_page_size  # type: ignore[assignment]
 
         parallel_config = vllm_config.parallel_config
-        scheduler_config = vllm_config.scheduler_config
+        # scheduler_config = vllm_config.scheduler_config
         parallel_config.worker_cls = \
                         "tpu_commons.worker.tpu_worker_jax.TPUWorker"
 
@@ -190,12 +190,12 @@ class TpuPlatform(Platform):
                 "Using uniproc_executor.")
             parallel_config.distributed_executor_backend = "uni"
 
-        if scheduler_config.is_multimodal_model and not \
-            scheduler_config.disable_chunked_mm_input:
-            logger.warning("TPU does not support running Multimodal models"\
-            " without setting `--disable_chunked_mm_input`. " \
-            "Forcing --disable_chunked_mm_input.")
-            scheduler_config.disable_chunked_mm_input = True
+        # if scheduler_config.is_multimodal_model and not \
+        #     scheduler_config.disable_chunked_mm_input:
+        #     logger.warning("TPU does not support running Multimodal models"\
+        #     " without setting `--disable_chunked_mm_input`. " \
+        #     "Forcing --disable_chunked_mm_input.")
+        #     scheduler_config.disable_chunked_mm_input = True
 
         kv_transfer_config = vllm_config.kv_transfer_config
         if kv_transfer_config is not None:
