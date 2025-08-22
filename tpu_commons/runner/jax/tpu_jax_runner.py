@@ -928,6 +928,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         input_ids, inputs_embeds = self._get_input_ids_embeds(
             input_ids, mm_embeds)
 
+        # TODO: Disable the checking for now
+        if self.is_multimodal_model:
+            self.maybe_forbid_compile = nullcontext()
+
         # TODO: make the encoder within this context.
         # NOTE: right now, mm model will use embeddings as the input,
         # but text-only model will use input_ids
