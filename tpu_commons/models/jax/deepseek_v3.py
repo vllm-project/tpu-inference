@@ -105,11 +105,8 @@ class DeepSeekV3(nnx.Module):
                                  hidden_size=hidden_size,
                                  dtype=dtype,
                                  rngs=self.rng,
-                                 vd_sharding=NamedSharding(
-                                     self.mesh,
-                                     P(('data', 'expert', 'model'), None)),
-                                 prelogit_td=NamedSharding(self.mesh, P()),
-                                 mesh=self.mesh,
+                                 vd_sharding=(('data', 'expert', 'model'),
+                                              None),
                                  random_init=self.random_init)
 
         self.layers = []
@@ -132,55 +129,44 @@ class DeepSeekV3(nnx.Module):
                 head_dim=v_head_dim,  # MLA uses v_head_dim as head_dim
                 dtype=dtype,
                 rngs=self.rng,
-                activation_attention_td=NamedSharding(self.mesh,
-                                                      P(None, 'model')),
-                activation_q_td=NamedSharding(self.mesh, P(None, 'model')),
-                query_tnh=NamedSharding(self.mesh, P(None, 'model', None)),
-                keyvalue_skh=NamedSharding(self.mesh, P(None, 'model', None)),
-                activation_attention_out_td=NamedSharding(
-                    self.mesh, P(None, 'model')),
-                attn_o_tnh=NamedSharding(self.mesh, P(None, 'model', None)),
-                q_da_sharding=NamedSharding(self.mesh, P(None, 'model')),
-                anh_sharding=NamedSharding(self.mesh, P(None, 'model', None)),
-                kv_da_sharding=NamedSharding(self.mesh, P(None, 'model')),
-                nhd_sharding=NamedSharding(self.mesh, P('model', None, None)))
+                activation_attention_td=(None, 'model'),
+                activation_q_td=(None, 'model'),
+                query_tnh=P(None, 'model', None),
+                keyvalue_skh=P(None, 'model', None),
+                activation_attention_out_td=(None, 'model'),
+                attn_o_tnh=P(None, 'model', None),
+                q_da_sharding=(None, 'model'),
+                anh_sharding=(None, 'model', None),
+                kv_da_sharding=(None, 'model'),
+                nhd_sharding=('model', None, None))
 
         for i in range(first_k_dense_replace):
             block = TransformerBlock(
                 pre_attention_norm=RMSNorm(
                     dims=hidden_size,
-                    mesh=self.mesh,
                     random_init=self.random_init,
                     epsilon=rms_norm_eps,
-                    activation_ffw_td=NamedSharding(self.mesh, P()),
                     with_scale=True,
                     dtype=dtype,
                     rngs=self.rng,
                 ),
                 pre_mlp_norm=RMSNorm(
                     dims=hidden_size,
-                    mesh=self.mesh,
                     random_init=self.random_init,
-                    activation_ffw_td=NamedSharding(self.mesh, P()),
                     epsilon=rms_norm_eps,
                     with_scale=True,
                     dtype=dtype,
                     rngs=self.rng,
                 ),
                 attn=_create_mla(),
-                custom_module=DenseFFW(
-                    dtype=dtype,
-                    hidden_act=hidden_act,
-                    hidden_size=hidden_size,
-                    intermediate_size=ffw_intermediate_size,
-                    mesh=self.mesh,
-                    rngs=self.rng,
-                    df_sharding=NamedSharding(self.mesh,
-                                              P(None, ('model', 'expert'))),
-                    fd_sharding=NamedSharding(self.mesh,
-                                              P(('model', 'expert'), None)),
-                    activation_ffw_td=NamedSharding(self.mesh, P()),
-                    random_init=self.random_init))
+                custom_module=DenseFFW(dtype=dtype,
+                                       hidden_act=hidden_act,
+                                       hidden_size=hidden_size,
+                                       intermediate_size=ffw_intermediate_size,
+                                       rngs=self.rng,
+                                       df_sharding=(None, ('model', 'expert')),
+                                       fd_sharding=(('model', 'expert'), None),
+                                       random_init=self.random_init))
 
             self.layers.append(block)
 
@@ -198,71 +184,54 @@ class DeepSeekV3(nnx.Module):
                 rngs=self.rng,
                 routed_scaling_factor=2.5,
                 dtype=dtype,
-                activation_ffw_td=NamedSharding(self.mesh, P('data', None)),
-                ed_sharding=NamedSharding(self.mesh, P('expert', None)),
-                e_sharding=NamedSharding(self.mesh, P('expert')))
-            custom_module = MoE(
-                dtype=dtype,
-                num_local_experts=num_local_experts,
-                apply_expert_weight_before_computation=False,
-                hidden_size=hidden_size,
-                intermediate_size_moe=moe_intermediate_size,
-                hidden_act=hidden_act,
-                mesh=self.mesh,
-                rngs=self.rng,
-                random_init=self.random_init,
-                activation_ffw_td=NamedSharding(self.mesh, P('data', None)),
-                activation_ffw_ted=NamedSharding(self.mesh,
-                                                 P('data', 'expert', None)),
-                edf_sharding=NamedSharding(self.mesh, P(
-                    'expert', None, 'model')),
-                efd_sharding=NamedSharding(self.mesh, P(
-                    'expert', 'model', None)),
-                router=router) if is_moe_layer else DenseFFW(
-                    dtype=dtype,
-                    hidden_act=hidden_act,
-                    hidden_size=hidden_size,
-                    intermediate_size=ffw_intermediate_size,
-                    mesh=self.mesh,
-                    rngs=self.rng,
-                    random_init=self.random_init,
-                    df_sharding=NamedSharding(self.mesh,
-                                              P(None, ('model', 'expert'))),
-                    fd_sharding=NamedSharding(self.mesh,
-                                              P(('model', 'expert'), None)),
-                    activation_ffw_td=NamedSharding(self.mesh, P()))
+                activation_ffw_td=('data', None),
+                ed_sharding=('expert', None),
+                e_sharding=('expert', ))
+            custom_module = MoE(dtype=dtype,
+                                num_local_experts=num_local_experts,
+                                apply_expert_weight_before_computation=False,
+                                hidden_size=hidden_size,
+                                intermediate_size_moe=moe_intermediate_size,
+                                hidden_act=hidden_act,
+                                rngs=self.rng,
+                                random_init=self.random_init,
+                                activation_ffw_td=('data', None),
+                                activation_ffw_ted=('data', 'expert', None),
+                                edf_sharding=('expert', None, 'model'),
+                                efd_sharding=('expert', 'model', None),
+                                router=router) if is_moe_layer else DenseFFW(
+                                    dtype=dtype,
+                                    hidden_act=hidden_act,
+                                    hidden_size=hidden_size,
+                                    intermediate_size=ffw_intermediate_size,
+                                    rngs=self.rng,
+                                    random_init=self.random_init,
+                                    df_sharding=(None, ('model', 'expert')),
+                                    fd_sharding=(('model', 'expert'), None))
 
-            shared_experts = DenseFFW(
-                dtype=dtype,
-                hidden_act=hidden_act,
-                hidden_size=hidden_size,
-                intermediate_size=num_shared_experts * moe_intermediate_size,
-                mesh=self.mesh,
-                rngs=self.rng,
-                random_init=self.random_init,
-                df_sharding=NamedSharding(self.mesh,
-                                          P(None, ('model', 'expert'))),
-                fd_sharding=NamedSharding(self.mesh,
-                                          P(('model', 'expert'), None)),
-                activation_ffw_td=NamedSharding(self.mesh, P()))
+            shared_experts = DenseFFW(dtype=dtype,
+                                      hidden_act=hidden_act,
+                                      hidden_size=hidden_size,
+                                      intermediate_size=num_shared_experts *
+                                      moe_intermediate_size,
+                                      rngs=self.rng,
+                                      random_init=self.random_init,
+                                      df_sharding=(None, ('model', 'expert')),
+                                      fd_sharding=(('model', 'expert'), None))
 
             pre_attention_norm = RMSNorm(
                 dims=hidden_size,
-                mesh=self.mesh,
                 rngs=self.rng,
                 random_init=self.random_init,
                 epsilon=rms_norm_eps,
-                activation_ffw_td=NamedSharding(self.mesh, P()),
                 with_scale=True,
                 dtype=dtype,
             )
 
             pre_mlp_norm = RMSNorm(
                 dims=hidden_size,
-                mesh=self.mesh,
                 rngs=self.rng,
                 random_init=self.random_init,
-                activation_ffw_td=NamedSharding(self.mesh, P()),
                 epsilon=rms_norm_eps,
                 with_scale=True,
                 dtype=dtype,
@@ -278,27 +247,20 @@ class DeepSeekV3(nnx.Module):
 
         self.final_norm = RMSNorm(
             dims=hidden_size,
-            mesh=self.mesh,
             rngs=self.rng,
             random_init=self.random_init,
-            activation_ffw_td=NamedSharding(self.mesh, P()),
             epsilon=rms_norm_eps,
             with_scale=True,
             dtype=dtype,
         )
 
-        self.lm_head = LMhead(
-            vocab_size=vocab_size,
-            hidden_size=hidden_size,
-            dtype=dtype,
-            rngs=self.rng,
-            prelogit_td=NamedSharding(self.mesh, P()),
-            vd_sharding=NamedSharding(self.mesh,
-                                      P(('data', 'expert', 'model'), None)),
-            dv_sharding=NamedSharding(self.mesh,
-                                      P(None, ('data', 'expert', 'model'))),
-            mesh=self.mesh,
-            random_init=self.random_init)
+        self.lm_head = LMhead(vocab_size=vocab_size,
+                              hidden_size=hidden_size,
+                              dtype=dtype,
+                              rngs=self.rng,
+                              vd_sharding=(('data', 'expert', 'model'), None),
+                              dv_sharding=(None, ('data', 'expert', 'model')),
+                              random_init=self.random_init)
 
     # For compatibility with flax.
     def apply(self, variables, *args, **kwargs):
@@ -503,9 +465,9 @@ class DeepSeekV3WeightLoader:
         def get_slice(index):
             return weight_np[index]
 
-        sharded_array = jax.make_array_from_callback(weight_np.shape,
-                                                     model_weight.sharding,
-                                                     get_slice)
+        sharded_array = jax.make_array_from_callback(
+            weight_np.shape,
+            NamedSharding(model_mesh, P(*model_weight.sharding)), get_slice)
 
         model_weight.value = sharded_array
 

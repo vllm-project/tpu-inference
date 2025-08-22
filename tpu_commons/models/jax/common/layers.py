@@ -4,8 +4,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from jax.sharding import Mesh, NamedSharding
-from jax.sharding import PartitionSpec as P
+from flax.typing import Sharding
 from jaxtyping import Float, Int
 
 from tpu_commons.models.jax.common.base import create_param
@@ -52,21 +51,17 @@ class RMSNorm(nnx.Module):
 
     Attributes:
         dims: The feature dimension to normalize over.
-        mesh: The JAX device mesh for distributed computation.
         epsilon: A small float added to the variance to avoid division by zero.
         with_scale: If True, learns a multiplicative scale parameter.
         dtype: The data type for computations.
-        quant: Optional configuration for quantization.
     """
     dims: int
-    mesh: Mesh
-    activation_ffw_td: NamedSharding
     rngs: nnx.Rngs
+    activation_ffw_td: Sharding = ()
     random_init: bool = False
     epsilon: float = 1e-6
     with_scale: bool = True
     dtype: Any = jnp.float32
-    quant: Any | None = None
 
     def __call__(self, x_TD: Float, op_mode='generate') -> Float:
         """Applies RMS Normalization to the input tensor.
@@ -94,7 +89,6 @@ class RMSNorm(nnx.Module):
     def __post_init__(self):
         self.scale = create_param(self.rngs,
                                   shape=(self.dims, ),
-                                  sharding=NamedSharding(self.mesh, P()),
                                   dtype=self.dtype,
                                   random_init=self.random_init)
 
@@ -108,21 +102,17 @@ class DenseFFW(nnx.Module):
     up-projection, followed by a final downward projection.
 
     Attributes:
-        mesh: The JAX device mesh.
         sharding_cfg: The configuration for tensor sharding.
-        quant: Optional configuration for quantization.
     """
-    mesh: Mesh
     dtype: jnp.dtype
     hidden_act: str
     hidden_size: int
     intermediate_size: int
-    df_sharding: NamedSharding
-    fd_sharding: NamedSharding
-    activation_ffw_td: NamedSharding
+    df_sharding: Sharding = ()
+    fd_sharding: Sharding = ()
+    activation_ffw_td: Sharding = ()
     rngs: nnx.Rngs
     random_init: bool = False
-    quant: Any | None = None
 
     def __call__(self, x_TD):
         """Performs the forward pass of the FFW layer.
@@ -180,16 +170,12 @@ class Embedder(nnx.Module):
     vectors and the "decoding" step of projecting model outputs back to logits
     over the vocabulary.
 
-    Attributes:
-        mesh: The JAX device mesh for distributed computation.
-        quant: Optional configuration for quantization.
     """
     vocab_size: int
     hidden_size: int
     dtype: jnp.dtype
-    mesh: Mesh
-    prelogit_td: NamedSharding
-    vd_sharding: NamedSharding
+    prelogit_td: Sharding = ()
+    vd_sharding: Sharding = ()
     rngs: nnx.Rngs
     random_init: bool = False
     normalize_embeddings: bool = False
@@ -268,7 +254,7 @@ class LMhead(Embedder):
     This implementation overrides the kernel generation, encoding, and decoding
     methods to work with the transposed embedding matrix layout.
     """
-    dv_sharding: NamedSharding
+    dv_sharding: Sharding
 
     def __post_init__(self):
         self.input_embedding_table_DV = create_param(

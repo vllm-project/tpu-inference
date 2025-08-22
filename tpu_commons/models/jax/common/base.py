@@ -5,7 +5,8 @@ from typing import Any, Callable, Mapping
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from jax.sharding import NamedSharding
+from flax.typing import Sharding
+from jax.sharding import PartitionSpec as P
 
 from tpu_commons.logger import init_logger
 
@@ -132,7 +133,7 @@ class Config:
 
 def create_param(rngs: nnx.Rngs,
                  shape: tuple[int, ...],
-                 sharding: NamedSharding,
+                 sharding: Sharding = (),
                  dtype: Any = jnp.float32,
                  random_init=False) -> nnx.Param:
     if random_init:
@@ -142,7 +143,7 @@ def create_param(rngs: nnx.Rngs,
 
         jitted_initializer = jax.jit(initializer,
                                      static_argnames=('shape', 'dtype'),
-                                     out_shardings=sharding)
+                                     out_shardings=P(*sharding))
         param_data = jitted_initializer(key, shape, dtype)
         return nnx.Param(param_data, sharding=sharding)
     else:

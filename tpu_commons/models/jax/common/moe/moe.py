@@ -1,10 +1,9 @@
 from dataclasses import dataclass
-from typing import Any
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from jax.sharding import Mesh, NamedSharding
+from flax.typing import Sharding
 from jaxtyping import Float
 
 from tpu_commons.models.jax.common.base import create_param
@@ -20,20 +19,16 @@ class Router(nnx.Module):
     This module determines which experts each token should be routed to based on the input.
 
     Attributes:
-        mesh: The JAX device mesh for distributed computation.
-        quant: Optional configuration for quantization.
     """
-    mesh: Mesh
     dtype: jnp.dtype
     hidden_size: int
     num_experts: int
     num_experts_per_tok: int
     router_act: str
     rngs: nnx.Rngs
-    activation_ffw_td: NamedSharding
-    ed_sharding: NamedSharding
+    activation_ffw_td: Sharding
+    ed_sharding: Sharding
     random_init: bool = False
-    quant: Any | None = None
 
     def __call__(self, x_TD: Float):
         """Routes tokens to experts.
@@ -77,11 +72,8 @@ class MoE(nnx.Module):
     This module implements a MoE layer with a router and multiple expert MLPs.
 
     Attributes:
-        mesh: The JAX mesh for device sharding.
         router: The Router module.
-        quant: Optional configuration for quantization.
     """
-    mesh: Mesh
     dtype: jnp.dtype
     num_local_experts: int
     apply_expert_weight_before_computation: bool
@@ -90,12 +82,11 @@ class MoE(nnx.Module):
     hidden_act: str
     rngs: nnx.Rngs
     router: nnx.Module
-    activation_ffw_td: NamedSharding
-    activation_ffw_ted: NamedSharding
-    edf_sharding: NamedSharding
-    efd_sharding: NamedSharding
+    activation_ffw_td: Sharding
+    activation_ffw_ted: Sharding
+    edf_sharding: Sharding
+    efd_sharding: Sharding
     random_init: bool = False
-    quant: Any | None = None
 
     def __call__(self, x_TD: Float):
         """Performs the forward pass of the MoE layer.
