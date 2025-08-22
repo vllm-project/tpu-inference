@@ -180,17 +180,15 @@ class Attention(nnx.Module):
                   `(seq, num_q_heads, head_dim)`.
         """
         md = attention_metadata
+        kv_cache_spec = P()  # Replicated
         in_specs = (
             self.query_tnh,  # q
             self.keyvalue_skh,  # k
             self.keyvalue_skh,  # v
-            P(),  # kv_cache: Replicated
-            P(),  # md.seq_lens: Replicated
-            P(),  # page_indices_flat: Replicated
-            P(),  # query_start_loc: Replicated
-            P(),  # distribution: Replicated
+            kv_cache_spec,  # kv_cache
         )
-        out_specs = self.attn_o_tnh
+
+        out_specs = (self.attn_o_tnh, kv_cache_spec)
 
         def _ragged_paged_attention(*args):
             return ragged_paged_attention(
