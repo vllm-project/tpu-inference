@@ -243,7 +243,6 @@ class JaxMergedColumnParallelLinearCore(torch.nn.Module):
                         'model'] >= TPU_SECOND_LAST_MINOR:
                     input.shard_(NamedSharding(self.mesh, P('model', None)))
             if self.fuse_matmuls:
-                output, output_bias = self.forward_fused(input)
+                return self.forward_fused(input)
             else:
-                output, output_bias = self.forward_split(input)
-            return output, output_bias
+                return self.forward_split(input)
