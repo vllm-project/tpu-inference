@@ -979,16 +979,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                     tpu_sampling_metadata,
                 )
             else:
-                bonus_logits = logits[
-                    spec_decode_metadata.bonus_logits_indices]
+                bonus_logits = self.select_hidden_states_fn(
+                    logits, spec_decode_metadata.bonus_logits_indices)
                 bonus_token_ids = sample(
                     self.rng_params_for_sampling,
                     self.mesh,
                     bonus_logits,
                     tpu_sampling_metadata,
                 )
-                target_logits = logits[
-                    spec_decode_metadata.target_logits_indices]
+                target_logits = self.select_hidden_states_fn(
+                    logits, spec_decode_metadata.target_logits_indices)
                 next_tokens = self.rejection_sampler(
                     draft_token_ids=spec_decode_metadata.draft_token_ids,
                     num_draft_tokens=spec_decode_metadata.draft_lengths,
@@ -1046,7 +1046,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         else:
             valid_sampled_token_ids = self.rejection_sampler.parse_output(
                 next_tokens, self.input_batch.vocab_size,
-                spec_decode_metadata.draft_lengths, num_reqs,
+                spec_decode_metadata.draft_lengths_cpu, num_reqs,
                 spec_decode_metadata.draft_token_ids.shape[0])
 
         # Mask out the sampled tokens that should not be sampled.
@@ -1294,6 +1294,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                      dtype=np.int32)
         ])
 
+        padded_num_draft_tokens_cpu = padded_num_draft_tokens
         # CPU -> TPU copy.
         (padded_num_draft_tokens, padded_draft_token_ids,
          padded_logits_indices, padded_target_logits_indices,
@@ -1305,6 +1306,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         metadata = SpecDecodeMetadata(
             draft_token_ids=padded_draft_token_ids,
             draft_lengths=padded_num_draft_tokens,
+            draft_lengths_cpu=padded_num_draft_tokens_cpu,
             target_logits_indices=padded_target_logits_indices,
             bonus_logits_indices=padded_bonus_logits_indices,
             final_logits_indices=padded_logits_indices,
@@ -1419,7 +1421,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
 
         # Put to device
         sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
-            self.mesh, self.input_batch, logits_indices.shape[0])
+            self.mesh, self.input_batch, padded_num_reqs)
         if self.uses_mrope:
             positions = mrope_positions
 
@@ -1570,11 +1572,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             # Update the cached states.
             req_state.num_computed_tokens = num_computed_tokens
             if not resumed_from_preemption:
-                # Append the new blocks to the existing block IDs.
-                for block_ids, new_ids in zip(req_state.block_ids,
-                                              new_block_ids):
-                    block_ids.extend(new_ids)
+                if new_block_ids is not None:
+                    # Append the new blocks to the existing block IDs.
+                    for block_ids, new_ids in zip(req_state.block_ids,
+                                                  new_block_ids):
+                        block_ids.extend(new_ids)
             else:
+                assert new_block_ids is not None
                 # The request is resumed from preemption.
                 # Replace the existing block IDs with the new ones.
                 req_state.block_ids = new_block_ids
@@ -1590,7 +1594,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             # Update the persistent batch.
             self.input_batch.num_computed_tokens_cpu[req_index] = (
                 num_computed_tokens)
-            self.input_batch.block_table.append_row(new_block_ids, req_index)
+            if new_block_ids is not None:
+                self.input_batch.block_table.append_row(
+                    new_block_ids, req_index)
 
             # Add spec_token_ids to token_ids_cpu.
             spec_token_ids = (

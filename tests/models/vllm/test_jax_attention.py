@@ -57,7 +57,7 @@ def generate_attention_metadata(num_tokens, mesh) -> AttentionMetadata:
 
 def generate_kv_caches(num_kv_heads, head_size, mesh, dtype):
     cache_shape = get_kv_cache_shape_with_mesh(mesh, 1024, 16, num_kv_heads,
-                                               head_size, dtype)
+                                               head_size, t2j_dtype(dtype))
     sharding = NamedSharding(mesh, PartitionSpec())
 
     def _allocate():
@@ -138,15 +138,16 @@ def test_jax_attention(mesh, num_heads, head_size, num_kv_heads, num_tokens):
         vllm_model_wrapper_context = get_vllm_model_wrapper_context()
         kv_cache = vllm_model_wrapper_context.kv_caches[0]
 
-    ref_output = ref_ragged_paged_attention(q,
-                                            k,
-                                            v,
-                                            kv_cache,
-                                            md.seq_lens,
-                                            md.block_tables,
-                                            md.query_start_loc,
-                                            md.request_distribution,
-                                            sm_scale=scale)
+    ref_output, _ = ref_ragged_paged_attention(
+        q,
+        jax.device_put(t2j(k), NamedSharding(mesh, P())),
+        jax.device_put(t2j(v), NamedSharding(mesh, P())),
+        kv_cache,
+        md.seq_lens,
+        md.block_tables,
+        md.query_start_loc,
+        md.request_distribution,
+        sm_scale=scale)
     ref_output = j2t(ref_output.astype(jnp.float32)).to(dtype)
 
     torch.testing.assert_close(ref_output, jax_output, atol=1e-2, rtol=1e-5)

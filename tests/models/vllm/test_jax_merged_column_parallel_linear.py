@@ -24,21 +24,19 @@ from tpu_commons.models.vllm.jax_merged_column_parallel_linear import \
 
 P = PartitionSpec
 
+_vllm_config = EngineArgs(
+    model="Qwen/Qwen2-1.5B-Instruct",
+    max_model_len=64,
+    max_num_batched_tokens=64,
+    max_num_seqs=4,
+).create_engine_config()
+
 
 @pytest.fixture(autouse=True)
 def setup_environment():
     # This is a fake config used for init dist env.
     # QKVParallelLinear needs dist env to be initialized.
-    engine_args = EngineArgs(
-        model="Qwen/Qwen2-1.5B-Instruct",
-        max_model_len=64,
-        max_num_batched_tokens=64,
-        max_num_seqs=4,
-    )
-
-    vllm_config = engine_args.create_engine_config()
-
-    with set_current_vllm_config(vllm_config):
+    with set_current_vllm_config(_vllm_config):
         temp_file = tempfile.mkstemp()[1]
         init_distributed_environment(
             1,
@@ -56,14 +54,14 @@ def setup_environment():
 def test_jax_merged_column_parallel_linear(bias, mesh, fuse_matmuls,
                                            enable_sp):
     dtype = torch.bfloat16
-
-    merged_column_linear = MergedColumnParallelLinear(
-        input_size=4096,
-        output_sizes=[14336] * 2,
-        bias=bias,
-        params_dtype=dtype,
-        return_bias=False,
-    )
+    with set_current_vllm_config(_vllm_config):
+        merged_column_linear = MergedColumnParallelLinear(
+            input_size=4096,
+            output_sizes=[14336] * 2,
+            bias=bias,
+            params_dtype=dtype,
+            return_bias=False,
+        )
     merged_column_linear.weight.data = torch.rand_like(
         merged_column_linear.weight.data) / 10
     if bias:
@@ -98,17 +96,19 @@ def test_jax_merged_column_parallel_linear(bias, mesh, fuse_matmuls,
 @pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize("mesh", [test_utils.get_spmd_mesh()])
 @pytest.mark.parametrize("fuse_matmuls", [False, True])
-def test_jax_merged_column_parallel_linear_w8a8_int8(bias, mesh, fuse_matmuls):
+@pytest.mark.parametrize("enable_sp", [False, True])
+def test_jax_merged_column_parallel_linear_w8a8_int8(bias, mesh, fuse_matmuls,
+                                                     enable_sp):
     dtype = torch.bfloat16
-
-    merged_column_linear = MergedColumnParallelLinear(
-        input_size=4096,
-        output_sizes=[14336] * 2,
-        bias=bias,
-        params_dtype=dtype,
-        return_bias=False,
-        quant_config=test_utils.gen_vllm_w8a8_int8_config(),
-    )
+    with set_current_vllm_config(_vllm_config):
+        merged_column_linear = MergedColumnParallelLinear(
+            input_size=4096,
+            output_sizes=[14336] * 2,
+            bias=bias,
+            params_dtype=dtype,
+            return_bias=False,
+            quant_config=test_utils.gen_vllm_w8a8_int8_config(),
+        )
 
     # Assert we're testing the right code path when quant config is set.
     assert isinstance(merged_column_linear.quant_method,
@@ -137,7 +137,7 @@ def test_jax_merged_column_parallel_linear_w8a8_int8(bias, mesh, fuse_matmuls):
     # Set jax default device to workaround a layout bug in JAX 0.7.0 and earlier
     with torchax.default_env(), jax.default_device(jax.devices("tpu")[0]):
         jax_merged_column_linear = JaxMergedColumnParallelLinear(
-            merged_column_linear, mesh, fuse_matmuls)
+            merged_column_linear, mesh, fuse_matmuls, enable_sp)
         jax_input_tensor = torch_view(t2j(input_tensor))
         jax_input_tensor.apply_jax_(jax.device_put,
                                     NamedSharding(mesh, P(None, None)))
