@@ -95,6 +95,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         self.dtype = self.model_config.dtype
 
         self.phased_profiling_dir = os.getenv("PHASED_PROFILING_DIR", "")
+        self.phase_based_profiler = None
         if self.phased_profiling_dir:
             self.phase_based_profiler = runner_utils.PhasedBasedProfiler(
                 self.phased_profiling_dir)
