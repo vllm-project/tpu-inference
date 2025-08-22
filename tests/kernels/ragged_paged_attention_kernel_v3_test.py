@@ -173,6 +173,7 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         self.assertAllClose(output, expected, atol=tol, rtol=tol)
         mask = ~jnp.isnan(expected_kv_cache)
         self.assertArraysEqual(updated_kv_cache[mask], expected_kv_cache[mask])
+        self.assertEqual(output.shape[-1], head_dim)
 
     @parameterized.product(dtype=[jnp.float32, jnp.bfloat16], )
     def test_ragged_paged_attention_basic(self, dtype):
