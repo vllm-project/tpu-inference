@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from typing import Any
 
 import jax
@@ -56,12 +56,13 @@ class RMSNorm(nnx.Module):
         dtype: The data type for computations.
     """
     dims: int
-    rngs: nnx.Rngs
     activation_ffw_td: Sharding = ()
     random_init: bool = False
     epsilon: float = 1e-6
     with_scale: bool = True
     dtype: Any = jnp.float32
+
+    rngs: InitVar[nnx.Rngs]
 
     def __call__(self, x_TD: Float, op_mode='generate') -> Float:
         """Applies RMS Normalization to the input tensor.
@@ -86,8 +87,8 @@ class RMSNorm(nnx.Module):
                                                    self.activation_ffw_td)
         return normed_x_TD.astype(self.dtype)
 
-    def __post_init__(self):
-        self.scale = create_param(self.rngs,
+    def __post_init__(self, rngs: nnx.Rngs):
+        self.scale = create_param(rngs,
                                   shape=(self.dims, ),
                                   dtype=self.dtype,
                                   random_init=self.random_init)
@@ -111,8 +112,9 @@ class DenseFFW(nnx.Module):
     df_sharding: Sharding = ()
     fd_sharding: Sharding = ()
     activation_ffw_td: Sharding = ()
-    rngs: nnx.Rngs
     random_init: bool = False
+
+    rngs: InitVar[nnx.Rngs]
 
     def __call__(self, x_TD):
         """Performs the forward pass of the FFW layer.
@@ -141,21 +143,21 @@ class DenseFFW(nnx.Module):
 
         return output_TD
 
-    def __post_init__(self):
+    def __post_init__(self, rngs: nnx.Rngs):
         D = self.hidden_size
         F = self.intermediate_size
 
-        self.kernel_gating_DF = create_param(self.rngs,
+        self.kernel_gating_DF = create_param(rngs,
                                              shape=(D, F),
                                              dtype=self.dtype,
                                              sharding=self.df_sharding,
                                              random_init=self.random_init)
-        self.kernel_up_proj_DF = create_param(self.rngs,
+        self.kernel_up_proj_DF = create_param(rngs,
                                               shape=(D, F),
                                               dtype=self.dtype,
                                               sharding=self.df_sharding,
                                               random_init=self.random_init)
-        self.kernel_down_proj_FD = create_param(self.rngs,
+        self.kernel_down_proj_FD = create_param(rngs,
                                                 shape=(F, D),
                                                 dtype=self.dtype,
                                                 sharding=self.fd_sharding,
@@ -176,13 +178,14 @@ class Embedder(nnx.Module):
     dtype: jnp.dtype
     prelogit_td: Sharding = ()
     vd_sharding: Sharding = ()
-    rngs: nnx.Rngs
     random_init: bool = False
     normalize_embeddings: bool = False
 
-    def __post_init__(self):
+    rngs: InitVar[nnx.Rngs]
+
+    def __post_init__(self, rngs: nnx.Rngs):
         self.input_embedding_table_VD = create_param(
-            self.rngs,
+            rngs,
             shape=(self.vocab_size, self.hidden_size),
             sharding=self.vd_sharding,
             dtype=self.dtype,
@@ -256,9 +259,9 @@ class LMhead(Embedder):
     """
     dv_sharding: Sharding
 
-    def __post_init__(self):
+    def __post_init__(self, rngs: nnx.Rngs):
         self.input_embedding_table_DV = create_param(
-            self.rngs,
+            rngs,
             shape=(self.hidden_size, self.vocab_size),
             sharding=self.dv_sharding,
             dtype=self.dtype,

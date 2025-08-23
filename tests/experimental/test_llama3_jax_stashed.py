@@ -5,6 +5,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
 
@@ -105,7 +106,8 @@ class TestLlamaForCausalLM:
 
     def test_init_70b_variant(self, mock_vllm_config_70b, rng, mesh):
         """Tests correct parameter detection for the 70B model variant."""
-        model = LlamaForCausalLM(mock_vllm_config_70b, rng, mesh)
+        model = nnx.eval_shape(
+            lambda: LlamaForCausalLM(mock_vllm_config_70b, rng, mesh))
         assert model.hidden_size == 8192
         assert "70b" in model.vllm_config.model_config.model.lower()
 
@@ -121,6 +123,7 @@ class TestLlamaForCausalLM:
         """
         Tests that random weight initialization creates concrete, non-zero-variance arrays.
         """
+        jax.set_mesh(mesh)
         model = LlamaForCausalLM(vllm_config=mock_vllm_config_8b,
                                  rng=rng,
                                  mesh=mesh,

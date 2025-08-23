@@ -4,8 +4,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import nnx
-from jax.sharding import Mesh, NamedSharding
-from jax.sharding import PartitionSpec as P
+from jax.sharding import Mesh
 
 from tpu_commons.models.jax.attention import get_kv_cache_shape
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
@@ -30,8 +29,7 @@ class TestMLA(unittest.TestCase):
         qk_nope_head_dim = 64
         qk_rope_head_dim = 32
 
-        dummy_sharding = NamedSharding(self.mesh, P())
-
+        jax.set_mesh(self.mesh)
         mla = MLA(
             hidden_size=hidden_size,
             num_attention_heads=32,
@@ -59,18 +57,7 @@ class TestMLA(unittest.TestCase):
             },
             mesh=self.mesh,
             random_init=True,
-            quant=None,
             # Provide all required sharding objects
-            nhd_sharding=dummy_sharding,
-            q_da_sharding=dummy_sharding,
-            anh_sharding=dummy_sharding,
-            kv_da_sharding=dummy_sharding,
-            activation_attention_td=dummy_sharding,
-            activation_q_td=dummy_sharding,
-            query_tnh=dummy_sharding,
-            keyvalue_skh=dummy_sharding,
-            attn_o_tnh=dummy_sharding,
-            activation_attention_out_td=dummy_sharding,
         )
 
         # Create input tensor
@@ -98,6 +85,8 @@ class TestMLA(unittest.TestCase):
                                       dtype=jnp.int32),  # This is cu_q_lens
             request_distribution=jnp.array([0, 0, 1], dtype=jnp.int32),
         )
+
+        mla.rope.initialize_cache()
 
         # Run forward pass
         new_kv_cache, output = mla(x,

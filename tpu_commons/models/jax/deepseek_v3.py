@@ -43,14 +43,6 @@ class DeepSeekV3(nnx.Module):
         self.vllm_config = vllm_config
         self.rng = nnx.Rngs(rng)
 
-        # Currently the runner will always set a mesh, so the custom default sharding (when
-        #  no sharding is set in vllm config) doesn't take effect.
-        # TODO(fhzhang): figure out whether we need to actually enable this.
-        #    strategy_dict = {
-        #        "tensor_parallelism": 4,
-        #        "expert_parallelism": 2
-        #    }  # todo: update this.
-
         num_layers: int = 61
         num_local_experts: int = 256
 
@@ -267,7 +259,18 @@ class DeepSeekV3(nnx.Module):
         return self.__call__(*args, **kwargs)
 
     def load_weights(self, rng: PRNGKey, cache_dir: Optional[str] = None):
+        # NOTE: Since we are using nnx.eval_shape to init the model,
+        # we have to pass dynamic arrays here for __call__'s usage.
+        self.rng = nnx.Rngs(rng)
         self.weight_loader.load_weights(self)
+        self.initialize_cache()
+
+    def initialize_cache(self):
+        # Initialize RoPE caches after weights are loaded and before JIT compilation.
+        for layer in self.layers:
+            if hasattr(layer, 'attn') and hasattr(layer.attn, 'rope'):
+                if hasattr(layer.attn.rope, 'initialize_cache'):
+                    layer.attn.rope.initialize_cache()
 
     def __call__(
         self,

@@ -17,6 +17,7 @@ logger = init_logger(__name__)
 # Define singleton initializers to avoid re-compilation.
 _scale_initializer = nnx.initializers.ones
 _sharded_initializer = nnx.initializers.xavier_normal()
+_init_fn = nnx.initializers.uniform()
 
 
 @dataclass
@@ -136,8 +137,8 @@ def create_param(rngs: nnx.Rngs,
                  sharding: Sharding = (),
                  dtype: Any = jnp.float32,
                  random_init=False) -> nnx.Param:
+    key = rngs.params()
     if random_init:
-        key = rngs.params()
         initializer = _scale_initializer if len(
             shape) == 1 else _sharded_initializer
 
@@ -147,5 +148,4 @@ def create_param(rngs: nnx.Rngs,
         param_data = jitted_initializer(key, shape, dtype)
         return nnx.Param(param_data, sharding=sharding)
     else:
-        param_struct = jax.ShapeDtypeStruct(shape=shape, dtype=dtype)
-        return nnx.Param(param_struct, sharding=sharding)
+        return nnx.Param(_init_fn(key, shape, dtype), sharding=sharding)

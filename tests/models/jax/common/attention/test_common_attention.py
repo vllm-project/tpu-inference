@@ -5,8 +5,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import nnx
-from jax.sharding import Mesh, NamedSharding
-from jax.sharding import PartitionSpec as P
+from jax.sharding import Mesh
 
 from tpu_commons.models.jax.attention import get_kv_cache_shape
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
@@ -34,7 +33,7 @@ class TestAttention(unittest.TestCase):
         num_attention_heads = 8
         head_dim = hidden_size // num_attention_heads
 
-        dummy_sharding = NamedSharding(self.mesh, P())
+        jax.set_mesh(self.mesh)
 
         attention = Attention(
             hidden_size=hidden_size,
@@ -46,14 +45,6 @@ class TestAttention(unittest.TestCase):
             dtype=jnp.bfloat16,
             mesh=self.mesh,
             random_init=True,
-            quant=None,
-            dnh_sharding=dummy_sharding,
-            dkh_sharding=dummy_sharding,
-            nhd_sharding=dummy_sharding,
-            activation_q_td=dummy_sharding,
-            query_tnh=dummy_sharding,
-            keyvalue_skh=dummy_sharding,
-            attn_o_tnh=dummy_sharding,
             rngs=nnx.Rngs(42),
         )
 

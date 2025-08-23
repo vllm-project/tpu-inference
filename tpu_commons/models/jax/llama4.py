@@ -233,6 +233,10 @@ class Llama4ForCausalLM(nnx.Module):
         nnx.display(self.lm_head)
 
     def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):
+        # NOTE: Since we are using nnx.eval_shape to init the model,
+        # we have to pass dynamic arrays here for __call__'s usage.
+        self.rng = nnx.Rngs(rng)
+
         weight_loader = Llama4WeightLoader(
             vllm_config=self.vllm_config,
             hidden_size=self.hidden_size,
