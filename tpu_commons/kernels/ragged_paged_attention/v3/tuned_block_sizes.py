@@ -5,6 +5,9 @@ import jax.numpy as jnp
 from tpu_commons.kernels.ragged_paged_attention.v3.util import (
     align_to, get_device_name, get_dtype_packing, get_tpu_version,
     next_power_of_2)
+from tpu_commons.logger import init_logger
+
+logger = init_logger(__name__)
 
 # key
 #   - device_name
@@ -3407,16 +3410,13 @@ def get_tuned_block_sizes(
     if tpu_version == 7:
         bkv_p, bq = (4096 // page_size, 32)
     else:
-        if device in TUNED_BLOCK_SIZES:
-            tb = TUNED_BLOCK_SIZES[device]
-            if page_size in tb:
-                tb = tb[page_size]
-                if dtypes in tb:
-                    tb = tb[dtypes]
-                    if head_dims in tb:
-                        tb = tb[head_dims]
-                        if max_model_len in tb:
-                            bkv_p, bq = tb[max_model_len]
+        try:
+            bkv_p, bq = TUNED_BLOCK_SIZES[device][page_size][dtypes][
+                head_dims][max_model_len]
+        except KeyError:
+            logger.warning(
+                "Couldn't find tuned block for device=%s, page_size=%s, dtypes=%s, head_dims=%s, max_model_len=%s",
+                device, page_size, dtypes, head_dims, max_model_len)
 
     return (min(pages_per_seq, bkv_p), min(max_num_tokens, bq))
 

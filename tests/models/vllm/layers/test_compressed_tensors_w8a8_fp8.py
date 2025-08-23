@@ -32,7 +32,7 @@ from tpu_commons.models.vllm.quantization.compressed_tensors.schemes.compressed_
 
 P = PartitionSpec
 MODELS = [
-    "RedHatAI/Llama-3.2-1B-Instruct-FP8-dynamic",
+    # "RedHatAI/Llama-3.2-1B-Instruct-FP8-dynamic",
     "RedHatAI/Llama-3.2-1B-Instruct-FP8"
 ]
 
@@ -71,6 +71,9 @@ def ref_w8a8_fp8_static(x: torch.Tensor, x_s: torch.Tensor, w_q: torch.Tensor,
     dtype_min = float(dtype_info.min)
 
     x_q = torch.clamp(x / x_s, dtype_min, dtype_max).to(w_q.dtype)
+    print(f'kky {x=}')
+    print(f'kky {x_q=}')
+    print(f'kky {x_s=}')
     out = torch.einsum('bd,fd->bf', x_q.to(torch.float32),
                        w_q.to(torch.float32))
     out = (out * x_s) * w_s.T
@@ -161,6 +164,8 @@ def initialize_layer_weights(layer: torch.nn.Module):
 
     if layer.bias is not None:
         layer.bias.data = torch.rand_like(layer.bias.data)
+
+    layer.input_scale.data = torch.rand_like(layer.input_scale.data)
 
 
 @pytest.fixture(autouse=True)
@@ -267,6 +272,10 @@ def test_jax_row_parallel_linear(model, bias, mesh, enable_sp):
 
     initialize_layer_weights(linear_layer)
     ref_output, layer_output = return_ref_and_layer_output(linear_layer)
+
+    print(f'kky {ref_output=}')
+    print(f'kky {layer_output=}')
+    assert False
     torch.testing.assert_close(ref_output, layer_output)
 
 

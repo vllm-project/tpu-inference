@@ -27,12 +27,8 @@ def quantize_array(
 
     # TODO(kyuyeunk): Investigate performance gain from non xlu transpose.
     scale = jnp.transpose(x_abs_max / dtype_max)
+    # print(f'kky {x.shape=} {x_abs_max.shape=} {scale.shape=}')
     x_q = x / scale
-    if is_float:
-        dtype_min = float(dtype_info.min)
-        x_q = jnp.clip(x_q, dtype_min, dtype_max)
-    else:
-        x_q = jnp.round(x_q)
     return x_q.astype(quant_dtype), scale.astype(jnp.float32)
 
 
@@ -159,54 +155,110 @@ def matmul_kernel(
     if quantize_activation and jnp.issubdtype(w_q_ref.dtype, jnp.integer):
         acc_dtype = jnp.int32
 
-    # Start of actual computation logic.
+    batch_block_size, out_block_size = out_ref.shape
+
+    # out_per_step = max(out_block_size // 2, 256)
+    # batch_per_step = max(batch_block_size // 2, 32)
+    # batch_per_step = batch_block_size
+    # out_per_step = 256
+    # out_per_step = out_block_size
+    batch_per_step = 256
+
     def matmul_body(quant: bool, is_first_step: bool, is_last_step: bool):
-        if quantize_activation:
+        w_q_tmp = w_q_ref[...]
+        if is_last_step:
+            w_scale_tmp = w_scale_ref[...]
+
+        for b_start in range(0, batch_block_size, batch_per_step):
+            b_end = min(b_start + batch_per_step, batch_block_size)
+
             if quant:
                 x_q_tmp, x_scale_tmp = quantize_array(
-                    x_ref[...],
-                    x_abs_max_ref[...],
+                    x_ref[b_start:b_end, :],
+                    x_abs_max_ref[:, b_start:b_end],
                     w_q_ref.dtype,
                 )
 
                 if save_x_q:
-                    x_q_scratch[...] = x_q_tmp
-                    x_scale_scratch[...] = x_scale_tmp
-
+                    x_q_scratch[b_start:b_end, :] = x_q_tmp
+                    x_scale_scratch[b_start:b_end, :] = x_scale_tmp
             else:
                 assert save_x_q
-                x_q_tmp = x_q_scratch[...]
+                x_q_tmp = x_q_scratch[b_start:b_end, :]
                 if is_last_step:
-                    x_scale_tmp = x_scale_scratch[...]
+                    x_scale_tmp = x_scale_scratch[b_start:b_end, :]
 
             acc = jax.lax.dot_general(
                 x_q_tmp,
-                w_q_ref[...],
-                (((1, ), (1, )), ((), ())),
-                preferred_element_type=acc_dtype,
-            )
-        else:
-            acc = jax.lax.dot_general(
-                x_ref[...],
-                w_q_ref[...],
+                w_q_tmp,
                 (((1, ), (1, )), ((), ())),
                 preferred_element_type=acc_dtype,
             )
 
-        if not is_first_step:
-            acc += acc_scratch[...]
+            if not is_first_step:
+                acc += acc_scratch[b_start:b_end, :]
 
-        if is_last_step:
-            acc *= w_scale_ref[...]
-            if quantize_activation:
-                # TODO(kyuyeunk): Investigate caching broadcast.
-                acc *= x_scale_tmp
-            out_ref[...] = acc.astype(x_ref_dtype)
-        else:
-            assert save_acc
-            acc_scratch[...] = acc
+            if is_last_step:
+                acc *= w_scale_tmp
+                if quantize_activation:
+                    # TODO(kyuyeunk): Investigate caching broadcast.
+                    acc *= x_scale_tmp
+                out_ref[b_start:b_end, :] = acc.astype(x_ref_dtype)
+            else:
+                assert save_acc
+                acc_scratch[b_start:b_end, :] = acc
 
     unfold_args((quant, is_first_step, is_last_step), (), matmul_body)
+    """
+  # Start of actual computation logic.
+  def matmul_body(quant: bool, is_first_step: bool, is_last_step: bool):
+    if quantize_activation:
+      if quant:
+        x_q_tmp, x_scale_tmp = quantize_array(
+            x_ref[...],
+            x_abs_max_ref[...],
+            w_q_ref.dtype,
+        )
+
+        if save_x_q:
+          x_q_scratch[...] = x_q_tmp
+          x_scale_scratch[...] = x_scale_tmp
+
+      else:
+        assert save_x_q
+        x_q_tmp = x_q_scratch[...]
+        if is_last_step:
+          x_scale_tmp = x_scale_scratch[...]
+
+      acc = jax.lax.dot_general(
+          x_q_tmp,
+          w_q_ref[...],
+          (((1,), (1,)), ((), ())),
+          preferred_element_type=acc_dtype,
+      )
+    else:
+      acc = jax.lax.dot_general(
+          x_ref[...],
+          w_q_ref[...],
+          (((1,), (1,)), ((), ())),
+          preferred_element_type=acc_dtype,
+      )
+
+    if not is_first_step:
+      acc += acc_scratch[...]
+
+    if is_last_step:
+      acc *= w_scale_ref[...]
+      if quantize_activation:
+        # TODO(kyuyeunk): Investigate caching broadcast.
+        acc *= x_scale_tmp
+      out_ref[...] = acc.astype(x_ref_dtype)
+    else:
+      assert save_acc
+      acc_scratch[...] = acc
+
+  unfold_args((quant, is_first_step, is_last_step), (), matmul_body)
+  """
 
 
 @functools.partial(

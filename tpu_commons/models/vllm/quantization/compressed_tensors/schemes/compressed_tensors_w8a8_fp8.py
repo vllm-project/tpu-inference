@@ -14,7 +14,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import \
 
 from tpu_commons.models.vllm.jax_linear_common import (
     sharded_quantized_matmul, slice_sharded_tensor_for_concatenation,
-    torch_to_jax_param)
+    torch_to_jax_param, sharded_quantized_matmul_static)
 from tpu_commons.models.vllm.quantization.common import JaxCommonLinearConfig
 
 P = PartitionSpec
@@ -61,6 +61,7 @@ class JaxCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
         super().__init__(strategy, is_static_input_scheme)
 
         self.jax_config = jax_config
+        self.jax_config.fuse_matmuls = True
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight = layer.weight
@@ -68,8 +69,8 @@ class JaxCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
 
         if self.is_static_input_scheme:
             # In static quant, all input_scales share the same value.
-            assert layer.input_scale.min() == layer.input_scale.max()
-            input_scale_first = layer.input_scale[0]
+            # assert layer.input_scale.min() == layer.input_scale.max()
+            input_scale_first = layer.input_scale.max().reshape(-1)
 
             input_scale = jax.device_put(
                 t2j(input_scale_first, use_dlpack=False),
@@ -86,7 +87,8 @@ class JaxCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
 
         if self.strategy == QuantizationStrategy.TENSOR:
             weight_scale, weight = requantize_with_max_scale(
-                weight, weight_scale, self.jax_config.output_sizes)
+                weight, weight_scale, layer.logical_widths)
+            weight_scale = weight_scale.reshape(-1)
             weight_scale = jax.device_put(
                 t2j(weight_scale, use_dlpack=False),
                 NamedSharding(self.jax_config.mesh, P()))
@@ -138,21 +140,10 @@ class JaxCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
 
         if self.is_static_input_scheme:
             # TODO(kyuyeunk): Add kernel support for static quant
-            input_scale = layer.input_scale.jax()
-            dtype_info = jnp.finfo(weight_jax.dtype)
-            maxval = float(dtype_info.max)
-            minval = float(dtype_info.min)
-            x_q = jnp.clip(x_jax / input_scale.astype(x_jax.dtype), minval,
-                           maxval).astype(weight_jax.dtype)
-
-            outs = jax.lax.dot_general(
-                x_q,
-                weight_jax,
-                (((1, ), (1, )), ((), ())),
-                preferred_element_type=jnp.float32,
-            )
-            outs *= weight_scale_jax
-            outs = outs.astype(x_jax.dtype)
+            input_scale_jax = layer.input_scale.jax()
+            outs = sharded_quantized_matmul_static(
+                x_jax, input_scale_jax, weight_jax, weight_scale_jax,
+                self.jax_config.mesh, self.jax_config.weight_sharding)
         else:
             outs = sharded_quantized_matmul(x_jax, weight_jax,
                                             weight_scale_jax,
@@ -177,24 +168,10 @@ class JaxCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
             weight_scale_jax = weight_scale.jax()
 
             if self.is_static_input_scheme:
-                # TODO(kyuyeunk): Add kernel support for static quant
-                input_scale = layer.input_scale.jax()
-                dtype_info = jnp.finfo(weight_jax.dtype)
-                maxval = float(dtype_info.max)
-                minval = float(dtype_info.min)
-                x_q = jnp.clip(x_jax / input_scale.astype(x_jax.dtype), minval,
-                               maxval).astype(weight_jax.dtype)
-
-                out = jax.lax.dot_general(
-                    x_q,
-                    weight_jax,
-                    (((1, ), (1, )), ((), ())),
-                    preferred_element_type=jnp.float32,
-                )
-                # TODO(kyuyeunk): Investigate performance gain from merging scales.
-                # out *= weight_scale_jax
-                out *= weight_scale_jax * input_scale
-                out = out.astype(x_jax.dtype)
+                input_scale_jax = layer.input_scale[i].jax()
+                out = sharded_quantized_matmul_static(
+                    x_jax, input_scale_jax, weight_jax, weight_scale_jax,
+                    self.jax_config.mesh, self.jax_config.weight_sharding)
             else:
                 out = sharded_quantized_matmul(x_jax, weight_jax,
                                                weight_scale_jax,

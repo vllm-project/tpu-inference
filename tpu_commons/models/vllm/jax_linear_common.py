@@ -34,6 +34,35 @@ def sharded_quantized_matmul(x: jax.Array, w_q: jax.Array, w_s: jax.Array,
                      check_rep=False)(x, w_q, w_s)
 
 
+def sharded_quantized_matmul_static(x: jax.Array, x_s: jax.Array,
+                                    w_q: jax.Array, w_s: jax.Array, mesh: Mesh,
+                                    weight_sharding: P):
+    out_axis, in_axis = weight_sharding
+    x_sharding = P(None, in_axis)
+    scale_sharding = P(out_axis, )
+    out_sharding = P(None, out_axis)
+
+    x = jax.lax.with_sharding_constraint(x, NamedSharding(mesh, x_sharding))
+
+    def wrapper(x, x_s, w_q, w_s):
+        output = quantized_matmul_kernel(
+            x,
+            x_s,
+            w_q,
+            w_s,
+            quantize_activation=True,
+        )
+        if in_axis:
+            output = jax.lax.psum(output, axis_name=in_axis)
+        return output
+
+    return shard_map(wrapper,
+                     mesh=mesh,
+                     in_specs=(x_sharding, P(), weight_sharding, P()),
+                     out_specs=(out_sharding),
+                     check_rep=False)(x, x_s, w_q, w_s)
+
+
 def reorder_concatenated_tensor_for_sharding(concatenated_tensor: jax.Array,
                                              split_sizes: list[int],
                                              n_shards: int, dim: int):
