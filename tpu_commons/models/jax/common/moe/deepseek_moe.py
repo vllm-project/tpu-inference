@@ -1,11 +1,10 @@
 from dataclasses import InitVar, dataclass
-from typing import Any, Tuple
+from typing import Tuple
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
 from flax.typing import Sharding
-from jax.sharding import Mesh
 from jaxtyping import Float
 
 from tpu_commons.models.jax.common.base import create_param
@@ -17,12 +16,8 @@ class DeepSeekV3Router(nnx.Module):
 
     This module determines which experts each token should be routed to based on the input.
 
-    Attributes:
-        mesh: The JAX device mesh for distributed computation.
-        quant: Optional configuration for quantization.
     """
 
-    mesh: Mesh
     hidden_size: int
     num_experts: int
     num_experts_per_tok: int
@@ -39,7 +34,6 @@ class DeepSeekV3Router(nnx.Module):
     e_sharding: Sharding = ()
 
     random_init: bool = False
-    quant: Any | None = None
 
     def get_topk_indices(self, scores_TE: Float) -> Float:
         """Get the topk indices of the scores.

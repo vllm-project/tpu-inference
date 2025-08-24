@@ -72,49 +72,48 @@ class Llama4AttentionTest(unittest.TestCase):
         self.assertTrue(jnp.allclose(output, expected_output))
 
     def test_apply_temperature_tuning(self):
-        jax.set_mesh(self.mesh)
-        hidden_size = 64
-        num_attention_heads = 4
-        head_dim = hidden_size // num_attention_heads
+        with jax.set_mesh(self.mesh):
+            hidden_size = 64
+            num_attention_heads = 4
+            head_dim = hidden_size // num_attention_heads
 
-        # Create dummy sharding objects
-        dummy_sharding = NamedSharding(self.mesh, P())
+            # Create dummy sharding objects
+            dummy_sharding = NamedSharding(self.mesh, P())
 
-        llama4_attention = Llama4Attention(
-            hidden_size=hidden_size,
-            num_attention_heads=num_attention_heads,
-            num_key_value_heads=num_attention_heads,
-            head_dim=head_dim,
-            rope_theta=10000.0,
-            rope_scaling={},
-            dtype=jnp.bfloat16,
-            use_qk_norm=False,
-            temperature_tuning=True,
-            temperature_tuning_scale=2.0,
-            temperature_tuning_floor_scale=2.0,
-            mesh=self.mesh,
-            random_init=True,
-            activation_attention_td=dummy_sharding,
-            activation_attention_out_td=dummy_sharding,
-            rngs=nnx.Rngs(42),
-        )
+            llama4_attention = Llama4Attention(
+                hidden_size=hidden_size,
+                num_attention_heads=num_attention_heads,
+                num_key_value_heads=num_attention_heads,
+                head_dim=head_dim,
+                rope_theta=10000.0,
+                rope_scaling={},
+                dtype=jnp.bfloat16,
+                use_qk_norm=False,
+                temperature_tuning=True,
+                temperature_tuning_scale=2.0,
+                temperature_tuning_floor_scale=2.0,
+                mesh=self.mesh,
+                random_init=True,
+                activation_attention_td=dummy_sharding,
+                activation_attention_out_td=dummy_sharding,
+                rngs=nnx.Rngs(42),
+            )
 
-        seq_len = 8
-        input_arr_TNH = jnp.ones((seq_len, num_attention_heads, head_dim),
-                                 dtype=jnp.bfloat16)
-        attention_metadata = AttentionMetadata(
-            input_positions=jnp.arange(seq_len, dtype=jnp.int32))
-        expected_scales = jnp.array(
-            [1, 2.375, 2.375, 3.20312, 3.20312, 3.76562, 3.76562, 4.21875],
-            dtype=jnp.bfloat16)
-        output = llama4_attention.apply_temperature_tuning(
-            attention_metadata, input_arr_TNH)
-        chex.assert_shape(output, (seq_len, num_attention_heads, head_dim))
+            seq_len = 8
+            input_arr_TNH = jnp.ones((seq_len, num_attention_heads, head_dim),
+                                     dtype=jnp.bfloat16)
+            attention_metadata = AttentionMetadata(
+                input_positions=jnp.arange(seq_len, dtype=jnp.int32))
+            expected_scales = jnp.array(
+                [1, 2.375, 2.375, 3.20312, 3.20312, 3.76562, 3.76562, 4.21875],
+                dtype=jnp.bfloat16)
+            output = llama4_attention.apply_temperature_tuning(
+                attention_metadata, input_arr_TNH)
+            chex.assert_shape(output, (seq_len, num_attention_heads, head_dim))
 
-        expected_output = jnp.ones_like(input_arr_TNH) * expected_scales[:,
-                                                                         None,
-                                                                         None]
-        chex.assert_trees_all_close(output, expected_output, atol=1e-3)
+            expected_output = jnp.ones_like(
+                input_arr_TNH) * expected_scales[:, None, None]
+            chex.assert_trees_all_close(output, expected_output, atol=1e-3)
 
 
 if __name__ == "__main__":

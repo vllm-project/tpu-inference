@@ -33,54 +33,53 @@ class TestAttention(unittest.TestCase):
         num_attention_heads = 8
         head_dim = hidden_size // num_attention_heads
 
-        jax.set_mesh(self.mesh)
+        with jax.set_mesh(self.mesh):
+            attention = Attention(
+                hidden_size=hidden_size,
+                num_attention_heads=num_attention_heads,
+                num_key_value_heads=num_attention_heads,
+                head_dim=head_dim,
+                rope_theta=10000.0,
+                rope_scaling={},
+                dtype=jnp.bfloat16,
+                mesh=self.mesh,
+                random_init=True,
+                rngs=nnx.Rngs(42),
+            )
 
-        attention = Attention(
-            hidden_size=hidden_size,
-            num_attention_heads=num_attention_heads,
-            num_key_value_heads=num_attention_heads,
-            head_dim=head_dim,
-            rope_theta=10000.0,
-            rope_scaling={},
-            dtype=jnp.bfloat16,
-            mesh=self.mesh,
-            random_init=True,
-            rngs=nnx.Rngs(42),
-        )
+            seq_len = 64
+            x = jnp.ones((seq_len, hidden_size), dtype=jnp.bfloat16)
 
-        seq_len = 64
-        x = jnp.ones((seq_len, hidden_size), dtype=jnp.bfloat16)
+            block_size = 16
+            num_blocks = 8
+            kv_dtype = jnp.bfloat16
+            cache_shape = get_kv_cache_shape(num_blocks, block_size,
+                                             num_attention_heads, head_dim,
+                                             kv_dtype)
 
-        block_size = 16
-        num_blocks = 8
-        kv_dtype = jnp.bfloat16
-        cache_shape = get_kv_cache_shape(num_blocks, block_size,
-                                         num_attention_heads, head_dim,
-                                         kv_dtype)
+            kv_cache = jnp.zeros(cache_shape, dtype=kv_dtype)
 
-        kv_cache = jnp.zeros(cache_shape, dtype=kv_dtype)
+            num_required_blocks = seq_len // block_size
 
-        num_required_blocks = seq_len // block_size
+            attention_metadata = AttentionMetadata(
+                input_positions=jnp.arange(seq_len, dtype=jnp.int32),
+                block_tables=jnp.array(list(range(num_required_blocks)),
+                                       dtype=jnp.int32),
+                seq_lens=jnp.array([seq_len], dtype=jnp.int32),
+                query_start_loc=jnp.array([0, seq_len], dtype=jnp.int32),
+                request_distribution=jnp.array([0, 0, 1], dtype=jnp.int32),
+            )
 
-        attention_metadata = AttentionMetadata(
-            input_positions=jnp.arange(seq_len, dtype=jnp.int32),
-            block_tables=jnp.array(list(range(num_required_blocks)),
-                                   dtype=jnp.int32),
-            seq_lens=jnp.array([seq_len], dtype=jnp.int32),
-            query_start_loc=jnp.array([0, seq_len], dtype=jnp.int32),
-            request_distribution=jnp.array([0, 0, 1], dtype=jnp.int32),
-        )
+            new_kv_cache, output = attention(
+                x,
+                is_prefill=True,
+                kv_cache=kv_cache,
+                attention_metadata=attention_metadata,
+            )
 
-        new_kv_cache, output = attention(
-            x,
-            is_prefill=True,
-            kv_cache=kv_cache,
-            attention_metadata=attention_metadata,
-        )
+            self.assertEqual(output.shape, (seq_len, hidden_size))
 
-        self.assertEqual(output.shape, (seq_len, hidden_size))
-
-        self.assertEqual(new_kv_cache.shape, kv_cache.shape)
+            self.assertEqual(new_kv_cache.shape, kv_cache.shape)
 
 
 if __name__ == "__main__":
