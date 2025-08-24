@@ -1,5 +1,5 @@
 import math
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from typing import Any, Tuple
 
 import jax
@@ -28,7 +28,6 @@ class MLA(nnx.Module):
 
     Attributes:
         mesh: The JAX device mesh for distributed computation.
-        quant: Optional configuration for quantization.
     """
     hidden_size: int
     num_attention_heads: int
@@ -59,7 +58,6 @@ class MLA(nnx.Module):
 
     attn_o_tnh: P = P()
     activation_attention_out_td: Sharding = ()
-    rngs: nnx.Rngs
 
     random_init: bool = False
     attention_chunk_size: int | None = None
@@ -67,7 +65,9 @@ class MLA(nnx.Module):
     quant: Any | None = None
     rope_mscale_all_dim: float = 1.0
 
-    def __post_init__(self):
+    rngs: InitVar[nnx.Rngs]
+
+    def __post_init__(self, rngs: nnx.Rngs):
         self.N = self.num_attention_heads
         self.K = self.num_key_value_heads
         self.D = self.hidden_size
@@ -84,11 +84,12 @@ class MLA(nnx.Module):
         self.scale = self.qk_head_dim**-0.5 * yarn_mscale**2
 
         self.rope = DeepseekScalingRotaryEmbedding(
-            self.qk_rope_head_dim,
-            self.rope_theta,
-            self.rope_scaling["original_max_position_embeddings"],
-            self.rope_scaling["factor"],
-            self.dtype,
+            rotary_dim=self.qk_rope_head_dim,
+            rope_theta=self.rope_theta,
+            original_max_position_embeddings=self.
+            rope_scaling["original_max_position_embeddings"],
+            scaling_factor=self.rope_scaling["factor"],
+            dtype=self.dtype,
             beta_fast=self.rope_scaling["beta_fast"],
             beta_slow=self.rope_scaling["beta_slow"],
             mscale=self.rope_scaling["mscale"],
@@ -96,27 +97,27 @@ class MLA(nnx.Module):
         )
 
         # Initializes the weight kernels
-        self.kernel_q_down_proj_DA = create_param(self.rngs,
+        self.kernel_q_down_proj_DA = create_param(rngs,
                                                   (self.D, self.q_lora_rank),
                                                   self.q_da_sharding,
                                                   self.dtype,
                                                   random_init=self.random_init)
         self.kernel_q_up_proj_ANH = create_param(
-            self.rngs,
+            rngs,
             (self.q_lora_rank, self.N, self.qk_head_dim),
             self.anh_sharding,
             self.dtype,
             random_init=self.random_init,
         )
         self.kernel_kv_down_proj_DA = create_param(
-            self.rngs,
+            rngs,
             (self.D, self.kv_lora_rank + self.qk_rope_head_dim),
             self.kv_da_sharding,
             self.dtype,
             random_init=self.random_init,
         )
         self.kernel_kv_up_proj_ANH = create_param(
-            self.rngs,
+            rngs,
             (self.kv_lora_rank, self.N,
              self.qk_nope_head_dim + self.v_head_dim),
             self.anh_sharding,
@@ -124,7 +125,7 @@ class MLA(nnx.Module):
             random_init=self.random_init,
         )
         self.kernel_o_proj_NHD = create_param(
-            self.rngs, (self.N, self.v_head_dim, self.D),
+            rngs, (self.N, self.v_head_dim, self.D),
             self.nhd_sharding,
             self.dtype,
             random_init=self.random_init)
@@ -134,7 +135,7 @@ class MLA(nnx.Module):
             with_scale=True,
             dtype=self.dtype,
             random_init=self.random_init,
-            rngs=self.rngs,
+            rngs=rngs,
         )
 
         self.kv_rms_norm = RMSNorm(
@@ -143,7 +144,7 @@ class MLA(nnx.Module):
             epsilon=self.rms_norm_eps,
             with_scale=True,
             dtype=self.dtype,
-            rngs=self.rngs,
+            rngs=rngs,
         )
 
     def __call__(self,

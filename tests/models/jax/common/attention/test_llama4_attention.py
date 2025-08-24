@@ -72,6 +72,7 @@ class Llama4AttentionTest(unittest.TestCase):
         self.assertTrue(jnp.allclose(output, expected_output))
 
     def test_apply_temperature_tuning(self):
+        jax.set_mesh(self.mesh)
         hidden_size = 64
         num_attention_heads = 4
         head_dim = hidden_size // num_attention_heads
@@ -93,16 +94,8 @@ class Llama4AttentionTest(unittest.TestCase):
             temperature_tuning_floor_scale=2.0,
             mesh=self.mesh,
             random_init=True,
-            quant=None,
             activation_attention_td=dummy_sharding,
             activation_attention_out_td=dummy_sharding,
-            dnh_sharding=dummy_sharding,
-            dkh_sharding=dummy_sharding,
-            nhd_sharding=dummy_sharding,
-            activation_q_td=dummy_sharding,
-            query_tnh=dummy_sharding,
-            keyvalue_skh=dummy_sharding,
-            attn_o_tnh=dummy_sharding,
             rngs=nnx.Rngs(42),
         )
 

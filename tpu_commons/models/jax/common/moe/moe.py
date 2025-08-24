@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 
 import jax
 import jax.numpy as jnp
@@ -25,7 +25,7 @@ class Router(nnx.Module):
     num_experts: int
     num_experts_per_tok: int
     router_act: str
-    rngs: nnx.Rngs
+    rngs: InitVar[nnx.Rngs]
     activation_ffw_td: Sharding
     ed_sharding: Sharding
     random_init: bool = False
@@ -55,10 +55,10 @@ class Router(nnx.Module):
             normalized_weights_TX = router_act(weights_TX.astype(self.dtype))
         return normalized_weights_TX, selected_experts_TX
 
-    def __post_init__(self):
+    def __post_init__(self, rngs: nnx.Rngs):
         """Generates the router kernel (weights) for routing."""
         shape = (self.hidden_size, self.num_experts)
-        self.kernel_DE = create_param(self.rngs,
+        self.kernel_DE = create_param(rngs,
                                       shape=shape,
                                       dtype=self.dtype,
                                       sharding=self.ed_sharding,
@@ -80,7 +80,7 @@ class MoE(nnx.Module):
     hidden_size: int
     intermediate_size_moe: int
     hidden_act: str
-    rngs: nnx.Rngs
+    rngs: InitVar[nnx.Rngs]
     router: nnx.Module
     activation_ffw_td: Sharding
     activation_ffw_ted: Sharding
@@ -114,7 +114,7 @@ class MoE(nnx.Module):
         else:
             return self._moe_fwd(x_TD, full_weights_TE)
 
-    def __post_init__(self):
+    def __post_init__(self, rngs: nnx.Rngs):
         """Generates the kernels (weights) for the router and experts (gating, up-projection, and down-projection layers)."""
 
         D = self.hidden_size
@@ -123,17 +123,17 @@ class MoE(nnx.Module):
         shape_up = (self.num_local_experts, D, F)
         shape_down = (self.num_local_experts, F, D)
 
-        self.kernel_gating_EDF = create_param(self.rngs,
+        self.kernel_gating_EDF = create_param(rngs,
                                               shape=shape_gating,
                                               dtype=self.dtype,
                                               sharding=self.edf_sharding,
                                               random_init=self.random_init)
-        self.kernel_up_proj_EDF = create_param(self.rngs,
+        self.kernel_up_proj_EDF = create_param(rngs,
                                                shape=shape_up,
                                                dtype=self.dtype,
                                                sharding=self.edf_sharding,
                                                random_init=self.random_init)
-        self.kernel_down_proj_EFD = create_param(self.rngs,
+        self.kernel_down_proj_EFD = create_param(rngs,
                                                  shape=shape_down,
                                                  dtype=self.dtype,
                                                  sharding=self.efd_sharding,

@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from typing import Any, Tuple
 
 import jax
@@ -31,7 +31,7 @@ class DeepSeekV3Router(nnx.Module):
     norm_topk_prob: bool
     routed_scaling_factor: float
     dtype: jnp.dtype
-    rngs: nnx.Rngs
+    rngs: InitVar[nnx.Rngs]
 
     # Sharding Attributes
     activation_ffw_td: Sharding = ()
@@ -101,16 +101,16 @@ class DeepSeekV3Router(nnx.Module):
 
         return weights_TX, topk_indices_TX
 
-    def __post_init__(self):
+    def __post_init__(self, rngs: nnx.Rngs):
         """Generates the router kernel (weights and bias) for routing."""
         D = self.hidden_size
         E = self.num_experts
-        self.kernel_DE = create_param(self.rngs,
+        self.kernel_DE = create_param(rngs,
                                       shape=(D, E),
                                       dtype=self.dtype,
                                       sharding=self.ed_sharding,
                                       random_init=self.random_init)
-        self.bias_E = create_param(self.rngs,
+        self.bias_E = create_param(rngs,
                                    shape=(E, ),
                                    dtype=self.dtype,
                                    sharding=self.e_sharding,

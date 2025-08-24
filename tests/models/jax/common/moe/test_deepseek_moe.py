@@ -3,8 +3,7 @@ import unittest
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from jax.sharding import Mesh, NamedSharding
-from jax.sharding import PartitionSpec as P
+from jax.sharding import Mesh
 
 from tpu_commons.models.jax.common.moe.deepseek_moe import DeepSeekV3Router
 
@@ -13,11 +12,10 @@ class TestDeepSeekV3Router(unittest.TestCase):
 
     def setUp(self):
         self.cpu_mesh = Mesh(jax.devices('cpu'), axis_names=('data', ))
-        self.tpu_mesh = Mesh(jax.devices('tpu'), axis_names=('data', ))
+        jax.set_mesh(self.cpu_mesh)
 
     def test_get_topk_indices_single_group(self):
         """Test get_topk_indices with single expert group."""
-        dummy_sharding = NamedSharding(self.cpu_mesh, P())
         router = DeepSeekV3Router(mesh=self.cpu_mesh,
                                   random_init=True,
                                   hidden_size=512,
@@ -28,11 +26,7 @@ class TestDeepSeekV3Router(unittest.TestCase):
                                   norm_topk_prob=True,
                                   routed_scaling_factor=1.0,
                                   dtype=jnp.bfloat16,
-                                  quant=None,
-                                  rngs=nnx.Rngs(42),
-                                  activation_ffw_td=dummy_sharding,
-                                  ed_sharding=dummy_sharding,
-                                  e_sharding=dummy_sharding)
+                                  rngs=nnx.Rngs(42))
         router.bias_E = jnp.zeros((4, ))
 
         scores = jnp.array([[0.1, 0.3, 0.2, 0.4]])  # shape: (1, 4)
@@ -44,7 +38,6 @@ class TestDeepSeekV3Router(unittest.TestCase):
 
     def test_get_topk_indices_2_groups(self):
         """Test get_topk_indices with 2 expert groups."""
-        dummy_sharding = NamedSharding(self.cpu_mesh, P())
         router = DeepSeekV3Router(mesh=self.cpu_mesh,
                                   random_init=True,
                                   hidden_size=512,
@@ -55,11 +48,7 @@ class TestDeepSeekV3Router(unittest.TestCase):
                                   norm_topk_prob=True,
                                   routed_scaling_factor=1.0,
                                   dtype=jnp.bfloat16,
-                                  quant=None,
-                                  rngs=nnx.Rngs(42),
-                                  activation_ffw_td=dummy_sharding,
-                                  ed_sharding=dummy_sharding,
-                                  e_sharding=dummy_sharding)
+                                  rngs=nnx.Rngs(42))
         router.bias_E = jnp.zeros((4, ))
 
         # 4 experts, 2 groups, 2 experts per group
@@ -71,7 +60,6 @@ class TestDeepSeekV3Router(unittest.TestCase):
         self.assertTrue(jnp.array_equal(indices, expected_indices))
 
     def test_router_e2e(self):
-        dummy_sharding = NamedSharding(self.cpu_mesh, P())
         router = DeepSeekV3Router(mesh=self.cpu_mesh,
                                   random_init=True,
                                   hidden_size=512,
@@ -82,11 +70,7 @@ class TestDeepSeekV3Router(unittest.TestCase):
                                   norm_topk_prob=True,
                                   routed_scaling_factor=1.0,
                                   dtype=jnp.bfloat16,
-                                  quant=None,
-                                  rngs=nnx.Rngs(42),
-                                  activation_ffw_td=dummy_sharding,
-                                  ed_sharding=dummy_sharding,
-                                  e_sharding=dummy_sharding)
+                                  rngs=nnx.Rngs(42))
         x = jnp.ones((2, 512))
         weights, indices = router(x)
         self.assertEqual(weights.shape, (2, 2))

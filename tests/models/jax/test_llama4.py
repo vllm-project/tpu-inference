@@ -98,6 +98,7 @@ class TestLlama4ForCausalLM:
         """
         Tests that random weight initialization creates concrete, non-zero-variance arrays.
         """
+        jax.set_mesh(mesh)
         model = Llama4ForCausalLM(vllm_config=mock_vllm_config_llama4,
                                   rng=rng,
                                   mesh=mesh,
