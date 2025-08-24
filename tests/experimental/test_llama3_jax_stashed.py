@@ -123,24 +123,24 @@ class TestLlamaForCausalLM:
         """
         Tests that random weight initialization creates concrete, non-zero-variance arrays.
         """
-        jax.set_mesh(mesh)
-        model = LlamaForCausalLM(vllm_config=mock_vllm_config_8b,
-                                 rng=rng,
-                                 mesh=mesh,
-                                 force_random_weights=True)
+        with jax.set_mesh(mesh):
+            model = LlamaForCausalLM(vllm_config=mock_vllm_config_8b,
+                                     rng=rng,
+                                     mesh=mesh,
+                                     force_random_weights=True)
 
-        embedding_weight = model.embedder.input_embedding_table_VD.value
-        attention_q_kernel = model.layers[0].attn.kernel_q_proj_DNH.value
-        final_norm_scale = model.final_norm.scale.value
+            embedding_weight = model.embedder.input_embedding_table_VD.value
+            attention_q_kernel = model.layers[0].attn.kernel_q_proj_DNH.value
+            final_norm_scale = model.final_norm.scale.value
 
-        assert isinstance(embedding_weight, jax.Array)
-        assert isinstance(attention_q_kernel, jax.Array)
-        assert isinstance(final_norm_scale, jax.Array)
+            assert isinstance(embedding_weight, jax.Array)
+            assert isinstance(attention_q_kernel, jax.Array)
+            assert isinstance(final_norm_scale, jax.Array)
 
-        assert jnp.std(embedding_weight) > 0
-        assert jnp.std(attention_q_kernel) > 0
+            assert jnp.std(embedding_weight) > 0
+            assert jnp.std(attention_q_kernel) > 0
 
-        assert jnp.all(final_norm_scale == 1.0)
+            assert jnp.all(final_norm_scale == 1.0)
 
     @patch("tpu_commons.experimental.llama3_jax_stashed.Llama3WeightLoader")
     def test_load_weights_called_correctly(self, mock_loader_cls, rng, mesh):
