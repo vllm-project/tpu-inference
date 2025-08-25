@@ -70,6 +70,7 @@ def run_pubsub_inference(args: dict, llm: LLM, sampling_params: SamplingParams):
     storage_client = storage.Client(project=args["project_id"])
 
     def message_callback(message: pubsub_v1.subscriber.message.Message):
+        logging.basicConfig(level=logging.INFO)
         """Callback function to process Pub/Sub messages."""
         try:
             data = json.loads(message.data)
