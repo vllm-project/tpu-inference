@@ -124,6 +124,12 @@ def main(args: dict):
     temperature = args.pop("temperature")
     top_p = args.pop("top_p")
     top_k = args.pop("top_k")
+    infra_args= {
+        'project_id': args.pop("project_id"),
+        'subscription_id': args.pop('subscription_id'),
+        'bucket_name': args.pop('bucket_name'),
+        'blob-name-prefix': args.pop('blob-name-prefix')
+    }
 
     # Create an LLM
     llm = LLM(**args)
@@ -140,7 +146,7 @@ def main(args: dict):
     if top_k is not None:
         sampling_params.top_k = top_k
 
-    run_pubsub_inference(args, llm, sampling_params)
+    run_pubsub_inference(infra_args, llm, sampling_params)
 
 
 if __name__ == "__main__":
