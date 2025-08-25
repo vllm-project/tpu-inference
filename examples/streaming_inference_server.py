@@ -102,7 +102,7 @@ def run_pubsub_inference(args: dict, llm: LLM, sampling_params: SamplingParams):
             message.ack()
         except json.decoder.JSONDecodeError as e:
             errorMsg = f"Error parsing message: {e}"
-            logging.info(errorMsg)
+            logging.error(errorMsg)
             results = [
                 {"error" : errorMsg}
             ]
