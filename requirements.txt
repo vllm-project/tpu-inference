@@ -16,3 +16,5 @@ flax
 torchax==0.0.5
 qwix @ git+https://github.com/google/qwix@main
 pathwaysutils
+google-cloud-pubsub
+google-cloud-storage
