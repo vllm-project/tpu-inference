@@ -369,29 +369,66 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             logger.info("Compilation finished in %.2f [secs].", end - start)
             hidden_states.block_until_ready()
 
-    def _precompile_select_hidden_states(self) -> None:
-        logger.info(
-            "Compiling select_hidden_states with different input shapes.")
-        hsize = self.model_config.get_hidden_size()
-        for num_tokens in self.num_tokens_paddings:
+    def _precompile_select_hidden_states_helper(
+        self,
+        name: str,
+        outer_paddings: List[int],
+        input_shape_fn: Callable[[int], Tuple[int, ...]],
+        input_dtype: Any,
+        sharding: Optional[NamedSharding] = None,
+        inner_loop_var_name: str = "num_tokens",
+    ) -> None:
+        logger.info(f"Compiling select_hidden_states for {name}.")
+        for outer_loop_val in outer_paddings:
             for num_reqs in self.num_reqs_paddings:
-                if num_reqs > num_tokens:
+                if num_reqs > outer_loop_val:
                     continue
-                hidden_states = jnp.ones((num_tokens, hsize),
-                                         dtype=jnp.bfloat16)
-                indices_do_sample = jnp.ones((num_reqs, ), dtype=jnp.int32)
-                hidden_states, indices_do_sample = self._device_array(
-                    (hidden_states, indices_do_sample))
+                input_tensor = jnp.ones(input_shape_fn(outer_loop_val),
+                                        dtype=input_dtype)
+                indices_to_sample = jnp.ones((num_reqs, ), dtype=jnp.int32)
+                if sharding:
+                    input_tensor = self._device_array(input_tensor,
+                                                      sharding=sharding)
+                else:
+                    input_tensor = self._device_array(input_tensor)
+                indices_to_sample = self._device_array(indices_to_sample)
                 start = time.perf_counter()
                 logger.info(
-                    f"Precompile select_hidden_states --> num_tokens={num_tokens} | "
+                    f"Precompile select_hidden_states --> {inner_loop_var_name}={outer_loop_val} | "
                     f"num_reqs={num_reqs}")
-                result = self.select_hidden_states_fn(hidden_states,
-                                                      indices_do_sample)
+                result = self.select_hidden_states_fn(input_tensor,
+                                                      indices_to_sample)
                 result.block_until_ready()
                 end = time.perf_counter()
                 logger.info("Compilation finished in %.2f [secs].",
                             end - start)
+
+    def _precompile_select_hidden_states(self) -> None:
+        logger.info(
+            "Compiling select_hidden_states with different input shapes.")
+        hsize = self.model_config.get_hidden_size()
+
+        # Precompile for regular hidden states
+        self._precompile_select_hidden_states_helper(
+            name="regular hidden states",
+            outer_paddings=self.num_tokens_paddings,
+            input_shape_fn=lambda num_tokens: (num_tokens, hsize),
+            input_dtype=jnp.bfloat16,
+            inner_loop_var_name="num_tokens",
+        )
+
+        # Spec decoding
+        if self.speculative_config:
+            vocab_size = self.model_config.get_vocab_size()
+            self._precompile_select_hidden_states_helper(
+                name="speculative decoding",
+                outer_paddings=self.num_logits_paddings,
+                input_shape_fn=lambda num_logits: (num_logits, vocab_size),
+                input_dtype=jnp.bfloat16,
+                sharding=NamedSharding(self.mesh, PartitionSpec(None,
+                                                                "model")),
+                inner_loop_var_name="num_logits",
+            )
 
     def _precompile_compute_logits(self) -> None:
         logger.info("Compiling compute_logits with different input shapes.")
@@ -457,6 +494,36 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             end = time.perf_counter()
             logger.info("Compilation finished in %.2f [secs].", end - start)
 
+    def _precompile_rejection_sampler(self) -> None:
+        logger.info(
+            "Compiling greedy_rejection_sampler with different input shapes.")
+        vocab_size = self.model_config.get_vocab_size()
+        for num_logits in self.num_logits_paddings:
+            for num_reqs in self.num_reqs_paddings:
+                target_probs = jnp.ones((num_logits, vocab_size),
+                                        dtype=jnp.bfloat16)
+                sharding = NamedSharding(self.mesh,
+                                         PartitionSpec(None, "model"))
+                target_probs = self._device_array(target_probs,
+                                                  sharding=sharding)
+                draft_token_ids = jnp.ones((num_logits, ), dtype=jnp.int32)
+                num_draft_tokens = jnp.ones((num_reqs, ), dtype=jnp.int32)
+                bonus_token_ids = jnp.ones((num_reqs, ), dtype=jnp.int32)
+                draft_token_ids, num_draft_tokens, bonus_token_ids = self._device_array(
+                    (draft_token_ids, num_draft_tokens, bonus_token_ids))
+                logger.info(
+                    f"Precompile greedy_rejection_sampler --> num_logits={num_logits} num_reqs={num_reqs}"
+                )
+                start = time.perf_counter()
+                result = self.rejection_sampler(draft_token_ids,
+                                                num_draft_tokens, -1, None,
+                                                target_probs, bonus_token_ids,
+                                                None)
+                result.block_until_ready()
+                end = time.perf_counter()
+                logger.info("Compilation finished in %.2f [secs].",
+                            end - start)
+
     @staticmethod
     @functools.partial(jax.jit, static_argnames=("max_logprobs", ))
     def _compute_and_gather_logprobs(logits, next_tokens, max_logprobs):
@@ -480,6 +547,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         self._precompile_sampling()
         self._precompile_gather_logprobs()
         self._precompile_structured_decoding()
+        if self.speculative_config:
+            self._precompile_rejection_sampler()
 
     def _precompile_structured_decoding(self) -> None:
         logger.info(
@@ -1145,6 +1214,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                 draft_token_ids.append([])
             else:
                 draft_token_ids.append(drafter_output.tolist())
+
         return draft_token_ids
 
     @functools.partial(jax.jit, static_argnums=(0, ))
