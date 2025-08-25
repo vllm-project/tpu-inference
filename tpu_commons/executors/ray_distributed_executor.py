@@ -36,6 +36,8 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
     """Ray-based distributed executor"""
 
     def _init_executor(self) -> None:
+        super()._init_executor()
+        
         self.forward_dag: Optional[ray.dag.CompiledDAG] = None
         # V1 uses SPMD worker and compiled DAG
         os.environ["VLLM_USE_RAY_SPMD_WORKER"] = "1"
