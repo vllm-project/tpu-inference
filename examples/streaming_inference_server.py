@@ -97,7 +97,7 @@ def run_pubsub_inference(args: dict, llm: LLM, sampling_params: SamplingParams):
                 json.dumps(results, indent=2),
                 content_type="application/json",
             )
-            logging.info(f"Results written to gs://{args['bucket_name']}/{blob_name}")
+            logging.info(f"Results written to gs://{output_gcs_bucket}/{output_gcs_blob}")
 
             message.ack()
         except Exception as e:
