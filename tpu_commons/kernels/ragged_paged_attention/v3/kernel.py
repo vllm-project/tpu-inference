@@ -1159,6 +1159,7 @@ def static_validate_inputs(
         "num_kv_pages_per_block",
         "num_queries_per_block",
         "vmem_limit_bytes",
+        "actual_num_q_heads_per_kv_head",
         "debug_mode",
     ),
     donate_argnames=("kv_cache", ),
@@ -1189,6 +1190,7 @@ def ragged_paged_attention(
     num_kv_pages_per_block: int | None = None,
     num_queries_per_block: int | None = None,
     vmem_limit_bytes: int | None = None,
+    actual_num_q_heads_per_kv_head: int | None = None,
     # Debug params.
     debug_mode: bool = False,
 ):
@@ -1251,7 +1253,6 @@ def ragged_paged_attention(
     actual_head_dim = q.shape[4]
     actual_num_kv_heads = k.shape[1]
 
-    actual_num_q_heads_per_kv_head = actual_num_q_heads // actual_num_kv_heads
     q, kv = prepare_inputs(q, k, v)
     (
         _,

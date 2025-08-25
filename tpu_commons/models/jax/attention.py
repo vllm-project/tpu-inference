@@ -22,6 +22,7 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh, total_num_pages: int,
 
 
 def sharded_ragged_paged_attention(sm_scale: float,
+                                   actual_num_q_heads_per_kv_head: int,
                                    mesh: Mesh,
                                    attention_chunk_size: int | None = None):
     """Shards along KV heads."""
@@ -44,6 +45,7 @@ def sharded_ragged_paged_attention(sm_scale: float,
             *args,
             sm_scale=sm_scale,
             sliding_window=attention_chunk_size,
+            actual_num_q_heads_per_kv_head=actual_num_q_heads_per_kv_head,
         )
 
     return jax.jit(
@@ -61,6 +63,7 @@ def attention(
     q: jax.Array,
     k: jax.Array,
     v: jax.Array,
+    actual_num_q_heads_per_kv_head: int,
     attention_metadata: AttentionMetadata,
     mesh: Mesh,
     head_dim_original: int | None = None,  # before padding,
@@ -84,7 +87,8 @@ def attention(
 
     # (T, N, H)
     output, kv_cache = sharded_ragged_paged_attention(
-        head_dim_original**-0.5, mesh, attention_chunk_size)(
+        head_dim_original**-0.5, actual_num_q_heads_per_kv_head, mesh,
+        attention_chunk_size)(
             q,
             k,
             v,

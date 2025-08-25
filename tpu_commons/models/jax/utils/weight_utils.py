@@ -35,6 +35,12 @@ class MetadataMap:
     pad_map: dict[str, tuple[int, ...]] = field(default_factory=dict)
     bias_pad_map: dict[str, tuple[int, ...]] = field(default_factory=dict)
 
+    pre_reshape_map: dict[str, tuple[int, ...]] = field(default_factory=dict)
+    pre_bias_reshape_map: dict[str, tuple[int,
+                                          ...]] = field(default_factory=dict)
+    pre_pad_map: dict[str, tuple[int, ...]] = field(default_factory=dict)
+    pre_bias_pad_map: dict[str, tuple[int, ...]] = field(default_factory=dict)
+
 
 ############ START Used by llama4, deepseek only for now START ############
 
@@ -236,12 +242,18 @@ def get_default_maps(vllm_config, mesh: Mesh,
         "v_proj.bias": (0, sharding_size // num_kv_heads),
     }
 
-    return MetadataMap(name_map=name_map,
-                       reshape_map=reshape_keys,
-                       bias_reshape_map=bias_reshape_keys,
-                       transpose_map=transpose_keys,
-                       pad_map=pad_keys,
-                       bias_pad_map=bias_pad_keys)
+    return MetadataMap(
+        name_map=name_map,
+        reshape_map=reshape_keys,
+        bias_reshape_map=bias_reshape_keys,
+        transpose_map=transpose_keys,
+        pad_map=pad_keys,
+        bias_pad_map=bias_pad_keys,
+        pre_reshape_map={},
+        pre_bias_reshape_map={},
+        pre_pad_map={},
+        pre_bias_pad_map={},
+    )
 
 
 def _load_hf_weights_on_thread(vllm_config,
@@ -256,6 +268,11 @@ def _load_hf_weights_on_thread(vllm_config,
     transpose_keys = metadata_map.transpose_map
     pad_keys = metadata_map.pad_map
     bias_pad_keys = metadata_map.bias_pad_map
+
+    pre_reshape_keys = metadata_map.pre_reshape_map
+    pre_bias_reshape_keys = metadata_map.pre_bias_reshape_map
+    pre_pad_keys = metadata_map.pre_pad_map
+    pre_bias_pad_keys = metadata_map.pre_bias_pad_map
 
     shard = functools.partial(shard_put, mesh=mesh)
 
@@ -300,6 +317,38 @@ def _load_hf_weights_on_thread(vllm_config,
             "before transform | "
             f"{hf_key}: {hf_weight.shape}  -->  {model_key}: {model_weight.value.shape} {model_sharding}"
         )
+
+        # pre_reshape
+        if hf_key.endswith(".bias"):
+            for key in pre_bias_reshape_keys:
+                if key in hf_key:
+                    hf_weight = jnp.reshape(hf_weight,
+                                            pre_bias_reshape_keys[key])
+                    break
+        else:
+            for key in pre_reshape_keys:
+                if key in hf_key:
+                    hf_weight = jnp.reshape(hf_weight, pre_reshape_keys[key])
+                    break
+
+        # pre_pad
+        if hf_key.endswith(".bias"):
+            for key in pre_bias_pad_keys:
+                if key in hf_key:
+                    # hf_weight = jnp.reshape(hf_weight, pre_bias_reshape_keys[key])
+                    hf_weight = jnp.pad(hf_weight,
+                                        pre_bias_pad_keys[key],
+                                        constant_values=0)
+                    break
+        else:
+            for key in pre_pad_keys:
+                if key in hf_key:
+                    hf_weight = jnp.pad(hf_weight,
+                                        pre_pad_keys[key],
+                                        constant_values=0)
+                    break
+
+        # reshape and transpose
         if hf_key.endswith(".bias"):
             for key in bias_reshape_keys:
                 if key in hf_key:
