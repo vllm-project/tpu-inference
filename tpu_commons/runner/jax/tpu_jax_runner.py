@@ -57,6 +57,8 @@ from tpu_commons.runner.jax.persistent_batch_manager import \
     PersistentBatchManager
 from tpu_commons.runner.jax.speculative_decoding_manager import \
     SpeculativeDecodingManager
+from tpu_commons.runner.jax.structured_decoding_manager import \
+    StructuredDecodingManager
 from tpu_commons.utils import make_optimized_mesh
 
 logger = init_logger(__name__)
@@ -125,6 +127,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
 
         self.compilation_manager = CompilationManager(self)
         self.speculative_decoding_manager = SpeculativeDecodingManager(self)
+        self.structured_decoding_manager = StructuredDecodingManager(self)
         self.kv_cache_manager = KVCacheManager(self)
         self.persistent_batch_manager = PersistentBatchManager(
             self.requests, self.input_batch, self.encoder_cache,
@@ -592,11 +595,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                                                       logits_indices)
             logits = self.compute_logits_fn(self.state, hidden_states)
             if scheduler_output.grammar_bitmask is not None:
-                require_struct_decoding, grammar_bitmask_padded, arange = \
-                    self.prepare_structured_decoding_input(
-                        logits, scheduler_output
-                    )
-                logits = self.structured_decode_fn(
+                (
+                    require_struct_decoding, grammar_bitmask_padded, arange
+                ) = self.structured_decoding_manager.prepare_structured_decoding_input(
+                    logits, scheduler_output)
+                logits = self.structured_decoding_manager.structured_decode_fn(
                     require_struct_decoding,
                     grammar_bitmask_padded,
                     logits,
@@ -725,78 +728,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         return self.speculative_decoding_manager.take_draft_token_ids()
-
-    @functools.partial(jax.jit, static_argnums=(0, ))
-    def structured_decode_fn(self, require_struct_decoding: jax.Array,
-                             grammar_bitmask: jax.Array, logits: jax.Array,
-                             arange: jax.Array) -> jax.Array:
-        return jax.lax.cond(
-            jnp.any(require_struct_decoding),
-            lambda: self._apply_grammar_bitmask_kernel(
-                logits, grammar_bitmask, require_struct_decoding, arange),
-            lambda: logits)
-
-    @functools.partial(jax.jit, static_argnums=(0, ))
-    def _apply_grammar_bitmask_kernel(self, logits: jax.Array,
-                                      grammar_bitmask: jax.Array,
-                                      require_struct_decoding: jax.Array,
-                                      arange: jax.Array) -> jax.Array:
-
-        # Unpack the bitmask for the entire batch at once.
-        # grammar_bitmask: (B, N) where B=num_reqs, N=cdiv(vocab_size, 32)
-        # arange: (32,)
-        # (B, N, 1) and (1, 1, 32) broadcast to (B, N, 32)
-        unpacked_bitmask = jnp.right_shift(grammar_bitmask[:, :, None],
-                                           arange[None, None, :]) & 1 == 0
-
-        # Reshape to (B, vocab_size) and apply to logits.
-        # (B, N * 32) -> (B, vocab_size)
-        unpacked_bitmask = unpacked_bitmask.reshape(logits.shape[0],
-                                                    -1)[:, :self.vocab_size]
-
-        masked_logits = jnp.where(unpacked_bitmask, -jnp.inf, logits)
-
-        return jnp.where(require_struct_decoding, masked_logits, logits)
-
-    def prepare_structured_decoding_input(
-        self, logits: jax.Array, scheduler_output: "VllmSchedulerOutput"
-    ) -> Tuple[jax.Array, jax.Array, jax.Array]:
-        grammar_bitmask = scheduler_output.grammar_bitmask
-        assert grammar_bitmask is not None
-        num_reqs, _ = logits.shape
-
-        # Reset pre-allocated tensors
-        self.grammar_bitmask_cpu.fill(0)
-        self.require_structured_out_cpu.fill(0)
-
-        # We receive the structured output bitmask from the scheduler, but the
-        # indices of the requests in the batch may not match the indices of
-        # the bitmask since the scheduler doesn't know how the tpu runner is
-        # ordering the requests in the batch. We need to match the order of
-        # bitmask with the order of requests
-        struct_out_indices: list[int] = []
-        mask_indices: list[int] = []
-        for req_id in self.input_batch.req_ids:
-            mask_index = scheduler_output.structured_output_request_ids.get(
-                req_id)
-            if mask_index is None:
-                continue
-            batch_index = self.input_batch.req_id_to_index[req_id]
-            struct_out_indices.append(batch_index)
-            mask_indices.append(mask_index)
-        self.grammar_bitmask_cpu[struct_out_indices] = grammar_bitmask[
-            mask_indices]
-        # It's not guaranteed that all requests in this batch require
-        # structured output, so create a bool tensor to represent
-        # the requests that need structured output.
-        self.require_structured_out_cpu[struct_out_indices] = True
-
-        require_structured_out_cpu, grammar_bitmask_cpu, structured_decode_arange = self._device_array(
-            (self.require_structured_out_cpu[:num_reqs],
-             self.grammar_bitmask_cpu[:num_reqs],
-             self.structured_decode_arange))
-
-        return require_structured_out_cpu, grammar_bitmask_cpu, structured_decode_arange
 
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens

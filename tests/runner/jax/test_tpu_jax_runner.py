@@ -306,9 +306,10 @@ class TestTPUJaxRunner:
         mock_logits_device = jnp.ones(logits_shape, dtype=jnp.bfloat16)
 
         # 2. ===== Test prepare_structured_decoding_input =====
-        (require_struct_decoding, grammar_bitmask,
-         arange) = self.runner.prepare_structured_decoding_input(
-             mock_logits_device, mock_scheduler_output)
+        (
+            require_struct_decoding, grammar_bitmask, arange
+        ) = self.runner.structured_decoding_manager.prepare_structured_decoding_input(
+            mock_logits_device, mock_scheduler_output)
 
         # Assertions for prepare_structured_decoding_input
         # require_structured_out_cpu should be [True, False, True]
@@ -331,7 +332,7 @@ class TestTPUJaxRunner:
 
         # 3. ===== Test structured_decode_fn =====
         # This function is jitted, so we call it with the device arrays
-        modified_logits = self.runner.structured_decode_fn(
+        modified_logits = self.runner.structured_decoding_manager.structured_decode_fn(
             require_struct_decoding, grammar_bitmask, mock_logits_device,
             arange)
 
