@@ -1,4 +1,5 @@
 qwix:
+  use_abstract_model: True
   rules:
     # NOTE: each entry corresponds to a qwix.QuantizationRule
     - module_path: '.*.custom_module.router.*'

@@ -59,7 +59,6 @@ class MLA(nnx.Module):
 
     attn_o_tnh: P = P()
     activation_attention_out_td: Sharding = ()
-    # rngs: InitVar[nnx.Rngs]
 
     random_init: bool = False
     attention_chunk_size: int | None = None

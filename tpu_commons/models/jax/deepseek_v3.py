@@ -11,6 +11,7 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from vllm.config import VllmConfig
 
+from tpu_commons import utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.common.attention.attention import AttentionMetadata
 from tpu_commons.models.jax.common.attention.deepseek_v3_attention import MLA
@@ -23,6 +24,7 @@ from tpu_commons.models.jax.common.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
 from tpu_commons.models.jax.utils.weight_utils import (get_param,
                                                        model_weights_generator,
+                                                       print_param_info,
                                                        reshape_params)
 
 logger = init_logger(__name__)
@@ -342,13 +344,13 @@ class DeepSeekV3WeightLoader:
             (attn_heads, qk_nope_head_dim + v_head_dim, kv_lora_rank),
             "o_proj": (hidden_size, attn_heads, v_head_dim)
         }
-
+        # NOTE: this is only needed if using the FP8 model
         self._scale_shape_map = {
             "q_b_proj":
             (1, qk_nope_head_dim + qk_rope_head_dim, q_lora_rank // 128),
             "kv_b_proj": (attn_heads, (qk_nope_head_dim + v_head_dim) // 128,
                           kv_lora_rank // 128),
-            "o_proj": (56, attn_heads, v_head_dim // 128),
+            "o_proj": (hidden_size // 128, attn_heads, v_head_dim // 128),
         }
         # Set the mappings from loaded parameter keys to standardized names.
         self._loaded_to_standardized_keys = {
@@ -459,26 +461,39 @@ class DeepSeekV3WeightLoader:
                                 weight,
                                 model_params,
                                 model_mesh,
-                                scale=None):
+                                scale=None) -> Tuple[int, int]:
         """
-        TODO
-        """
-        # scale = None
-        mapped_name = self.map_loaded_to_standardized_name(name)
-        model_weight = get_param(model_params, mapped_name)
-        test_weight = model_weight.array.qvalue.value if hasattr(
-            model_weight, "array") else model_weight.value
+        Loads a single weight into the model.
 
-        logger.info(
-            f"{name}: {weight.shape}  -->  {mapped_name}: {test_weight.shape} -->  {weight.dtype} {test_weight.dtype}"
-        )
+        NOTE: if using the base FP8 model, it is assumed that the Qwix abstract
+        pass has been run and that the model weights are thus QArrays, which we
+        will then load the weights/scales into.
+
+        Args:
+            name: The name of the weight.
+            weight: The weight to load.
+            model_params: The model parameters.
+            model_mesh: The model mesh.
+            scale: The scale of the weight (if using an FP8 model).
+
+        Returns:
+            Tuple[int, int]: The size (in bytes) for the given layer overall and per shard.
+                NOTE: if using the FP8 model (with Qwix), we'll include the scale size as well.
+        """
+        mapped_name = self.map_loaded_to_standardized_name(name)
+        base_model_weight = get_param(model_params, mapped_name)
+        model_weight = base_model_weight.array.qvalue if hasattr(
+            base_model_weight, "array") else base_model_weight
+        sharding = base_model_weight.array.qvalue.sharding if hasattr(
+            base_model_weight, "array") else base_model_weight.sharding
+
         # Convert weights from torch into numpy
-        # TODO: set cast_type based on model weight's type.
-        cast_type = test_weight.dtype
+        cast_type = model_weight.value.dtype
         weight_np = weight.to(torch.float32).numpy().astype(cast_type)
 
         if scale is not None:
             scale = scale.to(torch.float32).numpy().astype(self.scale_dtype)
+            # TODO: remove
             logger.info(
                 f"Loaded scale for {name}: {scale.shape} --> {mapped_name} {scale.dtype}"
             )
@@ -490,13 +505,16 @@ class DeepSeekV3WeightLoader:
         weight_np = self._transpose_params(name, weight_np)
         if scale is not None:
             scale = self._transpose_params(name, scale)
+            # This handles a weird case where the scale is not cleanly divisible by 128
+            # (the base weight shape is 576 and the block size is 128), so we'll repeat
+            # the scale to bypass this
             if "attn.kernel_kv_down_proj_DA" in mapped_name:
                 scale = scale.repeat(128, axis=1)[:, :576]
 
-        if test_weight.shape != weight_np.shape:
+        if model_weight.value.shape != weight_np.shape:
             raise ValueError(
                 f"Loaded shape for {name}: {weight_np.shape} "
-                f"does not match model shape for {mapped_name}: {test_weight.shape}!"
+                f"does not match model shape for {mapped_name}: {model_weight.value.shape}!"
             )
 
         def get_slice(index):
@@ -507,19 +525,17 @@ class DeepSeekV3WeightLoader:
             return scale[index]
 
         sharded_array = jax.make_array_from_callback(
-            weight_np.shape,
-            NamedSharding(model_mesh, P(*model_weight.sharding)), get_slice)
+            weight_np.shape, NamedSharding(model_mesh, P(*sharding)),
+            get_slice)
 
         if scale is not None:
-            # sharded_value = QArray(sharded_value, 1 / scale, None,
-            #                        weight.dtype)
-            # sharded_value.qvalue.block_until_ready()
-            # TODO: put as well?
             maybe_sharded_scale = scale
+            # Since, by default, we'll use the same sharding as the weights, we might
+            # encounter an error where the smaller/different sharding dim isn't divisible
+            # by the parallel size
             try:
                 maybe_sharded_scale = jax.make_array_from_callback(
-                    scale.shape,
-                    NamedSharding(model_mesh, P(*model_weight.sharding)),
+                    scale.shape, NamedSharding(model_mesh, P(*sharding)),
                     get_slice_scale)
             except ValueError:
                 logger.warning(
@@ -527,24 +543,31 @@ class DeepSeekV3WeightLoader:
                 )
             # NOTE: Despite the fact that scale has the name `scale_inv` in it, we don't need to
             # inverse it
-            model_weight.array.scale.value = maybe_sharded_scale
-            model_weight.array.qvalue.value = sharded_array
+            base_model_weight.array.scale.value = maybe_sharded_scale
+            base_model_weight.array.qvalue.value = sharded_array
         else:
-            # TODO: support none quant path
-            # sharded_value = QArray(sharded_value, None, None, weight.dtype)
-            # sharded_value.qvalue.block_until_ready()
             model_weight.value = sharded_array
 
+        model_weight_size_bytes = model_weight.nbytes / 1e9
+        model_weight_local_size_bytes = model_weight.addressable_shards[
+            0].data.nbytes / 1e9
+
+        if scale is not None:
+            model_weight_size_bytes += base_model_weight.array.scale.nbytes / 1e9
+            model_weight_local_size_bytes += base_model_weight.array.scale.addressable_shards[
+                0].data.nbytes / 1e9
+
+        if self.is_verbose:
+            logger.info(f"Memory usage after loading in {name}: "
+                        f"hbm={utils.hbm_usage_gb(jax.local_devices())}Gb")
+            print_param_info(model_weight, name)
+            if scale is not None:
+                print_param_info(base_model_weight.array.scale,
+                                 "scale for " + name)
+
         del weight, scale
-        value = model_weight.array.qvalue.value if hasattr(
-            model_weight, "array") else model_weight.value
-        from tpu_commons import utils
-        logger.info(f"Memory usage before applying quantization of params: "
-                    f"hbm={utils.hbm_usage_gb(jax.local_devices())}Gb")
-        # if self.is_verbose:
-        #     # TODO
-        #     print_param_info(value, name)
-        return value.nbytes / 1e9, value.addressable_shards[0].data.nbytes / 1e9
+        return model_weight.nbytes / 1e9, model_weight.addressable_shards[
+            0].data.nbytes / 1e9
 
     def load_weights(self, model_for_loading: nnx.Module):
         model_params = nnx.state(model_for_loading)
@@ -591,7 +614,6 @@ class DeepSeekV3WeightLoader:
                         continue
                 scale = None
                 if loaded_name.endswith(".weight_scale_inv"):
-                    # assuming weights are loaded before scales.
                     weight_name = loaded_name.replace(".weight_scale_inv",
                                                       ".weight")
                     if weight_name in fp8_weights:
