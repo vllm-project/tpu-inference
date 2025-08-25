@@ -3,7 +3,6 @@ import os
 import random
 import time
 from contextlib import nullcontext
-from dataclasses import asdict
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 import jax
@@ -190,7 +189,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
-        self.encoder_cache: dict[str, dict[int, jax.Array]] = {}
+        # mm_hash ->  encoder_output
+        self.encoder_cache: dict[str, jax.Array] = {}
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
@@ -754,8 +754,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
             mm_kwargs=getattr(request, "mm_kwargs", []),
-            mm_hashes=[],
             mm_positions=getattr(request, "mm_positions", []),
+            mm_hashes=getattr(request, "mm_hashes", []),
             pooling_params=getattr(request, "pooling_params", None),
             generator=None,
         )
@@ -821,14 +821,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
 
         # Batch the multi-modal inputs.
         mm_kwargs = list[MultiModalKwargsItem]()
-        req_ids_pos = list[tuple[str, int, PlaceholderRange]]()
+        # List of tuple (mm_hash, pos_info)
+        mm_hashes_pos = list[tuple[str, PlaceholderRange]]()
         for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
             req_state = self.requests[req_id]
 
             for mm_input_id in encoder_input_ids:
+                mm_hash = req_state.mm_hashes[mm_input_id]
                 mm_kwargs.append(req_state.mm_kwargs[mm_input_id])
-                req_ids_pos.append(
-                    (req_id, mm_input_id, req_state.mm_positions[mm_input_id]))
+                mm_hashes_pos.append(
+                    (mm_hash, req_state.mm_positions[mm_input_id]))
 
         # Batch mm inputs as much as we can: if a request in the batch has
         # multiple modalities or a different modality than the previous one,
@@ -887,14 +889,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                 encoder_outputs.append(output)
 
         # Cache the encoder outputs.
-        for (req_id, input_id, pos_info), output in zip(
-                req_ids_pos,
+        for (mm_hash, pos_info), output in zip(
+                mm_hashes_pos,
                 encoder_outputs,
         ):
             if req_id not in self.encoder_cache:
                 self.encoder_cache[req_id] = {}
 
-            self.encoder_cache[req_id][input_id] = scatter_mm_placeholders(
+            self.encoder_cache[mm_hash] = scatter_mm_placeholders(
                 output,
                 is_embed=pos_info.is_embed,
             )
@@ -910,6 +912,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             req_state = self.requests[req_id]
             num_computed_tokens = req_state.num_computed_tokens
             mm_positions = req_state.mm_positions
+            mm_hashes = req_state.mm_hashes
             for i, pos_info in enumerate(mm_positions):
                 start_pos = pos_info.offset
                 num_encoder_tokens = pos_info.length
@@ -931,9 +934,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                     num_computed_tokens - start_pos + num_scheduled_tokens,
                     num_encoder_tokens)
                 assert start_idx < end_idx
-                assert req_id in self.encoder_cache
-                assert i in self.encoder_cache[req_id]
-                encoder_output = self.encoder_cache[req_id][i]
+                mm_hash = mm_hashes[i]
+                encoder_output = self.encoder_cache.get(mm_hash, None)
+                assert encoder_output is not None,\
+                      f"Encoder cache miss for {mm_hash}."
+                encoder_output = self.encoder_cache[mm_hash]
 
                 if (is_embed := pos_info.is_embed) is not None:
                     is_embed = is_embed[start_idx:end_idx]
@@ -1549,7 +1554,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
-            self.encoder_cache.pop(req_id, None)
 
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
@@ -1564,12 +1568,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                 removed_req_indices.append(req_index)
 
         # Free the cached encoder outputs.
-        for req_id, input_id in scheduler_output.free_encoder_input_ids:
-            encoder_outputs = self.encoder_cache.get(req_id)
-            if encoder_outputs is not None:
-                encoder_outputs.pop(input_id, None)
-                if not encoder_outputs:
-                    self.encoder_cache.pop(req_id, None)
+        for mm_hash in scheduler_output.free_encoder_mm_hashes:
+            self.encoder_cache.pop(mm_hash, None)
 
         # Remove the unscheduled requests from the persistent batch.
         # NOTE(woosuk): The unscheduled requests are either preempted requests
@@ -1592,18 +1592,25 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         # Add new requests to the cached states.
         for new_req_data in scheduler_output.scheduled_new_reqs:
             req_id = new_req_data.req_id
+            sampling_params = new_req_data.sampling_params
 
-            data_items = asdict(new_req_data)
-            data_items["mm_hashes"] = []
+            self.requests[req_id] = CachedRequestState(
+                req_id=req_id,
+                prompt_token_ids=new_req_data.prompt_token_ids,
+                mm_kwargs=new_req_data.mm_kwargs,
+                mm_positions=new_req_data.mm_positions,
+                mm_hashes=new_req_data.mm_hashes,
+                sampling_params=sampling_params,
+                pooling_params=None,
+                generator=None,
+                block_ids=new_req_data.block_ids,
+                num_computed_tokens=new_req_data.num_computed_tokens,
+                output_token_ids=[],
+                lora_request=new_req_data.lora_request,
+            )
 
-            self.requests[req_id] = CachedRequestState(**data_items,
-                                                       output_token_ids=[])
+            req_ids_to_add.append(req_id)
 
-            # NOTE(wenlong): We need to explicitly set this
-            # because asdict will convert List[PlaceholderRange] to list[dict]
-            self.requests[req_id].mm_positions = new_req_data.mm_positions
-
-            # multi-modal related
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             if self.uses_mrope:
                 image_grid_thw = []
@@ -1641,8 +1648,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                         audio_feature_lengths=audio_feature_lengths,
                         use_audio_in_video=use_audio_in_video,
                     )
-
-            req_ids_to_add.append(req_id)
 
         # Update the states of the running/resumed requests.
         req_data = scheduler_output.scheduled_cached_reqs

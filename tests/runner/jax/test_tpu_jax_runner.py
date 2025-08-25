@@ -383,7 +383,7 @@ class TestTPUJaxRunner:
             mm_kwargs=[mm_item],
             mm_positions=[PlaceholderRange(offset=0, length=1)],
             lora_request=None,
-            mm_hashes=[],
+            mm_hashes=["req-1"],
             pooling_params=None,
             generator=None,
         )
@@ -399,8 +399,7 @@ class TestTPUJaxRunner:
         # 3. ===== Assert =====
         # Check if encoder_cache is populated correctly
         assert "req-1" in self.runner.encoder_cache
-        assert 0 in self.runner.encoder_cache["req-1"]
-        cached_embedding = self.runner.encoder_cache["req-1"][0]
+        cached_embedding = self.runner.encoder_cache["req-1"]
         np.testing.assert_array_equal(np.asarray(cached_embedding),
                                       np.asarray(dummy_embedding))
 
@@ -465,7 +464,7 @@ class TestTPUJaxRunner:
             mm_kwargs=[mm_item_1],
             mm_positions=[PlaceholderRange(offset=0, length=1)],
             lora_request=None,
-            mm_hashes=[],
+            mm_hashes=["req-1"],
             pooling_params=None,
             generator=None)
 
@@ -488,7 +487,7 @@ class TestTPUJaxRunner:
             mm_kwargs=[mm_item_2],
             mm_positions=[PlaceholderRange(offset=0, length=1)],
             lora_request=None,
-            mm_hashes=[],
+            mm_hashes=["req-2"],
             pooling_params=None,
             generator=None)
 
@@ -504,12 +503,10 @@ class TestTPUJaxRunner:
         # 3. ===== Assert =====
         assert "req-1" in self.runner.encoder_cache
         np.testing.assert_array_equal(
-            np.asarray(self.runner.encoder_cache["req-1"][0]),
-            np.asarray(emb_1))
+            np.asarray(self.runner.encoder_cache["req-1"]), np.asarray(emb_1))
         assert "req-2" in self.runner.encoder_cache
         np.testing.assert_array_equal(
-            np.asarray(self.runner.encoder_cache["req-2"][0]),
-            np.asarray(emb_2))
+            np.asarray(self.runner.encoder_cache["req-2"]), np.asarray(emb_2))
 
         self.mock_get_mm_embed_fn.assert_called_once()
         call_args = self.mock_get_mm_embed_fn.call_args
@@ -539,7 +536,7 @@ class TestTPUJaxRunner:
         # Mock encoder output
         encoder_embedding = jnp.arange(56 * 128, dtype=jnp.bfloat16).reshape(
             (56, 128))
-        self.runner.encoder_cache = {req_id: {0: encoder_embedding}}
+        self.runner.encoder_cache = {req_id: encoder_embedding}
 
         mock_sampling_params = MagicMock()
         mock_sampling_params.sampling_type = SamplingType.GREEDY
@@ -564,7 +561,7 @@ class TestTPUJaxRunner:
             mm_kwargs=[],
             mm_positions=[PlaceholderRange(offset=10, length=56)],
             lora_request=None,
-            mm_hashes=[],
+            mm_hashes=[req_id],
             pooling_params=None,
             generator=None,
         )
