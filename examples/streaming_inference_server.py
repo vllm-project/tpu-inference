@@ -128,7 +128,7 @@ def main(args: dict):
         'project_id': args.pop("project_id"),
         'subscription_id': args.pop('subscription_id'),
         'bucket_name': args.pop('bucket_name'),
-        'blob-name-prefix': args.pop('blob-name-prefix')
+        'blob_name_prefix': args.pop('blob_name_prefix')
     }
 
     # Create an LLM
