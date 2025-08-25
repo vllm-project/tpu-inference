@@ -255,8 +255,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                                             dtype=np.int64)
 
     @functools.partial(jax.jit, static_argnums=(0, ))
-    def select_hidden_states_fn(self, hidden_states, indices_do_sample):
-        return hidden_states[indices_do_sample]
+    def select_from_array_fn(self, array, indices_to_select):
+        return array[indices_to_select]
 
     def load_model(self):
         self.model_fn, self.compute_logits_fn, self.get_multimodal_embeddings_fn, self.get_input_embeddings_fn, self.state = get_model(
@@ -369,7 +369,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             logger.info("Compilation finished in %.2f [secs].", end - start)
             hidden_states.block_until_ready()
 
-    def _precompile_select_hidden_states_helper(
+    def _precompile_select_from_array_helper(
         self,
         name: str,
         outer_paddings: List[int],
@@ -378,38 +378,37 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         sharding: Optional[NamedSharding] = None,
         inner_loop_var_name: str = "num_tokens",
     ) -> None:
-        logger.info(f"Compiling select_hidden_states for {name}.")
+        logger.info(f"Compiling select_from_array for {name}.")
         for outer_loop_val in outer_paddings:
             for num_reqs in self.num_reqs_paddings:
                 if num_reqs > outer_loop_val:
                     continue
                 input_tensor = jnp.ones(input_shape_fn(outer_loop_val),
                                         dtype=input_dtype)
-                indices_to_sample = jnp.ones((num_reqs, ), dtype=jnp.int32)
+                indices_to_select = jnp.ones((num_reqs, ), dtype=jnp.int32)
                 if sharding:
                     input_tensor = self._device_array(input_tensor,
                                                       sharding=sharding)
                 else:
                     input_tensor = self._device_array(input_tensor)
-                indices_to_sample = self._device_array(indices_to_sample)
+                indices_to_select = self._device_array(indices_to_select)
                 start = time.perf_counter()
                 logger.info(
-                    f"Precompile select_hidden_states --> {inner_loop_var_name}={outer_loop_val} | "
+                    f"Precompile select_from_array --> {inner_loop_var_name}={outer_loop_val} | "
                     f"num_reqs={num_reqs}")
-                result = self.select_hidden_states_fn(input_tensor,
-                                                      indices_to_sample)
+                result = self.select_from_array_fn(input_tensor,
+                                                   indices_to_select)
                 result.block_until_ready()
                 end = time.perf_counter()
                 logger.info("Compilation finished in %.2f [secs].",
                             end - start)
 
-    def _precompile_select_hidden_states(self) -> None:
-        logger.info(
-            "Compiling select_hidden_states with different input shapes.")
+    def _precompile_select_from_array(self) -> None:
+        logger.info("Compiling select_from_array with different input shapes.")
         hsize = self.model_config.get_hidden_size()
 
         # Precompile for regular hidden states
-        self._precompile_select_hidden_states_helper(
+        self._precompile_select_from_array_helper(
             name="regular hidden states",
             outer_paddings=self.num_tokens_paddings,
             input_shape_fn=lambda num_tokens: (num_tokens, hsize),
@@ -420,7 +419,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         # Spec decoding
         if self.speculative_config:
             vocab_size = self.model_config.get_vocab_size()
-            self._precompile_select_hidden_states_helper(
+            self._precompile_select_from_array_helper(
                 name="speculative decoding",
                 outer_paddings=self.num_logits_paddings,
                 input_shape_fn=lambda num_logits: (num_logits, vocab_size),
@@ -542,7 +541,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             return
 
         self._precompile_backbone()
-        self._precompile_select_hidden_states()
+        self._precompile_select_from_array()
         self._precompile_compute_logits()
         self._precompile_sampling()
         self._precompile_gather_logprobs()
@@ -1031,8 +1030,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                     inputs_embeds,
                 )
 
-            hidden_states = self.select_hidden_states_fn(
-                hidden_states, logits_indices)
+            hidden_states = self.select_from_array_fn(hidden_states,
+                                                      logits_indices)
             logits = self.compute_logits_fn(self.state, hidden_states)
             if scheduler_output.grammar_bitmask is not None:
                 require_struct_decoding, grammar_bitmask_padded, arange = \
@@ -1054,7 +1053,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                     tpu_sampling_metadata,
                 )
             else:
-                bonus_logits = self.select_hidden_states_fn(
+                bonus_logits = self.select_from_array_fn(
                     logits, spec_decode_metadata.bonus_logits_indices)
                 bonus_token_ids = sample(
                     self.rng_params_for_sampling,
@@ -1062,7 +1061,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                     bonus_logits,
                     tpu_sampling_metadata,
                 )
-                target_logits = self.select_hidden_states_fn(
+                target_logits = self.select_from_array_fn(
                     logits, spec_decode_metadata.target_logits_indices)
                 next_tokens = self.rejection_sampler(
                     draft_token_ids=spec_decode_metadata.draft_token_ids,
