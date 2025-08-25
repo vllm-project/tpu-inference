@@ -82,8 +82,7 @@ def run_pubsub_inference(args: dict, llm: LLM, sampling_params: SamplingParams):
                 return
 
             logging.info(f"Received {len(prompts)} prompts. Running inference...")
-            # outputs = llm.generate(prompts, sampling_params)
-            outputs = 'lala'
+            outputs = llm.generate(prompts, sampling_params)
             logging.info("Inference complete.")
 
             results = [
