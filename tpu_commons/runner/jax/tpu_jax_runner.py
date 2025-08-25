@@ -1,7 +1,6 @@
 import functools
 import os
 import random
-import time
 from contextlib import nullcontext
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
@@ -52,6 +51,7 @@ from tpu_commons.models.jax.utils.multi_modal_utils import \
 from tpu_commons.models.jax.utils.weight_utils import (
     shard_put, transfer_state_with_mappings)
 from tpu_commons.runner import utils as runner_utils
+from tpu_commons.runner.jax.compilation_manager import CompilationManager
 from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
                                                     InputBatch)
 from tpu_commons.runner.jax.metadata import SpecDecodeMetadata
@@ -123,6 +123,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
 
         # Cached draft tokens.
         self._draft_token_ids: Optional[list[list[int]]] = None
+
+        self.compilation_manager = CompilationManager(self)
 
     def _verify_chunked_prefill_config(self):
         if (self.scheduler_config.max_num_batched_tokens
@@ -330,199 +332,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         if has_kv_transfer_group():
             get_kv_transfer_group().register_runner(self)
 
-    def _precompile_backbone(self) -> None:
-        for num_tokens in self.num_tokens_paddings:
-            input_ids = np.ones((num_tokens, ), dtype=np.int32)
-            positions = np.ones((num_tokens, ), dtype=np.int32)
-            block_tables = self.block_table_cpu[:self.max_num_reqs]
-            seq_lens = np.ones((self.max_num_reqs, ), dtype=np.int32)
-            query_start_loc = np.ones((self.max_num_reqs + 1, ),
-                                      dtype=np.int32)
-            request_distribution = np.array([0, 0, 0], dtype=np.int32)
-
-            # Convert block_tables to 1D on cpu.
-            block_tables = block_tables.reshape(-1)
-
-            (input_ids, positions, block_tables, query_start_loc, seq_lens,
-             request_distribution) = self._device_array(
-                 (input_ids, positions, block_tables, query_start_loc,
-                  seq_lens, request_distribution))
-            logger.info(f"Precompile backbone --> num_tokens={num_tokens}")
-
-            attention_metadata = AttentionMetadata(
-                input_positions=positions,
-                block_tables=block_tables,
-                seq_lens=seq_lens,
-                query_start_loc=query_start_loc,
-                request_distribution=request_distribution,
-            )
-
-            # TODO:
-            # Use a None inputs_embeds here, assuming it is text-only model
-            # For mm model, we will use another precompile function
-            inputs_embeds = None
-            start = time.perf_counter()
-            self.kv_caches, hidden_states = self.model_fn(
-                self.state, self.kv_caches, input_ids, attention_metadata,
-                inputs_embeds)
-            end = time.perf_counter()
-            logger.info("Compilation finished in %.2f [secs].", end - start)
-            hidden_states.block_until_ready()
-
-    def _precompile_select_from_array_helper(
-        self,
-        name: str,
-        outer_paddings: List[int],
-        input_shape_fn: Callable[[int], Tuple[int, ...]],
-        input_dtype: Any,
-        sharding: Optional[NamedSharding] = None,
-        inner_loop_var_name: str = "num_tokens",
-    ) -> None:
-        logger.info(f"Compiling select_from_array for {name}.")
-        for outer_loop_val in outer_paddings:
-            for num_reqs in self.num_reqs_paddings:
-                if num_reqs > outer_loop_val:
-                    continue
-                input_tensor = jnp.ones(input_shape_fn(outer_loop_val),
-                                        dtype=input_dtype)
-                indices_to_select = jnp.ones((num_reqs, ), dtype=jnp.int32)
-                if sharding:
-                    input_tensor = self._device_array(input_tensor,
-                                                      sharding=sharding)
-                else:
-                    input_tensor = self._device_array(input_tensor)
-                indices_to_select = self._device_array(indices_to_select)
-                start = time.perf_counter()
-                logger.info(
-                    f"Precompile select_from_array --> {inner_loop_var_name}={outer_loop_val} | "
-                    f"num_reqs={num_reqs}")
-                result = self.select_from_array_fn(input_tensor,
-                                                   indices_to_select)
-                result.block_until_ready()
-                end = time.perf_counter()
-                logger.info("Compilation finished in %.2f [secs].",
-                            end - start)
-
-    def _precompile_select_from_array(self) -> None:
-        logger.info("Compiling select_from_array with different input shapes.")
-        hsize = self.model_config.get_hidden_size()
-
-        # Precompile for regular hidden states
-        self._precompile_select_from_array_helper(
-            name="regular hidden states",
-            outer_paddings=self.num_tokens_paddings,
-            input_shape_fn=lambda num_tokens: (num_tokens, hsize),
-            input_dtype=jnp.bfloat16,
-            inner_loop_var_name="num_tokens",
-        )
-
-        # Spec decoding
-        if self.speculative_config:
-            vocab_size = self.model_config.get_vocab_size()
-            self._precompile_select_from_array_helper(
-                name="speculative decoding",
-                outer_paddings=self.num_logits_paddings,
-                input_shape_fn=lambda num_logits: (num_logits, vocab_size),
-                input_dtype=jnp.bfloat16,
-                sharding=NamedSharding(self.mesh, PartitionSpec(None,
-                                                                "model")),
-                inner_loop_var_name="num_logits",
-            )
-
-    def _precompile_compute_logits(self) -> None:
-        logger.info("Compiling compute_logits with different input shapes.")
-        hsize = self.model_config.get_hidden_size()
-        for num_reqs in self.num_reqs_paddings:
-            hidden_states = jnp.ones((num_reqs, hsize), dtype=jnp.bfloat16)
-            hidden_states = self._device_array(hidden_states)
-            logger.info(f"Precompile compute_logits --> num_reqs={num_reqs}")
-            start = time.perf_counter()
-            result = self.compute_logits_fn(self.state, hidden_states)
-            result.block_until_ready()
-            end = time.perf_counter()
-            logger.info("Compilation finished in %.2f [secs].", end - start)
-
-    def _precompile_sampling(self) -> None:
-        logger.info("Compiling sampling with different input shapes.")
-        hsize = self.model_config.get_vocab_size()
-        for num_reqs in self.num_reqs_paddings:
-            logits = jnp.ones((num_reqs, hsize), dtype=jnp.bfloat16)
-            # logits is expected to be sharded along hsize dim.
-            sharding = NamedSharding(self.mesh, PartitionSpec(None, "model"))
-            logits = self._device_array(logits, sharding=sharding)
-            logger.info(f"Precompile sampling --> num_reqs={num_reqs}")
-            start = time.perf_counter()
-            for do_sampling in (True, False):
-                if do_sampling:
-                    temperature = np.full((num_reqs, ), 0.7, dtype=np.float32)
-                    top_k = np.full((num_reqs, ), 20, dtype=np.int32)
-                    top_p = np.full((num_reqs, ), 0.8, dtype=np.float32)
-                    (temperature, top_k, top_p) = self._device_array(
-                        (temperature, top_k, top_p))
-                else:
-                    temperature = None
-                    top_k = None
-                    top_p = None
-
-                sampling_metadata = TPUSupportedSamplingMetadata(
-                    temperature=temperature,
-                    top_k=top_k,
-                    top_p=top_p,
-                    do_sampling=do_sampling,
-                )
-                result = sample(self.rng_params_for_sampling, self.mesh,
-                                logits, sampling_metadata)
-                result.block_until_ready()
-                end = time.perf_counter()
-                logger.info("Compilation finished in %.2f [secs].",
-                            end - start)
-
-    def _precompile_gather_logprobs(self) -> None:
-        logger.info("Compiling gather_logprobs with different input shapes.")
-        hsize = self.model_config.get_vocab_size()
-        for num_reqs in self.num_reqs_paddings:
-            logits = jnp.ones((num_reqs, hsize), dtype=jnp.bfloat16)
-            logits, = self._device_array((logits, ))
-            logger.info(f"Precompile gather_logprobs --> num_reqs={num_reqs}")
-            start = time.perf_counter()
-            token_ids = jnp.ones((num_reqs, ), dtype=jnp.int32)
-            token_ids, = self._device_array((token_ids, ))
-            result = self._compute_and_gather_logprobs(
-                logits, token_ids, self.model_config.max_logprobs)
-            result.logprob_token_ids.block_until_ready()
-            end = time.perf_counter()
-            logger.info("Compilation finished in %.2f [secs].", end - start)
-
-    def _precompile_rejection_sampler(self) -> None:
-        logger.info(
-            "Compiling greedy_rejection_sampler with different input shapes.")
-        vocab_size = self.model_config.get_vocab_size()
-        for num_logits in self.num_logits_paddings:
-            for num_reqs in self.num_reqs_paddings:
-                target_probs = jnp.ones((num_logits, vocab_size),
-                                        dtype=jnp.bfloat16)
-                sharding = NamedSharding(self.mesh,
-                                         PartitionSpec(None, "model"))
-                target_probs = self._device_array(target_probs,
-                                                  sharding=sharding)
-                draft_token_ids = jnp.ones((num_logits, ), dtype=jnp.int32)
-                num_draft_tokens = jnp.ones((num_reqs, ), dtype=jnp.int32)
-                bonus_token_ids = jnp.ones((num_reqs, ), dtype=jnp.int32)
-                draft_token_ids, num_draft_tokens, bonus_token_ids = self._device_array(
-                    (draft_token_ids, num_draft_tokens, bonus_token_ids))
-                logger.info(
-                    f"Precompile greedy_rejection_sampler --> num_logits={num_logits} num_reqs={num_reqs}"
-                )
-                start = time.perf_counter()
-                result = self.rejection_sampler(draft_token_ids,
-                                                num_draft_tokens, -1, None,
-                                                target_probs, bonus_token_ids,
-                                                None)
-                result.block_until_ready()
-                end = time.perf_counter()
-                logger.info("Compilation finished in %.2f [secs].",
-                            end - start)
-
     @staticmethod
     @functools.partial(jax.jit, static_argnames=("max_logprobs", ))
     def _compute_and_gather_logprobs(logits, next_tokens, max_logprobs):
@@ -530,48 +339,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         return gather_logprobs(logprobs, next_tokens, max_logprobs)
 
     def capture_model(self) -> None:
-        if os.getenv("SKIP_JAX_PRECOMPILE", False):
-            return
-        logger.info("Precompile all the subgraphs with possible input shapes.")
-
-        # TODO: wenlong: skip precompiling for mm models
-        # because the model requires input_embeds
-        if self.is_multimodal_model:
-            logger.info("[TEMP] skip precompiling for multi-modal models")
-            return
-
-        self._precompile_backbone()
-        self._precompile_select_from_array()
-        self._precompile_compute_logits()
-        self._precompile_sampling()
-        self._precompile_gather_logprobs()
-        self._precompile_structured_decoding()
-        if self.speculative_config:
-            self._precompile_rejection_sampler()
-
-    def _precompile_structured_decoding(self) -> None:
-        logger.info(
-            "Compiling structured_decoding with different input shapes.")
-        start = time.perf_counter()
-        for num_reqs in self.num_reqs_paddings:
-            dummy_logits = jnp.zeros((num_reqs, self.vocab_size),
-                                     dtype=jnp.bfloat16)
-            dummy_require_struct_decoding = self.require_structured_out_cpu[:
-                                                                            num_reqs]
-            dummy_grammar_bitmask = self.grammar_bitmask_cpu[:num_reqs]
-
-            (dummy_logits, dummy_require_struct_decoding,
-             dummy_grammar_bitmask, arange) = self._device_array(
-                 (dummy_logits, dummy_require_struct_decoding,
-                  dummy_grammar_bitmask, self.structured_decode_arange))
-
-            self.structured_decode_fn(dummy_require_struct_decoding,
-                                      dummy_grammar_bitmask, dummy_logits,
-                                      arange)
-            logger.info("  -- num_seqs: %d", num_reqs)
-
-        end = time.perf_counter()
-        logger.info("Compilation finished in %.2f [secs].", end - start)
+        self.compilation_manager.capture_model()
 
     @staticmethod
     @functools.partial(jax.jit)
