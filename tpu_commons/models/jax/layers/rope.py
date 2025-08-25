@@ -97,7 +97,12 @@ def apply_rope(
         sinusoid_inp = positions[..., jnp.newaxis] * timescale[jnp.newaxis, :]
 
         # Broadcast over the 'heads' dimension, assuming shape (batch*seq, heads, head_dim)
-        sinusoid_inp = sinusoid_inp[:, jnp.newaxis, ...]
+        # TODO(cuiq): Temp solution for testing. Don't check in.
+        if len(inputs.shape) == 3:  # (T, N, H)
+            sinusoid_inp = sinusoid_inp[:, jnp.newaxis, ...]
+        elif len(inputs.shape) == 5:  # (K, T, N // K // PACKING, PACKING, H)
+            sinusoid_inp = sinusoid_inp[jnp.newaxis, :, jnp.newaxis,
+                                        jnp.newaxis, ...]
         sin = jnp.sin(sinusoid_inp)
         cos = jnp.cos(sinusoid_inp)
 

@@ -77,7 +77,8 @@ def attention(
     # TODO(jevinjiang, cuiq): transpose q weight offline.
     # q: (T, N, H)
     # k,v: (T, K, H)
-
+    print("=============== attention============")
+    print(f"q shape: {q.shape}")
     if head_dim_original is None:
         head_dim_original = q.shape[-1]
 

@@ -8,6 +8,8 @@ from transformers import Qwen2Config, modeling_flax_utils
 from vllm.config import VllmConfig
 
 from tpu_commons import utils
+from tpu_commons.kernels.ragged_paged_attention.v3.util import \
+    get_dtype_packing
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention import attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
@@ -18,6 +20,28 @@ from tpu_commons.models.jax.utils.weight_utils import (get_default_maps,
 logger = init_logger(__name__)
 
 init_fn = nnx.initializers.uniform()
+
+
+def _get_reshape_maps(vllm_config):
+    model_config = vllm_config.model_config
+    hf_config = vllm_config.hf_config
+
+    num_heads = hf_config.num_attention_heads
+    num_kv_heads = hf_config.num_key_value_heads
+    hidden_size = model_config.get_hidden_size()
+    q_packing = get_dtype_packing(model_config.dtype)
+    num_q_heads_per_kv_head = num_heads // num_kv_heads
+    assert num_heads % num_kv_heads == 0
+    assert num_q_heads_per_kv_head % q_packing == 0
+
+    return {
+        "K": num_kv_heads,
+        "N": num_heads,
+        "D": hidden_size,
+        "H": model_config.get_head_size(),
+        "C": q_packing,
+        "R": num_q_heads_per_kv_head // q_packing
+    }
 
 
 class Qwen2MLP(nnx.Module):
@@ -84,12 +108,13 @@ class Qwen2Attention(nnx.Module):
         self.mesh = mesh
 
         self.q_proj = nnx.Einsum(
-            "TD,DNH->TNH",
+            "TD,DKRCH->KTRCH",
             (self.hidden_size, self.num_heads, self.head_dim),
             (self.num_heads, self.head_dim),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
-            bias_init=nnx.with_partitioning(init_fn, ("model", None)),
+            kernel_init=nnx.with_partitioning(init_fn,
+                                              (None, "K", "R", "C", None)),
+            bias_init=nnx.with_partitioning(init_fn, ("K", "R", "C", None)),
             rngs=rng,
         )
         self.k_proj = nnx.Einsum(
@@ -127,6 +152,8 @@ class Qwen2Attention(nnx.Module):
         md = attention_metadata
         # q: (T, N, H)
         q = self.q_proj(x)
+        print("=============qwen==========================")
+        print(f"q shape: {q.shape}")
         q = apply_rope(q, md.input_positions, self.head_dim_original,
                        self.rope_theta, self.rope_scaling)
 
@@ -347,7 +374,29 @@ class Qwen2ForCausalLM(nnx.Module):
             })
 
         metadata_map = get_default_maps(self.vllm_config, self.mesh, mappings)
+        self.update_medata_maps(metadata_map)
         load_hf_weights(vllm_config=self.vllm_config,
                         model=self,
                         metadata_map=metadata_map,
                         mesh=self.mesh)
+
+    def update_medata_maps(self, metadata_map):
+        # place update the map by replace the value directly
+
+        # reshape_keys
+        reshape_mapping = _get_reshape_maps(self.vllm_config)
+
+        metadata_map.reshape_map["q_proj"] = (reshape_mapping["K"],
+                                              reshape_mapping["R"],
+                                              reshape_mapping["C"],
+                                              reshape_mapping["H"],
+                                              reshape_mapping["D"])
+
+        metadata_map.bias_reshape_map["q_proj.bias"] = (
+            reshape_mapping["K"],
+            reshape_mapping["R"],
+            reshape_mapping["C"],
+            reshape_mapping["H"],
+        )
+        # KRCHD -> DKRCH
+        metadata_map.transpose_map["q_proj"] = (4, 0, 1, 2, 3)

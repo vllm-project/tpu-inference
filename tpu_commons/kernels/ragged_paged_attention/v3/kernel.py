@@ -887,39 +887,12 @@ def prepare_inputs(
         v: jax.
     Array,  # [max_num_tokens, actual_num_kv_heads, actual_head_dim],
 ):
+    assert len(q.shape) == 5, "force trying new reshaped q."
     max_num_tokens, actual_num_q_heads, actual_head_dim = q.shape
     actual_num_kv_heads = k.shape[1]
     assert actual_num_q_heads % actual_num_kv_heads == 0
-    actual_num_q_heads_per_kv_head = actual_num_q_heads // actual_num_kv_heads
-    q_packing = get_dtype_packing(q.dtype)
-    num_q_heads_per_kv_head = align_to(actual_num_q_heads_per_kv_head,
-                                       q_packing)
-    head_dim = align_to(actual_head_dim, 128)
-    q = (
-        jnp.pad(
-            q.reshape(
-                max_num_tokens,
-                actual_num_kv_heads,
-                actual_num_q_heads_per_kv_head,
-                actual_head_dim,
-            ),
-            (
-                (0, 0),
-                (0, 0),
-                (0, num_q_heads_per_kv_head - actual_num_q_heads_per_kv_head),
-                (0, head_dim - actual_head_dim),
-            ),
-            constant_values=0,
-        ).reshape(
-            max_num_tokens,
-            actual_num_kv_heads,
-            num_q_heads_per_kv_head // q_packing,
-            q_packing,
-            head_dim,
-        )
-        # TODO(jevinjiang): Explore fusing swapping non-tiling axis to DMA.
-        .swapaxes(0, 1))
-    # TODO(kyuyeunk, chengjiyao): Add kv quantization here.
+
+    # TODO(cuiq) Handle the padding.
     kv = merge_kv(k, v)
     return q, kv
 
