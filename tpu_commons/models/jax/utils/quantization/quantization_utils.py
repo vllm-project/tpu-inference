@@ -213,9 +213,11 @@ def apply_qwix_quantization(
         Either the concrete model (nnx.Module) or the abstract model (Callable) (if `apply_to_abstract_model` is True)
     """
     qwix_config = None
-    if vllm_config.additional_config.get("quantization"):
-        quantization_config = quantization_config_file_path_to_dict(
-            vllm_config.additional_config["quantization"])
+    if quantization_config := vllm_config.additional_config.get(
+            "quantization"):
+        if isinstance(quantization_config, str):
+            quantization_config = quantization_config_file_path_to_dict(
+                quantization_config)
         qwix_config = quantization_config.get("qwix").get("rules")
     if not qwix_config:
         return model_or_model_fn
