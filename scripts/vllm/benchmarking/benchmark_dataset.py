@@ -411,8 +411,10 @@ class Math500Dataset(BenchmarkDataset):
         self.load_data()
 
     def load_data(self) -> None:
+        dataset = []
         with open(self.dataset_path, "r", encoding="utf-8") as f:
-            dataset = json.load(f)
+            for line in f:
+                dataset.append(json.loads(line))
         # NOTE: each "data" entry also has a "solution" key that we don't
         # seem to use (in JetStream)
         self.data = [(data["problem"], data["answer"]) for data in dataset]
@@ -444,7 +446,7 @@ class Math500Dataset(BenchmarkDataset):
                 SampleRequest(
                     prompt=prompt,
                     prompt_len=prompt_len,
-                    expected_output_len=new_output_len or new_output_len,
+                    expected_output_len=new_output_len,
                     completion=completion,
                 ))
         self.maybe_oversample_requests(samples, num_requests)

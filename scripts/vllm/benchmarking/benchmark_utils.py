@@ -18,7 +18,42 @@ import nltk
 import numpy as np
 from backend_request_func import RequestFuncOutput
 from benchmark_dataset import SampleRequest
-from math_utils import extract_numbers, post_processing_math_ans, sympify_set
+from prm800k.grading.grader import grade_answer
+
+
+def extract_boxed_answer(pred_str: str) -> str:
+    # Extracts the content within \boxed{...}
+    pattern = r"\\boxed\{(.*?)\}"
+    match = re.search(pattern, pred_str)
+    if match:
+        return match.group(1)
+    return None
+
+def extract_final_answer(pred_str: str) -> str:
+    # Extracts the answer after "The final answer is: "
+    pattern = r"The final answer is: (.*)"
+    match = re.search(pattern, pred_str)
+    if match:
+        return match.group(1)
+    return None
+
+def extract_answer(pred_str: str) -> str:
+    """Extracts the final answer from a verbose model output."""
+    boxed_answer = extract_boxed_answer(pred_str)
+    if boxed_answer:
+        return boxed_answer
+
+    final_answer = extract_final_answer(pred_str)
+    if final_answer:
+        return final_answer
+
+    # Fallback to the original simple extraction if no clear markers are found
+    pattern = r"-?\d*\.?\d+"
+    ans = re.findall(pattern, pred_str.replace(",", ""))
+    if len(ans) >= 1:
+        return ans[-1]
+    else:
+        return ""
 
 
 def convert_to_pytorch_benchmark_format(args: argparse.Namespace,
@@ -114,71 +149,6 @@ def postprocess_text_mmlu(preds: List[str],
     return preds, targets
 
 
-def extract_boxed_answers(text):
-    pieces = text.split("boxed{")
-    if len(pieces) == 1:
-        return [""]
-    piece = pieces[1]
-    ans = []
-    for piece in pieces[1:]:
-        n = 0
-        for i in range(len(piece)):
-            if piece[i] == "{":
-                n += 1
-            elif piece[i] == "}":
-                n -= 1
-                if n < 0:
-                    if i + 1 < len(piece) and piece[i + 1] == "%":
-                        ans.append(piece[:i + 1])
-                        break
-                    else:
-                        ans.append(piece[:i])
-                        break
-    if ans:
-        return ans
-    else:
-        return [""]
-
-
-def extract_answer(pred_str, exhaust=False):
-    pred = []
-    if "boxed{" in pred_str:
-        pred = extract_boxed_answers(pred_str)
-    elif "Answer:" in pred_str:
-        matches = re.findall(r"Answer:[\*]*\s+(\S*.*)", pred_str)
-        if matches:
-            pred = [extract_numbers(matches[-1])]
-    elif "the answer is" in pred_str:
-        pred = [extract_numbers(pred_str.split("the answer is")[-1].strip())]
-    elif "final answer is $" in pred_str and "$. I hope" in pred_str:
-        tmp = pred_str.split("final answer is $", 1)[1]
-        pred = [tmp.split("$. I hope", 1)[0].strip()]
-    else:  # use the last number
-        pattern = r"-?\d*\.?\d+"
-        ans = re.findall(pattern, pred_str.replace(",", ""))
-        if len(ans) >= 1:
-            ans = ans[-1]
-        else:
-            ans = ""
-        if ans:
-            pred.append(ans)
-    # multiple line
-    pred_list = []
-    for ans in pred:
-        ans = ans.replace("<|end_of_text|>", "")
-        ans = ans.strip().split("\n")[0]
-        ans = ans.lstrip(":")
-        ans = ans.lstrip("$")
-        ans = ans.rstrip("$")
-        ans = ans.rstrip(".")
-        ans = ans.rstrip("/")
-        pred_list.append(ans)
-    if exhaust:
-        return pred_list
-    else:
-        return pred_list[-1] if pred_list else ""
-
-
 def eval_accuracy_math_500(request_outputs: List[RequestFuncOutput]) -> dict:
     """
     Evaluate accuracy for Math500 dataset.
@@ -191,26 +161,29 @@ def eval_accuracy_math_500(request_outputs: List[RequestFuncOutput]) -> dict:
 
     correct_ans = 0
     wrong_ans = 0
-    for p, t in zip(preds, targets):
-
-        p = extract_answer(p)
-        ans_set = post_processing_math_ans(p)
-        sympified_ans_set = sympify_set(ans_set)
-
-        target_set = post_processing_math_ans(t)
-        sympified_target_set = sympify_set(target_set)
-
-        if sympified_target_set == sympified_ans_set:
+    print("-" * 50)
+    for i, (p_raw, t) in enumerate(zip(preds, targets)):
+        print(f"Sample {i+1}:")
+        print(f"  Prediction (raw): {p_raw!r}")
+        p_extracted = extract_answer(p_raw)
+        print(f"  Prediction (extracted): {p_extracted!r}")
+        print(f"  Expected output: {t!r}")
+        is_correct = grade_answer(p_extracted, t)
+        if is_correct:
+            print("  Result: CORRECT")
             correct_ans += 1
-            continue
-        wrong_ans += 1
+        else:
+            print("  Result: INCORRECT")
+            wrong_ans += 1
+        print("-" * 50)
+
     total_ans = correct_ans + wrong_ans
     result = {}
     result["literal"] = correct_ans / total_ans if total_ans > 0 else 0.0
     result["gen_len"] = total_ans
     result["gen_num"] = total_ans
 
-    print("\nResults\n")
+    print("\nFinal Results\n")
     print(result)
     return result
 
@@ -311,6 +284,7 @@ def eval_benchmark_dataset_result(request_outputs: RequestFuncOutput,
         print("Evaluating MLPerf...")
         eval_accuracy_mlperf(request_outputs)
     elif dataset_name == "math500":
+        print("Evaluating Math500...")
         eval_accuracy_math_500(request_outputs)
     else:
         raise NotImplementedError("Evaluation is not support for dataset: %s" %
