@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from jax.sharding import NamedSharding
+from jax.sharding import Sharding
 
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
@@ -36,8 +36,8 @@ class Llama4Attention(Attention):
     temperature_tuning: bool
     temperature_tuning_floor_scale: float
     temperature_tuning_scale: float
-    activation_attention_td: NamedSharding
-    activation_attention_out_td: NamedSharding
+    activation_attention_td: Sharding
+    activation_attention_out_td: Sharding
 
     def __call__(self,
                  x,

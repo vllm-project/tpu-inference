@@ -11,10 +11,12 @@ class RotaryEmbeddingTest(jtu.JaxTestCase):
         head_dim = 2
         rope_theta = 10000
         original_max_position_embeddings = 2
-        rope = RotaryEmbedding(head_dim,
-                               rope_theta,
-                               original_max_position_embeddings,
-                               dtype=jnp.float32)
+        rope = RotaryEmbedding(
+            rotary_dim=head_dim,
+            rope_theta=rope_theta,
+            original_max_position_embeddings=original_max_position_embeddings,
+            dtype=jnp.float32)
+        rope.initialize_cache()
         self.assertTrue(
             rope.sin_cos_cache.shape == (original_max_position_embeddings,
                                          head_dim))
@@ -40,11 +42,13 @@ class DeepseekScalingRotaryEmbeddingTest(jtu.JaxTestCase):
         rope_theta = 10000
         original_max_position_embeddings = 1
         scaling_factor = 2
-        rope = DeepseekScalingRotaryEmbedding(head_dim,
-                                              rope_theta,
-                                              original_max_position_embeddings,
-                                              scaling_factor,
-                                              dtype=jnp.float32)
+        rope = DeepseekScalingRotaryEmbedding(
+            rotary_dim=head_dim,
+            rope_theta=rope_theta,
+            original_max_position_embeddings=original_max_position_embeddings,
+            scaling_factor=scaling_factor,
+            dtype=jnp.float32)
+        rope.initialize_cache()
         self.assertTrue(
             rope.sin_cos_cache.shape == (scaling_factor *
                                          original_max_position_embeddings,

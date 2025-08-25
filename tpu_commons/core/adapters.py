@@ -138,6 +138,10 @@ class VllmRequestAdapter(IRequest):
     def lora_request(self):
         return self._vllm_request.lora_request
 
+    @property
+    def block_hashes(self):
+        return self._vllm_request.block_hashes
+
     @status.setter
     def status(self, value: RequestStatus) -> None:
         self._vllm_request.status = value

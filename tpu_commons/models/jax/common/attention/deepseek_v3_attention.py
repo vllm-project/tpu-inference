@@ -5,8 +5,9 @@ from typing import Any, Tuple
 import jax
 import jax.numpy as jnp
 from flax import nnx
+from flax.typing import Sharding
 from jax.experimental import shard_map
-from jax.sharding import Mesh, NamedSharding
+from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
 from tpu_commons.kernels.ragged_paged_attention.v3.kernel import \
@@ -27,7 +28,6 @@ class MLA(nnx.Module):
 
     Attributes:
         mesh: The JAX device mesh for distributed computation.
-        quant: Optional configuration for quantization.
     """
     hidden_size: int
     num_attention_heads: int
@@ -47,19 +47,19 @@ class MLA(nnx.Module):
     rms_norm_eps: float
 
     # Sharding attributes
-    nhd_sharding: NamedSharding
-    q_da_sharding: NamedSharding
-    anh_sharding: NamedSharding
-    kv_da_sharding: NamedSharding
+    nhd_sharding: Sharding = ()
+    q_da_sharding: Sharding = ()
+    anh_sharding: Sharding = ()
+    kv_da_sharding: Sharding = ()
 
-    activation_attention_td: NamedSharding
-    activation_q_td: NamedSharding
-    query_tnh: NamedSharding
-    keyvalue_skh: NamedSharding
+    activation_attention_td: Sharding = ()
+    activation_q_td: Sharding = ()
+    query_tnh: P = P()
+    keyvalue_skh: P = P()
 
-    attn_o_tnh: NamedSharding
-    activation_attention_out_td: NamedSharding
-    rngs: InitVar[nnx.Rngs]
+    attn_o_tnh: P = P()
+    activation_attention_out_td: Sharding = ()
+    # rngs: InitVar[nnx.Rngs]
 
     random_init: bool = False
     attention_chunk_size: int | None = None
@@ -67,7 +67,9 @@ class MLA(nnx.Module):
     quant: Any | None = None
     rope_mscale_all_dim: float = 1.0
 
-    def __post_init__(self, rngs):
+    rngs: InitVar[nnx.Rngs]
+
+    def __post_init__(self, rngs: nnx.Rngs):
         self.N = self.num_attention_heads
         self.K = self.num_key_value_heads
         self.D = self.hidden_size
@@ -76,12 +78,20 @@ class MLA(nnx.Module):
 
         assert self.N == self.K, "N and K must be equal for MLA"
 
+        if self.rope_scaling["factor"] <= 1.0:
+            yarn_mscale = 1.0
+        else:
+            yarn_mscale = 0.1 * self.rope_mscale_all_dim * math.log(
+                self.rope_scaling["factor"]) + 1.0
+        self.scale = self.qk_head_dim**-0.5 * yarn_mscale**2
+
         self.rope = DeepseekScalingRotaryEmbedding(
-            self.qk_rope_head_dim,
-            self.rope_theta,
-            self.rope_scaling["original_max_position_embeddings"],
-            self.rope_scaling["factor"],
-            self.dtype,
+            rotary_dim=self.qk_rope_head_dim,
+            rope_theta=self.rope_theta,
+            original_max_position_embeddings=self.
+            rope_scaling["original_max_position_embeddings"],
+            scaling_factor=self.rope_scaling["factor"],
+            dtype=self.dtype,
             beta_fast=self.rope_scaling["beta_fast"],
             beta_slow=self.rope_scaling["beta_slow"],
             mscale=self.rope_scaling["mscale"],
@@ -123,8 +133,6 @@ class MLA(nnx.Module):
             random_init=self.random_init)
         self.q_rms_norm = RMSNorm(
             dims=self.q_lora_rank,
-            mesh=self.mesh,
-            activation_ffw_td=NamedSharding(self.mesh, P()),
             epsilon=self.rms_norm_eps,
             with_scale=True,
             dtype=self.unquant_dtype,
@@ -134,9 +142,7 @@ class MLA(nnx.Module):
 
         self.kv_rms_norm = RMSNorm(
             dims=self.kv_lora_rank,
-            mesh=self.mesh,
             random_init=self.random_init,
-            activation_ffw_td=NamedSharding(self.mesh, P()),
             epsilon=self.rms_norm_eps,
             with_scale=True,
             dtype=self.unquant_dtype,
@@ -281,27 +287,21 @@ class MLA(nnx.Module):
         """
         md = attention_metadata
         in_specs = (
-            self.query_tnh.spec,  # q
-            self.keyvalue_skh.spec,  # k
-            self.keyvalue_skh.spec,  # v
+            self.query_tnh,  # q
+            self.keyvalue_skh,  # k
+            self.keyvalue_skh,  # v
             P(),  # kv_cache: Replicated
             P(),  # md.seq_lens: Replicated
             P(),  # page_indices_flat: Replicated
             P(),  # query_start_loc: Replicated
             P(),  # distribution: Replicated
         )
-        out_specs = (self.attn_o_tnh.spec, P())
-        if self.rope_scaling["factor"] <= 1.0:
-            yarn_mscale = 1.0
-        else:
-            yarn_mscale = 0.1 * self.rope_mscale_all_dim * math.log(
-                self.rope_scaling["factor"]) + 1.0
-        scale = self.qk_head_dim**-0.5 * yarn_mscale**2
+        out_specs = (self.attn_o_tnh, P())
 
         def _ragged_paged_attention(*args):
             return ragged_paged_attention(
                 *args,
-                sm_scale=scale,
+                sm_scale=self.scale,
             )
 
         output_TNH, kv_cache = jax.jit(

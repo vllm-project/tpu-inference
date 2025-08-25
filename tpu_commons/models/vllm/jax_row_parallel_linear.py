@@ -15,13 +15,15 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import \
 
 from tpu_commons.models.vllm.jax_linear_common import (
     forward_unqunatized, forward_w8a8_int8_row_parallel)
+from tpu_commons.utils import TPU_SECOND_LAST_MINOR
 
 P = PartitionSpec
 
 
 class JaxRowParallelLinear(torch.nn.Module):
 
-    def __init__(self, row_linear: torch.nn.Module, mesh: Mesh):
+    def __init__(self, row_linear: torch.nn.Module, mesh: Mesh,
+                 enable_sequence_parallelism: bool):
         super().__init__()
         assert isinstance(row_linear, RowParallelLinear)
 
@@ -29,6 +31,7 @@ class JaxRowParallelLinear(torch.nn.Module):
         self.reduce_results = row_linear.reduce_results
         self.skip_bias_add = row_linear.skip_bias_add
         self.return_bias = row_linear.return_bias
+        self.enable_sequence_parallelism = enable_sequence_parallelism
 
         self.w8q8_int8_quant = False
         if isinstance(row_linear.quant_method,
@@ -96,4 +99,10 @@ class JaxRowParallelLinear(torch.nn.Module):
             if not self.return_bias:
                 return output
             output_bias = self.bias if self.skip_bias_add else None
+            if self.enable_sequence_parallelism:
+                token_num = input.shape[0]
+                # NOTE(chengjiyao): make sure the sharded token_num is larger than TPU_SECOND_LAST_MINOR
+                if token_num // self.mesh.shape[
+                        'model'] >= TPU_SECOND_LAST_MINOR:
+                    output.shard_(NamedSharding(self.mesh, P('model', None)))
             return output, output_bias

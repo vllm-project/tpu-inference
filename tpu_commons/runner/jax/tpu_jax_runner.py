@@ -10,31 +10,9 @@ import jax
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
+import vllm.envs as envs
 from flax import nnx
 from jax.sharding import NamedSharding, PartitionSpec
-
-import vllm.envs as envs
-from tpu_commons import utils as common_utils
-from tpu_commons.logger import init_logger
-from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.models.jax.common.sharding import build_mesh
-from tpu_commons.models.jax.layers.misc import shard_put
-from tpu_commons.models.jax.layers.sample.rejection_sampler import \
-    RejectionSampler
-from tpu_commons.models.jax.layers.sample.sampling import (compute_logprobs,
-                                                           gather_logprobs,
-                                                           sample)
-from tpu_commons.models.jax.layers.sample.sampling_metadata import \
-    TPUSupportedSamplingMetadata
-from tpu_commons.models.jax.model_loader import get_model
-from tpu_commons.models.jax.utils.multi_modal_utils import \
-    sanity_check_mm_encoder_outputs
-from tpu_commons.models.jax.utils.weight_utils import \
-    transfer_state_with_mappings
-from tpu_commons.runner import utils as runner_utils
-from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
-                                                    InputBatch)
-from tpu_commons.runner.jax.metadata import SpecDecodeMetadata
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
@@ -57,6 +35,28 @@ from vllm.v1.worker.kv_connector_model_runner_mixin import \
     KVConnectorModelRunnerMixin
 from vllm.v1.worker.utils import (gather_mm_placeholders,
                                   scatter_mm_placeholders)
+
+from tpu_commons import utils as common_utils
+from tpu_commons.logger import init_logger
+from tpu_commons.models.jax.attention_metadata import AttentionMetadata
+from tpu_commons.models.jax.common.sharding import build_mesh
+from tpu_commons.models.jax.layers.sample.rejection_sampler import \
+    RejectionSampler
+from tpu_commons.models.jax.layers.sample.sampling import (compute_logprobs,
+                                                           gather_logprobs,
+                                                           sample)
+from tpu_commons.models.jax.layers.sample.sampling_metadata import \
+    TPUSupportedSamplingMetadata
+from tpu_commons.models.jax.model_loader import get_model
+from tpu_commons.models.jax.utils.multi_modal_utils import \
+    sanity_check_mm_encoder_outputs
+from tpu_commons.models.jax.utils.weight_utils import (
+    shard_put, transfer_state_with_mappings)
+from tpu_commons.runner import utils as runner_utils
+from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
+                                                    InputBatch)
+from tpu_commons.runner.jax.metadata import SpecDecodeMetadata
+from tpu_commons.utils import make_optimized_mesh
 
 logger = init_logger(__name__)
 
@@ -93,6 +93,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
 
         self.devices = devices
         self.dtype = self.model_config.dtype
+
+        self.phased_profiling_dir = os.getenv("PHASED_PROFILING_DIR", "")
+        self.phase_based_profiler = None
+        if self.phased_profiling_dir:
+            self.phase_based_profiler = runner_utils.PhasedBasedProfiler(
+                self.phased_profiling_dir)
 
         # multi-modal related
         self.is_multimodal_model = None  # Will get updated once the model is loaded.
@@ -156,9 +162,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             axis_names = ("data", "model")
             mesh_shape = (dp, tp)
 
-            self.mesh = jax.make_mesh(mesh_shape,
-                                      axis_names,
-                                      devices=self.devices)
+            self.mesh = make_optimized_mesh(mesh_shape,
+                                            axis_names,
+                                            devices=self.devices)
         logger.info(f"Init mesh | mesh={self.mesh}")
 
     def _init_inputs(self) -> None:
@@ -768,6 +774,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                 mm_kwargs):
             batched_mm_inputs = mm_kwargs_group
             # Convert torch tensors to numpy arrays that JAX can handle.
+            if "pixel_values" in batched_mm_inputs and isinstance(
+                    batched_mm_inputs["pixel_values"], list):
+                batched_mm_inputs["pixel_values"] = torch.cat(
+                    batched_mm_inputs["pixel_values"], dim=0)
+
             image_grid_thw = ()
             for key, value in batched_mm_inputs.items():
                 if isinstance(value, torch.Tensor):
@@ -974,16 +985,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                     tpu_sampling_metadata,
                 )
             else:
-                bonus_logits = logits[
-                    spec_decode_metadata.bonus_logits_indices]
+                bonus_logits = self.select_hidden_states_fn(
+                    logits, spec_decode_metadata.bonus_logits_indices)
                 bonus_token_ids = sample(
                     self.rng_params_for_sampling,
                     self.mesh,
                     bonus_logits,
                     tpu_sampling_metadata,
                 )
-                target_logits = logits[
-                    spec_decode_metadata.target_logits_indices]
+                target_logits = self.select_hidden_states_fn(
+                    logits, spec_decode_metadata.target_logits_indices)
                 next_tokens = self.rejection_sampler(
                     draft_token_ids=spec_decode_metadata.draft_token_ids,
                     num_draft_tokens=spec_decode_metadata.draft_lengths,
@@ -1041,7 +1052,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         else:
             valid_sampled_token_ids = self.rejection_sampler.parse_output(
                 next_tokens, self.input_batch.vocab_size,
-                spec_decode_metadata.draft_lengths, num_reqs,
+                spec_decode_metadata.draft_lengths_cpu, num_reqs,
                 spec_decode_metadata.draft_token_ids.shape[0])
 
         # Mask out the sampled tokens that should not be sampled.
@@ -1289,6 +1300,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                      dtype=np.int32)
         ])
 
+        padded_num_draft_tokens_cpu = padded_num_draft_tokens
         # CPU -> TPU copy.
         (padded_num_draft_tokens, padded_draft_token_ids,
          padded_logits_indices, padded_target_logits_indices,
@@ -1300,6 +1312,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         metadata = SpecDecodeMetadata(
             draft_token_ids=padded_draft_token_ids,
             draft_lengths=padded_num_draft_tokens,
+            draft_lengths_cpu=padded_num_draft_tokens_cpu,
             target_logits_indices=padded_target_logits_indices,
             bonus_logits_indices=padded_bonus_logits_indices,
             final_logits_indices=padded_logits_indices,
@@ -1381,6 +1394,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         self.input_ids_cpu[
             total_num_scheduled_tokens:padded_total_num_scheduled_tokens] = 0
 
+        # Please see runner_utils.PhasedBasedProfiler for details
+        if self.phase_based_profiler:
+            batch_composition_stats = runner_utils.get_batch_composition_stats(
+                self.input_batch, total_num_scheduled_tokens, num_reqs,
+                padded_total_num_scheduled_tokens, scheduler_output)
+
+            self.phase_based_profiler.step(batch_composition_stats)
+
         # Inputs
         input_ids = self.input_ids_cpu[:padded_total_num_scheduled_tokens]
         positions = self.positions_cpu[:padded_total_num_scheduled_tokens]
@@ -1414,7 +1435,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
 
         # Put to device
         sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
-            self.mesh, self.input_batch, logits_indices.shape[0])
+            self.mesh, self.input_batch, padded_num_reqs)
         if self.uses_mrope:
             positions = mrope_positions
 
@@ -1565,11 +1586,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             # Update the cached states.
             req_state.num_computed_tokens = num_computed_tokens
             if not resumed_from_preemption:
-                # Append the new blocks to the existing block IDs.
-                for block_ids, new_ids in zip(req_state.block_ids,
-                                              new_block_ids):
-                    block_ids.extend(new_ids)
+                if new_block_ids is not None:
+                    # Append the new blocks to the existing block IDs.
+                    for block_ids, new_ids in zip(req_state.block_ids,
+                                                  new_block_ids):
+                        block_ids.extend(new_ids)
             else:
+                assert new_block_ids is not None
                 # The request is resumed from preemption.
                 # Replace the existing block IDs with the new ones.
                 req_state.block_ids = new_block_ids
@@ -1585,7 +1608,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             # Update the persistent batch.
             self.input_batch.num_computed_tokens_cpu[req_index] = (
                 num_computed_tokens)
-            self.input_batch.block_table.append_row(new_block_ids, req_index)
+            if new_block_ids is not None:
+                self.input_batch.block_table.append_row(
+                    new_block_ids, req_index)
 
             # Add spec_token_ids to token_ids_cpu.
             spec_token_ids = (

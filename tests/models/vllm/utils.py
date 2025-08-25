@@ -7,10 +7,11 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsConfig
 
 
-def get_spmd_mesh():
+def get_spmd_mesh(num_devices: int = 1):
     axis_names = ("data", "model")
-    mesh_shape = (1, len(jax.devices()))
-    return jax.make_mesh(mesh_shape, axis_names, devices=jax.devices())
+    devices = sorted(jax.devices(), key=lambda d: d.id)[0:num_devices]
+    mesh_shape = (1, len(devices))
+    return jax.make_mesh(mesh_shape, axis_names, devices=devices)
 
 
 def quantized_matmul_ref(self,
