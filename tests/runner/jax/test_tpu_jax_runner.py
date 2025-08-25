@@ -727,7 +727,8 @@ class TestTPUJaxRunner:
         # The default drafter is NgramProposer, so we replace it with a generic mock
         self.runner.drafter = MagicMock()
         with pytest.raises(AssertionError):
-            self.runner.propose_draft_token_ids([[1]])
+            self.runner.speculative_decoding_manager.propose_draft_token_ids(
+                [[1]])
 
     def test_propose_ngram_draft_token_ids(self):
         """Tests the logic for proposing N-gram draft tokens under various conditions."""
@@ -817,7 +818,8 @@ class TestTPUJaxRunner:
         ]
 
         # 2. ===== Act =====
-        result = self.runner.propose_ngram_draft_token_ids(sampled_token_ids)
+        result = self.runner.speculative_decoding_manager.propose_ngram_draft_token_ids(
+            sampled_token_ids)
 
         # 3. ===== Assert =====
         expected_result = [
@@ -852,7 +854,7 @@ class TestTPUJaxRunner:
     def test_take_draft_token_ids(self):
         """Tests the take_draft_token_ids method for speculative decoding."""
         # Case 1: No draft tokens are available.
-        self.runner._draft_token_ids = None
+        self.runner.speculative_decoding_manager._draft_token_ids = None
         result = self.runner.take_draft_token_ids()
         assert result is None
 
@@ -912,7 +914,7 @@ class TestTPUJaxRunner:
         self.runner.input_batch.add_request(req2)
 
         # Set the draft tokens to be taken
-        self.runner._draft_token_ids = mock_draft_ids
+        self.runner.speculative_decoding_manager._draft_token_ids = mock_draft_ids
 
         # Call the method to be tested
         result = self.runner.take_draft_token_ids()
@@ -924,7 +926,7 @@ class TestTPUJaxRunner:
         assert result.draft_token_ids == mock_draft_ids
 
         # Assert that the internal state is reset
-        assert self.runner._draft_token_ids is None
+        assert self.runner.speculative_decoding_manager._draft_token_ids is None
 
         # Case 3: Call again after taking, should return None
         result_after = self.runner.take_draft_token_ids()
@@ -994,7 +996,7 @@ class TestTPUJaxRunner:
                                               dtype=np.int32)
 
         # Act
-        metadata = self.runner._get_spec_decode_metadata(
+        metadata = self.runner.speculative_decoding_manager.get_spec_decode_metadata(
             num_draft_tokens_np,
             cu_num_scheduled_tokens_np,
             padded_num_reqs=padded_num_reqs)
