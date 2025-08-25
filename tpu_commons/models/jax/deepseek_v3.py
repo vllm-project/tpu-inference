@@ -165,7 +165,6 @@ class DeepSeekV3(nnx.Module):
         for i in range(first_k_dense_replace, num_layers):
             is_moe_layer = ((i + 1) % interleave_moe_layer_step == 0)
             router = DeepSeekV3Router(
-                mesh=self.mesh,
                 random_init=self.random_init,
                 hidden_size=hidden_size,
                 num_experts=num_local_experts,
