@@ -116,14 +116,13 @@ class TpuPlatform(Platform):
                 "VLLM_ENABLE_V1_MULTIPROCESSING must be 0 when using Pathways(JAX_PLATFORMS=proxy)"
             )
 
-        from vllm.config import CompilationLevel, CUDAGraphMode
+        from vllm.config import CompilationLevel
 
         cache_config = vllm_config.cache_config
         # For v0, the default block size is 16.
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = cast(BlockSize, 16)
         compilation_config = vllm_config.compilation_config
-        compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         # TPU only supports DYNAMO_ONCE compilation level
         # NOTE(xiang): the compilation_config is not used by jax.
@@ -132,9 +131,6 @@ class TpuPlatform(Platform):
 
         if compilation_config.backend == "":
             compilation_config.backend = "openxla"
-
-        assert vllm_config.speculative_config is None, \
-            "TPU does not support speculative decoding"
 
         # If we use vLLM's model implementation in PyTorch, we should set it with torch version of the dtype.
         impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
@@ -193,9 +189,6 @@ class TpuPlatform(Platform):
                 f"Unknown TPU multihost backend: {multihost_backend}. "
                 "Using uniproc_executor.")
             parallel_config.distributed_executor_backend = "uni"
-
-        assert not vllm_config.speculative_config, (
-            "Speculative decoding is not yet supported for TPU backend")
 
         if scheduler_config.is_multimodal_model and not \
             scheduler_config.disable_chunked_mm_input:

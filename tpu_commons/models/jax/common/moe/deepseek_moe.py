@@ -1,10 +1,10 @@
-from dataclasses import dataclass
-from typing import Any, Tuple
+from dataclasses import InitVar, dataclass
+from typing import Tuple
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from jax.sharding import Mesh, NamedSharding
+from flax.typing import Sharding
 from jaxtyping import Float
 
 from tpu_commons.models.jax.common.base import create_param
@@ -16,12 +16,8 @@ class DeepSeekV3Router(nnx.Module):
 
     This module determines which experts each token should be routed to based on the input.
 
-    Attributes:
-        mesh: The JAX device mesh for distributed computation.
-        quant: Optional configuration for quantization.
     """
 
-    mesh: Mesh
     hidden_size: int
     num_experts: int
     num_experts_per_tok: int
@@ -30,15 +26,14 @@ class DeepSeekV3Router(nnx.Module):
     norm_topk_prob: bool
     routed_scaling_factor: float
     dtype: jnp.dtype
-    rngs: nnx.Rngs
+    rngs: InitVar[nnx.Rngs]
 
     # Sharding Attributes
-    activation_ffw_td: NamedSharding
-    ed_sharding: NamedSharding
-    e_sharding: NamedSharding
+    activation_ffw_td: Sharding = ()
+    ed_sharding: Sharding = ()
+    e_sharding: Sharding = ()
 
     random_init: bool = False
-    quant: Any | None = None
 
     def get_topk_indices(self, scores_TE: Float) -> Float:
         """Get the topk indices of the scores.
@@ -100,16 +95,16 @@ class DeepSeekV3Router(nnx.Module):
 
         return weights_TX, topk_indices_TX
 
-    def __post_init__(self):
+    def __post_init__(self, rngs: nnx.Rngs):
         """Generates the router kernel (weights and bias) for routing."""
         D = self.hidden_size
         E = self.num_experts
-        self.kernel_DE = create_param(self.rngs,
+        self.kernel_DE = create_param(rngs,
                                       shape=(D, E),
                                       dtype=self.dtype,
                                       sharding=self.ed_sharding,
                                       random_init=self.random_init)
-        self.bias_E = create_param(self.rngs,
+        self.bias_E = create_param(rngs,
                                    shape=(E, ),
                                    dtype=self.dtype,
                                    sharding=self.e_sharding,

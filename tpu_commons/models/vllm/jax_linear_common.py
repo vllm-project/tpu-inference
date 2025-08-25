@@ -55,7 +55,7 @@ def forward_w8a8_int8_row_parallel(x: jax.Array, w: jax.Array, b: jax.Array,
 
 def reorder_concatenated_tensor_for_sharding(concatenated_tensor: jax.Array,
                                              split_sizes: list[int],
-                                             n_shards: int):
+                                             n_shards: int, dim: int):
     """
     Reorder a replicated concatenated tensor such that when sharded on multiple chips, each shard is a concatenation of the shards of the individual tensors.
     For example, let the concatenated_tensor be:
@@ -67,17 +67,20 @@ def reorder_concatenated_tensor_for_sharding(concatenated_tensor: jax.Array,
     In other words, it reorders the input tensor into 4 segements, with each segment corresponding to a shard and being AAABBC.
 
     Args:
-        concatenated_tensor: the tensor, concatenated on the 0-th dim.
-        split_sizes: each individual tensor's size on the 0-th dim.
+        concatenated_tensor: the tensor, concatenated on the dimension specified by `dim`.
+        split_sizes: each individual tensor's size on the dimension specified by `dim`.
         n_shards: num of shards.
+        dim: the dimension on which the concatenated_tensor is concatenated.
     """
 
     # Split the concatenated tensor into individual tensors.
     split_tensors = []
     start_offset = 0
-    for i, split_size in enumerate(split_sizes):
-        split_tensor = concatenated_tensor[start_offset:start_offset +
-                                           split_size]
+    for _, split_size in enumerate(split_sizes):
+        split_tensor = jax.lax.slice_in_dim(concatenated_tensor,
+                                            start_offset,
+                                            start_offset + split_size,
+                                            axis=dim)
         split_tensors.append(split_tensor)
         start_offset += split_size
 
@@ -86,14 +89,17 @@ def reorder_concatenated_tensor_for_sharding(concatenated_tensor: jax.Array,
     for j in range(n_shards):
         split_tensors_for_this_shard = []
         for i, split_size in enumerate(split_sizes):
+            assert split_size % n_shards == 0
             sz = split_size // n_shards  # size of this split tensor per shard
             split_tensor = split_tensors[i]
-            t = split_tensor[j * sz:(j + 1) * sz]
+            t = jax.lax.slice_in_dim(split_tensor,
+                                     j * sz, (j + 1) * sz,
+                                     axis=dim)
             split_tensors_for_this_shard.append(t)
-        tensor_shard = jnp.concatenate(split_tensors_for_this_shard)
+        tensor_shard = jnp.concatenate(split_tensors_for_this_shard, axis=dim)
         reordered_tensor_shards.append(tensor_shard)
 
-    reordered_tensor = jnp.concatenate(reordered_tensor_shards)
+    reordered_tensor = jnp.concatenate(reordered_tensor_shards, axis=dim)
     return reordered_tensor
 
 
@@ -127,7 +133,8 @@ def slice_sharded_tensor_for_concatenation(sharded_tensor: jax.Array,
 
     split_tensors = []
     start_offset = 0
-    for i, split_size in enumerate(split_sizes):
+    for _, split_size in enumerate(split_sizes):
+        assert split_size % n_shards == 0
         sz = split_size // n_shards  # size of this split tensor per shard
         end_offset = start_offset + sz
         _get_slice_on_shard_bound = functools.partial(

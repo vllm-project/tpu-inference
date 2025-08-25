@@ -1,4 +1,3 @@
 [run]
 omit =
-    */ragged_paged_attention/v3/*
-    */qwen2_5_vl.py
+    tpu_commons/kernels/*

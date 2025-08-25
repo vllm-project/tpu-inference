@@ -134,14 +134,19 @@ SKIP_JAX_PRECOMPILE=1
 
 There are two ways to profile your workload:
 
-#### Using `VLLM_TORCH_PROFILER_DIR`
+#### Using `PHASED_PROFILING_DIR`
 If you set the following environment variable:
 
 ```
-VLLM_TORCH_PROFILER_DIR=<DESIRED PROFILING OUTPUT DIR>
+PHASED_PROFILING_DIR=<DESIRED PROFILING OUTPUT DIR>
 ```
 
-vLLM will profile your entire workload, which can work well for toy workloads (like `examples/offline_inference.py`).
+we will automatically capture profiles during three phases of your workload (assuming they are encountered):
+1. Prefill-heavy (the quotient of prefill / total scheduled tokens for the given batch is => 0.9)
+2. Decode-heavy (the quotient of prefill / total scheduled tokens for the given batch is <= 0.2)
+3. Mixed (the quotient of prefill / total scheduled tokens for the given batch is between 0.4 and 0.6)
+
+To aid in your analysis, we will also log the batch composition for the profiled batches.
 
 #### Using `USE_JAX_PROFILER_SERVER`
 If you set the following environment variable:

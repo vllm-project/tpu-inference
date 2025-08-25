@@ -51,16 +51,25 @@ def setup_environment():
 
 @pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize("mesh", [test_utils.get_spmd_mesh()])
-def test_jax_row_parallel_linear(bias, mesh):
+@pytest.mark.parametrize("enable_sp", [False, True])
+def test_jax_row_parallel_linear(bias, mesh, enable_sp):
     dtype = torch.bfloat16
 
-    row_linear = RowParallelLinear(
-        input_size=4096,
-        output_size=8192,
-        bias=bias,
-        params_dtype=dtype,
-        return_bias=False,
+    engine_args = EngineArgs(
+        model="Qwen/Qwen2-1.5B-Instruct",
+        max_model_len=64,
+        max_num_batched_tokens=64,
+        max_num_seqs=4,
     )
+    vllm_config = engine_args.create_engine_config()
+    with set_current_vllm_config(vllm_config):
+        row_linear = RowParallelLinear(
+            input_size=4096,
+            output_size=8192,
+            bias=bias,
+            params_dtype=dtype,
+            return_bias=False,
+        )
 
     row_linear.weight.data = torch.rand_like(row_linear.weight.data) / 10
     if bias:
@@ -74,7 +83,8 @@ def test_jax_row_parallel_linear(bias, mesh):
 
     # Set jax default device to workaround a layout bug in JAX 0.7.0 and earlier
     with torchax.default_env(), jax.default_device(jax.devices("tpu")[0]):
-        jax_row_linear = JaxRowParallelLinear(row_linear, mesh=mesh)
+        jax_row_linear = JaxRowParallelLinear(
+            row_linear, mesh=mesh, enable_sequence_parallelism=enable_sp)
         jax_input_tensor = torch_view(t2j(input_tensor, use_dlpack=False))
         jax_input_tensor.apply_jax_(jax.device_put,
                                     NamedSharding(mesh, P(None, None)))
@@ -88,17 +98,26 @@ def test_jax_row_parallel_linear(bias, mesh):
 
 @pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize("mesh", [test_utils.get_spmd_mesh()])
-def test_jax_row_parallel_linear_w8a8_int8(bias, mesh):
+@pytest.mark.parametrize("enable_sp", [False, True])
+def test_jax_row_parallel_linear_w8a8_int8(bias, mesh, enable_sp):
     dtype = torch.bfloat16
 
-    row_linear = RowParallelLinear(
-        input_size=4096,
-        output_size=8192,
-        bias=bias,
-        params_dtype=dtype,
-        return_bias=False,
-        quant_config=test_utils.gen_vllm_w8a8_int8_config(),
+    engine_args = EngineArgs(
+        model="Qwen/Qwen2-1.5B-Instruct",
+        max_model_len=64,
+        max_num_batched_tokens=64,
+        max_num_seqs=4,
     )
+    vllm_config = engine_args.create_engine_config()
+    with set_current_vllm_config(vllm_config):
+        row_linear = RowParallelLinear(
+            input_size=4096,
+            output_size=8192,
+            bias=bias,
+            params_dtype=dtype,
+            return_bias=False,
+            quant_config=test_utils.gen_vllm_w8a8_int8_config(),
+        )
 
     # Assert we're testing the right code path when quant config is set.
     assert isinstance(row_linear.quant_method, CompressedTensorsLinearMethod)
@@ -124,7 +143,8 @@ def test_jax_row_parallel_linear_w8a8_int8(bias, mesh):
 
     # Set jax default device to workaround a layout bug in JAX 0.7.0 and earlier
     with torchax.default_env(), jax.default_device(jax.devices("tpu")[0]):
-        jax_row_linear = JaxRowParallelLinear(row_linear, mesh=mesh)
+        jax_row_linear = JaxRowParallelLinear(
+            row_linear, mesh=mesh, enable_sequence_parallelism=enable_sp)
         jax_input_tensor = torch_view(t2j(input_tensor, use_dlpack=False))
         jax_input_tensor.apply_jax_(jax.device_put,
                                     NamedSharding(mesh, P(None, None)))

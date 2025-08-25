@@ -14,6 +14,7 @@ from tpu_commons.models.vllm.jax_linear_common import (
     forward_unqunatized, forward_w8a8_int8_col_parallel,
     reorder_concatenated_tensor_for_sharding,
     slice_sharded_tensor_for_concatenation)
+from tpu_commons.utils import TPU_SECOND_LAST_MINOR
 
 P = PartitionSpec
 
@@ -22,7 +23,7 @@ class JaxMergedColumnParallelLinearCore(torch.nn.Module):
     """ A common class to implement Column Parallel Linear layer whose weight are merged from a list of smaller weight tensors, e.g. vLLM's MergedColumnParallelLinear and QKVParallelLinear layer. """
 
     def __init__(self, vllm_col_par_linear: torch.nn.Module, mesh: Mesh,
-                 name: str, fuse_matmuls: bool):
+                 name: str, fuse_matmuls: bool, enable_sequence_parallelism):
         super().__init__()
 
         self.gather_output = vllm_col_par_linear.gather_output
@@ -33,6 +34,7 @@ class JaxMergedColumnParallelLinearCore(torch.nn.Module):
         self.name = name
         self.fuse_matmuls = fuse_matmuls
         self.has_bias = vllm_col_par_linear.bias is not None
+        self.enable_sequence_parallelism = enable_sequence_parallelism
         self.n_matmuls = len(self.output_sizes)
         assert vllm_col_par_linear.tp_size == 1, (
             "The model has to be loaded with TP== 1 in order to run in Jax SPMD."
@@ -93,15 +95,19 @@ class JaxMergedColumnParallelLinearCore(torch.nn.Module):
             assert output_size % n_shards == 0, "Each output size in MergedColumnParallelLinear must be a  multiple of num chips in the 'model' axis."
 
         concat_weight = t2j(vllm_col_par_linear.weight.data, use_dlpack=False)
-        weight = reorder_concatenated_tensor_for_sharding(
-            concat_weight, self.output_sizes, n_shards)
+        weight = reorder_concatenated_tensor_for_sharding(concat_weight,
+                                                          self.output_sizes,
+                                                          n_shards,
+                                                          dim=0)
         weight = Parameter(torch_view(weight), requires_grad=False)
         self.register_parameter("weight", weight)
 
         if vllm_col_par_linear.bias is not None:
             concat_bias = t2j(vllm_col_par_linear.bias.data, use_dlpack=False)
-            bias = reorder_concatenated_tensor_for_sharding(
-                concat_bias, self.output_sizes, n_shards)
+            bias = reorder_concatenated_tensor_for_sharding(concat_bias,
+                                                            self.output_sizes,
+                                                            n_shards,
+                                                            dim=0)
             bias = Parameter(torch_view(bias), requires_grad=False)
             self.register_parameter("bias", bias)
         else:
@@ -112,7 +118,7 @@ class JaxMergedColumnParallelLinearCore(torch.nn.Module):
             concat_weight_scale = t2j(vllm_col_par_linear.weight_scale.data,
                                       use_dlpack=False)
             weight_scale = reorder_concatenated_tensor_for_sharding(
-                concat_weight_scale, self.output_sizes, n_shards)
+                concat_weight_scale, self.output_sizes, n_shards, dim=0)
             weight_scale = Parameter(torch_view(weight_scale),
                                      requires_grad=False)
             self.register_parameter("weight_scale", weight_scale)
@@ -230,6 +236,12 @@ class JaxMergedColumnParallelLinearCore(torch.nn.Module):
 
     def forward(self, input: torch.Tensor):
         with jax.named_scope(self.name):
+            if self.enable_sequence_parallelism:
+                token_num = input.shape[0]
+                # NOTE(chengjiyao): make sure the sharded token_num is larger than TPU_SECOND_LAST_MINOR
+                if token_num // self.mesh.shape[
+                        'model'] >= TPU_SECOND_LAST_MINOR:
+                    input.shard_(NamedSharding(self.mesh, P('model', None)))
             if self.fuse_matmuls:
                 return self.forward_fused(input)
             else:

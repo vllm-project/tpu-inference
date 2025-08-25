@@ -72,25 +72,28 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     # would cause JAX init failure when using multi hosts with Ray.
     _MODEL_REGISTRY = {}
 
+    from tpu_commons.models.jax.deepseek_v3 import DeepSeekV3
+    from tpu_commons.models.jax.llama4 import Llama4ForCausalLM
+    from tpu_commons.models.jax.phi3 import Phi3ForCausalLM
+    from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
+    from tpu_commons.models.jax.qwen2_5_vl import \
+        Qwen2_5_VLForConditionalGeneration
+    from tpu_commons.models.jax.qwen3 import Qwen3ForCausalLM
+
     if os.getenv("NEW_MODEL_DESIGN", False):
         from tpu_commons.experimental.llama3_jax_stashed import \
             LlamaForCausalLM
-        from tpu_commons.models.jax.deepseek_v3 import DeepSeekV3
-        from tpu_commons.models.jax.llama4 import Llama4ForCausalLM
-        from tpu_commons.models.jax.llama_guard_4 import LlamaGuard4ForCausalLM
-        _MODEL_REGISTRY["DeepSeekV3"] = DeepSeekV3
-        _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
-        _MODEL_REGISTRY["Llama4ForCausalLM"] = Llama4ForCausalLM
-        _MODEL_REGISTRY["LlamaGuard4ForCausalLM"] = LlamaGuard4ForCausalLM
     else:
         from tpu_commons.models.jax.llama3 import LlamaForCausalLM
-        from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
-        from tpu_commons.models.jax.qwen2_5_vl import \
-            Qwen2_5_VLForConditionalGeneration
-        _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
-        _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
-        _MODEL_REGISTRY[
-            "Qwen2_5_VLForConditionalGeneration"] = Qwen2_5_VLForConditionalGeneration
+
+    _MODEL_REGISTRY["Llama4ForCausalLM"] = Llama4ForCausalLM
+    _MODEL_REGISTRY["DeepSeekV3"] = DeepSeekV3
+    _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
+    _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
+    _MODEL_REGISTRY["Qwen3ForCausalLM"] = Qwen3ForCausalLM
+    _MODEL_REGISTRY[
+        "Qwen2_5_VLForConditionalGeneration"] = Qwen2_5_VLForConditionalGeneration
+    _MODEL_REGISTRY["Phi3ForCausalLM"] = Phi3ForCausalLM
 
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
@@ -109,30 +112,24 @@ def _get_nnx_model(
 ) -> nnx.Module:
     if os.getenv("JAX_RANDOM_WEIGHTS", False):
         # Create a sharded model with random inited weights.
-        if not os.getenv("NEW_MODEL_DESIGN", False):
-            # TODO: currently Qwen2ForCausalLM is using legacy model implementation
-            # will merge the random init logic when all model are migrated to new model implementation
-            @nnx.jit
-            def create_sharded_model():
-                model = model_class(vllm_config, rng, mesh)
-                state = nnx.state(model)
-                pspecs = nnx.get_partition_spec(state)
-                sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
-                nnx.update(model, sharded_state)
-                # NOTE: we don't support quantization for the old Qwen2ForCausalLM implementation
-                return model
+        # TODO: currently Qwen2ForCausalLM is using legacy model implementation
+        # will merge the random init logic when all model are migrated to new model implementation
+        @nnx.jit
+        def create_sharded_model():
+            model = model_class(vllm_config, rng, mesh)
+            state = nnx.state(model)
+            pspecs = nnx.get_partition_spec(state)
+            sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
+            nnx.update(model, sharded_state)
+            # NOTE: we don't support quantization for the old Qwen2ForCausalLM implementation
+            return model
 
-            with mesh:
-                jit_model = create_sharded_model()
-        else:
-
-            with mesh:
-                model = model_class(vllm_config,
-                                    rng,
-                                    mesh,
-                                    force_random_weights=True)
-                jit_model = _apply_qwix_quantization(vllm_config, model, rng,
-                                                     mesh)
+        with mesh:
+            jit_model = create_sharded_model()
+            jit_model = _apply_qwix_quantization(vllm_config, jit_model, rng,
+                                                 mesh)
+            if hasattr(jit_model, 'initialize_cache'):
+                jit_model.initialize_cache()
     else:
         # We first create an abstract model without allocating any weights,
         # then fill in its weigths during load_weights from HF.
@@ -143,10 +140,7 @@ def _get_nnx_model(
         # 2. The model loading won't be OOM. Otherwise the normal way will hold
         #    a full model weights after random-init, then duplicate a layer during
         #    the load_weights. This would be easy to OOM if the layer is super large.
-        if os.getenv("NEW_MODEL_DESIGN", False):
-            model = model_class(vllm_config, rng, mesh)
-        else:
-            model = nnx.eval_shape(lambda: model_class(vllm_config, rng, mesh))
+        model = nnx.eval_shape(lambda: model_class(vllm_config, rng, mesh))
         model.load_weights(rng)
         # Although the created model can already work, we still need to jit
         # the model creation again, otherwise the model forward will have

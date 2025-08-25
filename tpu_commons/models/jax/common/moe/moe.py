@@ -1,10 +1,9 @@
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import InitVar, dataclass
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from jax.sharding import Mesh, NamedSharding
+from flax.typing import Sharding
 from jaxtyping import Float
 
 from tpu_commons.models.jax.common.base import create_param
@@ -20,20 +19,16 @@ class Router(nnx.Module):
     This module determines which experts each token should be routed to based on the input.
 
     Attributes:
-        mesh: The JAX device mesh for distributed computation.
-        quant: Optional configuration for quantization.
     """
-    mesh: Mesh
     dtype: jnp.dtype
     hidden_size: int
     num_experts: int
     num_experts_per_tok: int
     router_act: str
-    rngs: nnx.Rngs
-    activation_ffw_td: NamedSharding
-    ed_sharding: NamedSharding
+    rngs: InitVar[nnx.Rngs]
+    activation_ffw_td: Sharding
+    ed_sharding: Sharding
     random_init: bool = False
-    quant: Any | None = None
 
     def __call__(self, x_TD: Float):
         """Routes tokens to experts.
@@ -60,10 +55,10 @@ class Router(nnx.Module):
             normalized_weights_TX = router_act(weights_TX.astype(self.dtype))
         return normalized_weights_TX, selected_experts_TX
 
-    def __post_init__(self):
+    def __post_init__(self, rngs: nnx.Rngs):
         """Generates the router kernel (weights) for routing."""
         shape = (self.hidden_size, self.num_experts)
-        self.kernel_DE = create_param(self.rngs,
+        self.kernel_DE = create_param(rngs,
                                       shape=shape,
                                       dtype=self.dtype,
                                       sharding=self.ed_sharding,
@@ -77,25 +72,21 @@ class MoE(nnx.Module):
     This module implements a MoE layer with a router and multiple expert MLPs.
 
     Attributes:
-        mesh: The JAX mesh for device sharding.
         router: The Router module.
-        quant: Optional configuration for quantization.
     """
-    mesh: Mesh
     dtype: jnp.dtype
     num_local_experts: int
     apply_expert_weight_before_computation: bool
     hidden_size: int
     intermediate_size_moe: int
     hidden_act: str
-    rngs: nnx.Rngs
+    rngs: InitVar[nnx.Rngs]
     router: nnx.Module
-    activation_ffw_td: NamedSharding
-    activation_ffw_ted: NamedSharding
-    edf_sharding: NamedSharding
-    efd_sharding: NamedSharding
+    activation_ffw_td: Sharding
+    activation_ffw_ted: Sharding
+    edf_sharding: Sharding
+    efd_sharding: Sharding
     random_init: bool = False
-    quant: Any | None = None
 
     def __call__(self, x_TD: Float):
         """Performs the forward pass of the MoE layer.
@@ -123,7 +114,7 @@ class MoE(nnx.Module):
         else:
             return self._moe_fwd(x_TD, full_weights_TE)
 
-    def __post_init__(self):
+    def __post_init__(self, rngs: nnx.Rngs):
         """Generates the kernels (weights) for the router and experts (gating, up-projection, and down-projection layers)."""
 
         D = self.hidden_size
@@ -132,17 +123,17 @@ class MoE(nnx.Module):
         shape_up = (self.num_local_experts, D, F)
         shape_down = (self.num_local_experts, F, D)
 
-        self.kernel_gating_EDF = create_param(self.rngs,
+        self.kernel_gating_EDF = create_param(rngs,
                                               shape=shape_gating,
                                               dtype=self.dtype,
                                               sharding=self.edf_sharding,
                                               random_init=self.random_init)
-        self.kernel_up_proj_EDF = create_param(self.rngs,
+        self.kernel_up_proj_EDF = create_param(rngs,
                                                shape=shape_up,
                                                dtype=self.dtype,
                                                sharding=self.edf_sharding,
                                                random_init=self.random_init)
-        self.kernel_down_proj_EFD = create_param(self.rngs,
+        self.kernel_down_proj_EFD = create_param(rngs,
                                                  shape=shape_down,
                                                  dtype=self.dtype,
                                                  sharding=self.efd_sharding,
