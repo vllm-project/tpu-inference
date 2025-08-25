@@ -5,6 +5,7 @@ import ray
 import vllm.envs as envs
 from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.executor.ray_distributed_executor import RayWorkerMetaData
 from vllm.executor.ray_utils import RayWorkerWrapper, _wait_until_pg_ready
 from vllm.platforms import current_platform
@@ -36,8 +37,6 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
     """Ray-based distributed executor"""
 
     def _init_executor(self) -> None:
-        super()._init_executor()
-        
         self.forward_dag: Optional[ray.dag.CompiledDAG] = None
         # V1 uses SPMD worker and compiled DAG
         os.environ["VLLM_USE_RAY_SPMD_WORKER"] = "1"
@@ -73,6 +72,11 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         self.use_v1 = envs.VLLM_USE_V1
 
         self.pp_locks: Optional[List[asyncio.Lock]] = None
+
+        # KV connector setup
+        self.has_connector = self.vllm_config.kv_transfer_config is not None
+        self.kv_output_aggregator = KVOutputAggregator(
+            self.parallel_config.world_size)
 
     def _initialize_ray_cluster(self,
                                 ray_address: Optional[str] = None) -> None:
