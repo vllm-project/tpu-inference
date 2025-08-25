@@ -100,6 +100,19 @@ def run_pubsub_inference(args: dict, llm: LLM, sampling_params: SamplingParams):
             logging.info(f"Results written to gs://{output_gcs_bucket}/{output_gcs_blob}")
 
             message.ack()
+        except json.decoder.JSONDecodeError as e:
+            errorMsg = f"Error parsing message: {e}"
+            logging.info(errorMsg)
+            results = [
+                {"error" : errorMsg}
+            ]
+            bucket = storage_client.bucket(output_gcs_bucket)
+            blob = bucket.blob(output_gcs_blob)
+            blob.upload_from_string(
+                json.dumps(results, indent=2),
+                content_type="application/json",
+            )
+            message.ack()
         except Exception as e:
             logging.exception(f"Error processing message: {e}")
             message.nack()
