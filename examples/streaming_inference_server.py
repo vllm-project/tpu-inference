@@ -119,16 +119,26 @@ def run_pubsub_inference(args: dict, llm: LLM, sampling_params: SamplingParams):
 
 
 def main(args: dict):
+    # Pop arguments not used by LLM
+    max_tokens = args.pop("max_tokens")
+    temperature = args.pop("temperature")
+    top_p = args.pop("top_p")
+    top_k = args.pop("top_k")
+
     # Create an LLM
-    llm = LLM(**{k: v for k, v in args.items() if k in EngineArgs.get_cli_args()})
+    llm = LLM(**args)
 
     # Create a sampling params object
-    sampling_params = SamplingParams(
-        max_tokens=args.get("max_tokens"),
-        temperature=args.get("temperature"),
-        top_p=args.get("top_p"),
-        top_k=args.get("top_k"),
-    )
+    # Create a sampling params object
+    sampling_params = llm.get_default_sampling_params()
+    if max_tokens is not None:
+        sampling_params.max_tokens = max_tokens
+    if temperature is not None:
+        sampling_params.temperature = temperature
+    if top_p is not None:
+        sampling_params.top_p = top_p
+    if top_k is not None:
+        sampling_params.top_k = top_k
 
     run_pubsub_inference(args, llm, sampling_params)
 
