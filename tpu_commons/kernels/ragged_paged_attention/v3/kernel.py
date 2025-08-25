@@ -23,7 +23,7 @@ DEFAULT_MASK_VALUE = -0.7 * float(jnp.finfo(jnp.dtype("float32")).max)
 
 def ref_ragged_paged_attention(
     queries: jax.
-    Array,  # [max_num_tokens, actual_num_q_heads, actual_head_dim]
+    Array,  # [num_kv_heads, max_num_tokens, num_q_heads_per_kv_heads // packing, packing, actual_head_dim],
     keys: jax.Array,  # [max_num_tokens, actual_num_kv_heads, actual_head_dim]
     values: jax.
     Array,  # [max_num_tokens, actual_num_kv_heads, actual_head_dim]
@@ -881,18 +881,14 @@ def merge_kv(
 
 
 def prepare_inputs(
-        q: jax.Array,  # [max_num_tokens, actual_num_q_heads, actual_head_dim],
+        q: jax.
+    Array,  # [num_kv_heads, max_num_tokens, num_q_heads_per_kv_heads // packing, packing, actual_head_dim],
         k: jax.
     Array,  # [max_num_tokens, actual_num_kv_heads, actual_head_dim],
         v: jax.
     Array,  # [max_num_tokens, actual_num_kv_heads, actual_head_dim],
 ):
     assert len(q.shape) == 5, "force trying new reshaped q."
-    max_num_tokens, actual_num_q_heads, actual_head_dim = q.shape
-    actual_num_kv_heads = k.shape[1]
-    assert actual_num_q_heads % actual_num_kv_heads == 0
-
-    # TODO(cuiq) Handle the padding.
     kv = merge_kv(k, v)
     return q, kv
 
@@ -1041,21 +1037,23 @@ def static_validate_inputs(
 ):
     """Validate inputs to the RPA kernel statically."""
     q, k, v = queries, keys, values
-    if not (len(q.shape) == len(k.shape) == len(v.shape) == 3):
-        raise ValueError(
-            f"Expected 2D array for {q.shape=}, {k.shape=}, {v.shape=}")
+    if not (len(q.shape) == 5):
+        raise ValueError(f"Expected 5D array for {q.shape=}")
+
+    if not (len(k.shape) == len(v.shape) == 3):
+        raise ValueError(f"Expected 3D array for {k.shape=}, {v.shape=}")
     if k.shape != v.shape:
         raise ValueError(f"Expected {k.shape=} to be equal to {v.shape=}")
-    if not (q.shape[0] == k.shape[0] == v.shape[0]):
+    if not (q.shape[1] == k.shape[0] == v.shape[0]):
         raise ValueError(
             f"Expected {q.shape[0]=} to be equal to {k.shape[0]=} and {v.shape[0]=}"
         )
-    if not (q.shape[2] == k.shape[2] == v.shape[2]):
+    if not (q.shape[4] == k.shape[2] == v.shape[2]):
         raise ValueError(
-            f"Expected {q.shape[2]=} to be equal to {k.shape[2]=} and {v.shape[2]=}"
+            f"Expected {q.shape[4]=} to be equal to {k.shape[2]=} and {v.shape[2]=}"
         )
 
-    actual_head_dim = q.shape[2]
+    actual_head_dim = q.shape[4]
     actual_num_q_heads = q.shape[1]
     actual_num_kv_heads = k.shape[1]
 
@@ -1249,9 +1247,8 @@ def ragged_paged_attention(
         num_queries_per_block=num_queries_per_block,
         vmem_limit_bytes=vmem_limit_bytes,
     )
-
-    actual_num_q_heads = q.shape[1]
-    actual_head_dim = q.shape[2]
+    actual_num_q_heads = q.shape[0] * q.shape[2] * q.shape[3]
+    actual_head_dim = q.shape[4]
     actual_num_kv_heads = k.shape[1]
 
     actual_num_q_heads_per_kv_head = actual_num_q_heads // actual_num_kv_heads

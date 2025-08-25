@@ -131,9 +131,6 @@ def model_weights_single_file_generator(
                         filter_regex, name):
                     continue
                 weight_tensor = f.get_tensor(name)
-                print(
-                    f"***** {name}: {type(weight_tensor)}, {weight_tensor.shape}"
-                )
 
                 yield name, weight_tensor
 
@@ -299,7 +296,6 @@ def _load_hf_weights_on_thread(vllm_config,
         model_weight, model_sharding = get_param_and_sharding(
             params, shardings, model_key)
 
-        logger.debug(f"model_weight - {model_weight}, {type(model_weight)}")
         logger.debug(
             "before transform | "
             f"{hf_key}: {hf_weight.shape}  -->  {model_key}: {model_weight.value.shape} {model_sharding}"
@@ -371,8 +367,6 @@ def load_hf_weights(vllm_config,
         model_path, vllm_config.load_config.download_dir)
     params = nnx.state(model)
     max_workers = min(64, len(weights_files))
-    print("=============weight_utils.py=============================")
-    print(f"weights_files: {weights_files}")
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
             executor.submit(_load_hf_weights_on_thread,

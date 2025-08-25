@@ -22,23 +22,30 @@ logger = init_logger(__name__)
 init_fn = nnx.initializers.uniform()
 
 
-def _get_reshape_maps(vllm_config):
-    model_config = vllm_config.model_config
-    hf_config = vllm_config.hf_config
+def _get_reshape_maps(hf_config, dtype):
+    # model_config = vllm_config.model_config
+    # hf_config = model_config.hf_config
 
     num_heads = hf_config.num_attention_heads
     num_kv_heads = hf_config.num_key_value_heads
-    hidden_size = model_config.get_hidden_size()
-    q_packing = get_dtype_packing(model_config.dtype)
+    hidden_size = hf_config.hidden_size
+    q_packing = get_dtype_packing(dtype)
     num_q_heads_per_kv_head = num_heads // num_kv_heads
+
+    head_dim_original = getattr(hf_config, "head_dim",
+                                hidden_size // num_heads)
+    head_dim = utils.get_padded_head_dim(head_dim_original)
+
+    # TODO(cuiq) handle padding instead of not allowing it.
     assert num_heads % num_kv_heads == 0
     assert num_q_heads_per_kv_head % q_packing == 0
+    assert head_dim == head_dim_original
 
     return {
         "K": num_kv_heads,
         "N": num_heads,
         "D": hidden_size,
-        "H": model_config.get_head_size(),
+        "H": head_dim,
         "C": q_packing,
         "R": num_q_heads_per_kv_head // q_packing
     }
@@ -106,15 +113,28 @@ class Qwen2Attention(nnx.Module):
                                                        sharding_size)
 
         self.mesh = mesh
-
+        reshape_map = _get_reshape_maps(config, dtype)
         self.q_proj = nnx.Einsum(
             "TD,DKRCH->KTRCH",
-            (self.hidden_size, self.num_heads, self.head_dim),
-            (self.num_heads, self.head_dim),
+            (
+                reshape_map["D"],
+                reshape_map["K"],
+                reshape_map["R"],
+                reshape_map["C"],
+                reshape_map["H"],
+            ),
+            (
+                reshape_map["K"],
+                reshape_map["R"],
+                reshape_map["C"],
+                reshape_map["H"],
+            ),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn,
-                                              (None, "K", "R", "C", None)),
-            bias_init=nnx.with_partitioning(init_fn, ("K", "R", "C", None)),
+            # TODO(cuiq): How partitioning works???
+            kernel_init=nnx.with_partitioning(
+                init_fn, (None, None, "model", None, None)),
+            bias_init=nnx.with_partitioning(init_fn,
+                                            (None, "model", None, None)),
             rngs=rng,
         )
         self.k_proj = nnx.Einsum(
@@ -152,8 +172,6 @@ class Qwen2Attention(nnx.Module):
         md = attention_metadata
         # q: (T, N, H)
         q = self.q_proj(x)
-        print("=============qwen==========================")
-        print(f"q shape: {q.shape}")
         q = apply_rope(q, md.input_positions, self.head_dim_original,
                        self.rope_theta, self.rope_scaling)
 
@@ -384,7 +402,9 @@ class Qwen2ForCausalLM(nnx.Module):
         # place update the map by replace the value directly
 
         # reshape_keys
-        reshape_mapping = _get_reshape_maps(self.vllm_config)
+        reshape_mapping = _get_reshape_maps(
+            self.vllm_config.model_config.hf_config,
+            self.vllm_config.model_config.dtype)
 
         metadata_map.reshape_map["q_proj"] = (reshape_mapping["K"],
                                               reshape_mapping["R"],
