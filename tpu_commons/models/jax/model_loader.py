@@ -14,6 +14,8 @@ from tpu_commons.models.jax.utils.quantization.quantization_utils import (
 
 logger = init_logger(__name__)
 
+_MODEL_REGISTRY = {}
+
 
 def _apply_qwix_quantization(vllm_config: VllmConfig, model: nnx.Module,
                              rng: jax.Array, mesh: Mesh) -> nnx.Module:
@@ -70,7 +72,6 @@ def _apply_qwix_quantization(vllm_config: VllmConfig, model: nnx.Module,
 def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     # NOTE: Use inline imports here, otherwise the normal imports
     # would cause JAX init failure when using multi hosts with Ray.
-    _MODEL_REGISTRY = {}
 
     from tpu_commons.models.jax.deepseek_v3 import DeepSeekV3
     from tpu_commons.models.jax.llama4 import Llama4ForCausalLM
@@ -254,3 +255,16 @@ def get_model(
         return get_vllm_model(vllm_config, rng, mesh)
     else:
         raise NotImplementedError("Unsupported MODEL_IMPL_TYPE")
+
+
+def register_model(arch: str, model: Any):
+    """
+    Registers a model class for a given architecture name.
+
+    Args:
+        arch: The name of the architecture (e.g., "LlamaForCausalLM").
+        model: The model class to register.
+    """
+    # TODO: Support lazy loading (like vllm)
+    # TODO: Also call vllm's `ModelRegistry.register_model`.
+    _MODEL_REGISTRY[arch] = model
