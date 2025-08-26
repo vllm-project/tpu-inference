@@ -10,6 +10,7 @@ from jax._src import dtypes
 from jax._src import mesh as mesh_lib
 from jax._src import xla_bridge as xb
 from jax._src.lib import xla_client as xc
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from vllm import envs
 
 from tpu_commons.logger import init_logger
@@ -171,3 +172,21 @@ def make_optimized_mesh(axis_shapes: Sequence[int],
                 return mesh
 
     return jax.make_mesh(axis_shapes, axis_names, devices=devices)
+
+
+def device_array(mesh: Mesh, *args, sharding=None, **kwargs) -> jax.Array:
+    """
+    Create a device array with the specified mesh and sharding.
+
+    Args:
+        mesh: The JAX mesh to use for device placement
+        *args: Positional arguments to pass to jax.device_put
+        sharding: Optional sharding specification. If None, uses PartitionSpec(None)
+        **kwargs: Keyword arguments to pass to jax.device_put
+
+    Returns:
+        A JAX array placed on the specified devices
+    """
+    if sharding is None:
+        sharding = NamedSharding(mesh, PartitionSpec(None))
+    return jax.device_put(*args, device=sharding, **kwargs)
