@@ -272,7 +272,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         return self.kv_cache_manager.get_kv_cache_spec()
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
-        self.kv_caches = []
         self.kv_cache_manager.initialize_kv_cache(kv_cache_config)
 
     def capture_model(self) -> None:

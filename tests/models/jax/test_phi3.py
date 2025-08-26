@@ -11,7 +11,7 @@ from vllm.config import ModelConfig
 
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.phi3 import Phi3ForCausalLM
-from tpu_commons.runner.jax.kv_cache_manager import create_kv_caches
+from tpu_commons.runner import utils as runner_utils
 
 
 class MockVllmConfig:
@@ -122,7 +122,7 @@ class TestPhi3ForCausalLM:
         model.load_weights(rng)
 
         # Test model forward
-        kv_caches = create_kv_caches(
+        kv_caches = runner_utils.create_kv_caches(
             num_blocks=4,
             block_size=32,
             num_kv_heads=num_kv_heads,
