@@ -195,27 +195,18 @@ class CompilationManager:
         logger.info(
             "Compiling disaggregated util with different input shapes.")
         block_size = self.runner.block_size
-        for num_blocks in range(1, self.runner.max_num_blocks_per_req//2):
+        for num_blocks in range(1, self.runner.max_num_blocks_per_req // 2):
             logger.info(
                 f"Precompile slice and insert for num_blocks {num_blocks}")
             start = time.perf_counter()
             block_numbers = list(range(1, num_blocks + 1))
             kv_cache_slices = self.runner.kv_cache_manager.get_kv_cache_for_block_ids(
                 block_numbers)
-            block_buckets = [
-                1, 2, 4, 8, 16, 32, 64, self.runner.max_num_blocks_per_req
-            ]
-            import bisect
-            bucket_index = bisect.bisect_left(block_buckets, num_blocks)
-            padded_num_blocks = block_buckets[bucket_index]
-            padding_size = padded_num_blocks - num_blocks
-            block_numbers.extend([0] * padding_size)
-            padded_block_numbers = jnp.array(block_numbers, dtype=jnp.int32)
-            self.runner.kv_caches = self.runner.kv_cache_manager._jitted_insert_kv_cache(
+            self.runner.kv_caches = self.runner.kv_cache_manager._jitted_insert_continuous_kv_cache(
                 block_size,
                 self.runner.kv_caches,
                 kv_cache_slices,
-                padded_block_numbers,
+                block_numbers[0],
             )
             end = time.perf_counter()
             logger.info("Compilation finished in %.2f [secs].", end - start)

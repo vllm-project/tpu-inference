@@ -94,7 +94,8 @@ class TPUWorker(AbstractTpuWorker):
         logger.info(f"Pre-sliced devices by engine: {self.devices}")
 
         use_jax_profiler_server = os.getenv("USE_JAX_PROFILER_SERVER", False)
-        if use_jax_profiler_server:
+        # Only one instance of profiler is allowed
+        if use_jax_profiler_server and jax.devices()[0] == self.devices[0]:
             jax_profiler_server_port = int(
                 os.getenv("JAX_PROFILER_SERVER_PORT", 9999))
             logger.info(

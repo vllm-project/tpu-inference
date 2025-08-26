@@ -73,7 +73,7 @@ class TestKVCacheManager:
         # This is needed for the padding logic in insert_request_with_kv_cache
         self.runner.vllm_config.cache_config.num_gpu_blocks = num_blocks
 
-        prompt_len = 63
+        prompt_len = 64
 
         # Populate a source KV cache with data. This represents the state
         # of the prefill runner's KV cache.
