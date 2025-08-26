@@ -1,15 +1,17 @@
 import functools
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, Any, List
 
 import jax
 import jax.numpy as jnp
 import torch
-from jax.sharding import NamedSharding, PartitionSpec
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 
+import tpu_commons.kernels.ragged_paged_attention.v3.kernel as rpa
+from tpu_commons import utils
 from tpu_commons import utils as common_utils
 from tpu_commons.logger import init_logger
 from tpu_commons.runner import utils as runner_utils
@@ -21,6 +23,70 @@ if TYPE_CHECKING:
     from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
 
 logger = init_logger(__name__)
+
+DEFAULT_KV_CACHE_DTYPE = jnp.bfloat16
+
+
+def create_kv_caches(
+    num_blocks: int,
+    block_size: int,
+    num_kv_heads: int,
+    head_size: int,
+    mesh: Mesh,
+    layer_names: List[str],
+    devices: List[Any],
+) -> List[jax.Array]:
+    """
+    Creates the KV caches, one per each decoder layer in the model, where the shape of each cache is
+    (num_blocks, block_size, cdiv(num_kv_heads * 2, packing), packing, head_size).
+
+    Args:
+        num_blocks: The number of blocks in the KV cache.
+        block_size: The size of each block in the KV cache.
+        num_kv_heads: The number of KV heads in the KV cache.
+        head_size: The size of each head in the KV cache.
+        mesh: The mesh to shard the KV caches across.
+        layer_names: The names of the decoder layers in the model.
+        devices: The devices to shard the KV caches across.
+
+    Returns:
+        A list of KV caches, one per each decoder layer in the model.
+
+    """
+    # TODO (jacobplatin): update this for quantized KV cache
+    cache_dtype = DEFAULT_KV_CACHE_DTYPE
+    # TODO(xiang): fix this together with get_kv_cache_spec
+    # cache_dtype = kv_cache_spec.dtype
+
+    # NOTE(jevinjiang): Instead of sharding automatically, we manually calculate
+    # the kv cache for each shard because the padding logic for RPA's KV cache
+    # needs to know the exact head number on each shard. In other words, we can
+    # not determine the padding logics for kv cache globally.
+    shard_cnt = mesh.shape["model"]
+    assert num_kv_heads % shard_cnt == 0
+    cache_shape_per_shard = rpa.get_kv_cache_shape(num_blocks, block_size,
+                                                   num_kv_heads // shard_cnt,
+                                                   head_size, cache_dtype)
+    # Intended to be replicated.
+    sharding = NamedSharding(mesh, PartitionSpec())
+
+    def _allocate() -> jax.Array:
+        return jnp.empty(
+            shape=cache_shape_per_shard,
+            dtype=cache_dtype,
+        )
+
+    sharded_allocate = jax.jit(_allocate, out_shardings=sharding)
+    kv_caches = []
+    for _ in layer_names:
+        kv_caches.append(sharded_allocate())
+    logger.info(
+        f"Init kv-cache | "
+        f"shape={len(layer_names)} * {shard_cnt} * {cache_shape_per_shard} | "
+        f"sharding={sharding} | "
+        f"dtype={cache_dtype} | "
+        f"hbm={utils.hbm_usage_gb(devices)}Gb")
+    return kv_caches
 
 
 class KVCacheManager:
@@ -56,8 +122,6 @@ class KVCacheManager:
         return kv_cache_spec
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
-        self.runner.kv_caches: List[jax.Array] = []
-
         kv_cache_groups = kv_cache_config.kv_cache_groups
         if len(kv_cache_groups) > 1:
             raise NotImplementedError(
@@ -68,7 +132,7 @@ class KVCacheManager:
         layer_names = kv_cache_groups[0].layer_names
 
         # NOTE: we'll multiply the num_kv_heads by 2 in the function
-        self.runner.kv_caches = runner_utils.create_kv_caches(
+        self.runner.kv_caches = create_kv_caches(
             num_blocks=kv_cache_config.num_blocks,
             block_size=kv_cache_spec.block_size,
             num_kv_heads=kv_cache_spec.num_kv_heads,
