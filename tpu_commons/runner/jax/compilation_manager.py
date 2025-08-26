@@ -11,6 +11,7 @@ from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.layers.sample.sampling import sample
 from tpu_commons.models.jax.layers.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
+from tpu_commons.utils import device_array
 
 if TYPE_CHECKING:
     from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
@@ -54,8 +55,9 @@ class CompilationManager:
 
             block_tables = block_tables.reshape(-1)
 
-            (input_ids, positions, block_tables, query_start_loc, seq_lens,
-             request_distribution) = self.runner._device_array(
+            (input_ids, positions, block_tables, query_start_loc,
+             seq_lens, request_distribution) = device_array(
+                 self.runner.mesh,
                  (input_ids, positions, block_tables, query_start_loc,
                   seq_lens, request_distribution))
             logger.info(f"Precompile backbone --> num_tokens={num_tokens}")
@@ -96,12 +98,13 @@ class CompilationManager:
                                         dtype=input_dtype)
                 indices_to_select = jnp.ones((num_reqs, ), dtype=jnp.int32)
                 if sharding:
-                    input_tensor = self.runner._device_array(input_tensor,
-                                                             sharding=sharding)
+                    input_tensor = device_array(self.runner.mesh,
+                                                input_tensor,
+                                                sharding=sharding)
                 else:
-                    input_tensor = self.runner._device_array(input_tensor)
-                indices_to_select = self.runner._device_array(
-                    indices_to_select)
+                    input_tensor = device_array(self.runner.mesh, input_tensor)
+                indices_to_select = device_array(self.runner.mesh,
+                                                 indices_to_select)
                 start = time.perf_counter()
                 logger.info(
                     f"Precompile select_from_array --> {inner_loop_var_name}={outer_loop_val} | "
@@ -142,7 +145,7 @@ class CompilationManager:
         hsize = self.runner.model_config.get_hidden_size()
         for num_reqs in self.runner.num_reqs_paddings:
             hidden_states = jnp.ones((num_reqs, hsize), dtype=jnp.bfloat16)
-            hidden_states = self.runner._device_array(hidden_states)
+            hidden_states = device_array(self.runner.mesh, hidden_states)
             logger.info(f"Precompile compute_logits --> num_reqs={num_reqs}")
             start = time.perf_counter()
             result = self.runner.compute_logits_fn(self.runner.state,
@@ -158,7 +161,7 @@ class CompilationManager:
             logits = jnp.ones((num_reqs, hsize), dtype=jnp.bfloat16)
             sharding = NamedSharding(self.runner.mesh,
                                      PartitionSpec(None, "model"))
-            logits = self.runner._device_array(logits, sharding=sharding)
+            logits = device_array(self.runner.mesh, logits, sharding=sharding)
             logger.info(f"Precompile sampling --> num_reqs={num_reqs}")
             start = time.perf_counter()
             for do_sampling in (True, False):
@@ -166,8 +169,9 @@ class CompilationManager:
                     temperature = np.full((num_reqs, ), 0.7, dtype=np.float32)
                     top_k = np.full((num_reqs, ), 20, dtype=np.int32)
                     top_p = np.full((num_reqs, ), 0.8, dtype=np.float32)
-                    (temperature, top_k, top_p) = self.runner._device_array(
-                        (temperature, top_k, top_p))
+                    (temperature, top_k,
+                     top_p) = device_array(self.runner.mesh,
+                                           (temperature, top_k, top_p))
                 else:
                     temperature = None
                     top_k = None
@@ -191,11 +195,11 @@ class CompilationManager:
         hsize = self.runner.model_config.get_vocab_size()
         for num_reqs in self.runner.num_reqs_paddings:
             logits = jnp.ones((num_reqs, hsize), dtype=jnp.bfloat16)
-            logits, = self.runner._device_array((logits, ))
+            logits, = device_array(self.runner.mesh, (logits, ))
             logger.info(f"Precompile gather_logprobs --> num_reqs={num_reqs}")
             start = time.perf_counter()
             token_ids = jnp.ones((num_reqs, ), dtype=jnp.int32)
-            token_ids, = self.runner._device_array((token_ids, ))
+            token_ids, = device_array(self.runner.mesh, (token_ids, ))
             result = self.runner._compute_and_gather_logprobs(
                 logits, token_ids, self.runner.model_config.max_logprobs)
             result.logprob_token_ids.block_until_ready()
@@ -212,12 +216,14 @@ class CompilationManager:
                                         dtype=jnp.bfloat16)
                 sharding = NamedSharding(self.runner.mesh,
                                          PartitionSpec(None, "model"))
-                target_probs = self.runner._device_array(target_probs,
-                                                         sharding=sharding)
+                target_probs = device_array(self.runner.mesh,
+                                            target_probs,
+                                            sharding=sharding)
                 draft_token_ids = jnp.ones((num_logits, ), dtype=jnp.int32)
                 num_draft_tokens = jnp.ones((num_reqs, ), dtype=jnp.int32)
                 bonus_token_ids = jnp.ones((num_reqs, ), dtype=jnp.int32)
-                draft_token_ids, num_draft_tokens, bonus_token_ids = self.runner._device_array(
+                draft_token_ids, num_draft_tokens, bonus_token_ids = device_array(
+                    self.runner.mesh,
                     (draft_token_ids, num_draft_tokens, bonus_token_ids))
                 logger.info("Precompile greedy_rejection_sampler --> "
                             f"num_logits={num_logits} num_reqs={num_reqs}")
@@ -243,7 +249,8 @@ class CompilationManager:
             dummy_grammar_bitmask = self.runner.grammar_bitmask_cpu[:num_reqs]
 
             (dummy_logits, dummy_require_struct_decoding,
-             dummy_grammar_bitmask, arange) = self.runner._device_array(
+             dummy_grammar_bitmask, arange) = device_array(
+                 self.runner.mesh,
                  (dummy_logits, dummy_require_struct_decoding,
                   dummy_grammar_bitmask, self.runner.structured_decode_arange))
 

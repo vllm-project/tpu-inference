@@ -9,6 +9,7 @@ from vllm.v1.outputs import DraftTokenIds
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
 from tpu_commons.runner import utils as runner_utils
+from tpu_commons.utils import device_array
 
 if TYPE_CHECKING:
     from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
@@ -169,7 +170,8 @@ class SpeculativeDecodingManager:
         # CPU -> TPU copy.
         (padded_num_draft_tokens, padded_draft_token_ids,
          padded_logits_indices, padded_target_logits_indices,
-         padded_bonus_logits_indices) = self.runner._device_array(
+         padded_bonus_logits_indices) = device_array(
+             self.runner.mesh,
              (padded_num_draft_tokens, padded_draft_token_ids,
               padded_logits_indices, padded_target_logits_indices,
               padded_bonus_logits_indices))

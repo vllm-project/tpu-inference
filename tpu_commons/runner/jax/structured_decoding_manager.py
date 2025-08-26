@@ -4,6 +4,8 @@ from typing import TYPE_CHECKING, Tuple
 import jax
 import jax.numpy as jnp
 
+from tpu_commons.utils import device_array
+
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import \
         SchedulerOutput as VllmSchedulerOutput
@@ -81,8 +83,9 @@ class StructuredDecodingManager:
         # the requests that need structured output.
         self.runner.require_structured_out_cpu[struct_out_indices] = True
 
-        (require_structured_out_cpu, grammar_bitmask_cpu,
-         structured_decode_arange) = self.runner._device_array(
+        (require_structured_out_cpu,
+         grammar_bitmask_cpu, structured_decode_arange) = device_array(
+             self.runner.mesh,
              (self.runner.require_structured_out_cpu[:num_reqs],
               self.runner.grammar_bitmask_cpu[:num_reqs],
               self.runner.structured_decode_arange))

@@ -9,7 +9,6 @@ import jaxtyping
 import numpy as np
 import vllm.envs as envs
 from flax import nnx
-from jax.sharding import NamedSharding, PartitionSpec
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import has_kv_transfer_group
 from vllm.forward_context import set_forward_context
@@ -51,7 +50,7 @@ from tpu_commons.runner.jax.speculative_decoding_manager import \
     SpeculativeDecodingManager
 from tpu_commons.runner.jax.structured_decoding_manager import \
     StructuredDecodingManager
-from tpu_commons.utils import make_optimized_mesh
+from tpu_commons.utils import device_array, make_optimized_mesh
 
 logger = init_logger(__name__)
 
@@ -619,9 +618,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         block_tables = block_tables.reshape(-1)
 
         (input_ids, positions, block_tables, query_start_loc, seq_lens,
-         logits_indices, request_distribution) = self._device_array(
-             (input_ids, positions, block_tables, query_start_loc, seq_lens,
-              logits_indices, request_distribution))
+         logits_indices, request_distribution) = device_array(
+             self.mesh, (input_ids, positions, block_tables, query_start_loc,
+                         seq_lens, logits_indices, request_distribution))
 
         return (
             input_ids,
@@ -648,11 +647,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             return None, inputs_embeds
         else:
             return input_ids, None
-
-    def _device_array(self, *args, sharding=None, **kwargs) -> jax.Array:
-        if sharding is None:
-            sharding = NamedSharding(self.mesh, PartitionSpec(None))
-        return jax.device_put(*args, device=sharding, **kwargs)
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         return self.speculative_decoding_manager.take_draft_token_ids()

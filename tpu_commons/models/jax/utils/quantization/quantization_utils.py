@@ -8,12 +8,13 @@ import jax.numpy as jnp
 import qwix
 import yaml
 from flax import nnx
-from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from jax.sharding import Mesh
 
 from tpu_commons import utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.runner.utils import create_kv_caches
+from tpu_commons.utils import device_array
 
 logger = init_logger(__name__)
 
@@ -94,11 +95,6 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
         devices=jax.local_devices(),
     )
 
-    def _device_array(*args, sharding=None, **kwargs) -> jax.Array:
-        if sharding is None:
-            sharding = NamedSharding(mesh, PartitionSpec(None))
-        return jax.device_put(*args, device=sharding, **kwargs)
-
     # NOTE: the inputs don't need to match the actual ones, as long as the consumed weights are the same
     input_ids = jax.random.randint(rng,
                                    (DEFAULT_NUM_TOKENS_FOR_MODEL_INPUTS, ),
@@ -129,10 +125,10 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
     num_seqs = jax.random.randint(rng, (1, ), 0, 100, dtype=jnp.int32)
     request_distribution = jnp.array([0, 0, num_seqs[0]], dtype=jnp.int32)
 
-    (input_ids, positions, block_tables, query_start_loc, seq_lens,
-     request_distribution) = _device_array(
-         (input_ids, positions, block_tables, query_start_loc, seq_lens,
-          request_distribution))
+    (input_ids, positions, block_tables,
+     query_start_loc, seq_lens, request_distribution) = device_array(
+         mesh, (input_ids, positions, block_tables, query_start_loc, seq_lens,
+                request_distribution))
 
     model_input = {
         "kv_caches":
