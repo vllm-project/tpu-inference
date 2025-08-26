@@ -247,9 +247,9 @@ class CompilationManager:
                  (dummy_logits, dummy_require_struct_decoding,
                   dummy_grammar_bitmask, self.runner.structured_decode_arange))
 
-            self.runner.structured_decode_fn(dummy_require_struct_decoding,
-                                             dummy_grammar_bitmask,
-                                             dummy_logits, arange)
+            self.runner.structured_decoding_manager.structured_decode_fn(
+                dummy_require_struct_decoding, dummy_grammar_bitmask,
+                dummy_logits, arange)
             logger.info("  -- num_seqs: %d", num_reqs)
 
         end = time.perf_counter()
