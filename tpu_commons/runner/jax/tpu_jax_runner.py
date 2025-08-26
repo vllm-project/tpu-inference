@@ -44,7 +44,7 @@ from tpu_commons.runner.jax.compilation_manager import CompilationManager
 from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
                                                     InputBatch)
 from tpu_commons.runner.jax.kv_cache_manager import KVCacheManager
-from tpu_commons.runner.jax.mm_manager import MultiModalityManager
+from tpu_commons.runner.jax.multimodal_manager import MultiModalManager
 from tpu_commons.runner.jax.persistent_batch_manager import \
     PersistentBatchManager
 from tpu_commons.runner.jax.speculative_decoding_manager import \
@@ -103,7 +103,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         self.speculative_decoding_manager = SpeculativeDecodingManager(self)
         self.structured_decoding_manager = StructuredDecodingManager(self)
         self.kv_cache_manager = KVCacheManager(self)
-        self.mm_manager = MultiModalityManager(self)
+        self.mm_manager = MultiModalManager(self)
         self.persistent_batch_manager = PersistentBatchManager(
             self.requests, self.input_batch, self.encoder_cache,
             self.uses_mrope, self.model_config)
