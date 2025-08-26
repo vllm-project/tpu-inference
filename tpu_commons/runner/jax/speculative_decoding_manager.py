@@ -1,16 +1,29 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
+import jax.numpy as jnp
 import numpy as np
 from vllm.v1.outputs import DraftTokenIds
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
 from tpu_commons.runner import utils as runner_utils
-from tpu_commons.runner.jax.metadata import SpecDecodeMetadata
 
 if TYPE_CHECKING:
     from tpu_commons.runner.jax.tpu_jax_runner import TPUJaxRunner
+
+
+@dataclass
+class SpecDecodeMetadata:
+    """Metadata for speculative decoding on JAX/TPU, containing all necessary indices."""
+    draft_token_ids: jnp.ndarray
+    draft_lengths: jnp.ndarray
+    draft_lengths_cpu: np.ndarray
+    target_logits_indices: jnp.ndarray
+    bonus_logits_indices: jnp.ndarray
+    final_logits_indices: jnp.ndarray
+    max_spec_len: int
 
 
 class SpeculativeDecodingManager:

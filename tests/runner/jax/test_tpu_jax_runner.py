@@ -16,7 +16,8 @@ from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
 from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
                                                     InputBatch)
-from tpu_commons.runner.jax.metadata import SpecDecodeMetadata
+from tpu_commons.runner.jax.speculative_decoding_manager import \
+    SpecDecodeMetadata
 from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
 
 
