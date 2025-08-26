@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
 
 
-class MultiModalityManager:
+class MultiModalManager:
 
     def __init__(self, runner: "TPUModelRunner"):
         self.runner = runner
