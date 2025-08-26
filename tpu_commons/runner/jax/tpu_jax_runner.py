@@ -84,7 +84,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
         self.device_config = vllm_config.device_config
-        self._verify_chunked_prefill_config()
 
         self.devices = devices
         self.dtype = self.model_config.dtype
@@ -107,13 +106,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         self.persistent_batch_manager = PersistentBatchManager(
             self.requests, self.input_batch, self.encoder_cache,
             self.uses_mrope, self.model_config)
-
-    def _verify_chunked_prefill_config(self):
-        if (self.scheduler_config.max_num_batched_tokens
-                < self.scheduler_config.max_num_seqs):
-            raise ValueError(
-                "max_num_batched_tokens needs to be larger than or equal to max_num_seqs."
-            )
 
     def _init_random(self):
         if self.model_config.seed is None:
