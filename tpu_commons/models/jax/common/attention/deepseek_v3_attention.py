@@ -93,7 +93,7 @@ class MLA(nnx.Module):
             dtype=self.dtype,
             beta_fast=self.rope_scaling["beta_fast"],
             beta_slow=self.rope_scaling["beta_slow"],
-            mscale=self.rope_scaling["mscale"],
+            mscale_value=self.rope_scaling["mscale"],
             mscale_all_dim=self.rope_scaling["mscale_all_dim"],
         )
 
