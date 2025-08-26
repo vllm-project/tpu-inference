@@ -411,10 +411,10 @@ class PhasedBasedProfiler:
             self, batch_composition_stats: dict) -> None:
         """
         Writes the batch composition stats to a file at the given time,
-        e.g.: prefill_heavy/batch_composition_stats_2025_08_22_15_41_41.json
+        e.g.: prefill_heavy/batch_composition_stats_2025_08_22_15_41_41_505018.json
         """
         now = datetime.datetime.now()
-        date_string_in_profiler_format = now.strftime("%Y_%m_%d_%H_%M_%S")
+        date_string_in_profiler_format = now.strftime("%Y_%m_%d_%H_%M_%S_%f")
 
         with open(
                 os.path.join(
