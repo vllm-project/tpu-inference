@@ -14,6 +14,14 @@ from tpu_commons.models.jax import model_loader
 from tpu_commons.models.jax.qwen3 import Qwen3ForCausalLM
 
 
+class MockModelA:
+    pass
+
+
+class MockModelB:
+    pass
+
+
 @pytest.fixture(scope="module")
 def mesh() -> Mesh:
     """Provides a JAX device mesh for sharding."""
@@ -58,6 +66,36 @@ def test_get_model_architecture_unsupported():
     config = PretrainedConfig(architectures=["UnsupportedModel"])
     with pytest.raises(ValueError, match="not supported"):
         model_loader._get_model_architecture(config)
+
+
+@pytest.fixture(autouse=True)
+def clear_model_registry_after_test():
+    """Clear the model registry after each test to prevent side effects."""
+    yield
+    model_loader._MODEL_REGISTRY.clear()
+
+
+def test_register_model_new_arch():
+    """Tests registering a new model architecture."""
+    model_loader.register_model("NewArch", MockModelA)
+    config = PretrainedConfig(architectures=["NewArch"])
+    model_class = model_loader._get_model_architecture(config)
+    assert model_class == MockModelA
+
+
+def test_register_model_update_arch():
+    """Tests updating an existing registered model architecture."""
+    # 1. Register initial model
+    model_loader.register_model("UpdatableArch", MockModelA)
+    config = PretrainedConfig(architectures=["UpdatableArch"])
+    # 2. Verify initial registration
+    model_class_1 = model_loader._get_model_architecture(config)
+    assert model_class_1 == MockModelA
+    # 3. Update the registration
+    model_loader.register_model("UpdatableArch", MockModelB)
+    # 4. Verify the update
+    model_class_2 = model_loader._get_model_architecture(config)
+    assert model_class_2 == MockModelB
 
 
 def test_get_flax_model(vllm_config, mesh):
