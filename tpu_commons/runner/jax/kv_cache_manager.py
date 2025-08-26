@@ -83,20 +83,17 @@ class KVCacheManager:
 
     @staticmethod
     @functools.partial(jax.jit)
-    def _jitted_gather_kv_cache(
-            kv_caches: List[jax.Array],
-            block_ids: jax.Array) -> List[jax.Array]:
+    def _jitted_gather_kv_cache(kv_caches: List[jax.Array],
+                                block_ids: jax.Array) -> List[jax.Array]:
         """
         JIT-compiled function to gather KV cache slices for all layers at once.
         This uses jax.tree.map to apply the operation across all layers.
         """
-        # Define the function to apply to each layer's cache.
-        # The 'block_ids' array is captured from the outer scope.
-        gather_and_reshape = lambda layer_kv_cache: (
-            layer_kv_cache.at[block_ids]
-            .get()
-            .reshape(-1, *layer_kv_cache.shape[2:])
-        )
+
+        def gather_and_reshape(layer_kv_cache):
+            return layer_kv_cache.at[block_ids].get().reshape(
+                -1, *layer_kv_cache.shape[2:])
+
         return jax.tree.map(gather_and_reshape, kv_caches)
 
     @staticmethod
