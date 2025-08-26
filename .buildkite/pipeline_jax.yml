@@ -64,9 +64,18 @@ steps:
            bash -c 'python3 -m pytest -s -v -x /workspace/tpu_commons/tests/e2e/test_multi_modal_inference.py && \
             bash /workspace/tpu_commons/tests/e2e/benchmarking/mm_bench.sh'
 
+   - label: "E2E speculative decoding test"
+     key: test_6
+     soft_fail: true
+     agents:
+       queue: tpu_v6e_queue
+     commands:
+       - |
+         .buildkite/scripts/run_in_docker.sh \
+           bash -c 'python3 -m pytest -s -v -x /workspace/tpu_commons/tests/e2e/test_speculative_decoding.py'
 
    - label: "JAX unit tests"
-     key: test_6
+     key: test_7
      soft_fail: true
      agents:
        queue: tpu_v6e_queue
@@ -80,7 +89,7 @@ steps:
            --cov-config=/workspace/tpu_commons/.coveragerc --cov tpu_commons --cov-report term-missing --cov-fail-under=69
 
    - label: "JAX unit tests - kernels"
-     key: test_7
+     key: test_8
      soft_fail: true
      agents:
        queue: tpu_v6e_queue
@@ -104,9 +113,10 @@ steps:
        - test_5
        - test_6
        - test_7
+       - test_8
      agents:
        queue: tpu_v6e_queue
      commands:
        - |
          .buildkite/scripts/check_results.sh \
-           "TPU JAX Tests Failed" test_0 test_1 test_2 test_3 test_4 test_5 test_6 test_7
+           "TPU JAX Tests Failed" test_0 test_1 test_2 test_3 test_4 test_5 test_6 test_7 test_8
