@@ -120,13 +120,13 @@ class Qwen2Attention(nnx.Module):
         self.actual_num_q_heads_per_kv_head = reshape_map[
             "actual_num_q_heads_per_kv_head"]
         self.q_proj = nnx.Einsum(
-            "TD,DKRCH->KTRCH",
+            "TD,KRCHD->KTRCH",
             (
-                reshape_map["D"],
                 reshape_map["K"],
                 reshape_map["R"],
                 reshape_map["C"],
                 reshape_map["H"],
+                reshape_map["D"],
             ),
             (
                 reshape_map["K"],
@@ -137,7 +137,7 @@ class Qwen2Attention(nnx.Module):
             param_dtype=dtype,
             # TODO(cuiq): How partitioning works???
             kernel_init=nnx.with_partitioning(
-                init_fn, (None, "model", None, None, None)),
+                init_fn, ("model", None, None, None, None)),
             bias_init=nnx.with_partitioning(init_fn,
                                             ("model", None, None, None)),
             rngs=rng,
@@ -451,5 +451,5 @@ class Qwen2ForCausalLM(nnx.Module):
             reshape_mapping["C"],
             reshape_mapping["H"],
         )
-        # KRCHD -> DKRCH
-        metadata_map.transpose_map["q_proj"] = (4, 0, 1, 2, 3)
+        # Don't transpose q_proj
+        del metadata_map.transpose_map["q_proj"]
