@@ -85,20 +85,19 @@ class KVCacheManager:
     @functools.partial(jax.jit)
     def _jitted_gather_kv_cache(
             kv_caches: List[jax.Array],
-            indices_to_gather: jax.Array) -> List[jax.Array]:
+            block_ids: jax.Array) -> List[jax.Array]:
         """
         JIT-compiled function to gather KV cache slices for all layers at once.
-        This fuses the reshape and take operations across all layers into a
-        single efficient kernel.
+        This uses jax.tree.map to apply the operation across all layers.
         """
-        batched_kv_cache_per_layer = []
-        for layer_kv_cache in kv_caches:
-            flat_layer_cache = layer_kv_cache.reshape(
-                -1, *layer_kv_cache.shape[2:])
-            all_gathered_slices = flat_layer_cache.take(indices_to_gather,
-                                                        axis=0)
-            batched_kv_cache_per_layer.append(all_gathered_slices)
-        return batched_kv_cache_per_layer
+        # Define the function to apply to each layer's cache.
+        # The 'block_ids' array is captured from the outer scope.
+        gather_and_reshape = lambda layer_kv_cache: (
+            layer_kv_cache.at[block_ids]
+            .get()
+            .reshape(-1, *layer_kv_cache.shape[2:])
+        )
+        return jax.tree.map(gather_and_reshape, kv_caches)
 
     @staticmethod
     @functools.partial(
@@ -147,17 +146,10 @@ class KVCacheManager:
             A list of JAX arrays, with each array representing the KV cache
             slices for a layer, concatenated for all blocks.
         """
-        all_indices_to_gather = []
-        for block_id in block_ids:
-            start_index = block_id * self.runner.block_size
-            all_indices_to_gather.extend(
-                range(start_index, start_index + self.runner.block_size))
-
-        indices_to_gather_jnp = jnp.array(all_indices_to_gather,
-                                          dtype=jnp.int32)
+        block_ids = jnp.array(block_ids)
         with runner_utils.LatencyTracker("BatchedGatherKVSlices-for-blocks"):
-            batched_kv_cache_per_layer = KVCacheManager._jitted_gather_kv_cache(
-                self.runner.kv_caches, indices_to_gather_jnp)
+            batched_kv_cache_per_layer = self._jitted_gather_kv_cache(
+                self.runner.kv_caches, block_ids)
 
         return batched_kv_cache_per_layer
 
