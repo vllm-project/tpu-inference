@@ -52,6 +52,7 @@ class TestTpuRayDistributedExecutor(unittest.TestCase):
         self.vllm_config = MockVllmConfig()
         # Reset placement group for each test as it might be modified.
         self.vllm_config.parallel_config.placement_group = None
+        self.vllm_config.kv_transfer_config = None
 
     def test_init_executor_basic_flow(self, mock_wait_until_pg_ready,
                                       mock_avail_resources, mock_get_port,

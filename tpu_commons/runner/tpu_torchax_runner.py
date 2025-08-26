@@ -303,6 +303,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 block_ids=new_req_data.block_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
+                mm_hashes=[],
                 lora_request=new_req_data.lora_request,
             )
 
