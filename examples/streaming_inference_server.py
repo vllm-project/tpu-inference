@@ -74,6 +74,14 @@ def run_pubsub_inference(args: dict, llm: LLM, sampling_params: SamplingParams):
         """Callback function to process Pub/Sub messages."""
         try:
             data = json.loads(message.data)
+            subscriber.modify_ack_deadline(
+                request={
+                    "subscription": subscription_path,
+                    "ack_ids": [message.ack_id],
+                    # Must be between 10 and 600.
+                    "ack_deadline_seconds": 600,
+                }
+            )
             prompts = data.get("prompts")
             output_gcs_bucket=data.get("output_gcs_bucket")
             output_gcs_blob=data.get("output_gcs_blob")
