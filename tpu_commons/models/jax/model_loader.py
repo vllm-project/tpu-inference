@@ -59,46 +59,47 @@ def _get_nnx_model(
     mesh: Mesh,
 ) -> nnx.Module:
 
-    use_random_weights = True
-
     def _create_abstract_model() -> nnx.Module:
+        """
+        Helper class to create an abstract model for `nnx.eval_shape`.
+        """
         return model_class(vllm_config, rng, mesh)
 
-    # Apply Qwix quantization to the model factory function.
-    abstract_model_fn = apply_qwix_quantization(vllm_config,
-                                                _create_abstract_model,
-                                                rng,
-                                                mesh,
-                                                apply_to_abstract_model=True)
-
-    # Create the model structure with abstract arrays (and QArrays).
-    model = nnx.eval_shape(abstract_model_fn)
-
-    # Now, populate the weights either randomly or from a checkpoint.
-    if use_random_weights:
-        # New path: Initialize with random weights into the QArray structure.
-        logger.info("Using random weights for abstract-quantized model.")
-        model.init_random_weights(rng)
-    else:
-        # Original path: Load weights from Hugging Face.
-        model.load_weights(rng)
-
-    # JIT the model to finalize sharding and optimize execution.
-    @nnx.jit(donate_argnums=(0, ))
-    def create_jit_model(model):
+    @nnx.jit(donate_argnums=(0, ),
+             static_argnames=('apply_qwix_on_abstract_model', ))
+    def create_jit_model(model, apply_qwix_on_abstract_model=False):
         state = nnx.state(model)
         nnx.update(model, state)
-        # Qwix is already applied, so no need for the concrete pass.
+        if not apply_qwix_on_abstract_model:
+            # NOTE: if Qwix is not configured, this will be a no-op
+            model = apply_qwix_quantization(vllm_config,
+                                            model,
+                                            rng,
+                                            mesh,
+                                            apply_to_abstract_model=False)
         return model
 
-    with mesh:
-        jit_model = create_jit_model(model)
-
-    return
     if os.getenv("JAX_RANDOM_WEIGHTS", False):
         # Create a sharded model with random inited weights.
         # TODO: currently Qwen2ForCausalLM is using legacy model implementation
         # will merge the random init logic when all model are migrated to new model implementation
+        # Handle the DeepSeek case, where we need to run an abstract pass for Qwix first and
+        # then load in the random weights.
+        if determine_whether_to_apply_qwix_on_abstract_model(vllm_config):
+            abstract_model_fn = apply_qwix_quantization(
+                vllm_config,
+                _create_abstract_model,
+                rng,
+                mesh,
+                apply_to_abstract_model=True)
+
+            model = nnx.eval_shape(abstract_model_fn)
+            model.init_random_weights(rng)
+            with mesh:
+                jit_model = create_jit_model(model,
+                                             apply_qwix_on_abstract_model=True)
+            return jit_model
+
         @nnx.jit
         def create_sharded_model():
             model = model_class(vllm_config, rng, mesh)
@@ -129,12 +130,6 @@ def _get_nnx_model(
         # 2. The model loading won't be OOM. Otherwise the normal way will hold
         #    a full model weights after random-init, then duplicate a layer during
         #    the load_weights. This would be easy to OOM if the layer is super large.
-        def _create_abstract_model() -> nnx.Module:
-            """
-            Helper class to create an abstract model for `nnx.eval_shape`.
-            """
-            return model_class(vllm_config, rng, mesh)
-
         abstract_model_fn = _create_abstract_model
         # NOTE: only one of the abstract (this) or or concrete Qwix quantization paths should
         # be taken
@@ -153,21 +148,8 @@ def _get_nnx_model(
         # Although the created model can already work, we still need to jit
         # the model creation again, otherwise the model forward will have
         # non-trivial overhead in PjitFunction.
-        @nnx.jit(donate_argnums=(0, ))
-        def create_jit_model(model):
-            state = nnx.state(model)
-            nnx.update(model, state)
-            if not apply_qwix_on_abstract_model:
-                # NOTE: if Qwix is not configured, this will be a no-op
-                model = apply_qwix_quantization(vllm_config,
-                                                model,
-                                                rng,
-                                                mesh,
-                                                apply_to_abstract_model=False)
-            return model
-
         with mesh:
-            jit_model = create_jit_model(model)
+            jit_model = create_jit_model(model, apply_qwix_on_abstract_model)
     return jit_model
 
 

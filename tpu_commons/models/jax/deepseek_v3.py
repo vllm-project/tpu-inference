@@ -311,7 +311,6 @@ class DeepSeekV3(nnx.Module):
         logger.info(
             "Initializing model with random weights (Qwix FP8 structure)...")
 
-        # Define a function to generate random sharded arrays
         def _get_random_sharded_array(key, param):
             weight = jax.random.normal(key, param.shape, param.dtype)
 
@@ -326,13 +325,12 @@ class DeepSeekV3(nnx.Module):
 
         # Iterate through all variables and initialize them
         for path, param in nnx.iter_graph(state):
-            print(path, param)
-            if not isinstance(param, nnx.Variable):
+            if not isinstance(param, nnx.Variable) or path[0] == 'rng':
                 continue
 
+            # QArray case (qvalue and scale)
             if hasattr(param.value, 'qvalue') and hasattr(
                     param.value, 'scale'):
-                # This is a QArray, initialize both qvalue and scale
                 qvalue_arr = param.value.qvalue
                 scale_arr = param.value.scale
 
@@ -343,7 +341,7 @@ class DeepSeekV3(nnx.Module):
                 scale_arr.value = _get_random_sharded_array(
                     scale_key, scale_arr)
             else:
-                # This is a regular parameter
+                # Regular parameter case
                 param.value = _get_random_sharded_array(
                     self.rng.params(), param)
 
