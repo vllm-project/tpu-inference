@@ -70,7 +70,6 @@ def run_pubsub_inference(args: dict, llm: LLM, sampling_params: SamplingParams):
     storage_client = storage.Client(project=args["project_id"])
 
     def message_callback(message: pubsub_v1.subscriber.message.Message):
-        logging.basicConfig(level=logging.INFO)
         """Callback function to process Pub/Sub messages."""
         try:
             data = json.loads(message.data)
@@ -126,8 +125,12 @@ def run_pubsub_inference(args: dict, llm: LLM, sampling_params: SamplingParams):
             logging.exception(f"Error processing message: {e}")
             message.nack()
 
+    # Limit the concurrency to 1. Otherwise vLLM Ray engine crashes.
+    executor = futures.ThreadPoolExecutor(max_workers=1)
+    # A thread pool-based scheduler. It must not be shared across SubscriberClients.
+    scheduler = pubsub_v1.subscriber.scheduler.ThreadScheduler(executor)
     streaming_pull_future = subscriber.subscribe(
-        subscription_path, callback=message_callback
+        subscription_path, callback=message_callback, scheduler=scheduler
     )
     logging.info(f"Listening for messages on {subscription_path}...")
 
