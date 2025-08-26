@@ -36,6 +36,7 @@ class CompilationManager:
         self._precompile_backbone()
         self._precompile_select_from_array()
         self._precompile_compute_logits()
+        self._precompile_disagg_utils()
         self._precompile_sampling()
         self._precompile_gather_logprobs()
         self._precompile_structured_decoding()
@@ -189,6 +190,35 @@ class CompilationManager:
                 end = time.perf_counter()
                 logger.info("Compilation finished in %.2f [secs].",
                             end - start)
+
+    def _precompile_disagg_utils(self) -> None:
+        logger.info(
+            "Compiling disaggregated util with different input shapes.")
+        block_size = self.runner.block_size
+        for num_blocks in range(1, self.runner.max_num_blocks_per_req//2):
+            logger.info(
+                f"Precompile slice and insert for num_blocks {num_blocks}")
+            start = time.perf_counter()
+            block_numbers = list(range(1, num_blocks + 1))
+            kv_cache_slices = self.runner.kv_cache_manager.get_kv_cache_for_block_ids(
+                block_numbers)
+            block_buckets = [
+                1, 2, 4, 8, 16, 32, 64, self.runner.max_num_blocks_per_req
+            ]
+            import bisect
+            bucket_index = bisect.bisect_left(block_buckets, num_blocks)
+            padded_num_blocks = block_buckets[bucket_index]
+            padding_size = padded_num_blocks - num_blocks
+            block_numbers.extend([0] * padding_size)
+            padded_block_numbers = jnp.array(block_numbers, dtype=jnp.int32)
+            self.runner.kv_caches = self.runner.kv_cache_manager._jitted_insert_kv_cache(
+                block_size,
+                self.runner.kv_caches,
+                kv_cache_slices,
+                padded_block_numbers,
+            )
+            end = time.perf_counter()
+            logger.info("Compilation finished in %.2f [secs].", end - start)
 
     def _precompile_gather_logprobs(self) -> None:
         logger.info("Compiling gather_logprobs with different input shapes.")
