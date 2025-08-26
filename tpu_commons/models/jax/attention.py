@@ -29,7 +29,7 @@ def sharded_ragged_paged_attention(sm_scale: float,
     qkv_spec = P(None, "model", None)
     kv_cache_spec = P()  # replicated
     in_specs = (
-        qkv_spec,  # q
+        P("model", None, None, None, None),  # q
         qkv_spec,  # k
         qkv_spec,  # v
         kv_cache_spec,  # kv cache
