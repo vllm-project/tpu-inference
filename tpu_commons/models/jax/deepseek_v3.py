@@ -493,10 +493,6 @@ class DeepSeekV3WeightLoader:
 
         if scale is not None:
             scale = scale.to(torch.float32).numpy().astype(self.scale_dtype)
-            # TODO: remove
-            logger.info(
-                f"Loaded scale for {name}: {scale.shape} --> {mapped_name} {scale.dtype}"
-            )
 
         # Reshape and transpose weights if necessary.
         weight_np = reshape_params(name, weight_np, self._weight_shape_map)
@@ -566,8 +562,7 @@ class DeepSeekV3WeightLoader:
                                  "scale for " + name)
 
         del weight, scale
-        return model_weight.nbytes / 1e9, model_weight.addressable_shards[
-            0].data.nbytes / 1e9
+        return model_weight_size_bytes, model_weight_local_size_bytes
 
     def load_weights(self, model_for_loading: nnx.Module):
         model_params = nnx.state(model_for_loading)

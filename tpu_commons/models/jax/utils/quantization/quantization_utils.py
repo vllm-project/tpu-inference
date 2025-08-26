@@ -163,7 +163,8 @@ def quantization_config_file_path_to_dict(
     The expected format of the quantization config YAML file is as follows:
     ```yaml
         qwix:
-            use_abstract_model: True (optional, defaults to False if not specified)
+            # optional, defaults to False if not specified
+            use_abstract_model: True
             rules:
                 # NOTE: each entry corresponds to a qwix.QuantizationRule
                 - module_path: '.*attn.*'
@@ -196,7 +197,13 @@ def apply_qwix_quantization(
         apply_to_abstract_model: bool) -> nnx.Module | Callable:
     """
     Will apply quantization if a valid quantization config with Qwix rules is provided.  See README
-    for more details.
+    for more details on Qwix.
+
+    Note that we currently support different methods for applying Qwix quantization.  The typical
+    approach has is to apply quantization on the concrete model, which already has the weights
+    loaded in.  However, for models like DeepSeek, which are already quantized, we need to
+    first create the abstract model, then apply Qwix quantization to the abstract model, and
+    finally load the weights in.
 
     Args:
         vllm_config: the base VLLM config
@@ -285,7 +292,8 @@ def determine_whether_to_apply_qwix_on_abstract_model(
         vllm_config: "VllmConfig") -> bool:
     """
     Determines whether to apply Qwix quantization on the abstract model (e.g. for DeepSeek)
-    or the concrete model.
+    or the concrete model.  See `apply_qwix_quantization` for more details on the differences
+    between these two approaches.
 
     Args:
         vllm_config: the vllm config
