@@ -13,7 +13,7 @@ from jax.sharding import Mesh
 from tpu_commons import utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.runner.utils import create_kv_caches
+from tpu_commons.runner.jax.kv_cache import create_kv_caches
 from tpu_commons.utils import device_array
 
 logger = init_logger(__name__)
