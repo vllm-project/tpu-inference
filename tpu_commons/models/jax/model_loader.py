@@ -58,6 +58,43 @@ def _get_nnx_model(
     rng: jax.Array,
     mesh: Mesh,
 ) -> nnx.Module:
+
+    use_random_weights = True
+
+    def _create_abstract_model() -> nnx.Module:
+        return model_class(vllm_config, rng, mesh)
+
+    # Apply Qwix quantization to the model factory function.
+    abstract_model_fn = apply_qwix_quantization(vllm_config,
+                                                _create_abstract_model,
+                                                rng,
+                                                mesh,
+                                                apply_to_abstract_model=True)
+
+    # Create the model structure with abstract arrays (and QArrays).
+    model = nnx.eval_shape(abstract_model_fn)
+
+    # Now, populate the weights either randomly or from a checkpoint.
+    if use_random_weights:
+        # New path: Initialize with random weights into the QArray structure.
+        logger.info("Using random weights for abstract-quantized model.")
+        model.init_random_weights(rng)
+    else:
+        # Original path: Load weights from Hugging Face.
+        model.load_weights(rng)
+
+    # JIT the model to finalize sharding and optimize execution.
+    @nnx.jit(donate_argnums=(0, ))
+    def create_jit_model(model):
+        state = nnx.state(model)
+        nnx.update(model, state)
+        # Qwix is already applied, so no need for the concrete pass.
+        return model
+
+    with mesh:
+        jit_model = create_jit_model(model)
+
+    return
     if os.getenv("JAX_RANDOM_WEIGHTS", False):
         # Create a sharded model with random inited weights.
         # TODO: currently Qwen2ForCausalLM is using legacy model implementation

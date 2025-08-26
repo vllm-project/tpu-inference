@@ -298,6 +298,58 @@ class DeepSeekV3(nnx.Module):
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         return self.lm_head.decode(hidden_states)
 
+    def init_random_weights(self, rng: PRNGKey):
+        """
+        Initializes the model with random weights, respecting the QArray
+        structure for quantized parameters. This is used when
+        JAX_RANDOM_WEIGHTS is true for models that require abstract
+        quantization (like FP8).
+        """
+        self.rng = nnx.Rngs(rng)
+        state = nnx.state(self)
+
+        logger.info(
+            "Initializing model with random weights (Qwix FP8 structure)...")
+
+        # Define a function to generate random sharded arrays
+        def _get_random_sharded_array(key, param):
+            weight = jax.random.normal(key, param.shape, param.dtype)
+
+            def get_slice(index):
+                return weight[index]
+
+            sharded_array = jax.make_array_from_callback(
+                param.shape, NamedSharding(self.mesh, P(*param.sharding)),
+                get_slice)
+
+            return sharded_array
+
+        # Iterate through all variables and initialize them
+        for path, param in nnx.iter_graph(state):
+            print(path, param)
+            if not isinstance(param, nnx.Variable):
+                continue
+
+            if hasattr(param.value, 'qvalue') and hasattr(
+                    param.value, 'scale'):
+                # This is a QArray, initialize both qvalue and scale
+                qvalue_arr = param.value.qvalue
+                scale_arr = param.value.scale
+
+                qvalue_key, scale_key = jax.random.split(self.rng.fork())
+
+                qvalue_arr.value = _get_random_sharded_array(
+                    qvalue_key, qvalue_arr)
+                scale_arr.value = _get_random_sharded_array(
+                    scale_key, scale_arr)
+            else:
+                # This is a regular parameter
+                param.value = _get_random_sharded_array(
+                    self.rng.params(), param)
+
+        self.initialize_cache()
+        logger.info("Random weight initialization complete.")
+
 
 @dataclass
 class DeepSeekV3WeightLoader:
