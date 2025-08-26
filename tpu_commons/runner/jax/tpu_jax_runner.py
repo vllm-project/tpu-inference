@@ -2,10 +2,9 @@ import functools
 import os
 import random
 from contextlib import nullcontext
-from typing import Any, Callable, Dict, List, Optional, Tuple, cast
+from typing import Any, List, Optional, cast
 
 import jax
-import jaxtyping
 import numpy as np
 import vllm.envs as envs
 from flax import nnx
@@ -37,8 +36,6 @@ from tpu_commons.models.jax.layers.sample.sampling import (compute_logprobs,
 from tpu_commons.models.jax.layers.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_commons.models.jax.model_loader import get_model
-from tpu_commons.models.jax.utils.weight_utils import (
-    shard_put, transfer_state_with_mappings)
 from tpu_commons.runner import utils as runner_utils
 from tpu_commons.runner.jax.compilation_manager import CompilationManager
 from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
@@ -677,26 +674,3 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
     ):
         return self.kv_cache_manager.insert_request_with_kv_cache(
             request, kv_cache_slices, block_ids)
-
-    ###### RL framework integration ######
-
-    def _sync_weights(
-        self,
-        updated_weights: jaxtyping.PyTree,
-        mappings: Dict[str, Tuple[str, Tuple[str]]],
-        transpose_keys: Dict[str, Tuple[int]],
-        reshard_fn: Callable[[jaxtyping.PyTree, jaxtyping.PyTree],
-                             jaxtyping.PyTree] = None
-    ) -> None:
-        """For RL framework integration."""
-        if reshard_fn is not None:
-            updated_weights = reshard_fn(updated_weights, self.state)
-            shard = None
-        else:
-            shard = functools.partial(shard_put, mesh=self.mesh)
-        self.state = transfer_state_with_mappings(
-            src_state=updated_weights,
-            tgt_state=self.state,
-            mappings=mappings,
-            transpose_keys=transpose_keys,
-            shard=shard)
