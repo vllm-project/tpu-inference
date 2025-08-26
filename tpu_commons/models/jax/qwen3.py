@@ -8,6 +8,8 @@ from transformers import Qwen3Config
 from vllm.config import VllmConfig
 
 from tpu_commons import utils
+from tpu_commons.kernels.ragged_paged_attention.v3.util import (
+    align_to, get_dtype_packing)
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention import attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
@@ -21,6 +23,38 @@ from tpu_commons.models.jax.utils.weight_utils import (get_default_maps,
 logger = init_logger(__name__)
 
 init_fn = nnx.initializers.uniform()
+
+
+def _get_reshape_maps(hf_config, dtype):
+    # model_config = vllm_config.model_config
+    # hf_config = model_config.hf_config
+
+    num_heads = hf_config.num_attention_heads
+    num_kv_heads = hf_config.num_key_value_heads
+    hidden_size = hf_config.hidden_size
+    q_packing = get_dtype_packing(dtype)
+    actual_num_q_heads_per_kv_head = num_heads // num_kv_heads
+    num_q_heads_per_kv_head = align_to(actual_num_q_heads_per_kv_head,
+                                       q_packing)
+    head_dim_original = getattr(hf_config, "head_dim",
+                                hidden_size // num_heads)
+    head_dim = utils.get_padded_head_dim(head_dim_original)
+
+    # TODO(cuiq) handle padding instead of not allowing it.
+    assert num_heads % num_kv_heads == 0
+    assert num_q_heads_per_kv_head % q_packing == 0
+    assert head_dim == head_dim_original
+
+    return {
+        "K": num_kv_heads,
+        "N": num_heads,
+        "D": hidden_size,
+        "H": head_dim,
+        "C": q_packing,
+        "R": num_q_heads_per_kv_head // q_packing,
+        "num_q_heads_per_kv_head": num_q_heads_per_kv_head,
+        "actual_num_q_heads_per_kv_head": actual_num_q_heads_per_kv_head,
+    }
 
 
 class Qwen3Attention(nnx.Module):
@@ -45,12 +79,23 @@ class Qwen3Attention(nnx.Module):
                                                        sharding_size)
 
         self.mesh = mesh
+        reshape_map = _get_reshape_maps(config, dtype)
+        self.actual_num_q_heads_per_kv_head = reshape_map[
+            "actual_num_q_heads_per_kv_head"]
 
         self.q_proj = nnx.Einsum(
-            "TD,DNH->TNH",
-            (self.hidden_size, self.num_heads, self.head_dim),
+            "TD,DKRCH->KTRCH",
+            (
+                reshape_map["D"],
+                reshape_map["K"],
+                reshape_map["R"],
+                reshape_map["C"],
+                reshape_map["H"],
+            ),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
+            # TODO(cuiq): How partitioning works???
+            kernel_init=nnx.with_partitioning(
+                init_fn, (None, "model", None, None, None)),
             rngs=rng,
         )
         self.q_norm = nnx.RMSNorm(
@@ -96,8 +141,10 @@ class Qwen3Attention(nnx.Module):
         attention_metadata: AttentionMetadata,
     ) -> Tuple[jax.Array, jax.Array]:
         md = attention_metadata
-        # q: (T, N, H)
+        # q: (K, T, num_q_heads_per_kv_heads_per_packing, packing, H)
         q = self.q_proj(x)
+
+        # TODO(cuiq): does this normal work?
         q = self.q_norm(q)
         q = apply_rope(q, md.input_positions, self.head_dim_original,
                        self.rope_theta, self.rope_scaling)
@@ -116,6 +163,7 @@ class Qwen3Attention(nnx.Module):
             q,
             k,
             v,
+            self.actual_num_q_heads_per_kv_head,
             attention_metadata,
             self.mesh,
             self.head_dim_original,
@@ -274,7 +322,59 @@ class Qwen3ForCausalLM(nnx.Module):
             })
 
         metadata_map = get_default_maps(self.vllm_config, self.mesh, mappings)
+        self.update_medata_maps(metadata_map)
+
         load_hf_weights(vllm_config=self.vllm_config,
                         model=self,
                         metadata_map=metadata_map,
                         mesh=self.mesh)
+
+    def update_medata_maps(self, metadata_map):
+        # place update the map by replace the value directly
+
+        # reshape_keys
+        reshape_mapping = _get_reshape_maps(
+            self.vllm_config.model_config.hf_config,
+            self.vllm_config.model_config.dtype)
+
+        # pre reshape
+        metadata_map.pre_reshape_map["q_proj"] = (
+            reshape_mapping["K"],
+            reshape_mapping["actual_num_q_heads_per_kv_head"],
+            reshape_mapping["H"], reshape_mapping["D"])
+        metadata_map.pre_bias_reshape_map["q_proj.bias"] = (
+            reshape_mapping["K"],
+            reshape_mapping["actual_num_q_heads_per_kv_head"],
+            reshape_mapping["H"],
+        )
+
+        # pre pad
+        metadata_map.pre_pad_map["q_proj"] = (
+            (0, 0),
+            (0, reshape_mapping["num_q_heads_per_kv_head"] -
+             reshape_mapping["actual_num_q_heads_per_kv_head"]),
+            (0, 0),
+            (0, 0),
+        )
+        metadata_map.pre_bias_pad_map["q_proj.bias"] = (
+            (0, 0),
+            (0, reshape_mapping["num_q_heads_per_kv_head"] -
+             reshape_mapping["actual_num_q_heads_per_kv_head"]),
+            (0, 0),
+        )
+
+        # final reshape
+        metadata_map.reshape_map["q_proj"] = (reshape_mapping["K"],
+                                              reshape_mapping["R"],
+                                              reshape_mapping["C"],
+                                              reshape_mapping["H"],
+                                              reshape_mapping["D"])
+
+        metadata_map.bias_reshape_map["q_proj.bias"] = (
+            reshape_mapping["K"],
+            reshape_mapping["R"],
+            reshape_mapping["C"],
+            reshape_mapping["H"],
+        )
+        # KRCHD -> DKRCH
+        metadata_map.transpose_map["q_proj"] = (4, 0, 1, 2, 3)
