@@ -106,7 +106,7 @@ class CompilationManager:
                 logger.info(
                     f"Precompile select_from_array --> {inner_loop_var_name}={outer_loop_val} | "
                     f"num_reqs={num_reqs}")
-                result = self.runner.select_from_array_fn(
+                result = self.runner._select_from_array_fn(
                     input_tensor, indices_to_select)
                 result.block_until_ready()
                 end = time.perf_counter()
