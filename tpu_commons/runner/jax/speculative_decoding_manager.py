@@ -11,7 +11,7 @@ from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from tpu_commons.runner import utils as runner_utils
 
 if TYPE_CHECKING:
-    from tpu_commons.runner.jax.tpu_jax_runner import TPUJaxRunner
+    from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
 
 
 @dataclass
@@ -28,7 +28,7 @@ class SpecDecodeMetadata:
 
 class SpeculativeDecodingManager:
 
-    def __init__(self, runner: TPUJaxRunner):
+    def __init__(self, runner: "TPUModelRunner"):
         self.runner = runner
         # Cached draft tokens.
         self._draft_token_ids: Optional[list[list[int]]] = None

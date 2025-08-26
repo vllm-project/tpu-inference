@@ -5,7 +5,6 @@ from contextlib import nullcontext
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 import jax
-import jax.numpy as jnp
 import jaxtyping
 import numpy as np
 import vllm.envs as envs
@@ -14,10 +13,6 @@ from jax.sharding import NamedSharding, PartitionSpec
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import has_kv_transfer_group
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
-from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils import cdiv
@@ -29,8 +24,6 @@ from vllm.v1.request import Request
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.worker.kv_connector_model_runner_mixin import \
     KVConnectorModelRunnerMixin
-from vllm.v1.worker.utils import (gather_mm_placeholders,
-                                  scatter_mm_placeholders)
 
 from tpu_commons import utils as common_utils
 from tpu_commons.logger import init_logger
@@ -44,8 +37,6 @@ from tpu_commons.models.jax.layers.sample.sampling import (compute_logprobs,
 from tpu_commons.models.jax.layers.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_commons.models.jax.model_loader import get_model
-from tpu_commons.models.jax.utils.multi_modal_utils import \
-    sanity_check_mm_encoder_outputs
 from tpu_commons.models.jax.utils.weight_utils import (
     shard_put, transfer_state_with_mappings)
 from tpu_commons.runner import utils as runner_utils
@@ -53,6 +44,7 @@ from tpu_commons.runner.jax.compilation_manager import CompilationManager
 from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
                                                     InputBatch)
 from tpu_commons.runner.jax.kv_cache_manager import KVCacheManager
+from tpu_commons.runner.jax.mm_manager import MultiModalityManager
 from tpu_commons.runner.jax.persistent_batch_manager import \
     PersistentBatchManager
 from tpu_commons.runner.jax.speculative_decoding_manager import \
@@ -96,39 +88,22 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
 
         self.devices = devices
         self.dtype = self.model_config.dtype
-
-        self.phased_profiling_dir = os.getenv("PHASED_PROFILING_DIR", "")
-        self.phase_based_profiler = None
-        if self.phased_profiling_dir:
-            self.phase_based_profiler = runner_utils.PhasedBasedProfiler(
-                self.phased_profiling_dir)
-
-        # multi-modal related
-        self.is_multimodal_model = None  # Will get updated once the model is loaded.
-        self.mm_registry = MULTIMODAL_REGISTRY
-        self.uses_mrope = self.model_config.uses_mrope
-
-        # Set up speculative decoding.
-        if self.speculative_config:
-            if self.speculative_config.method == "ngram":
-                self.drafter = NgramProposer(self.vllm_config)
-            else:
-                raise NotImplementedError(
-                    "Unsupported speculative decoding method: "
-                    f"{self.speculative_config.method}")
-            self.rejection_sampler = RejectionSampler()
-
-        self._init_random()
-        self._init_mesh()
-        self._init_inputs()
-
         self.maybe_forbid_compile = runner_utils.ForbidCompile(
         ) if envs.VLLM_XLA_CHECK_RECOMPILATION else nullcontext()
 
+        self._init_random()
+        self._init_mesh()
+        self._init_phased_profiling()
+        self._init_mm()
+        self._init_speculative_decoding()
+        self._init_inputs()
+
+        # Delegate functions to specific manager classes.
         self.compilation_manager = CompilationManager(self)
         self.speculative_decoding_manager = SpeculativeDecodingManager(self)
         self.structured_decoding_manager = StructuredDecodingManager(self)
         self.kv_cache_manager = KVCacheManager(self)
+        self.mm_manager = MultiModalityManager(self)
         self.persistent_batch_manager = PersistentBatchManager(
             self.requests, self.input_batch, self.encoder_cache,
             self.uses_mrope, self.model_config)
@@ -174,6 +149,27 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                                             axis_names,
                                             devices=self.devices)
         logger.info(f"Init mesh | mesh={self.mesh}")
+
+    def _init_phased_profiling(self) -> None:
+        self.phased_profiling_dir = os.getenv("PHASED_PROFILING_DIR", "")
+        self.phase_based_profiler = None
+        if self.phased_profiling_dir:
+            self.phase_based_profiler = runner_utils.PhasedBasedProfiler(
+                self.phased_profiling_dir)
+
+    def _init_mm(self) -> None:
+        self.is_multimodal_model = None
+        self.uses_mrope = self.model_config.uses_mrope
+
+    def _init_speculative_decoding(self) -> None:
+        if self.speculative_config:
+            if self.speculative_config.method == "ngram":
+                self.drafter = NgramProposer(self.vllm_config)
+            else:
+                raise NotImplementedError(
+                    "Unsupported speculative decoding method: "
+                    f"{self.speculative_config.method}")
+            self.rejection_sampler = RejectionSampler()
 
     def _init_inputs(self) -> None:
         model_config = self.model_config
@@ -263,10 +259,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         self.mrope_positions_cpu = np.zeros((3, self.max_num_tokens),
                                             dtype=np.int64)
 
-    @functools.partial(jax.jit, static_argnums=(0, ))
-    def select_from_array_fn(self, array, indices_to_select):
-        return array[indices_to_select]
-
     def load_model(self):
         self.model_fn, self.compute_logits_fn, self.get_multimodal_embeddings_fn, self.get_input_embeddings_fn, self.state = get_model(
             self.vllm_config,
@@ -291,232 +283,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         self.kv_cache_manager.initialize_kv_cache(kv_cache_config)
 
-    @staticmethod
-    @functools.partial(jax.jit, static_argnames=("max_logprobs", ))
-    def _compute_and_gather_logprobs(logits, next_tokens, max_logprobs):
-        logprobs = compute_logprobs(logits)
-        return gather_logprobs(logprobs, next_tokens, max_logprobs)
-
     def capture_model(self) -> None:
         self.compilation_manager.capture_model()
-
-    def get_kv_cache_for_block_ids(
-        self,
-        block_ids: List[int],
-    ) -> List[jax.Array]:
-        return self.kv_cache_manager.get_kv_cache_for_block_ids(block_ids)
-
-    def transfer_kv_cache(self,
-                          kv_cache_slices: List[jax.Array]) -> List[jax.Array]:
-        return self.kv_cache_manager.transfer_kv_cache(kv_cache_slices)
-
-    def insert_request_with_kv_cache(
-        self,
-        request: "Request",
-        kv_cache_slices: List[jax.Array],
-        block_ids: List[List[int]],
-    ):
-        return self.kv_cache_manager.insert_request_with_kv_cache(
-            request, kv_cache_slices, block_ids)
-
-    def _calc_mrope_positions(self, scheduler_output: "VllmSchedulerOutput"):
-        mrope_pos_ptr = 0
-        for index, req_id in enumerate(self.input_batch.req_ids):
-            req = self.requests[req_id]
-            assert req.mrope_positions is not None
-
-            num_computed_tokens = \
-                self.input_batch.num_computed_tokens_cpu[index]
-            num_scheduled_tokens = \
-                scheduler_output.num_scheduled_tokens[req_id]
-            num_prompt_tokens = len(req.prompt_token_ids)
-
-            if num_computed_tokens + num_scheduled_tokens > num_prompt_tokens:
-                prompt_part_len = max(0,
-                                      num_prompt_tokens - num_computed_tokens)
-                completion_part_len = max(
-                    0, num_scheduled_tokens - prompt_part_len)
-            else:
-                prompt_part_len = num_scheduled_tokens
-                completion_part_len = 0
-
-            assert num_scheduled_tokens == prompt_part_len + completion_part_len
-
-            if prompt_part_len > 0:
-                # prompt's mrope_positions are pre-computed
-                dst_start = mrope_pos_ptr
-                dst_end = mrope_pos_ptr + prompt_part_len
-                src_start = num_computed_tokens
-                src_end = num_computed_tokens + prompt_part_len
-
-                self.mrope_positions_cpu[:, dst_start:dst_end] = \
-                    req.mrope_positions[:,src_start:src_end]
-
-                mrope_pos_ptr += prompt_part_len
-
-            if completion_part_len > 0:
-                # compute completion's mrope_positions on-the-fly
-                dst_start = mrope_pos_ptr
-                dst_end = mrope_pos_ptr + completion_part_len
-
-                MRotaryEmbedding.get_next_input_positions_tensor(
-                    out=self.mrope_positions_cpu,
-                    out_offset=dst_start,
-                    mrope_position_delta=req.mrope_position_delta,
-                    context_len=num_computed_tokens + prompt_part_len,
-                    num_new_tokens=completion_part_len,
-                )
-
-                mrope_pos_ptr += completion_part_len
-
-    def _execute_mm_encoder(self, scheduler_output: "VllmSchedulerOutput"):
-        import torch
-        scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
-        if not scheduled_encoder_inputs:
-            return
-
-        # Batch the multi-modal inputs.
-        mm_kwargs = list[MultiModalKwargsItem]()
-        # List of tuple (mm_hash, pos_info)
-        mm_hashes_pos = list[tuple[str, PlaceholderRange]]()
-        for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
-            req_state = self.requests[req_id]
-
-            for mm_input_id in encoder_input_ids:
-                mm_hash = req_state.mm_hashes[mm_input_id]
-                mm_kwargs.append(req_state.mm_kwargs[mm_input_id])
-                mm_hashes_pos.append(
-                    (mm_hash, req_state.mm_positions[mm_input_id]))
-
-        # Batch mm inputs as much as we can: if a request in the batch has
-        # multiple modalities or a different modality than the previous one,
-        # we process it separately to preserve item order.
-        # FIXME(ywang96): This is a hacky way to deal with multiple modalities
-        # in the same batch while still being able to benefit from batching
-        # multimodal inputs. The proper solution should be reordering the
-        # encoder outputs.
-        encoder_outputs = []
-        for _, num_items, mm_kwargs_group in group_mm_kwargs_by_modality(
-                mm_kwargs):
-            batched_mm_inputs = mm_kwargs_group
-            # Convert torch tensors to numpy arrays that JAX can handle.
-            if "pixel_values" in batched_mm_inputs and isinstance(
-                    batched_mm_inputs["pixel_values"], list):
-                batched_mm_inputs["pixel_values"] = torch.cat(
-                    batched_mm_inputs["pixel_values"], dim=0)
-
-            image_grid_thw = ()
-            for key, value in batched_mm_inputs.items():
-                if isinstance(value, torch.Tensor):
-                    if key == 'image_grid_thw':
-                        # change it to tuple of tuples to make it hashable for JIT
-
-                        # Shape: (B, N, 3) -> (B*N, 3) -> tuple of tuples
-                        grid_thw_tensor = batched_mm_inputs[key]
-                        grid_thw_reshaped = grid_thw_tensor.reshape(-1, 3)
-                        image_grid_thw = tuple(
-                            tuple(row) for row in grid_thw_reshaped.tolist())
-
-                        continue
-
-                    if value.dtype == torch.bfloat16:
-                        batched_mm_inputs[key] = value.to(
-                            torch.float32).numpy().astype(jnp.bfloat16)
-                    else:
-                        batched_mm_inputs[key] = value.numpy()
-            batched_mm_inputs.pop('image_grid_thw')
-
-            # Run the encoder.
-            # `curr_group_outputs` is either of the following:
-            # 1. A tensor of shape (num_items, feature_size, hidden_size)
-            # in case feature_size is fixed across all multimodal items.
-            # 2. A list or tuple (length: num_items) of tensors, each of shape
-            # (feature_size, hidden_size) in case the feature size is dynamic
-            # depending on the input multimodal items.
-            curr_group_outputs = self.get_multimodal_embeddings_fn(
-                self.state, image_grid_thw, **batched_mm_inputs)
-
-            sanity_check_mm_encoder_outputs(
-                curr_group_outputs,
-                expected_num_items=num_items,
-            )
-
-            for output in curr_group_outputs:
-                encoder_outputs.append(output)
-
-        # Cache the encoder outputs.
-        for (mm_hash, pos_info), output in zip(
-                mm_hashes_pos,
-                encoder_outputs,
-        ):
-            if req_id not in self.encoder_cache:
-                self.encoder_cache[req_id] = {}
-
-            self.encoder_cache[mm_hash] = scatter_mm_placeholders(
-                output,
-                is_embed=pos_info.is_embed,
-            )
-
-    def _gather_mm_embeddings(
-        self,
-        scheduler_output: "VllmSchedulerOutput",
-    ) -> list[jax.Array]:
-        mm_embeds: list[jax.Array] = []
-        for req_id in self.input_batch.req_ids:
-            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
-                req_id]
-            req_state = self.requests[req_id]
-            num_computed_tokens = req_state.num_computed_tokens
-            mm_positions = req_state.mm_positions
-            mm_hashes = req_state.mm_hashes
-            for i, pos_info in enumerate(mm_positions):
-                start_pos = pos_info.offset
-                num_encoder_tokens = pos_info.length
-
-                # The encoder output is needed if the two ranges overlap:
-                # [num_computed_tokens,
-                #  num_computed_tokens + num_scheduled_tokens) and
-                # [start_pos, start_pos + num_encoder_tokens)
-                if start_pos >= num_computed_tokens + num_scheduled_tokens:
-                    # The encoder output is not needed in this step.
-                    break
-                if start_pos + num_encoder_tokens <= num_computed_tokens:
-                    # The encoder output is already processed and stored
-                    # in the decoder's KV cache.
-                    continue
-
-                start_idx = max(num_computed_tokens - start_pos, 0)
-                end_idx = min(
-                    num_computed_tokens - start_pos + num_scheduled_tokens,
-                    num_encoder_tokens)
-                assert start_idx < end_idx
-                mm_hash = mm_hashes[i]
-                encoder_output = self.encoder_cache.get(mm_hash, None)
-                assert encoder_output is not None,\
-                      f"Encoder cache miss for {mm_hash}."
-                encoder_output = self.encoder_cache[mm_hash]
-
-                if (is_embed := pos_info.is_embed) is not None:
-                    is_embed = is_embed[start_idx:end_idx]
-
-                mm_embeds_item = gather_mm_placeholders(
-                    encoder_output[start_idx:end_idx],
-                    is_embed=is_embed,
-                )
-                mm_embeds.append(mm_embeds_item)
-        return mm_embeds
-
-    def _get_input_ids_embeds(self, input_ids: jax.Array,
-                              mm_embeds: list[jax.Array]):
-        if self.is_multimodal_model:
-            inputs_embeds = self.get_input_embeddings_fn(
-                self.state,
-                input_ids=input_ids,
-                multimodal_embeddings=mm_embeds,
-            )
-            return None, inputs_embeds
-        else:
-            return input_ids, None
 
     def execute_model(
         self,
@@ -554,8 +322,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.
             # We have the modality embeds at this time.
-            self._execute_mm_encoder(scheduler_output)
-            mm_embeds = self._gather_mm_embeddings(scheduler_output)
+            self.mm_manager.execute_mm_encoder(scheduler_output)
+            mm_embeds = self.mm_manager.gather_mm_embeddings(scheduler_output)
         else:
             mm_embeds = []
 
@@ -591,8 +359,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                     inputs_embeds,
                 )
 
-            hidden_states = self.select_from_array_fn(hidden_states,
-                                                      logits_indices)
+            hidden_states = self._select_from_array_fn(hidden_states,
+                                                       logits_indices)
             logits = self.compute_logits_fn(self.state, hidden_states)
             if scheduler_output.grammar_bitmask is not None:
                 (
@@ -614,7 +382,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                     tpu_sampling_metadata,
                 )
             else:
-                bonus_logits = self.select_from_array_fn(
+                bonus_logits = self._select_from_array_fn(
                     logits, spec_decode_metadata.bonus_logits_indices)
                 bonus_token_ids = sample(
                     self.rng_params_for_sampling,
@@ -622,7 +390,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                     bonus_logits,
                     tpu_sampling_metadata,
                 )
-                target_logits = self.select_from_array_fn(
+                target_logits = self._select_from_array_fn(
                     logits, spec_decode_metadata.target_logits_indices)
                 next_tokens = self.rejection_sampler(
                     draft_token_ids=spec_decode_metadata.draft_token_ids,
@@ -726,8 +494,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         )
         return attn_metadata, model_runner_output
 
-    def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
-        return self.speculative_decoding_manager.take_draft_token_ids()
+    @functools.partial(jax.jit, static_argnums=(0, ))
+    def _select_from_array_fn(self, array, indices_to_select):
+        return array[indices_to_select]
+
+    @staticmethod
+    @functools.partial(jax.jit, static_argnames=("max_logprobs", ))
+    def _compute_and_gather_logprobs(logits, next_tokens, max_logprobs):
+        logprobs = compute_logprobs(logits)
+        return gather_logprobs(logprobs, next_tokens, max_logprobs)
 
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -770,7 +545,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
-            self._calc_mrope_positions(scheduler_output)
+            self.mm_manager.calc_mrope_positions(scheduler_output)
 
         # Get token indices.
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
@@ -870,10 +645,48 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             spec_decode_metadata,
         )
 
+    def _get_input_ids_embeds(self, input_ids: jax.Array,
+                              mm_embeds: list[jax.Array]):
+        if self.is_multimodal_model:
+            inputs_embeds = self.get_input_embeddings_fn(
+                self.state,
+                input_ids=input_ids,
+                multimodal_embeddings=mm_embeds,
+            )
+            return None, inputs_embeds
+        else:
+            return input_ids, None
+
     def _device_array(self, *args, sharding=None, **kwargs) -> jax.Array:
         if sharding is None:
             sharding = NamedSharding(self.mesh, PartitionSpec(None))
         return jax.device_put(*args, device=sharding, **kwargs)
+
+    def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
+        return self.speculative_decoding_manager.take_draft_token_ids()
+
+    ###### Local disagg utilities ######
+
+    def get_kv_cache_for_block_ids(
+        self,
+        block_ids: List[int],
+    ) -> List[jax.Array]:
+        return self.kv_cache_manager.get_kv_cache_for_block_ids(block_ids)
+
+    def transfer_kv_cache(self,
+                          kv_cache_slices: List[jax.Array]) -> List[jax.Array]:
+        return self.kv_cache_manager.transfer_kv_cache(kv_cache_slices)
+
+    def insert_request_with_kv_cache(
+        self,
+        request: "Request",
+        kv_cache_slices: List[jax.Array],
+        block_ids: List[List[int]],
+    ):
+        return self.kv_cache_manager.insert_request_with_kv_cache(
+            request, kv_cache_slices, block_ids)
+
+    ###### RL framework integration ######
 
     def _sync_weights(
         self,
@@ -883,6 +696,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         reshard_fn: Callable[[jaxtyping.PyTree, jaxtyping.PyTree],
                              jaxtyping.PyTree] = None
     ) -> None:
+        """For RL framework integration."""
         if reshard_fn is not None:
             updated_weights = reshard_fn(updated_weights, self.state)
             shard = None

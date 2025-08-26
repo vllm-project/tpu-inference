@@ -396,7 +396,7 @@ class TestTPUJaxRunner:
         self.mock_get_mm_embed_fn.return_value = (dummy_embedding, )
 
         # 2. ===== Act =====
-        self.runner._execute_mm_encoder(mock_scheduler_output)
+        self.runner.mm_manager.execute_mm_encoder(mock_scheduler_output)
 
         # 3. ===== Assert =====
         # Check if encoder_cache is populated correctly
@@ -500,7 +500,7 @@ class TestTPUJaxRunner:
         self.mock_get_mm_embed_fn.return_value = (emb_1, emb_2)
 
         # 2. ===== Act =====
-        self.runner._execute_mm_encoder(mock_scheduler_output)
+        self.runner.mm_manager.execute_mm_encoder(mock_scheduler_output)
 
         # 3. ===== Assert =====
         assert "req-1" in self.runner.encoder_cache
@@ -577,7 +577,7 @@ class TestTPUJaxRunner:
         mock_scheduler_output_1 = MagicMock(spec=VllmSchedulerOutput)
         mock_scheduler_output_1.num_scheduled_tokens = {req_id: 20}
 
-        gathered_embeds_1 = self.runner._gather_mm_embeddings(
+        gathered_embeds_1 = self.runner.mm_manager.gather_mm_embeddings(
             mock_scheduler_output_1)
 
         assert len(gathered_embeds_1) == 1
@@ -590,7 +590,7 @@ class TestTPUJaxRunner:
         mock_scheduler_output_2 = MagicMock(spec=VllmSchedulerOutput)
         mock_scheduler_output_2.num_scheduled_tokens = {req_id: 30}
 
-        gathered_embeds_2 = self.runner._gather_mm_embeddings(
+        gathered_embeds_2 = self.runner.mm_manager.gather_mm_embeddings(
             mock_scheduler_output_2)
 
         assert len(gathered_embeds_2) == 1
@@ -603,7 +603,7 @@ class TestTPUJaxRunner:
         mock_scheduler_output_3 = MagicMock(spec=VllmSchedulerOutput)
         mock_scheduler_output_3.num_scheduled_tokens = {req_id: 30}
 
-        gathered_embeds_3 = self.runner._gather_mm_embeddings(
+        gathered_embeds_3 = self.runner.mm_manager.gather_mm_embeddings(
             mock_scheduler_output_3)
 
         assert len(gathered_embeds_3) == 1
@@ -705,7 +705,7 @@ class TestTPUJaxRunner:
         with patch.object(MRotaryEmbedding,
                           "get_next_input_positions_tensor") as mock_get_next:
             # 2. ===== Act =====
-            self.runner._calc_mrope_positions(mock_scheduler_output)
+            self.runner.mm_manager.calc_mrope_positions(mock_scheduler_output)
 
             # 3. ===== Assert =====
             # The first 5 positions should be copied from the pre-computed prompt positions
