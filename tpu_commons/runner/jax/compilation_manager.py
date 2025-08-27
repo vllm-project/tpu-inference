@@ -85,19 +85,26 @@ class CompilationManager:
         self,
         name: str,
         outer_paddings: List[int],
+        inner_paddings: List[int],
         input_shape_fn: Callable[[int], Tuple[int, ...]],
         input_dtype: Any,
         sharding: Optional[NamedSharding] = None,
-        inner_loop_var_name: str = "num_tokens",
+        outer_loop_var_name: str = "num_tokens",
+        inner_loop_var_name: str = "num_reqs",
+        only_equal_paddings: bool = False,
     ) -> None:
         logger.info(f"Compiling select_from_array for {name}.")
         for outer_loop_val in outer_paddings:
-            for num_reqs in self.runner.num_reqs_paddings:
-                if num_reqs > outer_loop_val:
+            for inner_loop_val in inner_paddings:
+                if only_equal_paddings:
+                    if inner_loop_val != outer_loop_val:
+                        continue
+                elif inner_loop_val > outer_loop_val:
                     continue
                 input_tensor = jnp.ones(input_shape_fn(outer_loop_val),
                                         dtype=input_dtype)
-                indices_to_select = jnp.ones((num_reqs, ), dtype=jnp.int32)
+                indices_to_select = jnp.ones((inner_loop_val, ),
+                                             dtype=jnp.int32)
                 if sharding:
                     input_tensor = device_array(self.runner.mesh,
                                                 input_tensor,
@@ -108,8 +115,8 @@ class CompilationManager:
                                                  indices_to_select)
                 start = time.perf_counter()
                 logger.info(
-                    f"Precompile select_from_array --> {inner_loop_var_name}={outer_loop_val} | "
-                    f"num_reqs={num_reqs}")
+                    f"Precompile select_from_array --> {outer_loop_var_name}={outer_loop_val} | "
+                    f"{inner_loop_var_name}={inner_loop_val}")
                 result = self.runner._select_from_array_fn(
                     input_tensor, indices_to_select)
                 result.block_until_ready()
@@ -121,30 +128,56 @@ class CompilationManager:
         logger.info("Compiling select_from_array with different input shapes.")
         hsize = self.runner.model_config.get_hidden_size()
 
+        if self.runner.speculative_config:
+            index_paddings = self.runner.num_logits_paddings
+            index_var_name = "num_logits"
+        else:
+            index_paddings = self.runner.num_reqs_paddings
+            index_var_name = "num_reqs"
+
         self._precompile_select_from_array_helper(
-            name="regular hidden states",
+            name="[Spec Decoding] select all logits",
             outer_paddings=self.runner.num_tokens_paddings,
+            inner_paddings=index_paddings,
             input_shape_fn=lambda num_tokens: (num_tokens, hsize),
             input_dtype=jnp.bfloat16,
-            inner_loop_var_name="num_tokens",
+            sharding=NamedSharding(self.runner.mesh, PartitionSpec(None,
+                                                                   None)),
+            outer_loop_var_name="num_tokens",
+            inner_loop_var_name=index_var_name,
         )
 
         if self.runner.speculative_config:
             vocab_size = self.runner.model_config.get_vocab_size()
             self._precompile_select_from_array_helper(
-                name="speculative decoding",
+                name="[Spec Decoding] select bonus tokens",
                 outer_paddings=self.runner.num_logits_paddings,
+                inner_paddings=self.runner.num_reqs_paddings,
                 input_shape_fn=lambda num_logits: (num_logits, vocab_size),
                 input_dtype=jnp.bfloat16,
                 sharding=NamedSharding(self.runner.mesh,
                                        PartitionSpec(None, "model")),
+                outer_loop_var_name="num_logits",
+                inner_loop_var_name="num_reqs",
+            )
+            self._precompile_select_from_array_helper(
+                name="[Spec Decoding] select target tokens",
+                outer_paddings=self.runner.num_logits_paddings,
+                inner_paddings=self.runner.num_logits_paddings,
+                input_shape_fn=lambda num_logits: (num_logits, vocab_size),
+                input_dtype=jnp.bfloat16,
+                sharding=NamedSharding(self.runner.mesh,
+                                       PartitionSpec(None, "model")),
+                outer_loop_var_name="num_logits",
                 inner_loop_var_name="num_logits",
+                only_equal_paddings=True,
             )
 
     def _precompile_compute_logits(self) -> None:
         logger.info("Compiling compute_logits with different input shapes.")
         hsize = self.runner.model_config.get_hidden_size()
-        for num_reqs in self.runner.num_reqs_paddings:
+        leading_shape = self.runner.num_reqs_paddings if not self.runner.speculative_config else self.runner.num_logits_paddings
+        for num_reqs in leading_shape:
             hidden_states = jnp.ones((num_reqs, hsize), dtype=jnp.bfloat16)
             hidden_states = device_array(self.runner.mesh, hidden_states)
             logger.info(f"Precompile compute_logits --> num_reqs={num_reqs}")
@@ -195,7 +228,7 @@ class CompilationManager:
         logger.info(
             "Compiling disaggregated util with different input shapes.")
         block_size = self.runner.block_size
-        for num_blocks in range(1, self.runner.max_num_blocks_per_req//2):
+        for num_blocks in range(1, self.runner.max_num_blocks_per_req // 2):
             logger.info(
                 f"Precompile slice and insert for num_blocks {num_blocks}")
             start = time.perf_counter()
