@@ -1,4 +1,4 @@
-from typing import Any, List
+from typing import List
 
 import jax
 import jax.numpy as jnp
@@ -20,7 +20,6 @@ def create_kv_caches(
     head_size: int,
     mesh: Mesh,
     layer_names: List[str],
-    devices: List[Any],
 ) -> List[jax.Array]:
     """
     Creates the KV caches, a list of arrays, each array is for one attention layer.
@@ -37,7 +36,6 @@ def create_kv_caches(
         head_size: The size of each head in the KV cache.
         mesh: The mesh to shard the KV caches across.
         layer_names: The names of the decoder layers in the model.
-        devices: The devices to shard the KV caches across.
 
     Returns:
         A list of KV caches, one per each decoder layer in the model.
@@ -75,5 +73,5 @@ def create_kv_caches(
         f"shape={len(layer_names)} * {shard_cnt} * {cache_shape_per_shard} | "
         f"sharding={sharding} | "
         f"dtype={cache_dtype} | "
-        f"hbm={utils.hbm_usage_gb(devices)}Gb")
+        f"hbm={utils.hbm_usage_gb(mesh.devices.flatten())}Gb")
     return kv_caches

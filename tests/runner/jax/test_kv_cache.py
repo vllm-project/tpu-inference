@@ -25,7 +25,6 @@ def test_create_kv_caches(mesh: Mesh):
     num_kv_heads = 8
     head_size = 128
     layer_names = ["decoder.0", "decoder.1", "decoder.2"]  # Test with 3 layers
-    devices = jax.devices()
 
     expected_sharding = NamedSharding(mesh, PartitionSpec())
     expected_dtype = jnp.bfloat16
@@ -44,7 +43,6 @@ def test_create_kv_caches(mesh: Mesh):
             head_size=head_size,
             mesh=mesh,
             layer_names=layer_names,
-            devices=devices,
         )
 
         assert isinstance(kv_caches, list)
