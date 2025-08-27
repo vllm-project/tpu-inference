@@ -15,9 +15,6 @@ def get_tpu_worker_cls(worker_type=None):
     if worker_type == "jax":
         from tpu_commons.worker.tpu_worker_jax import TPUWorker
         return TPUWorker
-    elif worker_type == "torchax":
-        from tpu_commons.worker.tpu_worker_torchax import TPUWorker
-        return TPUWorker
     else:
         raise ValueError(f"Unknown TPU worker type: {worker_type}")
 
