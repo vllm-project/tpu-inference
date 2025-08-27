@@ -133,7 +133,7 @@ class TestQwixQuantizeNnxModel(unittest.TestCase):
                 "tpu_commons.models.jax.utils.quantization.quantization_utils.init_logger",
                 return_value=MagicMock()
         ), patch(
-                "tpu_commons.runner.utils.utils.hbm_usage_gb",
+                "tpu_commons.utils.hbm_usage_gb",
                 return_value=[(0.0, 0.0), (0.0, 0.0)]
         ), patch(
                 "tpu_commons.models.jax.utils.quantization.quantization_utils.create_kv_caches",

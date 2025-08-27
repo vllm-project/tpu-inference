@@ -10,7 +10,8 @@ import numpy as np
 import vllm.envs as envs
 from flax import nnx
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer import has_kv_transfer_group
+from vllm.distributed.kv_transfer import (get_kv_transfer_group,
+                                          has_kv_transfer_group)
 from vllm.forward_context import set_forward_context
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
@@ -272,7 +273,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         return self.kv_cache_manager.get_kv_cache_spec()
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+        self.kv_caches = []
         self.kv_cache_manager.initialize_kv_cache(kv_cache_config)
+        if has_kv_transfer_group():
+            get_kv_transfer_group().register_runner(self)
 
     def capture_model(self) -> None:
         self.compilation_manager.capture_model()

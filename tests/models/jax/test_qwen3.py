@@ -11,7 +11,7 @@ from vllm.config import ModelConfig
 
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.qwen3 import Qwen3ForCausalLM
-from tpu_commons.runner import utils as runner_utils
+from tpu_commons.runner.jax.kv_cache import create_kv_caches
 
 
 class MockVllmConfig:
@@ -125,14 +125,13 @@ class TestQwen3ForCausalLM:
         model.load_weights(rng)
 
         # Test model forward
-        kv_caches = runner_utils.create_kv_caches(
+        kv_caches = create_kv_caches(
             num_blocks=4,
             block_size=32,
             num_kv_heads=num_kv_heads,
             head_size=head_dim,
             mesh=mesh,
             layer_names=["layer"] * hf_config.num_hidden_layers,
-            devices=mesh.devices[0],
         )
         # 1 seq with 16 tokens
         input_ids, attention_metadata, indices_do_sample = mock_model_inputs

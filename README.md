@@ -113,7 +113,6 @@ To switch different backends (default is jax):
 
 ```
 TPU_BACKEND_TYPE=jax
-TPU_BACKEND_TYPE=torchax
 TPU_BACKEND_TYPE=pytorch_xla
 ```
 
@@ -207,27 +206,6 @@ docker run \
   --model=meta-llama/Llama-3.1-8B \
   --tensor_parallel_size=4 \
   --max_model_len=1024 \
-```
-
-## Torchax Guide
-
-**NOTE**: This is under development so the run may fail.
-
-### Install dependencies
-
-#### Install `vLLM`
-
-Follow the above [step](#install-vllm-tpu) to install vllm for TPU backend.
-
-#### Install `tpu_commons`
-
-Follow the above step to install [tpu_commons](#install-tpu_commons)
-
-### Run example script
-
-```
-cd vllm
-TPU_BACKEND_TYPE=torchax VLLM_TORCHAX_ENABLED=1 VLLM_USE_V1=1 python examples/offline_inference/tpu.py
 ```
 
 ## How to test kernel?

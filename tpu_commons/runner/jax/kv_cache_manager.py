@@ -5,8 +5,6 @@ import jax
 import jax.numpy as jnp
 import torch
 from jax.sharding import NamedSharding, PartitionSpec
-from vllm.distributed.kv_transfer import (get_kv_transfer_group,
-                                          has_kv_transfer_group)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 
@@ -14,6 +12,7 @@ from tpu_commons import utils as common_utils
 from tpu_commons.logger import init_logger
 from tpu_commons.runner import utils as runner_utils
 from tpu_commons.runner.jax.input_batch_jax import CachedRequestState
+from tpu_commons.runner.jax.kv_cache import create_kv_caches
 
 if TYPE_CHECKING:
     from vllm.v1.request import Request
@@ -56,8 +55,6 @@ class KVCacheManager:
         return kv_cache_spec
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
-        self.runner.kv_caches: List[jax.Array] = []
-
         kv_cache_groups = kv_cache_config.kv_cache_groups
         if len(kv_cache_groups) > 1:
             raise NotImplementedError(
@@ -68,18 +65,14 @@ class KVCacheManager:
         layer_names = kv_cache_groups[0].layer_names
 
         # NOTE: we'll multiply the num_kv_heads by 2 in the function
-        self.runner.kv_caches = runner_utils.create_kv_caches(
+        self.runner.kv_caches = create_kv_caches(
             num_blocks=kv_cache_config.num_blocks,
             block_size=kv_cache_spec.block_size,
             num_kv_heads=kv_cache_spec.num_kv_heads,
             head_size=kv_cache_spec.head_size,
             mesh=self.runner.mesh,
             layer_names=layer_names,
-            devices=self.runner.devices,
         )
-
-        if has_kv_transfer_group():
-            get_kv_transfer_group().register_runner(self.runner)
 
     @staticmethod
     @functools.partial(jax.jit)

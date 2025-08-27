@@ -13,7 +13,7 @@ from jax.sharding import Mesh
 from tpu_commons import utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.runner.utils import create_kv_caches
+from tpu_commons.runner.jax.kv_cache import create_kv_caches
 from tpu_commons.utils import device_array
 
 logger = init_logger(__name__)
@@ -92,7 +92,6 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
         head_size=kv_cache_head_size,
         mesh=mesh,
         layer_names=[f"layer.{i}" for i in range(num_hidden_layers)],
-        devices=jax.local_devices(),
     )
 
     # NOTE: the inputs don't need to match the actual ones, as long as the consumed weights are the same

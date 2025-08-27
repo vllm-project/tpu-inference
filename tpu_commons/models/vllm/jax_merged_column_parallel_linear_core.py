@@ -179,7 +179,7 @@ class JaxMergedColumnParallelLinearCore(torch.nn.Module):
 
         n_shards = self.mesh.shape['model']
         split_outputs = slice_sharded_tensor_for_concatenation(
-            output, self.output_sizes, n_shards, self.mesh)
+            output, self.output_sizes, n_shards)
         if self.gather_output:
             split_outputs = [
                 jax.lax.with_sharding_constraint(t,
@@ -195,7 +195,7 @@ class JaxMergedColumnParallelLinearCore(torch.nn.Module):
             output_bias = None
         else:
             split_biases = slice_sharded_tensor_for_concatenation(
-                self.bias, self.output_sizes, n_shards, self.mesh)
+                self.bias, self.output_sizes, n_shards)
             output_bias = torch_view(jnp.concatenate(split_biases, axis=-1))
         return output, output_bias
 

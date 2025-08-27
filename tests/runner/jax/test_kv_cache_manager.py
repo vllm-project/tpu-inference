@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 import jax.numpy as jnp
 import numpy as np
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig, SpeculativeConfig, VllmConfig)
+                         SchedulerConfig, VllmConfig)
 from vllm.sampling_params import SamplingType
 from vllm.v1.request import Request
 
@@ -40,17 +40,11 @@ class TestKVCacheManager:
                 tensor_parallel_size=1,
                 worker_use_ray=False,
             )
-            speculative_config = SpeculativeConfig(
-                model='ngram',
-                num_speculative_tokens=5,
-                prompt_lookup_max=4,
-            )
             vllm_config = VllmConfig(
                 model_config=model_config,
                 cache_config=cache_config,
                 scheduler_config=scheduler_config,
                 parallel_config=parallel_config,
-                speculative_config=speculative_config,
                 observability_config=None,
                 additional_config={},
             )
