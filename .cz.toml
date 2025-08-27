@@ -1,0 +1,8 @@
+[tool.commitizen]
+name = "cz_customize"
+
+[tool.commitizen.customize]
+message_template = "{{change_type}} {{message}}"
+example = "[Core] Add a new function for TPU runner"
+schema = "[tag] <description>"
+schema_pattern = "^\\[(Core|Kernel|Feature|CI|Doc|Model|Misc)\\]\\s.*"

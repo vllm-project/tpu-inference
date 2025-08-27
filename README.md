@@ -27,7 +27,7 @@ pip install -e .
 pip install pre-commit
 
 # Linting, formatting and static type checking
-pre-commit install --hook-type pre-commit --hook-type commit-msg
+pre-commit install --hook-type pre-commit --hook-type commit-msg --hook-type pre-push
 
 # You can manually run pre-commit with
 pre-commit run --all-files
