@@ -279,7 +279,6 @@ class CompilationManager:
         for num_blocks in range(1, self.runner.max_num_blocks_per_req // 2):
             logger.info(
                 f"Precompile slice and insert for num_blocks {num_blocks}")
-            start = time.perf_counter()
             block_numbers = list(range(1, num_blocks + 1))
             kv_cache_slices = self.runner.kv_cache_manager.get_kv_cache_for_block_ids(
                 block_numbers)
@@ -288,7 +287,6 @@ class CompilationManager:
                 self.runner.kv_caches,
                 kv_cache_slices,
                 block_numbers[0],
-
             )
 
     def _precompile_gather_logprobs(self) -> None:

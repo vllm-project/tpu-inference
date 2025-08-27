@@ -182,13 +182,11 @@ class _DisaggOrchestrator:
                         request = self._requests[req_id]
                         block_ids = (prefill_engine.scheduler.kv_cache_manager.
                                      get_block_ids(req_id))
-                        with LatencyTracker(
-                                f"ExtractKVCache-{req_id}-{block_ids}"):
-                            # Assume one KV cache group for now.
-                            kv_cache_map[req_id] = (
-                                prefill_engine.model_executor.driver_worker.
-                                model_runner.get_kv_cache_for_block_ids(
-                                    block_ids[0]), request.block_hashes)
+                        # Assume one KV cache group for now.
+                        kv_cache_map[req_id] = (
+                            prefill_engine.model_executor.driver_worker.
+                            model_runner.get_kv_cache_for_block_ids(
+                                block_ids[0]), request.block_hashes)
                         logger.debug(f"prefill done: for {req_id}")
                 transfer_backlog.put(kv_cache_map, block=True)
 
@@ -325,9 +323,8 @@ class _DisaggOrchestrator:
                 assert (len(new_block_ids[0]) == math.ceil(
                     prompt_tokens / self._config.cache_config.block_size))
 
-                with LatencyTracker(f"KVCacheInsert-{len(new_block_ids[0])}"):
-                    decode_engine.model_executor.driver_worker.model_runner.insert_request_with_kv_cache(
-                        vllm_request, kv_cache, new_block_ids)
+                decode_engine.model_executor.driver_worker.model_runner.insert_request_with_kv_cache(
+                    vllm_request, kv_cache, new_block_ids)
 
                 vllm_request.status = RequestStatus.RUNNING
                 block_hashes = prefill_output["block_hashes"]
@@ -339,10 +336,10 @@ class _DisaggOrchestrator:
 
             scheduler_output = decode_engine.scheduler.schedule()
 
-            logger.info(f'''decode-{idx}: scheduler_output -
+            logger.debug(f'''decode-{idx}: scheduler_output -
                 {scheduler_output.scheduled_cached_reqs.num_computed_tokens},
                 new block ids - {scheduler_output.scheduled_cached_reqs.new_block_ids}'''
-                        )
+                         )
 
             with LatencyTracker(f"decode-{idx}"):
                 model_output = decode_engine.execute_model_with_error_logging(
@@ -488,7 +485,8 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
                 logger.info("Waiting for READY message from DP Coordinator...")
 
         if (self.vllm_config.cache_config.enable_prefix_caching
-                or self.scheduler.get_kv_connector() is not None):
+                or self._prefill_engines[0].scheduler.get_kv_connector()
+                is not None):
 
             block_size = vllm_config.cache_config.block_size
             caching_hash_fn = get_hash_fn_by_name(
