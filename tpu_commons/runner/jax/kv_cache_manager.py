@@ -264,8 +264,7 @@ class KVCacheManager:
             start_block = block_numbers[0]
             with runner_utils.LatencyTracker(
                     f"JittedInsertContinuousKVCache-b{len(block_numbers)}"):
-                logger.debug(
-                    f"inserting to continuous blocks {block_numbers}")
+                logger.debug(f"inserting to continuous blocks {block_numbers}")
                 self.runner.kv_caches = KVCacheManager._jitted_insert_continuous_kv_cache(
                     self.runner.block_size,
                     self.runner.kv_caches,
