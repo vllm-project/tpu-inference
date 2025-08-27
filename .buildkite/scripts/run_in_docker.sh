@@ -52,7 +52,22 @@ DOCKER_HF_HOME="/tmp/hf_home"
 
 # (TODO): Consider creating a remote registry to cache and share between agents.
 # Subsequent builds on the same host should be cached.
-docker rmi -f "$(docker images vllm-tpu -q)"
+
+# Cleanup of existing containers and images.
+echo "Starting cleanup for vllm-tpu..."
+leftover_containers=$(docker ps -a -q --filter "ancestor=vllm-tpu")
+if [ -n "$leftover_containers" ]; then
+  echo "Removing leftover containers using vllm-tpu image(s)..."
+  docker rm -f $leftover_containers
+fi
+old_images=$(docker images vllm-tpu -q)
+
+if [ -n "$old_images" ]; then
+  echo "Removing old vllm-tpu image(s)..."
+  docker rmi -f $old_images
+fi
+echo "Cleanup complete."
+
 docker build --no-cache -f docker/Dockerfile -t "vllm-tpu:${BUILDKITE_COMMIT}" .
 
 exec docker run \
