@@ -109,41 +109,37 @@ class Attention(nnx.Module):
         x_SD = jnp.asarray(x, self.dtype)
         x_q_TD = nnx.with_sharding_constraint(x, self.activation_q_td)
         H = self.head_dim
-        with jax.named_scope("q_proj"):
-            q_TNH = jnp.einsum('TD,DNH -> TNH', x_q_TD,
-                               self.kernel_q_proj_DNH.value)
-            if use_attention_rope:
-                q_TNH = apply_rope(q_TNH, md.input_positions, H,
-                                   self.rope_theta, self.rope_scaling,
-                                   self.rope_input_ordering)
-            q_TNH = nnx.with_sharding_constraint(q_TNH, self.query_tnh)
-        with jax.named_scope("k_proj"):
-            k_SKH = jnp.einsum('SD,DKH -> SKH', x_SD,
-                               self.kernel_k_proj_DKH.value)
-            if use_attention_rope:
-                k_SKH = apply_rope(k_SKH, md.input_positions, H,
-                                   self.rope_theta, self.rope_scaling,
-                                   self.rope_input_ordering)
-            k_SKH = nnx.with_sharding_constraint(k_SKH, self.keyvalue_skh)
+        # with jax.named_scope("q_proj"):
+        q_TNH = jnp.einsum('TD,DNH -> TNH', x_q_TD,
+                           self.kernel_q_proj_DNH.value)
+        if use_attention_rope:
+            q_TNH = apply_rope(q_TNH, md.input_positions, H, self.rope_theta,
+                               self.rope_scaling, self.rope_input_ordering)
+        q_TNH = nnx.with_sharding_constraint(q_TNH, self.query_tnh)
+        # with jax.named_scope("k_proj"):
+        k_SKH = jnp.einsum('SD,DKH -> SKH', x_SD, self.kernel_k_proj_DKH.value)
+        if use_attention_rope:
+            k_SKH = apply_rope(k_SKH, md.input_positions, H, self.rope_theta,
+                               self.rope_scaling, self.rope_input_ordering)
+        k_SKH = nnx.with_sharding_constraint(k_SKH, self.keyvalue_skh)
 
-        with jax.named_scope("v_proj"):
-            v_SKH = jnp.einsum('SD,DKH -> SKH', x_SD,
-                               self.kernel_v_proj_DKH.value)
+        # with jax.named_scope("v_proj"):
+        v_SKH = jnp.einsum('SD,DKH -> SKH', x_SD, self.kernel_v_proj_DKH.value)
 
-        with jax.named_scope("attn_op"):
-            new_kv_cache, outputs_TNH = self.attention(
-                is_prefill,
-                kv_cache,
-                q_TNH,
-                k_SKH,
-                v_SKH,
-                attention_metadata,
-                self.mesh,
-            )
+        # with jax.named_scope("attn_op"):
+        new_kv_cache, outputs_TNH = self.attention(
+            is_prefill,
+            kv_cache,
+            q_TNH,
+            k_SKH,
+            v_SKH,
+            attention_metadata,
+            self.mesh,
+        )
 
-        with jax.named_scope("o_proj"):
-            o_TD = jnp.einsum('TNH,NHD -> TD', outputs_TNH,
-                              self.kernel_o_proj_NHD.value)
+        # with jax.named_scope("o_proj"):
+        o_TD = jnp.einsum('TNH,NHD -> TD', outputs_TNH,
+                          self.kernel_o_proj_NHD.value)
         return new_kv_cache, o_TD
 
     def attention(

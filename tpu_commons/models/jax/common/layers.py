@@ -76,13 +76,13 @@ class RMSNorm(nnx.Module):
         x_TD = jnp.asarray(x_TD, self.dtype)
         x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
 
-        with jax.named_scope("rms_norm_variance"):
-            var_T1 = jnp.mean(jnp.square(x_TD), axis=-1, keepdims=True)
-        with jax.named_scope("rms_norm_rsqrt"):
-            normed_x_TD = x_TD * jax.lax.rsqrt(var_T1 + self.epsilon)
+        # with jax.named_scope("rms_norm_variance"):
+        var_T1 = jnp.mean(jnp.square(x_TD), axis=-1, keepdims=True)
+        # with jax.named_scope("rms_norm_rsqrt"):
+        normed_x_TD = x_TD * jax.lax.rsqrt(var_T1 + self.epsilon)
 
-        with jax.named_scope("rms_norm_scale_apply"):
-            normed_x_TD *= self.scale.value
+        # with jax.named_scope("rms_norm_scale_apply"):
+        normed_x_TD *= self.scale.value
         normed_x_TD = nnx.with_sharding_constraint(normed_x_TD,
                                                    self.activation_ffw_td)
         return normed_x_TD.astype(self.dtype)
@@ -128,18 +128,18 @@ class DenseFFW(nnx.Module):
         # TODO consider to create factories for einsum(?)
         x_TD = jnp.asarray(x_TD, self.dtype)
         x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
-        with jax.named_scope("wi_0"):
-            gating_TF = jnp.einsum('TD,DF -> TF', x_TD,
-                                   self.kernel_gating_DF.value)
-            activated_gating_TF = modeling_flax_utils.ACT2FN[self.hidden_act](
-                gating_TF)
-        with jax.named_scope("wi_1"):
-            up_proj_TF = jnp.einsum('TD,DF -> TF', x_TD,
-                                    self.kernel_up_proj_DF.value)
+        # with jax.named_scope("wi_0"):
+        gating_TF = jnp.einsum('TD,DF -> TF', x_TD,
+                               self.kernel_gating_DF.value)
+        activated_gating_TF = modeling_flax_utils.ACT2FN[self.hidden_act](
+            gating_TF)
+        # with jax.named_scope("wi_1"):
+        up_proj_TF = jnp.einsum('TD,DF -> TF', x_TD,
+                                self.kernel_up_proj_DF.value)
         fuse_TF = activated_gating_TF * up_proj_TF
-        with jax.named_scope("wo"):
-            output_TD = jnp.einsum('TF,FD -> TD', fuse_TF,
-                                   self.kernel_down_proj_FD.value)
+        # with jax.named_scope("wo"):
+        output_TD = jnp.einsum('TF,FD -> TD', fuse_TF,
+                               self.kernel_down_proj_FD.value)
 
         return output_TD
 
@@ -222,9 +222,9 @@ class Embedder(nnx.Module):
         x_TD = jnp.asarray(x_TD, self.dtype)
         x_TD = nnx.with_sharding_constraint(x_TD, self.prelogit_td)
 
-        with jax.named_scope("embedder_decode_projection"):
-            logits_TV = jnp.einsum('VD,TD -> TV',
-                                   self.input_embedding_table_VD.value, x_TD)
+        # with jax.named_scope("embedder_decode_projection"):
+        logits_TV = jnp.einsum('VD,TD -> TV',
+                               self.input_embedding_table_VD.value, x_TD)
         return logits_TV
 
     def encode(self, x_T: Int) -> Float:
@@ -237,14 +237,14 @@ class Embedder(nnx.Module):
             The corresponding embedding vectors, with shape
             `(batch, sequence, d_model)`.
         """
-        with jax.named_scope("embedder_encode_lookup"):
-            embedding_TD = jnp.take(self.input_embedding_table_VD.value,
-                                    x_T,
-                                    axis=0)
+        # with jax.named_scope("embedder_encode_lookup"):
+        embedding_TD = jnp.take(self.input_embedding_table_VD.value,
+                                x_T,
+                                axis=0)
 
         if self.normalize_embeddings:
-            with jax.named_scope("embedder_normalize_embeddings"):
-                embedding_TD *= jnp.sqrt(self.hidden_size).astype(self.dtype)
+            # with jax.named_scope("embedder_normalize_embeddings"):
+            embedding_TD *= jnp.sqrt(self.hidden_size).astype(self.dtype)
         return embedding_TD
 
 
@@ -295,7 +295,7 @@ class LMhead(Embedder):
         x_TD = jnp.asarray(x_TD, self.dtype)
         x_TD = nnx.with_sharding_constraint(x_TD, self.prelogit_td)
 
-        with jax.named_scope("lmhead_decode_projection"):
-            logits_TV = jnp.einsum('DV,TD -> TV',
-                                   self.input_embedding_table_DV.value, x_TD)
+        # with jax.named_scope("lmhead_decode_projection"):
+        logits_TV = jnp.einsum('DV,TD -> TV',
+                               self.input_embedding_table_DV.value, x_TD)
         return logits_TV
