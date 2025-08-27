@@ -277,37 +277,18 @@ class CompilationManager:
             "Compiling disaggregated util with different input shapes.")
         block_size = self.runner.block_size
         for num_blocks in range(1, self.runner.max_num_blocks_per_req // 2):
+            logger.info(
+                f"Precompile slice and insert for num_blocks {num_blocks}")
+            start = time.perf_counter()
             block_numbers = list(range(1, num_blocks + 1))
             kv_cache_slices = self.runner.kv_cache_manager.get_kv_cache_for_block_ids(
                 block_numbers)
-            block_buckets = BLOCK_BUCKETS + [
-                self.runner.max_num_blocks_per_req
-            ]
-            import bisect
-            bucket_index = bisect.bisect_left(block_buckets, num_blocks)
-            padded_num_blocks = block_buckets[bucket_index]
-            padding_size = padded_num_blocks - num_blocks
-            block_numbers.extend([0] * padding_size)
-            padded_block_numbers = jnp.array(block_numbers, dtype=jnp.int32)
-
-            def insert_kv_cache_wrapper(block_size, kv_caches, kv_cache_slices,
-                                        padded_block_numbers):
-                self.runner.kv_caches = self.runner.kv_cache_manager._jitted_insert_kv_cache(
-                    block_size,
-                    kv_caches,
-                    kv_cache_slices,
-                    padded_block_numbers,
-                )
-                return None
-
-            self._run_compilation(
-                "slice_and_insert",
-                insert_kv_cache_wrapper,
+            self.runner.kv_caches = self.runner.kv_cache_manager._jitted_insert_continuous_kv_cache(
                 block_size,
                 self.runner.kv_caches,
                 kv_cache_slices,
-                padded_block_numbers,
-                num_blocks=num_blocks,
+                block_numbers[0],
+
             )
 
     def _precompile_gather_logprobs(self) -> None:
