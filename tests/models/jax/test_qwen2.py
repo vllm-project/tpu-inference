@@ -135,7 +135,6 @@ class TestQwen2ForCausalLM:
             head_size=head_dim,
             mesh=mesh,
             layer_names=["layer"] * hf_config.num_hidden_layers,
-            devices=mesh.devices[0],
         )
         # 1 seq with 16 tokens
         input_ids, attention_metadata, indices_do_sample = mock_model_inputs

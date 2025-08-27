@@ -72,7 +72,6 @@ class KVCacheManager:
             head_size=kv_cache_spec.head_size,
             mesh=self.runner.mesh,
             layer_names=layer_names,
-            devices=self.runner.devices,
         )
 
     @staticmethod
