@@ -83,19 +83,31 @@ def get_mesh() -> Mesh:
     return jax.make_mesh((sharding_size, ), ("model", ))
 
 
+def get_kv_shape(mesh: Mesh) -> tuple[int, ...]:
+    num_blocks = 10
+    block_size = 32
+    num_kv_heads = 8
+    shard_size = mesh.shape["model"]
+    head_dim = 128
+
+    import tpu_commons.kernels.ragged_paged_attention.v3.kernel as rpa
+    shape = rpa.get_kv_cache_shape(num_blocks, block_size,
+                                   num_kv_heads // shard_size, head_dim,
+                                   jnp.bfloat16)
+    return shape
+
+
 def get_kv_spec(mesh: Mesh) -> jax.ShapeDtypeStruct:
-    # (num_blocks, block_size, num_kv_heads, head_dim)
-    shape = (10, 32, 8, 128)
+    shape = get_kv_shape(mesh)
     dtype = jnp.bfloat16
-    sharding = NamedSharding(mesh, P(None, None, "model", None))
+    sharding = NamedSharding(mesh, P())
     num_layers = 4
     return [jax.ShapeDtypeStruct(shape, dtype, sharding=sharding)] * num_layers
 
 
 # Hard code the shard spec, it could have been calculated.
-def get_kv_shard_spec() -> jax.ShapeDtypeStruct:
-    # (num_blocks, block_size, num_kv_heads, head_dim)
-    shape = (10, 32, 2, 128)
+def get_kv_shard_spec(mesh: Mesh) -> jax.ShapeDtypeStruct:
+    shape = get_kv_shape(mesh)
     dtype = jnp.bfloat16
     sharding = SingleDeviceSharding(jax.local_devices()[0])
     num_layers = 4
@@ -229,7 +241,7 @@ def decode_worker(pid: int, squeue: multiprocessing.Queue):
 
     log("Pulling...")
     uuid = get_uuid(pid)
-    kv_shard_spec = get_kv_shard_spec()
+    kv_shard_spec = get_kv_shard_spec(mesh)
     kv_shard = conn.pull(uuid, kv_shard_spec)
 
     kv_spec = get_kv_spec(mesh)

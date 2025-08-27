@@ -78,10 +78,18 @@ def get_mesh() -> Mesh:
 
 
 def get_kv_spec(mesh: Mesh) -> list[int]:
-    # (num_blocks, block_size, num_kv_heads, head_dim)
-    shape = (10, 32, 8, 128)
+    num_blocks = 10
+    block_size = 32
+    num_kv_heads = 8
+    shard_size = mesh.shape["model"]
+    head_dim = 128
+
+    import tpu_commons.kernels.ragged_paged_attention.v3.kernel as rpa
+    shape = rpa.get_kv_cache_shape(num_blocks, block_size,
+                                   num_kv_heads // shard_size, head_dim,
+                                   jnp.bfloat16)
     dtype = jnp.bfloat16
-    sharding = NamedSharding(mesh, P(None, None, "model", None))
+    sharding = NamedSharding(mesh, P())
     num_layers = 4
     return [jax.ShapeDtypeStruct(shape, dtype, sharding=sharding)] * num_layers
 
