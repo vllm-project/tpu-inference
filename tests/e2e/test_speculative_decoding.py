@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 import string
+import time
 
 import pytest
 from vllm import LLM, SamplingParams
@@ -52,7 +53,6 @@ def test_ngram_correctness(
         ref_outputs = ref_llm.generate(test_prompts, sampling_config)
 
         del ref_llm
-        import time
 
         # Waiting for TPUs to be released.
         time.sleep(10)
@@ -80,3 +80,56 @@ def test_ngram_correctness(
 
         assert misses == 0
         del spec_llm
+
+
+def test_speculative_decoding_performance(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+):
+    '''
+    Test that speculative decoding provides significant performance improvement.
+    Compares timing between reference LLM and speculative LLM using Llama 3 8B.
+    Expects spec_llm to be at least Yx faster than ref_llm.
+    '''
+    model_name = "meta-llama/Llama-3.1-8B-Instruct"
+
+    with monkeypatch.context():
+        # Use a smaller set of prompts for performance testing
+        test_prompts = get_test_prompts()
+
+        # Test reference LLM timing
+        ref_llm = LLM(model=model_name, max_model_len=1024, max_num_seqs=1)
+
+        start_time = time.time()
+        _ = ref_llm.generate(test_prompts, sampling_config)
+        ref_time = time.time() - start_time
+
+        del ref_llm
+
+        # Waiting for TPUs to be released
+        time.sleep(10)
+
+        # Test speculative LLM timing with max_num_seqs=1
+        spec_llm = LLM(model=model_name,
+                       speculative_config={
+                           "method": "ngram",
+                           "prompt_lookup_max": 2,
+                           "prompt_lookup_min": 2,
+                           "num_speculative_tokens": 3,
+                       },
+                       max_model_len=1024,
+                       max_num_seqs=1)
+
+        start_time = time.time()
+        _ = spec_llm.generate(test_prompts, sampling_config)
+        spec_time = time.time() - start_time
+
+        del spec_llm
+
+        speedup = ref_time / spec_time
+        print(f"Reference LLM time: {ref_time:.2f}s")
+        print(f"Speculative LLM time: {spec_time:.2f}s")
+        print(f"Speedup: {speedup:.2f}x")
+
+        # TODO(pooyam): Make this tighter once we have better performance.
+        assert speedup >= 2.0, f"Expected at least 2x speedup, got {speedup:.2f}x"
