@@ -76,36 +76,25 @@ def reorder_concatenated_tensor_for_sharding(concatenated_tensor: jax.Array,
     # Split the concatenated tensor into individual tensors.
     split_tensors = []
     start_offset = 0
-    for _, split_size in enumerate(split_sizes):
+    old_shape = concatenated_tensor.shape
+    # New shape ensures each split_tensor[i] maps to a tensor in ith shards
+    new_shape = old_shape[:dim] + (n_shards, -1) + old_shape[dim + 1:]
+    for split_size in split_sizes:
         split_tensor = jax.lax.slice_in_dim(concatenated_tensor,
                                             start_offset,
                                             start_offset + split_size,
                                             axis=dim)
-        split_tensors.append(split_tensor)
+        split_tensors.append(split_tensor.reshape(new_shape))
         start_offset += split_size
-
-    # For each shard, collect the portion of each split tensor that should be on this shard.
-    reordered_tensor_shards = []
-    for j in range(n_shards):
-        split_tensors_for_this_shard = []
-        for i, split_size in enumerate(split_sizes):
-            assert split_size % n_shards == 0
-            sz = split_size // n_shards  # size of this split tensor per shard
-            split_tensor = split_tensors[i]
-            t = jax.lax.slice_in_dim(split_tensor,
-                                     j * sz, (j + 1) * sz,
-                                     axis=dim)
-            split_tensors_for_this_shard.append(t)
-        tensor_shard = jnp.concatenate(split_tensors_for_this_shard, axis=dim)
-        reordered_tensor_shards.append(tensor_shard)
-
-    reordered_tensor = jnp.concatenate(reordered_tensor_shards, axis=dim)
-    return reordered_tensor
+    # While maintaining 0th dim as a shard dim, we concatenate along 1th dim to
+    # to create concatenated tnensor where 0th dim maps to shard dim.
+    reordered_tensor = jnp.concatenate(split_tensors, axis=dim + 1)
+    return reordered_tensor.reshape(old_shape)
 
 
 def slice_sharded_tensor_for_concatenation(sharded_tensor: jax.Array,
                                            split_sizes: list[int],
-                                           n_shards: int, mesh: Mesh):
+                                           n_shards: int):
     """
     Slice the input tensor which is sharded on multiple chips (on the last dim) into individual tensors with the same sharding.
     For example, let the sharded_tensor be:
@@ -124,29 +113,20 @@ def slice_sharded_tensor_for_concatenation(sharded_tensor: jax.Array,
         split_sizes: each individual tensor's size on the last dim.
         n_shards: num of shards.
     """
-
-    def _get_slice_on_shard(tensor_shard, start_offset, end_offset):
-        return tensor_shard[..., start_offset:end_offset]
-
-    sharding_spec = P(*((None, ) * (sharded_tensor.ndim - 1) +
-                        ('model', )))  # Shard on the last dim.
+    new_shape = sharded_tensor.shape[:-1] + (n_shards, -1)
+    # New shape ensures each sharded_tensor[:, i] maps to a tensor in ith shards
+    sharded_tensor = sharded_tensor.reshape(new_shape)
 
     split_tensors = []
     start_offset = 0
-    for _, split_size in enumerate(split_sizes):
+    for split_size in split_sizes:
         assert split_size % n_shards == 0
         sz = split_size // n_shards  # size of this split tensor per shard
         end_offset = start_offset + sz
-        _get_slice_on_shard_bound = functools.partial(
-            _get_slice_on_shard,
-            start_offset=start_offset,
-            end_offset=end_offset)
+        # Because we are slicing over last dim, sharding dim remains intact.
+        # Therefore, splitting happens locally.
+        split_tensor = sharded_tensor[..., start_offset:end_offset]
+        split_tensors.append(split_tensor.reshape(new_shape[:-2] + (-1, )))
         start_offset = end_offset
-        split_tensor = shard_map(_get_slice_on_shard_bound,
-                                 mesh=mesh,
-                                 in_specs=(sharding_spec),
-                                 out_specs=(sharding_spec),
-                                 check_rep=False)(sharded_tensor)
-        split_tensors.append(split_tensor)
 
     return split_tensors
