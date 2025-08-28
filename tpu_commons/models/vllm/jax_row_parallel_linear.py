@@ -3,6 +3,7 @@ from typing import Optional
 import jax
 import jax.numpy as jnp
 import torch
+from jax._src.layout import Format, Layout
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import torch_view
@@ -47,8 +48,13 @@ class JaxRowParallelLinear(torch.nn.Module):
         self._shard_weight(mesh)
 
     def _shard_weight(self, mesh: Mesh):
-        self.weight.apply_jax_(jax.device_put,
-                               NamedSharding(mesh, P(None, 'model')))
+        sharding = NamedSharding(mesh, P(None, 'model'))
+        layout = Layout(major_to_minor=(1, 0))
+        format = Format(layout=layout, sharding=sharding)
+        self.weight.apply_jax_(jax.device_put, format)
+        print(
+            f"JaxRowParallelLinear._shard_weight {self.weight.jax().format.layout=}"
+        )
 
         if self.bias is not None:
             self.bias.apply_jax_(jax.device_put, NamedSharding(

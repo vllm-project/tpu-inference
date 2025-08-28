@@ -1,6 +1,7 @@
 import jax
 import jax.numpy as jnp
 import torch
+from jax._src.layout import Format, Layout
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import torch_view
@@ -55,8 +56,11 @@ class JaxMergedColumnParallelLinearCore(torch.nn.Module):
             self._shard_weight_split(mesh)
 
     def _shard_weight_fused(self, mesh: Mesh):
-        self.weight.apply_jax_(jax.device_put,
-                               NamedSharding(mesh, P('model', None)))
+        sharding = NamedSharding(mesh, P('model', None))
+        layout = Layout(major_to_minor=(1, 0))
+        format = Format(layout=layout, sharding=sharding)
+        self.weight.apply_jax_(jax.device_put, format)
+        print(f"_shard_weight_fused {self.weight.jax().format.layout=}")
 
         if self.bias is not None:
             self.bias.apply_jax_(jax.device_put,
@@ -67,12 +71,16 @@ class JaxMergedColumnParallelLinearCore(torch.nn.Module):
                                          NamedSharding(mesh, P('model')))
 
     def _shard_weight_split(self, mesh: Mesh):
+        sharding = NamedSharding(mesh, P('model', None))
+        layout = Layout(major_to_minor=(1, 0))
+        format = Format(layout=layout, sharding=sharding)
+
         # Shard all weights in the weight_list
         for i in range(self.n_matmuls):
             weight = getattr(self, f"weight_{i}")
-            weight.apply_jax_(jax.device_put,
-                              NamedSharding(mesh, P('model', None)))
+            weight.apply_jax_(jax.device_put, format)
             setattr(self, f"weight_{i}", weight)
+            print(f"_shard_weight_split {weight.jax().format.layout=}")
 
         if self.has_bias:
             for i in range(self.n_matmuls):
