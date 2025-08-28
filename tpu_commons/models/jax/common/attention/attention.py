@@ -107,7 +107,7 @@ class Attention(nnx.Module):
         """
         md = attention_metadata
         x_SD = jnp.asarray(x, self.dtype)
-        x_q_TD = nnx.with_sharding_constraint(x, self.activation_q_td)
+        x_q_TD = jax.lax.with_sharding_constraint(x, self.activation_q_td)
         H = self.head_dim
         with jax.named_scope("q_proj"):
             q_TNH = jnp.einsum('TD,DNH -> TNH', x_q_TD,
@@ -116,7 +116,7 @@ class Attention(nnx.Module):
                 q_TNH = apply_rope(q_TNH, md.input_positions, H,
                                    self.rope_theta, self.rope_scaling,
                                    self.rope_input_ordering)
-            q_TNH = nnx.with_sharding_constraint(q_TNH, self.query_tnh)
+            q_TNH = jax.lax.with_sharding_constraint(q_TNH, self.query_tnh)
         with jax.named_scope("k_proj"):
             k_SKH = jnp.einsum('SD,DKH -> SKH', x_SD,
                                self.kernel_k_proj_DKH.value)
@@ -124,7 +124,7 @@ class Attention(nnx.Module):
                 k_SKH = apply_rope(k_SKH, md.input_positions, H,
                                    self.rope_theta, self.rope_scaling,
                                    self.rope_input_ordering)
-            k_SKH = nnx.with_sharding_constraint(k_SKH, self.keyvalue_skh)
+            k_SKH = jax.lax.with_sharding_constraint(k_SKH, self.keyvalue_skh)
 
         with jax.named_scope("v_proj"):
             v_SKH = jnp.einsum('SD,DKH -> SKH', x_SD,

@@ -42,7 +42,7 @@ class Router(nnx.Module):
                 - selected_experts_TX: Indices of selected experts, shape (sequence_length, num_experts_per_tok).
         """
         x_TD = jnp.asarray(x_TD, self.dtype)
-        x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
+        x_TD = jax.lax.with_sharding_constraint(x_TD, self.activation_ffw_td)
         router_act = modeling_flax_utils.ACT2FN[self.router_act]
         router_logits_TE = jnp.einsum('TD,DE -> TE', x_TD,
                                       self.kernel_DE.value)
@@ -98,7 +98,7 @@ class MoE(nnx.Module):
             Output array of shape (sequence_length, d_model) after passing through MoE.
         """
         x_TD = jnp.asarray(x_TD, self.dtype)
-        x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
+        x_TD = jax.lax.with_sharding_constraint(x_TD, self.activation_ffw_td)
         weights_TX, indices_TX = self.router(x_TD)
         one_hot_indices_TXE = jax.nn.one_hot(
             indices_TX, num_classes=self.num_local_experts, dtype=self.dtype)
@@ -159,7 +159,8 @@ class MoE(nnx.Module):
         with jax.named_scope("activation_expert_weighting"):
             x_TED = x_TED * weights_TED
 
-        x_TED = nnx.with_sharding_constraint(x_TED, self.activation_ffw_ted)
+        x_TED = jax.lax.with_sharding_constraint(x_TED,
+                                                 self.activation_ffw_ted)
         with jax.named_scope("gating"):
             gating_TEF = jnp.einsum('TED,EDF -> TEF', x_TED,
                                     self.kernel_gating_EDF.value)
@@ -189,7 +190,7 @@ class MoE(nnx.Module):
             Output array of shape (sequence_length, d_model).
         """
         x_TD = jnp.asarray(x_TD, self.dtype)
-        x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
+        x_TD = jax.lax.with_sharding_constraint(x_TD, self.activation_ffw_td)
         with jax.named_scope("gating"):
             gating_TEF = jnp.einsum('TD,EDF -> TEF', x_TD,
                                     self.kernel_gating_EDF.value)
