@@ -9,6 +9,7 @@ from concurrent import futures
 
 import vllm.envs as envs
 from google.cloud import pubsub_v1, storage
+import google.auth
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.utils import FlexibleArgumentParser
 
@@ -54,6 +55,16 @@ def create_parser():
     )
     return parser
 
+def get_current_service_account_email():
+    """Retrieves the email address of the current service account."""
+    try:
+        credentials, project = google.auth.default()
+        if hasattr(credentials, 'service_account_email'):
+            return credentials.service_account_email
+        else:
+            return "No service account attached or credential type is not a service account."
+    except Exception as e:
+        return f"An error occurred: {e}"
 
 def run_pubsub_inference(args: dict, llm: LLM, sampling_params: SamplingParams):
     """Listens to Pub/Sub, runs batched LLM inference, and writes to GCS."""
@@ -155,6 +166,8 @@ def main(args: dict):
         'bucket_name': args.pop('bucket_name'),
         'blob_name_prefix': args.pop('blob_name_prefix')
     }
+
+    logging.error(f"Current SA email: {get_current_service_account_email()}")
 
     # Create an LLM
     llm = LLM(**args)
