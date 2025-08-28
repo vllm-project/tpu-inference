@@ -82,6 +82,7 @@ class DeepSeekV3(nnx.Module):
         self.random_init = force_random_weights or self.vllm_config.additional_config.get(
             "random_weights", False)
         self.mesh = mesh
+        self.scale_dtype = scale_dtype
 
         self.weight_loader = DeepSeekV3WeightLoader(
             vllm_config=vllm_config,
@@ -311,39 +312,58 @@ class DeepSeekV3(nnx.Module):
         logger.info(
             "Initializing model with random weights (Qwix FP8 structure)...")
 
-        def _get_random_sharded_array(key, param):
-            weight = jax.random.normal(key, param.shape, param.dtype)
+        def _get_random_sharded_array(key, param, param_shape, dtype):
+            weight = jax.random.normal(key, param_shape, dtype)
 
             def get_slice(index):
                 return weight[index]
 
-            sharded_array = jax.make_array_from_callback(
-                param.shape, NamedSharding(self.mesh, P(*param.sharding)),
-                get_slice)
+            try:
+                sharded_array = jax.make_array_from_callback(
+                    param_shape, NamedSharding(self.mesh, P(*param.sharding)),
+                    get_slice)
+            except:
+                print("WARNING: failed to shard, skipping...", param_shape,
+                      param.sharding)
+                sharded_array = jax.make_array_from_callback(
+                    param_shape, NamedSharding(self.mesh, P()), get_slice)
 
             return sharded_array
 
         # Iterate through all variables and initialize them
+        prev_path, prev_param_shape = None, None
         for path, param in nnx.iter_graph(state):
             if not isinstance(param, nnx.Variable) or path[0] == 'rng':
                 continue
 
-            # QArray case (qvalue and scale)
-            if hasattr(param.value, 'qvalue') and hasattr(
-                    param.value, 'scale'):
-                qvalue_arr = param.value.qvalue
-                scale_arr = param.value.scale
+            is_qwix_scale = (path[-1] == 'scale' and path[-2] == "array")
+            param_dtype = self.scale_dtype if is_qwix_scale else param.value.dtype
+            param_shape = param.value.shape
+            # TODO: refactor this
+            if is_qwix_scale:
+                if path[3] == "kernel_kv_down_proj_DA":
+                    param_shape = (56, 576)
+                # kv_b_proj
+                elif path[3] == "kernel_kv_up_proj_ANH":
+                    param_shape = (4, 128, 2)
+                # q_b_proj
+                elif path[3] == "kernel_q_up_proj_ANH":
+                    param_shape = (12, 1, 192)
+                # o_proj
+                elif path[3] == "kernel_o_proj_NHD":
+                    param_shape = (128, 1, 56)
+                # mlp.experts.*.down_proj.weight":
+                elif path[3] == "kernel_down_proj_EFD":
+                    param_shape = (256, 16, 56)
+                # mlp.experts.*.up/gate_proj.weight":
+                elif path[3] in ["kernel_up_proj_EDF", "kernel_gating_EDF"]:
+                    param_shape = (256, 56, 16)
+                else:
+                    param_shape = tuple(dim // 128 for dim in prev_param_shape)
 
-                qvalue_key, scale_key = jax.random.split(self.rng.fork())
-
-                qvalue_arr.value = _get_random_sharded_array(
-                    qvalue_key, qvalue_arr)
-                scale_arr.value = _get_random_sharded_array(
-                    scale_key, scale_arr)
-            else:
-                # Regular parameter case
-                param.value = _get_random_sharded_array(
-                    self.rng.params(), param)
+            param.value = _get_random_sharded_array(self.rng.params(), param,
+                                                    param_shape, param_dtype)
+            prev_path, prev_param_shape = path, param_shape
 
         self.initialize_cache()
         logger.info("Random weight initialization complete.")
