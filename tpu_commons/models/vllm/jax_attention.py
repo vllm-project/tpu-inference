@@ -7,7 +7,6 @@ import torch.nn
 from jax.sharding import Mesh
 from torchax.interop import jax_view, torch_view
 from vllm.attention import Attention as VllmAttention
-from vllm.model_executor.models.utils import extract_layer_index
 
 from tpu_commons.models.jax.attention import attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
@@ -80,7 +79,7 @@ class JaxAttention(torch.nn.Module):
         self.head_size = vllm_attn.head_size
         self.scale = vllm_attn.impl.scale
         self.num_kv_heads = vllm_attn.num_kv_heads
-        self.layer_idx = extract_layer_index(vllm_attn.layer_name)
+        self.layer_name = vllm_attn.layer_name
         self.mesh = mesh
 
     def forward(
@@ -94,11 +93,13 @@ class JaxAttention(torch.nn.Module):
         output_shape: Optional[torch.Size] = None,
     ) -> torch.Tensor:
         vllm_model_wrapper_context = get_vllm_model_wrapper_context()
+        kv_cache_index = vllm_model_wrapper_context.layer_name_to_kvcache_index[
+            self.layer_name]
+        kv_cache = vllm_model_wrapper_context.kv_caches[kv_cache_index]
         new_kv_cache, outputs = _jax_attn_func(
-            vllm_model_wrapper_context.kv_caches[self.layer_idx], jax_view(q),
-            jax_view(k), jax_view(v),
+            kv_cache, jax_view(q), jax_view(k), jax_view(v),
             vllm_model_wrapper_context.attention_metadata, self.mesh,
             self.scale, self.head_size, self.num_heads, self.num_kv_heads)
-        vllm_model_wrapper_context.kv_caches[self.layer_idx] = new_kv_cache
+        vllm_model_wrapper_context.kv_caches[kv_cache_index] = new_kv_cache
 
         return torch_view(outputs)

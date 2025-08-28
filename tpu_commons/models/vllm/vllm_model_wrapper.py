@@ -3,7 +3,7 @@ import functools
 import os
 import tempfile
 from contextlib import nullcontext
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
 from unittest.mock import patch
 
 import jax
@@ -144,18 +144,21 @@ class VllmModelWrapper:
                 "xla_tpu_reduce_scatter_collective_matmul_mode":
                 "post_spmd_conservative"
             },
-        )
+            static_argnames=('layer_name_to_kvcache_index', ))
         def step_fun(
             params_and_buffers,  # this has been wrapped into a torchax TorchValue
             kv_caches: List[jax.Array],
             input_ids: jax.Array,
             attention_metadata: AttentionMetadata,
+            input_embeds: jax.Array,
+            layer_name_to_kvcache_index: Sequence[Tuple[str, int]],
             *args,
         ) -> Tuple[List[jax.Array], jax.Array]:
-
+            layer_name_to_kvcache_index = dict(layer_name_to_kvcache_index)
             with torchax.default_env(), set_vllm_model_wrapper_context(
                     kv_caches=kv_caches,
                     attention_metadata=attention_metadata,
+                    layer_name_to_kvcache_index=layer_name_to_kvcache_index,
             ):
                 # We need to wrap args from jax land into TorchValue with
                 # torch_view in order to call the Torch function.

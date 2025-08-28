@@ -180,6 +180,7 @@ def get_flax_model(
             hidden_states_sharding,
         ),
         donate_argnums=2,  # 0 is graphdef, 1 is state, 2 is kv_cache
+        static_argnums=6,  #6 is layer_name_to_kvcache_index.
     )
     def run_model(graphdef, state, *args):
         model = nnx.merge(graphdef, state)
