@@ -17,7 +17,7 @@ max_batched_tokens=98304
 max_model_len=98304
 dataset_name="hf"
 dataset_path="lmarena-ai/VisionArena-Chat"
-num_prompts=10
+num_prompts=100
 
 TIMEOUT_SECONDS=600
 READY_MESSAGE="Application startup complete."
@@ -118,6 +118,14 @@ done
 if $did_find_ready_message; then
     echo "Starting the benchmark for $model_name..."
     echo "Current working directory: $(pwd)"
+    python /workspace/vllm/benchmarks/benchmark_serving.py \
+    --backend openai-chat \
+    --model "$model_name" \
+    --dataset-name "$dataset_name" \
+    --dataset-path "$dataset_path" \
+    --num-prompts "$num_prompts" \
+    --endpoint /v1/chat/completions 2>&1 | tee -a "$BENCHMARK_LOG_FILE"
+
     python /workspace/vllm/benchmarks/benchmark_serving.py \
     --backend openai-chat \
     --model "$model_name" \
