@@ -126,6 +126,9 @@ if $did_find_ready_message; then
     --num-prompts "$num_prompts" \
     --endpoint /v1/chat/completions 2>&1 | tee -a "$BENCHMARK_LOG_FILE"
 
+    echo "Going to sleep for 5 seconds..."
+    sleep 5
+
     python /workspace/vllm/benchmarks/benchmark_serving.py \
     --backend openai-chat \
     --model "$model_name" \
