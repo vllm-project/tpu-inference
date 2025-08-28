@@ -59,6 +59,8 @@ def get_current_service_account_email():
     """Retrieves the email address of the current service account."""
     try:
         credentials, project = google.auth.default()
+        logging.error(credentials)
+        logging.error(project)
         if hasattr(credentials, 'service_account_email'):
             return credentials.service_account_email
         else:
