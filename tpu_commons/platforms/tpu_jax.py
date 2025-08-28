@@ -46,8 +46,7 @@ class TpuPlatform(Platform):
     supported_quantization: list[str] = ["tpu_int8", "compressed-tensors"]
 
     additional_env_vars: list[str] = [
-        "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS", "TPU_BACKEND_TYPE",
-        "TPU_MULTIHOST_BACKEND"
+        "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS", "TPU_MULTIHOST_BACKEND"
     ]
 
     @classmethod
