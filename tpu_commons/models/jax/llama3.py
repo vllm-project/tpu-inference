@@ -54,6 +54,7 @@ class LlamaMLP(nnx.Module):
         self.act_fn = modeling_flax_utils.ACT2FN[act]
 
     def __call__(self, x: jax.Array) -> jax.Array:
+        print(self.gate_proj, x.shape)
         gate = self.act_fn(self.gate_proj(x))
         up = self.up_proj(x)
         fuse = gate * up
@@ -121,14 +122,19 @@ class LlamaAttention(nnx.Module):
         md = attention_metadata
         # q: (T, N, H)
         q = self.q_proj(x)
+        print(q.dtype, x.dtype)
         q = apply_rope(q, md.input_positions, self.head_dim_original,
                        self.rope_theta, self.rope_scaling)
+        print(q.dtype)
         # k: (T, K, H)
         k = self.k_proj(x)
+        print(k.dtype)
         k = apply_rope(k, md.input_positions, self.head_dim_original,
                        self.rope_theta, self.rope_scaling)
+        print(k.dtype)
         # v: (T, K, H)
         v = self.v_proj(x)
+        print(v.dtype)
         # o: (T, N, H)
         new_kv_cache, outputs = attention(
             kv_cache,
@@ -181,6 +187,7 @@ class LlamaDecoderLayer(nnx.Module):
         x: jax.Array,
         attention_metadata: AttentionMetadata,
     ) -> Tuple[jax.Array, jax.Array]:
+        print("decoder layer", x.dtype)
         hidden_states = self.input_layernorm(x)
         kv_cache, attn_output = self.self_attn(
             kv_cache,
@@ -282,6 +289,7 @@ class LlamaForCausalLM(nnx.Module):
         *args,
     ) -> Tuple[List[jax.Array], jax.Array]:
         x = self.embed(input_ids)
+        print("embed", x.dtype)
         kv_caches, x = self.model(
             kv_caches,
             x,

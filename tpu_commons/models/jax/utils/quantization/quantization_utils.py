@@ -229,3 +229,58 @@ def load_and_unpack_gptq_int8(weight_dict):
         zp = None
     scale = scales.astype(jnp.float32).transpose()
     return qpl.QArray(qvalue, scale, zp, jnp.int8)
+
+
+AWQ_REVERSE_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
+
+
+def unpack(matrix: jnp.ndarray, bits: int):
+    """Unpacks AWQ weights from int32 to int4 values inside int8 datatype.
+    Converted to JAX from https://github.com/casper-hansen/AutoAWQ/blob/f0321eedca887c12680553fc561d176b03b1b9a5/awq/utils/packing_utils.py#L8
+    """
+
+    shifts = jnp.arange(0, 32, bits)
+    # zero-point quantization will need uint4 otherwise int4.
+    # https://github.com/casper-hansen/AutoAWQ/blob/f0321eedca887c12680553fc561d176b03b1b9a5/awq/quantize/quantizer.py#L76
+    iweights = jnp.right_shift(matrix[..., None], shifts[None, None, :]).astype(
+        jnp.uint4
+    )
+    return iweights.reshape(iweights.shape[0], -1)
+
+
+def reverse_awq_order(matrix: jnp.ndarray, bits: int):
+    """Reorders the packed int4 values.
+    Converted to JAX from https://github.com/casper-hansen/AutoAWQ/blob/f0321eedca887c12680553fc561d176b03b1b9a5/awq/utils/packing_utils.py#L29
+    """
+    reverse_order_tensor = jnp.arange(matrix.shape[-1], dtype=jnp.int32)
+    reverse_order_tensor = reverse_order_tensor.reshape(-1, 32 // bits)
+    reverse_order_tensor = reverse_order_tensor[:, jnp.array(AWQ_REVERSE_ORDER)]
+    reverse_order_tensor = reverse_order_tensor.reshape(-1)
+
+    return matrix[:, reverse_order_tensor]
+
+
+def load_and_unpack_awq(weight_dict):
+    qweight = weight_dict['qweight']
+    qzeros = weight_dict['qzeros']
+    scales = weight_dict['scales']
+
+    # int4 -> uint4??
+    qvalue = jax.lax.bitcast_convert_type(qweight, jnp.uint4)[...,
+                                                             AWQ_REVERSE_ORDER]
+    qvalue = qvalue.reshape(qvalue.shape[0], -1).transpose() + 8
+    zp = jax.lax.bitcast_convert_type(qzeros, jnp.uint4)[..., AWQ_REVERSE_ORDER]
+    zp = zp.reshape(zp.shape[0], -1).transpose() + 8
+    if jnp.all(zp == 0):
+        zp = None
+    scale = scales.astype(jnp.float32).transpose()
+    # uint4 ??
+    return qpl.QArray(qvalue, scale, zp, jnp.int4)
+
+
+def awq_dict_to_qarray(weight_dict):
+    qweight = weight_dict['qweight']
+    qzeros = weight_dict['qzeros']
+    scales = weight_dict['scales']
+    # TODO: dtype??
+    return qpl.QArray(qweight, scales, qzeros, jnp.uint4)
