@@ -33,7 +33,9 @@ pre-commit install --hook-type pre-commit --hook-type commit-msg
 pre-commit run --all-files
 ```
 
-### Run JAX path examples
+## Run examples
+
+### Run JAX models
 
 Run `Llama 3.1 8B` offline inference on 4 TPU chips:
 
@@ -44,7 +46,7 @@ HF_TOKEN=<huggingface_token> python tpu_commons/examples/offline_inference.py \
     --max_model_len=1024
 ```
 
-### Run JAX path examples with disaggregated serving
+### Run JAX models with local disaggregated serving
 
 Run `Llama 3.1 8B Instruct` offline inference on 4 TPU chips in disaggregated mode:
 
@@ -56,7 +58,17 @@ python tpu_commons/examples/offline_inference.py \
     --max_num_seqs=8
 ```
 
-### Run JAX path examples with Ray-based multi-host serving
+### Run JAX models with llm-d disaggregated serving
+
+We simulate the llm-d scenario using a single TPU VM.
+
+```
+bash examples/disagg/run_disagg_servers.sh
+```
+
+Then follow the instructions output by the command to send requests.
+
+### Run JAX model with Ray-based multi-host serving
 
 Run `Llama 3.1 70B Instruct` offline inference on 4 hosts (v6e-16) in interleaved mode:
 
@@ -107,14 +119,42 @@ python vllm/examples/offline_inference/basic/generate.py \
     --enable-expert-parallel
 ```
 
+## Run docker containers
+
+### Build and push docker image
+
+This can be run on a CPU VM.
+
+```
+cd ~
+git clone https://github.com/vllm-project/tpu_commons.git
+cd tpu_commons
+
+DOCKER_URI=<Specify a GCR URI>
+# example:
+# DOCKER_URI=gcr.io/cloud-nas-260507/ullm:$USER-test
+
+docker build -f docker/Dockerfile -t $DOCKER_URI .
+docker push $DOCKER_URI
+```
+
+### Download docker image and run
+
+Pull the docker image and run it:
+
+```
+DOCKER_URI=<the same URI used in docker build>
+docker pull $DOCKER_URI
+docker run \
+  --rm \
+  $DOCKER_URI \
+  python /workspace/tpu_commons/examples/offline_inference.py \
+  --model=meta-llama/Llama-3.1-8B \
+  --tensor_parallel_size=4 \
+  --max_model_len=1024 \
+```
+
 ### Relevant env
-
-To switch different backends (default is jax):
-
-```
-TPU_BACKEND_TYPE=jax
-TPU_BACKEND_TYPE=pytorch_xla
-```
 
 To switch different model implementations (default is flax_nnx):
 
@@ -123,17 +163,23 @@ MODEL_IMPL_TYPE=flax_nnx
 MODEL_IMPL_TYPE=vllm
 ```
 
-To run JAX path without precompiling the model:
+To run JAX models without precompiling:
 
 ```
 SKIP_JAX_PRECOMPILE=1
 ```
 
-### Profiling
+To run JAX models with random initialized weights:
+
+```
+JAX_RANDOM_WEIGHTS=1
+```
+
+## Profiling
 
 There are two ways to profile your workload:
 
-#### Using `PHASED_PROFILING_DIR`
+### Using `PHASED_PROFILING_DIR`
 If you set the following environment variable:
 
 ```
@@ -173,62 +219,7 @@ In order to use this approach, you can do the following:
 
 6. Enter the desired amount of time (in ms) you'd like to capture the profile for and then click `Capture`.   If everything goes smoothly, you should see a success message, and your `logdir` should be populated.
 
-## Develop on a CPU VM and run docker on a TPU VM
-
-### On the CPU VM
-
-Build docker image:
-
-```
-cd ~
-git clone https://github.com/vllm-project/tpu_commons.git
-cd tpu_commons
-
-DOCKER_URI=<Specify a GCR URI>
-# example:
-# DOCKER_URI=gcr.io/cloud-nas-260507/ullm:$USER-test
-
-docker build -f docker/Dockerfile -t $DOCKER_URI .
-docker push $DOCKER_URI
-```
-
-### On the TPU-VM side:
-
-Pull the docker image and run it:
-
-```
-DOCKER_URI=<the same URI used in docker build>
-docker pull $DOCKER_URI
-docker run \
-  --rm \
-  $DOCKER_URI \
-  python /workspace/tpu_commons/examples/offline_inference.py \
-  --model=meta-llama/Llama-3.1-8B \
-  --tensor_parallel_size=4 \
-  --max_model_len=1024 \
-```
-
-## How to test kernel?
-
-Install dependencies:
-
-```
-pip install -r requirements.txt
-```
-
-Make sure TPU device is accessible:
-
-```
-tpu-info
-```
-
-Run the test:
-
-```
-pytest -v tests/kernels
-```
-
-## How to run an End-To-End (E2E) benchmarking run?
+## How to run an End-To-End (E2E) benchmark?
 In order to run an [E2E benchmark test](https://github.com/vllm-project/tpu_commons/blob/main/scripts/vllm/benchmarking/README.md), which will spin up a vLLM server with Llama 3.1 8B and run a single request from the MLPerf dataset against it, you can run the
 following command locally:
 

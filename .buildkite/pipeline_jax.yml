@@ -14,7 +14,6 @@ steps:
      key: test_1
      soft_fail: true
      env:
-       TPU_BACKEND_TYPE: "jax"
        QUANTIZATION: "True"
      agents:
        queue: tpu_v6e_queue

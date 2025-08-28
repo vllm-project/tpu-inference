@@ -28,10 +28,6 @@ if [ -z "${BUILDKITE_COMMIT:-}" ]; then
   exit 1
 fi
 
-if [ -z "${TPU_BACKEND_TYPE:-}" ]; then
-  TPU_BACKEND_TYPE=jax
-fi
-
 if [ -z "${MODEL_IMPL_TYPE:-}" ]; then
   MODEL_IMPL_TYPE=flax_nnx
 fi
@@ -58,13 +54,13 @@ echo "Starting cleanup for vllm-tpu..."
 leftover_containers=$(docker ps -a -q --filter "ancestor=vllm-tpu")
 if [ -n "$leftover_containers" ]; then
   echo "Removing leftover containers using vllm-tpu image(s)..."
-  docker rm -f $leftover_containers
+  docker rm -f "$leftover_containers"
 fi
 old_images=$(docker images vllm-tpu -q)
 
 if [ -n "$old_images" ]; then
   echo "Removing old vllm-tpu image(s)..."
-  docker rmi -f $old_images
+  docker rmi -f "$old_images"
 fi
 echo "Cleanup complete."
 
@@ -77,7 +73,6 @@ exec docker run \
   --rm \
   -v "$LOCAL_HF_HOME":"$DOCKER_HF_HOME" \
   -e HF_HOME="$DOCKER_HF_HOME" \
-  -e TPU_BACKEND_TYPE="$TPU_BACKEND_TYPE" \
   -e MODEL_IMPL_TYPE="$MODEL_IMPL_TYPE" \
   -e HF_TOKEN="$HF_TOKEN" \
   -e VLLM_XLA_CACHE_PATH= \
