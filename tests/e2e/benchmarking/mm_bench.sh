@@ -12,12 +12,12 @@
 #   --max_num_batched_tokens 98304
 
 # Spin up the vLLM server
-model_name="Qwen/Qwen2.5-VL-7B-Instruct"
+model_name="Qwen/Qwen2.5-VL-3B-Instruct"
 max_batched_tokens=98304
 max_model_len=98304
 dataset_name="hf"
 dataset_path="lmarena-ai/VisionArena-Chat"
-num_prompts=10
+num_prompts=100
 
 TIMEOUT_SECONDS=600
 READY_MESSAGE="Application startup complete."
