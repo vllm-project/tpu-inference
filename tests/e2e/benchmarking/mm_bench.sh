@@ -124,10 +124,10 @@ if $did_find_ready_message; then
     --dataset-name "$dataset_name" \
     --dataset-path "$dataset_path" \
     --num-prompts "$num_prompts" \
-    --endpoint /v1/chat/completions 2>&1 | tee -a "$BENCHMARK_LOG_FILE"
+    --endpoint /v1/chat/completions
 
-    echo "Going to sleep for 5 seconds..."
-    sleep 5
+    echo "Going to sleep for 30 seconds..."
+    sleep 30
 
     python /workspace/vllm/benchmarks/benchmark_serving.py \
     --backend openai-chat \
