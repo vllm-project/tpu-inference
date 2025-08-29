@@ -189,7 +189,7 @@ def start_process(cmd) -> tuple[subprocess.Popen, int]:
     while line:
       # The log obtained from stdout is bytes, decode it into string.
       # Remove newline via rstrip() to not print an empty line.
-      logging.info(line.decode(errors='backslashreplace').rstrip())
+      logging.error(line.decode(errors='backslashreplace').rstrip())
       line = process.stdout.readline()
 
   t = threading.Thread(target=log_stdout)
@@ -237,7 +237,7 @@ class OpenAIModelServer():
       while self._server_process.poll() is None:
         try:
           models = client.models.list().data
-          logging.info('models: %s' % models)
+          logging.error('models: %s' % models)
           if len(models) > 0:
             self._server_started = True
             return
