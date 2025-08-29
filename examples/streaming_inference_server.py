@@ -16,6 +16,7 @@ import google.auth
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.utils import FlexibleArgumentParser
 from openai import OpenAI
+from openai import AsyncOpenAI
 
 from tpu_commons.core import disagg_utils
 
@@ -83,7 +84,7 @@ def get_current_service_account_email():
     except Exception as e:
         return f"An error occurred: {e}"
 
-def run_pubsub_inference(args: dict, llm: LLM, sampling_params: SamplingParams):
+def run_pubsub_inference(args: dict, llm: LLM, sampling_params: SamplingParams, server: OpenAIModelServer):
     """Listens to Pub/Sub, runs batched LLM inference, and writes to GCS."""
     if not all([args.get("project_id"), args.get("subscription_id"), args.get("bucket_name")]):
         raise ValueError(
@@ -118,7 +119,20 @@ def run_pubsub_inference(args: dict, llm: LLM, sampling_params: SamplingParams):
                 return
 
             logging.info(f"Received {len(prompts)} prompts. Running inference...")
-            outputs = llm.generate(prompts, sampling_params)
+            if llm:
+                outputs = llm.generate(prompts, sampling_params)
+            else:
+                with getAsyncVLLMClient(server.get_server_port()) as client:
+                    try:
+                        async_predictions = [
+                            client.completions.create(
+                                model="model", prompt=prompt, **inference_args)
+                            for prompt in prompts
+                        ]
+                        responses = asyncio.gather(*async_predictions)
+                    except Exception as e:
+                        model.check_connectivity()
+                        raise e
             logging.info("Inference complete.")
 
             results = [
@@ -174,6 +188,14 @@ def getVLLMClient(port) -> OpenAI:
   openai_api_key = "EMPTY"
   openai_api_base = f"http://localhost:{port}/v1"
   return OpenAI(
+      api_key=openai_api_key,
+      base_url=openai_api_base,
+  )
+
+def getAsyncVLLMClient(port) -> AsyncOpenAI:
+  openai_api_key = "EMPTY"
+  openai_api_base = f"http://localhost:{port}/v1"
+  return AsyncOpenAI(
       api_key=openai_api_key,
       base_url=openai_api_base,
   )
@@ -279,22 +301,22 @@ def main(args: dict):
     logging.error(f"Current SA email: {get_current_service_account_email()}")
 
     # Create an LLM
-    llm = LLM(**args) if not infra_args['use_openai_server'] else None
-    openai = OpenAIModelServer(openai_args) if infra_args['use_openai_server'] else None
-
-    # Create a sampling params object
-    # Create a sampling params object
-    sampling_params = llm.get_default_sampling_params()
-    if max_tokens is not None:
-        sampling_params.max_tokens = max_tokens
-    if temperature is not None:
-        sampling_params.temperature = temperature
-    if top_p is not None:
-        sampling_params.top_p = top_p
-    if top_k is not None:
-        sampling_params.top_k = top_k
-
-    run_pubsub_inference(infra_args, llm, sampling_params)
+    if infra_args['use_openai_server']:
+        llm = LLM(**args)
+        # Create a sampling params object
+        sampling_params = llm.get_default_sampling_params()
+        if max_tokens is not None:
+            sampling_params.max_tokens = max_tokens
+        if temperature is not None:
+            sampling_params.temperature = temperature
+        if top_p is not None:
+            sampling_params.top_p = top_p
+        if top_k is not None:
+            sampling_params.top_k = top_k
+        run_pubsub_inference(infra_args, llm, sampling_params, None)
+    else:
+        openai = OpenAIModelServer(openai_args)
+        run_pubsub_inference(infra_args, None, None, openai)
 
 
 if __name__ == "__main__":
