@@ -260,17 +260,12 @@ def main(args: dict):
         'max_pubsub_workers': args.pop('max_pubsub_workers'),
         'use_openai_server' : True if args.pop('use_openai_server') else False,
     }
-    if 'use_openai_server' in args:
-       args.pop('use_openai_server')
-       infra_args['use_openai_server']=True
-    else:
-       infra_args['use_openai_server']=False
 
     logging.error(f"Current SA email: {get_current_service_account_email()}")
 
     # Create an LLM
-    llm = LLM(**args) if not infra_args.use_openai_server else None
-    openai = OpenAIModelServer(**args) if infra_args.use_openai_server else None
+    llm = LLM(**args) if not infra_args['use_openai_server'] else None
+    openai = OpenAIModelServer(**args) if infra_args['use_openai_server'] else None
 
     # Create a sampling params object
     # Create a sampling params object
