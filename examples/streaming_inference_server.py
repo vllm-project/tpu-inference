@@ -258,7 +258,7 @@ def main(args: dict):
         'bucket_name': args.pop('bucket_name'),
         'blob_name_prefix': args.pop('blob_name_prefix'),
         'max_pubsub_workers': args.pop('max_pubsub_workers'),
-        'use_openai_server' : args.pop('use_openai_server'),
+        'use_openai_server' : True if args.pop('use_openai_server') else False,
     }
 
     logging.error(f"Current SA email: {get_current_service_account_email()}")
