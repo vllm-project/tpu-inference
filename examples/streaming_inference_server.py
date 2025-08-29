@@ -260,8 +260,9 @@ def getAsyncVLLMClient(port) -> AsyncOpenAI:
 
 def start_process(cmd) -> tuple[subprocess.Popen, int]:
   logging.error("Starting service with %s", str(cmd).replace("',", "'"))
+  logging.error("Starting service with environment: %s", os.environ)
   process = subprocess.Popen(
-      cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+      cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,env=os.environ)
 
   # Emit the output of this command as info level logging.
   def log_stdout():
