@@ -114,11 +114,10 @@ class CompilationManager:
                 input_ids,
                 attention_metadata,
                 inputs_embeds,
-                layer_name_to_kvcache_index,
             ):
                 kv_caches, hidden_states = self.runner.model_fn(
                     state, kv_caches, input_ids, attention_metadata,
-                    inputs_embeds, layer_name_to_kvcache_index)
+                    inputs_embeds)
                 self.runner.kv_caches = kv_caches
                 return hidden_states
 
@@ -130,7 +129,6 @@ class CompilationManager:
                 input_ids,
                 attention_metadata,
                 inputs_embeds,
-                tuple(self.runner.layer_name_to_kvcache_index.items()),
                 num_tokens=num_tokens,
             )
 
