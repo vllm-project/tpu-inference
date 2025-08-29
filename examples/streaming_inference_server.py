@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import time
+import subprocess
 from concurrent import futures
 
 import vllm.envs as envs
