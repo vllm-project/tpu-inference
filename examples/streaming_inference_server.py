@@ -59,6 +59,11 @@ def create_parser():
         default=1,
         help="Maximum number of workers for the Pub/Sub subscriber.",
     )
+    app_group.add_argument(
+        "--use-openai-server",
+        action="store_true",
+        help="Whether to use OpenAI server.",
+    )
     return parser
 
 def get_current_service_account_email():
@@ -161,6 +166,84 @@ def run_pubsub_inference(args: dict, llm: LLM, sampling_params: SamplingParams):
         subscriber.close()
         logging.info("Shutting down.")
 
+def start_process(cmd) -> tuple[subprocess.Popen, int]:
+  port, = subprocess_server.pick_port(None)
+  cmd = [arg.replace('{{PORT}}', str(port)) for arg in cmd]  # pylint: disable=not-an-iterable
+  logging.info("Starting service with %s", str(cmd).replace("',", "'"))
+  process = subprocess.Popen(
+      cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+  # Emit the output of this command as info level logging.
+  def log_stdout():
+    line = process.stdout.readline()
+    while line:
+      # The log obtained from stdout is bytes, decode it into string.
+      # Remove newline via rstrip() to not print an empty line.
+      logging.info(line.decode(errors='backslashreplace').rstrip())
+      line = process.stdout.readline()
+
+  t = threading.Thread(target=log_stdout)
+  t.daemon = True
+  t.start()
+  return process, port
+
+class OpenAIModelServer():
+  def __init__(self, vllm_server_kwargs: dict[str, str]):
+    self._vllm_server_kwargs = vllm_server_kwargs
+    self._server_started = False
+    self._server_process = None
+    self._server_port: int = -1
+    self._server_process_lock = threading.RLock()
+
+    self.start_server()
+
+  def start_server(self, retries=3):
+    with self._server_process_lock:
+      if not self._server_started:
+        server_cmd = [
+            sys.executable,
+            '-m',
+            'vllm.entrypoints.openai.api_server',
+            '--port',
+            '{{PORT}}',
+        ]
+        for k, v in self._vllm_server_kwargs.items():
+          server_cmd.append(f'--{k}')
+          # Only add values for commands with value part.
+          if v is not None:
+            server_cmd.append(v)
+        self._server_process, self._server_port = start_process(server_cmd)
+
+      self.check_connectivity(retries)
+
+  def get_server_port(self) -> int:
+    if not self._server_started:
+      self.start_server()
+    return self._server_port
+
+  def check_connectivity(self, retries=3):
+    with getVLLMClient(self._server_port) as client:
+      while self._server_process.poll() is None:
+        try:
+          models = client.models.list().data
+          logging.info('models: %s' % models)
+          if len(models) > 0:
+            self._server_started = True
+            return
+        except:  # pylint: disable=bare-except
+          pass
+        # Sleep while bringing up the process
+        time.sleep(5)
+
+      if retries == 0:
+        self._server_started = False
+        raise Exception(
+            "Failed to start vLLM server, polling process exited with code " +
+            "%s.  Next time a request is tried, the server will be restarted" %
+            self._server_process.poll())
+      else:
+        self.start_server(retries - 1)
+
 
 def main(args: dict):
     # Pop arguments not used by LLM
@@ -174,12 +257,14 @@ def main(args: dict):
         'bucket_name': args.pop('bucket_name'),
         'blob_name_prefix': args.pop('blob_name_prefix'),
         'max_pubsub_workers': args.pop('max_pubsub_workers'),
+        'use_openai_server' : args.pop('use_openai_server'),
     }
 
     logging.error(f"Current SA email: {get_current_service_account_email()}")
 
     # Create an LLM
-    llm = LLM(**args)
+    llm = LLM(**args) if not infra_args.use_openai_server else None
+    openai = OpenAIModelServer(**args) if infra_args.use_openai_server else None
 
     # Create a sampling params object
     # Create a sampling params object
