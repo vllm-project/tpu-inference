@@ -84,6 +84,64 @@ def get_current_service_account_email():
     except Exception as e:
         return f"An error occurred: {e}"
 
+class OpenAIModelServer():
+  def __init__(self, vllm_server_kwargs: dict[str, str]):
+    self._vllm_server_kwargs = vllm_server_kwargs
+    self._server_started = False
+    self._server_process = None
+    self._server_port: int = -1
+    self._server_process_lock = threading.RLock()
+
+    self.start_server()
+
+  def start_server(self, retries=3):
+    with self._server_process_lock:
+      if not self._server_started:
+        self._server_port = 1537
+        server_cmd = [
+            sys.executable,
+            '-m',
+            'vllm.entrypoints.openai.api_server',
+            '--port',
+            str(self._server_port),
+        ]
+        for k, v in self._vllm_server_kwargs.items():
+          server_cmd.append(f'--{k}')
+          # Only add values for commands with value part.
+          if v is not None:
+            server_cmd.append(str(v))
+        self._server_process = start_process(server_cmd)
+
+      self.check_connectivity(retries)
+
+  def get_server_port(self) -> int:
+    if not self._server_started:
+      self.start_server()
+    return self._server_port
+
+  def check_connectivity(self, retries=3):
+    with getVLLMClient(self._server_port) as client:
+      while self._server_process.poll() is None:
+        try:
+          models = client.models.list().data
+          logging.error('models: %s' % models)
+          if len(models) > 0:
+            self._server_started = True
+            return
+        except:  # pylint: disable=bare-except
+          pass
+        # Sleep while bringing up the process
+        time.sleep(5)
+
+      if retries == 0:
+        self._server_started = False
+        raise Exception(
+            "Failed to start vLLM server, polling process exited with code " +
+            "%s.  Next time a request is tried, the server will be restarted" %
+            self._server_process.poll())
+      else:
+        self.start_server(retries - 1)
+
 def run_pubsub_inference(args: dict, llm: LLM, sampling_params: SamplingParams, server: OpenAIModelServer):
     """Listens to Pub/Sub, runs batched LLM inference, and writes to GCS."""
     if not all([args.get("project_id"), args.get("subscription_id"), args.get("bucket_name")]):
@@ -218,64 +276,6 @@ def start_process(cmd) -> tuple[subprocess.Popen, int]:
   t.daemon = True
   t.start()
   return process
-
-class OpenAIModelServer():
-  def __init__(self, vllm_server_kwargs: dict[str, str]):
-    self._vllm_server_kwargs = vllm_server_kwargs
-    self._server_started = False
-    self._server_process = None
-    self._server_port: int = -1
-    self._server_process_lock = threading.RLock()
-
-    self.start_server()
-
-  def start_server(self, retries=3):
-    with self._server_process_lock:
-      if not self._server_started:
-        self._server_port = 1537
-        server_cmd = [
-            sys.executable,
-            '-m',
-            'vllm.entrypoints.openai.api_server',
-            '--port',
-            str(self._server_port),
-        ]
-        for k, v in self._vllm_server_kwargs.items():
-          server_cmd.append(f'--{k}')
-          # Only add values for commands with value part.
-          if v is not None:
-            server_cmd.append(str(v))
-        self._server_process = start_process(server_cmd)
-
-      self.check_connectivity(retries)
-
-  def get_server_port(self) -> int:
-    if not self._server_started:
-      self.start_server()
-    return self._server_port
-
-  def check_connectivity(self, retries=3):
-    with getVLLMClient(self._server_port) as client:
-      while self._server_process.poll() is None:
-        try:
-          models = client.models.list().data
-          logging.error('models: %s' % models)
-          if len(models) > 0:
-            self._server_started = True
-            return
-        except:  # pylint: disable=bare-except
-          pass
-        # Sleep while bringing up the process
-        time.sleep(5)
-
-      if retries == 0:
-        self._server_started = False
-        raise Exception(
-            "Failed to start vLLM server, polling process exited with code " +
-            "%s.  Next time a request is tried, the server will be restarted" %
-            self._server_process.poll())
-      else:
-        self.start_server(retries - 1)
 
 
 def main(args: dict):
