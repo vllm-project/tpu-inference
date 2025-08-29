@@ -170,8 +170,6 @@ def run_pubsub_inference(args: dict, llm: LLM, sampling_params: SamplingParams):
         logging.info("Shutting down.")
 
 def start_process(cmd) -> tuple[subprocess.Popen, int]:
-  port, = subprocess_server.pick_port(None)
-  cmd = [arg.replace('{{PORT}}', str(port)) for arg in cmd]  # pylint: disable=not-an-iterable
   logging.error("Starting service with %s", str(cmd).replace("',", "'"))
   process = subprocess.Popen(
       cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -188,7 +186,7 @@ def start_process(cmd) -> tuple[subprocess.Popen, int]:
   t = threading.Thread(target=log_stdout)
   t.daemon = True
   t.start()
-  return process, port
+  return process
 
 class OpenAIModelServer():
   def __init__(self, vllm_server_kwargs: dict[str, str]):
@@ -203,19 +201,20 @@ class OpenAIModelServer():
   def start_server(self, retries=3):
     with self._server_process_lock:
       if not self._server_started:
+        self._server_port = 1537
         server_cmd = [
             sys.executable,
             '-m',
             'vllm.entrypoints.openai.api_server',
             '--port',
-            '{{PORT}}',
+            self._server_port,
         ]
         for k, v in self._vllm_server_kwargs.items():
           server_cmd.append(f'--{k}')
           # Only add values for commands with value part.
           if v is not None:
             server_cmd.append(v)
-        self._server_process, self._server_port = start_process(server_cmd)
+        self._server_process = start_process(server_cmd)
 
       self.check_connectivity(retries)
 
