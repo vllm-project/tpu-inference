@@ -53,6 +53,12 @@ def create_parser():
         default="llm-results/",
         help="Prefix for the GCS blob name.",
     )
+    app_group.add_argument(
+        "--max-pubsub-workers",
+        type=int,
+        default=1,
+        help="Maximum number of workers for the Pub/Sub subscriber.",
+    )
     return parser
 
 def get_current_service_account_email():
@@ -139,7 +145,7 @@ def run_pubsub_inference(args: dict, llm: LLM, sampling_params: SamplingParams):
             message.nack()
 
     # Limit the concurrency to 1. Otherwise vLLM Ray engine crashes.
-    executor = futures.ThreadPoolExecutor(max_workers=1)
+    executor = futures.ThreadPoolExecutor(max_workers=args["max_pubsub_workers"])
     # A thread pool-based scheduler. It must not be shared across SubscriberClients.
     scheduler = pubsub_v1.subscriber.scheduler.ThreadScheduler(executor)
     streaming_pull_future = subscriber.subscribe(
@@ -166,7 +172,8 @@ def main(args: dict):
         'project_id': args.pop("project_id"),
         'subscription_id': args.pop('subscription_id'),
         'bucket_name': args.pop('bucket_name'),
-        'blob_name_prefix': args.pop('blob_name_prefix')
+        'blob_name_prefix': args.pop('blob_name_prefix'),
+        'max_pubsub_workers': args.pop('max_pubsub_workers'),
     }
 
     logging.error(f"Current SA email: {get_current_service_account_email()}")
