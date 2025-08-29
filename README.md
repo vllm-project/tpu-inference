@@ -175,6 +175,13 @@ To run JAX models with random initialized weights:
 JAX_RANDOM_WEIGHTS=1
 ```
 
+To run workloads on multi-host:
+
+``
+TPU_MULTIHOST_BACKEND=ray
+
+```
+
 ## Profiling
 
 There are two ways to profile your workload:
@@ -183,7 +190,9 @@ There are two ways to profile your workload:
 If you set the following environment variable:
 
 ```
+
 PHASED_PROFILING_DIR=<DESIRED PROFILING OUTPUT DIR>
+
 ```
 
 we will automatically capture profiles during three phases of your workload (assuming they are encountered):
@@ -197,7 +206,9 @@ To aid in your analysis, we will also log the batch composition for the profiled
 If you set the following environment variable:
 
 ```
+
 USE_JAX_PROFILER_SERVER=True
+
 ```
 
 you can instead manually decide when to capture a profile and for how long, which can helpful if your workload (e.g. E2E benchmarking) is
@@ -206,7 +217,9 @@ large and taking a profile of the entire workload (i.e. using the above method) 
 You can additionally set the desired profiling port (default is `9999`):
 
 ```
+
 JAX_PROFILER_SERVER_PORT=XXXX
+
 ```
 
 In order to use this approach, you can do the following:
@@ -224,7 +237,9 @@ In order to run an [E2E benchmark test](https://github.com/vllm-project/tpu_comm
 following command locally:
 
 ```
+
 BUILDKITE_COMMIT=0f199f1 .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
+
 ```
 
 While this will run the code in a Docker image, you can also run the bare `tests/e2e/benchmarking/mlperf.sh` script itself,
@@ -242,14 +257,18 @@ To enable quantization, you can do one of the following:
 Simply pass the name of a quantization config found inside the quantization config directory (`tpu_commons/models/jax/utils/quantization/configs/`), for example:
 
 ```
+
 ... --additional_config='{"quantization": "int8_default.yaml"}'
+
 ```
 
 #### Using a quantization config JSON
 Alternatively, you can pass the explicit quantization configuration as JSON string, where each entry in `rules` corresponds to a Qwix rule (see below):
 
 ```
+
 { "qwix": { "rules": [{ "module_path": ".*", "weight_qtype": "int8", "act_qtype": "int8" }]}}
+
 ```
 
 ### Creating your own quantization config YAML
@@ -259,12 +278,14 @@ To create your own quantization config YAML file:
 2. For Qwix quantization, add a new entry to the file as follows:
 
 ```
+
 qwix:
   rules:
     # NOTE: each entry corresponds to a qwix.QuantizationRule
     - module_path: '.*'
       weight_qtype: 'int8'
       act_qtype: 'int8'
+
 ```
 
 where each entry under `rules` corresponds to a `qwix.QuantizationRule`.  To learn more about Qwix and defining Qwix rules, please see the relevant docs [here](https://github.com/google/qwix?tab=readme-ov-file#quantization-config).
@@ -272,5 +293,7 @@ where each entry under `rules` corresponds to a `qwix.QuantizationRule`.  To lea
 1. To use the config, simply pass the name of the file you created in the `--additional_config`, e.g.:
 
 ```
+
 ... --additional_config='{"quantization": "YOUR_FILE_NAME_HERE.yaml"}'
+
 ```
