@@ -6,10 +6,10 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import (MultiModalBatchedField,
-                                    MultiModalFieldElem, MultiModalKwargsItem)
+                                    MultiModalFieldElem, MultiModalKwargsItem,
+                                    PlaceholderRange)
 from vllm.sampling_params import SamplingType
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
-from vllm.v1.request import PlaceholderRange
 
 from tpu_commons.runner.jax.input_batch_jax import CachedRequestState
 from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
