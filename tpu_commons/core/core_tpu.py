@@ -394,6 +394,7 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
         # engine core to be executed, instead we create other instance of
         # engine cores and let them do the work.
         self.vllm_config = vllm_config
+        self.vllm_config.cache_config.gpu_memory_utilization = self.vllm_config.cache_config.gpu_memory_utilization - 0.1
 
         # We should be taking the input from the client, the code below is forked from
         # vllm.v1.engine.core.EngineCoreProc.
@@ -483,7 +484,7 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
                 raise RuntimeError("Input socket thread died during startup")
             if addresses.coordinator_input is not None:
                 logger.info("Waiting for READY message from DP Coordinator...")
-
+        self.request_block_hasher = None
         if (self.vllm_config.cache_config.enable_prefix_caching
                 or self._prefill_engines[0].scheduler.get_kv_connector()
                 is not None):
