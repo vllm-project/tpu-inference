@@ -184,7 +184,7 @@ def run_pubsub_inference(args: dict, llm: LLM, sampling_params: SamplingParams, 
                     try:
                         async_predictions = [
                             client.completions.create(
-                                model="model", prompt=prompt, **inference_args)
+                                model=args['model'], prompt=prompt, **inference_args)
                             for prompt in prompts
                         ]
                         responses = asyncio.gather(*async_predictions)
@@ -292,11 +292,6 @@ def main(args: dict):
         'max_pubsub_workers': args.pop('max_pubsub_workers'),
         'use_openai_server' : True if args.pop('use_openai_server') else False,
     }
-    openai_args = {
-       'model' : args['model'],
-       'tensor_parallel_size': args['tensor_parallel_size'],
-       'max_model_len': args['max_model_len'],
-    }
 
     logging.error(f"Current SA email: {get_current_service_account_email()}")
 
@@ -315,6 +310,11 @@ def main(args: dict):
             sampling_params.top_k = top_k
         run_pubsub_inference(infra_args, llm, sampling_params, None)
     else:
+        openai_args = {
+            'model' : args['model'],
+            'tensor_parallel_size': args['tensor_parallel_size'],
+            'max_model_len': args['max_model_len'],
+        }
         openai = OpenAIModelServer(openai_args)
         run_pubsub_inference(infra_args, None, None, openai)
 
