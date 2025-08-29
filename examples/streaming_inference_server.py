@@ -15,6 +15,7 @@ from google.cloud import pubsub_v1, storage
 import google.auth
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.utils import FlexibleArgumentParser
+from openai import OpenAI
 
 from tpu_commons.core import disagg_utils
 
@@ -168,6 +169,14 @@ def run_pubsub_inference(args: dict, llm: LLM, sampling_params: SamplingParams):
         streaming_pull_future.result()
         subscriber.close()
         logging.info("Shutting down.")
+
+def getVLLMClient(port) -> OpenAI:
+  openai_api_key = "EMPTY"
+  openai_api_base = f"http://localhost:{port}/v1"
+  return OpenAI(
+      api_key=openai_api_key,
+      base_url=openai_api_base,
+  )
 
 def start_process(cmd) -> tuple[subprocess.Popen, int]:
   logging.error("Starting service with %s", str(cmd).replace("',", "'"))
