@@ -213,7 +213,7 @@ class OpenAIModelServer():
           server_cmd.append(f'--{k}')
           # Only add values for commands with value part.
           if v is not None:
-            server_cmd.append(v)
+            server_cmd.append(str(v))
         self._server_process = start_process(server_cmd)
 
       self.check_connectivity(retries)
