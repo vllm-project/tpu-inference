@@ -207,7 +207,7 @@ class OpenAIModelServer():
             '-m',
             'vllm.entrypoints.openai.api_server',
             '--port',
-            str(self._server_port),
+            self._server_port,
         ]
         for k, v in self._vllm_server_kwargs.items():
           server_cmd.append(f'--{k}')
@@ -261,12 +261,17 @@ def main(args: dict):
         'max_pubsub_workers': args.pop('max_pubsub_workers'),
         'use_openai_server' : True if args.pop('use_openai_server') else False,
     }
+    openai_args = {
+       'model' : args['model'],
+       'tensor_parallel_size': args['tensor_parallel_size'],
+       'max_model_len': args['max_model_len'],
+    }
 
     logging.error(f"Current SA email: {get_current_service_account_email()}")
 
     # Create an LLM
     llm = LLM(**args) if not infra_args['use_openai_server'] else None
-    openai = OpenAIModelServer(args) if infra_args['use_openai_server'] else None
+    openai = OpenAIModelServer(openai_args) if infra_args['use_openai_server'] else None
 
     # Create a sampling params object
     # Create a sampling params object
