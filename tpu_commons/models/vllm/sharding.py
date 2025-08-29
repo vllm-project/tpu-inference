@@ -1,6 +1,4 @@
 import functools
-from dataclasses import dataclass
-from typing import Optional
 
 import humanize
 import jax
@@ -38,26 +36,8 @@ P = PartitionSpec
 logger = init_logger(__name__)
 
 
-@dataclass
-class AttentionInfo:
-    layer_name: str
-    num_kv_heads: int
-    head_size: int
-    attn_type: str
-    sliding_window: Optional[int] = None
-    kv_sharing_target_layer_name: Optional[str] = None
-
-
 def shard_attention(layer: torch.nn.Module, mesh: Mesh,
                     vllm_config: VllmConfig):
-    vllm_config.compilation_config.static_forward_context[
-        layer.layer_name] = AttentionInfo(
-            layer_name=layer.layer_name,
-            num_kv_heads=layer.num_kv_heads,
-            head_size=layer.head_size,
-            attn_type=layer.attn_type,
-            sliding_window=layer.sliding_window,
-            kv_sharing_target_layer_name=layer.kv_sharing_target_layer_name)
     return JaxAttention(layer, mesh)
 
 
