@@ -296,7 +296,7 @@ def main(args: dict):
     logging.error(f"Current SA email: {get_current_service_account_email()}")
 
     # Create an LLM
-    if infra_args['use_openai_server']:
+    if not infra_args['use_openai_server']:
         llm = LLM(**args)
         # Create a sampling params object
         sampling_params = llm.get_default_sampling_params()
