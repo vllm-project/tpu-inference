@@ -34,7 +34,21 @@ logger = init_logger(__name__)
 
 
 class RayDistributedExecutor(RayDistributedExecutorV1):
-    """Ray-based distributed executor"""
+    """Ray-based distributed executor for TPU.
+
+    The implementation is similar to vllm/executor/ray_distributed_executor.py
+    with these major differences:
+
+    1. self._init_executor():
+       VLLM_USE_RAY_SPMD_WORKER=1, in which the driver worker is the same as other workers.
+    2. self._initialize_ray_cluster():
+       This sets placement_group_specs for TPU.
+       In vLLM one GPU maps to one placement group.
+       While here one TPU node with all chips maps to one placement group.
+    3. self._init_workers_ray():
+       This set TPU resources when create each worker.
+       And we omit the driver worker related logic.
+    """
 
     def _init_executor(self) -> None:
         self.forward_dag: Optional[ray.dag.CompiledDAG] = None
@@ -78,8 +92,7 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         self.kv_output_aggregator = KVOutputAggregator(
             self.parallel_config.world_size)
 
-    def _initialize_ray_cluster(self,
-                                ray_address: Optional[str] = None) -> None:
+    def _initialize_ray_cluster(self) -> None:
         """Initialize the distributed cluster with Ray.
 
         it will connect to the Ray cluster and create a placement group
@@ -92,7 +105,8 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
             logger.info(
                 "Ray is already initialized. Skipping Ray initialization.")
         else:
-            ray.init(address=ray_address)
+            logger.warning("Ray is not initialized, this is mainly for test.")
+            ray.init()
 
         device_str = current_platform.ray_device_key
         if not device_str:
@@ -241,6 +255,7 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
 
         node_workers = defaultdict(list)  # node id -> list of worker ranks
         node_tpus = defaultdict(list)  # node id -> list of tpu ids
+
         for i, (node_id, tpu_ids) in enumerate(worker_node_and_tpu_ids):
             node_workers[node_id].append(i)
             # `tpu_ids` can be a list of strings or integers.
@@ -255,13 +270,11 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         n_nodes = len(node_workers)
 
         if n_nodes != n_ips:
-            raise RuntimeError(
-                f"Every node should have a unique IP address. Got {n_nodes}"
-                f" nodes with node ids {list(node_workers.keys())} and "
-                f"{n_ips} unique IP addresses {all_ips}. Please check your"
-                " network configuration. If you set `VLLM_HOST_IP`"
-                " environment variable, make sure it is unique for"
-                " each node.")
+            logger.warning(
+                f"Got {n_nodes} nodes but with {n_ips} IP addresses. "
+                "This is not a typical production setup whose "
+                "number of nodes and IPs is euqal. This setup may "
+                "lead to unexpected behaviors.")
 
         # Set environment variables for the driver and workers.
         all_args_to_update_environment_variables = [{

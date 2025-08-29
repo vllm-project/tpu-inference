@@ -367,6 +367,11 @@ def load_hf_weights(vllm_config,
         model_path, vllm_config.load_config.download_dir)
     params = nnx.state(model)
     max_workers = min(64, len(weights_files))
+    # NOTE(xiang): Disable multi-threading mode if running on multi-host.
+    # Because multi-threading would cause different JAX processes to load
+    # different weights at the same time.
+    if os.environ.get("TPU_MULTIHOST_BACKEND", "").lower() == "ray":
+        max_workers = 1
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
             executor.submit(_load_hf_weights_on_thread,
