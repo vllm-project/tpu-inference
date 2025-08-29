@@ -207,7 +207,7 @@ class OpenAIModelServer():
             '-m',
             'vllm.entrypoints.openai.api_server',
             '--port',
-            self._server_port,
+            str(self._server_port),
         ]
         for k, v in self._vllm_server_kwargs.items():
           server_cmd.append(f'--{k}')
