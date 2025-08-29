@@ -265,7 +265,7 @@ def main(args: dict):
 
     # Create an LLM
     llm = LLM(**args) if not infra_args['use_openai_server'] else None
-    openai = OpenAIModelServer(**args) if infra_args['use_openai_server'] else None
+    openai = OpenAIModelServer(args) if infra_args['use_openai_server'] else None
 
     # Create a sampling params object
     # Create a sampling params object
