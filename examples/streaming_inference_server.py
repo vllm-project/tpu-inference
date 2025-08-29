@@ -170,7 +170,7 @@ def run_pubsub_inference(args: dict, llm: LLM, sampling_params: SamplingParams):
 def start_process(cmd) -> tuple[subprocess.Popen, int]:
   port, = subprocess_server.pick_port(None)
   cmd = [arg.replace('{{PORT}}', str(port)) for arg in cmd]  # pylint: disable=not-an-iterable
-  logging.info("Starting service with %s", str(cmd).replace("',", "'"))
+  logging.error("Starting service with %s", str(cmd).replace("',", "'"))
   process = subprocess.Popen(
       cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
