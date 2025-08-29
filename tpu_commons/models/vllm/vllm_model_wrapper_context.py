@@ -1,16 +1,14 @@
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import jax
 from jax.sharding import Mesh
 
-KVCache = Tuple[jax.Array, jax.Array]
-
 
 @dataclass
 class VllmModelWrapperContext:
-    kv_caches: List[KVCache]
+    kv_caches: List[jax.Array]
     mesh: Mesh
 
 
@@ -28,7 +26,7 @@ def get_vllm_model_wrapper_context() -> VllmModelWrapperContext:
 @contextmanager
 def set_vllm_model_wrapper_context(
     *,
-    kv_caches: List[KVCache],
+    kv_caches: List[jax.Array],
     mesh: Mesh,
 ):
     global _vllm_model_wrapper_context
