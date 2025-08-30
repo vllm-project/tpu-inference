@@ -497,6 +497,7 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
             self.request_block_hasher = get_request_block_hasher(
                 block_size, caching_hash_fn)
 
+        self.mm_receiver_cache = None
         self._orchestrator = _DisaggOrchestrator(
             config=VllmConfigAdapter(vllm_config),
             output_queue=self.output_queue,
