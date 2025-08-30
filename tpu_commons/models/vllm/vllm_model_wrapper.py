@@ -3,7 +3,7 @@ import functools
 import os
 import tempfile
 from contextlib import nullcontext
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
 from unittest.mock import patch
 
 import jax
@@ -131,6 +131,7 @@ class VllmModelWrapper:
         self.model = _VllmRunner(vllm_model)
 
         # jax.config.update("jax_explain_cache_misses", True)
+        self.vllm_config.compilation_config.static_forward_context = vllm_config_for_load.compilation_config.static_forward_context
 
         params_and_buffers = shard_model_to_tpu(self.model, self.mesh,
                                                 self.vllm_config)
@@ -149,19 +150,23 @@ class VllmModelWrapper:
                 "xla_tpu_reduce_scatter_collective_matmul_mode":
                 "post_spmd_conservative"
             },
-        )
+            static_argnames=('layer_name_to_kvcache_index', ))
         def step_fun(
             params_and_buffers,  # this has been wrapped into a torchax TorchValue
             kv_caches: List[jax.Array],
             input_ids: jax.Array,
             attn_metadata: AttentionMetadata,
+            input_embeds: jax.Array,
+            layer_name_to_kvcache_index: Sequence[Tuple[str, int]],
             *args,
         ) -> Tuple[List[jax.Array], jax.Array]:
-
+            layer_name_to_kvcache_index = dict(layer_name_to_kvcache_index)
             with torchax.default_env(), set_vllm_model_wrapper_context(
-                    kv_caches=kv_caches, mesh=self.mesh), set_forward_context(
-                        attn_metadata=attn_metadata,
-                        vllm_config=self.vllm_config):
+                    kv_caches=kv_caches,
+                    mesh=self.mesh,
+                    layer_name_to_kvcache_index=layer_name_to_kvcache_index
+            ), set_forward_context(attn_metadata=attn_metadata,
+                                   vllm_config=self.vllm_config):
                 # We need to wrap args from jax land into TorchValue with
                 # torch_view in order to call the Torch function.
                 hidden_states = torch.func.functional_call(

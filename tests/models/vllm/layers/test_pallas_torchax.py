@@ -179,7 +179,9 @@ class TestPallasAttentionBackendImpl:
         query, key, value, kv_cache, metadata = create_inputs(mesh)
 
         with torchax.default_env(), set_vllm_model_wrapper_context(
-                kv_caches=[kv_cache], mesh=mesh):
+                kv_caches=[kv_cache],
+                mesh=mesh,
+                layer_name_to_kvcache_index={'0': 0}):
             impl.forward(layer, query, key, value, torch.tensor([]), metadata)
 
     def test_forward_with_vllm_kv_cache_raises_error(self, mesh):

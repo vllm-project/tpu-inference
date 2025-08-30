@@ -350,6 +350,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                     input_ids,
                     attn_metadata,
                     inputs_embeds,
+                    tuple(self.layer_name_to_kvcache_index.items()),
                 )
 
             hidden_states = self._select_from_array_fn(hidden_states,
