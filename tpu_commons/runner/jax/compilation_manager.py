@@ -67,15 +67,16 @@ class CompilationManager:
             logger.info("[TEMP] skip precompiling for multi-modal models")
             return
 
-        self._precompile_backbone()
-        self._precompile_select_from_array()
-        self._precompile_compute_logits()
-        self._precompile_disagg_utils()
-        self._precompile_sampling()
-        self._precompile_gather_logprobs()
-        self._precompile_structured_decoding()
-        if self.runner.speculative_config:
-            self._precompile_rejection_sampler()
+        with self.maybe_setup_dummy_loras(self.lora_config):
+            self._precompile_backbone()
+            self._precompile_select_from_array()
+            self._precompile_compute_logits()
+            self._precompile_disagg_utils()
+            self._precompile_sampling()
+            self._precompile_gather_logprobs()
+            self._precompile_structured_decoding()
+            if self.runner.speculative_config:
+                self._precompile_rejection_sampler()
 
     def _precompile_backbone(self) -> None:
         for num_tokens in self.runner.num_tokens_paddings:
@@ -115,11 +116,14 @@ class CompilationManager:
                 attention_metadata,
                 inputs_embeds,
             ):
-                kv_caches, hidden_states = self.runner.model_fn(
-                    state, kv_caches, input_ids, attention_metadata,
-                    inputs_embeds)
-                self.runner.kv_caches = kv_caches
-                return hidden_states
+                with self.maybe_select_dummy_loras(
+                        self.lora_config, np.array([num_tokens],
+                                                   dtype=np.int32)):
+                    kv_caches, hidden_states = self.runner.model_fn(
+                        state, kv_caches, input_ids, attention_metadata,
+                        inputs_embeds)
+                    self.runner.kv_caches = kv_caches
+                    return hidden_states
 
             self._run_compilation(
                 "backbone",

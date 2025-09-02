@@ -13,6 +13,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.forward_context import set_forward_context
+from vllm.lora.request import LoRARequest
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils import cdiv
@@ -24,6 +25,7 @@ from vllm.v1.request import Request
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.worker.kv_connector_model_runner_mixin import \
     KVConnectorModelRunnerMixin
+from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from tpu_commons import utils as common_utils
 from tpu_commons.logger import init_logger
@@ -66,7 +68,7 @@ DUMMY_METADATA = AttentionMetadata(
 )
 
 
-class TPUModelRunner(KVConnectorModelRunnerMixin):
+class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
     def __init__(
         self,
@@ -230,6 +232,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
 
         # tensors for structured decoding
         self.vocab_size = self.model_config.get_vocab_size()
+        if self.lora_config is not None:
+            # lora_config.lora_extra_vocab_size is the "Maximum size of extra vocabulary that can be present in a LoRA adapter" per https://github.com/vanbasten23/vllm/blob/7f4a8b6705622fde952a2e633e86716f902d6e1b/vllm/config.py#L3040
+            self.vocab_size += self.lora_config.lora_extra_vocab_size
         self.grammar_bitmask_cpu = np.zeros(
             (self.max_num_reqs, cdiv(self.vocab_size, 32)),
             dtype=np.int32,
@@ -252,7 +257,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                                             dtype=np.int64)
 
     def load_model(self):
-        self.model_fn, self.compute_logits_fn, self.get_multimodal_embeddings_fn, self.get_input_embeddings_fn, self.state = get_model(
+        self.model_fn, self.compute_logits_fn, self.get_multimodal_embeddings_fn, self.get_input_embeddings_fn, self.state, self.lora_manager = get_model(
             self.vllm_config,
             self.rng_key,
             self.mesh,
@@ -626,6 +631,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
              self.mesh, (input_ids, positions, block_tables, query_start_loc,
                          seq_lens, logits_indices, request_distribution))
 
+        if self.lora_config is not None:
+            # We need to respect padding when activating LoRA adapters
+            padded_num_scheduled_tokens_per_req = np.copy(
+                num_scheduled_tokens_per_req
+            )  # Copying to avoid accidental state corruption bugs
+            padded_num_scheduled_tokens_per_req[-1] += \
+                padded_total_num_scheduled_tokens - total_num_scheduled_tokens
+
+            self.set_active_loras(self.input_batch,
+                                  padded_num_scheduled_tokens_per_req)
+
         return (
             input_ids,
             AttentionMetadata(
@@ -639,6 +655,20 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             logits_indices,
             spec_decode_metadata,
         )
+
+    def set_active_loras(
+        self,
+        input_batch: InputBatch,  # Note, it's the jax InputBatch.
+        num_scheduled_tokens: np.ndarray) -> None:
+
+        prompt_lora_mapping: tuple[int, ...]  # of size input_batch.num_reqs
+        token_lora_mapping: tuple[int,
+                                  ...]  # of size np.sum(num_scheduled_tokens)
+        lora_requests: set[LoRARequest]
+        prompt_lora_mapping, token_lora_mapping, lora_requests = \
+                            input_batch.make_lora_inputs(num_scheduled_tokens)
+        return super()._set_active_loras(prompt_lora_mapping,
+                                         token_lora_mapping, lora_requests)
 
     def _get_input_ids_embeds(self, input_ids: jax.Array,
                               mm_embeds: list[jax.Array]):

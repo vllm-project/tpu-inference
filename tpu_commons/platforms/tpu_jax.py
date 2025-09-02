@@ -87,7 +87,7 @@ class TpuPlatform(Platform):
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
-        return "vllm.lora.punica_wrapper.punica_tpu.PunicaWrapperTPU"
+        return "tpu_commons.lora.torch_punica_tpu.PunicaWrapperTPU"
 
     @classmethod
     def get_infinity_values(cls, dtype: jnp.dtype) -> Tuple[float, float]:
