@@ -3,15 +3,16 @@ import functools
 import humanize
 import jax
 import torch
-from torch.nn import Parameter
 import torchax
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from torch.nn import Parameter
 from torch.utils import _pytree as pytree
 from torchax.interop import torch_view
 from torchax.ops.mappings import t2j
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding, ParallelLMHead
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead, VocabParallelEmbedding)
 
 from tpu_commons.logger import init_logger
 from tpu_commons.models.vllm.jax_fused_moe import JaxFusedMoE
@@ -28,11 +29,12 @@ def shard_fused_moe(layer: torch.nn.Module, mesh: Mesh,
     return jax_layer
 
 
-def shard_vocab_parallel_embedding(layer: torch.nn.Module, mesh: Mesh, vllm_config: VllmConfig):
+def shard_vocab_parallel_embedding(layer: torch.nn.Module, mesh: Mesh,
+                                   vllm_config: VllmConfig):
     assert isinstance(layer, VocabParallelEmbedding)
     w = Parameter(torch_view(t2j(layer.weight)), requires_grad=False)
     layer.weight = w.apply_jax_(jax.device_put,
-        NamedSharding(mesh, P('model', None)))
+                                NamedSharding(mesh, P('model', None)))
     return layer
 
 
@@ -43,11 +45,11 @@ def shard_lm_head(layer: torch.nn.Module, mesh: Mesh, vllm_config: VllmConfig):
     assert isinstance(layer, ParallelLMHead)
     w = Parameter(torch_view(t2j(layer.weight)), requires_grad=False)
     layer.weight = w.apply_jax_(jax.device_put,
-        NamedSharding(mesh, P('model', None)))
+                                NamedSharding(mesh, P('model', None)))
     if hasattr(layer, 'bias'):
         bias = Parameter(torch_view(t2j(layer.bias)), requires_grad=False)
         layer.bias = bias.apply_jax_(jax.device_put,
-            NamedSharding(mesh, P('model')))
+                                     NamedSharding(mesh, P('model')))
     return layer
 
 
@@ -142,7 +144,7 @@ def extract_all_buffers(m: torch.nn.Module):
                 continue
 
             qual_name = prefix + k
-            if isinstance(v, torch.nn.Parameter):
+            if isinstance(v, torch.nn.Parameter) and k in module._parameters:
                 params[qual_name] = v
             elif isinstance(v, torch.nn.ParameterList):
                 for i, param in enumerate(v):
@@ -166,7 +168,8 @@ def set_all_buffers(m, params, buffers, variables):
             qual_name = prefix + k
             if (potential_v := buffers.get(qual_name)) is not None or (
                     potential_v := variables.get(qual_name)) is not None:
-                setattr(module, k, potential_v)
+                if getattr(module, k, None) is None:
+                    setattr(module, k, potential_v)
             elif (potential_v := params.get(qual_name)) is not None:
                 # print(k, potential_v)
                 # setattr(module, k, torch.nn.Parameter(potential_v))

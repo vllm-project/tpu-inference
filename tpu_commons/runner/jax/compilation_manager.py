@@ -67,7 +67,7 @@ class CompilationManager:
             logger.info("[TEMP] skip precompiling for multi-modal models")
             return
 
-        with self.maybe_setup_dummy_loras(self.lora_config):
+        with self.runner.maybe_setup_dummy_loras(self.runner.lora_config):
             self._precompile_backbone()
             self._precompile_select_from_array()
             self._precompile_compute_logits()
@@ -116,9 +116,9 @@ class CompilationManager:
                 attention_metadata,
                 inputs_embeds,
             ):
-                with self.maybe_select_dummy_loras(
-                        self.lora_config, np.array([num_tokens],
-                                                   dtype=np.int32)):
+                with self.runner.maybe_select_dummy_loras(
+                        self.runner.lora_config,
+                        np.array([num_tokens], dtype=np.int32)):
                     kv_caches, hidden_states = self.runner.model_fn(
                         state, kv_caches, input_ids, attention_metadata,
                         inputs_embeds)

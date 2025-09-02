@@ -145,6 +145,9 @@ class VllmModelWrapper:
                 device="cpu")
 
             replace_set_lora(vllm_model)
+        # why moved below function here whereas it used to be in vllm_get_model?
+        # vllm_get_model moves the vllm_model to jax device. But we expect to initialize the weight on cpu
+        # and load_lora_model get the device from the vllm_model (aka the base model in lora).
         move_weights_to_torchax_tensor(vllm_model)
 
         self.model = _VllmRunner(vllm_model)
@@ -193,7 +196,8 @@ class VllmModelWrapper:
                         "inputs_embeds": None,
                     },
                     tie_weights=False,
-                    strict=True)
+                    strict=True,
+                )
                 vllm_model_wrapper_context = get_vllm_model_wrapper_context()
                 new_kv_caches = vllm_model_wrapper_context.kv_caches
             # Wrap the hidden_states from torch land into a JaxValue for the jax
