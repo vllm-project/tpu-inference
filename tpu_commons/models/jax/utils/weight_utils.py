@@ -20,8 +20,8 @@ from safetensors import safe_open
 from tpu_commons import utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.utils import file_utils
-from tpu_commons.models.jax.utils.quantization.quantization_utils import \
-    load_and_unpack_awq, unpack, reverse_awq_order, awq_dict_to_qarray
+from tpu_commons.models.jax.utils.quantization.quantization_utils import (
+    awq_dict_to_qarray, reverse_awq_order, unpack)
 
 logger = init_logger(__name__)
 
@@ -298,7 +298,6 @@ def _load_hf_weights_on_thread(vllm_config, params: nnx.State,
     except TypeError:
         shardings = params
 
-    gptq_dict = {"g_idx": [], "qzeros": [], "qweight": []}
     awq_dict = {"scales": [], "qzeros": [], "qweight": []}
     qwix_weight = False
 
@@ -324,10 +323,30 @@ def _load_hf_weights_on_thread(vllm_config, params: nnx.State,
                 awq_dict["qzeros"] = awq_dict["qzeros"]
                 awq_dict["scales"] = awq_dict["scales"]
 
+                if "layers.0.self_attn.q_proj" in hf_key:
+                    print(awq_dict["qweight"].shape, awq_dict["qweight"])
+                    print(awq_dict["qzeros"].shape, awq_dict["qzeros"])
+                    print(awq_dict["scales"].shape, awq_dict["scales"])
+                    print("BEFORE")
+
                 awq_dict["qweight"] = unpack(awq_dict["qweight"], bits=4)
-                awq_dict["qweight"] = reverse_awq_order(awq_dict["qweight"], bits=4)
+                awq_dict["qweight"] = reverse_awq_order(awq_dict["qweight"],
+                                                        bits=4)
                 awq_dict["qzeros"] = unpack(awq_dict["qzeros"], bits=4)
-                awq_dict["qzeros"] = reverse_awq_order(awq_dict["qzeros"], bits=4)
+                awq_dict["qzeros"] = reverse_awq_order(awq_dict["qzeros"],
+                                                       bits=4)
+
+                # if "q_proj" in hf_key:
+                awq_dict["qweight"] = awq_dict["qweight"].transpose()
+                awq_dict["qzeros"] = awq_dict["qzeros"].transpose()
+                awq_dict["scales"] = awq_dict["scales"].transpose()
+
+                if "layers.0.self_attn.q_proj" in hf_key:
+                    print(awq_dict["qweight"].shape, awq_dict["qweight"])
+                    print(awq_dict["qzeros"].shape, awq_dict["qzeros"])
+                    print(awq_dict["scales"].shape, awq_dict["scales"])
+                    print("AFTER")
+                    # raise ValueError
             else:
                 continue
 
@@ -374,8 +393,12 @@ def _load_hf_weights_on_thread(vllm_config, params: nnx.State,
                     if qwix_weight:
                         # TODO
                         scale_zeros_reshape = list(reshape_keys[key])
-                        scale_zeros_reshape[-1] = scale_zeros_reshape[-1] // awq_group_size
-                        print("Reshaping for AWQ", reshape_keys[key], scale_zeros_reshape, awq_dict["qweight"].shape, awq_dict["scales"].shape, awq_dict["qzeros"].shape)
+                        scale_zeros_reshape[
+                            -1] = scale_zeros_reshape[-1] // awq_group_size
+                        print("Reshaping for AWQ", reshape_keys[key],
+                              scale_zeros_reshape, awq_dict["qweight"].shape,
+                              awq_dict["scales"].shape,
+                              awq_dict["qzeros"].shape)
                         awq_dict["qweight"] = jnp.reshape(
                             awq_dict["qweight"], reshape_keys[key])
                         awq_dict["scales"] = jnp.reshape(
@@ -447,16 +470,31 @@ def _load_hf_weights_on_thread(vllm_config, params: nnx.State,
             # scale = qwix_weight.scale
             # TODO: shard
             # transpose the awq_dict entries
+            # if "mlp." in model_key:
+            #     awq_dict["qweight"] = awq_dict["qweight"].transpose()
+            #     awq_dict["qzeros"] = awq_dict["qzeros"].transpose()
+            #     awq_dict["scales"] = awq_dict["scales"].transpose()
             qwix_qarray = awq_dict_to_qarray(awq_dict)
             model_weight.array.qvalue.value = qwix_qarray.qvalue
-            model_weight.array.scale.value = qwix_qarray.scale
+            # TODO?
+            model_weight.array.scale.value = qwix_qarray.scale.astype(
+                jnp.bfloat16)
             model_weight.array.zero_point.value = qwix_qarray.zero_point
-            print("Setting qwix weight for ", model_key, model_weight.array.qvalue.value.shape, model_weight.array.scale.value.shape, model_weight.array.zero_point.value.shape)
+
+            print("Setting qwix weight for ", model_key,
+                  model_weight.array.qvalue.value.shape,
+                  model_weight.array.scale.value.shape,
+                  model_weight.array.zero_point.value.shape,
+                  model_weight.array.qvalue.value.dtype,
+                  model_weight.array.scale.value.dtype,
+                  model_weight.array.zero_point.value.dtype)
             qwix_weight = False
         else:
             # TODO: do we want this?
             hf_weight = hf_weight.astype(model_weight.value.dtype)
             model_weight.value = shard(hf_weight, model_sharding)
+            print("Setting regular weight for", model_key,
+                  model_weight.value.shape, model_weight.value.dtype)
 
 
 def load_hf_weights(vllm_config, model: nnx.Module, metadata_map: MetadataMap,

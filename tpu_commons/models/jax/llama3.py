@@ -54,7 +54,6 @@ class LlamaMLP(nnx.Module):
         self.act_fn = modeling_flax_utils.ACT2FN[act]
 
     def __call__(self, x: jax.Array) -> jax.Array:
-        print(self.gate_proj, x.shape)
         gate = self.act_fn(self.gate_proj(x))
         up = self.up_proj(x)
         fuse = gate * up
@@ -121,20 +120,27 @@ class LlamaAttention(nnx.Module):
     ) -> Tuple[jax.Array, jax.Array]:
         md = attention_metadata
         # q: (T, N, H)
+        if hasattr(self.q_proj, "kernel") and hasattr(
+                self.q_proj.kernel, "array") and hasattr(
+                    self.q_proj.kernel.array, "qvalue"):
+            # jax.debug.print("qvalue inny {x}", x=self.q_proj.kernel.array.qvalue.value)
+            # jax.debug.print("qvalue inny transpose {x}", x=jnp.transpose(self.q_proj.kernel.array.qvalue.value, (1, 0, 2)))
+            # jax.debug.print("qvalue inny {x}", x=self.q_proj.kernel.array.qvalue.value.shape)
+            # jax.debug.print("scales inny {x}", x=self.q_proj.kernel.array.scale.value)
+            # jax.debug.print("scales inny {x}", x=self.q_proj.kernel.array.scale.value.shape)
+            # jax.debug.print("zp inny {x}", x=self.q_proj.kernel.array.zero_point.value)
+            # jax.debug.print("zp inny {x}", x=self.q_proj.kernel.array.zero_point.value.shape)
+            pass
         q = self.q_proj(x)
-        print(q.dtype, x.dtype)
         q = apply_rope(q, md.input_positions, self.head_dim_original,
                        self.rope_theta, self.rope_scaling)
-        print(q.dtype)
+        # jax.debug.print("attnqapplyrope outty {x}", x=q)
         # k: (T, K, H)
         k = self.k_proj(x)
-        print(k.dtype)
         k = apply_rope(k, md.input_positions, self.head_dim_original,
                        self.rope_theta, self.rope_scaling)
-        print(k.dtype)
         # v: (T, K, H)
         v = self.v_proj(x)
-        print(v.dtype)
         # o: (T, N, H)
         new_kv_cache, outputs = attention(
             kv_cache,
@@ -187,13 +193,15 @@ class LlamaDecoderLayer(nnx.Module):
         x: jax.Array,
         attention_metadata: AttentionMetadata,
     ) -> Tuple[jax.Array, jax.Array]:
-        print("decoder layer", x.dtype)
         hidden_states = self.input_layernorm(x)
+        # jax.debug.print("input_layer_norm first {x}", x=hidden_states)
         kv_cache, attn_output = self.self_attn(
             kv_cache,
             hidden_states,
             attention_metadata,
         )
+        # jax.debug.print("attn_output outty {x}", x=attn_output)
+        # jax.debug.print("attn_output {x}", x=attn_output)
         attn_output += x
 
         residual = attn_output
@@ -288,8 +296,9 @@ class LlamaForCausalLM(nnx.Module):
         attention_metadata: AttentionMetadata,
         *args,
     ) -> Tuple[List[jax.Array], jax.Array]:
+        # jax.debug.print("input_ids {input_ids}", input_ids=input_ids)
         x = self.embed(input_ids)
-        print("embed", x.dtype)
+        # jax.debug.print("embed end x {x}", x=x)
         kv_caches, x = self.model(
             kv_caches,
             x,
