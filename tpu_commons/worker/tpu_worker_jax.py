@@ -22,7 +22,7 @@ from tpu_commons.di.abstracts import (AbstractKVCacheConfig,
                                       AbstractSchedulerOutput)
 from tpu_commons.di.interfaces import HostInterface
 from tpu_commons.logger import init_logger
-from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
+from tpu_commons.runner.tpu_jax_runner import TPUModelRunner
 from tpu_commons.worker._temporary_vllm_compat import (
     adapt_kv_cache_config_if_needed, adapt_lora_request_if_needed,
     adapt_scheduler_output_if_needed)

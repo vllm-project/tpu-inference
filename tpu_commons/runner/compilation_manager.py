@@ -14,7 +14,7 @@ from tpu_commons.models.jax.layers.sample.sampling_metadata import \
 from tpu_commons.utils import device_array
 
 if TYPE_CHECKING:
-    from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
+    from tpu_commons.runner.tpu_jax_runner import TPUModelRunner
 
 logger = init_logger(__name__)
 

@@ -86,7 +86,7 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 from tpu_commons.logger import init_logger
-from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
+from tpu_commons.runner.tpu_jax_runner import TPUModelRunner
 from tpu_commons.utils import device_array
 
 EngineId = str

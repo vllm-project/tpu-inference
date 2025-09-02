@@ -11,7 +11,7 @@ from vllm.config import ModelConfig
 
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.llama3 import LlamaForCausalLM
-from tpu_commons.runner.jax.kv_cache import create_kv_caches
+from tpu_commons.runner.kv_cache import create_kv_caches
 
 
 class MockVllmConfig:
