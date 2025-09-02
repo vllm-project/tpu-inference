@@ -39,7 +39,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         self.vllm_config = vllm_config
         model_config = vllm_config.model_config
 
-        self.rng = nnx.Rngs(rng)
+        # self.rng = nnx.Rngs(rng)
         self.mesh = mesh
         self.is_verbose = getattr(self.vllm_config.additional_config,
                                   "is_verbose", False)
@@ -60,16 +60,16 @@ class LlamaGuard4ForCausalLM(nnx.Module):
 
         intermediate_size = 8192
 
-        self.embedder = Embedder(vocab_size=vocab_size,
-                                 hidden_size=self.hidden_size,
-                                 dtype=dtype,
-                                 prelogit_td=NamedSharding(self.mesh, P()),
-                                 vd_sharding=NamedSharding(
-                                     self.mesh,
-                                     P(('data', 'expert', 'model'), None)),
-                                 mesh=self.mesh,
-                                 rngs=self.rng,
-                                 random_init=force_random_weights)
+        self.embedder = Embedder(
+            vocab_size=vocab_size,
+            hidden_size=self.hidden_size,
+            dtype=dtype,
+            prelogit_td=NamedSharding(self.mesh, P()),
+            vd_sharding=NamedSharding(self.mesh,
+                                      P(('data', 'expert', 'model'), None)),
+            #mesh=self.mesh,
+            rngs=nnx.Rngs(rng),
+            random_init=force_random_weights)
 
         self.layers = []
 
@@ -78,13 +78,13 @@ class LlamaGuard4ForCausalLM(nnx.Module):
 
             # Llama Guard 4 is a dense model, so we use a standard MLP.
             custom_module = DenseFFW(
-                mesh=self.mesh,
+                #mesh=self.mesh,
                 dtype=dtype,
                 hidden_act=hidden_act,
                 hidden_size=self.hidden_size,
                 intermediate_size=intermediate_size,
                 random_init=force_random_weights,
-                rngs=self.rng,
+                rngs=nnx.Rngs(rng),
                 df_sharding=NamedSharding(self.mesh, P(None, 'model')),
                 fd_sharding=NamedSharding(self.mesh, P('model', None)),
                 activation_ffw_td=NamedSharding(self.mesh, P('data', None)))
@@ -102,7 +102,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                     "high_freq_factor": 1.0,
                     "original_max_position_embeddings": 8192
                 },
-                rngs=self.rng,
+                rngs=nnx.Rngs(rng),
                 rope_input_ordering="interleaved",
                 temperature_tuning=True,
                 temperature_tuning_scale=0.1,
@@ -111,26 +111,34 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                 attention_chunk_size=None if use_attention_rope else 8192,
                 mesh=self.mesh,
                 random_init=force_random_weights,
+
+                # Added ".spec" to the ends of these
                 activation_attention_td=NamedSharding(self.mesh,
-                                                      P('data', 'model')),
-                activation_q_td=NamedSharding(self.mesh, P('data', 'model')),
-                query_tnh=NamedSharding(self.mesh, P('data', 'model', None)),
+                                                      P('data', 'model')).spec,
+                activation_q_td=NamedSharding(self.mesh, P('data',
+                                                           'model')).spec,
+                query_tnh=NamedSharding(self.mesh, P('data', 'model',
+                                                     None)).spec,
                 keyvalue_skh=NamedSharding(self.mesh, P('data', 'model',
-                                                        None)),
+                                                        None)).spec,
                 activation_attention_out_td=NamedSharding(
-                    self.mesh, P('data', 'model')),
-                attn_o_tnh=NamedSharding(self.mesh, P('data', 'model', None)),
-                dnh_sharding=NamedSharding(self.mesh, P(None, 'model', None)),
-                dkh_sharding=NamedSharding(self.mesh, P(None, 'model', None)),
-                nhd_sharding=NamedSharding(self.mesh, P('model', None, None)),
+                    self.mesh, P('data', 'model')).spec,
+                attn_o_tnh=NamedSharding(self.mesh, P('data', 'model',
+                                                      None)).spec,
+                dnh_sharding=NamedSharding(self.mesh, P(None, 'model',
+                                                        None)).spec,
+                dkh_sharding=NamedSharding(self.mesh, P(None, 'model',
+                                                        None)).spec,
+                nhd_sharding=NamedSharding(self.mesh, P('model', None,
+                                                        None)).spec,
             )
 
             pre_attention_norm = RMSNorm(
                 dims=self.hidden_size,
-                mesh=self.mesh,
+                #mesh=self.mesh,
                 random_init=force_random_weights,
                 epsilon=rms_norm_eps,
-                rngs=self.rng,
+                rngs=nnx.Rngs(rng),
                 activation_ffw_td=NamedSharding(self.mesh, P()),
                 with_scale=True,
                 dtype=dtype,
@@ -138,10 +146,10 @@ class LlamaGuard4ForCausalLM(nnx.Module):
 
             pre_mlp_norm = RMSNorm(
                 dims=self.hidden_size,
-                mesh=self.mesh,
+                #mesh=self.mesh,
                 activation_ffw_td=NamedSharding(self.mesh, P()),
                 epsilon=rms_norm_eps,
-                rngs=self.rng,
+                rngs=nnx.Rngs(rng),
                 with_scale=True,
                 dtype=dtype,
                 random_init=force_random_weights,
@@ -156,10 +164,10 @@ class LlamaGuard4ForCausalLM(nnx.Module):
 
         self.final_norm = RMSNorm(
             dims=self.hidden_size,
-            mesh=self.mesh,
+            #mesh=self.mesh,
             activation_ffw_td=NamedSharding(self.mesh, P()),
             epsilon=rms_norm_eps,
-            rngs=self.rng,
+            rngs=nnx.Rngs(rng),
             with_scale=True,
             dtype=dtype,
             random_init=force_random_weights,
@@ -169,13 +177,13 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             vocab_size=vocab_size,
             hidden_size=self.hidden_size,
             dtype=dtype,
-            rngs=self.rng,
+            rngs=nnx.Rngs(rng),
             prelogit_td=NamedSharding(self.mesh, P()),
             vd_sharding=NamedSharding(self.mesh,
                                       P(('data', 'expert', 'model'), None)),
             dv_sharding=NamedSharding(self.mesh,
                                       P(None, ('data', 'expert', 'model'))),
-            mesh=self.mesh,
+            #mesh=self.mesh,
             random_init=force_random_weights)
         if self.is_verbose:
             self._print_model_architecture()
@@ -211,7 +219,15 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         *args,
     ) -> Tuple[List[KVCacheType], jax.Array]:
         is_prefill = False
+
+        # Debug print the input_ids to ensure they're being passed correctly
+        jax.debug.print("Input IDs: {}", input_ids)
+
         x_TD = self.embedder.encode(input_ids)
+
+        # Add debug print to check the embeddings
+        jax.debug.print("Input embedding slice: {}", x_TD[:1, :5])
+
         for (i, block) in enumerate(self.layers):
             kv_cache = kv_caches[i]
             new_kv_cache, x_TD = block(x_TD, is_prefill, kv_cache,
@@ -226,6 +242,31 @@ class LlamaGuard4ForCausalLM(nnx.Module):
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         logits_TV = jnp.dot(hidden_states,
                             self.lm_head.input_embedding_table_DV.value)
+
+        # Check the max and min values of the logits to see if they're reasonable
+        jax.debug.print("Logits min/max: {}/{}", jnp.min(logits_TV),
+                        jnp.max(logits_TV))
+
+        # Also check the logits for the `safe` and `unsafe` tokens
+        # You'll need to find the token IDs for these from your tokenizer
+        safe_token_id = 60411  # From your debug output
+        unsafe_token_id = 72110  # From your debug output
+        jax.debug.print("Logits for 'safe' token: {}",
+                        logits_TV[0, safe_token_id])
+        jax.debug.print("Logits for 'unsafe' token: {}",
+                        logits_TV[0, unsafe_token_id])
+
+        # Find the token ID with the highest logit value
+        predicted_token_id = jnp.argmax(logits_TV, axis=-1)
+        jax.debug.print("Predicted token ID from argmax: {}",
+                        predicted_token_id[0])
+
+        # Use jax.debug.print to view a slice of the logits_TV array
+        jax.debug.print("This is logits_TV: {}", logits_TV[0, :20])
+
+        # It's also a good practice to block until the device is ready to ensure the print statement is flushed
+        jax.block_until_ready(logits_TV)
+
         return logits_TV
 
 
@@ -304,6 +345,11 @@ class LlamaGuard4WeightLoader:
         model_params = nnx.state(model_for_loading)
         with jax.default_device(jax.devices("cpu")[0]):
             for loaded_name, loaded_weight in self.names_and_weights_generator:
+                if loaded_name.endswith(".bias"):
+                    continue
+                if "vision_model" in loaded_name or "multi_modal_projector" in loaded_name:
+                    continue
+
                 mapped_name = self.map_loaded_to_standardized_name(loaded_name)
                 model_weight = get_param(model_params, mapped_name)
 
@@ -321,8 +367,16 @@ class LlamaGuard4WeightLoader:
                 logger.info(
                     f"Transformed parameter {loaded_name} to {mapped_name}: {loaded_weight.shape} --> {model_weight.value.shape}"
                 )
+
+                # some of the model_weight.sharding entries were tuples and not NamedSharding objects
+                sharding_spec = model_weight.sharding
+                if isinstance(sharding_spec, NamedSharding):
+                    sharding_spec = sharding_spec.spec
+                elif sharding_spec == ():
+                    sharding_spec = P()
+
                 model_weight.value = shard_put(loaded_weight,
-                                               model_weight.sharding.spec,
+                                               sharding_spec,
                                                mesh=model_for_loading.mesh)
                 if self.is_verbose:
                     print_param_info(model_weight, loaded_name)

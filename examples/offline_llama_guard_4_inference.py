@@ -45,6 +45,16 @@ def main(args: dict):
     # Create an LLM
     llm = LLM(**args)
 
+    # Temporary patch as we haven't fully implemented the multimodal part of this model
+    llm.llm_engine.processor.model_config.processor_return_mm_hashes = False
+
+    # Access the tokenizer and print its vocabulary
+    tokenizer = llm.llm_engine.tokenizer.tokenizer
+    print(f"Tokenizer vocab size: {len(tokenizer.get_vocab())}")
+    print("Important tokens:")
+    print(f"Token for 'safe': {tokenizer.encode('safe')}")
+    print(f"Token for 'unsafe': {tokenizer.encode('unsafe')}")
+
     # Create a sampling params object
     sampling_params = llm.get_default_sampling_params()
     if max_tokens is not None:
@@ -181,6 +191,24 @@ def main(args: dict):
         for conv in conversations
     ]
 
+    for i, output in enumerate(outputs):
+        original_conversation = conversations[i]
+        generated_text = output.outputs[0].text.strip()
+        generated_token_ids = output.outputs[
+            0].token_ids  # Get the raw token IDs
+        expected_text = expected_outputs[i]
+
+        print(f"Prompt: {original_conversation[0]['content']!r}\n")
+        print(f"Generated token IDs: {generated_token_ids}"
+              )  # Print the token IDs
+        print(f"Generated text: {generated_text!r}")
+        print(f"Expected text:  {expected_text!r}")
+
+        token_strings = [
+            tokenizer.decode([token_id]) for token_id in generated_token_ids
+        ]
+        print(f"Decoded tokens: {token_strings}")
+
     if envs.VLLM_TORCH_PROFILER_DIR is not None:
         llm.stop_profile()
 
@@ -204,7 +232,7 @@ def main(args: dict):
         print("-" * 80)
 
     assert all_passed, "Some tests failed!"
-    print("🎉 All tests passed!")
+    print("All tests passed!")
 
 
 if __name__ == "__main__":

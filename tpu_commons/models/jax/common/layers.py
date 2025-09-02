@@ -125,21 +125,46 @@ class DenseFFW(nnx.Module):
         Returns:
             The output tensor of shape `(batch, sequence, d_model)`.
         """
+        # Log the input to the DenseFFW block
+        jax.debug.print("DenseFFW input (first 5 values): {}", x_TD[0, :5])
+
         # TODO consider to create factories for einsum(?)
         x_TD = jnp.asarray(x_TD, self.dtype)
         x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
         with jax.named_scope("wi_0"):
             gating_TF = jnp.einsum('TD,DF -> TF', x_TD,
                                    self.kernel_gating_DF.value)
+
+            # Log the output after the first einsum (gating)
+            jax.debug.print("gating_TF (first 5 values): {}", gating_TF[0, :5])
+
             activated_gating_TF = modeling_flax_utils.ACT2FN[self.hidden_act](
                 gating_TF)
+
+            # Log the output after the activation function
+            jax.debug.print("activated_gating_TF (first 5 values): {}",
+                            activated_gating_TF[0, :5])
+
         with jax.named_scope("wi_1"):
             up_proj_TF = jnp.einsum('TD,DF -> TF', x_TD,
                                     self.kernel_up_proj_DF.value)
+            # Log the output after the second einsum (up-projection)
+            jax.debug.print("up_proj_TF (first 5 values): {}",
+                            up_proj_TF[0, :5])
         fuse_TF = activated_gating_TF * up_proj_TF
+        # Log the output after the fusion (element-wise multiplication)
+        jax.debug.print("fuse_TF (first 5 values): {}", fuse_TF[0, :5])
+
         with jax.named_scope("wo"):
+            jax.debug.print("kernel_down_proj_FD (first 5 values): {}",
+                            self.kernel_down_proj_FD.value[:5, 0])
             output_TD = jnp.einsum('TF,FD -> TD', fuse_TF,
                                    self.kernel_down_proj_FD.value)
+        # Log the final output of the DenseFFW block
+        jax.debug.print("DenseFFW final output (first 5 values): {}",
+                        output_TD[0, :5])
+
+        jax.block_until_ready(output_TD)
 
         return output_TD
 
@@ -162,6 +187,13 @@ class DenseFFW(nnx.Module):
                                                 dtype=self.dtype,
                                                 sharding=self.fd_sharding,
                                                 random_init=self.random_init)
+
+        jax.debug.print("kernel_gating_DF shape: {}",
+                        self.kernel_gating_DF.value.shape)
+        jax.debug.print("kernel_up_proj_DF shape: {}",
+                        self.kernel_up_proj_DF.value.shape)
+        jax.debug.print("kernel_down_proj_FD shape: {}",
+                        self.kernel_down_proj_FD.value.shape)
 
 
 @dataclass(kw_only=True)

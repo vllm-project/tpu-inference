@@ -74,6 +74,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
 
     from tpu_commons.models.jax.deepseek_v3 import DeepSeekV3
     from tpu_commons.models.jax.llama4 import Llama4ForCausalLM
+    from tpu_commons.models.jax.llama_guard_4 import LlamaGuard4ForCausalLM
     from tpu_commons.models.jax.phi3 import Phi3ForCausalLM
     from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
     from tpu_commons.models.jax.qwen2_5_vl import \
@@ -86,6 +87,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     else:
         from tpu_commons.models.jax.llama3 import LlamaForCausalLM
 
+    _MODEL_REGISTRY["LlamaGuard4ForCausalLM"] = LlamaGuard4ForCausalLM
     _MODEL_REGISTRY["Llama4ForCausalLM"] = Llama4ForCausalLM
     _MODEL_REGISTRY["DeepSeekV3"] = DeepSeekV3
     _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
@@ -142,6 +144,15 @@ def _get_nnx_model(
         #    the load_weights. This would be easy to OOM if the layer is super large.
         model = nnx.eval_shape(lambda: model_class(vllm_config, rng, mesh))
         model.load_weights(rng)
+
+        # Debug code to inspect the state
+        model_states = nnx.state(model)
+        for i, (key, value) in enumerate(model_states.items()):
+            print(f"State item {i}: {key} -> {type(value)}")
+            if i == 435:
+                print(f"!!! SUSPICIOUS ITEM: {value}")
+                # Use a more detailed inspection if needed, like value.shape, value.dtype
+
         # Although the created model can already work, we still need to jit
         # the model creation again, otherwise the model forward will have
         # non-trivial overhead in PjitFunction.
