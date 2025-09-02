@@ -177,7 +177,7 @@ JAX_RANDOM_WEIGHTS=1
 
 To run workloads on multi-host:
 
-``
+```
 TPU_MULTIHOST_BACKEND=ray
 
 ```
