@@ -28,6 +28,8 @@ from vllm.sequence import IntermediateTensors
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.vllm.quantization import get_tpu_quantization_config
+from tpu_commons.models.vllm.quantization.unquantized import \
+    JaxUnquantizedLinearMethod
 from tpu_commons.models.vllm.sharding import shard_model_to_tpu
 from tpu_commons.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
@@ -143,6 +145,8 @@ class VllmModelWrapper:
                 device="cpu")
 
             replace_set_lora(vllm_model)
+        move_weights_to_torchax_tensor(vllm_model)
+
         self.model = _VllmRunner(vllm_model)
 
         # jax.config.update("jax_explain_cache_misses", True)
@@ -225,6 +229,13 @@ class VllmModelWrapper:
             return jax_view(logits)
 
         return compute_logits_func
+
+
+def move_weights_to_torchax_tensor(model: torch.nn.Module):
+    for _, module in model.named_modules():
+        quant_method = getattr(module, "quant_method", None)
+        if isinstance(quant_method, JaxUnquantizedLinearMethod):
+            quant_method.move_weights_to_torchax_tensor(module)
 
 
 def load_lora_model(model: torch.nn.Module, model_config: ModelConfig,

@@ -65,7 +65,8 @@ class JaxUnquantizedLinearMethod(UnquantizedLinearMethod):
     def __init__(self, jax_config: JaxCommonLinearConfig):
         self.jax_config = jax_config
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    # previously process_weights_after_loading
+    def move_weights_to_torchax_tensor(self, layer: torch.nn.Module) -> None:
         weight = torch_to_jax_param(
             layer.weight,
             NamedSharding(self.jax_config.mesh,
