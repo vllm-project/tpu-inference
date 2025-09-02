@@ -237,7 +237,7 @@ def get_vllm_model(
     )
     params = model.load_weights()
 
-    jit_model = model.jit_step_func()
+    jit_model = model.jit_step_func(params)
     compute_logits_fn = model.jit_compute_logits_func()
     return jit_model, compute_logits_fn, None, None, params
 

@@ -11,6 +11,8 @@ import torch
 import torch.nn
 import torchax
 from flax.typing import PRNGKey
+from jax import numpy as jnp
+from jax._src.layout import Format, Layout
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import TORCH_DTYPE_TO_JAX
@@ -138,18 +140,18 @@ class VllmModelWrapper:
         # Returning to the jax land, so we need to wrap it into a JaxValue.
         return jax_view(params_and_buffers)
 
-    def jit_step_func(self):
+    def _create_dummy_tensor(self,
+                             shape: Tuple[int, ...],
+                             dtype: Any,
+                             sharding: Optional[NamedSharding] = None) -> Any:
+        """Helper to create dummy tensors for precompilation."""
+        tensor = jnp.ones(shape, dtype=dtype)
+        if sharding:
+            return device_array(self.runner.mesh, tensor, sharding=sharding)
+        return device_array(self.runner.mesh, tensor)
 
-        @functools.partial(
-            jax.jit,
-            donate_argnums=(1, ),  # donate kv_cache
-            compiler_options={
-                "xla_tpu_all_gather_collective_matmul_mode":
-                "post_spmd_conservative",
-                "xla_tpu_reduce_scatter_collective_matmul_mode":
-                "post_spmd_conservative"
-            },
-        )
+    def jit_step_func(self, params_and_buffers):
+
         def step_fun(
             params_and_buffers,  # this has been wrapped into a torchax TorchValue
             kv_caches: List[jax.Array],
@@ -182,6 +184,30 @@ class VllmModelWrapper:
             hidden_states = jax_view(hidden_states)
 
             return new_kv_caches, hidden_states
+
+        params_and_buffers_format = jax.tree.map(
+            lambda w: Format(layout=Layout.AUTO, sharding=w.sharding),
+            params_and_buffers,
+        )
+
+        MIN_NUM_SEQS = 8
+        num_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
+        max_num_reqs = max(self.vllm_config.scheduler_config.max_num_seqs,
+                           MIN_NUM_SEQS)
+        input_ids = self._create_dummy_tensor((num_tokens, ), jnp.int32)
+        positions = self._create_dummy_tensor((num_tokens, ), jnp.int32)
+
+        step_fun_with_layout = jax.jit(
+            step_fun,
+            donate_argnums=(1, ),  # donate kv_cache
+            compiler_options={
+                "xla_tpu_all_gather_collective_matmul_mode":
+                "post_spmd_conservative",
+                "xla_tpu_reduce_scatter_collective_matmul_mode":
+                "post_spmd_conservative"
+            },
+            in_shardings=(params_and_buffers_format, ))
+        lowered = step_fun_with_layout.lower(params_and_buffers, )
 
         return step_fun
 
