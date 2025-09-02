@@ -46,8 +46,7 @@ class TpuPlatform(Platform):
     supported_quantization: list[str] = ["tpu_int8", "compressed-tensors"]
 
     additional_env_vars: list[str] = [
-        "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS", "TPU_BACKEND_TYPE",
-        "TPU_MULTIHOST_BACKEND"
+        "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS", "TPU_MULTIHOST_BACKEND"
     ]
 
     @classmethod
@@ -61,7 +60,7 @@ class TpuPlatform(Platform):
 
         if use_v1:
             logger.info("Using Pallas V1 backend.")
-            return "vllm.v1.attention.backends.pallas.PallasAttentionBackend"
+            return "tpu_commons.attention.backends.pallas_torchax.PallasAttentionBackend"
         else:
             logger.info("Using Pallas backend.")
             return "vllm.attention.backends.pallas.PallasAttentionBackend"
@@ -116,14 +115,13 @@ class TpuPlatform(Platform):
                 "VLLM_ENABLE_V1_MULTIPROCESSING must be 0 when using Pathways(JAX_PLATFORMS=proxy)"
             )
 
-        from vllm.config import CompilationLevel, CUDAGraphMode
+        from vllm.config import CompilationLevel
 
         cache_config = vllm_config.cache_config
         # For v0, the default block size is 16.
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = cast(BlockSize, 16)
         compilation_config = vllm_config.compilation_config
-        compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         # TPU only supports DYNAMO_ONCE compilation level
         # NOTE(xiang): the compilation_config is not used by jax.
@@ -155,6 +153,7 @@ class TpuPlatform(Platform):
                 vllm_config.model_config.dtype.dtype)
 
         if envs.VLLM_USE_V1:
+            # TODO(cuiq): remove this dependency.
             from vllm.v1.attention.backends.pallas import \
                 PallasAttentionBackend
             cache_config.block_size = PallasAttentionBackend.get_page_size(

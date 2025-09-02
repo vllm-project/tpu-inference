@@ -73,7 +73,7 @@ import jax.numpy as jnp
 import numpy as np
 import zmq
 from jax.experimental.transfer import start_transfer_server
-from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from jax.sharding import Mesh
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
@@ -86,7 +86,8 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 from tpu_commons.logger import init_logger
-from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
+from tpu_commons.runner.tpu_jax_runner import TPUModelRunner
+from tpu_commons.utils import device_array
 
 EngineId = str
 ReqId = str
@@ -533,7 +534,7 @@ class TPUConnectorWorker:
     def _prepare_kv_and_wait(self, req_id: str, req_meta: SendMeta):
         local_block_ids = req_meta.local_block_ids
         # TODO(xiang): pad block_ids to avoid recompilation
-        indices = self._device_array(np.array(local_block_ids))
+        indices = device_array(self.mesh, np.array(local_block_ids))
         kv = select_from_kv_caches(self.runner.kv_caches, indices)
         # NOTE(xiang): We need to manually store the kv because:
         # Although we can set use_raw_buffers=True to let kv be safely destroyed after
@@ -563,7 +564,7 @@ class TPUConnectorWorker:
 
         kv_spec = self._get_kv_spec(len(remote_block_ids))
         # TODO(xiang): pad block_ids to avoid recompilation
-        indices = self._device_array(np.array(local_block_ids))
+        indices = device_array(self.mesh, np.array(local_block_ids))
         kv = conn.pull(req_meta.uuid, kv_spec)
         logger.info(f"Worker ----> pull kv uuid={req_meta.uuid}")
         return kv, indices
@@ -626,11 +627,6 @@ class TPUConnectorWorker:
         if done_recving:
             logger.info(f"Worker ---->  done_recving={done_recving}")
         return done_sending, done_recving
-
-    def _device_array(self, *args, sharding=None, **kwargs) -> jax.Array:
-        if sharding is None:
-            sharding = NamedSharding(self.mesh, PartitionSpec(None))
-        return jax.device_put(*args, device=sharding, **kwargs)
 
 
 def get_uuid() -> int:

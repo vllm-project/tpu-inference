@@ -3,78 +3,22 @@ import functools
 import humanize
 import jax
 import torch
+from torch.nn import Parameter
 import torchax
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from torch.nn.parameter import Parameter
 from torch.utils import _pytree as pytree
-from torchax.interop import extract_all_buffers, torch_view
+from torchax.interop import torch_view
 from torchax.ops.mappings import t2j
-from vllm.attention import Attention as VllmAttention
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.linear import \
-    UnquantizedLinearMethod  # yapf: disable
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               MergedColumnParallelLinear,
-                                               QKVParallelLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding, ParallelLMHead
 
 from tpu_commons.logger import init_logger
-from tpu_commons.models.vllm.jax_attention import JaxAttention
 from tpu_commons.models.vllm.jax_fused_moe import JaxFusedMoE
-from tpu_commons.models.vllm.jax_merged_column_parallel_linear import \
-    JaxMergedColumnParallelLinear
-from tpu_commons.models.vllm.jax_merged_column_parallel_linear_fusion_assignments import \
-    get_model_matmul_fusion_assignment
-from tpu_commons.models.vllm.jax_qkv_parallel_linear import \
-    JaxQKVParallelLinear
-from tpu_commons.models.vllm.jax_row_parallel_linear import \
-    JaxRowParallelLinear
 
 P = PartitionSpec
 
 logger = init_logger(__name__)
-
-
-def shard_attention(layer: torch.nn.Module, mesh: Mesh,
-                    vllm_config: VllmConfig):
-    return JaxAttention(layer, mesh)
-
-
-def shard_qkv_parallel_linear(layer: torch.nn.Module, mesh: Mesh,
-                              vllm_config: VllmConfig):
-    assert isinstance(layer, QKVParallelLinear)
-    jax_layer = JaxQKVParallelLinear(layer, mesh,
-                                     shard_qkv_parallel_linear.fuse_matmuls)
-    return jax_layer
-
-
-def shard_merged_column_parallel_linear(layer: torch.nn.Module, mesh: Mesh,
-                                        vllm_config: VllmConfig):
-    assert isinstance(layer, MergedColumnParallelLinear)
-    jax_layer = JaxMergedColumnParallelLinear(
-        layer, mesh, shard_merged_column_parallel_linear.fuse_matmuls)
-    return jax_layer
-
-
-def shard_column_parallel_linear(layer: torch.nn.Module, mesh: Mesh,
-                                 vllm_config: VllmConfig):
-    assert isinstance(layer, ColumnParallelLinear)
-    if not isinstance(layer.quant_method, UnquantizedLinearMethod):
-        raise ValueError(
-            "tpu_commons torchax ColumnParallelLinear doesn't support quantization"
-        )
-    w = Parameter(torch_view(t2j(layer.weight)), requires_grad=False)
-    layer.weight = w.apply_jax_(jax.device_put,
-                                NamedSharding(mesh, P('model', None)))
-    return layer
-
-
-def shard_row_parallel_linear(layer: torch.nn.Module, mesh: Mesh,
-                              vllm_config: VllmConfig):
-    assert isinstance(layer, RowParallelLinear)
-    jax_layer = JaxRowParallelLinear(layer, mesh)
-    return jax_layer
 
 
 def shard_fused_moe(layer: torch.nn.Module, mesh: Mesh,
@@ -84,13 +28,34 @@ def shard_fused_moe(layer: torch.nn.Module, mesh: Mesh,
     return jax_layer
 
 
+def shard_vocab_parallel_embedding(layer: torch.nn.Module, mesh: Mesh, vllm_config: VllmConfig):
+    assert isinstance(layer, VocabParallelEmbedding)
+    w = Parameter(torch_view(t2j(layer.weight)), requires_grad=False)
+    layer.weight = w.apply_jax_(jax.device_put,
+        NamedSharding(mesh, P('model', None)))
+    return layer
+
+
+def shard_lm_head(layer: torch.nn.Module, mesh: Mesh, vllm_config: VllmConfig):
+    # TODO(qihqi): currently this is not handling case of tie_word_weights=True.
+    # if that config is set, then we should not create new weights but reuse the weight
+    # from VocabParallelEmbedding
+    assert isinstance(layer, ParallelLMHead)
+    w = Parameter(torch_view(t2j(layer.weight)), requires_grad=False)
+    layer.weight = w.apply_jax_(jax.device_put,
+        NamedSharding(mesh, P('model', None)))
+    if hasattr(layer, 'bias'):
+        bias = Parameter(torch_view(t2j(layer.bias)), requires_grad=False)
+        layer.bias = bias.apply_jax_(jax.device_put,
+            NamedSharding(mesh, P('model')))
+    return layer
+
+
 MODULE_TYPE_TO_WRAPPING_FUNC = {
-    VllmAttention: shard_attention,
-    QKVParallelLinear: shard_qkv_parallel_linear,
-    MergedColumnParallelLinear: shard_merged_column_parallel_linear,
-    ColumnParallelLinear: shard_column_parallel_linear,
-    RowParallelLinear: shard_row_parallel_linear,
+    # TODO(kyuyeunk): Refactor this layer to use vLLM APIs.
     FusedMoE: shard_fused_moe,
+    VocabParallelEmbedding: shard_vocab_parallel_embedding,
+    ParallelLMHead: shard_lm_head,
 }
 
 
@@ -142,33 +107,71 @@ def shard_model_to_tpu(model: torch.nn.Module, mesh: Mesh,
         return torch_view(x).apply_jax_(jax.device_put,
                                         NamedSharding(mesh, P()))
 
-    tp_size = vllm_config.parallel_config.tensor_parallel_size
-    shard_qkv_parallel_linear.fuse_matmuls = get_model_matmul_fusion_assignment(
-        vllm_config.model_config.model,
-        vllm_config.scheduler_config.max_num_batched_tokens, tp_size,
-        "QKVParallelLinear")
-    shard_merged_column_parallel_linear.fuse_matmuls = get_model_matmul_fusion_assignment(
-        vllm_config.model_config.model,
-        vllm_config.scheduler_config.max_num_batched_tokens, tp_size,
-        "MergedColumnParallelLinear")
-
     with jax.default_device(jax.devices("cpu")[0]), torchax.default_env():
         shard_parallel_layers_to_tpu(model, mesh, vllm_config)
 
         # For other weight tensors, repliate them on all the TPU chips.
-        params, buffers = extract_all_buffers(model)
+        params, buffers, variables = extract_all_buffers(model)
 
         fmt_size = functools.partial(humanize.naturalsize, binary=True)
-        for qual_name, x in {**params, **buffers}.items():
+        for qual_name, x in {**params, **buffers, **variables}.items():
             if _is_unmoved_tensor(x):
                 tensor_size = fmt_size(x.nbytes)
                 logger.debug(
                     f"{qual_name=} is not sharded, {tensor_size=}, {x.shape=}, {x.dtype=}"
                 )
 
-        params, buffers = pytree.tree_map_only(_is_unmoved_tensor,
-                                               _move_to_tpu_replicated,
-                                               (params, buffers))
+        params, buffers, variables = pytree.tree_map_only(
+            _is_unmoved_tensor, _move_to_tpu_replicated,
+            (params, buffers, variables))
+        set_all_buffers(model, {}, {}, variables)
         params_and_buffers = {**params, **buffers}
 
         return params_and_buffers
+
+
+def extract_all_buffers(m: torch.nn.Module):
+    params = {}
+    buffers = {}
+    variables = {}
+
+    def extract_one(module, prefix):
+        for k in dir(module):
+            v = getattr(module, k, None)
+            if v is None:
+                continue
+
+            qual_name = prefix + k
+            if isinstance(v, torch.nn.Parameter):
+                params[qual_name] = v
+            elif isinstance(v, torch.nn.ParameterList):
+                for i, param in enumerate(v):
+                    params[qual_name + f'.{i}'] = param
+            elif k in module._buffers:
+                buffers[qual_name] = v
+            elif isinstance(v, torch.Tensor):
+                variables[qual_name] = v
+
+        for name, child in module.named_children():
+            extract_one(child, prefix + name + '.')
+
+    extract_one(m, '')
+    return params, buffers, variables
+
+
+def set_all_buffers(m, params, buffers, variables):
+
+    def set_one(module, prefix):
+        for k in dir(module):
+            qual_name = prefix + k
+            if (potential_v := buffers.get(qual_name)) is not None or (
+                    potential_v := variables.get(qual_name)) is not None:
+                setattr(module, k, potential_v)
+            elif (potential_v := params.get(qual_name)) is not None:
+                # print(k, potential_v)
+                # setattr(module, k, torch.nn.Parameter(potential_v))
+                module.register_parameter(k, potential_v)
+        for name, child in module.named_children():
+            set_one(child, prefix + name + '.')
+
+    set_one(m, '')

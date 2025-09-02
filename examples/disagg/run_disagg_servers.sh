@@ -3,7 +3,7 @@
 # shellcheck disable=all
 set -e
 
-MODEL="/mnt/disks/data/Qwen/Qwen2.5-0.5B-Instruct"
+MODEL="Qwen/Qwen2.5-0.5B-Instruct"
 
 NUM_PREFILL_INSTANCES=1
 NUM_DECODE_INSTANCES=1
@@ -104,14 +104,14 @@ python $HOME/tpu_commons/examples/disagg/toy_proxy_server.py \
 cat <<'EOF'
 The proxy server has been launched on: 127.0.0.1:7080
 
-Send example request:
+>> Send example request:
 
 curl -X POST \
 http://127.0.0.1:7080/v1/completions \
 -H "Content-Type: application/json" \
 -d '{"prompt": "We hold these truths to be self-evident, that all men are created equal, that they are endowed by their Creator with certain unalienable Rights, that among these are Life, Liberty and the pursuit of Happiness.--That to secure these rights, Governments are instituted among Men, deriving their just powers from the consent of the governed,  ", "max_tokens": 10}'
 
-Stop the proxy server and all prefill/decode instances:
+>> Stop the proxy server and all prefill/decode instances:
 
 pkill -f "vllm serve" && pkill -f "toy_proxy_server" && pkill -f "run_disagg_servers"
 EOF

@@ -22,7 +22,7 @@ from tpu_commons.di.abstracts import (AbstractKVCacheConfig,
                                       AbstractSchedulerOutput)
 from tpu_commons.di.interfaces import HostInterface
 from tpu_commons.logger import init_logger
-from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
+from tpu_commons.runner.tpu_jax_runner import TPUModelRunner
 from tpu_commons.worker._temporary_vllm_compat import (
     adapt_kv_cache_config_if_needed, adapt_lora_request_if_needed,
     adapt_scheduler_output_if_needed)
@@ -94,7 +94,8 @@ class TPUWorker(AbstractTpuWorker):
         logger.info(f"Pre-sliced devices by engine: {self.devices}")
 
         use_jax_profiler_server = os.getenv("USE_JAX_PROFILER_SERVER", False)
-        if use_jax_profiler_server:
+        # Only one instance of profiler is allowed
+        if use_jax_profiler_server and jax.devices()[0] == self.devices[0]:
             jax_profiler_server_port = int(
                 os.getenv("JAX_PROFILER_SERVER_PORT", 9999))
             logger.info(

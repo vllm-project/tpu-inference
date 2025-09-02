@@ -11,7 +11,7 @@ from vllm.config import ModelConfig
 
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.llama3 import LlamaForCausalLM
-from tpu_commons.runner import utils as runner_utils
+from tpu_commons.runner.kv_cache import create_kv_caches
 
 
 class MockVllmConfig:
@@ -93,8 +93,7 @@ class TestLlamaForCausalLM:
         layers = model.model.layers
         assert len(layers) == hf_config.num_hidden_layers
         assert isinstance(model.rng, nnx.Rngs)
-        assert isinstance(model.embed, nnx.Embed)
-        assert model.lm_head == model.embed.embedding
+        assert model.model.lm_head == model.model.embed.embedding
 
         attn = layers[0].self_attn
         hidden_size = hf_config.hidden_size
@@ -127,14 +126,13 @@ class TestLlamaForCausalLM:
         model.load_weights(rng)
 
         # Test model forward
-        kv_caches = runner_utils.create_kv_caches(
+        kv_caches = create_kv_caches(
             num_blocks=4,
             block_size=32,
             num_kv_heads=num_kv_heads,
             head_size=head_dim,
             mesh=mesh,
             layer_names=["layer"] * hf_config.num_hidden_layers,
-            devices=mesh.devices[0],
         )
         # 1 seq with 16 tokens
         input_ids, attention_metadata, indices_do_sample = mock_model_inputs

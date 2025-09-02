@@ -5,9 +5,10 @@ from typing import Optional
 import jax
 import jax.numpy as jnp
 import torch
-from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from jax.sharding import Mesh
 
-from tpu_commons.runner.jax.input_batch_jax import InputBatch
+from tpu_commons.runner.input_batch_jax import InputBatch
+from tpu_commons.utils import device_array
 
 DEFAULT_SAMPLING_PARAMS = dict(
     temperature=-1.0,
@@ -58,15 +59,11 @@ class TPUSupportedSamplingMetadata:
         top_p_tensor = fill_slice(input_batch.top_p_cpu,
                                   DEFAULT_SAMPLING_PARAMS["top_p"])
 
-        def _device_array(cpu_tensor):
-            sharding = NamedSharding(mesh, PartitionSpec(None))
-            return jax.device_put(cpu_tensor, device=sharding)
-
         # Slice persistent device tensors to a fixed pre-compiled padded shape.
         return cls(
-            temperature=_device_array(temp_tensor[:padded_num_reqs]),
-            top_p=_device_array(top_p_tensor[:padded_num_reqs]),
-            top_k=_device_array(top_k_tensor[:padded_num_reqs]),
+            temperature=device_array(mesh, temp_tensor[:padded_num_reqs]),
+            top_p=device_array(mesh, top_p_tensor[:padded_num_reqs]),
+            top_k=device_array(mesh, top_k_tensor[:padded_num_reqs]),
             do_sampling=not input_batch.all_greedy,
             logprobs=needs_logprobs,
         )

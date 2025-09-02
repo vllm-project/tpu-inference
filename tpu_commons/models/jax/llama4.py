@@ -5,7 +5,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from flax.typing import PRNGKey
-from jax.sharding import Mesh, NamedSharding
+from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from vllm.config import VllmConfig
 
@@ -77,11 +77,8 @@ class Llama4ForCausalLM(nnx.Module):
         self.embedder = Embedder(vocab_size=vocab_size,
                                  hidden_size=self.hidden_size,
                                  dtype=dtype,
-                                 prelogit_td=NamedSharding(self.mesh, P()),
-                                 vd_sharding=NamedSharding(
-                                     self.mesh,
-                                     P(('data', 'expert', 'model'), None)),
-                                 mesh=self.mesh,
+                                 vd_sharding=(('data', 'expert', 'model'),
+                                              None),
                                  rngs=self.rng,
                                  random_init=force_random_weights)
 
@@ -94,48 +91,39 @@ class Llama4ForCausalLM(nnx.Module):
                             self.interleave_moe_layer_step == 0
             use_attention_rope = (i + 1) % self.no_rope_layer_interval != 0
 
-            router = Router(mesh=self.mesh,
-                            dtype=dtype,
+            router = Router(dtype=dtype,
                             hidden_size=self.hidden_size,
                             num_experts=num_local_experts,
                             num_experts_per_tok=1,
                             router_act="sigmoid",
                             rngs=self.rng,
-                            activation_ffw_td=NamedSharding(
-                                self.mesh, P('data', None)),
-                            ed_sharding=NamedSharding(self.mesh,
-                                                      P(None, 'expert')),
+                            activation_ffw_td=('data', None),
+                            ed_sharding=(None, 'expert'),
                             random_init=force_random_weights)
 
-            custom_module = MoE(
-                mesh=self.mesh,
-                dtype=dtype,
-                num_local_experts=num_local_experts,
-                apply_expert_weight_before_computation=True,
-                hidden_size=self.hidden_size,
-                intermediate_size_moe=intermediate_size_moe,
-                hidden_act=hidden_act,
-                router=router,
-                rngs=self.rng,
-                activation_ffw_td=NamedSharding(self.mesh, P('data', None)),
-                activation_ffw_ted=NamedSharding(self.mesh,
-                                                 P('data', 'expert', None)),
-                edf_sharding=NamedSharding(self.mesh, P(
-                    'expert', None, 'model')),
-                efd_sharding=NamedSharding(self.mesh, P(
-                    'expert', 'model', None)),
-                random_init=force_random_weights
-            ) if is_moe_layer else DenseFFW(
-                mesh=self.mesh,
-                dtype=dtype,
-                hidden_act=hidden_act,
-                hidden_size=self.hidden_size,
-                intermediate_size=intermediate_size,
-                random_init=force_random_weights,
-                rngs=self.rng,
-                df_sharding=NamedSharding(self.mesh, P(None, 'model')),
-                fd_sharding=NamedSharding(self.mesh, P('model', None)),
-                activation_ffw_td=NamedSharding(self.mesh, P('data', None)))
+            custom_module = MoE(dtype=dtype,
+                                num_local_experts=num_local_experts,
+                                apply_expert_weight_before_computation=True,
+                                hidden_size=self.hidden_size,
+                                intermediate_size_moe=intermediate_size_moe,
+                                hidden_act=hidden_act,
+                                router=router,
+                                rngs=self.rng,
+                                activation_ffw_td=('data', None),
+                                activation_ffw_ted=('data', 'expert', None),
+                                edf_sharding=('expert', None, 'model'),
+                                efd_sharding=('expert', 'model', None),
+                                random_init=force_random_weights
+                                ) if is_moe_layer else DenseFFW(
+                                    dtype=dtype,
+                                    hidden_act=hidden_act,
+                                    hidden_size=self.hidden_size,
+                                    intermediate_size=intermediate_size,
+                                    random_init=force_random_weights,
+                                    rngs=self.rng,
+                                    df_sharding=(None, 'model'),
+                                    fd_sharding=('model', None),
+                                    activation_ffw_td=('data', None))
 
             attn = Llama4Attention(
                 hidden_size=self.hidden_size,
@@ -160,47 +148,39 @@ class Llama4ForCausalLM(nnx.Module):
                 attention_chunk_size=None if use_attention_rope else 8192,
                 mesh=self.mesh,
                 random_init=force_random_weights,
-                activation_attention_td=NamedSharding(self.mesh,
-                                                      P('data', 'model')),
-                activation_q_td=NamedSharding(self.mesh, P('data', 'model')),
-                query_tnh=NamedSharding(self.mesh, P('data', 'model', None)),
-                keyvalue_skh=NamedSharding(self.mesh, P('data', 'model',
-                                                        None)),
-                activation_attention_out_td=NamedSharding(
-                    self.mesh, P('data', 'model')),
-                attn_o_tnh=NamedSharding(self.mesh, P('data', 'model', None)),
-                dnh_sharding=NamedSharding(self.mesh, P(None, 'model', None)),
-                dkh_sharding=NamedSharding(self.mesh, P(None, 'model', None)),
-                nhd_sharding=NamedSharding(self.mesh, P('model', None, None)),
+                activation_attention_td=('data', 'model'),
+                activation_q_td=('data', 'model'),
+                query_tnh=P('data', 'model', None),
+                keyvalue_skh=P('data', 'model', None),
+                activation_attention_out_td=('data', 'model'),
+                attn_o_tnh=P('data', 'model', None),
+                dnh_sharding=(None, 'model', None),
+                dkh_sharding=(None, 'model', None),
+                nhd_sharding=('model', None, None),
             )
 
-            shared_experts = DenseFFW(
-                dtype=dtype,
-                hidden_act=hidden_act,
-                hidden_size=self.hidden_size,
-                intermediate_size=num_shared_experts * intermediate_size_moe,
-                mesh=self.mesh,
-                rngs=self.rng,
-                random_init=force_random_weights,
-                df_sharding=NamedSharding(self.mesh, P(None, 'model')),
-                fd_sharding=NamedSharding(self.mesh, P('model', None)),
-                activation_ffw_td=NamedSharding(self.mesh, P('data', None)))
+            shared_experts = DenseFFW(dtype=dtype,
+                                      hidden_act=hidden_act,
+                                      hidden_size=self.hidden_size,
+                                      intermediate_size=num_shared_experts *
+                                      intermediate_size_moe,
+                                      rngs=self.rng,
+                                      random_init=force_random_weights,
+                                      df_sharding=(None, 'model'),
+                                      fd_sharding=('model', None),
+                                      activation_ffw_td=('data', None))
 
             pre_attention_norm = RMSNorm(
                 dims=self.hidden_size,
-                mesh=self.mesh,
                 random_init=force_random_weights,
                 epsilon=rms_norm_eps,
                 rngs=self.rng,
-                activation_ffw_td=NamedSharding(self.mesh, P()),
                 with_scale=True,
                 dtype=dtype,
             )
 
             pre_mlp_norm = RMSNorm(
                 dims=self.hidden_size,
-                mesh=self.mesh,
-                activation_ffw_td=NamedSharding(self.mesh, P()),
                 epsilon=rms_norm_eps,
                 rngs=self.rng,
                 with_scale=True,
@@ -219,8 +199,6 @@ class Llama4ForCausalLM(nnx.Module):
 
         self.final_norm = RMSNorm(
             dims=self.hidden_size,
-            mesh=self.mesh,
-            activation_ffw_td=NamedSharding(self.mesh, P()),
             epsilon=rms_norm_eps,
             rngs=self.rng,
             with_scale=True,
@@ -228,18 +206,13 @@ class Llama4ForCausalLM(nnx.Module):
             random_init=force_random_weights,
         )
 
-        self.lm_head = LMhead(
-            vocab_size=vocab_size,
-            hidden_size=self.hidden_size,
-            dtype=dtype,
-            rngs=self.rng,
-            prelogit_td=NamedSharding(self.mesh, P()),
-            vd_sharding=NamedSharding(self.mesh,
-                                      P(('data', 'expert', 'model'), None)),
-            dv_sharding=NamedSharding(self.mesh,
-                                      P(None, ('data', 'expert', 'model'))),
-            mesh=self.mesh,
-            random_init=force_random_weights)
+        self.lm_head = LMhead(vocab_size=vocab_size,
+                              hidden_size=self.hidden_size,
+                              dtype=dtype,
+                              rngs=self.rng,
+                              vd_sharding=(('data', 'expert', 'model'), None),
+                              dv_sharding=(None, ('data', 'expert', 'model')),
+                              random_init=force_random_weights)
         if self.is_verbose:
             self._print_model_architecture()
 
@@ -260,6 +233,10 @@ class Llama4ForCausalLM(nnx.Module):
         nnx.display(self.lm_head)
 
     def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):
+        # NOTE: Since we are using nnx.eval_shape to init the model,
+        # we have to pass dynamic arrays here for __call__'s usage.
+        self.rng = nnx.Rngs(rng)
+
         weight_loader = Llama4WeightLoader(
             vllm_config=self.vllm_config,
             hidden_size=self.hidden_size,
@@ -403,11 +380,10 @@ class Llama4WeightLoader:
                     f"Loaded shape for {split_loaded_name}: {loaded_weight.shape} "
                     f"does not match model shape for {mapped_name}: {mapped_model_weight.value.shape}!"
                 )
-            mapped_model_weight.value = shard_put(
-                loaded_weight,
-                mapped_model_weight.sharding.spec,
-                mesh=model_for_loading.mesh)
-            logger.info(
+            mapped_model_weight.value = shard_put(loaded_weight,
+                                                  mapped_model_weight.sharding,
+                                                  mesh=model_for_loading.mesh)
+            logger.debug(
                 f"{split_loaded_name}: {loaded_weight.shape}  -->  {mapped_name}: {mapped_model_weight.value.shape}"
             )
             if self.is_verbose:
@@ -436,11 +412,11 @@ class Llama4WeightLoader:
                         f"Loaded shape for {loaded_name}: {loaded_weight.shape} "
                         f"does not match model shape for {mapped_name}: {model_weight.value.shape}!"
                     )
-                logger.info(
+                logger.debug(
                     f"Transformed parameter {loaded_name} to {mapped_name}: {loaded_weight.shape} --> {model_weight.value.shape}"
                 )
                 model_weight.value = shard_put(loaded_weight,
-                                               model_weight.sharding.spec,
+                                               model_weight.sharding,
                                                mesh=model_for_loading.mesh)
                 if self.is_verbose:
                     print_param_info(model_weight, loaded_name)

@@ -17,11 +17,13 @@ from torchax.ops.mappings import TORCH_DTYPE_TO_JAX
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
+from vllm.forward_context import set_forward_context
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.sequence import IntermediateTensors
 
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
+from tpu_commons.models.vllm.quantization import get_tpu_quantization_config
 from tpu_commons.models.vllm.sharding import shard_model_to_tpu
 from tpu_commons.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
@@ -83,6 +85,9 @@ class VllmModelWrapper:
         self.rng = rng
         self.mesh = mesh
 
+        self.vllm_config.quant_config = get_tpu_quantization_config(
+            self.vllm_config, self.mesh)
+
     def load_weights(self):
         # Initialize the vLLM distribution layer as a single chip environment,
         # we'll swap the model's parallel modules with TPU SPMD equivalents.
@@ -138,19 +143,25 @@ class VllmModelWrapper:
         @functools.partial(
             jax.jit,
             donate_argnums=(1, ),  # donate kv_cache
+            compiler_options={
+                "xla_tpu_all_gather_collective_matmul_mode":
+                "post_spmd_conservative",
+                "xla_tpu_reduce_scatter_collective_matmul_mode":
+                "post_spmd_conservative"
+            },
         )
         def step_fun(
             params_and_buffers,  # this has been wrapped into a torchax TorchValue
             kv_caches: List[jax.Array],
             input_ids: jax.Array,
-            attention_metadata: AttentionMetadata,
+            attn_metadata: AttentionMetadata,
             *args,
         ) -> Tuple[List[jax.Array], jax.Array]:
 
             with torchax.default_env(), set_vllm_model_wrapper_context(
-                    kv_caches=kv_caches,
-                    attention_metadata=attention_metadata,
-            ):
+                    kv_caches=kv_caches, mesh=self.mesh), set_forward_context(
+                        attn_metadata=attn_metadata,
+                        vllm_config=self.vllm_config):
                 # We need to wrap args from jax land into TorchValue with
                 # torch_view in order to call the Torch function.
                 hidden_states = torch.func.functional_call(
@@ -158,8 +169,7 @@ class VllmModelWrapper:
                     torch_view(params_and_buffers),
                     kwargs={
                         "input_ids": torch_view(input_ids),
-                        "positions":
-                        torch_view(attention_metadata.input_positions),
+                        "positions": torch_view(attn_metadata.input_positions),
                         "intermediate_tensors": None,
                         "inputs_embeds": None,
                     },
@@ -186,7 +196,8 @@ class VllmModelWrapper:
             params_and_buffers: Any,
             hidden_states: jax.Array,
         ) -> jax.Array:
-            with torchax.default_env():
+            with torchax.default_env(), set_vllm_model_wrapper_context(
+                    kv_caches=None, mesh=self.mesh):
                 logits = torch.func.functional_call(
                     self.model,
                     torch_view(params_and_buffers),
