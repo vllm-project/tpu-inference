@@ -40,16 +40,14 @@ from tpu_commons.models.jax.model_loader import get_model
 from tpu_commons.models.jax.utils.weight_utils import (
     shard_put, transfer_state_with_mappings)
 from tpu_commons.runner import utils as runner_utils
-from tpu_commons.runner.jax.compilation_manager import CompilationManager
-from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
-                                                    InputBatch)
-from tpu_commons.runner.jax.kv_cache_manager import KVCacheManager
-from tpu_commons.runner.jax.multimodal_manager import MultiModalManager
-from tpu_commons.runner.jax.persistent_batch_manager import \
-    PersistentBatchManager
-from tpu_commons.runner.jax.speculative_decoding_manager import \
+from tpu_commons.runner.compilation_manager import CompilationManager
+from tpu_commons.runner.input_batch_jax import CachedRequestState, InputBatch
+from tpu_commons.runner.kv_cache_manager import KVCacheManager
+from tpu_commons.runner.multimodal_manager import MultiModalManager
+from tpu_commons.runner.persistent_batch_manager import PersistentBatchManager
+from tpu_commons.runner.speculative_decoding_manager import \
     SpeculativeDecodingManager
-from tpu_commons.runner.jax.structured_decoding_manager import \
+from tpu_commons.runner.structured_decoding_manager import \
     StructuredDecodingManager
 from tpu_commons.utils import device_array, make_optimized_mesh
 

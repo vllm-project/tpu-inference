@@ -2,8 +2,7 @@ import numpy as np
 import pytest
 from vllm.sampling_params import SamplingParams
 
-from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
-                                                    InputBatch)
+from tpu_commons.runner.input_batch_jax import CachedRequestState, InputBatch
 
 # Default parameters for creating InputBatch instances in tests
 MAX_NUM_REQS = 8

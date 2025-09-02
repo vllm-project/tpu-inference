@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import torch
 from jax.sharding import Mesh
 
-from tpu_commons.runner.jax.input_batch_jax import InputBatch
+from tpu_commons.runner.input_batch_jax import InputBatch
 from tpu_commons.utils import device_array
 
 DEFAULT_SAMPLING_PARAMS = dict(

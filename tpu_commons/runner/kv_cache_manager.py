@@ -11,13 +11,13 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from tpu_commons import utils as common_utils
 from tpu_commons.logger import init_logger
 from tpu_commons.runner import utils as runner_utils
-from tpu_commons.runner.jax.input_batch_jax import CachedRequestState
-from tpu_commons.runner.jax.kv_cache import create_kv_caches
+from tpu_commons.runner.input_batch_jax import CachedRequestState
+from tpu_commons.runner.kv_cache import create_kv_caches
 
 if TYPE_CHECKING:
     from vllm.v1.request import Request
 
-    from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
+    from tpu_commons.runner.tpu_jax_runner import TPUModelRunner
 
 logger = init_logger(__name__)
 

@@ -13,7 +13,7 @@ from tpu_commons.models.jax.utils.multi_modal_utils import \
     sanity_check_mm_encoder_outputs
 
 if TYPE_CHECKING:
-    from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
+    from tpu_commons.runner.tpu_jax_runner import TPUModelRunner
 
 
 class MultiModalManager:
