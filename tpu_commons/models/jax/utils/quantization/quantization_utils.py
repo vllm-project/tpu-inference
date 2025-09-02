@@ -24,6 +24,8 @@ DEFAULT_NUM_TOKENS_FOR_MODEL_INPUTS = 512
 DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS = 256
 DEFAULT_MAX_NUM_BLOCKS_PER_REQ = 16
 
+AWQ_REVERSE_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
+
 
 def parse_qwix_config_to_rules(
         qwix_config: List[dict]) -> List[qwix.QuantizationRule]:
@@ -186,101 +188,60 @@ def quantization_config_file_path_to_dict(
     )
 
 
-def load_and_unpack_gptq_int4(weight_dict):
-    """
-  TODO
-  """
-    g_idx = weight_dict['g_idx']
-    qweight = weight_dict['qweight']
-    qzeros = weight_dict['qzeros']
-    scales = weight_dict['scales']
-
-    # g_idx is always even.
-    tile_count = scales.shape[0]
-    assert jnp.all(
-        g_idx.reshape(tile_count, -1) == jnp.arange(tile_count).reshape(
-            tile_count, 1))
-
-    # .transpose()
-    qvalue = qweight.view(jnp.int4) - 8
-    # .transpose()
-    zp = qzeros.view(jnp.int4) - 7
-    if jnp.all(zp == 0):
-        zp = None
-    scale = scales.astype(jnp.float32)  # .transpose()
-    return qpl.QArray(qvalue, scale, zp, jnp.int4)
-
-
-def load_and_unpack_gptq_int8(weight_dict):
-    g_idx = weight_dict['g_idx']
-    qweight = weight_dict['qweight']
-    qzeros = weight_dict['qzeros']
-    scales = weight_dict['scales']
-
-    # g_idx is always even.
-    tile_count = scales.shape[0]
-    assert jnp.all(
-        g_idx.reshape(tile_count, -1) == jnp.arange(tile_count).reshape(
-            tile_count, 1))
-
-    qvalue = qweight.transpose().view(jnp.int8) - 128
-    zp = qzeros.view(jnp.int8).transpose() - 127
-    if jnp.all(zp == 0):
-        zp = None
-    scale = scales.astype(jnp.float32).transpose()
-    return qpl.QArray(qvalue, scale, zp, jnp.int8)
-
-
-AWQ_REVERSE_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
-
-
-def unpack(matrix: jnp.ndarray, bits: int):
+def unpack_awq_weight_to_int4(matrix: jnp.ndarray, bits: int) -> jnp.ndarray:
     """Unpacks AWQ weights from int32 to int4 values inside int8 datatype.
     Converted to JAX from https://github.com/casper-hansen/AutoAWQ/blob/f0321eedca887c12680553fc561d176b03b1b9a5/awq/utils/packing_utils.py#L8
+
+    Args:
+        matrix: the JAX weight array to unpack
+        bits: the number of bits to unpack to
+
+    Returns:
+        the unpacked JAX weight array
     """
 
     shifts = jnp.arange(0, 32, bits)
     # zero-point quantization will need uint4 otherwise int4.
     # https://github.com/casper-hansen/AutoAWQ/blob/f0321eedca887c12680553fc561d176b03b1b9a5/awq/quantize/quantizer.py#L76
-    iweights = jnp.right_shift(matrix[..., None], shifts[None, None, :]).astype(
-        jnp.uint4
-    )
+    iweights = jnp.right_shift(matrix[..., None],
+                               shifts[None, None, :]).astype(jnp.uint4)
     return iweights.reshape(iweights.shape[0], -1)
 
 
-def reverse_awq_order(matrix: jnp.ndarray, bits: int):
+def reverse_awq_order(matrix: jnp.ndarray, bits: int) -> jnp.ndarray:
     """Reorders the packed int4 values.
     Converted to JAX from https://github.com/casper-hansen/AutoAWQ/blob/f0321eedca887c12680553fc561d176b03b1b9a5/awq/utils/packing_utils.py#L29
+
+    Args:
+        matrix: the JAX weight array to reorder
+        bits: the number of bits to unpack to
+
+    Returns:
+        the reordered JAX weight array
     """
     reverse_order_tensor = jnp.arange(matrix.shape[-1], dtype=jnp.int32)
     reverse_order_tensor = reverse_order_tensor.reshape(-1, 32 // bits)
-    reverse_order_tensor = reverse_order_tensor[:, jnp.array(AWQ_REVERSE_ORDER)]
+    reverse_order_tensor = reverse_order_tensor[:,
+                                                jnp.array(AWQ_REVERSE_ORDER)]
     reverse_order_tensor = reverse_order_tensor.reshape(-1)
 
     return matrix[:, reverse_order_tensor]
 
 
-def load_and_unpack_awq(weight_dict):
+def awq_dict_to_qarray(weight_dict: dict,
+                       qarray_dtype: jnp.dtype) -> qpl.QArray:
+    """
+    Converts a dictioanry containing AWQ weights (qweight, qzeros, scales) to a Qwix
+    QArray object.
+
+    Args:
+        weight_dict: a dictionary containing the AWQ weights
+        qarray_dtype: the dtype of the QArray
+
+    Returns:
+        a Qwix QArray
+    """
     qweight = weight_dict['qweight']
     qzeros = weight_dict['qzeros']
     scales = weight_dict['scales']
-
-    # int4 -> uint4??
-    qvalue = jax.lax.bitcast_convert_type(qweight, jnp.uint4)[...,
-                                                             AWQ_REVERSE_ORDER]
-    qvalue = qvalue.reshape(qvalue.shape[0], -1).transpose() + 8
-    zp = jax.lax.bitcast_convert_type(qzeros, jnp.uint4)[..., AWQ_REVERSE_ORDER]
-    zp = zp.reshape(zp.shape[0], -1).transpose() + 8
-    if jnp.all(zp == 0):
-        zp = None
-    scale = scales.astype(jnp.float32).transpose()
-    # uint4 ??
-    return qpl.QArray(qvalue, scale, zp, jnp.int4)
-
-
-def awq_dict_to_qarray(weight_dict):
-    qweight = weight_dict['qweight']
-    qzeros = weight_dict['qzeros']
-    scales = weight_dict['scales']
-    # TODO: dtype??
-    return qpl.QArray(qweight, scales, qzeros, jnp.uint4)
+    return qpl.QArray(qweight, scales, qzeros, qarray_dtype)

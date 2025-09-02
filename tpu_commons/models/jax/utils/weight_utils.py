@@ -21,7 +21,7 @@ from tpu_commons import utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.utils import file_utils
 from tpu_commons.models.jax.utils.quantization.quantization_utils import (
-    awq_dict_to_qarray, reverse_awq_order, unpack)
+    awq_dict_to_qarray, reverse_awq_order, unpack_awq_weight_to_int4)
 
 logger = init_logger(__name__)
 
@@ -329,10 +329,12 @@ def _load_hf_weights_on_thread(vllm_config, params: nnx.State,
                     print(awq_dict["scales"].shape, awq_dict["scales"])
                     print("BEFORE")
 
-                awq_dict["qweight"] = unpack(awq_dict["qweight"], bits=4)
+                awq_dict["qweight"] = unpack_awq_weight_to_int4(
+                    awq_dict["qweight"], bits=4)
                 awq_dict["qweight"] = reverse_awq_order(awq_dict["qweight"],
                                                         bits=4)
-                awq_dict["qzeros"] = unpack(awq_dict["qzeros"], bits=4)
+                awq_dict["qzeros"] = unpack_awq_weight_to_int4(
+                    awq_dict["qzeros"], bits=4)
                 awq_dict["qzeros"] = reverse_awq_order(awq_dict["qzeros"],
                                                        bits=4)
 
@@ -466,28 +468,12 @@ def _load_hf_weights_on_thread(vllm_config, params: nnx.State,
 
         # Update the model weight
         if qwix_weight:
-            # sharded_weight = shard(qwix_weight.qvalue, model_sharding)
-            # scale = qwix_weight.scale
-            # TODO: shard
-            # transpose the awq_dict entries
-            # if "mlp." in model_key:
-            #     awq_dict["qweight"] = awq_dict["qweight"].transpose()
-            #     awq_dict["qzeros"] = awq_dict["qzeros"].transpose()
-            #     awq_dict["scales"] = awq_dict["scales"].transpose()
-            qwix_qarray = awq_dict_to_qarray(awq_dict)
+            qwix_qarray = awq_dict_to_qarray(awq_dict, jnp.uint4)
             model_weight.array.qvalue.value = qwix_qarray.qvalue
             # TODO?
             model_weight.array.scale.value = qwix_qarray.scale.astype(
                 jnp.bfloat16)
             model_weight.array.zero_point.value = qwix_qarray.zero_point
-
-            print("Setting qwix weight for ", model_key,
-                  model_weight.array.qvalue.value.shape,
-                  model_weight.array.scale.value.shape,
-                  model_weight.array.zero_point.value.shape,
-                  model_weight.array.qvalue.value.dtype,
-                  model_weight.array.scale.value.dtype,
-                  model_weight.array.zero_point.value.dtype)
             qwix_weight = False
         else:
             # TODO: do we want this?

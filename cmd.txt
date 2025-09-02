@@ -1,3 +1,0 @@
-TPU_BACKEND_TYPE=jax python examples/offline_inference.py --model MaziyarPanahi/Meta-Llama-3-8B-Instruct-GPTQ --task=generate --max_model_len=1024
-
-TPU_BACKEND_TYPE=jax python examples/offline_inference.py --model MaziyarPanahi/Meta-Llama-3-8B-Instruct-GPTQ --task=generate --max_model_len=1024 --additional_config='{"quantization": {"qwix": {"rules": [{"module_path": ".*", "weight_qtype": "int8", "act_qtype": "int8"}]}}}'

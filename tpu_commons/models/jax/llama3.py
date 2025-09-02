@@ -120,21 +120,9 @@ class LlamaAttention(nnx.Module):
     ) -> Tuple[jax.Array, jax.Array]:
         md = attention_metadata
         # q: (T, N, H)
-        if hasattr(self.q_proj, "kernel") and hasattr(
-                self.q_proj.kernel, "array") and hasattr(
-                    self.q_proj.kernel.array, "qvalue"):
-            # jax.debug.print("qvalue inny {x}", x=self.q_proj.kernel.array.qvalue.value)
-            # jax.debug.print("qvalue inny transpose {x}", x=jnp.transpose(self.q_proj.kernel.array.qvalue.value, (1, 0, 2)))
-            # jax.debug.print("qvalue inny {x}", x=self.q_proj.kernel.array.qvalue.value.shape)
-            # jax.debug.print("scales inny {x}", x=self.q_proj.kernel.array.scale.value)
-            # jax.debug.print("scales inny {x}", x=self.q_proj.kernel.array.scale.value.shape)
-            # jax.debug.print("zp inny {x}", x=self.q_proj.kernel.array.zero_point.value)
-            # jax.debug.print("zp inny {x}", x=self.q_proj.kernel.array.zero_point.value.shape)
-            pass
         q = self.q_proj(x)
         q = apply_rope(q, md.input_positions, self.head_dim_original,
                        self.rope_theta, self.rope_scaling)
-        # jax.debug.print("attnqapplyrope outty {x}", x=q)
         # k: (T, K, H)
         k = self.k_proj(x)
         k = apply_rope(k, md.input_positions, self.head_dim_original,
@@ -194,14 +182,11 @@ class LlamaDecoderLayer(nnx.Module):
         attention_metadata: AttentionMetadata,
     ) -> Tuple[jax.Array, jax.Array]:
         hidden_states = self.input_layernorm(x)
-        # jax.debug.print("input_layer_norm first {x}", x=hidden_states)
         kv_cache, attn_output = self.self_attn(
             kv_cache,
             hidden_states,
             attention_metadata,
         )
-        # jax.debug.print("attn_output outty {x}", x=attn_output)
-        # jax.debug.print("attn_output {x}", x=attn_output)
         attn_output += x
 
         residual = attn_output
@@ -217,10 +202,18 @@ class LlamaModel(nnx.Module):
                  mesh: Mesh) -> None:
         model_config = vllm_config.model_config
         hf_config = model_config.hf_config
+        vocab_size = model_config.get_vocab_size()
         dtype = model_config.dtype
         rms_norm_eps = hf_config.rms_norm_eps
         hidden_size = hf_config.hidden_size
 
+        self.embed = nnx.Embed(
+            num_embeddings=vocab_size,
+            features=hidden_size,
+            param_dtype=dtype,
+            embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
+            rngs=rng,
+        )
         self.layers = [
             LlamaDecoderLayer(
                 config=hf_config,
@@ -236,13 +229,21 @@ class LlamaModel(nnx.Module):
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
         )
+        if model_config.hf_config.tie_word_embeddings:
+            self.lm_head = self.embed.embedding
+        else:
+            self.lm_head = nnx.Param(
+                init_fn(rng.params(), (hidden_size, vocab_size), dtype),
+                sharding=(None, "model"),
+            )
 
     def __call__(
         self,
         kv_caches: List[jax.Array],
-        x: jax.Array,
+        input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
     ) -> Tuple[List[jax.Array], jax.Array]:
+        x = self.embed(input_ids)
         for i, layer in enumerate(self.layers):
             kv_cache = kv_caches[i]
             kv_cache, x = layer(
@@ -259,35 +260,15 @@ class LlamaForCausalLM(nnx.Module):
 
     def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,
                  mesh: Mesh) -> None:
-        model_config = vllm_config.model_config
-        vocab_size = model_config.get_vocab_size()
-        hidden_size = model_config.get_hidden_size()
-        dtype = model_config.dtype
-
         self.vllm_config = vllm_config
         self.rng = nnx.Rngs(rng_key)
         self.mesh = mesh
 
-        self.embed = nnx.Embed(
-            num_embeddings=vocab_size,
-            features=hidden_size,
-            param_dtype=dtype,
-            embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
-            rngs=self.rng,
-        )
         self.model = LlamaModel(
             vllm_config=vllm_config,
             rng=self.rng,
             mesh=mesh,
         )
-
-        if model_config.hf_config.tie_word_embeddings:
-            self.lm_head = self.embed.embedding
-        else:
-            self.lm_head = nnx.Param(
-                init_fn(self.rng.params(), (hidden_size, vocab_size), dtype),
-                sharding=(None, "model"),
-            )
 
     def __call__(
         self,
@@ -296,21 +277,18 @@ class LlamaForCausalLM(nnx.Module):
         attention_metadata: AttentionMetadata,
         *args,
     ) -> Tuple[List[jax.Array], jax.Array]:
-        # jax.debug.print("input_ids {input_ids}", input_ids=input_ids)
-        x = self.embed(input_ids)
-        # jax.debug.print("embed end x {x}", x=x)
         kv_caches, x = self.model(
             kv_caches,
-            x,
+            input_ids,
             attention_metadata,
         )
         return kv_caches, x
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         if self.vllm_config.model_config.hf_config.tie_word_embeddings:
-            logits = jnp.dot(hidden_states, self.lm_head.value.T)
+            logits = jnp.dot(hidden_states, self.model.lm_head.value.T)
         else:
-            logits = jnp.dot(hidden_states, self.lm_head.value)
+            logits = jnp.dot(hidden_states, self.model.lm_head.value)
         return logits
 
     def load_weights(self, rng_key: jax.Array):
@@ -321,7 +299,7 @@ class LlamaForCausalLM(nnx.Module):
         # Key: path to a HF layer weight
         # Value: path to a nnx layer weight
         mappings = {
-            "model.embed_tokens": "embed.embedding",
+            "model.embed_tokens": "model.embed.embedding",
             "model.layers.*.input_layernorm":
             "model.layers.*.input_layernorm.scale",
             "model.layers.*.mlp.down_proj":
@@ -344,7 +322,7 @@ class LlamaForCausalLM(nnx.Module):
         # Add lm_head mapping only if it's not tied to embeddings
         if not self.vllm_config.model_config.hf_config.tie_word_embeddings:
             mappings.update({
-                "lm_head": "lm_head",
+                "lm_head": "model.lm_head",
             })
 
         metadata_map = get_default_maps(self.vllm_config, self.mesh, mappings)
