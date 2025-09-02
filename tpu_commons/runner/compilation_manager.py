@@ -305,8 +305,7 @@ class CompilationManager:
             )
 
     def _precompile_rejection_sampler(self) -> None:
-        logger.info(
-            "Compiling greedy_rejection_sampler with different input shapes.")
+        logger.info("Compiling rejection_sampler with different input shapes.")
         vocab_size = self.runner.model_config.get_vocab_size()
         for num_logits in self.runner.num_logits_paddings:
             for num_reqs in self.runner.num_reqs_paddings:
@@ -320,19 +319,36 @@ class CompilationManager:
                                                              jnp.int32)
                 bonus_token_ids = self._create_dummy_tensor((num_reqs, ),
                                                             jnp.int32)
-                self._run_compilation(
-                    "greedy_rejection_sampler",
-                    self.runner.rejection_sampler,
-                    draft_token_ids,
-                    num_draft_tokens,
-                    -1,
-                    None,
-                    target_probs,
-                    bonus_token_ids,
-                    None,
-                    num_logits=num_logits,
-                    num_reqs=num_reqs,
-                )
+
+                for do_sampling in (False, True):
+                    sampling_metadata = TPUSupportedSamplingMetadata(
+                        do_sampling=do_sampling)
+
+                    if do_sampling:
+                        compilation_name = "random_rejection_sampler"
+                        draft_probs = self._create_dummy_tensor(
+                            (num_logits, vocab_size), jnp.bfloat16, sharding)
+                        key = self.runner.rng_params_for_sampling
+                    else:
+                        compilation_name = "greedy_rejection_sampler"
+                        draft_probs = None
+                        key = None
+
+                    self._run_compilation(
+                        compilation_name,
+                        self.runner.rejection_sampler,
+                        draft_token_ids,
+                        num_draft_tokens,
+                        -1,  # max_spec_len
+                        draft_probs,
+                        target_probs,
+                        bonus_token_ids,
+                        sampling_metadata,
+                        key,
+                        num_logits=num_logits,
+                        num_reqs=num_reqs,
+                        do_sampling=do_sampling,
+                    )
 
     def _precompile_structured_decoding(self) -> None:
         logger.info(
