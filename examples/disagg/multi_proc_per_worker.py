@@ -131,11 +131,11 @@ def prefill_worker(pid: int, squeue: multiprocessing.Queue):
 
     def _get_p2p_server_addr(pid: int):
         ports = [8576, 8577, 8578, 8579]
-        return f"localhost:{ports[pid]}"
+        return f"127.0.0.1:{ports[pid]}"
 
     def _get_ip(pid: int):
         port = _get_port(pid)
-        return f"localhost:{port}"
+        return f"127.0.0.1:{port}"
 
     def _get_ips():
         ips = [_get_ip(i) for i in range(4)]
@@ -176,7 +176,7 @@ def prefill_worker(pid: int, squeue: multiprocessing.Queue):
     s = start_transfer_server(
         jax.local_devices()[0].client,
         _get_p2p_server_addr(pid),
-        ['0.0.0.0:0'],
+        ['127.0.0.1:0'],
     )
     server_addr = s.address()
     log(f"Launched server on {server_addr}")
@@ -201,15 +201,15 @@ def decode_worker(pid: int, squeue: multiprocessing.Queue):
 
     def _get_p2p_server_addr(pid: int):
         ports = [8586, 8587, 8588, 8589]
-        return f"localhost:{ports[pid]}"
+        return f"127.0.0.1:{ports[pid]}"
 
     def _get_prefill_p2p_server_addr(pid: int):
         ports = [8576, 8577, 8578, 8579]
-        return f"localhost:{ports[pid]}"
+        return f"127.0.0.1:{ports[pid]}"
 
     def _get_ip(pid: int):
         port = _get_port(pid)
-        return f"localhost:{port}"
+        return f"127.0.0.1:{port}"
 
     def _get_ips():
         ips = [_get_ip(i) for i in range(4)]
@@ -230,7 +230,7 @@ def decode_worker(pid: int, squeue: multiprocessing.Queue):
     s = start_transfer_server(
         jax.local_devices()[0].client,
         _get_p2p_server_addr(pid),
-        ['0.0.0.0:0'],
+        ['127.0.0.1:0'],
     )
     server_addr = s.address()
     log(f"Launched server on {server_addr}")

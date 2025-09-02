@@ -138,8 +138,8 @@ def prefill_worker(squeue: multiprocessing.Queue):
 
     s = start_transfer_server(
         jax.local_devices()[0].client,
-        'localhost:7080',
-        ['0.0.0.0:0'],
+        '127.0.0.1:7080',
+        ['127.0.0.1:0'],
         use_raw_buffers=False,
     )
     log(f"Launched server on {s.address()}")
@@ -174,13 +174,13 @@ def decode_worker(squeue: multiprocessing.Queue):
 
     s = start_transfer_server(
         jax.local_devices()[0].client,
-        'localhost:7081',
-        ['0.0.0.0:0'],
+        '127.0.0.1:7081',
+        ['127.0.0.1:0'],
     )
     server_addr = s.address()
     log(f"Launched server on {server_addr}")
 
-    prefill_addr = "localhost:7080"
+    prefill_addr = "127.0.0.1:7080"
     conn = s.connect(prefill_addr)
     log(f"Created connection with {prefill_addr}")
 
