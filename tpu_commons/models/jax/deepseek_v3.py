@@ -194,8 +194,10 @@ class DeepSeekV3(nnx.Module):
                                 random_init=self.random_init,
                                 activation_ffw_td=('data', None),
                                 activation_ffw_ted=('data', 'expert', None),
-                                edf_sharding=('expert', None, 'model'),
-                                efd_sharding=('expert', 'model', None),
+                                # edf_sharding=('expert', None, 'model'),
+                                # efd_sharding=('expert', 'model', None),
+                                edf_sharding=('model', None, None),
+                                efd_sharding=('model',  None, None),
                                 router=router) if is_moe_layer else DenseFFW(
                                     dtype=dtype,
                                     hidden_act=hidden_act,
@@ -312,15 +314,19 @@ class DeepSeekV3(nnx.Module):
         logger.info(
             "Initializing model with random weights (Qwix FP8 structure)...")
 
-        def _get_random_sharded_array(key, param, param_shape, dtype):
-            weight = jax.random.normal(key, param_shape, dtype)
+        def _get_random_sharded_array(key, param, param_shape, dtype, is_int4):
+            final_shape = param_shape
+            if is_int4:
+                weight = jax.random.randint(key, param_shape, minval=-8, maxval=7, dtype=jnp.int8).astype(jnp.int4)
+            else:
+                weight = jax.random.normal(key, param_shape, dtype)
 
             def get_slice(index):
                 return weight[index]
 
             try:
                 sharded_array = jax.make_array_from_callback(
-                    param_shape, NamedSharding(self.mesh, P(*param.sharding)),
+                    final_shape, NamedSharding(self.mesh, P(*param.sharding)),
                     get_slice)
             except:
                 print("WARNING: failed to shard, skipping...", param_shape,
@@ -335,6 +341,7 @@ class DeepSeekV3(nnx.Module):
         for path, param in nnx.iter_graph(state):
             if not isinstance(param, nnx.Variable) or path[0] == 'rng':
                 continue
+            is_int4_weight = ("qvalue" in path and "array" in path) and not (len(path) > 1 and 'router' == path[-2])
 
             is_qwix_scale = (path[-1] == 'scale' and path[-2] == "array")
             param_dtype = self.scale_dtype if is_qwix_scale else param.value.dtype
@@ -362,7 +369,7 @@ class DeepSeekV3(nnx.Module):
                     param_shape = tuple(dim // 128 for dim in prev_param_shape)
 
             param.value = _get_random_sharded_array(self.rng.params(), param,
-                                                    param_shape, param_dtype)
+                                                    param_shape, param_dtype, is_int4_weight)
             prev_path, prev_param_shape = path, param_shape
 
         self.initialize_cache()

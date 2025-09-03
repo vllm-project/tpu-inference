@@ -1,0 +1,8 @@
+qwix:
+  use_abstract_model: True
+  rules:
+    - module_path: '.*.custom_module.router.*'
+      weight_qtype: null
+    - module_path: '.*'
+      weight_qtype: 'int4'
+      act_qtype: 'float8_e4m3fn'

@@ -2540,7 +2540,8 @@ def get_tuned_block_sizes(
     device, page_size, dtypes, head_dims, max_model_len = keys
 
     # Default block sizes.
-    bkv_p, bq = (2048 // page_size, 32)
+    # bkv_p, bq = (2048 // page_size, 32)
+    bkv_p, bq = (512 // page_size, 32)
     if tpu_version == 4:
         # TPUv4 has much smaller VMEM size so we pick fixed block sizes.
         bkv_p, bq = (512 // page_size, 32)

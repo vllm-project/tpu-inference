@@ -47,7 +47,7 @@ class TpuPlatform(Platform):
 
     additional_env_vars: list[str] = [
         "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS", "TPU_BACKEND_TYPE",
-        "TPU_MULTIHOST_BACKEND"
+        "TPU_MULTIHOST_BACKEND", "JAX_RANDOM_WEIGHTS", "VLLM_MLA_DISABLE", "NEW_MODEL_DESIGN", "SKIP_JAX_PRECOMPILE"
     ]
 
     @classmethod
