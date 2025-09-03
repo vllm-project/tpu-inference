@@ -122,6 +122,9 @@ class CompilationManager:
 
                     model = self.runner.model.model
                     shard_lora_weights_and_move_to_tpu(model, self.runner.mesh)
+                    # Move the punica wrapper's metadata to torchax TPU tensor.
+                    self.runner.lora_manager._adapter_manager.punica_wrapper.move_to_device(
+                        self.runner.mesh)
 
                     kv_caches, hidden_states = self.runner.model_fn(
                         state, kv_caches, input_ids, attention_metadata,

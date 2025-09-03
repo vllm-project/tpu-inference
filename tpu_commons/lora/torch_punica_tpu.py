@@ -9,6 +9,8 @@ import torch
 import torch.nn.functional as F
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
+from torchax.interop import torch_view
+from torchax.ops.mappings import t2j
 from vllm.lora.punica_wrapper.utils import convert_mapping
 
 if TYPE_CHECKING:
@@ -314,21 +316,27 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         self.indices_len[:] = indices_len
 
     def move_to_device(self, mesh: Mesh):
-        self._token_lora_indices = self._token_lora_indices.to('jax')
-        self._token_lora_indices.apply_jax_(jax.device_put,
-                                            NamedSharding(mesh, P(None)))
+        self._token_lora_indices = t2j(self._token_lora_indices,
+                                       use_dlpack=False)
+        self._token_lora_indices = torch_view(
+            self._token_lora_indices).apply_jax_(jax.device_put,
+                                                 NamedSharding(mesh, P()))
 
-        self._sampler_indices = self._sampler_indices.to('jax')
-        self._sampler_indices.apply_jax_(jax.device_put,
-                                         NamedSharding(mesh, P(None)))
+        self._sampler_indices = t2j(self._sampler_indices, use_dlpack=False)
+        self._sampler_indices = torch_view(self._sampler_indices).apply_jax_(
+            jax.device_put, NamedSharding(mesh, P()))
 
-        self._sampler_indices_padded = self._sampler_indices_padded.to('jax')
-        self._sampler_indices_padded.apply_jax_(jax.device_put,
-                                                NamedSharding(mesh, P(None)))
+        self._sampler_indices_padded = t2j(self._sampler_indices_padded,
+                                           use_dlpack=False)
+        self._sampler_indices_padded = torch_view(
+            self._sampler_indices_padded).apply_jax_(jax.device_put,
+                                                     NamedSharding(mesh, P()))
 
-        self._embeddings_indices = self._embeddings_indices.to('jax')
-        self._embeddings_indices.apply_jax_(jax.device_put,
-                                            NamedSharding(mesh, P(None)))
+        self._embeddings_indices = t2j(self._embeddings_indices,
+                                       use_dlpack=False)
+        self._embeddings_indices = torch_view(
+            self._embeddings_indices).apply_jax_(jax.device_put,
+                                                 NamedSharding(mesh, P()))
 
     def _update_prefill_metadata(self,
                                  token_lora_tensor: torch.Tensor) -> None:
