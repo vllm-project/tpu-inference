@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, mock_open, patch
 
 import jax
 import qwix
@@ -9,7 +9,7 @@ from flax import nnx
 from jax.sharding import Mesh
 
 import tpu_commons.models.jax.utils.quantization.quantization_utils as quantize_qwix  # noqa: E402
-from tpu_commons.models.jax.model_loader import _apply_qwix_quantization
+from tpu_commons.models.jax.model_loader import apply_qwix_quantization
 from tpu_commons.models.jax.utils.quantization.quantization_utils import (
     DEFAULT_MAX_NUM_BLOCKS_PER_REQ, DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS,
     DEFAULT_NUM_TOKENS_FOR_MODEL_INPUTS)
@@ -195,7 +195,8 @@ class TestApplyQwixQuantization(unittest.TestCase):
         self.mock_vllm_config.model_config.get_total_num_kv_heads.return_value = 8
         self.mock_vllm_config.model_config.hf_config.num_hidden_layers = 32
 
-        self.mock_model = MagicMock(name="original_nnx_model")
+        self.mock_model = MagicMock(name="original_nnx_model",
+                                    spec_set=nnx.Module)
         self.mock_rng = MagicMock(name="mock_rng")
         self.mock_mesh = MagicMock(name="mock_mesh")
 
@@ -203,9 +204,11 @@ class TestApplyQwixQuantization(unittest.TestCase):
         """
         Test that the model is returned unchanged if no 'quantization' key exists.
         """
-        result = _apply_qwix_quantization(self.mock_vllm_config,
-                                          self.mock_model, self.mock_rng,
-                                          self.mock_mesh)
+        result = apply_qwix_quantization(self.mock_vllm_config,
+                                         self.mock_model,
+                                         self.mock_rng,
+                                         self.mock_mesh,
+                                         apply_to_abstract_model=False)
 
         self.assertIs(result, self.mock_model,
                       "Model should be returned as-is.")
@@ -225,8 +228,12 @@ class TestApplyQwixQuantization(unittest.TestCase):
             }
         }
 
-        _apply_qwix_quantization(self.mock_vllm_config, self.mock_model,
-                                 self.mock_rng, self.mock_mesh)
+        with patch('tpu_commons.utils.get_padded_num_heads', return_value=128):
+            apply_qwix_quantization(self.mock_vllm_config,
+                                    self.mock_model,
+                                    self.mock_rng,
+                                    self.mock_mesh,
+                                    apply_to_abstract_model=False)
         mock_jit.assert_called_once()
 
     @patch('tpu_commons.models.jax.model_loader.nnx.jit')
@@ -236,11 +243,206 @@ class TestApplyQwixQuantization(unittest.TestCase):
         """
         config_path = "int8_default.yaml"
         self.mock_vllm_config.additional_config = {"quantization": config_path}
-
-        _apply_qwix_quantization(self.mock_vllm_config, self.mock_model,
-                                 self.mock_rng, self.mock_mesh)
+        with patch('tpu_commons.utils.get_padded_num_heads', return_value=128):
+            apply_qwix_quantization(self.mock_vllm_config,
+                                    self.mock_model,
+                                    self.mock_rng,
+                                    self.mock_mesh,
+                                    apply_to_abstract_model=False)
 
         mock_jit.assert_called_once()
+
+
+class TestQuantizationConfigFileToDict(unittest.TestCase):
+    """Tests for the quantization_config_file_path_to_dict function."""
+
+    @patch("os.listdir")
+    @patch("os.path.join")
+    def test_file_not_found_raises_value_error(self, mock_join, mock_listdir):
+        """Test that a ValueError is raised if the config file is not found."""
+        mock_listdir.return_value = ["another_file.yaml", "config.txt"]
+        config_file_path = "non_existent.yaml"
+
+        with self.assertRaisesRegex(
+                ValueError,
+                f"Could not find quantization config file with name '{config_file_path}'"
+        ):
+            quantize_qwix.quantization_config_file_path_to_dict(
+                config_file_path)
+        mock_listdir.assert_called_once_with(
+            quantize_qwix.QUANTIZATION_CONFIG_PATH)
+
+    @patch("os.listdir")
+    @patch("os.path.join")
+    @patch("builtins.open",
+           new_callable=mock_open,
+           read_data="qwix:\n  rules: []")
+    def test_file_found_and_loaded_successfully(self, mock_file, mock_join,
+                                                mock_listdir):
+        """Test that the YAML file is correctly loaded when found."""
+        config_filename = "my_quant_config.yaml"
+        mock_listdir.return_value = ["another.yaml", config_filename]
+        mock_join.return_value = f"/fake/path/{config_filename}"
+        expected_dict = {"qwix": {"rules": []}}
+
+        result = quantize_qwix.quantization_config_file_path_to_dict(
+            config_filename)
+
+        mock_listdir.assert_called_once_with(
+            quantize_qwix.QUANTIZATION_CONFIG_PATH)
+        mock_join.assert_called_once_with(
+            quantize_qwix.QUANTIZATION_CONFIG_PATH, config_filename)
+        mock_file.assert_called_once_with(f"/fake/path/{config_filename}", "r")
+        self.assertEqual(result, expected_dict)
+
+
+class TestApplyQwixQuantizationLogic(unittest.TestCase):
+    """Tests the core logic of apply_qwix_quantization."""
+
+    def setUp(self):
+        self.mock_vllm_config = MagicMock()
+        self.mock_vllm_config.additional_config = {}
+        self.mock_vllm_config.cache_config.block_size = 16
+        self.mock_vllm_config.model_config.get_head_size.return_value = 128
+        self.mock_vllm_config.model_config.get_total_num_kv_heads.return_value = 8
+        self.mock_vllm_config.model_config.hf_config.num_hidden_layers = 32
+        self.mock_model = MagicMock(name="original_nnx_model")
+        self.mock_rng = MagicMock(name="mock_rng")
+        self.mock_mesh = MagicMock(name="mock_mesh", shape={"model": 1})
+
+    def test_quantization_config_without_qwix_rules(self):
+        """Test model is unchanged if the config lacks 'qwix' or 'rules'."""
+        self.mock_vllm_config.additional_config = {"quantization": {}}
+        result1 = quantize_qwix.apply_qwix_quantization(
+            self.mock_vllm_config, self.mock_model, self.mock_rng,
+            self.mock_mesh, False)
+        self.assertIs(result1, self.mock_model)
+
+        self.mock_vllm_config.additional_config = {
+            "quantization": {
+                "qwix": {}
+            }
+        }
+        result2 = quantize_qwix.apply_qwix_quantization(
+            self.mock_vllm_config, self.mock_model, self.mock_rng,
+            self.mock_mesh, False)
+        self.assertIs(result2, self.mock_model)
+
+    @patch(
+        'tpu_commons.models.jax.utils.quantization.quantization_utils.qwix_quantize_nnx_model'
+    )
+    @patch(
+        'tpu_commons.models.jax.utils.quantization.quantization_utils.utils')
+    def test_apply_to_abstract_model(self, mock_utils, mock_quantize_func):
+        """Test quantization is correctly applied to an abstract model factory."""
+        mock_utils.get_padded_num_heads.return_value = 8
+        mock_utils.get_padded_head_dim.return_value = 128
+        qwix_rules = [{"module_path": ".*", "weight_qtype": "int8"}]
+        self.mock_vllm_config.additional_config = {
+            "quantization": {
+                "qwix": {
+                    "rules": qwix_rules
+                }
+            }
+        }
+        mock_abstract_model = MagicMock(name="abstract_model")
+        mock_model_fn = MagicMock(name="model_factory",
+                                  return_value=mock_abstract_model)
+        quantized_model = MagicMock(name="quantized_model")
+        mock_quantize_func.return_value = quantized_model
+
+        model_factory = quantize_qwix.apply_qwix_quantization(
+            self.mock_vllm_config,
+            mock_model_fn,
+            self.mock_rng,
+            self.mock_mesh,
+            apply_to_abstract_model=True)
+
+        self.assertTrue(callable(model_factory))
+        result_model = model_factory()
+
+        mock_model_fn.assert_called_once()
+        mock_quantize_func.assert_called_once()
+        call_kwargs = mock_quantize_func.call_args.kwargs
+        self.assertIs(call_kwargs['model'], mock_abstract_model)
+        self.assertIs(call_kwargs['rng'], self.mock_rng)
+        self.assertIs(result_model, quantized_model)
+
+    @patch(
+        'tpu_commons.models.jax.utils.quantization.quantization_utils.qwix_quantize_nnx_model'
+    )
+    @patch(
+        'tpu_commons.models.jax.utils.quantization.quantization_utils.utils')
+    def test_apply_to_abstract_model_with_initialize_cache(
+            self, mock_utils, mock_quantize_func):
+        """Test abstract model quantization with 'initialize_cache' method."""
+        mock_utils.get_padded_num_heads.return_value = 8
+        mock_utils.get_padded_head_dim.return_value = 128
+        qwix_rules = [{"module_path": ".*", "weight_qtype": "int8"}]
+        self.mock_vllm_config.additional_config = {
+            "quantization": {
+                "qwix": {
+                    "rules": qwix_rules
+                }
+            }
+        }
+        mock_abstract_model = MagicMock(name="abstract_model")
+        mock_abstract_model.initialize_cache = MagicMock()
+        mock_model_fn = MagicMock(name="model_factory",
+                                  return_value=mock_abstract_model)
+
+        model_factory = quantize_qwix.apply_qwix_quantization(
+            self.mock_vllm_config,
+            mock_model_fn,
+            self.mock_rng,
+            self.mock_mesh,
+            apply_to_abstract_model=True)
+
+        model_factory()
+
+        mock_abstract_model.initialize_cache.assert_called_once()
+        mock_quantize_func.assert_called_once()
+
+
+class TestDetermineWhetherToApplyQwixOnAbstractModel(unittest.TestCase):
+    """Tests for determine_whether_to_apply_qwix_on_abstract_model."""
+
+    def setUp(self):
+        self.mock_vllm_config = MagicMock()
+        self.mock_vllm_config.additional_config = {
+            "quantization": "some_config.yaml"
+        }
+
+    @patch(
+        "tpu_commons.models.jax.utils.quantization.quantization_utils.quantization_config_file_path_to_dict"
+    )
+    def test_returns_true_when_config_is_true(self, mock_load_dict):
+        """Test it returns True when use_abstract_model is True in config."""
+        mock_load_dict.return_value = {"qwix": {"use_abstract_model": True}}
+        result = quantize_qwix.determine_whether_to_apply_qwix_on_abstract_model(
+            self.mock_vllm_config)
+        self.assertTrue(result)
+        mock_load_dict.assert_called_once_with("some_config.yaml")
+
+    @patch(
+        "tpu_commons.models.jax.utils.quantization.quantization_utils.quantization_config_file_path_to_dict"
+    )
+    def test_returns_false_when_config_is_false(self, mock_load_dict):
+        """Test it returns False when use_abstract_model is False in config."""
+        mock_load_dict.return_value = {"qwix": {"use_abstract_model": False}}
+        result = quantize_qwix.determine_whether_to_apply_qwix_on_abstract_model(
+            self.mock_vllm_config)
+        self.assertFalse(result)
+
+    @patch(
+        "tpu_commons.models.jax.utils.quantization.quantization_utils.quantization_config_file_path_to_dict"
+    )
+    def test_returns_false_when_key_is_missing(self, mock_load_dict):
+        """Test it defaults to False when use_abstract_model key is missing."""
+        mock_load_dict.return_value = {"qwix": {"rules": []}}
+        result = quantize_qwix.determine_whether_to_apply_qwix_on_abstract_model(
+            self.mock_vllm_config)
+        self.assertFalse(result)
 
 
 if __name__ == '__main__':
