@@ -11,9 +11,7 @@ from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.layers.sample.sampling import sample
 from tpu_commons.models.jax.layers.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
-from tpu_commons.utils import device_array
-
-# from tpu_commons.utils import shard_lora_weights_and_move_to_tpu
+from tpu_commons.utils import device_array, shard_lora_weights_and_move_to_tpu
 
 if TYPE_CHECKING:
     from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
@@ -122,8 +120,8 @@ class CompilationManager:
                         self.runner.lora_config,
                         np.array([num_tokens], dtype=np.int32)):
 
-                    # model = self.runner.model.model
-                    # shard_lora_weights_and_move_to_tpu(model, self.runner.mesh)
+                    model = self.runner.model.model
+                    shard_lora_weights_and_move_to_tpu(model, self.runner.mesh)
 
                     kv_caches, hidden_states = self.runner.model_fn(
                         state, kv_caches, input_ids, attention_metadata,
