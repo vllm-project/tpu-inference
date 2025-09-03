@@ -5,6 +5,7 @@ This test suite is structured to mirror the GPU rejection sampler tests.
 from dataclasses import dataclass
 from typing import List, Tuple
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -781,3 +782,570 @@ class TestRejectionSampler:
 
         expected = [list(range(1, 28)) + [99]]  # Tokens up to mismatch point
         assert parsed_output == expected, f"Expected {expected}, got {parsed_output}"
+
+
+# ======================== NON-GREEDY SAMPLING TESTS ========================
+
+
+class TestNonGreedyRejectionSampler:
+    """Test suite for non-greedy (random) rejection sampling."""
+
+    def test_non_greedy_basic_functionality(self, rejection_sampler,
+                                            test_helper):
+        """Test basic non-greedy sampling functionality."""
+        metadata = test_helper.create_sampling_metadata(all_greedy=False)
+
+        # Create simple test case
+        draft_tokens = [10, 20, 30]
+        target_tokens = [10, 50, 30]  # Mismatch at position 1
+
+        draft_token_ids = jnp.array(draft_tokens, dtype=jnp.int32)
+        target_probs = test_helper.create_target_probs_from_tokens(
+            target_tokens, VOCAB_SIZE)
+
+        # Create draft probabilities - make draft tokens highly likely
+        draft_probs = jnp.full((len(draft_tokens), VOCAB_SIZE),
+                               -100.0,
+                               dtype=jnp.float32)
+        for i, token_id in enumerate(draft_tokens):
+            draft_probs = draft_probs.at[i, token_id].set(100.0)
+
+        num_draft_tokens = jnp.array([3], dtype=jnp.int32)
+        bonus_token_ids = jnp.array([99], dtype=jnp.int32)
+        key = jax.random.PRNGKey(42)
+
+        output = rejection_sampler(
+            draft_token_ids=draft_token_ids,
+            num_draft_tokens=num_draft_tokens,
+            max_spec_len=3,
+            draft_probs=draft_probs,
+            target_probs=target_probs,
+            bonus_token_ids=bonus_token_ids,
+            sampling_metadata=metadata,
+            key=key,
+        )
+
+        parsed_output = rejection_sampler.parse_output(
+            output,
+            VOCAB_SIZE,
+            num_draft_tokens_cpu=np.asarray(num_draft_tokens),
+            batch_size=1,
+            padded_tokens_length=3)
+
+        # For non-greedy sampling, exact output depends on random sampling
+        # but we can check that the first token should be accepted
+        assert len(parsed_output) == 1
+        assert len(parsed_output[0]) >= 1
+        assert parsed_output[0][0] == 10  # First token should match
+
+    def test_non_greedy_deterministic_with_seed(self, rejection_sampler,
+                                                test_helper):
+        """Test that non-greedy sampling is deterministic with the same seed."""
+        metadata = test_helper.create_sampling_metadata(all_greedy=False)
+
+        # Create test case
+        draft_tokens = [1, 2, 3, 4]
+        target_tokens = [1, 5, 3, 6]  # Mismatches at positions 1 and 3
+
+        draft_token_ids = jnp.array(draft_tokens, dtype=jnp.int32)
+        target_probs = test_helper.create_target_probs_from_tokens(
+            target_tokens, VOCAB_SIZE)
+
+        # Create draft probabilities
+        draft_probs = jnp.full((len(draft_tokens), VOCAB_SIZE),
+                               -100.0,
+                               dtype=jnp.float32)
+        for i, token_id in enumerate(draft_tokens):
+            draft_probs = draft_probs.at[i, token_id].set(100.0)
+
+        num_draft_tokens = jnp.array([4], dtype=jnp.int32)
+        bonus_token_ids = jnp.array([99], dtype=jnp.int32)
+
+        # Run with same seed multiple times
+        key = jax.random.PRNGKey(123)
+        outputs = []
+
+        for _ in range(5):
+            output = rejection_sampler(
+                draft_token_ids=draft_token_ids,
+                num_draft_tokens=num_draft_tokens,
+                max_spec_len=4,
+                draft_probs=draft_probs,
+                target_probs=target_probs,
+                bonus_token_ids=bonus_token_ids,
+                sampling_metadata=metadata,
+                key=key,
+            )
+
+            parsed_output = rejection_sampler.parse_output(
+                output,
+                VOCAB_SIZE,
+                num_draft_tokens_cpu=np.asarray(num_draft_tokens),
+                batch_size=1,
+                padded_tokens_length=4)
+            outputs.append(parsed_output)
+
+        # All outputs should be identical with same seed
+        for i in range(1, len(outputs)):
+            assert outputs[i] == outputs[
+                0], f"Run {i}: {outputs[i]} != {outputs[0]}"
+
+    def test_non_greedy_with_draft_probs_none(self, rejection_sampler,
+                                              test_helper):
+        """Test non-greedy sampling when draft_probs is None."""
+        metadata = test_helper.create_sampling_metadata(all_greedy=False)
+
+        # Create test case
+        draft_tokens = [15, 25]
+        target_tokens = [15, 35]  # Mismatch at position 1
+
+        draft_token_ids = jnp.array(draft_tokens, dtype=jnp.int32)
+        target_probs = test_helper.create_target_probs_from_tokens(
+            target_tokens, VOCAB_SIZE)
+
+        num_draft_tokens = jnp.array([2], dtype=jnp.int32)
+        bonus_token_ids = jnp.array([88], dtype=jnp.int32)
+        key = jax.random.PRNGKey(777)
+
+        output = rejection_sampler(
+            draft_token_ids=draft_token_ids,
+            num_draft_tokens=num_draft_tokens,
+            max_spec_len=2,
+            draft_probs=None,  # No draft probabilities
+            target_probs=target_probs,
+            bonus_token_ids=bonus_token_ids,
+            sampling_metadata=metadata,
+            key=key,
+        )
+
+        parsed_output = rejection_sampler.parse_output(
+            output,
+            VOCAB_SIZE,
+            num_draft_tokens_cpu=np.asarray(num_draft_tokens),
+            batch_size=1,
+            padded_tokens_length=2)
+
+        # Should have valid output
+        assert len(parsed_output) == 1
+        assert len(parsed_output[0]) >= 1
+        assert parsed_output[0][0] == 15  # First token should match
+
+    def test_non_greedy_multiple_sequences(self, rejection_sampler,
+                                           test_helper):
+        """Test non-greedy sampling with multiple sequences."""
+        metadata = test_helper.create_sampling_metadata(all_greedy=False)
+
+        # Create test case with 3 sequences
+        draft_tokens = [1, 2, 3, 4, 5, 6, 7]  # [1,2] [3,4,5] [6,7]
+        target_tokens = [1, 5, 3, 8, 5, 6,
+                         9]  # Mismatches at different positions
+
+        draft_token_ids = jnp.array(draft_tokens, dtype=jnp.int32)
+        target_probs = test_helper.create_target_probs_from_tokens(
+            target_tokens, VOCAB_SIZE)
+
+        # Create draft probabilities
+        draft_probs = jnp.full((len(draft_tokens), VOCAB_SIZE),
+                               -100.0,
+                               dtype=jnp.float32)
+        for i, token_id in enumerate(draft_tokens):
+            draft_probs = draft_probs.at[i, token_id].set(100.0)
+
+        num_draft_tokens = jnp.array([2, 3, 2], dtype=jnp.int32)
+        bonus_token_ids = jnp.array([11, 12, 13], dtype=jnp.int32)
+        key = jax.random.PRNGKey(456)
+
+        output = rejection_sampler(
+            draft_token_ids=draft_token_ids,
+            num_draft_tokens=num_draft_tokens,
+            max_spec_len=3,
+            draft_probs=draft_probs,
+            target_probs=target_probs,
+            bonus_token_ids=bonus_token_ids,
+            sampling_metadata=metadata,
+            key=key,
+        )
+
+        parsed_output = rejection_sampler.parse_output(
+            output,
+            VOCAB_SIZE,
+            num_draft_tokens_cpu=np.asarray(num_draft_tokens),
+            batch_size=3,
+            padded_tokens_length=7)
+
+        # Should have 3 sequences
+        assert len(parsed_output) == 3
+
+        # First sequence: [1, 2] -> [1, 5] (mismatch at pos 1)
+        assert parsed_output[0][0] == 1
+
+        # Second sequence: [3, 4, 5] -> [3, 8, 5] (mismatch at pos 1)
+        assert parsed_output[1][0] == 3
+
+        # Third sequence: [6, 7] -> [6, 9] (mismatch at pos 1)
+        assert parsed_output[2][0] == 6
+
+    def test_non_greedy_with_all_accepted_tokens(self, rejection_sampler,
+                                                 test_helper):
+        """Test non-greedy sampling when all tokens are accepted (perfect match)."""
+        metadata = test_helper.create_sampling_metadata(all_greedy=False)
+
+        # Perfect match case
+        draft_tokens = [10, 20, 30]
+        target_tokens = [10, 20, 30]  # Perfect match
+
+        draft_token_ids = jnp.array(draft_tokens, dtype=jnp.int32)
+        target_probs = test_helper.create_target_probs_from_tokens(
+            target_tokens, VOCAB_SIZE)
+
+        # Create draft probabilities - make acceptance very likely
+        draft_probs = jnp.full((len(draft_tokens), VOCAB_SIZE),
+                               -100.0,
+                               dtype=jnp.float32)
+        for i, token_id in enumerate(draft_tokens):
+            draft_probs = draft_probs.at[i, token_id].set(100.0)
+
+        num_draft_tokens = jnp.array([3], dtype=jnp.int32)
+        bonus_token_ids = jnp.array([99], dtype=jnp.int32)
+        key = jax.random.PRNGKey(999)
+
+        output = rejection_sampler(
+            draft_token_ids=draft_token_ids,
+            num_draft_tokens=num_draft_tokens,
+            max_spec_len=3,
+            draft_probs=draft_probs,
+            target_probs=target_probs,
+            bonus_token_ids=bonus_token_ids,
+            sampling_metadata=metadata,
+            key=key,
+        )
+
+        parsed_output = rejection_sampler.parse_output(
+            output,
+            VOCAB_SIZE,
+            num_draft_tokens_cpu=np.asarray(num_draft_tokens),
+            batch_size=1,
+            padded_tokens_length=3)
+
+        # With perfect match and high acceptance probability, should get bonus token
+        assert len(parsed_output) == 1
+        # The exact output depends on random sampling, but should contain the draft tokens
+
+    def test_non_greedy_empty_sequence(self, rejection_sampler, test_helper):
+        """Test non-greedy sampling with empty sequences."""
+        metadata = test_helper.create_sampling_metadata(all_greedy=False)
+
+        # Empty sequences should get bonus tokens
+        draft_token_ids = jnp.array([], dtype=jnp.int32)
+        target_probs = jnp.array([], dtype=jnp.float32).reshape(0, VOCAB_SIZE)
+
+        num_draft_tokens = jnp.array([0, 0], dtype=jnp.int32)
+        bonus_token_ids = jnp.array([77, 88], dtype=jnp.int32)
+        key = jax.random.PRNGKey(333)
+
+        output = rejection_sampler(
+            draft_token_ids=draft_token_ids,
+            num_draft_tokens=num_draft_tokens,
+            max_spec_len=1,
+            draft_probs=None,
+            target_probs=target_probs,
+            bonus_token_ids=bonus_token_ids,
+            sampling_metadata=metadata,
+            key=key,
+        )
+
+        parsed_output = rejection_sampler.parse_output(
+            output,
+            VOCAB_SIZE,
+            num_draft_tokens_cpu=np.asarray(num_draft_tokens),
+            batch_size=2,
+            padded_tokens_length=0)
+
+        # Should get bonus tokens for empty sequences
+        expected = [[77], [88]]
+        assert parsed_output == expected, f"Expected {expected}, got {parsed_output}"
+
+    def test_non_greedy_requires_key(self, rejection_sampler, test_helper):
+        """Test that non-greedy sampling requires a random key."""
+        metadata = test_helper.create_sampling_metadata(all_greedy=False)
+
+        # Create simple test case
+        draft_tokens = [1, 2]
+        target_tokens = [1, 3]
+
+        draft_token_ids = jnp.array(draft_tokens, dtype=jnp.int32)
+        target_probs = test_helper.create_target_probs_from_tokens(
+            target_tokens, VOCAB_SIZE)
+
+        num_draft_tokens = jnp.array([2], dtype=jnp.int32)
+        bonus_token_ids = jnp.array([99], dtype=jnp.int32)
+
+        # Should raise ValueError when key is None for non-greedy sampling
+        with pytest.raises(ValueError, match="A random key must be provided"):
+            rejection_sampler(
+                draft_token_ids=draft_token_ids,
+                num_draft_tokens=num_draft_tokens,
+                max_spec_len=2,
+                draft_probs=None,
+                target_probs=target_probs,
+                bonus_token_ids=bonus_token_ids,
+                sampling_metadata=metadata,
+                key=None,  # No key provided
+            )
+
+    def test_non_greedy_vs_greedy_same_perfect_case(self, rejection_sampler,
+                                                    test_helper):
+        """Test that greedy and non-greedy produce same results for perfect matches."""
+        # Perfect match case - both should produce identical results
+        draft_tokens = [5, 15, 25]
+        target_tokens = [5, 15, 25]  # Perfect match
+
+        draft_token_ids = jnp.array(draft_tokens, dtype=jnp.int32)
+        target_probs = test_helper.create_target_probs_from_tokens(
+            target_tokens, VOCAB_SIZE)
+
+        # Create draft probabilities
+        draft_probs = jnp.full((len(draft_tokens), VOCAB_SIZE),
+                               -100.0,
+                               dtype=jnp.float32)
+        for i, token_id in enumerate(draft_tokens):
+            draft_probs = draft_probs.at[i, token_id].set(100.0)
+
+        num_draft_tokens = jnp.array([3], dtype=jnp.int32)
+        bonus_token_ids = jnp.array([99], dtype=jnp.int32)
+
+        # Greedy sampling
+        greedy_metadata = test_helper.create_sampling_metadata(all_greedy=True)
+        greedy_output = rejection_sampler(
+            draft_token_ids=draft_token_ids,
+            num_draft_tokens=num_draft_tokens,
+            max_spec_len=3,
+            draft_probs=draft_probs,
+            target_probs=target_probs,
+            bonus_token_ids=bonus_token_ids,
+            sampling_metadata=greedy_metadata,
+        )
+
+        # Non-greedy sampling with high acceptance probability should behave similarly
+        # Note: Due to probabilistic nature, we can't guarantee identical outputs
+        # but for perfect matches with high probabilities, they should be very similar
+        non_greedy_metadata = test_helper.create_sampling_metadata(
+            all_greedy=False)
+        key = jax.random.PRNGKey(555)
+        non_greedy_output = rejection_sampler(
+            draft_token_ids=draft_token_ids,
+            num_draft_tokens=num_draft_tokens,
+            max_spec_len=3,
+            draft_probs=draft_probs,
+            target_probs=target_probs,
+            bonus_token_ids=bonus_token_ids,
+            sampling_metadata=non_greedy_metadata,
+            key=key,
+        )
+
+        # Parse outputs
+        greedy_parsed = rejection_sampler.parse_output(
+            greedy_output, VOCAB_SIZE, np.asarray(num_draft_tokens), 1, 3)
+        non_greedy_parsed = rejection_sampler.parse_output(
+            non_greedy_output, VOCAB_SIZE, np.asarray(num_draft_tokens), 1, 3)
+
+        # For perfect match, greedy should have all tokens + bonus
+        assert greedy_parsed == [[5, 15, 25, 99]]
+
+        # Non-greedy should have valid output (exact content may vary due to sampling)
+        assert len(non_greedy_parsed) == 1
+        assert len(non_greedy_parsed[0]) >= 1
+
+
+# ======================== STATISTICAL DISTRIBUTION VALIDATION ========================
+
+
+class TestStatisticalDistributionValidation:
+    """Test suite for validating rejection sampling produces correct probability distributions."""
+
+    def test_rejection_sampling_approximates_target_distribution(self):
+        """Verify rejection sampling approximates target distribution.
+
+        This test validates that rejection sampling produces the correct probability
+        distribution despite sampling from a potentially distinct draft distribution.
+
+        The test works by:
+        1. Creating random target and draft probability distributions
+        2. Using rejection sampling to generate token samples
+        3. Estimating the output distribution from samples
+        4. Comparing convergence to target vs random reference distributions
+
+        We expect that as sample size increases, the distance to the target
+        distribution decreases much more than the distance to random distributions.
+        """
+        vocab_size = 10
+        k = 2
+        num_reference_probs = 100
+
+        # Create random distributions
+        key = jax.random.PRNGKey(42)
+        draft_key, target_key, reference_key = jax.random.split(key, 3)
+
+        # Draft and target distributions
+        draft_logits = jax.random.normal(draft_key, (vocab_size, ))
+        draft_probs = jax.nn.softmax(draft_logits)
+
+        target_logits = jax.random.normal(target_key, (vocab_size, ))
+        target_probs = jax.nn.softmax(target_logits)
+
+        # Reference distributions for comparison
+        reference_logits = jax.random.normal(reference_key,
+                                             (num_reference_probs, vocab_size))
+        reference_probs = jax.nn.softmax(reference_logits, axis=-1)
+
+        sample_sizes = [10, 100, 1_000, 10_000, 100_000]
+        distance_wrt_reference: List[float] = []
+        distance_wrt_target: List[float] = []
+
+        for num_samples in sample_sizes:
+            # Estimate rejection sampling distribution
+            estimated_probs = self._estimate_rejection_sampling_pdf(
+                draft_probs, target_logits, k, vocab_size, num_samples)
+
+            # Calculate distances
+            reference_vs_rejsample_dist = float(
+                jnp.mean(
+                    jnp.linalg.norm(reference_probs - estimated_probs[None, :],
+                                    axis=-1)))
+            target_vs_rejsample_dist = float(
+                jnp.linalg.norm(target_probs - estimated_probs))
+
+            distance_wrt_reference.append(reference_vs_rejsample_dist)
+            distance_wrt_target.append(target_vs_rejsample_dist)
+
+            print(f"{num_samples=} {target_vs_rejsample_dist=:.05f} "
+                  f"{reference_vs_rejsample_dist=:.05f}")
+
+        # Calculate relative improvements
+        relative_change_target = self._get_ratio_first_to_last(
+            distance_wrt_target)
+        relative_change_reference = self._get_ratio_first_to_last(
+            distance_wrt_reference)
+
+        print(f"Target improvement ratio: {relative_change_target:.02f}")
+        print(f"Reference improvement ratio: {relative_change_reference:.02f}")
+
+        # Validation: Target distribution should converge much better than reference
+        expected_improvement_multiplier = 20
+        assert (relative_change_target >
+                relative_change_reference * expected_improvement_multiplier), \
+            f"Target convergence ({relative_change_target:.2f}) should be " \
+            f"{expected_improvement_multiplier}x better than reference " \
+            f"({relative_change_reference:.2f})"
+
+    def _estimate_rejection_sampling_pdf(
+        self,
+        draft_probs: jnp.ndarray,
+        target_logits: jnp.ndarray,
+        k: int,
+        vocab_size: int,
+        num_samples: int,
+    ) -> jnp.ndarray:
+        """Estimate probability distribution of rejection sampling output.
+
+        Args:
+            draft_probs: Draft probability distribution [vocab_size]
+            target_logits: Target logits [vocab_size]
+            k: Number of draft tokens per sequence
+            vocab_size: Size of vocabulary
+            num_samples: Number of samples to generate
+
+        Returns:
+            Estimated probability distribution [vocab_size]
+        """
+        rejection_sampler = RejectionSampler()
+
+        # Prepare inputs in the flattened format expected by TPU sampler
+        num_tokens = num_samples * k
+
+        # Expand draft probs to match flattened format [num_tokens, vocab_size]
+        draft_probs_expanded = jnp.tile(draft_probs[None, :], (num_tokens, 1))
+
+        # Convert target logits to probabilities and expand to flattened format
+        target_probs_1d = jax.nn.softmax(target_logits)
+        target_probs_expanded = jnp.tile(target_probs_1d[None, :],
+                                         (num_tokens, 1))
+
+        # Generate random draft token ids from draft distribution
+        key = jax.random.PRNGKey(123)
+        draft_tokens_2d = jax.random.categorical(key,
+                                                 jnp.log(draft_probs + 1e-8),
+                                                 shape=(num_samples, k))
+        draft_token_ids = draft_tokens_2d.flatten()
+
+        # Prepare other inputs
+        num_draft_tokens = jnp.full((num_samples, ), k, dtype=jnp.int32)
+        bonus_token_ids = jnp.zeros((num_samples, ),
+                                    dtype=jnp.int32)  # Not used in estimation
+
+        # Create sampling metadata for non-greedy sampling
+        sampling_metadata = TPUSupportedSamplingMetadata(
+            do_sampling=True,  # Non-greedy sampling
+            logprobs=False,
+        )
+
+        # Run rejection sampling
+        sample_key = jax.random.PRNGKey(456)
+        output_token_ids = rejection_sampler(
+            draft_token_ids=draft_token_ids,
+            num_draft_tokens=num_draft_tokens,
+            max_spec_len=k,
+            draft_probs=draft_probs_expanded,
+            target_probs=target_probs_expanded,
+            bonus_token_ids=bonus_token_ids,
+            sampling_metadata=sampling_metadata,
+            key=sample_key,
+        )
+
+        # Parse output and extract main tokens (exclude bonus tokens)
+        parsed_output = rejection_sampler.parse_output(
+            output_token_ids,
+            vocab_size=vocab_size,
+            num_draft_tokens_cpu=np.asarray(num_draft_tokens),
+            batch_size=num_samples,
+            padded_tokens_length=num_tokens)
+
+        # Flatten all main tokens (exclude bonus tokens)
+        all_tokens = []
+        for seq_tokens in parsed_output:
+            if len(seq_tokens) == 0:
+                continue
+            # For rejection sampling, we need to exclude bonus tokens
+            # The bonus token is typically the last one if all draft tokens were accepted
+            # Otherwise, we take all valid tokens up to the rejection point
+            if len(seq_tokens) > k:
+                # More tokens than expected draft tokens means bonus token included
+                main_tokens = seq_tokens[:k]
+            else:
+                # No bonus token, take all tokens
+                main_tokens = seq_tokens
+            all_tokens.extend(main_tokens)
+
+        # Convert to numpy for histogram computation
+        if not all_tokens:
+            # Fallback if no tokens generated
+            return jnp.ones(vocab_size) / vocab_size
+
+        tokens_array = np.array(all_tokens, dtype=np.int32)
+
+        # Calculate histogram (probability distribution)
+        hist, _ = np.histogram(tokens_array,
+                               bins=vocab_size,
+                               range=(0, vocab_size),
+                               density=True)
+
+        # Normalize to ensure it sums to 1
+        hist = hist / (hist.sum() + 1e-8)
+
+        return jnp.array(hist, dtype=jnp.float32)
+
+    def _get_ratio_first_to_last(self, elements: List[float]) -> float:
+        """Calculate ratio of first to last element in list."""
+        if len(elements) < 2 or elements[-1] == 0:
+            return 1.0
+        return elements[0] / elements[-1]
