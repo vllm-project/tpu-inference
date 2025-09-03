@@ -122,6 +122,7 @@ class TPUWorker(AbstractTpuWorker):
                     f"hbm={utils.hbm_usage_gb(self.devices)}Gb")
 
         # Need to call connector's init after jax.devices.
+        ensure_model_parallel_initialized(self.vllm_config)
         ensure_kv_transfer_initialized(self.vllm_config)
         self.model_runner = TPUModelRunner(self.vllm_config, self.devices)
 
@@ -237,3 +238,20 @@ class TPUWorker(AbstractTpuWorker):
                                                mappings=mappings,
                                                transpose_keys=transpose_keys,
                                                reshard_fn=reshard_fn)
+
+
+def ensure_model_parallel_initialized(vllm_config: VllmConfig) -> None:
+    """The replacement of vLLM's ensure_model_parallel_initialized().
+    vLLM calls torch.distributed to init model parallelism, which
+    does not work for JAX on TPU.
+    So we need to hack some behaviors to ensure this won't break any
+    downstream workflows.
+    """
+    from unittest.mock import MagicMock
+
+    from vllm.distributed import parallel_state
+
+    # Mock _PP rather than creating a vLLM's GroupCoordinator,
+    # to avoid calling torch.distributed.
+    parallel_state._PP = MagicMock()
+    parallel_state._PP.is_last_rank = True
