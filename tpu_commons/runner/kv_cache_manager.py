@@ -204,7 +204,10 @@ class KVCacheManager:
     @functools.partial(
         jax.jit,
         static_argnames=("block_size"),
-        donate_argnames=("kv_caches"),
+        donate_argnames=(
+            "kv_caches",
+            "kv_cache_slices",
+        ),
     )
     def _jitted_insert_kv_cache(
         block_size,
@@ -235,7 +238,10 @@ class KVCacheManager:
     @functools.partial(
         jax.jit,
         static_argnames=("block_size"),
-        donate_argnames=("kv_caches"),
+        donate_argnames=(
+            "kv_caches",
+            "kv_cache_slices",
+        ),
     )
     def _jitted_insert_continuous_kv_cache(
         block_size,
@@ -310,9 +316,10 @@ class KVCacheManager:
         # We shard along the num_kv_heads dimension (axis=1), which corresponds
         # to the "model" axis of the mesh for tensor parallelism.
         logger.debug(
-            f"Transferring kv cache shape {kv_cache_slices[0].shape} sharding {kv_cache_slices[0].sharding}"
+            f"Transferring kv cache shape {len(kv_cache_slices)} * {kv_cache_slices[0].shape} sharding {kv_cache_slices[0].sharding} size {kv_cache_slices[0].nbytes * len(kv_cache_slices)/1024/1024} Mbytes"
         )
-        sharding = NamedSharding(self.runner.mesh, PartitionSpec())
+        sharding = NamedSharding(self.runner.mesh,
+                                 PartitionSpec(None, None, "model"))
         transferred_kv_cache = jax.device_put(kv_cache_slices, sharding)
         for cache in transferred_kv_cache:
             cache.block_until_ready()

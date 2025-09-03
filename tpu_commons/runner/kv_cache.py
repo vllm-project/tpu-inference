@@ -52,15 +52,15 @@ def create_kv_caches(
     # not determine the padding logics for kv cache globally.
     shard_cnt = mesh.shape["model"]
     assert num_kv_heads % shard_cnt == 0
-    cache_shape_per_shard = rpa.get_kv_cache_shape(num_blocks, block_size,
-                                                   num_kv_heads // shard_cnt,
+    cache_shape = rpa.get_kv_cache_shape(num_blocks, block_size,
+                                                   num_kv_heads,
                                                    head_size, cache_dtype)
-    # Intended to be replicated.
-    sharding = NamedSharding(mesh, PartitionSpec())
+
+    sharding = NamedSharding(mesh, PartitionSpec(None, None, "model"))
 
     def _allocate() -> jax.Array:
         return jnp.empty(
-            shape=cache_shape_per_shard,
+            shape=cache_shape,
             dtype=cache_dtype,
         )
 
@@ -70,7 +70,7 @@ def create_kv_caches(
         kv_caches.append(sharded_allocate())
     logger.info(
         f"Init kv-cache | "
-        f"shape={len(layer_names)} * {shard_cnt} * {cache_shape_per_shard} | "
+        f"shape={len(layer_names)} * {shard_cnt} | "
         f"sharding={sharding} | "
         f"dtype={cache_dtype} | "
         f"hbm={utils.hbm_usage_gb(mesh.devices.flatten())}Gb")
