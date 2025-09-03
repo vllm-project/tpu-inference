@@ -116,14 +116,19 @@ def torch_to_jax_param(
     output_sizes: Optional[int],
     n_shards: int,
     fused: bool,
+    dim: int = 0,
+    jax_dtype: Optional[jnp.dtype] = None,
 ) -> Union[torch.nn.Parameter, torch.nn.ParameterList]:
     if output_sizes is None:
         output_sizes = [tensor.shape[0]]
 
     tensor = t2j(tensor, use_dlpack=False)
+    if jax_dtype:
+        tensor = tensor.astype(jax_dtype)
+
     if fused:
         tensor = reorder_concatenated_tensor_for_sharding(
-            tensor, output_sizes, n_shards, 0)
+            tensor, output_sizes, n_shards, dim)
         tensor = jax.device_put(tensor, sharding)
         param = torch.nn.Parameter(torch_view(tensor), requires_grad=False)
     else:
@@ -132,7 +137,10 @@ def torch_to_jax_param(
         for size in output_sizes:
             end_offset = start_offset + size
 
-            tensor_split = tensor[start_offset:end_offset]
+            tensor_split = jax.lax.slice_in_dim(tensor,
+                                                start_offset,
+                                                end_offset,
+                                                axis=dim)
             tensor_split = jax.device_put(tensor_split, sharding)
             tensor_split = torch.nn.Parameter(torch_view(tensor_split),
                                               requires_grad=False)
