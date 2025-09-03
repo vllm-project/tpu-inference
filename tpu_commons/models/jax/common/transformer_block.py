@@ -37,7 +37,7 @@ class TransformerBlock(nnx.Module):
                                               self.use_attention_rope)
         attn_output_TD += attn_residual_TD
         jax.debug.print("Attention output (after residual): {}",
-                        attn_output_TD[:1, :5])
+                        attn_output_TD)
 
         # FFW Block
         ffw_residual_TD = attn_output_TD

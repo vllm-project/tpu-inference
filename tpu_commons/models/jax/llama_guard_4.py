@@ -74,7 +74,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         self.layers = []
 
         for i in range(num_layers):
-            use_attention_rope = False  #(i + 1) % self.no_rope_layer_interval != 0 #Llama 4 Guard does not use RoPe.
+            use_attention_rope = True  #False  #(i + 1) % self.no_rope_layer_interval != 0 #Llama 4 Guard does not use RoPe.
 
             # Llama Guard 4 is a dense model, so we use a standard MLP.
             custom_module = DenseFFW(
@@ -211,7 +211,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             attn_head_dim=self.head_dim)
         weight_loader.load_weights(self)
 
-    def __call__(
+    def __call__(  #check input ids, embeddings, query projection. Start from the back (check final logits first), then start from the front and proceed until you find a difference
         self,
         kv_caches: List[jax.Array],
         input_ids: jax.Array,
@@ -226,7 +226,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         x_TD = self.embedder.encode(input_ids)
 
         # Add debug print to check the embeddings
-        jax.debug.print("Input embedding slice: {}", x_TD[:1, :5])
+        jax.debug.print("Input embedding slice: {}", x_TD[0, :3])
 
         for (i, block) in enumerate(self.layers):
             kv_cache = kv_caches[i]
@@ -354,11 +354,49 @@ class LlamaGuard4WeightLoader:
                 model_weight = get_param(model_params, mapped_name)
 
                 if not loaded_name.endswith(".bias"):
-                    loaded_weight = reshape_params(loaded_name, loaded_weight,
-                                                   self._weight_shape_map)
-                    loaded_weight = transpose_params(loaded_name,
-                                                     loaded_weight,
-                                                     self._transpose_map)
+                    # Use a conditional transpose for the down_proj layer.
+                    if "down_proj" in loaded_name:
+                        # PyTorch stores as (out, in), JAX wants (in, out)
+                        loaded_weight = jnp.transpose(loaded_weight, (1, 0))
+                    else:
+                        # For other layers, continue to use the transpose_params helper.
+                        loaded_weight = reshape_params(loaded_name,
+                                                       loaded_weight,
+                                                       self._weight_shape_map)
+                        loaded_weight = transpose_params(
+                            loaded_name, loaded_weight, self._transpose_map)
+
+                # --- Print a slice of key model weights here ---
+                if "embed_tokens" in loaded_name:
+                    jax.debug.print("JAX Embedding Table (slice):\n{}",
+                                    loaded_weight[:3, :5])
+
+                if "layers.0.self_attn.q_proj" in loaded_name:
+                    jax.debug.print("JAX layers.0 q_proj.weight (slice):\n{}",
+                                    loaded_weight[:3, :5])
+
+                if "layers.0.self_attn.k_proj" in loaded_name:
+                    jax.debug.print("JAX layers.0 k_proj.weight (slice):\n{}",
+                                    loaded_weight[:3, :5])
+
+                if "layers.0.self_attn.v_proj" in loaded_name:
+                    jax.debug.print("JAX layers.0 v_proj.weight (slice):\n{}",
+                                    loaded_weight[:3, :5])
+
+                if "layers.0.feed_forward.gate_proj" in loaded_name:
+                    jax.debug.print(
+                        "JAX layers.0 gate_proj.weight (slice):\n{}",
+                        loaded_weight[:3, :5])
+
+                if "layers.0.feed_forward.down_proj" in loaded_name:
+                    jax.debug.print(
+                        "JAX layers.0 down_proj.weight (slice):\n{}",
+                        loaded_weight[:3, :5])
+
+                if "layers.0.feed_forward.up_proj" in loaded_name:
+                    jax.debug.print("JAX layers.0 up_proj.weight (slice):\n{}",
+                                    loaded_weight[:3, :5])
+
                 if model_weight.value.shape != loaded_weight.shape:
                     raise ValueError(
                         f"Loaded shape for {loaded_name}: {loaded_weight.shape} "

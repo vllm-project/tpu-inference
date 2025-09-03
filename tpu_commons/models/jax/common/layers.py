@@ -126,7 +126,7 @@ class DenseFFW(nnx.Module):
             The output tensor of shape `(batch, sequence, d_model)`.
         """
         # Log the input to the DenseFFW block
-        jax.debug.print("DenseFFW input (first 5 values): {}", x_TD[0, :5])
+        jax.debug.print("DenseFFW input (first 5 values): {}", x_TD)
 
         # TODO consider to create factories for einsum(?)
         x_TD = jnp.asarray(x_TD, self.dtype)
@@ -136,7 +136,7 @@ class DenseFFW(nnx.Module):
                                    self.kernel_gating_DF.value)
 
             # Log the output after the first einsum (gating)
-            jax.debug.print("gating_TF (first 5 values): {}", gating_TF[0, :5])
+            jax.debug.print("gating_TF (first 5 values): {}", gating_TF)
 
             activated_gating_TF = modeling_flax_utils.ACT2FN[self.hidden_act](
                 gating_TF)
@@ -153,7 +153,7 @@ class DenseFFW(nnx.Module):
                             up_proj_TF[0, :5])
         fuse_TF = activated_gating_TF * up_proj_TF
         # Log the output after the fusion (element-wise multiplication)
-        jax.debug.print("fuse_TF (first 5 values): {}", fuse_TF[0, :5])
+        jax.debug.print("fuse_TF (first 5 values): {}", fuse_TF)
 
         with jax.named_scope("wo"):
             jax.debug.print("kernel_down_proj_FD (first 5 values): {}",
