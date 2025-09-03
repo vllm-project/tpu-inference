@@ -189,3 +189,89 @@ def device_array(mesh: Mesh, *args, sharding=None, **kwargs) -> jax.Array:
     if sharding is None:
         sharding = NamedSharding(mesh, PartitionSpec(None))
     return jax.device_put(*args, device=sharding, **kwargs)
+
+
+# P = PartitionSpec
+#
+# def shard_and_move_tensor_to_tpu(tensor, mesh):
+#     if isinstance(tensor, torch.Tensor) and not isinstance(tensor, torchax.tensor.Tensor):
+#         with jax.default_device(jax.devices("tpu")[0]):
+#             tensor = t2j(tensor, use_dlpack=False)
+#         return torch_view(tensor).apply_jax_(jax.device_put,
+#                                         NamedSharding(mesh, P()))
+#
+#
+# def shard_and_move_lora_to_tpu(layer: torch.nn.Module, mesh: Mesh):
+#     for i in range(layer.n_slices):
+#         shard_and_move_tensor_to_tpu(layer.lora_a_stacked[i], mesh)
+#         shard_and_move_tensor_to_tpu(layer.lora_b_stacked[i], mesh)
+#         if layer.lora_bias_stacked is not None:
+#             shard_and_move_tensor_to_tpu(layer.lora_bias_stacked[i], mesh)
+#
+#
+# def partition_column_parallel_linear_lora(layer: torch.nn.Module,
+#                                      mesh: Mesh) -> torch.nn.Module:
+#     assert isinstance(layer, MergedColumnParallelLinearWithLoRA)
+#     shard_and_move_lora_to_tpu(layer, mesh)
+#     return layer
+#
+#
+# def partition_qkv_parallel_linear_lora(layer: torch.nn.Module,
+#                                   mesh: Mesh) -> torch.nn.Module:
+#     assert isinstance(layer, MergedQKVParallelLinearWithLoRA)
+#     shard_and_move_lora_to_tpu(layer, mesh)
+#     return layer
+#
+#
+# def partition_row_parallel_linear_lora(layer: torch.nn.Module,
+#                                   mesh: Mesh) -> torch.nn.Module:
+#     assert isinstance(layer, RowParallelLinearWithLoRA)
+#     shard_and_move_lora_to_tpu(layer, mesh)
+#     return layer
+#
+# MODULE_TYPE_TO_WRAPPING_FUNC = OrderedDict([
+#     # We only need to deal with:
+#     # 'MergedColumnParallelLinearWithLoRA'
+#     # 'MergedQKVParallelLinearWithLoRA'
+#     # 'RowParallelLinearWithLoRA'
+#     ("MergedColumnParallelLinearWithLoRA", partition_column_parallel_linear_lora),
+#     ("MergedQKVParallelLinearWithLoRA", partition_qkv_parallel_linear_lora),
+#     ("RowParallelLinearWithLoRA", partition_row_parallel_linear_lora),
+# ])
+#
+# def get_fqn(module):
+#     # Get the fully qualified name of the module
+#     return module.__class__.__qualname__
+#
+# def shard_lora_weights_and_move_to_tpu(model: torch.nn.Module, mesh: Mesh) -> None:
+#     """
+#     Recursively check a PyTorch model and apply appropriate sharding based on
+#     the MODULE_TYPE_TO_WRAPPING_FUNC mapping.
+#
+#     Args:
+#         model: torch.nn.Module to process
+#         mesh: An SPMD mesh object used for sharding
+#     """
+#
+#     def _process_module(module, name=None, parent=None):
+#         for module_type, wrapping_func in MODULE_TYPE_TO_WRAPPING_FUNC.items():
+#             if get_fqn(module) == module_type:
+#                 wrapped_module = wrapping_func(module, mesh)
+#
+#                 assert parent is not None and name is not None, (
+#                     "Top Level module is not expected to be wrapped.")
+#                 if wrapped_module is not module:
+#                     # Wrapped module and module are different py object.
+#                     # The original module should be replaced by the
+#                     # wrapped_module.
+#                     logger.debug("replace %s with %s", module, wrapped_module)
+#                     setattr(parent, name, wrapped_module)
+#
+#                 module = wrapped_module
+#                 break
+#
+#         for child_name, child_module in list(module.named_children()):
+#             _process_module(child_module, child_name, module)
+#
+#     _process_module(model)
+#
