@@ -24,9 +24,8 @@ def create_kv_caches(
     """
     Creates the KV caches, a list of arrays, each array is for one attention layer.
 
-    As required by RPA-v3, the shape of the array needs to be per shard.
-    (num_blocks, block_size, cdiv(num_kv_heads_per_shard * 2, packing), packing, head_size).
-    num_kv_heads_per_shard = num_kv_heads // shard_size
+    The shape of the KV cache per layer is:
+    (num_blocks, block_size, cdiv(num_kv_heads * 2, packing), packing, head_size).
     packing =  (32 // dtype bits)
 
     Args:
@@ -46,15 +45,10 @@ def create_kv_caches(
     # TODO(xiang): fix this together with get_kv_cache_spec
     # cache_dtype = kv_cache_spec.dtype
 
-    # NOTE(jevinjiang): Instead of sharding automatically, we manually calculate
-    # the kv cache for each shard because the padding logic for RPA's KV cache
-    # needs to know the exact head number on each shard. In other words, we can
-    # not determine the padding logics for kv cache globally.
     shard_cnt = mesh.shape["model"]
     assert num_kv_heads % shard_cnt == 0
-    cache_shape = rpa.get_kv_cache_shape(num_blocks, block_size,
-                                                   num_kv_heads,
-                                                   head_size, cache_dtype)
+    cache_shape = rpa.get_kv_cache_shape(num_blocks, block_size, num_kv_heads,
+                                         head_size, cache_dtype)
 
     sharding = NamedSharding(mesh, PartitionSpec(None, None, "model"))
 
@@ -68,10 +62,9 @@ def create_kv_caches(
     kv_caches = []
     for _ in layer_names:
         kv_caches.append(sharded_allocate())
-    logger.info(
-        f"Init kv-cache | "
-        f"shape={len(layer_names)} * {shard_cnt} | "
-        f"sharding={sharding} | "
-        f"dtype={cache_dtype} | "
-        f"hbm={utils.hbm_usage_gb(mesh.devices.flatten())}Gb")
+    logger.info(f"Init kv-cache | "
+                f"shape={len(layer_names)} * {shard_cnt} | "
+                f"sharding={sharding} | "
+                f"dtype={cache_dtype} | "
+                f"hbm={utils.hbm_usage_gb(mesh.devices.flatten())}Gb")
     return kv_caches
