@@ -205,6 +205,9 @@ def shard_and_move_tensor_to_tpu(tensor, mesh):
             tensor = t2j(tensor, use_dlpack=False)
         return torch_view(tensor).apply_jax_(jax.device_put,
                                              NamedSharding(mesh, P()))
+    else:
+        assert isinstance(tensor, torchax.tensor.Tensor)
+        return tensor.apply_jax_(jax.device_put, NamedSharding(mesh, P()))
 
 
 def shard_and_move_lora_to_tpu(layer: torch.nn.Module, mesh: Mesh):
