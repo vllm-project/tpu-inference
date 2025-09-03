@@ -1,6 +1,4 @@
-# TODO: Update documentation
-
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -8,6 +6,7 @@ from flax import nnx
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.sampler import SamplingMetadata
 
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.common.attention.attention import (
@@ -26,13 +25,13 @@ class LlamaForCausalLM(nnx.Module):
 
     def __init__(self,
                  vllm_config: VllmConfig,
-                 rng: jax.Array,
+                 rng_key: jax.Array,
                  mesh: Mesh,
                  force_random_weights: bool = False):
         assert mesh is not None
 
         self.vllm_config = vllm_config
-        self.rng = nnx.Rngs(rng)
+        self.rng = nnx.Rngs(rng_key)
         self.mesh = mesh
 
         model_name = self.vllm_config.model_config.model.lower()
@@ -132,68 +131,10 @@ class LlamaForCausalLM(nnx.Module):
                               dv_sharding=(None, 'model'),
                               random_init=force_random_weights)
 
-    def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):
-        # NOTE: Since we are using nnx.eval_shape to init the model,
-        # we have to pass dynamic arrays here for __call__'s usage.
-        self.rng = nnx.Rngs(rng)
-        weight_loader = Llama3WeightLoader(
-            vllm_config=self.vllm_config,
-            hidden_size=self.hidden_size,
-            attn_heads=self.num_attention_heads,
-            num_key_value_heads=self.num_key_value_heads,
-            attn_head_dim=self.head_dim)
+    def load_weights(self, rng_key: jax.Array):
+        self.rng = nnx.Rngs(rng_key)
 
-        weight_loader.load_weights(self)
-
-    def __call__(
-        self,
-        kv_caches: List[jax.Array],
-        input_ids: jax.Array,
-        attention_metadata: AttentionMetadata,
-        *args,
-    ) -> Tuple[List[KVCacheType], jax.Array]:
-        is_prefill = False
-        with jax.named_scope("llama_embed_input"):  #Embedding
-            x_TD = self.embedder.encode(input_ids)
-
-        with jax.named_scope("llama_model_transformer_blocks"):
-            for (i, layer) in enumerate(self.layers):
-                kv_cache = kv_caches[i]
-
-                # The first layer is unscoped to avoid JAX tracing issues.
-                # JAX's profiler may incorrectly apply the scope name from the first
-                # layer's kernel compilation to all subsequent layers. Skipping the
-                # first layer ensures distinct scope names for the remaining layers.
-                if i == 0:
-                    new_kv_cache, x_TD = layer(x_TD, is_prefill, kv_cache,
-                                               attention_metadata)
-                else:
-                    with jax.named_scope(f'layer_{i}'):
-                        new_kv_cache, x_TD = layer(x_TD, is_prefill, kv_cache,
-                                                   attention_metadata)
-
-                kv_caches[i] = new_kv_cache
-
-        with jax.named_scope(
-                "llama_final_norm"):  #Norm after last transformer block
-            final_activation_TD = self.final_norm(x_TD)
-
-        return kv_caches, final_activation_TD
-
-    def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        with jax.named_scope("llama_lm_head_projection"
-                             ):  #LM head projection to produce logits
-            logits_TV = jnp.dot(hidden_states,
-                                self.lm_head.input_embedding_table_DV.value)
-
-        return logits_TV
-
-
-class Llama3WeightLoader:
-
-    def __init__(self, vllm_config: VllmConfig, hidden_size, attn_heads,
-                 num_key_value_heads, attn_head_dim):
-        self._transpose_map = {
+        transpose_map = {
             "lm_head": (1, 0),
             "gate_proj": (1, 0),
             "up_proj": (1, 0),
@@ -203,20 +144,18 @@ class Llama3WeightLoader:
             "v_proj": (2, 0, 1),
             "o_proj": (1, 2, 0),
         }
-        self._weight_shape_map = {
-            "q_proj": (attn_heads, -1, hidden_size),
-            "k_proj": (num_key_value_heads, -1, hidden_size),
-            "v_proj": (num_key_value_heads, -1, hidden_size),
-            "o_proj": (hidden_size, attn_heads, -1),
+        weight_shape_map = {
+            "q_proj": (self.num_attention_heads, -1, self.hidden_size),
+            "k_proj": (self.num_key_value_heads, -1, self.hidden_size),
+            "v_proj": (self.num_key_value_heads, -1, self.hidden_size),
+            "o_proj": (self.hidden_size, self.num_attention_heads, -1),
         }
-        self._bias_shape_map = {
-            "q_proj.bias": (attn_heads, attn_head_dim),
-            "k_proj.bias": (num_key_value_heads, attn_head_dim),
-            "v_proj.bias": (num_key_value_heads, attn_head_dim)
+        bias_shape_map = {
+            "q_proj.bias": (self.num_attention_heads, self.head_dim),
+            "k_proj.bias": (self.num_key_value_heads, self.head_dim),
+            "v_proj.bias": (self.num_key_value_heads, self.head_dim),
         }
-
-        # Set the mappings from loaded parameter keys to standardized names.
-        self._loaded_to_standardized_keys = {
+        loaded_to_standardized_keys = {
             "model.embed_tokens": "embedder.input_embedding_table_VD",
             "model.layers.*.input_layernorm":
             "layers.*.pre_attention_norm.scale",
@@ -237,20 +176,83 @@ class Llama3WeightLoader:
             "model.layers.*.self_attn.v_proj":
             "layers.*.attn.kernel_v_proj_DKH",
             "model.norm": "final_norm.scale",
-            "lm_head": "lm_head.input_embedding_table_DV"
+            "lm_head": "lm_head.input_embedding_table_DV",
         }
-        self.vllm_config = vllm_config
 
-    def load_weights(self, model_for_loading: nnx.Module):
-        model_params = nnx.state(model_for_loading)
-        metadata_map = MetadataMap(name_map=self._loaded_to_standardized_keys,
-                                   reshape_map=self._weight_shape_map,
-                                   bias_reshape_map=self._bias_shape_map,
-                                   transpose_map=self._transpose_map)
+        metadata_map = MetadataMap(name_map=loaded_to_standardized_keys,
+                                   reshape_map=weight_shape_map,
+                                   bias_reshape_map=bias_shape_map,
+                                   transpose_map=transpose_map)
         load_hf_weights(vllm_config=self.vllm_config,
-                        model=model_for_loading,
+                        model=self,
                         metadata_map=metadata_map,
-                        mesh=model_for_loading.mesh)
+                        mesh=self.mesh)
 
-        # TODO: validate that all of the model_params were accounted for as well.
-        nnx.update(model_for_loading, model_params)
+    def _build_jax_attention_metadata(
+            self, positions: jax.Array,
+            attn_metadata: dict) -> AttentionMetadata:
+        """Translates vLLM-style metadata into the JAX AttentionMetadata required by layers."""
+        return AttentionMetadata(
+            input_positions=positions,
+            block_tables=attn_metadata.block_tables,
+            seq_lens=attn_metadata.seq_lens,
+            query_start_loc=attn_metadata.seq_start_loc,
+            request_distribution=attn_metadata.request_distribution,
+        )
+
+    def forward(
+        self,
+        input_ids: jax.Array,
+        positions: jax.Array,
+        kv_caches: List[jax.Array],
+        attn_metadata: AttentionMetadata,
+    ) -> Tuple[List[KVCacheType], jax.Array]:
+        """vLLM-compatible forward pass that remains functionally pure for JAX."""
+        jax_attn_metadata = self._build_jax_attention_metadata(
+            positions, attn_metadata)
+
+        is_prefill = False
+        with jax.named_scope("llama_embed_input"):
+            x_TD = self.embedder.encode(input_ids)
+
+        with jax.named_scope("llama_model_transformer_blocks"):
+            new_kv_caches = []
+            for i, layer in enumerate(self.layers):
+                kv_cache = kv_caches[i]
+                scope_name = f'layer_{i}' if i > 0 else None
+                with jax.named_scope(scope_name):
+                    new_kv_cache, x_TD = layer(x_TD, is_prefill, kv_cache,
+                                               jax_attn_metadata)
+                new_kv_caches.append(new_kv_cache)
+
+        with jax.named_scope("llama_final_norm"):
+            final_activation_TD = self.final_norm(x_TD)
+
+        return new_kv_caches, final_activation_TD
+
+    def __call__(
+        self,
+        state: Any,
+        kv_caches: List[jax.Array],
+        input_ids: jax.Array,
+        attn_metadata: AttentionMetadata,
+        input_embeds: Any,
+    ) -> Tuple[List[KVCacheType], jax.Array]:
+        """Standard JAX/NNX entry point, delegating to the forward method."""
+        return self.forward(
+            input_ids=input_ids,
+            positions=attn_metadata.input_positions,
+            kv_caches=kv_caches,
+            attn_metadata=attn_metadata,
+        )
+
+    def compute_logits(
+        self,
+        hidden_states: jax.Array,
+        sampling_metadata: Optional[SamplingMetadata] = None,
+    ) -> jax.Array:
+        """Computes logits from hidden states."""
+        with jax.named_scope("llama_lm_head_projection"):
+            logits_TV = jnp.dot(hidden_states,
+                                self.lm_head.input_embedding_table_DV.value)
+        return logits_TV
