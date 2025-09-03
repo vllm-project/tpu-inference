@@ -7,6 +7,7 @@ from typing import Any, List, Optional, Tuple
 from unittest.mock import patch
 
 import jax
+import numpy as np
 import torch
 import torch.nn
 import torchax
@@ -22,13 +23,19 @@ from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.sequence import IntermediateTensors
+from vllm.utils import cdiv
 
+from tpu_commons import utils as common_utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.vllm.quantization import get_tpu_quantization_config
 from tpu_commons.models.vllm.sharding import shard_model_to_tpu
 from tpu_commons.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
+from tpu_commons.runner.kv_cache import create_kv_caches
+from tpu_commons.utils import device_array
+
+P = PartitionSpec
 
 logger = init_logger(__name__)
 
@@ -147,8 +154,8 @@ class VllmModelWrapper:
         """Helper to create dummy tensors for precompilation."""
         tensor = jnp.ones(shape, dtype=dtype)
         if sharding:
-            return device_array(self.runner.mesh, tensor, sharding=sharding)
-        return device_array(self.runner.mesh, tensor)
+            return device_array(self.mesh, tensor, sharding=sharding)
+        return device_array(self.mesh, tensor)
 
     def jit_step_func(self, params_and_buffers):
 
@@ -185,17 +192,85 @@ class VllmModelWrapper:
 
             return new_kv_caches, hidden_states
 
+        MIN_NUM_SEQS = 8
+        num_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
+        max_num_reqs = max(self.vllm_config.scheduler_config.max_num_seqs,
+                           MIN_NUM_SEQS)
+        max_model_len = self.vllm_config.model_config.max_model_len
+        block_size = self.vllm_config.cache_config.block_size
+        max_num_blocks_per_req = cdiv(max_model_len, block_size)
+        input_ids = self._create_dummy_tensor((num_tokens, ), jnp.int32)
+        positions = self._create_dummy_tensor((num_tokens, ), jnp.int32)
+
+        # Keep existing pattern for complex array operations
+        block_table_cpu = np.zeros((max_num_reqs, max_num_blocks_per_req),
+                                   dtype=np.int32)
+        block_tables = block_table_cpu[:max_num_reqs]
+        block_tables = block_tables.reshape(-1)
+        block_tables = device_array(self.mesh, block_tables)
+
+        seq_lens = self._create_dummy_tensor((max_num_reqs, ), jnp.int32)
+        query_start_loc = self._create_dummy_tensor((max_num_reqs + 1, ),
+                                                    jnp.int32)
+
+        # Keep existing pattern for specific value arrays
+        request_distribution = np.array([0, 0, 0], dtype=np.int32)
+        request_distribution = device_array(self.mesh, request_distribution)
+
+        attn_metadata = AttentionMetadata(
+            input_positions=positions,
+            block_tables=block_tables,
+            seq_lens=seq_lens,
+            query_start_loc=query_start_loc,
+            request_distribution=request_distribution,
+        )
+
+        # Pad num_kv_heads to multiple of TP size.
+        num_kv_heads = common_utils.get_padded_num_heads(
+            self.vllm_config.model_config.get_total_num_kv_heads(),
+            self.mesh.shape["model"])
+
+        # Pad head_dim to multiple of 128.
+        head_size = self.vllm_config.model_config.get_head_size()
+        head_size = common_utils.get_padded_head_dim(head_size)
+
+        parallel_config = self.vllm_config.parallel_config
+        layer_names = [
+            f"layers.{i}" for i in range(
+                self.vllm_config.model_config.get_num_layers(parallel_config))
+        ]
+
+        kv_caches = create_kv_caches(
+            num_blocks=2,
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            mesh=self.mesh,
+            layer_names=layer_names,
+        )
+
+        def gen_placeholder(w):
+            return jax.ShapeDtypeStruct(shape=w.shape, dtype=w.dtype)
+
+        params_and_buffers_placeholder = jax.tree.map(gen_placeholder,
+                                                      params_and_buffers)
+        kv_caches_placeholder = jax.tree.map(gen_placeholder, kv_caches)
+        input_ids_placeholder = jax.tree.map(gen_placeholder, input_ids)
+        attn_metadata_placeholder = jax.tree.map(gen_placeholder,
+                                                 attn_metadata)
+        inputs_embeds = None  # The torchax code path doesn't support Multi-modal models yet.
+
         params_and_buffers_format = jax.tree.map(
             lambda w: Format(layout=Layout.AUTO, sharding=w.sharding),
             params_and_buffers,
         )
 
-        MIN_NUM_SEQS = 8
-        num_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
-        max_num_reqs = max(self.vllm_config.scheduler_config.max_num_seqs,
-                           MIN_NUM_SEQS)
-        input_ids = self._create_dummy_tensor((num_tokens, ), jnp.int32)
-        positions = self._create_dummy_tensor((num_tokens, ), jnp.int32)
+        def get_sharding(w):
+            return w.format
+
+        kv_caches_sharding = jax.tree.map(get_sharding, kv_caches)
+        input_ids_sharding = jax.tree.map(get_sharding, input_ids)
+        attn_metadata_sharding = jax.tree.map(get_sharding, attn_metadata)
 
         step_fun_with_layout = jax.jit(
             step_fun,
@@ -204,12 +279,26 @@ class VllmModelWrapper:
                 "xla_tpu_all_gather_collective_matmul_mode":
                 "post_spmd_conservative",
                 "xla_tpu_reduce_scatter_collective_matmul_mode":
-                "post_spmd_conservative"
+                "post_spmd_conservative",
+                # "xla_early_exit_with_layouts": True,
             },
-            in_shardings=(params_and_buffers_format, ))
-        lowered = step_fun_with_layout.lower(params_and_buffers, )
+            in_shardings=(params_and_buffers_format, kv_caches_sharding,
+                          input_ids_sharding, attn_metadata_sharding,
+                          NamedSharding(self.mesh, P())))
+        print("jit_step func after jax.jit")
+        lowered = step_fun_with_layout.lower(params_and_buffers_placeholder,
+                                             kv_caches_placeholder,
+                                             input_ids_placeholder,
+                                             attn_metadata_placeholder,
+                                             inputs_embeds)
+        print("jit_step func after lower")
+        compiled = lowered.compile()
+        print("jit_step func after compile")
+        input_formats = compiled.input_formats
+        params_and_buffers_optimal_format = input_formats[0][0]
+        print(f"jit_step_func {params_and_buffers_optimal_format=}")
 
-        return step_fun
+        return compiled
 
     def jit_compute_logits_func(self):
 
