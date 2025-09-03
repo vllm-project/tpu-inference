@@ -289,13 +289,15 @@ def determine_whether_to_apply_qwix_on_abstract_model(
     Determines whether to apply Qwix quantization on the abstract model (e.g. for DeepSeek)
     or the concrete model.  See `apply_qwix_quantization` for more details on the differences
     between these two approaches.
-
     Args:
         vllm_config: the vllm config
-
     Returns:
         whether to apply Qwix quantization on the abstract model
     """
-    qwix_config = quantization_config_file_path_to_dict(
-        vllm_config.additional_config["quantization"])
-    return qwix_config.get("qwix", {}).get("use_abstract_model", False)
+    quantization_config = None
+    if quantization_config := vllm_config.additional_config.get(
+            "quantization", {}):
+        if isinstance(quantization_config, str):
+            quantization_config = quantization_config_file_path_to_dict(
+                quantization_config)
+    return quantization_config.get("qwix", {}).get("use_abstract_model", False)

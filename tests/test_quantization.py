@@ -413,6 +413,9 @@ class TestDetermineWhetherToApplyQwixOnAbstractModel(unittest.TestCase):
             "quantization": "some_config.yaml"
         }
 
+        self.mock_vllm_config_no_additional_config = MagicMock()
+        self.mock_vllm_config_no_additional_config.additional_config = {}
+
     @patch(
         "tpu_commons.models.jax.utils.quantization.quantization_utils.quantization_config_file_path_to_dict"
     )
@@ -442,6 +445,12 @@ class TestDetermineWhetherToApplyQwixOnAbstractModel(unittest.TestCase):
         mock_load_dict.return_value = {"qwix": {"rules": []}}
         result = quantize_qwix.determine_whether_to_apply_qwix_on_abstract_model(
             self.mock_vllm_config)
+        self.assertFalse(result)
+
+    def test_returns_false_when_additional_config_is_missing(self):
+        """Test it returns False when additional_config is missing."""
+        result = quantize_qwix.determine_whether_to_apply_qwix_on_abstract_model(
+            self.mock_vllm_config_no_additional_config)
         self.assertFalse(result)
 
 
