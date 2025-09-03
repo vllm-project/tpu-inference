@@ -53,7 +53,8 @@ from tpu_commons.runner.jax.speculative_decoding_manager import \
     SpeculativeDecodingManager
 from tpu_commons.runner.jax.structured_decoding_manager import \
     StructuredDecodingManager
-from tpu_commons.utils import device_array, make_optimized_mesh
+from tpu_commons.utils import (device_array, make_optimized_mesh,
+                               shard_lora_weights_and_move_to_tpu)
 
 logger = init_logger(__name__)
 
@@ -641,6 +642,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             self.set_active_loras(self.input_batch,
                                   padded_num_scheduled_tokens_per_req)
+            shard_lora_weights_and_move_to_tpu(self.model.model, self.mesh)
+            self.lora_manager._adapter_manager.punica_wrapper.move_to_device(
+                self.mesh)
 
         return (
             input_ids,
