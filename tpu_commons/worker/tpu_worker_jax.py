@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import tempfile
 from typing import Callable, Dict, Optional, Tuple, Union
 
 import jax
@@ -10,6 +11,8 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
                                           has_kv_transfer_group)
+from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
+                                             init_distributed_environment)
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -49,7 +52,8 @@ class TPUWorker(AbstractTpuWorker):
                  host_interface: Optional[HostInterface] = None):
         super().__init__(host_interface)
 
-        # If we use vLLM's model implementation in PyTorch, we should set it with torch version of the dtype.
+        # If we use vLLM's model implementation in PyTorch, we should set it
+        # with torch version of the dtype.
         impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
         if impl != "vllm":  # vllm-pytorch implementation does not need this conversion
 
@@ -121,8 +125,20 @@ class TPUWorker(AbstractTpuWorker):
                     f"devices={self.devices} | "
                     f"hbm={utils.hbm_usage_gb(self.devices)}Gb")
 
-        # Need to call connector's init after jax.devices.
-        ensure_model_parallel_initialized(self.vllm_config)
+        # Initialize the vLLM distribution layer as a single chip environment,
+        # we'll swap the model's parallel modules with TPU SPMD equivalents.
+        temp_file = tempfile.mkstemp()[1]
+        init_distributed_environment(
+            world_size=1,
+            rank=0,
+            local_rank=0,
+            distributed_init_method=f"file://{temp_file}",
+            backend="gloo",
+        )
+        ensure_model_parallel_initialized(
+            tensor_model_parallel_size=1,
+            pipeline_model_parallel_size=1,
+        )
         ensure_kv_transfer_initialized(self.vllm_config)
         self.model_runner = TPUModelRunner(self.vllm_config, self.devices)
 
@@ -238,20 +254,3 @@ class TPUWorker(AbstractTpuWorker):
                                                mappings=mappings,
                                                transpose_keys=transpose_keys,
                                                reshard_fn=reshard_fn)
-
-
-def ensure_model_parallel_initialized(vllm_config: VllmConfig) -> None:
-    """The replacement of vLLM's ensure_model_parallel_initialized().
-    vLLM calls torch.distributed to init model parallelism, which
-    does not work for JAX on TPU.
-    So we need to hack some behaviors to ensure this won't break any
-    downstream workflows.
-    """
-    from unittest.mock import MagicMock
-
-    from vllm.distributed import parallel_state
-
-    # Mock _PP rather than creating a vLLM's GroupCoordinator,
-    # to avoid calling torch.distributed.
-    parallel_state._PP = MagicMock()
-    parallel_state._PP.is_last_rank = True
