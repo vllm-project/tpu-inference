@@ -351,7 +351,6 @@ class CompilationManager:
                         self.runner.rejection_sampler,
                         draft_token_ids,
                         num_draft_tokens,
-                        -1,  # max_spec_len
                         draft_probs,
                         target_probs,
                         bonus_token_ids,

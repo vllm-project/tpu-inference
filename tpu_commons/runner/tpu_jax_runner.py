@@ -389,7 +389,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                 next_tokens = self.rejection_sampler(
                     draft_token_ids=spec_decode_metadata.draft_token_ids,
                     num_draft_tokens=spec_decode_metadata.draft_lengths,
-                    max_spec_len=spec_decode_metadata.max_spec_len,
                     draft_probs=None,
                     target_logits=target_logits,
                     bonus_token_ids=bonus_token_ids,
