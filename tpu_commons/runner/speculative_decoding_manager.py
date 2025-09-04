@@ -24,7 +24,6 @@ class SpecDecodeMetadata:
     target_logits_indices: jnp.ndarray
     bonus_logits_indices: jnp.ndarray
     final_logits_indices: jnp.ndarray
-    max_spec_len: int
 
 
 class SpeculativeDecodingManager:
@@ -104,7 +103,6 @@ class SpeculativeDecodingManager:
         # Compute the logits indices.
         # [4, 1, 3, 1, 2]
         num_sampled_tokens = num_draft_tokens + 1
-        max_spec_len = np.max(num_draft_tokens)
 
         # Step 1. cu_num_sampled_tokens: [4, 5, 8, 9, 11]
         # arange: [0, 1, 2, 3, 0, 0, 1, 2, 0, 0, 1]
@@ -183,6 +181,5 @@ class SpeculativeDecodingManager:
             target_logits_indices=padded_target_logits_indices,
             bonus_logits_indices=padded_bonus_logits_indices,
             final_logits_indices=padded_logits_indices,
-            max_spec_len=max_spec_len,
         )
         return metadata
