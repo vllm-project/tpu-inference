@@ -333,7 +333,7 @@ class KVCacheManager:
             f"Transferring kv cache shape {len(kv_cache_slices)} * {kv_cache_slices[0].shape} sharding {kv_cache_slices[0].sharding} size {kv_cache_slices[0].nbytes * len(kv_cache_slices)/1024/1024} Mbytes"
         )
         sharding = NamedSharding(self.runner.mesh,
-                                 PartitionSpec(None, None, "model"))
+                                 PartitionSpec(None, "model"))
         transferred_kv_cache = jax.device_put(kv_cache_slices, sharding)
         for cache in transferred_kv_cache:
             cache.block_until_ready()
