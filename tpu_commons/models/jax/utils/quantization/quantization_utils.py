@@ -296,8 +296,7 @@ def determine_whether_to_apply_qwix_on_abstract_model(
     """
     quantization_config = None
     if quantization_config := vllm_config.additional_config.get(
-            "quantization"):
-        print(quantization_config)
+            "quantization", {}):
         if isinstance(quantization_config, str):
             quantization_config = quantization_config_file_path_to_dict(
                 quantization_config)
