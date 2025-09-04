@@ -405,7 +405,7 @@ class TestApplyQwixQuantizationLogic(unittest.TestCase):
 
 
 class TestDetermineWhetherToApplyQwixOnAbstractModel(unittest.TestCase):
-    """Tests for determine_whether_to_apply_qwix_on_abstract_model."""
+    """Tests for apply_qwix_on_abstract_model."""
 
     def setUp(self):
         self.mock_vllm_config = MagicMock()
@@ -422,7 +422,7 @@ class TestDetermineWhetherToApplyQwixOnAbstractModel(unittest.TestCase):
     def test_returns_true_when_config_is_true(self, mock_load_dict):
         """Test it returns True when use_abstract_model is True in config."""
         mock_load_dict.return_value = {"qwix": {"use_abstract_model": True}}
-        result = quantize_qwix.determine_whether_to_apply_qwix_on_abstract_model(
+        result = quantize_qwix.apply_qwix_on_abstract_model(
             self.mock_vllm_config)
         self.assertTrue(result)
         mock_load_dict.assert_called_once_with("some_config.yaml")
@@ -433,7 +433,7 @@ class TestDetermineWhetherToApplyQwixOnAbstractModel(unittest.TestCase):
     def test_returns_false_when_config_is_false(self, mock_load_dict):
         """Test it returns False when use_abstract_model is False in config."""
         mock_load_dict.return_value = {"qwix": {"use_abstract_model": False}}
-        result = quantize_qwix.determine_whether_to_apply_qwix_on_abstract_model(
+        result = quantize_qwix.apply_qwix_on_abstract_model(
             self.mock_vllm_config)
         self.assertFalse(result)
 
@@ -443,13 +443,13 @@ class TestDetermineWhetherToApplyQwixOnAbstractModel(unittest.TestCase):
     def test_returns_false_when_key_is_missing(self, mock_load_dict):
         """Test it defaults to False when use_abstract_model key is missing."""
         mock_load_dict.return_value = {"qwix": {"rules": []}}
-        result = quantize_qwix.determine_whether_to_apply_qwix_on_abstract_model(
+        result = quantize_qwix.apply_qwix_on_abstract_model(
             self.mock_vllm_config)
         self.assertFalse(result)
 
     def test_returns_false_when_additional_config_is_missing(self):
         """Test it returns False when additional_config is missing."""
-        result = quantize_qwix.determine_whether_to_apply_qwix_on_abstract_model(
+        result = quantize_qwix.apply_qwix_on_abstract_model(
             self.mock_vllm_config_no_additional_config)
         self.assertFalse(result)
 

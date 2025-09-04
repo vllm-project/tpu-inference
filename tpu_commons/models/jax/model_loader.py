@@ -10,7 +10,7 @@ from vllm.config import VllmConfig
 
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.utils.quantization.quantization_utils import (
-    apply_qwix_quantization, determine_whether_to_apply_qwix_on_abstract_model)
+    apply_qwix_on_abstract_model, apply_qwix_quantization)
 
 logger = init_logger(__name__)
 
@@ -96,13 +96,16 @@ def _get_nnx_model(
         def _create_abstract_model() -> nnx.Module:
             """
             Helper class to create an abstract model for `nnx.eval_shape`.
+
+            Returns:
+                An abstract model function.
             """
             return model_class(vllm_config, rng, mesh)
 
         abstract_model_fn = _create_abstract_model
         # NOTE: only one of the abstract (this) or or concrete Qwix quantization paths should
         # be taken
-        if apply_qwix_on_abstract_model := determine_whether_to_apply_qwix_on_abstract_model(
+        if should_apply_qwix_on_abstract_model := apply_qwix_on_abstract_model(
                 vllm_config):
             # NOTE: if Qwix is not configured, this will return `_create_abstract_model` and
             # thus be a no-op
@@ -123,7 +126,7 @@ def _get_nnx_model(
             nnx.update(model, state)
             # NOTE: only one of the abstract (this) or or concrete Qwix quantization paths should
             # be taken
-            if not apply_qwix_on_abstract_model:
+            if not should_apply_qwix_on_abstract_model:
                 # NOTE: if Qwix is not configured, this will be a no-op
                 model = apply_qwix_quantization(vllm_config,
                                                 model,
