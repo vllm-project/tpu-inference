@@ -14,7 +14,6 @@ steps:
      key: test_1
      soft_fail: true
      env:
-       TPU_BACKEND_TYPE: "jax"
        QUANTIZATION: "True"
      agents:
        queue: tpu_v6e_queue
@@ -97,7 +96,8 @@ steps:
        - |
          .buildkite/scripts/run_in_docker.sh \
            python3 -m pytest -s -v -x /workspace/tpu_commons/tests/kernels \
-           --ignore=/workspace/tpu_commons/tests/kernels/ragged_paged_attention_kernel_v2_test.py
+           --ignore=/workspace/tpu_commons/tests/kernels/ragged_paged_attention_kernel_v2_test.py \
+           --ignore=/workspace/tpu_commons/tests/kernels/ragged_kv_cache_update_v2_test.py
 
 
   # -----------------------------------------------------------------

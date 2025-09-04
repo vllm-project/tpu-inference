@@ -1,4 +1,0 @@
-TPU_BACKEND_TYPE=jax python vllm/examples/offline_inference/basic/generate.py --task=generate --max_model_len=1024
-
-
-TPU_BACKEND_TYPE=jax python examples/offline_inference/basic/generate.py --model=meta-llama/Meta-Llama-3-8B-Instruct --task=generate --max_model_len=1024

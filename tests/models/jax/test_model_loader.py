@@ -1,4 +1,5 @@
 import os
+import tempfile
 from unittest.mock import MagicMock, patch
 
 import jax
@@ -7,11 +8,21 @@ import pytest
 import torch
 from jax.sharding import Mesh
 from transformers import PretrainedConfig
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
+                                             init_distributed_environment)
 from vllm.engine.arg_utils import EngineArgs
 
 from tpu_commons.models.jax import model_loader
 from tpu_commons.models.jax.qwen3 import Qwen3ForCausalLM
+
+
+class MockModelA:
+    pass
+
+
+class MockModelB:
+    pass
 
 
 @pytest.fixture(scope="module")
@@ -60,6 +71,36 @@ def test_get_model_architecture_unsupported():
         model_loader._get_model_architecture(config)
 
 
+@pytest.fixture(autouse=True)
+def clear_model_registry_after_test():
+    """Clear the model registry after each test to prevent side effects."""
+    yield
+    model_loader._MODEL_REGISTRY.clear()
+
+
+def test_register_model_new_arch():
+    """Tests registering a new model architecture."""
+    model_loader.register_model("NewArch", MockModelA)
+    config = PretrainedConfig(architectures=["NewArch"])
+    model_class = model_loader._get_model_architecture(config)
+    assert model_class == MockModelA
+
+
+def test_register_model_update_arch():
+    """Tests updating an existing registered model architecture."""
+    # 1. Register initial model
+    model_loader.register_model("UpdatableArch", MockModelA)
+    config = PretrainedConfig(architectures=["UpdatableArch"])
+    # 2. Verify initial registration
+    model_class_1 = model_loader._get_model_architecture(config)
+    assert model_class_1 == MockModelA
+    # 3. Update the registration
+    model_loader.register_model("UpdatableArch", MockModelB)
+    # 4. Verify the update
+    model_class_2 = model_loader._get_model_architecture(config)
+    assert model_class_2 == MockModelB
+
+
 def test_get_flax_model(vllm_config, mesh):
     """
     An integration test for the main public function `get_flax_model`.
@@ -88,6 +129,20 @@ def test_get_vllm_model(mesh):
     vllm_config = engine_args.create_engine_config()
     vllm_config.model_config.dtype = torch.bfloat16
 
+    with set_current_vllm_config(vllm_config):
+        temp_file = tempfile.mkstemp()[1]
+        init_distributed_environment(
+            world_size=1,
+            rank=0,
+            local_rank=0,
+            distributed_init_method=f"file://{temp_file}",
+            backend="gloo",
+        )
+        ensure_model_parallel_initialized(
+            tensor_model_parallel_size=1,
+            pipeline_model_parallel_size=1,
+        )
+
     model_fn, compute_logits_fn, _, _, _ = model_loader.get_vllm_model(
         vllm_config, rng, mesh)
 
@@ -106,6 +161,20 @@ def test_get_vllm_model_random_weights(mesh, set_in_config):
         vllm_config.load_config.load_format = "dummy"
     else:
         os.environ["JAX_RANDOM_WEIGHTS"] = "True"
+
+    with set_current_vllm_config(vllm_config):
+        temp_file = tempfile.mkstemp()[1]
+        init_distributed_environment(
+            world_size=1,
+            rank=0,
+            local_rank=0,
+            distributed_init_method=f"file://{temp_file}",
+            backend="gloo",
+        )
+        ensure_model_parallel_initialized(
+            tensor_model_parallel_size=1,
+            pipeline_model_parallel_size=1,
+        )
 
     with patch(
             "vllm.model_executor.model_loader.dummy_loader.DummyModelLoader.load_weights"
