@@ -11,7 +11,7 @@ from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.layers.sample.sampling import sample
 from tpu_commons.models.jax.layers.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
-from tpu_commons.utils import device_array, shard_lora_weights_and_move_to_tpu
+from tpu_commons.utils import device_array
 
 if TYPE_CHECKING:
     from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
@@ -116,21 +116,11 @@ class CompilationManager:
                 attention_metadata,
                 inputs_embeds,
             ):
-                with self.runner.maybe_select_dummy_loras(
-                        self.runner.lora_config,
-                        np.array([num_tokens], dtype=np.int32)):
-
-                    model = self.runner.model.model
-                    shard_lora_weights_and_move_to_tpu(model, self.runner.mesh)
-                    # Move the punica wrapper's metadata to torchax TPU tensor.
-                    self.runner.lora_manager._adapter_manager.punica_wrapper.move_to_device(
-                        self.runner.mesh)
-
-                    kv_caches, hidden_states = self.runner.model_fn(
-                        state, kv_caches, input_ids, attention_metadata,
-                        inputs_embeds)
-                    self.runner.kv_caches = kv_caches
-                    return hidden_states
+                kv_caches, hidden_states = self.runner.model_fn(
+                    state, kv_caches, input_ids, attention_metadata,
+                    inputs_embeds)
+                self.runner.kv_caches = kv_caches
+                return hidden_states
 
             self._run_compilation(
                 "backbone",

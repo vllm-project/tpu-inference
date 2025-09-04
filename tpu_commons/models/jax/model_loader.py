@@ -240,6 +240,7 @@ def get_vllm_model(
 
     jit_model = model.jit_step_func()
     compute_logits_fn = model.jit_compute_logits_func()
+    # the model needs to be returned because lora weights are neither torch.nn.parameter nor torch.nn.buffer. After we load the lora weights and set it to the torch.nn.Module, we can shard it and move it to TPU.
     return jit_model, compute_logits_fn, None, None, params, lora_manager, model
 
 

@@ -19,7 +19,6 @@ from vllm.config import (LoRAConfig, ModelConfig, SchedulerConfig, VllmConfig,
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.forward_context import set_forward_context
-from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.model_executor.models import supports_lora, supports_multimodal
@@ -144,7 +143,6 @@ class VllmModelWrapper:
                 vllm_config_for_load.lora_config,
                 device="cpu")
 
-            replace_set_lora(vllm_model)
         # why moved below function here whereas it used to be in vllm_get_model?
         # vllm_get_model moves the vllm_model to jax device. But we expect to initialize the weight on cpu
         # and load_lora_model get the device from the vllm_model (aka the base model in lora).
@@ -268,30 +266,3 @@ def load_lora_model(model: torch.nn.Module, model_config: ModelConfig,
         max_position_embeddings=text_config.max_position_embeddings,
     )
     return lora_manager, lora_manager.create_lora_manager(model)
-
-
-def replace_set_lora(model):
-
-    def _tpu_set_lora(
-        self,
-        index: int,
-        lora_a: torch.Tensor,
-        lora_b: torch.Tensor,
-        embeddings_tensor: Optional[torch.Tensor],
-        bias: Optional[torch.Tensor] = None,
-    ):
-        # TODO: The integer index leads to a recompilation, but converting it
-        # to a tensor doesn't seem to work anymore. This might be fixed with a
-        # later release of torch_xla.
-        self._original_set_lora(index, lora_a, lora_b, embeddings_tensor, bias)
-
-    def _tpu_reset_lora(self, index: int):
-        self._original_reset_lora(index)
-
-    for _, module in model.named_modules():
-        if isinstance(module, BaseLayerWithLoRA):
-            module._original_set_lora = module.set_lora
-            module._original_reset_lora = module.reset_lora
-            module.set_lora = _tpu_set_lora.__get__(module, module.__class__)
-            module.reset_lora = _tpu_reset_lora.__get__(
-                module, module.__class__)

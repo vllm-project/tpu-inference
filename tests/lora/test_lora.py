@@ -55,7 +55,6 @@ def test_single_lora():
                           lora_request=lora_request)[0].outputs[0].text
 
     answer = output.strip()[0]
-    print(f'xw32 test finished. {answer=}')
 
     assert answer.isdigit()
     assert int(answer) == 2
