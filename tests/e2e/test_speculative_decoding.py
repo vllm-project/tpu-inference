@@ -23,8 +23,8 @@ def get_test_prompts():
 @pytest.fixture
 def sampling_config():
     return SamplingParams(temperature=0,
-                          max_tokens=10,
-                          ignore_eos=False,
+                          max_tokens=16,
+                          ignore_eos=True,
                           repetition_penalty=1,
                           frequency_penalty=0,
                           presence_penalty=0,
@@ -37,19 +37,20 @@ def model_name():
     return "Qwen/Qwen2.5-0.5B-Instruct"
 
 
-def test_ngram_correctness(
+def _test_ngram_correctness_helper(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
     model_name: str,
 ):
     '''
+    Helper function to test ngram correctness.
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using ngram speculative decoding.
     '''
     with monkeypatch.context():
         test_prompts = get_test_prompts()
 
-        ref_llm = LLM(model=model_name, max_model_len=1024)
+        ref_llm = LLM(model=model_name, max_model_len=1024, max_num_seqs=4)
         ref_outputs = ref_llm.generate(test_prompts, sampling_config)
 
         del ref_llm
@@ -82,6 +83,35 @@ def test_ngram_correctness(
         del spec_llm
 
 
+def test_ngram_correctness_greedy(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+    model_name: str,
+):
+    '''
+    Compare the outputs of a original LLM and a speculative LLM
+    should be the same when using ngram speculative decoding with greedy sampling.
+    '''
+    _test_ngram_correctness_helper(monkeypatch, sampling_config, model_name)
+
+
+def test_ngram_correctness_random(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+    model_name: str,
+):
+    '''
+    Compare the outputs of a original LLM and a speculative LLM
+    should be the same when using ngram speculative decoding with random sampling.
+    '''
+    # Modify sampling config for random sampling
+    sampling_config.temperature = 0.01
+    sampling_config.top_p = 0.9
+    sampling_config.top_k = 5
+
+    _test_ngram_correctness_helper(monkeypatch, sampling_config, model_name)
+
+
 def test_speculative_decoding_performance(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
@@ -98,7 +128,10 @@ def test_speculative_decoding_performance(
         test_prompts = get_test_prompts()
 
         # Test reference LLM timing
-        ref_llm = LLM(model=model_name, max_model_len=1024, max_num_seqs=1)
+        ref_llm = LLM(model=model_name,
+                      max_model_len=1024,
+                      max_num_seqs=1,
+                      enable_prefix_caching=False)
 
         start_time = time.time()
         _ = ref_llm.generate(test_prompts, sampling_config)
@@ -118,7 +151,8 @@ def test_speculative_decoding_performance(
                            "num_speculative_tokens": 3,
                        },
                        max_model_len=1024,
-                       max_num_seqs=1)
+                       max_num_seqs=1,
+                       enable_prefix_caching=False)
 
         start_time = time.time()
         _ = spec_llm.generate(test_prompts, sampling_config)
