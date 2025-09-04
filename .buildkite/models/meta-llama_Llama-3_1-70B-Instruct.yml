@@ -1,0 +1,70 @@
+# meta-llama/Llama-3.1-70B-Instruct
+agents:
+  queue: tpu_v6e_8_queue
+steps:
+  - label: "Unit tests for meta-llama/Llama-3.1-70B-Instruct"
+    key: "ut_meta-llama_Llama-3_1-70B-Instruct"
+    commands:
+      # - replace_with_test_commands  # TODO: Replaced to actual test commands
+      - echo "[DEBUG], unit testing for meta-llama/Llama-3.1-70B-Instruct"  # TODO: Replace to actual test commands
+  - label: "Notifications: Unit tests for meta-llama/Llama-3.1-70B-Instruct"
+    key: "notifications_ut_meta-llama_Llama-3_1-70B-Instruct"
+    depends_on: "ut_meta-llama_Llama-3_1-70B-Instruct"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_8_queue
+    commands:
+      - |
+        .buildkite/scripts/check_results.sh \
+          "Unit tests for meta-llama/Llama-3.1-70B-Instruct" ut_meta-llama_Llama-3_1-70B-Instruct
+
+  - label: "Integration tests for meta-llama/Llama-3.1-70B-Instruct"
+    key: "it_meta-llama_Llama-3_1-70B-Instruct"
+    depends_on: "notifications_ut_meta-llama_Llama-3_1-70B-Instruct"
+    commands:
+      # TODO: expected_accuracy need parameterized
+      # - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/test_accuracy.sh -t 1 -m "meta-llama/Llama-3.1-70B-Instruct"
+      - echo "[DEBUG], integration testing for meta-llama/Llama-3.1-70B-Instruct"  # TODO: Replace to actual test commands
+  - label: "Notifications: Integration tests for meta-llama/Llama-3.1-70B-Instruct"
+    key: "notifications_it_meta-llama_Llama-3_1-70B-Instruct"
+    depends_on: "it_meta-llama_Llama-3_1-70B-Instruct"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_8_queue
+    commands:
+      - |
+        .buildkite/scripts/check_results.sh \
+          "Integration tests for meta-llama/Llama-3.1-70B-Instruct" it_meta-llama_Llama-3_1-70B-Instruct
+
+  - label: "Performance benchmarks for meta-llama/Llama-3.1-70B-Instruct"
+    key: "pb_meta-llama_Llama-3_1-70B-Instruct"
+    depends_on: "notifications_it_meta-llama_Llama-3_1-70B-Instruct"
+    commands:
+      # - replace_with_test_command  # TODO
+      - echo "[DEBUG], performance benchmarking for meta-llama/Llama-3.1-70B-Instruct"  # TODO: Replace to actual test commands
+  - label: "Notifications: Performance benchmarks for meta-llama/Llama-3.1-70B-Instruct"
+    key: "notifications_pb_meta-llama_Llama-3_1-70B-Instruct"
+    depends_on: "pb_meta-llama_Llama-3_1-70B-Instruct"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_8_queue
+    commands:
+      - |
+        .buildkite/scripts/check_results.sh \
+          "Performance benchmarks for meta-llama/Llama-3.1-70B-Instruct" pb_meta-llama_Llama-3_1-70B-Instruct
+
+  - label: "Stress tests for meta-llama/Llama-3.1-70B-Instruct"
+    key: "st_meta-llama_Llama-3_1-70B-Instruct"
+    depends_on: "notifications_pb_meta-llama_Llama-3_1-70B-Instruct"
+    commands:
+      # - our_stress_tests_script meta-llama/Llama-3.1-70B-Instruct expected_throughput # TODO: expected_throughput need parameterized
+      - echo "[DEBUG], stress testing for meta-llama/Llama-3.1-70B-Instruct"  # TODO: Replace to actual test commands
+  - label: "Notifications: Stress tests for meta-llama/Llama-3.1-70B-Instruct"
+    key: "notifications_st_meta-llama_Llama-3_1-70B-Instruct"
+    depends_on: "st_meta-llama_Llama-3_1-70B-Instruct"
+    agents:
+      queue: tpu_v6e_8_queue
+    commands:
+      - |
+        .buildkite/scripts/check_results.sh \
+          "Stress tests for meta-llama/Llama-3.1-70B-Instruct" st_meta-llama_Llama-3_1-70B-Instruct

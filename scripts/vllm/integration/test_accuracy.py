@@ -20,14 +20,8 @@ import os
 from pathlib import Path
 from vllm.platforms import current_platform
 
-MODEL_NAMES = [
-    "Qwen/Qwen3-1.7B",
-    "google/gemma-3-1b-it",
-    # "meta-llama/Llama-3.1-8B-Instruct",
-]
-FP8_KV_MODEL_NAMES = [
-    "Qwen/Qwen3-1.7B",
-]
+MODEL_NAMES = []
+FP8_KV_MODEL_NAMES = []
 NUM_CONCURRENT = 500
 TASK = "gsm8k"
 FILTER = "exact_match,strict-match"
@@ -67,7 +61,9 @@ def write_expected_value_to_json(model_name, measured_value, json_filepath):
             with open(json_filepath, 'r', encoding='utf-8') as f:
                 data = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
-            print(f"'{json_filepath}' not found or is empty/invalid. A new one will be created.")
+            print(
+                f"'{json_filepath}' not found or is empty/invalid. A new one will be created."
+            )
             data = {}
         
         data[model_name] = measured_value
@@ -75,9 +71,14 @@ def write_expected_value_to_json(model_name, measured_value, json_filepath):
         try:
             with open(json_filepath, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=4)
-            print(f"Successfully updated '{json_filepath}' with the result for {model_name}.")
+            print(
+                f"Successfully updated '{json_filepath}' with the result for {model_name}."
+            )
         except IOError as e:
-            print(f"Error: Failed to write to file '{json_filepath}'. Reason: {e}")
+            print(
+                f"Error: Failed to write to file '{json_filepath}'. Reason: {e}"
+            )
+            raise
 
 # Read expected values from json file if exist
 # TBD: To support the functionality of connecting GPU and TPU expected values in the future
@@ -102,12 +103,6 @@ def run_test(model_name, expected_values_data, expected_json_filepath, more_args
     print(f"Running test for model: {model_name}")
 
     model_args = f"pretrained={model_name},max_model_len=4096"
-    
-    download_path = "/mnt/disks/persist"
-    # download_path = "/tmp/hf_model"
-    if os.path.isdir(download_path) and os.access(download_path, os.R_OK) and os.access(download_path, os.W_OK):
-        model_args = f"{model_args},download_dir={download_path}"
-    
     if more_args is not None:
         model_args = "{},{}".format(model_args, more_args)
 
@@ -166,9 +161,8 @@ def test_lm_eval_accuracy_v1_engine(model, monkeypatch: pytest.MonkeyPatch, requ
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
         
-        more_args = None
+        more_args = "max_model_len=2048,max_num_seqs=64"
         if current_platform.is_tpu():
-            more_args = "max_model_len=2048,max_num_seqs=64"
             tp_size_str = f"tensor_parallel_size={tp_size}"
             more_args += ",{}".format(tp_size_str)
         

@@ -1,0 +1,70 @@
+# Feat-A
+agents:
+  queue: tpu_v6e_queue
+steps:
+  - label: "Unit tests for Feat-A"
+    key: "ut_Feat-A"
+    commands:
+      # - replace_with_test_commands  # TODO: Replaced to actual test commands
+      - echo "[DEBUG], unit testing for Feat-A"  # TODO: Replace to actual test commands
+  - label: "Notifications: Unit tests for Feat-A"
+    key: "notifications_ut_Feat-A"
+    depends_on: "ut_Feat-A"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        .buildkite/scripts/check_results.sh \
+          "Unit tests for Feat-A" ut_Feat-A
+
+  - label: "Integration tests for Feat-A"
+    key: "it_Feat-A"
+    depends_on: "notifications_ut_Feat-A"
+    commands:
+      # TODO: expected_accuracy need parameterized
+      # - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/test_accuracy.sh -t 1 -m "Feat-A"
+      - echo "[DEBUG], integration testing for Feat-A"  # TODO: Replace to actual test commands
+  - label: "Notifications: Integration tests for Feat-A"
+    key: "notifications_it_Feat-A"
+    depends_on: "it_Feat-A"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        .buildkite/scripts/check_results.sh \
+          "Integration tests for Feat-A" it_Feat-A
+
+  - label: "Performance benchmarks for Feat-A"
+    key: "pb_Feat-A"
+    depends_on: "notifications_it_Feat-A"
+    commands:
+      # - replace_with_test_command  # TODO
+      - echo "[DEBUG], performance benchmarking for Feat-A"  # TODO: Replace to actual test commands
+  - label: "Notifications: Performance benchmarks for Feat-A"
+    key: "notifications_pb_Feat-A"
+    depends_on: "pb_Feat-A"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        .buildkite/scripts/check_results.sh \
+          "Performance benchmarks for Feat-A" pb_Feat-A
+
+  - label: "Stress tests for Feat-A"
+    key: "st_Feat-A"
+    depends_on: "notifications_pb_Feat-A"
+    commands:
+      # - our_stress_tests_script Feat-A expected_throughput # TODO: expected_throughput need parameterized
+      - echo "[DEBUG], stress testing for Feat-A"  # TODO: Replace to actual test commands
+  - label: "Notifications: Stress tests for Feat-A"
+    key: "notifications_st_Feat-A"
+    depends_on: "st_Feat-A"
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        .buildkite/scripts/check_results.sh \
+          "Stress tests for Feat-A" st_Feat-A

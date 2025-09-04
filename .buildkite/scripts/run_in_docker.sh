@@ -12,12 +12,17 @@ if [ "$#" -eq 0 ]; then
 fi
 
 MOUNT_EXPECT_RESULT="False"
+GPU_BASE="False"
 OTHER_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --mount-expect-result)
             MOUNT_EXPECT_RESULT="True"
+            shift 1
+            ;;
+        --gpu)
+            GPU_BASE="True"
             shift 1
             ;;
         *)
@@ -110,7 +115,18 @@ fi
 echo "Cleanup complete."
 
 IMAGE_NAME="vllm-tpu"
-docker build --no-cache -f docker/Dockerfile -t "${IMAGE_NAME}:${BUILDKITE_COMMIT}" .
+if [ $GPU_BASE == "True" ]; then
+  echo "Docker build gpu image"
+  IMAGE_NAME="vllm-gpu"
+  docker build --no-cache -f docker/Dockerfile.cuda -t "${IMAGE_NAME}:${BUILDKITE_COMMIT}" .
+  # DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 \
+  #   --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.8.1 --build-arg FLASHINFER_AOT_COMPILE=true \
+  #   --build-arg INSTALL_KV_CONNECTORS=true --tag "${IMAGE_NAME}:${BUILDKITE_COMMIT}" \
+  #   --target vllm-openai --progress plain -f docker/Dockerfile.cuda.dev .
+    # public.ecr.aws/q9t5s3a7/vllm-release-repo
+else
+  docker build --no-cache -f docker/Dockerfile -t "${IMAGE_NAME}:${BUILDKITE_COMMIT}" .
+fi
 
 echo "Execute Cmd: $@ on Image: ${IMAGE_NAME}:${BUILDKITE_COMMIT}"
 

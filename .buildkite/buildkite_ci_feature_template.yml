@@ -1,0 +1,70 @@
+# {FEATURE_NAME}
+agents:
+  queue: {QUEUE}
+steps:
+  - label: "Unit tests for {FEATURE_NAME}"
+    key: "ut_{SAFE_FEATURE_NAME}"
+    commands:
+      # - replace_with_test_commands  # TODO: Replaced to actual test commands
+      - echo "[DEBUG], unit testing for {FEATURE_NAME}"  # TODO: Replace to actual test commands
+  - label: "Notifications: Unit tests for {FEATURE_NAME}"
+    key: "notifications_ut_{SAFE_FEATURE_NAME}"
+    depends_on: "ut_{SAFE_FEATURE_NAME}"
+    soft_fail: true
+    agents:
+      queue: {QUEUE}
+    commands:
+      - |
+        .buildkite/scripts/check_results.sh \
+          "Unit tests for {FEATURE_NAME}" ut_{SAFE_FEATURE_NAME}
+
+  - label: "Integration tests for {FEATURE_NAME}"
+    key: "it_{SAFE_FEATURE_NAME}"
+    depends_on: "notifications_ut_{SAFE_FEATURE_NAME}"
+    commands:
+      # TODO: expected_accuracy need parameterized
+      # - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/test_accuracy.sh -t 1 -m "{FEATURE_NAME}"
+      - echo "[DEBUG], integration testing for {FEATURE_NAME}"  # TODO: Replace to actual test commands
+  - label: "Notifications: Integration tests for {FEATURE_NAME}"
+    key: "notifications_it_{SAFE_FEATURE_NAME}"
+    depends_on: "it_{SAFE_FEATURE_NAME}"
+    soft_fail: true
+    agents:
+      queue: {QUEUE}
+    commands:
+      - |
+        .buildkite/scripts/check_results.sh \
+          "Integration tests for {FEATURE_NAME}" it_{SAFE_FEATURE_NAME}
+
+  - label: "Performance benchmarks for {FEATURE_NAME}"
+    key: "pb_{SAFE_FEATURE_NAME}"
+    depends_on: "notifications_it_{SAFE_FEATURE_NAME}"
+    commands:
+      # - replace_with_test_command  # TODO
+      - echo "[DEBUG], performance benchmarking for {FEATURE_NAME}"  # TODO: Replace to actual test commands
+  - label: "Notifications: Performance benchmarks for {FEATURE_NAME}"
+    key: "notifications_pb_{SAFE_FEATURE_NAME}"
+    depends_on: "pb_{SAFE_FEATURE_NAME}"
+    soft_fail: true
+    agents:
+      queue: {QUEUE}
+    commands:
+      - |
+        .buildkite/scripts/check_results.sh \
+          "Performance benchmarks for {FEATURE_NAME}" pb_{SAFE_FEATURE_NAME}
+
+  - label: "Stress tests for {FEATURE_NAME}"
+    key: "st_{SAFE_FEATURE_NAME}"
+    depends_on: "notifications_pb_{SAFE_FEATURE_NAME}"
+    commands:
+      # - our_stress_tests_script {FEATURE_NAME} expected_throughput # TODO: expected_throughput need parameterized
+      - echo "[DEBUG], stress testing for {FEATURE_NAME}"  # TODO: Replace to actual test commands
+  - label: "Notifications: Stress tests for {FEATURE_NAME}"
+    key: "notifications_st_{SAFE_FEATURE_NAME}"
+    depends_on: "st_{SAFE_FEATURE_NAME}"
+    agents:
+      queue: {QUEUE}
+    commands:
+      - |
+        .buildkite/scripts/check_results.sh \
+          "Stress tests for {FEATURE_NAME}" st_{SAFE_FEATURE_NAME}

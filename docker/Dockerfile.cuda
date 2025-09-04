@@ -1,0 +1,72 @@
+ARG CUDA_VERSION=12.8.1
+ARG BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
+
+FROM $BASE_IMAGE
+
+ARG GET_PIP_URL="https://bootstrap.pypa.io/get-pip.py"
+ARG PYTHON_VERSION=3.12
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install Python and other dependencies
+RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
+    && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
+    && apt-get update -y \
+    && apt-get install -y --no-install-recommends \
+       software-properties-common \
+       curl \
+    && add-apt-repository ppa:deadsnakes/ppa -y \
+    && apt-get update -y \
+    && apt-get install -y --no-install-recommends \
+       python${PYTHON_VERSION} \
+       python${PYTHON_VERSION}-dev \
+       python${PYTHON_VERSION}-venv \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
+    && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
+    && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
+    && curl -sS ${GET_PIP_URL} | python${PYTHON_VERSION} \
+    && python3 --version && python3 -m pip --version \
+    # Clean up apt caches to reduce image size
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+
+# Remove existing versions of dependencies
+RUN pip uninstall -y torch torch_xla torchvision
+
+# Install some basic utilities
+RUN apt-get update && apt-get install -y \
+    git \
+    libopenblas-base libopenmpi-dev libomp-dev
+
+# Build vLLM
+WORKDIR /workspace/vllm
+ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
+RUN git clone $VLLM_REPO /workspace/vllm
+
+RUN pip install -r requirements/cuda.txt
+RUN VLLM_TARGET_DEVICE="cuda" pip install -e .
+
+# Install test dependencies
+RUN python3 -m pip install -e tests/vllm_test_utils
+RUN python3 -m pip install --no-cache-dir \
+    git+https://github.com/thuml/depyf.git \
+    pytest \
+    pytest-asyncio \
+    tpu-info \
+    datasets \
+    git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d#egg=lm-eval[api] \
+    pytest-cov \
+    numba
+
+# Install tpu_commons
+WORKDIR /workspace/tpu_commons
+# Install requirements first and cache so we don't need to re-install on code change.
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+COPY requirements_benchmarking.txt .
+# These are needed for the E2E benchmarking tests (i.e. tests/e2e/benchmarking/mlperf.sh)
+RUN pip install -r requirements_benchmarking.txt
+COPY . .
+RUN pip install -e .
+
+CMD ["/bin/bash"]

@@ -13,8 +13,9 @@ def pytest_addoption(parser):
         "--expected-values-file",
         type=str,
         default=None,
-        help="Path to a JSON file with expected accuracy values."
-    )
+        help="This is used to specify the JSON file that stores the expected values. " +
+            "The results from running test_accuracy on a GPU will be saved to this file, " +
+            "and when running on a TPU, the results will be read from this file for comparison.")
     parser.addoption(
         "--model-names",
         action="store",
