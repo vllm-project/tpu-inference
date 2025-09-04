@@ -390,7 +390,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                     num_draft_tokens=spec_decode_metadata.draft_lengths,
                     max_spec_len=spec_decode_metadata.max_spec_len,
                     draft_probs=None,
-                    target_probs=target_logits,
+                    target_logits=target_logits,
                     bonus_token_ids=bonus_token_ids,
                     sampling_metadata=tpu_sampling_metadata,
                 )
