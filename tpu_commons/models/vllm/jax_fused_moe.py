@@ -112,7 +112,7 @@ def tensor_sharded_gmm_merged_column_parallel(
     output_sizes = [intermediate_size, intermediate_size]
 
     return slice_sharded_tensor_for_concatenation(gmm_result, output_sizes,
-                                                  n_shards, mesh)
+                                                  n_shards)
 
 
 def tensor_sharded_gmm_row_parallel(

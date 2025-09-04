@@ -43,11 +43,12 @@ class TpuPlatform(Platform):
     device_control_env_var: str = "TPU_VISIBLE_CHIPS"
     simple_compile_backend: str = "openxla"
 
-    supported_quantization: list[str] = ["tpu_int8", "compressed-tensors"]
+    supported_quantization: list[str] = [
+        "tpu_int8", "compressed-tensors", "awq"
+    ]
 
     additional_env_vars: list[str] = [
-        "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS", "TPU_BACKEND_TYPE",
-        "TPU_MULTIHOST_BACKEND"
+        "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS", "TPU_MULTIHOST_BACKEND"
     ]
 
     @classmethod
@@ -61,7 +62,7 @@ class TpuPlatform(Platform):
 
         if use_v1:
             logger.info("Using Pallas V1 backend.")
-            return "vllm.v1.attention.backends.pallas.PallasAttentionBackend"
+            return "tpu_commons.attention.backends.pallas_torchax.PallasAttentionBackend"
         else:
             logger.info("Using Pallas backend.")
             return "vllm.attention.backends.pallas.PallasAttentionBackend"
@@ -154,6 +155,7 @@ class TpuPlatform(Platform):
                 vllm_config.model_config.dtype.dtype)
 
         if envs.VLLM_USE_V1:
+            # TODO(cuiq): remove this dependency.
             from vllm.v1.attention.backends.pallas import \
                 PallasAttentionBackend
             cache_config.block_size = PallasAttentionBackend.get_page_size(

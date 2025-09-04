@@ -14,10 +14,8 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh, total_num_pages: int,
                                  page_size: int, actual_num_kv_heads: int,
                                  actual_head_dim: int, kv_dtype: any):
     """Gets the KV cache shape based on the mesh configuration."""
-    model_cnt = mesh.shape["model"]
-    assert actual_num_kv_heads % model_cnt == 0
-    return get_kv_cache_shape(total_num_pages, page_size,
-                              actual_num_kv_heads // model_cnt,
+
+    return get_kv_cache_shape(total_num_pages, page_size, actual_num_kv_heads,
                               actual_head_dim, kv_dtype)
 
 
@@ -26,7 +24,7 @@ def sharded_ragged_paged_attention(sm_scale: float,
                                    attention_chunk_size: int | None = None):
     """Shards along KV heads."""
     qkv_spec = P(None, "model", None)
-    kv_cache_spec = P()  # replicated
+    kv_cache_spec = P(None, None, "model")
     in_specs = (
         qkv_spec,  # q
         qkv_spec,  # k

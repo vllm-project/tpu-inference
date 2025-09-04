@@ -180,7 +180,7 @@ class Attention(nnx.Module):
                   `(seq, num_q_heads, head_dim)`.
         """
         md = attention_metadata
-        kv_cache_spec = P()  # Replicated
+        kv_cache_spec = P(None, None, "model")
         in_specs = (
             self.query_tnh,  # q
             self.keyvalue_skh,  # k

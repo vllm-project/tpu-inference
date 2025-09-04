@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 from tpu_commons import utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.runner.utils import create_kv_caches
+from tpu_commons.runner.kv_cache import create_kv_caches
 from tpu_commons.utils import device_array
 
 logger = init_logger(__name__)
@@ -96,7 +96,6 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
         head_size=kv_cache_head_size,
         mesh=mesh,
         layer_names=[f"layer.{i}" for i in range(num_hidden_layers)],
-        devices=jax.local_devices(),
     )
 
     # NOTE: the inputs don't need to match the actual ones, as long as the consumed weights are the same
@@ -196,10 +195,12 @@ def apply_qwix_quantization(
     for more details on Qwix.
 
     Note that we currently support different methods for applying Qwix quantization.  The typical
-    approach has is to apply quantization on the concrete model, which already has the weights
+    approach is to apply quantization on the concrete model, which already has the weights
     loaded in.  However, for models like DeepSeek, which are already quantized, we need to
     first create the abstract model, then apply Qwix quantization to the abstract model, and
-    finally load the weights in.
+    finally load the weights in.  To use the latter approach, you will need to modify the
+    model weight loading code appropriately (see deepseek_v3.py for an example) and
+    pass and `use_abstract_model=True` in the quantization config.
 
     Args:
         vllm_config: the base VLLM config
@@ -244,6 +245,8 @@ def apply_qwix_quantization(
         assert isinstance(model_or_model_fn, nnx.Module)
         qwix_quantize_nnx_model_with_config = functools.partial(
             qwix_quantize_nnx_model, qwix_config=qwix_config)
+        # NOTE: it's REALLY important `qwix_quantize_nnx_model_with_config` is jitted
+        # or else you'll run into hanging
         model_or_model_fn = nnx.jit(
             qwix_quantize_nnx_model_with_config,
             donate_argnums=(0, ),
@@ -264,7 +267,6 @@ def apply_qwix_quantization(
 
         return model_or_model_fn
 
-    # NOTE: it's REALLY important this is jitted, or else you'll run into hanging
     qwix_quantize_fn_for_eval = functools.partial(
         qwix_quantize_nnx_model,
         qwix_config=qwix_config,
@@ -274,7 +276,10 @@ def apply_qwix_quantization(
         kv_cache_num_kv_heads=num_kv_heads,
         kv_cache_head_size=head_size)
 
-    def create_and_quantize_model_factory():
+    def create_and_quantize_model_factory() -> Callable:
+        """
+        Helper function to create and quantize the abstract model.
+        """
         model = model_or_model_fn()
         # Handle the DeepSeek case, where this needs to be called in the abstract model
         if hasattr(model, 'initialize_cache'):
@@ -284,19 +289,20 @@ def apply_qwix_quantization(
     return create_and_quantize_model_factory
 
 
-def determine_whether_to_apply_qwix_on_abstract_model(
-        vllm_config: "VllmConfig") -> bool:
+def apply_qwix_on_abstract_model(vllm_config: "VllmConfig") -> bool:
     """
     Determines whether to apply Qwix quantization on the abstract model (e.g. for DeepSeek)
     or the concrete model.  See `apply_qwix_quantization` for more details on the differences
     between these two approaches.
-
     Args:
         vllm_config: the vllm config
-
     Returns:
         whether to apply Qwix quantization on the abstract model
     """
-    qwix_config = quantization_config_file_path_to_dict(
-        vllm_config.additional_config["quantization"])
-    return qwix_config.get("qwix", {}).get("use_abstract_model", False)
+    quantization_config = None
+    if quantization_config := vllm_config.additional_config.get(
+            "quantization", {}):
+        if isinstance(quantization_config, str):
+            quantization_config = quantization_config_file_path_to_dict(
+                quantization_config)
+    return quantization_config.get("qwix", {}).get("use_abstract_model", False)

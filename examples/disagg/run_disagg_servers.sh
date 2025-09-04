@@ -3,7 +3,7 @@
 # shellcheck disable=all
 set -e
 
-MODEL="/mnt/disks/data/Qwen/Qwen2.5-0.5B-Instruct"
+MODEL="Qwen/Qwen2.5-0.5B-Instruct"
 
 NUM_PREFILL_INSTANCES=1
 NUM_DECODE_INSTANCES=1
@@ -32,6 +32,7 @@ cleanup_instances() {
 
 mkdir -p $HOME/logs
 
+KV_IP="127.0.0.1"
 
 # Start prefill instances
 for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
@@ -48,7 +49,7 @@ for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
     --port $PORT \
     --gpu-memory-utilization 0.2 \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
-    --kv-transfer-config "{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_commons.distributed.tpu_connector\",\"kv_role\":\"kv_producer\",\"kv_port\":$KV_PORT}" \
+    --kv-transfer-config "{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_commons.distributed.tpu_connector\",\"kv_role\":\"kv_producer\",\"kv_ip\":\"$KV_IP\",\"kv_port\":\"$KV_PORT\"}" \
     > $HOME/logs/prefill_$i.txt 2>&1 &
 
     PREFILL_HOSTS+=("localhost")
@@ -71,7 +72,7 @@ for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
     --port $PORT \
     --gpu-memory-utilization 0.2 \
     --tensor-parallel-size $DECODER_TP_SIZE \
-    --kv-transfer-config "{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_commons.distributed.tpu_connector\",\"kv_role\":\"kv_consumer\",\"kv_port\":$KV_PORT}" \
+    --kv-transfer-config "{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_commons.distributed.tpu_connector\",\"kv_role\":\"kv_consumer\",\"kv_ip\":\"$KV_IP\",\"kv_port\":\"$KV_PORT\"}" \
     > $HOME/logs/decode_$i.txt 2>&1 &
 
     DECODE_HOSTS+=("localhost")
@@ -104,14 +105,14 @@ python $HOME/tpu_commons/examples/disagg/toy_proxy_server.py \
 cat <<'EOF'
 The proxy server has been launched on: 127.0.0.1:7080
 
-Send example request:
+>> Send example request:
 
 curl -X POST \
 http://127.0.0.1:7080/v1/completions \
 -H "Content-Type: application/json" \
 -d '{"prompt": "We hold these truths to be self-evident, that all men are created equal, that they are endowed by their Creator with certain unalienable Rights, that among these are Life, Liberty and the pursuit of Happiness.--That to secure these rights, Governments are instituted among Men, deriving their just powers from the consent of the governed,  ", "max_tokens": 10}'
 
-Stop the proxy server and all prefill/decode instances:
+>> Stop the proxy server and all prefill/decode instances:
 
 pkill -f "vllm serve" && pkill -f "toy_proxy_server" && pkill -f "run_disagg_servers"
 EOF
