@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import re
+
 import jax
 
 from tpu_commons.logger import init_logger
@@ -264,12 +266,10 @@ TUNED_BLOCK_SIZES = {
 def get_tpu_version() -> int:
     """Returns the numeric version of the TPU, or -1 if not on TPU."""
     kind = jax.devices()[0].device_kind
-    if 'TPU' not in kind:
+    match = re.match(r'^TPU[^\d]*(\d+)', kind)
+    if match is None:
         return -1
-    if kind.endswith(' lite'):
-        kind = kind[:-len(' lite')]
-    assert kind[:-1] == 'TPU v', kind
-    return int(kind[-1])
+    return int(match.group(1))
 
 
 def get_key(
