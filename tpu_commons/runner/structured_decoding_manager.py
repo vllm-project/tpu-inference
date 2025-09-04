@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.sched.output import \
         SchedulerOutput as VllmSchedulerOutput
 
-    from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
+    from tpu_commons.runner.tpu_jax_runner import TPUModelRunner
 
 
 class StructuredDecodingManager:

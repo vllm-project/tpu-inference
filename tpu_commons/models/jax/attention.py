@@ -26,7 +26,7 @@ def sharded_ragged_paged_attention(sm_scale: float,
                                    attention_chunk_size: int | None = None):
     """Shards along KV heads."""
     qkv_spec = P(None, "model", None)
-    kv_cache_spec = P()  # replicated
+    kv_cache_spec = P(None, None, "model")
     in_specs = (
         qkv_spec,  # q
         qkv_spec,  # k

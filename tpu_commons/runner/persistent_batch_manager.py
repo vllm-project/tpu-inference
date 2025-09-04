@@ -5,8 +5,7 @@ from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
 from tpu_commons.logger import init_logger
-from tpu_commons.runner.jax.input_batch_jax import (CachedRequestState,
-                                                    InputBatch)
+from tpu_commons.runner.input_batch_jax import CachedRequestState, InputBatch
 
 logger = init_logger(__name__)
 

@@ -14,7 +14,7 @@ from tpu_commons.models.jax.layers.sample.sampling_metadata import \
 from tpu_commons.utils import device_array
 
 if TYPE_CHECKING:
-    from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
+    from tpu_commons.runner.tpu_jax_runner import TPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -115,10 +115,11 @@ class CompilationManager:
                 input_ids,
                 attention_metadata,
                 inputs_embeds,
+                layer_name_to_kvcache_index,
             ):
                 kv_caches, hidden_states = self.runner.model_fn(
                     state, kv_caches, input_ids, attention_metadata,
-                    inputs_embeds)
+                    inputs_embeds, layer_name_to_kvcache_index)
                 self.runner.kv_caches = kv_caches
                 return hidden_states
 
@@ -130,6 +131,7 @@ class CompilationManager:
                 input_ids,
                 attention_metadata,
                 inputs_embeds,
+                tuple(self.runner.layer_name_to_kvcache_index.items()),
                 num_tokens=num_tokens,
             )
 
@@ -306,8 +308,7 @@ class CompilationManager:
             )
 
     def _precompile_rejection_sampler(self) -> None:
-        logger.info(
-            "Compiling greedy_rejection_sampler with different input shapes.")
+        logger.info("Compiling rejection_sampler with different input shapes.")
         vocab_size = self.runner.model_config.get_vocab_size()
         for num_logits in self.runner.num_logits_paddings:
             for num_reqs in self.runner.num_reqs_paddings:
@@ -321,19 +322,46 @@ class CompilationManager:
                                                              jnp.int32)
                 bonus_token_ids = self._create_dummy_tensor((num_reqs, ),
                                                             jnp.int32)
-                self._run_compilation(
-                    "greedy_rejection_sampler",
-                    self.runner.rejection_sampler,
-                    draft_token_ids,
-                    num_draft_tokens,
-                    -1,
-                    None,
-                    target_probs,
-                    bonus_token_ids,
-                    None,
-                    num_logits=num_logits,
-                    num_reqs=num_reqs,
-                )
+
+                for do_sampling in (False, True):
+                    if do_sampling:
+                        compilation_name = "random_rejection_sampler"
+                        draft_probs = self._create_dummy_tensor(
+                            (num_logits, vocab_size), jnp.bfloat16, sharding)
+                        key = self.runner.rng_params_for_sampling
+                        temperature = self._create_dummy_tensor((num_logits, ),
+                                                                np.float32)
+                        top_k = self._create_dummy_tensor((num_logits, ),
+                                                          np.int32)
+                        top_p = self._create_dummy_tensor((num_logits, ),
+                                                          np.float32)
+                        sampling_metadata = TPUSupportedSamplingMetadata(
+                            temperature=temperature,
+                            top_k=top_k,
+                            top_p=top_p,
+                            do_sampling=do_sampling)
+                    else:
+                        compilation_name = "greedy_rejection_sampler"
+                        draft_probs = None
+                        key = None
+                        sampling_metadata = TPUSupportedSamplingMetadata(
+                            do_sampling=do_sampling)
+
+                    self._run_compilation(
+                        compilation_name,
+                        self.runner.rejection_sampler,
+                        draft_token_ids,
+                        num_draft_tokens,
+                        -1,  # max_spec_len
+                        draft_probs,
+                        target_probs,
+                        bonus_token_ids,
+                        sampling_metadata,
+                        key,
+                        num_logits=num_logits,
+                        num_reqs=num_reqs,
+                        do_sampling=do_sampling,
+                    )
 
     def _precompile_structured_decoding(self) -> None:
         logger.info(

@@ -13,7 +13,7 @@ from vllm.utils import swap_dict_values
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 
-from tpu_commons.runner.jax.block_table_jax import MultiGroupBlockTable
+from tpu_commons.runner.block_table_jax import MultiGroupBlockTable
 
 _SAMPLING_EPS = 1e-5
 

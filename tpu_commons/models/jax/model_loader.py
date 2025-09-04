@@ -165,7 +165,7 @@ def get_flax_model(
 ) -> nnx.Module:
     model_class = _get_model_architecture(vllm_config.model_config.hf_config)
     jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh)
-    kv_cache_sharding = NamedSharding(mesh, PartitionSpec())  # replicated
+    kv_cache_sharding = NamedSharding(mesh, PartitionSpec(None, None, "model"))
     hidden_states_sharding = NamedSharding(mesh, PartitionSpec(None,
                                                                None))  # (T, D)
 
@@ -180,6 +180,7 @@ def get_flax_model(
             hidden_states_sharding,
         ),
         donate_argnums=2,  # 0 is graphdef, 1 is state, 2 is kv_cache
+        static_argnums=6,  #6 is layer_name_to_kvcache_index
     )
     def run_model(graphdef, state, *args):
         model = nnx.merge(graphdef, state)

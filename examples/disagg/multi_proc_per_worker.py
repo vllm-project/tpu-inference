@@ -83,31 +83,33 @@ def get_mesh() -> Mesh:
     return jax.make_mesh((sharding_size, ), ("model", ))
 
 
-def get_kv_shape(mesh: Mesh) -> tuple[int, ...]:
+def get_kv_shape(mesh: Mesh, per_shard: bool = False) -> tuple[int, ...]:
     num_blocks = 10
     block_size = 32
     num_kv_heads = 8
-    shard_size = mesh.shape["model"]
     head_dim = 128
 
+    if per_shard:
+        shard_size = mesh.shape["model"]
+        num_kv_heads = num_kv_heads // shard_size
+
     import tpu_commons.kernels.ragged_paged_attention.v3.kernel as rpa
-    shape = rpa.get_kv_cache_shape(num_blocks, block_size,
-                                   num_kv_heads // shard_size, head_dim,
-                                   jnp.bfloat16)
+    shape = rpa.get_kv_cache_shape(num_blocks, block_size, num_kv_heads,
+                                   head_dim, jnp.bfloat16)
     return shape
 
 
 def get_kv_spec(mesh: Mesh) -> jax.ShapeDtypeStruct:
     shape = get_kv_shape(mesh)
     dtype = jnp.bfloat16
-    sharding = NamedSharding(mesh, P())
+    sharding = NamedSharding(mesh, P(None, None, "model"))
     num_layers = 4
     return [jax.ShapeDtypeStruct(shape, dtype, sharding=sharding)] * num_layers
 
 
 # Hard code the shard spec, it could have been calculated.
 def get_kv_shard_spec(mesh: Mesh) -> jax.ShapeDtypeStruct:
-    shape = get_kv_shape(mesh)
+    shape = get_kv_shape(mesh, per_shard=True)
     dtype = jnp.bfloat16
     sharding = SingleDeviceSharding(jax.local_devices()[0])
     num_layers = 4
@@ -131,11 +133,11 @@ def prefill_worker(pid: int, squeue: multiprocessing.Queue):
 
     def _get_p2p_server_addr(pid: int):
         ports = [8576, 8577, 8578, 8579]
-        return f"localhost:{ports[pid]}"
+        return f"127.0.0.1:{ports[pid]}"
 
     def _get_ip(pid: int):
         port = _get_port(pid)
-        return f"localhost:{port}"
+        return f"127.0.0.1:{port}"
 
     def _get_ips():
         ips = [_get_ip(i) for i in range(4)]
@@ -176,7 +178,7 @@ def prefill_worker(pid: int, squeue: multiprocessing.Queue):
     s = start_transfer_server(
         jax.local_devices()[0].client,
         _get_p2p_server_addr(pid),
-        ['0.0.0.0:0'],
+        ['127.0.0.1:0'],
     )
     server_addr = s.address()
     log(f"Launched server on {server_addr}")
@@ -201,15 +203,15 @@ def decode_worker(pid: int, squeue: multiprocessing.Queue):
 
     def _get_p2p_server_addr(pid: int):
         ports = [8586, 8587, 8588, 8589]
-        return f"localhost:{ports[pid]}"
+        return f"127.0.0.1:{ports[pid]}"
 
     def _get_prefill_p2p_server_addr(pid: int):
         ports = [8576, 8577, 8578, 8579]
-        return f"localhost:{ports[pid]}"
+        return f"127.0.0.1:{ports[pid]}"
 
     def _get_ip(pid: int):
         port = _get_port(pid)
-        return f"localhost:{port}"
+        return f"127.0.0.1:{port}"
 
     def _get_ips():
         ips = [_get_ip(i) for i in range(4)]
@@ -230,7 +232,7 @@ def decode_worker(pid: int, squeue: multiprocessing.Queue):
     s = start_transfer_server(
         jax.local_devices()[0].client,
         _get_p2p_server_addr(pid),
-        ['0.0.0.0:0'],
+        ['127.0.0.1:0'],
     )
     server_addr = s.address()
     log(f"Launched server on {server_addr}")

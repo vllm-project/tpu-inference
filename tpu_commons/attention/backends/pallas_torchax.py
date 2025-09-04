@@ -9,7 +9,6 @@ from jax.sharding import Mesh
 from torchax.interop import jax_view, torch_view
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
-from vllm.model_executor.models.utils import extract_layer_index
 
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention import attention
@@ -96,8 +95,10 @@ class PallasAttentionBackendImpl(AttentionImpl):
         del kv_cache  # Use kv_cache from vllm wrapper context values instead.
 
         vllm_model_wrapper_context = get_vllm_model_wrapper_context()
-        layer_idx = extract_layer_index(layer.layer_name)
-        kv_cache = vllm_model_wrapper_context.kv_caches[layer_idx]
+        kv_cache_index = vllm_model_wrapper_context.layer_name_to_kvcache_index[
+            layer.layer_name]
+        kv_cache = vllm_model_wrapper_context.kv_caches[kv_cache_index]
+
         mesh = vllm_model_wrapper_context.mesh
 
         new_kv_cache, outputs = _jax_attn_func(kv_cache, jax_view(query),
@@ -105,7 +106,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
                                                attn_metadata, mesh, self.scale,
                                                self.head_size, self.num_heads,
                                                self.num_kv_heads)
-        vllm_model_wrapper_context.kv_caches[layer_idx] = new_kv_cache
+        vllm_model_wrapper_context.kv_caches[kv_cache_index] = new_kv_cache
 
         return torch_view(outputs)
 

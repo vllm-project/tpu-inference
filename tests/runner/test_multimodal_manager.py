@@ -11,8 +11,8 @@ from vllm.multimodal.inputs import (MultiModalBatchedField,
 from vllm.sampling_params import SamplingType
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
-from tpu_commons.runner.jax.input_batch_jax import CachedRequestState
-from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
+from tpu_commons.runner.input_batch_jax import CachedRequestState
+from tpu_commons.runner.tpu_jax_runner import TPUModelRunner
 
 
 class TestMultiModalManager:
@@ -26,7 +26,7 @@ class TestMultiModalManager:
         with patch('jax.devices', return_value=self.mock_devices), \
              patch('jax.make_mesh', return_value=self.mock_mesh), \
              patch('jax.random.key', return_value=self.mock_rng_key), \
-             patch('tpu_commons.runner.jax.tpu_jax_runner.get_model', return_value=MagicMock()):
+             patch('tpu_commons.runner.tpu_jax_runner.get_model', return_value=MagicMock()):
 
             model_config = ModelConfig(tokenizer_mode="auto",
                                        trust_remote_code=False,

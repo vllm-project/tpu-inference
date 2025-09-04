@@ -1,17 +1,16 @@
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import jax
 from jax.sharding import Mesh
 
-KVCache = Tuple[jax.Array, jax.Array]
-
 
 @dataclass
 class VllmModelWrapperContext:
-    kv_caches: List[KVCache]
+    kv_caches: List[jax.Array]
     mesh: Mesh
+    layer_name_to_kvcache_index: Dict[str, int]
 
 
 _vllm_model_wrapper_context: Optional[VllmModelWrapperContext] = None
@@ -28,13 +27,17 @@ def get_vllm_model_wrapper_context() -> VllmModelWrapperContext:
 @contextmanager
 def set_vllm_model_wrapper_context(
     *,
-    kv_caches: List[KVCache],
+    kv_caches: List[jax.Array],
     mesh: Mesh,
+    layer_name_to_kvcache_index: Dict[str, int] = None,
 ):
     global _vllm_model_wrapper_context
     prev_context = _vllm_model_wrapper_context
-    _vllm_model_wrapper_context = VllmModelWrapperContext(kv_caches=kv_caches,
-                                                          mesh=mesh)
+    _vllm_model_wrapper_context = VllmModelWrapperContext(
+        kv_caches=kv_caches,
+        mesh=mesh,
+        layer_name_to_kvcache_index=layer_name_to_kvcache_index,
+    )
 
     try:
         yield

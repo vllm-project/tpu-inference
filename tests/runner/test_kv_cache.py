@@ -6,7 +6,7 @@ import pytest
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 from tpu_commons.models.jax.attention import get_kv_cache_shape_with_mesh
-from tpu_commons.runner.jax.kv_cache import create_kv_caches
+from tpu_commons.runner.kv_cache import create_kv_caches
 
 
 @pytest.fixture

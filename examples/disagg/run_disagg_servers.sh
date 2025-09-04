@@ -32,6 +32,7 @@ cleanup_instances() {
 
 mkdir -p $HOME/logs
 
+KV_IP="127.0.0.1"
 
 # Start prefill instances
 for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
@@ -48,7 +49,7 @@ for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
     --port $PORT \
     --gpu-memory-utilization 0.2 \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
-    --kv-transfer-config "{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_commons.distributed.tpu_connector\",\"kv_role\":\"kv_producer\",\"kv_port\":$KV_PORT}" \
+    --kv-transfer-config "{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_commons.distributed.tpu_connector\",\"kv_role\":\"kv_producer\",\"kv_ip\":\"$KV_IP\",\"kv_port\":\"$KV_PORT\"}" \
     > $HOME/logs/prefill_$i.txt 2>&1 &
 
     PREFILL_HOSTS+=("localhost")
@@ -71,7 +72,7 @@ for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
     --port $PORT \
     --gpu-memory-utilization 0.2 \
     --tensor-parallel-size $DECODER_TP_SIZE \
-    --kv-transfer-config "{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_commons.distributed.tpu_connector\",\"kv_role\":\"kv_consumer\",\"kv_port\":$KV_PORT}" \
+    --kv-transfer-config "{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_commons.distributed.tpu_connector\",\"kv_role\":\"kv_consumer\",\"kv_ip\":\"$KV_IP\",\"kv_port\":\"$KV_PORT\"}" \
     > $HOME/logs/decode_$i.txt 2>&1 &
 
     DECODE_HOSTS+=("localhost")

@@ -11,6 +11,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tpu_commons.models.jax.layers.binary_search import topk_mask, topp_mask
 from tpu_commons.models.jax.layers.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 
@@ -20,6 +21,7 @@ MAX_SPEC_LEN = 32
 
 # Placeholder token ID for rejected tokens
 PLACEHOLDER_TOKEN_ID = -1
+GREEDY_TEMPERATURE = -1
 
 
 class RejectionSampler:
@@ -43,10 +45,11 @@ class RejectionSampler:
         # [num_tokens, vocab_size] - flattened format
         draft_probs: Optional[jnp.ndarray],
         # [num_tokens, vocab_size] - flattened format
-        target_probs: jnp.ndarray,
+        target_logits: jnp.ndarray,
         # [batch_size]
         bonus_token_ids: jnp.ndarray,
         sampling_metadata: TPUSupportedSamplingMetadata,
+        key: Optional[jax.random.PRNGKey] = None,
     ) -> jnp.ndarray:
         """
         Perform rejection sampling on draft tokens with flattened inputs.
@@ -59,6 +62,7 @@ class RejectionSampler:
             target_probs: Target probabilities in flattened format [num_tokens, vocab_size].
             bonus_token_ids: Bonus token IDs [batch_size].
             sampling_metadata: Additional metadata needed for sampling.
+            key: JAX random key for non-greedy sampling.
 
         Returns:
             output_token_ids: A tensor containing the final output token IDs.
@@ -68,9 +72,10 @@ class RejectionSampler:
             num_draft_tokens=num_draft_tokens,
             max_spec_len=max_spec_len,
             draft_probs=draft_probs,
-            target_probs=target_probs,
+            target_logits=target_logits,
             bonus_token_ids=bonus_token_ids,
             sampling_metadata=sampling_metadata,
+            key=key,
         )
 
     def forward(
@@ -83,10 +88,11 @@ class RejectionSampler:
         # [num_tokens, vocab_size] - flattened format
         draft_probs: Optional[jnp.ndarray],
         # [num_tokens, vocab_size] - flattened format
-        target_probs: jnp.ndarray,
+        target_logits: jnp.ndarray,
         # [batch_size]
         bonus_token_ids: jnp.ndarray,
         sampling_metadata: TPUSupportedSamplingMetadata,
+        key: Optional[jax.random.PRNGKey] = None,
     ) -> jnp.ndarray:
         """
         Perform rejection sampling on draft tokens with flattened inputs.
@@ -96,14 +102,21 @@ class RejectionSampler:
             num_draft_tokens: Number of draft tokens per request [batch_size].
             max_spec_len: Maximum number of speculative tokens.
             draft_probs: Draft probabilities in flattened format [num_tokens, vocab_size].
-            target_probs: Target probabilities in flattened format [num_tokens, vocab_size].
+            target_logits: Target logits in flattened format [num_tokens, vocab_size].
             bonus_token_ids: Bonus token IDs [batch_size].
             sampling_metadata: Additional metadata needed for sampling.
+            key: JAX random key for non-greedy sampling.
 
         Returns:
             output_token_ids: A tensor containing the final output token IDs.
         """
         assert max_spec_len <= MAX_SPEC_LEN
+
+        if sampling_metadata.do_sampling:
+            target_probs = _compute_probs(target_logits, num_draft_tokens,
+                                          sampling_metadata)
+        else:
+            target_probs = target_logits
 
         output_token_ids = rejection_sample(
             draft_token_ids,
@@ -113,6 +126,7 @@ class RejectionSampler:
             target_probs,
             bonus_token_ids,
             sampling_metadata,
+            key=key,
         )
         return output_token_ids
 
@@ -178,6 +192,94 @@ class RejectionSampler:
         return outputs
 
 
+def _compute_probs(
+    logits: jnp.ndarray,
+    num_draft_tokens: jnp.ndarray,
+    sampling_metadata: TPUSupportedSamplingMetadata,
+) -> jnp.ndarray:
+    """
+    Apply top-k, top-p, and temperature to logits and compute probabilities.
+    """
+    total_tokens = logits.shape[0]
+    segment_ids, _ = _get_segment_info(num_draft_tokens, total_tokens)
+
+    # Expand sampling params from [batch_size] to [num_tokens]
+    top_k = sampling_metadata.top_k[segment_ids]
+    top_p = sampling_metadata.top_p[segment_ids]
+    temperatures = sampling_metadata.temperature[segment_ids]
+
+    # Apply top-k and top-p masking
+    logits = logits.astype(jnp.float32)
+    # Only apply top-k masking if k > 0 for each token
+    should_apply_topk = jnp.expand_dims(top_k > 0, axis=-1)
+    topk_masked = topk_mask(logits, top_k, replace_val=-jnp.inf)
+    logits = jnp.where(should_apply_topk, topk_masked, logits)
+
+    # Only apply top-p masking if p < 1.0 for each token
+    should_apply_topp = jnp.expand_dims(top_p < 1.0, axis=-1)
+    topp_masked = topp_mask(logits, top_p, replace_val=-jnp.inf)
+    logits = jnp.where(should_apply_topp, topp_masked, logits)
+
+    # Apply temperature scaling
+    temperatures = jnp.expand_dims(temperatures, axis=-1)
+    # Add epsilon to avoid division by zero
+    logits /= (temperatures + 1e-9)
+
+    return jax.nn.softmax(logits, axis=-1)
+
+
+def _get_segment_info(num_draft_tokens: jax.Array, total_tokens: int):
+    """Helper to create segment IDs and per-segment indices."""
+    batch_size = num_draft_tokens.shape[0]
+
+    # `segment_ids` assigns a unique ID to each token, corresponding to its
+    # sequence in the batch. E.g., [0, 0, 0, 1, 1, 2, 2, 2, 2] for sequences [3, 2, 4].
+    segment_ids = jnp.repeat(jnp.arange(batch_size),
+                             num_draft_tokens,
+                             total_repeat_length=total_tokens)
+
+    # `group_indices` creates a within-segment index for each token.
+    # E.g., [0, 1, 2, 0, 1, 0, 1, 2, 3] for the example above.
+    segment_starts = jnp.concatenate(
+        [jnp.array([0]), jnp.cumsum(num_draft_tokens)[:-1]])
+    broadcast_starts = jnp.repeat(segment_starts,
+                                  num_draft_tokens,
+                                  total_repeat_length=total_tokens)
+    group_indices = jnp.arange(total_tokens) - broadcast_starts
+    return segment_ids, group_indices
+
+
+@jax.jit
+def _sample_recovered_tokens(
+    draft_token_ids: jax.Array,
+    draft_probs: Optional[jax.Array],
+    target_probs: jax.Array,
+    key: jax.random.PRNGKey,
+) -> jax.Array:
+    """
+    Sample recovered tokens using the Gumbel-Max trick.
+    This is used when a draft token is rejected in random sampling.
+    """
+    if draft_probs is not None:
+        # The new distribution is p' = max(p_target - p_draft, 0)
+        new_dist = jnp.maximum(target_probs - draft_probs, 0)
+    else:
+        # If no draft probs, the new distribution is the target distribution
+        # with the draft token's probability zeroed out.
+        vocab_size = target_probs.shape[-1]
+        mask = jax.nn.one_hot(draft_token_ids, vocab_size, dtype=jnp.bool)
+        new_dist = target_probs * ~mask
+
+    # Gumbel-Max trick to sample from the new distribution:
+    # y = argmax(log(p') + g) where g ~ Gumbel(0,1)
+    # This is equivalent to argmax(p' / q) where q ~ Exponential(1)
+    q = jax.random.exponential(key, shape=new_dist.shape)
+
+    # Add a small epsilon to avoid division by zero
+    recovered_token_ids = jnp.argmax(new_dist / (q + 1e-9), axis=-1)
+    return recovered_token_ids
+
+
 def rejection_sample(
     # [num_tokens] - flattened format
     draft_token_ids: jnp.ndarray,
@@ -191,6 +293,7 @@ def rejection_sample(
     # [batch_size]
     bonus_token_ids: jnp.ndarray,
     sampling_metadata: TPUSupportedSamplingMetadata,
+    key: Optional[jax.random.PRNGKey] = None,
 ) -> jnp.ndarray:
     """
     Perform rejection sampling on draft tokens with flattened inputs.
@@ -203,19 +306,115 @@ def rejection_sample(
         target_probs: Target probabilities in flattened format [num_tokens, vocab_size].
         bonus_token_ids: Bonus token IDs [batch_size].
         sampling_metadata: Sampling metadata.
+        key: JAX random key for non-greedy sampling.
 
     Returns:
         output_token_ids: Output token IDs [num_tokens + batch_size].
     """
-    # Use segment-based approach with flattened inputs directly
-    output_token_ids = _greedy_rejection_sample_with_segment(
+    if sampling_metadata.do_sampling is False:
+        greedy_output = _greedy_rejection_sample_with_segment(
+            draft_token_ids, target_probs, num_draft_tokens, bonus_token_ids)
+        return greedy_output
+
+    # Random path
+    if key is None:
+        raise ValueError(
+            "A random key must be provided for non-greedy sampling.")
+
+    random_output = _random_rejection_sample_with_segment(
         draft_token_ids,
+        draft_probs,
         target_probs,
         num_draft_tokens,
         bonus_token_ids,
+        key,
     )
 
-    return output_token_ids
+    return random_output
+
+
+@jax.jit
+def _random_rejection_sample_with_segment(
+    draft_token_ids: jax.Array,
+    draft_probs: Optional[jax.Array],
+    target_probs: jax.Array,
+    num_draft_tokens: jax.Array,
+    bonus_token_ids: jax.Array,
+    key: jax.random.PRNGKey,
+) -> jax.Array:
+    """
+    Performs random speculative decoding validation in a vectorized, jittable manner.
+    """
+    total_tokens = draft_token_ids.shape[0]
+    batch_size = num_draft_tokens.shape[0]
+
+    # Split random key
+    uniform_key, recover_key = jax.random.split(key)
+
+    # --- Step 1: Get Segment Info ---
+    segment_ids, group_indices = _get_segment_info(num_draft_tokens,
+                                                   total_tokens)
+
+    # --- Step 2: Acceptance/Rejection Logic ---
+    if draft_probs is not None:
+        draft_token_probs = jnp.take_along_axis(draft_probs,
+                                                draft_token_ids[:, None],
+                                                axis=-1).squeeze(-1)
+    else:
+        draft_token_probs = 1.0
+
+    target_token_probs = jnp.take_along_axis(target_probs,
+                                             draft_token_ids[:, None],
+                                             axis=-1).squeeze(-1)
+
+    uniform_probs = jax.random.uniform(uniform_key, shape=(total_tokens, ))
+
+    # Acceptance condition: p_target(d) / p_draft(d) >= u
+    ratio = target_token_probs / (draft_token_probs + 1e-9)
+    accepted = ratio >= uniform_probs
+
+    # --- Step 3: Find First Rejection ---
+    rejections = ~accepted
+    large_value = total_tokens
+    rejection_indices = jnp.where(rejections, group_indices, large_value)
+
+    first_rejection_idx_per_segment = jax.ops.segment_min(
+        data=rejection_indices.astype(jnp.int32),
+        segment_ids=segment_ids,
+        num_segments=batch_size,
+        indices_are_sorted=True,
+    )
+
+    max_int = jnp.iinfo(jnp.int32).max
+    first_rejection_idx_per_segment = jnp.where(
+        first_rejection_idx_per_segment == max_int, large_value,
+        first_rejection_idx_per_segment)
+
+    # --- Step 4: Sample Recovered Tokens ---
+    recovered_token_ids = _sample_recovered_tokens(draft_token_ids,
+                                                   draft_probs, target_probs,
+                                                   recover_key)
+
+    # --- Step 5: Generate Main Token Output ---
+    first_rejection_idx_broadcast = jnp.repeat(
+        first_rejection_idx_per_segment,
+        num_draft_tokens,
+        total_repeat_length=total_tokens)
+
+    main_tokens = jnp.where(
+        group_indices < first_rejection_idx_broadcast, draft_token_ids,
+        jnp.where(group_indices == first_rejection_idx_broadcast,
+                  recovered_token_ids, PLACEHOLDER_TOKEN_ID))
+
+    # --- Step 6: Handle Bonus Tokens ---
+    all_accepted = first_rejection_idx_per_segment == large_value
+    no_draft_tokens = num_draft_tokens == 0
+    should_get_bonus = all_accepted | no_draft_tokens
+    bonus_tokens = jnp.where(should_get_bonus, bonus_token_ids,
+                             PLACEHOLDER_TOKEN_ID)
+
+    # --- Step 7: Concatenate ---
+    return jnp.concatenate([main_tokens, bonus_tokens])
 
 
 # TODO(pooyam): Optimize/Profile this implementation further. Currently, I just want working e2e. There might be overheads with `parse_output` that can be optimized on TPU.
@@ -261,21 +460,8 @@ def _greedy_rejection_sample_with_segment(
     # --- Step 1: Create Segment IDs and Per-Segment Indices ---
     total_tokens = draft_token_ids.shape[0]
     batch_size = num_draft_tokens.shape[0]
-
-    # `segment_ids` assigns a unique ID to each token, corresponding to its
-    # sequence in the batch. E.g., [0, 0, 0, 1, 1, 2, 2, 2, 2] for sequences [3, 2, 4].
-    segment_ids = jnp.repeat(jnp.arange(batch_size),
-                             num_draft_tokens,
-                             total_repeat_length=total_tokens)
-
-    # `group_indices` creates a within-segment index for each token.
-    # E.g., [0, 1, 2, 0, 1, 0, 1, 2, 3] for the example above.
-    segment_starts = jnp.concatenate(
-        [jnp.array([0]), jnp.cumsum(num_draft_tokens)[:-1]])
-    broadcast_starts = jnp.repeat(segment_starts,
-                                  num_draft_tokens,
-                                  total_repeat_length=total_tokens)
-    group_indices = jnp.arange(total_tokens) - broadcast_starts
+    segment_ids, group_indices = _get_segment_info(num_draft_tokens,
+                                                   total_tokens)
 
     # --- Step 2: Find the First Mismatch in Each Segment ---
 

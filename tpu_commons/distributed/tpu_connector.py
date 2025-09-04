@@ -86,7 +86,7 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 from tpu_commons.logger import init_logger
-from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
+from tpu_commons.runner.tpu_jax_runner import TPUModelRunner
 from tpu_commons.utils import device_array
 
 EngineId = str
@@ -426,6 +426,7 @@ class TPUConnectorWorker:
         # req_id: thread_future
         self.reqs_pulling: dict[ReqId, Future] = {}
 
+        self.host = self.config.kv_ip
         self.kv_transfer_port = self.config.kv_port
         self.kv_transfer_server = None
         self._maybe_start_p2p_server()
@@ -469,11 +470,12 @@ class TPUConnectorWorker:
     def _maybe_start_p2p_server(self):
         if self.kv_transfer_server is not None:
             return
-        server_addr = f"0.0.0.0:{self.kv_transfer_port}"
+        server_addr = f"{self.host}:{self.kv_transfer_port}"
+        transport_addr = f'{self.host}:0'
         self.kv_transfer_server = start_transfer_server(
             jax.local_devices()[0].client,
             server_addr,
-            ['0.0.0.0:0'],
+            [transport_addr],
             max_num_parallel_copies=8,
             transfer_size=256 * 1024 * 1024,
             use_raw_buffers=False,

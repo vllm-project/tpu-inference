@@ -10,6 +10,8 @@ from tpu_commons.models.vllm.quantization.compressed_tensors.compressed_tensors 
     JaxCompressedTensorsConfig  # noqa: E501
 from tpu_commons.models.vllm.quantization.unquantized import \
     JaxUnquantizedConfig
+from tpu_commons.models.vllm.quantization.awq import \
+    JaxAWQConfig
 
 
 def get_tpu_quantization_config(vllm_config: VllmConfig,
@@ -19,6 +21,7 @@ def get_tpu_quantization_config(vllm_config: VllmConfig,
     method_to_config: dict[str, str] = {
         None: JaxUnquantizedConfig,
         "compressed-tensors": JaxCompressedTensorsConfig,
+        "awq": JaxAWQConfig,
     }
 
     if model_config.quantization not in method_to_config:

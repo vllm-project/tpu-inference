@@ -5,7 +5,7 @@ import numpy as np
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
 
-from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
+from tpu_commons.runner.tpu_jax_runner import TPUModelRunner
 
 
 class TestTPUJaxRunner:
@@ -19,7 +19,7 @@ class TestTPUJaxRunner:
         with patch('jax.devices', return_value=self.mock_devices), \
              patch('jax.make_mesh', return_value=self.mock_mesh), \
              patch('jax.random.key', return_value=self.mock_rng_key), \
-             patch('tpu_commons.runner.jax.tpu_jax_runner.get_model', return_value=MagicMock()):
+             patch('tpu_commons.runner.tpu_jax_runner.get_model', return_value=MagicMock()):
 
             model_config = ModelConfig(tokenizer_mode="auto",
                                        trust_remote_code=False,
@@ -112,8 +112,8 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
         with patch('jax.devices', return_value=self.mock_devices), \
              patch('jax.make_mesh', return_value=self.mock_mesh), \
              patch('jax.random.key', return_value=self.mock_rng_key), \
-             patch('tpu_commons.runner.jax.tpu_jax_runner.nnx.Rngs', return_value=self.mock_rng_key), \
-             patch('tpu_commons.runner.jax.tpu_jax_runner.get_model', return_value=self._model_get_model()):
+             patch('tpu_commons.runner.tpu_jax_runner.nnx.Rngs', return_value=self.mock_rng_key), \
+             patch('tpu_commons.runner.tpu_jax_runner.get_model', return_value=self._model_get_model()):
 
             model_config = ModelConfig(tokenizer_mode="auto",
                                        trust_remote_code=False,
