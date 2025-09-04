@@ -1,6 +1,7 @@
 import functools
 import os
 import random
+import time
 from contextlib import nullcontext
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
@@ -104,6 +105,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         self.persistent_batch_manager = PersistentBatchManager(
             self.requests, self.input_batch, self.encoder_cache,
             self.uses_mrope, self.model_config)
+
+        self.batch_composition = None
 
     def _init_random(self):
         if self.model_config.seed is None:
@@ -290,6 +293,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         self,
         scheduler_output: "VllmSchedulerOutput",
     ) -> tuple[AttentionMetadata, ModelRunnerOutput]:
+        preempted_reqs = scheduler_output.preempted_req_ids
         self.persistent_batch_manager.update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
             if has_kv_transfer_group():
@@ -344,6 +348,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                     scheduler_output) as kv_connector_output:
                 # NOTE(Wenlong): It takes both `input_ids` and `inputs_embeds`,
                 # but one of them would be `None`
+                start = time.perf_counter()
+                start_mem = common_utils.hbm_usage_gb(self.devices)
                 self.kv_caches, hidden_states = self.model_fn(
                     self.state,
                     self.kv_caches,
@@ -351,6 +357,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                     attn_metadata,
                     inputs_embeds,
                     tuple(self.layer_name_to_kvcache_index.items()),
+                )
+                end_mem = common_utils.hbm_usage_gb(self.devices)
+                print(
+                    f"model_fn time: {time.perf_counter() - start} for batch {self.batch_composition  } starting from {start_mem} to {end_mem} Gb with {len(preempted_reqs)} preempted requests"
                 )
 
             hidden_states = self._select_from_array_fn(hidden_states,
@@ -578,6 +588,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                 padded_total_num_scheduled_tokens, scheduler_output)
 
             self.phase_based_profiler.step(batch_composition_stats)
+
+        batch_composition_stats = runner_utils.get_batch_composition_stats(
+            self.input_batch, total_num_scheduled_tokens, num_reqs,
+            padded_total_num_scheduled_tokens, scheduler_output)
+        self.batch_composition = batch_composition_stats
 
         # Inputs
         input_ids = self.input_ids_cpu[:padded_total_num_scheduled_tokens]
