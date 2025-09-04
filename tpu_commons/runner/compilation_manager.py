@@ -326,7 +326,6 @@ class CompilationManager:
                     draft_probs = None
                     if do_sampling:
                         compilation_name = "random_rejection_sampler"
-                        key = self.runner.rng_params_for_sampling
                         temperature = self._create_dummy_tensor((num_reqs, ),
                                                                 np.float32)
                         top_k = self._create_dummy_tensor((num_reqs, ),
@@ -340,7 +339,6 @@ class CompilationManager:
                             do_sampling=do_sampling)
                     else:
                         compilation_name = "greedy_rejection_sampler"
-                        key = None
                         sampling_metadata = TPUSupportedSamplingMetadata(
                             do_sampling=do_sampling)
 
@@ -353,7 +351,7 @@ class CompilationManager:
                         target_probs,
                         bonus_token_ids,
                         sampling_metadata,
-                        key,
+                        self.runner.rng_params_for_sampling,
                         num_logits=num_logits,
                         num_reqs=num_reqs,
                         do_sampling=do_sampling,
