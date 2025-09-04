@@ -1,8 +1,9 @@
 import functools
 import os
-from typing import Any
+from typing import Any, Optional
 
 import jax
+import torch
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from transformers import PretrainedConfig
@@ -116,7 +117,6 @@ def _get_nnx_model(
                 mesh,
                 apply_to_abstract_model=True)
         model = nnx.eval_shape(abstract_model_fn)
-        model.load_weights(rng)
         # Although the created model can already work, we still need to jit
         # the model creation again, otherwise the model forward will have
         # non-trivial overhead in PjitFunction.
@@ -136,6 +136,7 @@ def _get_nnx_model(
             return model
 
         with mesh:
+            model.load_weights(rng)
             jit_model = create_jit_model(model)
     return jit_model
 
@@ -240,14 +241,55 @@ def get_model(
         raise NotImplementedError("Unsupported MODEL_IMPL_TYPE")
 
 
-def register_model(arch: str, model: Any):
+def register_model(arch: str, model: Any) -> None:
     """
     Registers a model class for a given architecture name.
 
+    This function registers the model with both the tpu_commons registry
+    and the vLLM registry. For vLLM, it creates a compatible wrapper
+    around the JAX model.
+
     Args:
         arch: The name of the architecture (e.g., "LlamaForCausalLM").
-        model: The model class to register.
+        model: The JAX model class to register (e.g., a flax.nnx.Module).
     """
-    # TODO: Support lazy loading (like vllm)
-    # TODO: Also call vllm's `ModelRegistry.register_model`.
+    # Register with tpu_commons registry for the JAX backend
     _MODEL_REGISTRY[arch] = model
+
+    # Create a vLLM-compatible wrapper for the JAX model class.
+    # This wrapper inherits from the JAX model and torch.nn.Module
+    # to pass vLLM's type checks. It is not meant to be instantiated
+    # or executed by vLLM's PyTorch backend.
+    def unimplemented_forward(
+        self,
+        input_ids: "torch.Tensor",
+        positions: "torch.Tensor",
+        intermediate_tensors: Optional[Any] = None,
+        inputs_embeds: Optional["torch.Tensor"] = None,
+    ) -> None:
+        raise NotImplementedError(
+            "This is a JAX model and does not implement the PyTorch forward method."
+        )
+
+    # We need a custom __init__ that only calls torch.nn.Module's init,
+    # to avoid triggering JAX logic when vLLM inspects the class.
+    def wrapper_init(self, *args, **kwargs):
+        torch.nn.Module.__init__(self)
+
+    # Dynamically create the wrapper class that is a subclass of both the
+    # JAX model and torch.nn.Module.
+    VllmCompatibleModel = type(
+        f"VllmCompatible{model.__name__}",
+        (model, torch.nn.Module),
+        {
+            "__init__": wrapper_init,
+            "forward": unimplemented_forward,
+            # Prevent vLLM from trying to load weights into this dummy class.
+            "load_weights": lambda self, *args, **kwargs: None,
+        })
+
+    # Register the wrapped model with vLLM's registry.
+    from vllm.model_executor.models.registry import ModelRegistry
+    ModelRegistry.register_model(arch, VllmCompatibleModel)
+    logger.info(
+        f"Registered JAX model {arch} with tpu_commons and vLLM registries.")
