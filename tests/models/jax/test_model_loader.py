@@ -1,4 +1,5 @@
 import os
+import tempfile
 from unittest.mock import MagicMock, patch
 
 import jax
@@ -8,6 +9,8 @@ import torch
 from jax.sharding import Mesh
 from transformers import PretrainedConfig
 from vllm.config import ModelConfig, VllmConfig
+from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
+                                             init_distributed_environment)
 from vllm.engine.arg_utils import EngineArgs
 
 from tpu_commons.models.jax import model_loader
@@ -126,8 +129,22 @@ def test_get_vllm_model(mesh):
     vllm_config = engine_args.create_engine_config()
     vllm_config.model_config.dtype = torch.bfloat16
 
-    model_fn, compute_logits_fn, _, _, _ = model_loader.get_vllm_model(
-        vllm_config, rng, mesh)
+    with patch("vllm.config.get_current_vllm_config",
+               return_value=vllm_config):
+        temp_file = tempfile.mkstemp()[1]
+        init_distributed_environment(
+            world_size=1,
+            rank=0,
+            local_rank=0,
+            distributed_init_method=f"file://{temp_file}",
+            backend="gloo",
+        )
+        ensure_model_parallel_initialized(
+            tensor_model_parallel_size=1,
+            pipeline_model_parallel_size=1,
+        )
+        model_fn, compute_logits_fn, _, _, _ = model_loader.get_vllm_model(
+            vllm_config, rng, mesh)
 
     assert callable(model_fn)
     assert callable(compute_logits_fn)
