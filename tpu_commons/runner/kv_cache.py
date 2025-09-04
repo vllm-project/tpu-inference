@@ -5,7 +5,6 @@ import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 import tpu_commons.kernels.ragged_paged_attention.v3.kernel as rpa
-from tpu_commons import utils
 from tpu_commons.logger import init_logger
 
 logger = init_logger(__name__)
@@ -62,9 +61,4 @@ def create_kv_caches(
     kv_caches = []
     for _ in layer_names:
         kv_caches.append(sharded_allocate())
-    logger.info(f"Init kv-cache | "
-                f"shape={len(layer_names)} * {shard_cnt} | "
-                f"sharding={sharding} | "
-                f"dtype={cache_dtype} | "
-                f"hbm={utils.hbm_usage_gb(mesh.devices.flatten())}Gb")
     return kv_caches

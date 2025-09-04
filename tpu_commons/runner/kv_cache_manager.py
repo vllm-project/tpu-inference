@@ -11,6 +11,7 @@ from vllm.config import get_layers_from_vllm_config
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec, SlidingWindowSpec)
 
+from tpu_commons import utils
 from tpu_commons import utils as common_utils
 from tpu_commons.logger import init_logger
 from tpu_commons.runner import utils as runner_utils
@@ -141,17 +142,21 @@ class KVCacheManager:
         representative_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
         page_size_bytes = representative_spec.page_size_bytes
         self.runner.layer_name_to_kvcache_index: Dict[str, int] = {}
+        kv_caches = self.runner.kv_caches
+        num_blocks_list = []
         for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
             assert kv_cache_tensor.size % page_size_bytes == 0
+            num_blocks = kv_cache_tensor.size // page_size_bytes
             # NOTE: we'll multiply the num_kv_heads by 2 in the function
             kv_cache = create_kv_caches(
-                num_blocks=kv_cache_tensor.size // page_size_bytes,
+                num_blocks=num_blocks,
                 block_size=representative_spec.block_size,
                 num_kv_heads=representative_spec.num_kv_heads,
                 head_size=representative_spec.head_size,
                 mesh=self.runner.mesh,
                 layer_names=[f'kv_cache_tensor.{i}'])[0]
-            self.runner.kv_caches.append(kv_cache)
+            kv_caches.append(kv_cache)
+            num_blocks_list.append(num_blocks)
             for layer_name in kv_cache_tensor.shared_by:
                 self.runner.layer_name_to_kvcache_index[layer_name] = i
 
@@ -161,6 +166,15 @@ class KVCacheManager:
                 self.runner.layer_name_to_kvcache_index[
                     layer_name] = self.runner.layer_name_to_kvcache_index[
                         target_layer_name]
+
+        logger.info(
+            f"Init kv-cache | "
+            f"num_layers={len(kv_caches)} | "
+            f"shape=(num_blocks, {kv_caches[0].shape[1:]}) | "
+            f"num_blocks={num_blocks_list} | "
+            f"sharding={kv_caches[0].sharding} | "
+            f"dtype={kv_caches[0].dtype} | "
+            f"hbm={utils.hbm_usage_gb(self.runner.mesh.devices.flatten())}Gb")
 
     @staticmethod
     @functools.partial(jax.jit)
