@@ -271,49 +271,53 @@ class RejectionSamplerTestHelper:
     """Helper class for rejection sampler tests."""
 
     @staticmethod
-    def create_target_probs_from_tokens(
+    def create_target_logits_from_tokens(
             target_token_ids: List[int],
             vocab_size: int = VOCAB_SIZE) -> jnp.ndarray:
         """
-        Create target probabilities that will produce desired token ids on argmax.
+        Create target logits that will produce desired token ids on argmax.
 
         Args:
             target_token_ids: List of target token IDs
             vocab_size: Size of the vocabulary
 
         Returns:
-            JAX array of target probabilities
+            JAX array of target logits
         """
         num_tokens = len(target_token_ids)
         if num_tokens == 0:
             return jnp.empty((0, vocab_size), dtype=jnp.float32)
 
-        # Create target probs with low values
-        target_probs = jnp.full((num_tokens, vocab_size),
-                                -100.0,
-                                dtype=jnp.float32)
+        # Create target logits with low values
+        target_logits = jnp.full((num_tokens, vocab_size),
+                                 -100.0,
+                                 dtype=jnp.float32)
 
         # Set high values at desired token positions to make them the argmax
         for i, token_id in enumerate(target_token_ids):
-            target_probs = target_probs.at[i, token_id].set(100.0)
+            target_logits = target_logits.at[i, token_id].set(100.0)
 
-        return target_probs
+        return target_logits
 
     @staticmethod
     def create_sampling_metadata(
-            all_greedy: bool = True) -> TPUSupportedSamplingMetadata:
+        all_greedy: bool = True,
+        batch_size: int = 1,
+        top_k: int = -1,
+        top_p: float = 1.0,
+        temperature: float = 1.0,
+    ) -> TPUSupportedSamplingMetadata:
         """
         Create TPU sampling metadata object.
-
-        Args:
-            all_greedy: Whether to use greedy sampling (True) or not
-
-        Returns:
-            TPUSupportedSamplingMetadata object
         """
         return TPUSupportedSamplingMetadata(
-            do_sampling=not all_greedy,  # do_sampling=False means greedy
+            do_sampling=not all_greedy,
             logprobs=False,
+            top_k=jnp.full((batch_size, ), top_k, dtype=jnp.int32),
+            top_p=jnp.full((batch_size, ), top_p, dtype=jnp.float32),
+            temperature=jnp.full((batch_size, ),
+                                 temperature,
+                                 dtype=jnp.float32),
         )
 
     @staticmethod
@@ -360,7 +364,7 @@ class RejectionSamplerTestHelper:
             vocab_size: Vocabulary size
 
         Returns:
-            Tuple of (draft_token_ids, target_probs, num_draft_tokens,
+            Tuple of (draft_token_ids, target_logits, num_draft_tokens,
                      bonus_token_ids, max_spec_len)
         """
         helper = RejectionSamplerTestHelper()
@@ -378,12 +382,12 @@ class RejectionSamplerTestHelper:
 
             # Extract only the first total_actual_tokens from the padded array
             draft_token_ids = padded_draft_tokens[:total_actual_tokens]
-            target_probs = helper.create_target_probs_from_tokens(
+            target_logits = helper.create_target_logits_from_tokens(
                 test_case.target_tokens, vocab_size)
         else:
             draft_token_ids = jnp.array(test_case.draft_tokens,
                                         dtype=jnp.int32)
-            target_probs = helper.create_target_probs_from_tokens(
+            target_logits = helper.create_target_logits_from_tokens(
                 test_case.target_tokens, vocab_size)
             num_draft_tokens = jnp.array(test_case.num_draft_per_seq,
                                          dtype=jnp.int32)
@@ -392,7 +396,7 @@ class RejectionSamplerTestHelper:
         max_spec_len = int(
             jnp.max(num_draft_tokens)) if len(num_draft_tokens) > 0 else 1
 
-        return (draft_token_ids, target_probs, num_draft_tokens,
+        return (draft_token_ids, target_logits, num_draft_tokens,
                 bonus_token_ids, max_spec_len)
 
     @staticmethod
@@ -413,7 +417,7 @@ class RejectionSamplerTestHelper:
         metadata = helper.create_sampling_metadata(all_greedy=True)
 
         # Prepare inputs
-        (draft_token_ids, target_probs, num_draft_tokens, bonus_token_ids,
+        (draft_token_ids, target_logits, num_draft_tokens, bonus_token_ids,
          max_spec_len) = helper.prepare_test_inputs(test_case, vocab_size)
 
         # Call the rejection sampler
@@ -422,7 +426,7 @@ class RejectionSamplerTestHelper:
             num_draft_tokens=num_draft_tokens,
             max_spec_len=max_spec_len,
             draft_probs=None,
-            target_probs=target_probs,
+            target_logits=target_logits,
             bonus_token_ids=bonus_token_ids,
             sampling_metadata=metadata,
         )
@@ -611,8 +615,8 @@ class TestRejectionSampler:
         total_actual_tokens = int(jnp.sum(num_draft_tokens))
         draft_token_ids = padded_draft_tokens[:total_actual_tokens]
 
-        target_probs = test_helper.create_target_probs_from_tokens([1, 5],
-                                                                   VOCAB_SIZE)
+        target_logits = test_helper.create_target_logits_from_tokens(
+            [1, 5], VOCAB_SIZE)
         bonus_token_ids = jnp.array([3], dtype=jnp.int32)
         max_spec_len = 2
 
@@ -621,7 +625,7 @@ class TestRejectionSampler:
             num_draft_tokens=num_draft_tokens,
             max_spec_len=max_spec_len,
             draft_probs=None,
-            target_probs=target_probs,
+            target_logits=target_logits,
             bonus_token_ids=bonus_token_ids,
             sampling_metadata=metadata,
         )
@@ -757,7 +761,7 @@ class TestRejectionSampler:
                                               ]  # Mismatch at position 27
 
         draft_token_ids = jnp.array(draft_tokens, dtype=jnp.int32)
-        target_probs = test_helper.create_target_probs_from_tokens(
+        target_logits = test_helper.create_target_logits_from_tokens(
             target_tokens, VOCAB_SIZE)
         num_draft_tokens = jnp.array([30], dtype=jnp.int32)
         bonus_token_ids = jnp.array([100], dtype=jnp.int32)
@@ -768,7 +772,7 @@ class TestRejectionSampler:
             num_draft_tokens=num_draft_tokens,
             max_spec_len=max_spec_len,
             draft_probs=None,
-            target_probs=target_probs,
+            target_logits=target_logits,
             bonus_token_ids=bonus_token_ids,
             sampling_metadata=metadata,
         )
@@ -800,7 +804,7 @@ class TestNonGreedyRejectionSampler:
         target_tokens = [10, 50, 30]  # Mismatch at position 1
 
         draft_token_ids = jnp.array(draft_tokens, dtype=jnp.int32)
-        target_probs = test_helper.create_target_probs_from_tokens(
+        target_logits = test_helper.create_target_logits_from_tokens(
             target_tokens, VOCAB_SIZE)
 
         # Create draft probabilities - make draft tokens highly likely
@@ -809,6 +813,9 @@ class TestNonGreedyRejectionSampler:
                                dtype=jnp.float32)
         for i, token_id in enumerate(draft_tokens):
             draft_probs = draft_probs.at[i, token_id].set(100.0)
+
+        # Convert logits to probabilities for draft_probs
+        draft_probs = jax.nn.softmax(draft_probs, axis=-1)
 
         num_draft_tokens = jnp.array([3], dtype=jnp.int32)
         bonus_token_ids = jnp.array([99], dtype=jnp.int32)
@@ -819,7 +826,7 @@ class TestNonGreedyRejectionSampler:
             num_draft_tokens=num_draft_tokens,
             max_spec_len=3,
             draft_probs=draft_probs,
-            target_probs=target_probs,
+            target_logits=target_logits,
             bonus_token_ids=bonus_token_ids,
             sampling_metadata=metadata,
             key=key,
@@ -848,7 +855,7 @@ class TestNonGreedyRejectionSampler:
         target_tokens = [1, 5, 3, 6]  # Mismatches at positions 1 and 3
 
         draft_token_ids = jnp.array(draft_tokens, dtype=jnp.int32)
-        target_probs = test_helper.create_target_probs_from_tokens(
+        target_logits = test_helper.create_target_logits_from_tokens(
             target_tokens, VOCAB_SIZE)
 
         # Create draft probabilities
@@ -857,6 +864,9 @@ class TestNonGreedyRejectionSampler:
                                dtype=jnp.float32)
         for i, token_id in enumerate(draft_tokens):
             draft_probs = draft_probs.at[i, token_id].set(100.0)
+
+        # Convert logits to probabilities for draft_probs
+        draft_probs = jax.nn.softmax(draft_probs, axis=-1)
 
         num_draft_tokens = jnp.array([4], dtype=jnp.int32)
         bonus_token_ids = jnp.array([99], dtype=jnp.int32)
@@ -871,7 +881,7 @@ class TestNonGreedyRejectionSampler:
                 num_draft_tokens=num_draft_tokens,
                 max_spec_len=4,
                 draft_probs=draft_probs,
-                target_probs=target_probs,
+                target_logits=target_logits,
                 bonus_token_ids=bonus_token_ids,
                 sampling_metadata=metadata,
                 key=key,
@@ -900,7 +910,7 @@ class TestNonGreedyRejectionSampler:
         target_tokens = [15, 35]  # Mismatch at position 1
 
         draft_token_ids = jnp.array(draft_tokens, dtype=jnp.int32)
-        target_probs = test_helper.create_target_probs_from_tokens(
+        target_logits = test_helper.create_target_logits_from_tokens(
             target_tokens, VOCAB_SIZE)
 
         num_draft_tokens = jnp.array([2], dtype=jnp.int32)
@@ -912,7 +922,7 @@ class TestNonGreedyRejectionSampler:
             num_draft_tokens=num_draft_tokens,
             max_spec_len=2,
             draft_probs=None,  # No draft probabilities
-            target_probs=target_probs,
+            target_logits=target_logits,
             bonus_token_ids=bonus_token_ids,
             sampling_metadata=metadata,
             key=key,
@@ -941,7 +951,7 @@ class TestNonGreedyRejectionSampler:
                          9]  # Mismatches at different positions
 
         draft_token_ids = jnp.array(draft_tokens, dtype=jnp.int32)
-        target_probs = test_helper.create_target_probs_from_tokens(
+        target_logits = test_helper.create_target_logits_from_tokens(
             target_tokens, VOCAB_SIZE)
 
         # Create draft probabilities
@@ -950,6 +960,9 @@ class TestNonGreedyRejectionSampler:
                                dtype=jnp.float32)
         for i, token_id in enumerate(draft_tokens):
             draft_probs = draft_probs.at[i, token_id].set(100.0)
+
+        # Convert logits to probabilities for draft_probs
+        draft_probs = jax.nn.softmax(draft_probs, axis=-1)
 
         num_draft_tokens = jnp.array([2, 3, 2], dtype=jnp.int32)
         bonus_token_ids = jnp.array([11, 12, 13], dtype=jnp.int32)
@@ -960,7 +973,7 @@ class TestNonGreedyRejectionSampler:
             num_draft_tokens=num_draft_tokens,
             max_spec_len=3,
             draft_probs=draft_probs,
-            target_probs=target_probs,
+            target_logits=target_logits,
             bonus_token_ids=bonus_token_ids,
             sampling_metadata=metadata,
             key=key,
@@ -995,7 +1008,7 @@ class TestNonGreedyRejectionSampler:
         target_tokens = [10, 20, 30]  # Perfect match
 
         draft_token_ids = jnp.array(draft_tokens, dtype=jnp.int32)
-        target_probs = test_helper.create_target_probs_from_tokens(
+        target_logits = test_helper.create_target_logits_from_tokens(
             target_tokens, VOCAB_SIZE)
 
         # Create draft probabilities - make acceptance very likely
@@ -1004,6 +1017,9 @@ class TestNonGreedyRejectionSampler:
                                dtype=jnp.float32)
         for i, token_id in enumerate(draft_tokens):
             draft_probs = draft_probs.at[i, token_id].set(100.0)
+
+        # Convert logits to probabilities for draft_probs
+        draft_probs = jax.nn.softmax(draft_probs, axis=-1)
 
         num_draft_tokens = jnp.array([3], dtype=jnp.int32)
         bonus_token_ids = jnp.array([99], dtype=jnp.int32)
@@ -1014,7 +1030,7 @@ class TestNonGreedyRejectionSampler:
             num_draft_tokens=num_draft_tokens,
             max_spec_len=3,
             draft_probs=draft_probs,
-            target_probs=target_probs,
+            target_logits=target_logits,
             bonus_token_ids=bonus_token_ids,
             sampling_metadata=metadata,
             key=key,
@@ -1037,7 +1053,7 @@ class TestNonGreedyRejectionSampler:
 
         # Empty sequences should get bonus tokens
         draft_token_ids = jnp.array([], dtype=jnp.int32)
-        target_probs = jnp.array([], dtype=jnp.float32).reshape(0, VOCAB_SIZE)
+        target_logits = jnp.array([], dtype=jnp.float32).reshape(0, VOCAB_SIZE)
 
         num_draft_tokens = jnp.array([0, 0], dtype=jnp.int32)
         bonus_token_ids = jnp.array([77, 88], dtype=jnp.int32)
@@ -1048,7 +1064,7 @@ class TestNonGreedyRejectionSampler:
             num_draft_tokens=num_draft_tokens,
             max_spec_len=1,
             draft_probs=None,
-            target_probs=target_probs,
+            target_logits=target_logits,
             bonus_token_ids=bonus_token_ids,
             sampling_metadata=metadata,
             key=key,
@@ -1074,7 +1090,7 @@ class TestNonGreedyRejectionSampler:
         target_tokens = [1, 3]
 
         draft_token_ids = jnp.array(draft_tokens, dtype=jnp.int32)
-        target_probs = test_helper.create_target_probs_from_tokens(
+        target_logits = test_helper.create_target_logits_from_tokens(
             target_tokens, VOCAB_SIZE)
 
         num_draft_tokens = jnp.array([2], dtype=jnp.int32)
@@ -1087,7 +1103,7 @@ class TestNonGreedyRejectionSampler:
                 num_draft_tokens=num_draft_tokens,
                 max_spec_len=2,
                 draft_probs=None,
-                target_probs=target_probs,
+                target_logits=target_logits,
                 bonus_token_ids=bonus_token_ids,
                 sampling_metadata=metadata,
                 key=None,  # No key provided
@@ -1101,7 +1117,7 @@ class TestNonGreedyRejectionSampler:
         target_tokens = [5, 15, 25]  # Perfect match
 
         draft_token_ids = jnp.array(draft_tokens, dtype=jnp.int32)
-        target_probs = test_helper.create_target_probs_from_tokens(
+        target_logits = test_helper.create_target_logits_from_tokens(
             target_tokens, VOCAB_SIZE)
 
         # Create draft probabilities
@@ -1110,6 +1126,9 @@ class TestNonGreedyRejectionSampler:
                                dtype=jnp.float32)
         for i, token_id in enumerate(draft_tokens):
             draft_probs = draft_probs.at[i, token_id].set(100.0)
+
+        # Convert logits to probabilities for draft_probs
+        draft_probs = jax.nn.softmax(draft_probs, axis=-1)
 
         num_draft_tokens = jnp.array([3], dtype=jnp.int32)
         bonus_token_ids = jnp.array([99], dtype=jnp.int32)
@@ -1121,7 +1140,7 @@ class TestNonGreedyRejectionSampler:
             num_draft_tokens=num_draft_tokens,
             max_spec_len=3,
             draft_probs=draft_probs,
-            target_probs=target_probs,
+            target_logits=target_logits,
             bonus_token_ids=bonus_token_ids,
             sampling_metadata=greedy_metadata,
         )
@@ -1137,7 +1156,7 @@ class TestNonGreedyRejectionSampler:
             num_draft_tokens=num_draft_tokens,
             max_spec_len=3,
             draft_probs=draft_probs,
-            target_probs=target_probs,
+            target_logits=target_logits,
             bonus_token_ids=bonus_token_ids,
             sampling_metadata=non_greedy_metadata,
             key=key,
@@ -1266,10 +1285,9 @@ class TestStatisticalDistributionValidation:
         # Expand draft probs to match flattened format [num_tokens, vocab_size]
         draft_probs_expanded = jnp.tile(draft_probs[None, :], (num_tokens, 1))
 
-        # Convert target logits to probabilities and expand to flattened format
-        target_probs_1d = jax.nn.softmax(target_logits)
-        target_probs_expanded = jnp.tile(target_probs_1d[None, :],
-                                         (num_tokens, 1))
+        # Expand target logits to flattened format
+        target_logits_expanded = jnp.tile(target_logits[None, :],
+                                          (num_tokens, 1))
 
         # Generate random draft token ids from draft distribution
         key = jax.random.PRNGKey(123)
@@ -1287,6 +1305,9 @@ class TestStatisticalDistributionValidation:
         sampling_metadata = TPUSupportedSamplingMetadata(
             do_sampling=True,  # Non-greedy sampling
             logprobs=False,
+            top_k=jnp.full((num_samples, ), -1, dtype=jnp.int32),
+            top_p=jnp.full((num_samples, ), 1.0, dtype=jnp.float32),
+            temperature=jnp.full((num_samples, ), 1.0, dtype=jnp.float32),
         )
 
         # Run rejection sampling
@@ -1296,7 +1317,7 @@ class TestStatisticalDistributionValidation:
             num_draft_tokens=num_draft_tokens,
             max_spec_len=k,
             draft_probs=draft_probs_expanded,
-            target_probs=target_probs_expanded,
+            target_logits=target_logits_expanded,
             bonus_token_ids=bonus_token_ids,
             sampling_metadata=sampling_metadata,
             key=sample_key,
@@ -1349,3 +1370,261 @@ class TestStatisticalDistributionValidation:
         if len(elements) < 2 or elements[-1] == 0:
             return 1.0
         return elements[0] / elements[-1]
+
+
+# ======================== TOP-K AND TOP-P SAMPLING TESTS ========================
+
+
+class TestTopKTopPSampling:
+    """Test suite for top-k and top-p sampling with rejection sampler."""
+
+    def _test_masked_logits(
+        self,
+        rejection_sampler: RejectionSampler,
+        batch_size: int,
+        num_draft_tokens: int,
+        vocab_size: int,
+        target_logits: jnp.ndarray,
+        allowed_tokens_per_pos: List[jnp.ndarray],
+        sampling_metadata: TPUSupportedSamplingMetadata,
+    ):
+        """Helper function to test that only allowed tokens are sampled.
+
+        Args:
+            rejection_sampler: The rejection sampler instance
+            batch_size: Number of sequences in the batch
+            num_draft_tokens: Number of draft tokens per sequence
+            vocab_size: Size of vocabulary
+            target_logits: Target logits tensor
+            allowed_tokens_per_pos: List of allowed token arrays for each position
+            sampling_metadata: Sampling metadata with top-k/top-p settings
+        """
+        num_tokens = batch_size * num_draft_tokens
+
+        # Create random draft probabilities
+        key = jax.random.PRNGKey(42)
+        draft_logits = jax.random.normal(key, (num_tokens, vocab_size))
+        draft_probs = jax.nn.softmax(draft_logits, axis=-1)
+
+        # Randomly sample draft token ids from draft probs
+        draft_key = jax.random.PRNGKey(123)
+        draft_token_ids = jax.random.categorical(draft_key,
+                                                 jnp.log(draft_probs + 1e-8),
+                                                 shape=(num_tokens, ))
+
+        # Prepare inputs
+        num_draft_per_seq = jnp.full((batch_size, ),
+                                     num_draft_tokens,
+                                     dtype=jnp.int32)
+        bonus_token_ids = jnp.zeros((batch_size, ), dtype=jnp.int32)
+        max_spec_len = num_draft_tokens
+
+        # Run rejection sampling multiple times to get statistical confidence
+        sample_keys = jax.random.split(jax.random.PRNGKey(456), 10)
+        all_sampled_tokens = []
+
+        for sample_key in sample_keys:
+            output_token_ids = rejection_sampler(
+                draft_token_ids=draft_token_ids,
+                num_draft_tokens=num_draft_per_seq,
+                max_spec_len=max_spec_len,
+                draft_probs=draft_probs,
+                target_logits=target_logits,
+                bonus_token_ids=bonus_token_ids,
+                sampling_metadata=sampling_metadata,
+                key=sample_key,
+            )
+
+            # Parse output and extract tokens
+            parsed_output = rejection_sampler.parse_output(
+                output_token_ids,
+                vocab_size=vocab_size,
+                num_draft_tokens_cpu=np.asarray(num_draft_per_seq),
+                batch_size=batch_size,
+                padded_tokens_length=num_tokens)
+
+            # For each sequence, check tokens (excluding bonus tokens)
+            for seq_idx, seq_tokens in enumerate(parsed_output):
+                for pos, token_id in enumerate(seq_tokens):
+                    if pos < num_draft_tokens:  # Only check draft tokens, not bonus
+                        token_idx = seq_idx * num_draft_tokens + pos
+                        if token_idx < len(allowed_tokens_per_pos):
+                            allowed_tokens = allowed_tokens_per_pos[token_idx]
+                            all_sampled_tokens.append(
+                                (token_idx, token_id, allowed_tokens))
+
+        # Check that all sampled tokens are within allowed sets
+        for token_idx, token_id, allowed_tokens in all_sampled_tokens:
+            assert token_id in allowed_tokens, \
+                f"Token {token_id} at position {token_idx} not in allowed set {allowed_tokens.tolist()}"
+
+    @pytest.mark.parametrize("top_k", [1, 5, 99])
+    def test_top_k(self, rejection_sampler, test_helper, top_k):
+        """Test rejection sampling with top-k sampling."""
+        vocab_size = 100
+        batch_size = 10
+        num_draft_tokens = 3
+        num_tokens = batch_size * num_draft_tokens
+
+        # Randomly create top-k indices for each token position
+        key = jax.random.PRNGKey(42)
+        top_k_indices = []
+        for i in range(num_tokens):
+            perm_key = jax.random.fold_in(key, i)
+            indices = jax.random.permutation(perm_key, vocab_size)[:top_k]
+            top_k_indices.append(indices)
+
+        # Create target logits with uniform distribution
+        target_logits = jnp.zeros((num_tokens, vocab_size), dtype=jnp.float32)
+
+        # Increment logits for top-k indices slightly to make them more likely
+        # If masking works correctly, only these tokens should be sampled
+        for i in range(num_tokens):
+            indices = top_k_indices[i]
+            target_logits = target_logits.at[i, indices].add(0.1)
+
+        # Create sampling metadata with top-k
+        sampling_metadata = test_helper.create_sampling_metadata(
+            all_greedy=False,
+            batch_size=batch_size,
+            top_k=top_k,
+            top_p=1.0,
+            temperature=1.0,
+        )
+
+        self._test_masked_logits(
+            rejection_sampler=rejection_sampler,
+            batch_size=batch_size,
+            num_draft_tokens=num_draft_tokens,
+            vocab_size=vocab_size,
+            target_logits=target_logits,
+            allowed_tokens_per_pos=top_k_indices,
+            sampling_metadata=sampling_metadata,
+        )
+
+    @pytest.mark.parametrize("top_p", [0.5, 0.9, 0.99])
+    def test_top_p(self, rejection_sampler, test_helper, top_p):
+        """Test rejection sampling with top-p sampling."""
+        vocab_size = 100
+        batch_size = 10
+        num_draft_tokens = 3
+        num_tokens = batch_size * num_draft_tokens
+
+        # Create random target logits
+        key = jax.random.PRNGKey(42)
+        target_logits = jax.random.normal(key, (num_tokens, vocab_size))
+
+        # Create temperature array for batch
+        temperature = jnp.ones(batch_size, dtype=jnp.float32)
+
+        # Calculate top-p indices for each token position
+        rescaled_logits = target_logits / temperature.repeat(num_draft_tokens,
+                                                             axis=0)[:, None]
+
+        # Sort logits and calculate cumulative probabilities
+        logits_sorted = jnp.sort(rescaled_logits, axis=-1)
+        logits_idx = jnp.argsort(rescaled_logits, axis=-1)
+        probs_sorted = jax.nn.softmax(logits_sorted, axis=-1)
+        probs_cumsum = jnp.cumsum(probs_sorted, axis=-1)
+
+        # Create top-p mask
+        top_p_mask = probs_cumsum <= (1 - top_p)
+        # Ensure at least one token is kept
+        top_p_mask = top_p_mask.at[:, -1].set(False)
+
+        # Get top-p indices for each position
+        top_p_indices = []
+        for i in range(num_tokens):
+            valid_indices = logits_idx[i][~top_p_mask[i]]
+            top_p_indices.append(valid_indices)
+
+        # Create sampling metadata with top-p
+        sampling_metadata = test_helper.create_sampling_metadata(
+            all_greedy=False,
+            batch_size=batch_size,
+            top_k=-1,
+            top_p=top_p,
+            temperature=1.0,
+        )
+
+        self._test_masked_logits(
+            rejection_sampler=rejection_sampler,
+            batch_size=batch_size,
+            num_draft_tokens=num_draft_tokens,
+            vocab_size=vocab_size,
+            target_logits=target_logits,
+            allowed_tokens_per_pos=top_p_indices,
+            sampling_metadata=sampling_metadata,
+        )
+
+    def test_top_k_and_top_p_combined(self, rejection_sampler, test_helper):
+        """Test rejection sampling with both top-k and top-p applied.
+
+        This test verifies that both top-k and top-p can be used together
+        without errors, but doesn't verify the exact masking behavior since
+        the order of application may vary from our test implementation.
+        """
+        vocab_size = 50
+        batch_size = 5
+        num_draft_tokens = 2
+        num_tokens = batch_size * num_draft_tokens
+        top_k = 10
+        top_p = 0.8
+
+        # Create random target logits
+        key = jax.random.PRNGKey(123)
+        target_logits = jax.random.normal(key, (num_tokens, vocab_size))
+
+        # Create random draft probabilities
+        draft_key = jax.random.PRNGKey(42)
+        draft_logits = jax.random.normal(draft_key, (num_tokens, vocab_size))
+        draft_probs = jax.nn.softmax(draft_logits, axis=-1)
+
+        # Randomly sample draft token ids from draft probs
+        sample_key = jax.random.PRNGKey(123)
+        draft_token_ids = jax.random.categorical(sample_key,
+                                                 jnp.log(draft_probs + 1e-8),
+                                                 shape=(num_tokens, ))
+
+        # Create sampling metadata with both top-k and top-p
+        sampling_metadata = test_helper.create_sampling_metadata(
+            all_greedy=False,
+            batch_size=batch_size,
+            top_k=top_k,
+            top_p=top_p,
+            temperature=1.0,
+        )
+
+        # Prepare inputs
+        num_draft_per_seq = jnp.full((batch_size, ),
+                                     num_draft_tokens,
+                                     dtype=jnp.int32)
+        bonus_token_ids = jnp.zeros((batch_size, ), dtype=jnp.int32)
+
+        # Just test that the combined sampling runs without errors
+        run_key = jax.random.PRNGKey(456)
+        output_token_ids = rejection_sampler(
+            draft_token_ids=draft_token_ids,
+            num_draft_tokens=num_draft_per_seq,
+            max_spec_len=num_draft_tokens,
+            draft_probs=draft_probs,
+            target_logits=target_logits,
+            bonus_token_ids=bonus_token_ids,
+            sampling_metadata=sampling_metadata,
+            key=run_key,
+        )
+
+        # Parse output to verify it's well-formed
+        parsed_output = rejection_sampler.parse_output(
+            output_token_ids,
+            vocab_size=vocab_size,
+            num_draft_tokens_cpu=np.asarray(num_draft_per_seq),
+            batch_size=batch_size,
+            padded_tokens_length=num_tokens)
+
+        # Basic sanity checks
+        assert len(parsed_output) == batch_size
+        for seq_tokens in parsed_output:
+            assert len(seq_tokens) >= 0  # Should have at least empty list
+            for token_id in seq_tokens:
+                assert 0 <= token_id < vocab_size  # Valid token range

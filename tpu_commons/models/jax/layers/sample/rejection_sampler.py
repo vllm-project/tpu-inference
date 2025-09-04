@@ -11,6 +11,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tpu_commons.models.jax.layers.binary_search import topk_mask, topp_mask
 from tpu_commons.models.jax.layers.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 
@@ -44,7 +45,7 @@ class RejectionSampler:
         # [num_tokens, vocab_size] - flattened format
         draft_probs: Optional[jnp.ndarray],
         # [num_tokens, vocab_size] - flattened format
-        target_probs: jnp.ndarray,
+        target_logits: jnp.ndarray,
         # [batch_size]
         bonus_token_ids: jnp.ndarray,
         sampling_metadata: TPUSupportedSamplingMetadata,
@@ -71,7 +72,7 @@ class RejectionSampler:
             num_draft_tokens=num_draft_tokens,
             max_spec_len=max_spec_len,
             draft_probs=draft_probs,
-            target_probs=target_probs,
+            target_logits=target_logits,
             bonus_token_ids=bonus_token_ids,
             sampling_metadata=sampling_metadata,
             key=key,
@@ -87,7 +88,7 @@ class RejectionSampler:
         # [num_tokens, vocab_size] - flattened format
         draft_probs: Optional[jnp.ndarray],
         # [num_tokens, vocab_size] - flattened format
-        target_probs: jnp.ndarray,
+        target_logits: jnp.ndarray,
         # [batch_size]
         bonus_token_ids: jnp.ndarray,
         sampling_metadata: TPUSupportedSamplingMetadata,
@@ -101,7 +102,7 @@ class RejectionSampler:
             num_draft_tokens: Number of draft tokens per request [batch_size].
             max_spec_len: Maximum number of speculative tokens.
             draft_probs: Draft probabilities in flattened format [num_tokens, vocab_size].
-            target_probs: Target probabilities in flattened format [num_tokens, vocab_size].
+            target_logits: Target logits in flattened format [num_tokens, vocab_size].
             bonus_token_ids: Bonus token IDs [batch_size].
             sampling_metadata: Additional metadata needed for sampling.
             key: JAX random key for non-greedy sampling.
@@ -110,6 +111,12 @@ class RejectionSampler:
             output_token_ids: A tensor containing the final output token IDs.
         """
         assert max_spec_len <= MAX_SPEC_LEN
+
+        if sampling_metadata.do_sampling:
+            target_probs = _compute_probs(target_logits, num_draft_tokens,
+                                          sampling_metadata)
+        else:
+            target_probs = target_logits
 
         output_token_ids = rejection_sample(
             draft_token_ids,
@@ -183,6 +190,42 @@ class RejectionSampler:
             start_idx = end_idx
 
         return outputs
+
+
+def _compute_probs(
+    logits: jnp.ndarray,
+    num_draft_tokens: jnp.ndarray,
+    sampling_metadata: TPUSupportedSamplingMetadata,
+) -> jnp.ndarray:
+    """
+    Apply top-k, top-p, and temperature to logits and compute probabilities.
+    """
+    total_tokens = logits.shape[0]
+    segment_ids, _ = _get_segment_info(num_draft_tokens, total_tokens)
+
+    # Expand sampling params from [batch_size] to [num_tokens]
+    top_k = sampling_metadata.top_k[segment_ids]
+    top_p = sampling_metadata.top_p[segment_ids]
+    temperatures = sampling_metadata.temperature[segment_ids]
+
+    # Apply top-k and top-p masking
+    logits = logits.astype(jnp.float32)
+    # Only apply top-k masking if k > 0 for each token
+    should_apply_topk = jnp.expand_dims(top_k > 0, axis=-1)
+    topk_masked = topk_mask(logits, top_k, replace_val=-jnp.inf)
+    logits = jnp.where(should_apply_topk, topk_masked, logits)
+
+    # Only apply top-p masking if p < 1.0 for each token
+    should_apply_topp = jnp.expand_dims(top_p < 1.0, axis=-1)
+    topp_masked = topp_mask(logits, top_p, replace_val=-jnp.inf)
+    logits = jnp.where(should_apply_topp, topp_masked, logits)
+
+    # Apply temperature scaling
+    temperatures = jnp.expand_dims(temperatures, axis=-1)
+    # Add epsilon to avoid division by zero
+    logits /= (temperatures + 1e-9)
+
+    return jax.nn.softmax(logits, axis=-1)
 
 
 def _get_segment_info(num_draft_tokens: jax.Array, total_tokens: int):

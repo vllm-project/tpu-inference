@@ -323,18 +323,28 @@ class CompilationManager:
                                                             jnp.int32)
 
                 for do_sampling in (False, True):
-                    sampling_metadata = TPUSupportedSamplingMetadata(
-                        do_sampling=do_sampling)
-
                     if do_sampling:
                         compilation_name = "random_rejection_sampler"
                         draft_probs = self._create_dummy_tensor(
                             (num_logits, vocab_size), jnp.bfloat16, sharding)
                         key = self.runner.rng_params_for_sampling
+                        temperature = self._create_dummy_tensor((num_logits, ),
+                                                                np.float32)
+                        top_k = self._create_dummy_tensor((num_logits, ),
+                                                          np.int32)
+                        top_p = self._create_dummy_tensor((num_logits, ),
+                                                          np.float32)
+                        sampling_metadata = TPUSupportedSamplingMetadata(
+                            temperature=temperature,
+                            top_k=top_k,
+                            top_p=top_p,
+                            do_sampling=do_sampling)
                     else:
                         compilation_name = "greedy_rejection_sampler"
                         draft_probs = None
                         key = None
+                        sampling_metadata = TPUSupportedSamplingMetadata(
+                            do_sampling=do_sampling)
 
                     self._run_compilation(
                         compilation_name,
