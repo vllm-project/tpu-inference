@@ -5,6 +5,7 @@ This implementation follows the same algorithm as the GPU version but is
 designed for JAX/TPU compatibility. It currently only supports greedy sampling.
 """
 
+import functools
 from typing import Optional
 
 import jax
@@ -71,6 +72,7 @@ class RejectionSampler:
             key=key,
         )
 
+    @functools.partial(jax.jit, static_argnums=(0, ))
     def forward(
         self,
         # [num_tokens] - flattened format
@@ -238,7 +240,6 @@ def _get_segment_info(num_draft_tokens: jax.Array, total_tokens: int):
     return segment_ids, group_indices
 
 
-@jax.jit
 def _sample_recovered_tokens(
     draft_token_ids: jax.Array,
     draft_probs: Optional[jax.Array],
@@ -320,7 +321,6 @@ def rejection_sample(
     return random_output
 
 
-@jax.jit
 def _random_rejection_sample_with_segment(
     draft_token_ids: jax.Array,
     draft_probs: Optional[jax.Array],
@@ -412,7 +412,6 @@ def _random_rejection_sample_with_segment(
 # - Scan based approach.
 # Overall, I expect XLA to optimize the scan-based approach pretty well, but
 # it would be good to compare performance against other methods.
-@jax.jit
 def _greedy_rejection_sample_with_segment(
     draft_token_ids: jax.Array,
     target_probs: jax.Array,

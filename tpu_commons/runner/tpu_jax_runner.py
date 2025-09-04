@@ -393,6 +393,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                     target_logits=target_logits,
                     bonus_token_ids=bonus_token_ids,
                     sampling_metadata=tpu_sampling_metadata,
+                    key=self.rng_params_for_sampling,
                 )
 
             if tpu_sampling_metadata.logprobs:
