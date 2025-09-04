@@ -117,7 +117,7 @@ class JaxCompressedTensorsW8A8Int8(CompressedTensorsW8A8Int8):
         x_jax = x.jax()
         outs = []
         for i, (weight, weight_scale) in enumerate(
-                zip(layer.weight, layer.wieght_scale)):
+                zip(layer.weight, layer.weight_scale)):
             weight_jax = weight.jax()
             weight_scale_jax = weight_scale.jax()
 
