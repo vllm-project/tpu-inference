@@ -1,4 +1,4 @@
-from typing import Any, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -196,7 +196,7 @@ class LlamaForCausalLM(nnx.Module):
             input_positions=positions,
             block_tables=attn_metadata.block_tables,
             seq_lens=attn_metadata.seq_lens,
-            query_start_loc=attn_metadata.seq_start_loc,
+            query_start_loc=attn_metadata.query_start_loc,
             request_distribution=attn_metadata.request_distribution,
         )
 
@@ -219,10 +219,19 @@ class LlamaForCausalLM(nnx.Module):
             new_kv_caches = []
             for i, layer in enumerate(self.layers):
                 kv_cache = kv_caches[i]
-                scope_name = f'layer_{i}' if i > 0 else None
-                with jax.named_scope(scope_name):
+
+                # The first layer is unscoped to avoid JAX tracing issues.
+                # JAX's profiler may incorrectly apply the scope name from the first
+                # layer's kernel compilation to all subsequent layers. Skipping the
+                # first layer ensures distinct scope names for the remaining layers.
+                if i == 0:
                     new_kv_cache, x_TD = layer(x_TD, is_prefill, kv_cache,
                                                jax_attn_metadata)
+                else:
+                    with jax.named_scope(f'layer_{i}'):
+                        new_kv_cache, x_TD = layer(x_TD, is_prefill, kv_cache,
+                                                   jax_attn_metadata)
+
                 new_kv_caches.append(new_kv_cache)
 
         with jax.named_scope("llama_final_norm"):
@@ -232,11 +241,10 @@ class LlamaForCausalLM(nnx.Module):
 
     def __call__(
         self,
-        state: Any,
         kv_caches: List[jax.Array],
         input_ids: jax.Array,
         attn_metadata: AttentionMetadata,
-        input_embeds: Any,
+        *args,
     ) -> Tuple[List[KVCacheType], jax.Array]:
         """Standard JAX/NNX entry point, delegating to the forward method."""
         return self.forward(
