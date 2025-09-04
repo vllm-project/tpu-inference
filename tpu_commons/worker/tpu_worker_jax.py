@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 import jaxtyping
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
                                           has_kv_transfer_group)
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
@@ -127,18 +127,19 @@ class TPUWorker(AbstractTpuWorker):
 
         # Initialize the vLLM distribution layer as a single chip environment,
         # we'll swap the model's parallel modules with TPU SPMD equivalents.
-        temp_file = tempfile.mkstemp()[1]
-        init_distributed_environment(
-            world_size=1,
-            rank=0,
-            local_rank=0,
-            distributed_init_method=f"file://{temp_file}",
-            backend="gloo",
-        )
-        ensure_model_parallel_initialized(
-            tensor_model_parallel_size=1,
-            pipeline_model_parallel_size=1,
-        )
+        with set_current_vllm_config(self.vllm_config):
+            temp_file = tempfile.mkstemp()[1]
+            init_distributed_environment(
+                world_size=1,
+                rank=0,
+                local_rank=0,
+                distributed_init_method=f"file://{temp_file}",
+                backend="gloo",
+            )
+            ensure_model_parallel_initialized(
+                tensor_model_parallel_size=1,
+                pipeline_model_parallel_size=1,
+            )
         ensure_kv_transfer_initialized(self.vllm_config)
         self.model_runner = TPUModelRunner(self.vllm_config, self.devices)
 
