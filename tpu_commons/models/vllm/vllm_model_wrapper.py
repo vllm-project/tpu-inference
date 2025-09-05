@@ -126,11 +126,6 @@ class VllmModelWrapper:
                     device="jax")
             replace_set_lora(vllm_model)
 
-        # why moved below function here whereas it used to be in vllm_get_model?
-        # vllm_get_model moves the vllm_model to jax device. But we expect to initialize the weight on cpu
-        # and load_lora_model get the device from the vllm_model (aka the base model in lora).
-        # move_weights_to_torchax_tensor(vllm_model)
-
         self.model = _VllmRunner(vllm_model)
 
         # jax.config.update("jax_explain_cache_misses", True)
@@ -219,13 +214,6 @@ class VllmModelWrapper:
             return jax_view(logits)
 
         return compute_logits_func
-
-
-# def move_weights_to_torchax_tensor(model: torch.nn.Module):
-#     for _, module in model.named_modules():
-#         quant_method = getattr(module, "quant_method", None)
-#         if isinstance(quant_method, JaxUnquantizedLinearMethod):
-#             quant_method.move_weights_to_torchax_tensor(module)
 
 
 def load_lora_model(model: torch.nn.Module, model_config: ModelConfig,

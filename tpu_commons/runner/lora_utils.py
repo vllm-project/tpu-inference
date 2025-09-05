@@ -34,6 +34,7 @@ class LoraUtils:
                             self.runner.input_batch.make_lora_inputs(padded_num_scheduled_tokens_per_req)
         self.runner._set_active_loras(prompt_lora_mapping, token_lora_mapping,
                                       lora_requests)
+        # One should not put lora_manager.set_active_loras under torchax.default_env() because set_active_loras also load lora from disk and torchax currently does not support that.
         self.runner.set_active_loras(self.runner.input_batch,
                                      padded_num_scheduled_tokens_per_req)
 
