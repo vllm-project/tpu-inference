@@ -4,13 +4,9 @@
 import math
 from typing import TYPE_CHECKING, Optional, Union
 
-import jax
 import torch
 import torch.nn.functional as F
-from jax.sharding import Mesh, NamedSharding
-from jax.sharding import PartitionSpec as P
-from torchax.interop import torch_view
-from torchax.ops.mappings import t2j
+import torchax
 from vllm.lora.punica_wrapper.utils import convert_mapping
 
 if TYPE_CHECKING:
@@ -271,6 +267,16 @@ class PunicaWrapperTPU(PunicaWrapperBase):
 
         return output.view(orig_output.shape)
 
+    @property
+    def token_lora_indices(self) -> torch.Tensor:
+        """
+        This property provides the lora indices corresponding to each token
+        in the batch. An index of -1 means no lora should be applied.
+        """
+        with torchax.default_env():
+            token_lora_len = self.indices_len[0]
+            return self._token_lora_indices[:token_lora_len]
+
     # This performs the same tensor ops as the base method, except it does them
     # on the CPU then transfers the results to the TPU
     def _update_base_metadata(
@@ -301,49 +307,29 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             extra_vocab_size,
             "cpu",
         )
-        self._token_lora_indices = self._pad_to_shape(
-            base_indices, self._token_lora_indices.shape,
-            dims=1).to(self.device)
-        self._sampler_indices = self._pad_to_shape(sampler_indices,
-                                                   self._sampler_indices.shape,
-                                                   dims=1).to(self.device)
-        self._sampler_indices_padded = self._pad_to_shape(
-            sampler_indices_padded, self._sampler_indices_padded.shape,
-            dims=1).to(self.device)
-        self._embeddings_indices = self._pad_to_shape(
-            embeddings_indices, self._embeddings_indices.shape,
-            dims=2).to(self.device)
-        self.indices_len[:] = indices_len
-
-    def move_to_device(self, mesh: Mesh):
-        self._token_lora_indices = t2j(self._token_lora_indices,
-                                       use_dlpack=False)
-        self._token_lora_indices = torch_view(
-            self._token_lora_indices).apply_jax_(jax.device_put,
-                                                 NamedSharding(mesh, P()))
-
-        self._sampler_indices = t2j(self._sampler_indices, use_dlpack=False)
-        self._sampler_indices = torch_view(self._sampler_indices).apply_jax_(
-            jax.device_put, NamedSharding(mesh, P()))
-
-        self._sampler_indices_padded = t2j(self._sampler_indices_padded,
-                                           use_dlpack=False)
-        self._sampler_indices_padded = torch_view(
-            self._sampler_indices_padded).apply_jax_(jax.device_put,
-                                                     NamedSharding(mesh, P()))
-
-        self._embeddings_indices = t2j(self._embeddings_indices,
-                                       use_dlpack=False)
-        self._embeddings_indices = torch_view(
-            self._embeddings_indices).apply_jax_(jax.device_put,
-                                                 NamedSharding(mesh, P()))
+        with torchax.default_env():
+            self._token_lora_indices = self._pad_to_shape(
+                base_indices, self._token_lora_indices.shape,
+                dims=1).to(self.device)
+            self._sampler_indices = self._pad_to_shape(
+                sampler_indices, self._sampler_indices.shape,
+                dims=1).to(self.device)
+            self._sampler_indices_padded = self._pad_to_shape(
+                sampler_indices_padded,
+                self._sampler_indices_padded.shape,
+                dims=1).to(self.device)
+            self._embeddings_indices = self._pad_to_shape(
+                embeddings_indices, self._embeddings_indices.shape,
+                dims=2).to(self.device)
+            self.indices_len[:] = indices_len
 
     def _update_prefill_metadata(self,
                                  token_lora_tensor: torch.Tensor) -> None:
-        self.batch_size = 1
-        self._lora_indices_per_batch[:self.
-                                     batch_size] = token_lora_tensor[:self.
-                                                                     batch_size]
+        with torchax.default_env():
+            self.batch_size = 1
+            self._lora_indices_per_batch[:self.
+                                         batch_size] = token_lora_tensor[:self.
+                                                                         batch_size]
 
     def _pad_prompt_mapping(
             self, prompt_mapping: tuple[int, ...]) -> tuple[int, ...]:

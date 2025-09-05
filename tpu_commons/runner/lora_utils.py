@@ -39,5 +39,3 @@ class LoraUtils:
 
         shard_lora_weights_and_move_to_tpu(self.runner.model.model,
                                            self.runner.mesh)
-        self.runner.lora_manager._adapter_manager.punica_wrapper.move_to_device(
-            self.runner.mesh)
