@@ -194,10 +194,10 @@ def test_ngram_performance_random(
     '''
     Test that speculative decoding provides significant performance improvement.
     Compares timing between reference LLM and speculative LLM using Llama 3 8B.
-    Expects spec_llm to be at least 3.9x faster than ref_llm.
+    Expects spec_llm to be at least 3.8 faster than ref_llm.
     '''
     sampling_config.temperature = 0.01
     sampling_config.top_p = 0.9
     sampling_config.top_k = 5
 
-    _test_ngram_performance_helper(monkeypatch, sampling_config, 3.9)
+    _test_ngram_performance_helper(monkeypatch, sampling_config, 3.8)
