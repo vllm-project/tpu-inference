@@ -102,15 +102,12 @@ steps:
    - label: "lora tests for JAX + vLLM models"
      key: test_9
      soft_fail: true
-     env:
-       MODEL_IMPL_TYPE: "vllm"
-       SKIP_JAX_PRECOMPILE: '1'
      agents:
        queue: tpu_v6e_queue
      commands:
        - |
          .buildkite/scripts/run_in_docker.sh \
-           bash -c 'python3 -m pytest -s -v -x /workspace/tpu_commons/tests/lora/test_lora.py'
+           bash -c 'SKIP_JAX_PRECOMPILE=1 MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_commons/tests/lora/test_lora.py'
 
 
   # -----------------------------------------------------------------
