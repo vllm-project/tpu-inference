@@ -13,7 +13,6 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.forward_context import set_forward_context
-from vllm.lora.request import LoRARequest
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils import cdiv
@@ -45,14 +44,14 @@ from tpu_commons.runner import utils as runner_utils
 from tpu_commons.runner.compilation_manager import CompilationManager
 from tpu_commons.runner.input_batch_jax import CachedRequestState, InputBatch
 from tpu_commons.runner.kv_cache_manager import KVCacheManager
+from tpu_commons.runner.lora_utils import LoraUtils
 from tpu_commons.runner.multimodal_manager import MultiModalManager
 from tpu_commons.runner.persistent_batch_manager import PersistentBatchManager
 from tpu_commons.runner.speculative_decoding_manager import \
     SpeculativeDecodingManager
 from tpu_commons.runner.structured_decoding_manager import \
     StructuredDecodingManager
-from tpu_commons.utils import (device_array, make_optimized_mesh,
-                               shard_lora_weights_and_move_to_tpu)
+from tpu_commons.utils import device_array, make_optimized_mesh
 
 logger = init_logger(__name__)
 
@@ -107,6 +106,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.persistent_batch_manager = PersistentBatchManager(
             self.requests, self.input_batch, self.encoder_cache,
             self.uses_mrope, self.model_config)
+        self.lora_utils = LoraUtils(self)
 
     def _init_random(self):
         if self.model_config.seed is None:
@@ -632,18 +632,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                          seq_lens, logits_indices, request_distribution))
 
         if self.lora_config is not None:
-            # We need to respect padding when activating LoRA adapters
-            padded_num_scheduled_tokens_per_req = np.copy(
-                num_scheduled_tokens_per_req
-            )  # Copying to avoid accidental state corruption bugs
-            padded_num_scheduled_tokens_per_req[-1] += \
-                padded_total_num_scheduled_tokens - total_num_scheduled_tokens
-
-            self.set_active_loras(self.input_batch,
-                                  padded_num_scheduled_tokens_per_req)
-            shard_lora_weights_and_move_to_tpu(self.model.model, self.mesh)
-            self.lora_manager._adapter_manager.punica_wrapper.move_to_device(
-                self.mesh)
+            self.lora_utils.set_active_loras(
+                num_scheduled_tokens_per_req, total_num_scheduled_tokens,
+                padded_total_num_scheduled_tokens)
 
         return (
             input_ids,
@@ -658,20 +649,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             logits_indices,
             spec_decode_metadata,
         )
-
-    def set_active_loras(
-        self,
-        input_batch: InputBatch,  # Note, it's the jax InputBatch.
-        num_scheduled_tokens: np.ndarray) -> None:
-
-        prompt_lora_mapping: tuple[int, ...]  # of size input_batch.num_reqs
-        token_lora_mapping: tuple[int,
-                                  ...]  # of size np.sum(num_scheduled_tokens)
-        lora_requests: set[LoRARequest]
-        prompt_lora_mapping, token_lora_mapping, lora_requests = \
-                            input_batch.make_lora_inputs(num_scheduled_tokens)
-        return super()._set_active_loras(prompt_lora_mapping,
-                                         token_lora_mapping, lora_requests)
 
     def _get_input_ids_embeds(self, input_ids: jax.Array,
                               mm_embeds: list[jax.Array]):
