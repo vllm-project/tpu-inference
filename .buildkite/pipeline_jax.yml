@@ -104,7 +104,7 @@ steps:
      soft_fail: true
      env:
        MODEL_IMPL_TYPE: "vllm"
-       SKIP_JAX_PRECOMPILE: 1
+       SKIP_JAX_PRECOMPILE: '1'
      agents:
        queue: tpu_v6e_queue
      commands:
