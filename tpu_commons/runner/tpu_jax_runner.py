@@ -5,10 +5,13 @@ from contextlib import nullcontext
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 import jax
+import jax.numpy as jnp
 import jaxtyping
 import numpy as np
+import torch
 import vllm.envs as envs
 from flax import nnx
+from torchax.ops.mappings import j2t_dtype
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
@@ -65,6 +68,17 @@ DUMMY_METADATA = AttentionMetadata(
     request_distribution=[0, 0, 0],
 )
 
+TPU_STR_DTYPE_TO_TORCH_DTYPE = {
+    "half": torch.half,
+    "bfloat16": torch.bfloat16,
+    "float": torch.float,
+    "fp8": torch.float8_e4m3fn,
+    "fp8_e4m3": torch.float8_e4m3fn,
+    "fp8_e5m2": torch.float8_e5m2,
+    "int8": torch.int8,
+    "uint8": torch.uint8,
+}
+
 
 class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
@@ -107,6 +121,23 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.requests, self.input_batch, self.encoder_cache,
             self.uses_mrope, self.model_config)
         self.lora_utils = LoraUtils(self)
+
+        cache_config = self.cache_config
+        if cache_config.cache_dtype == "auto":
+            model_dtype = self.dtype
+            if isinstance(model_dtype, str):
+                self.kv_cache_dtype = TPU_STR_DTYPE_TO_TORCH_DTYPE[model_dtype]
+            elif isinstance(getattr(model_dtype, 'dtype', None), jnp.dtype):
+                self.kv_cache_dtype = j2t_dtype(model_dtype.dtype)
+            elif isinstance(model_dtype, torch.dtype):
+                self.kv_cache_dtype = model_dtype
+            else:
+                raise ValueError(
+                    "KV cache is unsupported for model_dtype of %s",
+                    model_dtype)
+        else:
+            self.kv_cache_dtype = TPU_STR_DTYPE_TO_TORCH_DTYPE[
+                cache_config.cache_dtype]
 
     def _init_random(self):
         if self.model_config.seed is None:
@@ -395,11 +426,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 next_tokens = self.rejection_sampler(
                     draft_token_ids=spec_decode_metadata.draft_token_ids,
                     num_draft_tokens=spec_decode_metadata.draft_lengths,
-                    max_spec_len=spec_decode_metadata.max_spec_len,
                     draft_probs=None,
                     target_logits=target_logits,
                     bonus_token_ids=bonus_token_ids,
                     sampling_metadata=tpu_sampling_metadata,
+                    key=self.rng_params_for_sampling,
                 )
 
             if tpu_sampling_metadata.logprobs:

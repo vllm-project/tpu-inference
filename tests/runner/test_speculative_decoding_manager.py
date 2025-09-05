@@ -288,14 +288,13 @@ class TestSpeculativeDecodingManager:
         self.mock_device_array = mock_device_array
 
     @pytest.mark.parametrize(
-        "num_draft_tokens,cu_num_scheduled_tokens,padded_num_reqs,expected_max_spec_len,expected_logits_indices,expected_bonus_logits_indices,expected_target_logits_indices,expected_draft_token_ids",
+        "num_draft_tokens,cu_num_scheduled_tokens,padded_num_reqs,expected_logits_indices,expected_bonus_logits_indices,expected_target_logits_indices,expected_draft_token_ids",
         [
             (
                 # Normal case
                 [3, 0, 2, 0, 1],
                 [4, 104, 107, 207, 209],
                 8,
-                3,
                 [0, 1, 2, 3, 103, 104, 105, 106, 206, 207, 208],
                 [3, 4, 7, 8, 10, 0, 0, 0],
                 [0, 1, 2, 5, 6, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -305,7 +304,6 @@ class TestSpeculativeDecodingManager:
                 [5, 3, 4, 2, 1],
                 [6, 10, 18, 22, 26],
                 8,
-                5,
                 [
                     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 13, 14, 15, 16, 17, 19, 20,
                     21, 24, 25
@@ -322,9 +320,8 @@ class TestSpeculativeDecodingManager:
         ])
     def test_get_spec_decode_metadata_parametrized(
             self, num_draft_tokens, cu_num_scheduled_tokens, padded_num_reqs,
-            expected_max_spec_len, expected_logits_indices,
-            expected_bonus_logits_indices, expected_target_logits_indices,
-            expected_draft_token_ids):
+            expected_logits_indices, expected_bonus_logits_indices,
+            expected_target_logits_indices, expected_draft_token_ids):
         """Comprehensive parametrized test for _get_spec_decode_metadata function."""
         # Setup
         self._setup_spec_decode_metadata_test()
@@ -345,7 +342,6 @@ class TestSpeculativeDecodingManager:
 
         # Assert basic properties
         assert isinstance(metadata, SpecDecodeMetadata)
-        assert metadata.max_spec_len == expected_max_spec_len
 
         # Determine padding length based on expected_logits_indices length
         if len(expected_logits_indices) <= 16:

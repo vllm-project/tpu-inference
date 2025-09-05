@@ -252,3 +252,8 @@ class TpuPlatform(Platform):
                                  f"{cls.device_name} V0.")
             if params.sampling_type == SamplingType.RANDOM_SEED:
                 raise ValueError("JAX does not support per-request seed.")
+
+    @classmethod
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
+                                    model_config: ModelConfig) -> bool:
+        return True

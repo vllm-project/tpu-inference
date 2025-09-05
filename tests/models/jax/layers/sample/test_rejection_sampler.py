@@ -365,7 +365,7 @@ class RejectionSamplerTestHelper:
 
         Returns:
             Tuple of (draft_token_ids, target_logits, num_draft_tokens,
-                     bonus_token_ids, max_spec_len)
+                     bonus_token_ids)
         """
         helper = RejectionSamplerTestHelper()
 
@@ -393,11 +393,9 @@ class RejectionSamplerTestHelper:
                                          dtype=jnp.int32)
 
         bonus_token_ids = jnp.array(test_case.bonus_tokens, dtype=jnp.int32)
-        max_spec_len = int(
-            jnp.max(num_draft_tokens)) if len(num_draft_tokens) > 0 else 1
 
         return (draft_token_ids, target_logits, num_draft_tokens,
-                bonus_token_ids, max_spec_len)
+                bonus_token_ids)
 
     @staticmethod
     def run_rejection_sampler_test(
@@ -417,14 +415,13 @@ class RejectionSamplerTestHelper:
         metadata = helper.create_sampling_metadata(all_greedy=True)
 
         # Prepare inputs
-        (draft_token_ids, target_logits, num_draft_tokens, bonus_token_ids,
-         max_spec_len) = helper.prepare_test_inputs(test_case, vocab_size)
+        (draft_token_ids, target_logits, num_draft_tokens,
+         bonus_token_ids) = helper.prepare_test_inputs(test_case, vocab_size)
 
         # Call the rejection sampler
         output = rejection_sampler(
             draft_token_ids=draft_token_ids,
             num_draft_tokens=num_draft_tokens,
-            max_spec_len=max_spec_len,
             draft_probs=None,
             target_logits=target_logits,
             bonus_token_ids=bonus_token_ids,
@@ -618,12 +615,10 @@ class TestRejectionSampler:
         target_logits = test_helper.create_target_logits_from_tokens(
             [1, 5], VOCAB_SIZE)
         bonus_token_ids = jnp.array([3], dtype=jnp.int32)
-        max_spec_len = 2
 
         output = rejection_sampler(
             draft_token_ids=draft_token_ids,
             num_draft_tokens=num_draft_tokens,
-            max_spec_len=max_spec_len,
             draft_probs=None,
             target_logits=target_logits,
             bonus_token_ids=bonus_token_ids,
@@ -765,12 +760,10 @@ class TestRejectionSampler:
             target_tokens, VOCAB_SIZE)
         num_draft_tokens = jnp.array([30], dtype=jnp.int32)
         bonus_token_ids = jnp.array([100], dtype=jnp.int32)
-        max_spec_len = 30
 
         output = rejection_sampler(
             draft_token_ids=draft_token_ids,
             num_draft_tokens=num_draft_tokens,
-            max_spec_len=max_spec_len,
             draft_probs=None,
             target_logits=target_logits,
             bonus_token_ids=bonus_token_ids,
@@ -824,7 +817,6 @@ class TestNonGreedyRejectionSampler:
         output = rejection_sampler(
             draft_token_ids=draft_token_ids,
             num_draft_tokens=num_draft_tokens,
-            max_spec_len=3,
             draft_probs=draft_probs,
             target_logits=target_logits,
             bonus_token_ids=bonus_token_ids,
@@ -879,7 +871,6 @@ class TestNonGreedyRejectionSampler:
             output = rejection_sampler(
                 draft_token_ids=draft_token_ids,
                 num_draft_tokens=num_draft_tokens,
-                max_spec_len=4,
                 draft_probs=draft_probs,
                 target_logits=target_logits,
                 bonus_token_ids=bonus_token_ids,
@@ -920,7 +911,6 @@ class TestNonGreedyRejectionSampler:
         output = rejection_sampler(
             draft_token_ids=draft_token_ids,
             num_draft_tokens=num_draft_tokens,
-            max_spec_len=2,
             draft_probs=None,  # No draft probabilities
             target_logits=target_logits,
             bonus_token_ids=bonus_token_ids,
@@ -971,7 +961,6 @@ class TestNonGreedyRejectionSampler:
         output = rejection_sampler(
             draft_token_ids=draft_token_ids,
             num_draft_tokens=num_draft_tokens,
-            max_spec_len=3,
             draft_probs=draft_probs,
             target_logits=target_logits,
             bonus_token_ids=bonus_token_ids,
@@ -1028,7 +1017,6 @@ class TestNonGreedyRejectionSampler:
         output = rejection_sampler(
             draft_token_ids=draft_token_ids,
             num_draft_tokens=num_draft_tokens,
-            max_spec_len=3,
             draft_probs=draft_probs,
             target_logits=target_logits,
             bonus_token_ids=bonus_token_ids,
@@ -1062,7 +1050,6 @@ class TestNonGreedyRejectionSampler:
         output = rejection_sampler(
             draft_token_ids=draft_token_ids,
             num_draft_tokens=num_draft_tokens,
-            max_spec_len=1,
             draft_probs=None,
             target_logits=target_logits,
             bonus_token_ids=bonus_token_ids,
@@ -1101,7 +1088,6 @@ class TestNonGreedyRejectionSampler:
             rejection_sampler(
                 draft_token_ids=draft_token_ids,
                 num_draft_tokens=num_draft_tokens,
-                max_spec_len=2,
                 draft_probs=None,
                 target_logits=target_logits,
                 bonus_token_ids=bonus_token_ids,
@@ -1138,7 +1124,6 @@ class TestNonGreedyRejectionSampler:
         greedy_output = rejection_sampler(
             draft_token_ids=draft_token_ids,
             num_draft_tokens=num_draft_tokens,
-            max_spec_len=3,
             draft_probs=draft_probs,
             target_logits=target_logits,
             bonus_token_ids=bonus_token_ids,
@@ -1154,7 +1139,6 @@ class TestNonGreedyRejectionSampler:
         non_greedy_output = rejection_sampler(
             draft_token_ids=draft_token_ids,
             num_draft_tokens=num_draft_tokens,
-            max_spec_len=3,
             draft_probs=draft_probs,
             target_logits=target_logits,
             bonus_token_ids=bonus_token_ids,
@@ -1315,7 +1299,6 @@ class TestStatisticalDistributionValidation:
         output_token_ids = rejection_sampler(
             draft_token_ids=draft_token_ids,
             num_draft_tokens=num_draft_tokens,
-            max_spec_len=k,
             draft_probs=draft_probs_expanded,
             target_logits=target_logits_expanded,
             bonus_token_ids=bonus_token_ids,
@@ -1417,7 +1400,6 @@ class TestTopKTopPSampling:
                                      num_draft_tokens,
                                      dtype=jnp.int32)
         bonus_token_ids = jnp.zeros((batch_size, ), dtype=jnp.int32)
-        max_spec_len = num_draft_tokens
 
         # Run rejection sampling multiple times to get statistical confidence
         sample_keys = jax.random.split(jax.random.PRNGKey(456), 10)
@@ -1427,7 +1409,6 @@ class TestTopKTopPSampling:
             output_token_ids = rejection_sampler(
                 draft_token_ids=draft_token_ids,
                 num_draft_tokens=num_draft_per_seq,
-                max_spec_len=max_spec_len,
                 draft_probs=draft_probs,
                 target_logits=target_logits,
                 bonus_token_ids=bonus_token_ids,
@@ -1606,7 +1587,6 @@ class TestTopKTopPSampling:
         output_token_ids = rejection_sampler(
             draft_token_ids=draft_token_ids,
             num_draft_tokens=num_draft_per_seq,
-            max_spec_len=num_draft_tokens,
             draft_probs=draft_probs,
             target_logits=target_logits,
             bonus_token_ids=bonus_token_ids,

@@ -14,16 +14,19 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh, total_num_pages: int,
                                  page_size: int, actual_num_kv_heads: int,
                                  actual_head_dim: int, kv_dtype: any):
     """Gets the KV cache shape based on the mesh configuration."""
-    model_cnt = mesh.shape["model"]
-    assert actual_num_kv_heads % model_cnt == 0
-    return get_kv_cache_shape(total_num_pages, page_size,
-                              actual_num_kv_heads // model_cnt,
+
+    return get_kv_cache_shape(total_num_pages, page_size, actual_num_kv_heads,
                               actual_head_dim, kv_dtype)
 
 
-def sharded_ragged_paged_attention(sm_scale: float,
-                                   mesh: Mesh,
-                                   attention_chunk_size: int | None = None):
+def sharded_ragged_paged_attention(
+    sm_scale: float,
+    mesh: Mesh,
+    attention_chunk_size: int | None = None,
+    q_scale: float | None = None,
+    k_scale: float | None = None,
+    v_scale: float | None = None,
+):
     """Shards along KV heads."""
     qkv_spec = P(None, "model", None)
     kv_cache_spec = P(None, None, "model")
@@ -44,6 +47,9 @@ def sharded_ragged_paged_attention(sm_scale: float,
             *args,
             sm_scale=sm_scale,
             sliding_window=attention_chunk_size,
+            q_scale=q_scale,
+            k_scale=k_scale,
+            v_scale=v_scale,
         )
 
     return jax.jit(
@@ -64,7 +70,10 @@ def attention(
     attention_metadata: AttentionMetadata,
     mesh: Mesh,
     head_dim_original: int | None = None,  # before padding,
-    attention_chunk_size: int | None = None
+    attention_chunk_size: int | None = None,
+    q_scale: float | None = None,
+    k_scale: float | None = None,
+    v_scale: float | None = None,
 ) -> Tuple[jax.Array, jax.Array]:
     # T: seq_len
     # N: num_heads
@@ -85,7 +94,8 @@ def attention(
 
     # (T, N, H)
     output, kv_cache = sharded_ragged_paged_attention(
-        head_dim_original**-0.5, mesh, attention_chunk_size)(
+        head_dim_original**-0.5, mesh, attention_chunk_size, q_scale, k_scale,
+        v_scale)(
             q,
             k,
             v,

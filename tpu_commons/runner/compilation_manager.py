@@ -323,16 +323,14 @@ class CompilationManager:
                                                             jnp.int32)
 
                 for do_sampling in (False, True):
+                    draft_probs = None
                     if do_sampling:
                         compilation_name = "random_rejection_sampler"
-                        draft_probs = self._create_dummy_tensor(
-                            (num_logits, vocab_size), jnp.bfloat16, sharding)
-                        key = self.runner.rng_params_for_sampling
-                        temperature = self._create_dummy_tensor((num_logits, ),
+                        temperature = self._create_dummy_tensor((num_reqs, ),
                                                                 np.float32)
-                        top_k = self._create_dummy_tensor((num_logits, ),
+                        top_k = self._create_dummy_tensor((num_reqs, ),
                                                           np.int32)
-                        top_p = self._create_dummy_tensor((num_logits, ),
+                        top_p = self._create_dummy_tensor((num_reqs, ),
                                                           np.float32)
                         sampling_metadata = TPUSupportedSamplingMetadata(
                             temperature=temperature,
@@ -341,8 +339,6 @@ class CompilationManager:
                             do_sampling=do_sampling)
                     else:
                         compilation_name = "greedy_rejection_sampler"
-                        draft_probs = None
-                        key = None
                         sampling_metadata = TPUSupportedSamplingMetadata(
                             do_sampling=do_sampling)
 
@@ -351,12 +347,11 @@ class CompilationManager:
                         self.runner.rejection_sampler,
                         draft_token_ids,
                         num_draft_tokens,
-                        -1,  # max_spec_len
                         draft_probs,
                         target_probs,
                         bonus_token_ids,
                         sampling_metadata,
-                        key,
+                        self.runner.rng_params_for_sampling,
                         num_logits=num_logits,
                         num_reqs=num_reqs,
                         do_sampling=do_sampling,
