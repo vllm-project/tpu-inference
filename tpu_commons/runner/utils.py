@@ -295,7 +295,9 @@ class PhasedBasedProfiler:
     def __init__(self, profile_dir: str):
         self.profiling_n_steps_left: int = 0
         self.profile_dir_with_phase_suffix: str = None
-        self.num_steps_to_profile_for: int = PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR
+        self.num_steps_to_profile_for: int = int(
+            os.getenv("PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR",
+                      PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR))
         self.profile_dir: str = profile_dir
         # NOTE: we purposely don't have AMBIGUOUS here
         self.inference_phase_seen: dict = {
@@ -412,7 +414,7 @@ class PhasedBasedProfiler:
         have_seen_all_phases = all(self.inference_phase_seen.values())
         # We want to start profiling only after the first trial request
         is_past_initial_request = batch_composition_stats[
-            "num_reqs"] > 1 and batch_composition_stats[
+            "num_reqs"] >= 1 and batch_composition_stats[
                 "total_num_scheduled_tokens"] > 1
         if is_past_initial_request and (not have_seen_all_phases
                                         or self.current_phase != ""):

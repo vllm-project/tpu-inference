@@ -81,15 +81,13 @@ def get_kv_spec(mesh: Mesh) -> list[int]:
     num_blocks = 10
     block_size = 32
     num_kv_heads = 8
-    shard_size = mesh.shape["model"]
     head_dim = 128
 
     import tpu_commons.kernels.ragged_paged_attention.v3.kernel as rpa
-    shape = rpa.get_kv_cache_shape(num_blocks, block_size,
-                                   num_kv_heads // shard_size, head_dim,
-                                   jnp.bfloat16)
+    shape = rpa.get_kv_cache_shape(num_blocks, block_size, num_kv_heads,
+                                   head_dim, jnp.bfloat16)
     dtype = jnp.bfloat16
-    sharding = NamedSharding(mesh, P())
+    sharding = NamedSharding(mesh, P(None, None, "model"))
     num_layers = 4
     return [jax.ShapeDtypeStruct(shape, dtype, sharding=sharding)] * num_layers
 
@@ -138,8 +136,8 @@ def prefill_worker(squeue: multiprocessing.Queue):
 
     s = start_transfer_server(
         jax.local_devices()[0].client,
-        'localhost:7080',
-        ['0.0.0.0:0'],
+        '127.0.0.1:7080',
+        ['127.0.0.1:0'],
         use_raw_buffers=False,
     )
     log(f"Launched server on {s.address()}")
@@ -174,13 +172,13 @@ def decode_worker(squeue: multiprocessing.Queue):
 
     s = start_transfer_server(
         jax.local_devices()[0].client,
-        'localhost:7081',
-        ['0.0.0.0:0'],
+        '127.0.0.1:7081',
+        ['127.0.0.1:0'],
     )
     server_addr = s.address()
     log(f"Launched server on {server_addr}")
 
-    prefill_addr = "localhost:7080"
+    prefill_addr = "127.0.0.1:7080"
     conn = s.connect(prefill_addr)
     log(f"Created connection with {prefill_addr}")
 

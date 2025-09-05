@@ -4,12 +4,12 @@ import functools
 from typing import Optional, Tuple
 
 import jax
+import jax.numpy as jnp
 import torch
 from jax.sharding import Mesh
 from torchax.interop import jax_view, torch_view
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
-from vllm.model_executor.models.utils import extract_layer_index
 
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention import attention
@@ -19,6 +19,14 @@ from tpu_commons.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context
 
 logger = init_logger(__name__)
+
+TPU_STR_DTYPE_TO_JAX_DTYPE = {
+    "bfloat16": jnp.bfloat16,
+    "fp8": jnp.float8_e4m3fn,
+    "fp8_e4m3": jnp.float8_e4m3,
+    "fp8_e5m2": jnp.float8_e5m2,
+    "int8": jnp.int8,
+}
 
 
 class PallasAttentionBackend(AttentionBackend):
@@ -63,14 +71,30 @@ class PallasAttentionBackendImpl(AttentionImpl):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         if alibi_slopes is not None:
             raise NotImplementedError("Alibi slopes is not supported.")
+        self.kv_cache_quantized_dtype = None
         if kv_cache_dtype != "auto":
-            raise NotImplementedError("FP8 KV cache dtype is not supported.")
+            self.kv_cache_quantized_dtype = TPU_STR_DTYPE_TO_JAX_DTYPE.get(
+                kv_cache_dtype.lower().strip())
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
                                       "PallasAttentionBackendImpl")
+
+    def quantize_kv(self, layer: AttentionLayer, key: jax.Array,
+                    value: jax.Array):
+        dtype_info = jnp.finfo(self.kv_cache_quantized_dtype)
+        minval, maxval = float(dtype_info.min), float(dtype_info.max)
+        # TODO(kyuyeunk): Add support for jnp.Tensor (layer._k_scale) scale
+        key = key.astype(jnp.float32) / layer._k_scale_float
+        key = jnp.clip(key, minval, maxval)
+        key = key.astype(self.kv_cache_quantized_dtype)
+        value = value.astype(jnp.float32) / layer._v_scale_float
+        value = jnp.clip(value, minval, maxval)
+        value = value.astype(self.kv_cache_quantized_dtype)
+
+        return key, value
 
     def forward(
         self,
@@ -96,24 +120,36 @@ class PallasAttentionBackendImpl(AttentionImpl):
         del kv_cache  # Use kv_cache from vllm wrapper context values instead.
 
         vllm_model_wrapper_context = get_vllm_model_wrapper_context()
-        layer_idx = extract_layer_index(layer.layer_name)
-        kv_cache = vllm_model_wrapper_context.kv_caches[layer_idx]
+        kv_cache_index = vllm_model_wrapper_context.layer_name_to_kvcache_index[
+            layer.layer_name]
+        kv_cache = vllm_model_wrapper_context.kv_caches[kv_cache_index]
+
         mesh = vllm_model_wrapper_context.mesh
 
-        new_kv_cache, outputs = _jax_attn_func(kv_cache, jax_view(query),
-                                               jax_view(key), jax_view(value),
+        query, key, value = jax_view(query), jax_view(key), jax_view(value)
+        q_scale = k_scale = v_scale = None
+        if self.kv_cache_quantized_dtype:
+            key, value = self.quantize_kv(layer, key, value)
+            # TODO(kyuyeunk): Add query quantization support for w8a8 attention
+            # q_scale = layer._q_scale
+            k_scale = layer._k_scale_float
+            v_scale = layer._v_scale_float
+
+        new_kv_cache, outputs = _jax_attn_func(kv_cache, query, key, value,
                                                attn_metadata, mesh, self.scale,
                                                self.head_size, self.num_heads,
-                                               self.num_kv_heads)
-        vllm_model_wrapper_context.kv_caches[layer_idx] = new_kv_cache
+                                               self.num_kv_heads, q_scale,
+                                               k_scale, v_scale)
+        vllm_model_wrapper_context.kv_caches[kv_cache_index] = new_kv_cache
 
         return torch_view(outputs)
 
 
 @functools.partial(
     jax.jit,
-    static_argnums=(5, 6, 7, 8,
-                    9),  # mesh, scale, head_size, num_heads, num_kv_heads
+    static_argnums=(
+        5, 6, 7, 8, 9, 10, 11, 12
+    ),  # mesh, scale, head_size, num_heads, num_kv_heads, q_scale, k_scale, v_scale
     donate_argnums=(0, ),  # donate kv_cache
 )
 def _jax_attn_func(
@@ -127,6 +163,9 @@ def _jax_attn_func(
     head_size: int,
     num_heads: int,
     num_kv_heads: int,
+    q_scale: Optional[float] = None,
+    k_scale: Optional[float] = None,
+    v_scale: Optional[float] = None,
 ) -> Tuple[jax.Array, jax.Array]:
     del scale  # Unused for now, as the attention function applies a default scale.
 
@@ -151,6 +190,9 @@ def _jax_attn_func(
         v,
         attention_metadata,
         mesh,
+        q_scale=q_scale,
+        k_scale=k_scale,
+        v_scale=v_scale,
     )
 
     # Convert the shape back to vLLM's convention

@@ -10,9 +10,11 @@ from vllm.config import VllmConfig
 
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.utils.quantization.quantization_utils import (
-    apply_qwix_quantization, determine_whether_to_apply_qwix_on_abstract_model)
+    apply_qwix_on_abstract_model, apply_qwix_quantization)
 
 logger = init_logger(__name__)
+
+_MODEL_REGISTRY = {}
 
 
 def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
@@ -95,13 +97,16 @@ def _get_nnx_model(
         def _create_abstract_model() -> nnx.Module:
             """
             Helper class to create an abstract model for `nnx.eval_shape`.
+
+            Returns:
+                An abstract model function.
             """
             return model_class(vllm_config, rng, mesh)
 
         abstract_model_fn = _create_abstract_model
         # NOTE: only one of the abstract (this) or or concrete Qwix quantization paths should
         # be taken
-        if apply_qwix_on_abstract_model := determine_whether_to_apply_qwix_on_abstract_model(
+        if should_apply_qwix_on_abstract_model := apply_qwix_on_abstract_model(
                 vllm_config):
             # NOTE: if Qwix is not configured, this will return `_create_abstract_model` and
             # thus be a no-op
@@ -120,7 +125,9 @@ def _get_nnx_model(
         def create_jit_model(model):
             state = nnx.state(model)
             nnx.update(model, state)
-            if not apply_qwix_on_abstract_model:
+            # NOTE: only one of the abstract (this) or or concrete Qwix quantization paths should
+            # be taken
+            if not should_apply_qwix_on_abstract_model:
                 # NOTE: if Qwix is not configured, this will be a no-op
                 model = apply_qwix_quantization(vllm_config,
                                                 model,
@@ -141,7 +148,7 @@ def get_flax_model(
 ) -> nnx.Module:
     model_class = _get_model_architecture(vllm_config.model_config.hf_config)
     jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh)
-    kv_cache_sharding = NamedSharding(mesh, PartitionSpec())  # replicated
+    kv_cache_sharding = NamedSharding(mesh, PartitionSpec(None, None, "model"))
     hidden_states_sharding = NamedSharding(mesh, PartitionSpec(None,
                                                                None))  # (T, D)
 
@@ -156,6 +163,7 @@ def get_flax_model(
             hidden_states_sharding,
         ),
         donate_argnums=2,  # 0 is graphdef, 1 is state, 2 is kv_cache
+        static_argnums=6,  #6 is layer_name_to_kvcache_index
     )
     def run_model(graphdef, state, *args):
         model = nnx.merge(graphdef, state)

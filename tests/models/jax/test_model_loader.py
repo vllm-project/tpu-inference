@@ -1,4 +1,5 @@
 import os
+import tempfile
 from unittest.mock import MagicMock, patch
 
 import jax
@@ -7,7 +8,9 @@ import pytest
 import torch
 from jax.sharding import Mesh
 from transformers import PretrainedConfig
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
+                                             init_distributed_environment)
 from vllm.engine.arg_utils import EngineArgs
 
 from tpu_commons.models.jax import model_loader
@@ -126,6 +129,20 @@ def test_get_vllm_model(mesh):
     vllm_config = engine_args.create_engine_config()
     vllm_config.model_config.dtype = torch.bfloat16
 
+    with set_current_vllm_config(vllm_config):
+        temp_file = tempfile.mkstemp()[1]
+        init_distributed_environment(
+            world_size=1,
+            rank=0,
+            local_rank=0,
+            distributed_init_method=f"file://{temp_file}",
+            backend="gloo",
+        )
+        ensure_model_parallel_initialized(
+            tensor_model_parallel_size=1,
+            pipeline_model_parallel_size=1,
+        )
+
     model_fn, compute_logits_fn, _, _, _ = model_loader.get_vllm_model(
         vllm_config, rng, mesh)
 
@@ -144,6 +161,20 @@ def test_get_vllm_model_random_weights(mesh, set_in_config):
         vllm_config.load_config.load_format = "dummy"
     else:
         os.environ["JAX_RANDOM_WEIGHTS"] = "True"
+
+    with set_current_vllm_config(vllm_config):
+        temp_file = tempfile.mkstemp()[1]
+        init_distributed_environment(
+            world_size=1,
+            rank=0,
+            local_rank=0,
+            distributed_init_method=f"file://{temp_file}",
+            backend="gloo",
+        )
+        ensure_model_parallel_initialized(
+            tensor_model_parallel_size=1,
+            pipeline_model_parallel_size=1,
+        )
 
     with patch(
             "vllm.model_executor.model_loader.dummy_loader.DummyModelLoader.load_weights"

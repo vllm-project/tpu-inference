@@ -196,11 +196,15 @@ def apply_qwix_quantization(
     """
     Will apply quantization if a valid quantization config with Qwix rules is provided.  See README
     for more details on Qwix.
+
     Note that we currently support different methods for applying Qwix quantization.  The typical
-    approach has is to apply quantization on the concrete model, which already has the weights
+    approach is to apply quantization on the concrete model, which already has the weights
     loaded in.  However, for models like DeepSeek, which are already quantized, we need to
     first create the abstract model, then apply Qwix quantization to the abstract model, and
-    finally load the weights in.
+    finally load the weights in.  To use the latter approach, you will need to modify the
+    model weight loading code appropriately (see deepseek_v3.py for an example) and
+    pass and `use_abstract_model=True` in the quantization config.
+
     Args:
         vllm_config: the base VLLM config
         model_or_model_fn: if `apply_to_abstract_model` is True, this will be a Callable that returns the abstract model
@@ -243,6 +247,8 @@ def apply_qwix_quantization(
         assert isinstance(model_or_model_fn, nnx.Module)
         qwix_quantize_nnx_model_with_config = functools.partial(
             qwix_quantize_nnx_model, qwix_config=qwix_config)
+        # NOTE: it's REALLY important `qwix_quantize_nnx_model_with_config` is jitted
+        # or else you'll run into hanging
         model_or_model_fn = nnx.jit(
             qwix_quantize_nnx_model_with_config,
             donate_argnums=(0, ),
@@ -263,7 +269,6 @@ def apply_qwix_quantization(
 
         return model_or_model_fn
 
-    # NOTE: it's REALLY important this is jitted, or else you'll run into hanging
     qwix_quantize_fn_for_eval = functools.partial(
         qwix_quantize_nnx_model,
         qwix_config=qwix_config,
@@ -273,7 +278,10 @@ def apply_qwix_quantization(
         kv_cache_num_kv_heads=num_kv_heads,
         kv_cache_head_size=head_size)
 
-    def create_and_quantize_model_factory():
+    def create_and_quantize_model_factory() -> Callable:
+        """
+        Helper function to create and quantize the abstract model.
+        """
         model = model_or_model_fn()
         # Handle the DeepSeek case, where this needs to be called in the abstract model
         if hasattr(model, 'initialize_cache'):
@@ -283,8 +291,7 @@ def apply_qwix_quantization(
     return create_and_quantize_model_factory
 
 
-def determine_whether_to_apply_qwix_on_abstract_model(
-        vllm_config: "VllmConfig") -> bool:
+def apply_qwix_on_abstract_model(vllm_config: "VllmConfig") -> bool:
     """
     Determines whether to apply Qwix quantization on the abstract model (e.g. for DeepSeek)
     or the concrete model.  See `apply_qwix_quantization` for more details on the differences

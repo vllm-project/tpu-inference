@@ -26,7 +26,7 @@ def test_create_kv_caches(mesh: Mesh):
     head_size = 128
     layer_names = ["decoder.0", "decoder.1", "decoder.2"]  # Test with 3 layers
 
-    expected_sharding = NamedSharding(mesh, PartitionSpec())
+    expected_sharding = NamedSharding(mesh, PartitionSpec(None, None, "model"))
     expected_dtype = jnp.bfloat16
     expected_shape = get_kv_cache_shape_with_mesh(mesh, num_blocks, block_size,
                                                   num_kv_heads, head_size,

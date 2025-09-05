@@ -41,22 +41,24 @@ BLOCK_SIZE = 16
 MAX_BLOCKS_PER_SEQ = 8
 
 
-def create_inputs(mesh):
+def create_inputs(mesh: Mesh,
+                  q_dtype: jnp.dtype = jnp.bfloat16,
+                  kv_dtype: jnp.dtype = jnp.bfloat16):
     key = jax.random.key(0)
     q = jax.random.uniform(key, (TOTAL_TOKENS, NUM_HEADS * HEAD_DIM),
-                           dtype=jnp.bfloat16)
+                           dtype=q_dtype)
     k = jax.random.uniform(key, (TOTAL_TOKENS, NUM_KV_HEADS * HEAD_DIM),
-                           dtype=jnp.bfloat16)
+                           dtype=q_dtype)
     v = jax.random.uniform(key, (TOTAL_TOKENS, NUM_KV_HEADS * HEAD_DIM),
-                           dtype=jnp.bfloat16)
+                           dtype=q_dtype)
     q = torch_view(q)
     k = torch_view(k)
     v = torch_view(v)
 
     kv_cache_shape = get_kv_cache_shape_with_mesh(mesh, NUM_BLOCKS, BLOCK_SIZE,
                                                   NUM_KV_HEADS, HEAD_DIM,
-                                                  jnp.bfloat16)
-    kv_cache = jax.random.normal(key, kv_cache_shape, dtype=jnp.bfloat16)
+                                                  kv_dtype)
+    kv_cache = jax.random.normal(key, kv_cache_shape, dtype=kv_dtype)
 
     positions = jnp.ones((TOTAL_TOKENS, ), dtype=jnp.int32)
     block_tables = jnp.zeros((MAX_NUM_SEQS * MAX_BLOCKS_PER_SEQ),
@@ -133,20 +135,6 @@ class TestPallasAttentionBackendImpl:
                 attn_type=AttentionType.DECODER,
             )
 
-    def test_init_with_fp8_kv_cache_raises_error(self):
-        with pytest.raises(NotImplementedError,
-                           match="FP8 KV cache dtype is not supported"):
-            PallasAttentionBackendImpl(
-                num_heads=32,
-                head_size=128,
-                scale=0.088,
-                num_kv_heads=8,
-                alibi_slopes=None,
-                sliding_window=None,
-                kv_cache_dtype="fp8",
-                attn_type=AttentionType.DECODER,
-            )
-
     def test_init_with_encoder_attention_raises_error(self):
         with pytest.raises(NotImplementedError,
                            match="Encoder self-attention"):
@@ -179,7 +167,35 @@ class TestPallasAttentionBackendImpl:
         query, key, value, kv_cache, metadata = create_inputs(mesh)
 
         with torchax.default_env(), set_vllm_model_wrapper_context(
-                kv_caches=[kv_cache], mesh=mesh):
+                kv_caches=[kv_cache],
+                mesh=mesh,
+                layer_name_to_kvcache_index={'0': 0}):
+            impl.forward(layer, query, key, value, torch.tensor([]), metadata)
+
+    def test_forward_with_fp8_kv_cache(self, mesh):
+        impl = PallasAttentionBackendImpl(
+            num_heads=NUM_HEADS,
+            head_size=HEAD_DIM,
+            scale=0.088,
+            num_kv_heads=NUM_KV_HEADS,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="fp8",
+            attn_type=AttentionType.DECODER,
+        )
+
+        layer = MagicMock()
+        layer.layer_name = "0"
+        layer._k_scale_float = 1
+        layer._v_scale_float = 1
+
+        query, key, value, kv_cache, metadata = create_inputs(
+            mesh, kv_dtype=jnp.float8_e4m3fn)
+
+        with torchax.default_env(), set_vllm_model_wrapper_context(
+                kv_caches=[kv_cache],
+                mesh=mesh,
+                layer_name_to_kvcache_index={'0': 0}):
             impl.forward(layer, query, key, value, torch.tensor([]), metadata)
 
     def test_forward_with_vllm_kv_cache_raises_error(self, mesh):
