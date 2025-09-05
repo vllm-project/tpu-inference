@@ -203,6 +203,7 @@ def get_default_maps(vllm_config, mesh: Mesh,
     }
     transpose_keys: dict[str, tuple[int, ...]] = {
         "lm_head": (1, 0),
+        "fc": (1, 0),
         "gate_proj": (1, 0),
         "up_proj": (1, 0),
         "down_proj": (1, 0),
@@ -276,7 +277,7 @@ def _load_hf_weights_on_thread(vllm_config,
             hf_key = hf_key.removesuffix(".weight")
 
         # Find the corresponding model key using the HF key
-        if "layer" in hf_key:
+        if "layers" in hf_key:
             layer_num = re.search(r"layers\.(\d+)", hf_key).group(1)
             layer_key = re.sub(r"layers\.\d+", "layers.*", hf_key)
             model_key = name_map[layer_key]
@@ -290,6 +291,11 @@ def _load_hf_weights_on_thread(vllm_config,
             if hf_key not in name_map and hf_key == "lm_head":
                 logger.warning(
                     f"Skip loading {hf_key} due to tie_word_embeddings")
+                continue
+            if hf_key not in name_map and "t2d" in hf_key:
+                logger.warning(
+                    f"Skip loading {hf_key} as it's not used in eagle-3 for now"
+                )
                 continue
             model_key = name_map.get(hf_key, hf_key)
         model_weight, model_sharding = get_param_and_sharding(
@@ -360,9 +366,13 @@ def load_hf_weights(vllm_config,
                     model: nnx.Module,
                     metadata_map: MetadataMap,
                     mesh: Mesh,
-                    filter_regex: str | None = None):
+                    filter_regex: str | None = None,
+                    is_draft_model: bool = False):
     """Load weights from all model weights files to the model, run in multi threads."""
-    model_path = vllm_config.model_config.model
+    if is_draft_model:
+        model_path = vllm_config.speculative_config.draft_model_config.model
+    else:
+        model_path = vllm_config.model_config.model
     weights_files = get_model_weights_files(
         model_path, vllm_config.load_config.download_dir)
     params = nnx.state(model)

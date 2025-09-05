@@ -2,10 +2,12 @@
 from dataclasses import replace
 from typing import Any
 
+import jax
 import jax.numpy as jnp
 from vllm.config import VllmConfig
 
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
+from tpu_commons.models.jax.model_loader import get_model
 
 
 class EagleProposer:
@@ -37,12 +39,13 @@ class EagleProposer:
         self.num_speculative_tokens = (
             self.speculative_config.num_speculative_tokens)
         self.block_size = vllm_config.cache_config.block_size
-        self.model = None
+        self.rng_key = jax.random.key(self.vllm_config.model_config.seed)
 
     def load_model(self) -> None:
         """Loads the draft model."""
-        # TODO: Add impelemntation
-        raise NotImplementedError("load_model is not implemented yet.")
+        # TODO(ranlihao): Sharing embedding and lm_head weights between the target and draft
+        self.model_fn, self.compute_logits_fn, _, _, self.state, _, _ = get_model(
+            self.vllm_config, self.rng_key, self.mesh, is_draft_model=True)
 
     def prepare_inputs(self, ) -> tuple[jnp.ndarray]:
         """Prepares inputs for the speculative decoding step.
