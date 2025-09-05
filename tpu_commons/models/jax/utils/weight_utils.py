@@ -49,16 +49,30 @@ def print_param_info(param: nnx.Param, name: str):
 
 
 def transpose_params(param_key: str, param_tensor: jax.Array, transpose_map):
+    jax.debug.print(
+        f"Before transpose: {param_key} - Shape: {param_tensor.shape}")
     for key, value in transpose_map.items():
         if key in param_key:
-            return jnp.transpose(param_tensor, value)
-    return param_tensor  # Base case / no-op
+            transposed_tensor = jnp.transpose(param_tensor, value)
+            jax.debug.print(
+                f"Transposing with key '{key}' by axes {value}. New shape: {transposed_tensor.shape}"
+            )
+            return transposed_tensor
+    jax.debug.print(f"No transpose applied to {param_key}")
+    return param_tensor
 
 
 def reshape_params(param_key: str, param_tensor: jax.Array, shape_map):
+    jax.debug.print(
+        f"Before reshape: {param_key} - Shape: {param_tensor.shape}")
     for key, new_shape in shape_map.items():
         if key in param_key:
-            return jnp.reshape(param_tensor, new_shape)
+            reshaped_tensor = jnp.reshape(param_tensor, new_shape)
+            jax.debug.print(
+                f"Reshaping with key '{key}' to shape {new_shape}. New shape: {reshaped_tensor.shape}"
+            )
+            return reshaped_tensor
+    jax.debug.print(f"No reshape applied to {param_key}")
     return param_tensor  # Base case / no-op
 
 

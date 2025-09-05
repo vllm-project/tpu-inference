@@ -65,16 +65,16 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             hidden_size=self.hidden_size,
             dtype=dtype,
             prelogit_td=NamedSharding(self.mesh, P()),
-            vd_sharding=NamedSharding(self.mesh,
-                                      P(('data', 'expert', 'model'), None)),
+            vd_sharding=NamedSharding(self.mesh, P((), None)),
             #mesh=self.mesh,
             rngs=nnx.Rngs(rng),
-            random_init=force_random_weights)
+            random_init=force_random_weights,
+        )
 
         self.layers = []
 
         for i in range(num_layers):
-            use_attention_rope = True  #False  #(i + 1) % self.no_rope_layer_interval != 0 #Llama 4 Guard does not use RoPe.
+            use_attention_rope = True  #(i + 1) % self.no_rope_layer_interval != 0
 
             # Llama Guard 4 is a dense model, so we use a standard MLP.
             custom_module = DenseFFW(
@@ -179,10 +179,8 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             dtype=dtype,
             rngs=nnx.Rngs(rng),
             prelogit_td=NamedSharding(self.mesh, P()),
-            vd_sharding=NamedSharding(self.mesh,
-                                      P(('data', 'expert', 'model'), None)),
-            dv_sharding=NamedSharding(self.mesh,
-                                      P(None, ('data', 'expert', 'model'))),
+            vd_sharding=NamedSharding(self.mesh, P()),
+            dv_sharding=NamedSharding(self.mesh, P()),
             #mesh=self.mesh,
             random_init=force_random_weights)
         if self.is_verbose:
@@ -226,7 +224,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         x_TD = self.embedder.encode(input_ids)
 
         # Add debug print to check the embeddings
-        jax.debug.print("Input embedding slice: {}", x_TD[0, :3])
+        jax.debug.print("Input embedding {}", x_TD)
 
         for (i, block) in enumerate(self.layers):
             kv_cache = kv_caches[i]
@@ -235,6 +233,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             jax.block_until_ready(x_TD)
             kv_caches[i] = new_kv_cache
 
+        jax.debug.print("Final layer before norm: {}", x_TD)
         final_activation_TD = self.final_norm(x_TD)
 
         return kv_caches, final_activation_TD
@@ -261,8 +260,8 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         jax.debug.print("Predicted token ID from argmax: {}",
                         predicted_token_id[0])
 
-        # Use jax.debug.print to view a slice of the logits_TV array
-        jax.debug.print("This is logits_TV: {}", logits_TV[0, :20])
+        # Use jax.debug.print to view of the logits_TV array
+        jax.debug.print("This is logits_TV: {}", logits_TV)
 
         # It's also a good practice to block until the device is ready to ensure the print statement is flushed
         jax.block_until_ready(logits_TV)
@@ -345,6 +344,10 @@ class LlamaGuard4WeightLoader:
         model_params = nnx.state(model_for_loading)
         with jax.default_device(jax.devices("cpu")[0]):
             for loaded_name, loaded_weight in self.names_and_weights_generator:
+                jax.debug.print(
+                    f"Loaded: {loaded_name} - Shape: {loaded_weight.shape} - Values:\n{loaded_weight}"
+                )
+
                 if loaded_name.endswith(".bias"):
                     continue
                 if "vision_model" in loaded_name or "multi_modal_projector" in loaded_name:
@@ -354,48 +357,40 @@ class LlamaGuard4WeightLoader:
                 model_weight = get_param(model_params, mapped_name)
 
                 if not loaded_name.endswith(".bias"):
-                    # Use a conditional transpose for the down_proj layer.
-                    if "down_proj" in loaded_name:
-                        # PyTorch stores as (out, in), JAX wants (in, out)
-                        loaded_weight = jnp.transpose(loaded_weight, (1, 0))
-                    else:
-                        # For other layers, continue to use the transpose_params helper.
-                        loaded_weight = reshape_params(loaded_name,
-                                                       loaded_weight,
-                                                       self._weight_shape_map)
-                        loaded_weight = transpose_params(
-                            loaded_name, loaded_weight, self._transpose_map)
+                    # For other layers, continue to use the transpose_params helper.
+                    loaded_weight = reshape_params(loaded_name, loaded_weight,
+                                                   self._weight_shape_map)
+                    loaded_weight = transpose_params(loaded_name,
+                                                     loaded_weight,
+                                                     self._transpose_map)
 
-                # --- Print a slice of key model weights here ---
+                # --- Print key model weights here ---
                 if "embed_tokens" in loaded_name:
-                    jax.debug.print("JAX Embedding Table (slice):\n{}",
-                                    loaded_weight[:3, :5])
+                    jax.debug.print("JAX Embedding Table:\n{}", loaded_weight)
 
                 if "layers.0.self_attn.q_proj" in loaded_name:
-                    jax.debug.print("JAX layers.0 q_proj.weight (slice):\n{}",
-                                    loaded_weight[:3, :5])
+                    jax.debug.print("JAX layers.0 q_proj.weight:\n{}",
+                                    loaded_weight)
 
                 if "layers.0.self_attn.k_proj" in loaded_name:
-                    jax.debug.print("JAX layers.0 k_proj.weight (slice):\n{}",
-                                    loaded_weight[:3, :5])
+                    jax.debug.print("JAX layers.0 k_proj.weight:\n{}",
+                                    loaded_weight)
 
                 if "layers.0.self_attn.v_proj" in loaded_name:
-                    jax.debug.print("JAX layers.0 v_proj.weight (slice):\n{}",
-                                    loaded_weight[:3, :5])
+                    jax.debug.print("JAX layers.0 v_proj.weight:\n{}",
+                                    loaded_weight)
 
                 if "layers.0.feed_forward.gate_proj" in loaded_name:
-                    jax.debug.print(
-                        "JAX layers.0 gate_proj.weight (slice):\n{}",
-                        loaded_weight[:3, :5])
+                    jax.debug.print("JAX layers.0 gate_proj.weight:\n{}",
+                                    loaded_weight)
 
                 if "layers.0.feed_forward.down_proj" in loaded_name:
-                    jax.debug.print(
-                        "JAX layers.0 down_proj.weight (slice):\n{}",
-                        loaded_weight[:3, :5])
+                    jax.debug.print("JAX layers.0 down_proj.weight:\n{}",
+                                    loaded_weight)
 
                 if "layers.0.feed_forward.up_proj" in loaded_name:
-                    jax.debug.print("JAX layers.0 up_proj.weight (slice):\n{}",
-                                    loaded_weight[:3, :5])
+                    jax.debug.print("JAX layers.0 up_proj.weight:\n{}",
+                                    loaded_weight)
 
                 if model_weight.value.shape != loaded_weight.shape:
                     raise ValueError(
