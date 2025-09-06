@@ -30,6 +30,8 @@ import msgspec
 from vllm.executor.msgspec_utils import encode_hook
 from vllm.model_executor.layers.sampler import SamplerOutput
 
+from tpu_commons.distributed.utils import set_node_kv_ip_port
+
 logger = init_logger(__name__)
 
 
@@ -91,6 +93,10 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         self.has_connector = self.vllm_config.kv_transfer_config is not None
         self.kv_output_aggregator = KVOutputAggregator(
             self.parallel_config.world_size)
+        if self.has_connector:
+            ip_port = self._run_workers("get_node_kv_ip_port")
+            for item in ip_port:
+                set_node_kv_ip_port(item)
 
     def _initialize_ray_cluster(self) -> None:
         """Initialize the distributed cluster with Ray.
@@ -114,8 +120,6 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
                 f"current platform {current_platform.device_name} does not "
                 "support ray.")
 
-        logger.info("Creating a new placement group.")
-
         placement_group_specs: List[Dict[str, float]] = [{
             device_str:
             node['Resources'][device_str]
@@ -136,6 +140,9 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         # This way, at least bundle is required to be created in a current
         # node.
         placement_group_specs[0][f"node:{current_ip}"] = 0.001
+        logger.info(
+            f"RayDistributedExecutor | placement_group_specs={placement_group_specs}"
+        )
 
         # By default, Ray packs resources as much as possible.
         current_placement_group = ray.util.placement_group(
@@ -159,8 +166,6 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         if self.parallel_config.ray_workers_use_nsight:
             ray_remote_kwargs = self._configure_ray_workers_use_nsight(
                 ray_remote_kwargs)
-
-        logger.info("use_ray_spmd_worker: %s", self.use_ray_spmd_worker)
 
         # Create the workers.
         bundle_indices: List[int]
@@ -264,6 +269,9 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
             node_tpus[node_id].extend(tpu_ids)
         for node_id, tpu_ids in node_tpus.items():
             node_tpus[node_id] = sorted(tpu_ids)
+        logger.info(
+            f"RayDistributedExecutor | node_workers={node_workers} | node_tpus={node_tpus}"
+        )
 
         all_ips = set(worker_ips + [driver_ip])
         n_ips = len(all_ips)
