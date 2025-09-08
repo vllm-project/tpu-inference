@@ -366,7 +366,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             input_ids, mm_embeds)
 
         # TODO: Disable this for now
-        if self.is_multimodal_model:
+        if self.is_multimodal_model or self.lora_config is not None:
             self.maybe_forbid_compile = nullcontext()
 
         # TODO: make _get_input_ids_embeds within this context
