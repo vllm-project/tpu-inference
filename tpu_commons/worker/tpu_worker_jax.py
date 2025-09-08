@@ -255,3 +255,6 @@ class TPUWorker(AbstractTpuWorker):
                                                mappings=mappings,
                                                transpose_keys=transpose_keys,
                                                reshard_fn=reshard_fn)
+
+    def shutdown(self) -> None:
+        return
