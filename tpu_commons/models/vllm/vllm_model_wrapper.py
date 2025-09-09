@@ -21,7 +21,8 @@ from vllm.sequence import IntermediateTensors
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.vllm.quantization import get_tpu_quantization_config
-from tpu_commons.models.vllm.sharding import shard_model_to_tpu
+from tpu_commons.models.vllm.sharding import (MLP_TP_AXIS_NAME,
+                                              shard_model_to_tpu)
 from tpu_commons.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 
@@ -176,7 +177,8 @@ class VllmModelWrapper:
         @functools.partial(
             jax.jit,
             out_shardings=(NamedSharding(self.mesh,
-                                         PartitionSpec(None, "model"))),
+                                         PartitionSpec(None,
+                                                       MLP_TP_AXIS_NAME))),
         )
         def compute_logits_func(
             params_and_buffers: Any,

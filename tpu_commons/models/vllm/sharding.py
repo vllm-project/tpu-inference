@@ -21,6 +21,10 @@ P = PartitionSpec
 
 logger = init_logger(__name__)
 
+VOCAB_AXIS_NAME = ('data', 'expert', 'model')
+ATTN_HEAD_AXIS_NAME = 'model'
+MLP_TP_AXIS_NAME = ('additional_model', 'model')
+
 
 def shard_fused_moe(layer: torch.nn.Module, mesh: Mesh,
                     vllm_config: VllmConfig):
@@ -34,7 +38,7 @@ def shard_vocab_parallel_embedding(layer: torch.nn.Module, mesh: Mesh,
     assert isinstance(layer, VocabParallelEmbedding)
     w = Parameter(torch_view(t2j(layer.weight)), requires_grad=False)
     layer.weight = w.apply_jax_(jax.device_put,
-                                NamedSharding(mesh, P('model', None)))
+                                NamedSharding(mesh, P(MLP_TP_AXIS_NAME, None)))
     return layer
 
 
@@ -45,11 +49,11 @@ def shard_lm_head(layer: torch.nn.Module, mesh: Mesh, vllm_config: VllmConfig):
     assert isinstance(layer, ParallelLMHead)
     w = Parameter(torch_view(t2j(layer.weight)), requires_grad=False)
     layer.weight = w.apply_jax_(jax.device_put,
-                                NamedSharding(mesh, P('model', None)))
+                                NamedSharding(mesh, P(MLP_TP_AXIS_NAME, None)))
     if hasattr(layer, 'bias'):
         bias = Parameter(torch_view(t2j(layer.bias)), requires_grad=False)
         layer.bias = bias.apply_jax_(jax.device_put,
-                                     NamedSharding(mesh, P('model')))
+                                     NamedSharding(mesh, P(MLP_TP_AXIS_NAME)))
     return layer
 
 
