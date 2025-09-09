@@ -244,6 +244,7 @@ def load_lora_model(model: torch.nn.Module, model_config: ModelConfig,
     return lora_manager, lora_manager.create_lora_manager(model)
 
 
+# The reason why replace the method is that the set_lora and reset_lora need to run under torchax env.
 def replace_set_lora(model):
 
     def _tpu_set_lora(

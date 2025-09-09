@@ -32,11 +32,10 @@ class LoraUtils:
         lora_requests: set[LoRARequest]
         prompt_lora_mapping, token_lora_mapping, lora_requests = \
                             self.runner.input_batch.make_lora_inputs(padded_num_scheduled_tokens_per_req)
+        # One should not put lora_manager.set_active_loras under torchax.default_env() because set_active_loras also load lora from disk and torchax currently does not support that.
+        # Here we load the lora and set the lora weight to the linear layers.
         self.runner._set_active_loras(prompt_lora_mapping, token_lora_mapping,
                                       lora_requests)
-        # One should not put lora_manager.set_active_loras under torchax.default_env() because set_active_loras also load lora from disk and torchax currently does not support that.
-        self.runner.set_active_loras(self.runner.input_batch,
-                                     padded_num_scheduled_tokens_per_req)
 
         shard_lora_weights_and_move_to_tpu(self.runner.model.model,
                                            self.runner.mesh)
