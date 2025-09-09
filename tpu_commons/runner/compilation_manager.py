@@ -2,8 +2,10 @@ import os
 import time
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple
 
+import jax
 import jax.numpy as jnp
 import numpy as np
+import vllm.envs as envs
 from jax.sharding import NamedSharding, PartitionSpec
 
 from tpu_commons.logger import init_logger
@@ -26,6 +28,10 @@ class CompilationManager:
 
     def __init__(self, runner: "TPUModelRunner"):
         self.runner = runner
+        if not envs.VLLM_DISABLE_COMPILE_CACHE:
+            logger.info("Enabling JAX compile cache.")
+            jax.config.update("jax_compilation_cache_dir",
+                              envs.VLLM_XLA_CACHE_PATH)
 
     def _create_dummy_tensor(self,
                              shape: Tuple[int, ...],
