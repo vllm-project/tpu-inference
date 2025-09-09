@@ -83,6 +83,7 @@ steps:
          .buildkite/scripts/run_in_docker.sh \
            python3 -m pytest -s -v -x /workspace/tpu_commons/tests/ \
            --ignore=/workspace/tpu_commons/tests/kernels \
+           --ignore=/workspace/tpu_commons/tests/lora \
            --ignore=/workspace/tpu_commons/tests/e2e \
            --ignore=/workspace/tpu_commons/tpu_commons/mock \
            --cov-config=/workspace/tpu_commons/.coveragerc --cov tpu_commons --cov-report term-missing --cov-fail-under=69
