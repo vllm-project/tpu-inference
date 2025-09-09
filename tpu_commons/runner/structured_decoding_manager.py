@@ -61,27 +61,22 @@ class StructuredDecodingManager:
         self.runner.grammar_bitmask_cpu.fill(0)
         self.runner.require_structured_out_cpu.fill(0)
 
-        # We receive the structured output bitmask from the scheduler, but the
-        # indices of the requests in the batch may not match the indices of
-        # the bitmask since the scheduler doesn't know how the tpu runner is
-        # ordering the requests in the batch. We need to match the order of
-        # bitmask with the order of requests
-        struct_out_indices: list[int] = []
-        mask_indices: list[int] = []
-        for req_id in self.runner.input_batch.req_ids:
-            mask_index = scheduler_output.structured_output_request_ids.get(
-                req_id)
-            if mask_index is None:
+        sorted_struct_requests = sorted(
+            scheduler_output.structured_output_request_ids.items(),
+            key=lambda item: item[1])
+
+        cumulative_mask_idx = 0
+        for req_id, _ in sorted_struct_requests:
+            if req_id not in self.runner.input_batch.req_id_to_index:
                 continue
             batch_index = self.runner.input_batch.req_id_to_index[req_id]
-            struct_out_indices.append(batch_index)
-            mask_indices.append(mask_index)
-        self.runner.grammar_bitmask_cpu[struct_out_indices] = grammar_bitmask[
-            mask_indices]
-        # It's not guaranteed that all requests in this batch require
-        # structured output, so create a bool tensor to represent
-        # the requests that need structured output.
-        self.runner.require_structured_out_cpu[struct_out_indices] = True
+            self.runner.grammar_bitmask_cpu[batch_index] = grammar_bitmask[
+                cumulative_mask_idx]
+            # It's not guaranteed that all requests in this batch require
+            # structured output, so create a bool tensor to represent
+            # the requests that need structured output.
+            self.runner.require_structured_out_cpu[batch_index] = True
+            cumulative_mask_idx += 1
 
         (require_structured_out_cpu,
          grammar_bitmask_cpu, structured_decode_arange) = device_array(
