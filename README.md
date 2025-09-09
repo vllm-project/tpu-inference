@@ -225,7 +225,7 @@ JAX_PROFILER_SERVER_PORT=XXXX
 In order to use this approach, you can do the following:
 
 1. Run your typical `vllm serve` or `offline_inference` command (making sure to set `USE_JAX_PROFILER_SERVER=True`)
-2. Run your benchmarking command (`python benchmark_serving.py...`)
+2. Run your benchmarking command (`vllm bench serve...`)
 3. Once the warmup has completed and your benchmark is running, start a new tensorboard instance with your `logdir` set to the desired output location of your profiles (e.g. `tensorboard --logdir=profiles/llama3-mmlu/`)
 4. Open the tensorboard instance and navigate to the `profile` page (e.g. `http://localhost:6006/#profile`)
 5. Click `Capture Profile` and, in the `Profile Service URL(s) or TPU name` box, enter `localhost:XXXX` where `XXXX` is your `JAX_PROFILER_SERVER_PORT` (default is `9999`)
