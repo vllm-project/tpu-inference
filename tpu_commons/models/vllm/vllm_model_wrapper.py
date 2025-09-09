@@ -13,9 +13,12 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import TORCH_DTYPE_TO_JAX
-from vllm.config import VllmConfig
+from vllm.config import LoRAConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.forward_context import set_forward_context
+from vllm.lora.layers import BaseLayerWithLoRA
+from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.model_loader import get_model as vllm_get_model
+from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm.sequence import IntermediateTensors
 
 from tpu_commons.logger import init_logger
@@ -108,7 +111,21 @@ class VllmModelWrapper:
 
         # Load the vLLM model and wrap it into a new model whose forward function can calculate the hidden_state and logits.
         with load_context:
+            # vllm_get_model will move the model weight to TPU.
             vllm_model = vllm_get_model(vllm_config=vllm_config_for_load)
+        lora_manager = None
+        if vllm_config_for_load.lora_config is not None:
+            # replace the layer with LoRA layers.
+            with torchax.default_env():
+                # the device in load_lora_model is used to set the device used in punica wrapper.
+                lora_manager, vllm_model = load_lora_model(
+                    vllm_model,
+                    vllm_config_for_load.model_config,
+                    vllm_config_for_load.scheduler_config,
+                    vllm_config_for_load.lora_config,
+                    device="jax")
+            replace_set_lora(vllm_model)
+
         self.model = _VllmRunner(vllm_model)
 
         # jax.config.update("jax_explain_cache_misses", True)
@@ -118,7 +135,7 @@ class VllmModelWrapper:
                                                 self.vllm_config)
 
         # Returning to the jax land, so we need to wrap it into a JaxValue.
-        return jax_view(params_and_buffers)
+        return jax_view(params_and_buffers), lora_manager
 
     def jit_step_func(self):
 
@@ -160,7 +177,8 @@ class VllmModelWrapper:
                         "inputs_embeds": None,
                     },
                     tie_weights=False,
-                    strict=True)
+                    strict=True,
+                )
                 vllm_model_wrapper_context = get_vllm_model_wrapper_context()
                 new_kv_caches = vllm_model_wrapper_context.kv_caches
             # Wrap the hidden_states from torch land into a JaxValue for the jax
@@ -196,3 +214,59 @@ class VllmModelWrapper:
             return jax_view(logits)
 
         return compute_logits_func
+
+
+def load_lora_model(model: torch.nn.Module, model_config: ModelConfig,
+                    scheduler_config: SchedulerConfig, lora_config: LoRAConfig,
+                    device: str) -> torch.nn.Module:
+    if not supports_lora(model):
+        raise ValueError(
+            f"{model.__class__.__name__} does not support LoRA yet.")
+
+    if supports_multimodal(model):
+        logger.warning("Regarding multimodal models, vLLM currently "
+                       "only supports adding LoRA to language model.")
+
+    # Use get_text_config() in case of multimodal models
+    text_config = model_config.hf_config.get_text_config()
+
+    # Add LoRA Manager to the Model Runner
+    lora_manager = LRUCacheWorkerLoRAManager(
+        scheduler_config.max_num_seqs,
+        scheduler_config.max_num_batched_tokens,
+        model_config.get_vocab_size(),
+        lora_config,
+        device,
+        model.embedding_modules,
+        model.embedding_padding_modules,
+        max_position_embeddings=text_config.max_position_embeddings,
+    )
+    return lora_manager, lora_manager.create_lora_manager(model)
+
+
+# The reason why replace the method is that the set_lora and reset_lora need to run under torchax env.
+def replace_set_lora(model):
+
+    def _tpu_set_lora(
+        self,
+        index: int,
+        lora_a: torch.Tensor,
+        lora_b: torch.Tensor,
+        embeddings_tensor: Optional[torch.Tensor],
+        bias: Optional[torch.Tensor] = None,
+    ):
+        with torchax.default_env():
+            self._original_set_lora(index, lora_a, lora_b, embeddings_tensor,
+                                    bias)
+
+    def _tpu_reset_lora(self, index: int):
+        with torchax.default_env():
+            self._original_reset_lora(index)
+
+    for _, module in model.named_modules():
+        if isinstance(module, BaseLayerWithLoRA):
+            module._original_set_lora = module.set_lora
+            module._original_reset_lora = module.reset_lora
+            module.set_lora = _tpu_set_lora.__get__(module, module.__class__)
+            module.reset_lora = _tpu_reset_lora.__get__(
+                module, module.__class__)

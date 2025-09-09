@@ -205,7 +205,8 @@ def get_flax_model(
         run_get_multimodal_embeddings, graphdef)
     get_input_embeddings_fn = functools.partial(run_get_input_embeddings,
                                                 graphdef)
-    return model_fn, compute_logits_fn, get_multimodal_embeddings_fn, get_input_embeddings_fn, state
+    lora_manager, model = None, None
+    return model_fn, compute_logits_fn, get_multimodal_embeddings_fn, get_input_embeddings_fn, state, lora_manager, model
 
 
 def get_vllm_model(
@@ -220,11 +221,12 @@ def get_vllm_model(
         rng=rng,
         mesh=mesh,
     )
-    params = model.load_weights()
+    params, lora_manager = model.load_weights()
 
     jit_model = model.jit_step_func()
     compute_logits_fn = model.jit_compute_logits_func()
-    return jit_model, compute_logits_fn, None, None, params
+    # the model needs to be returned because lora weights are neither torch.nn.parameter nor torch.nn.buffer. After we load the lora weights and set it to the torch.nn.Module, we can shard it and move it to TPU.
+    return jit_model, compute_logits_fn, None, None, params, lora_manager, model
 
 
 def get_model(

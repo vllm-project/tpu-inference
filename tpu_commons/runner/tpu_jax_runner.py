@@ -27,6 +27,7 @@ from vllm.v1.request import Request
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.worker.kv_connector_model_runner_mixin import \
     KVConnectorModelRunnerMixin
+from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from tpu_commons import utils as common_utils
 from tpu_commons.logger import init_logger
@@ -46,6 +47,7 @@ from tpu_commons.runner import utils as runner_utils
 from tpu_commons.runner.compilation_manager import CompilationManager
 from tpu_commons.runner.input_batch_jax import CachedRequestState, InputBatch
 from tpu_commons.runner.kv_cache_manager import KVCacheManager
+from tpu_commons.runner.lora_utils import LoraUtils
 from tpu_commons.runner.multimodal_manager import MultiModalManager
 from tpu_commons.runner.persistent_batch_manager import PersistentBatchManager
 from tpu_commons.runner.speculative_decoding_manager import \
@@ -78,7 +80,7 @@ TPU_STR_DTYPE_TO_TORCH_DTYPE = {
 }
 
 
-class TPUModelRunner(KVConnectorModelRunnerMixin):
+class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
     def __init__(
         self,
@@ -118,6 +120,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         self.persistent_batch_manager = PersistentBatchManager(
             self.requests, self.input_batch, self.encoder_cache,
             self.uses_mrope, self.model_config)
+        self.lora_utils = LoraUtils(self)
 
         cache_config = self.cache_config
         if cache_config.cache_dtype == "auto":
@@ -259,6 +262,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
 
         # tensors for structured decoding
         self.vocab_size = self.model_config.get_vocab_size()
+        if self.lora_config is not None:
+            # lora_config.lora_extra_vocab_size is the "Maximum size of extra vocabulary that can be present in a LoRA adapter" per https://github.com/vanbasten23/vllm/blob/7f4a8b6705622fde952a2e633e86716f902d6e1b/vllm/config.py#L3040
+            self.vocab_size += self.lora_config.lora_extra_vocab_size
         self.grammar_bitmask_cpu = np.zeros(
             (self.max_num_reqs, cdiv(self.vocab_size, 32)),
             dtype=np.int32,
@@ -281,7 +287,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                                             dtype=np.int64)
 
     def load_model(self):
-        self.model_fn, self.compute_logits_fn, self.get_multimodal_embeddings_fn, self.get_input_embeddings_fn, self.state = get_model(
+        self.model_fn, self.compute_logits_fn, self.get_multimodal_embeddings_fn, self.get_input_embeddings_fn, self.state, self.lora_manager, self.model = get_model(
             self.vllm_config,
             self.rng_key,
             self.mesh,
@@ -360,7 +366,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             input_ids, mm_embeds)
 
         # TODO: Disable this for now
-        if self.is_multimodal_model:
+        if self.is_multimodal_model or self.lora_config is not None:
             self.maybe_forbid_compile = nullcontext()
 
         # TODO: make _get_input_ids_embeds within this context
@@ -655,6 +661,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
          logits_indices, request_distribution) = device_array(
              self.mesh, (input_ids, positions, block_tables, query_start_loc,
                          seq_lens, logits_indices, request_distribution))
+
+        if self.lora_config is not None:
+            self.lora_utils.set_active_loras(
+                num_scheduled_tokens_per_req, total_num_scheduled_tokens,
+                padded_total_num_scheduled_tokens)
 
         return (
             input_ids,
