@@ -425,11 +425,21 @@ def _load_hf_weights_on_thread(vllm_config,
         # Update the model weight
         if qwix_weight:
             qwix_qarray = awq_dict_to_qarray(awq_dict, jnp.uint4)
-            model_weight.array.qvalue.value = qwix_qarray.qvalue
-            # TODO?
-            model_weight.array.scale.value = qwix_qarray.scale.astype(
-                jnp.bfloat16)
-            model_weight.array.zero_point.value = qwix_qarray.zero_point
+            qvalue_spec = model_weight.array.qvalue.sharding.spec if isinstance(
+                model_weight.array.qvalue.sharding,
+                NamedSharding) else model_weight.array.qvalue.sharding
+            scale_spec = model_weight.array.scale.sharding.spec if isinstance(
+                model_weight.array.scale.sharding,
+                NamedSharding) else model_weight.array.scale.sharding
+            zero_point_spec = model_weight.array.zero_point.sharding.spec if isinstance(
+                model_weight.array.zero_point.sharding,
+                NamedSharding) else model_weight.array.zero_point.sharding
+            model_weight.array.qvalue.value = shard(qwix_qarray.qvalue,
+                                                    qvalue_spec)
+            model_weight.array.scale.value = shard(
+                qwix_qarray.scale.astype(jnp.bfloat16), scale_spec)
+            model_weight.array.zero_point.value = shard(
+                qwix_qarray.zero_point, zero_point_spec)
             qwix_weight = False
         else:
             # TODO: do we want this?

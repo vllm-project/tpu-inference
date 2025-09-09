@@ -20,7 +20,6 @@ _MODEL_REGISTRY = {}
 def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     # NOTE: Use inline imports here, otherwise the normal imports
     # would cause JAX init failure when using multi hosts with Ray.
-    _MODEL_REGISTRY = {}
 
     from tpu_commons.models.jax.deepseek_v3 import DeepSeekV3
     from tpu_commons.models.jax.llama4 import Llama4ForCausalLM
@@ -37,7 +36,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
         from tpu_commons.models.jax.llama3 import LlamaForCausalLM
 
     _MODEL_REGISTRY["Llama4ForCausalLM"] = Llama4ForCausalLM
-    _MODEL_REGISTRY["DeepSeekV3"] = DeepSeekV3
+    _MODEL_REGISTRY["DeepseekV3ForCausalLM"] = DeepSeekV3
     _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
     _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
     _MODEL_REGISTRY["Qwen3ForCausalLM"] = Qwen3ForCausalLM
@@ -239,3 +238,16 @@ def get_model(
         return get_vllm_model(vllm_config, rng, mesh)
     else:
         raise NotImplementedError("Unsupported MODEL_IMPL_TYPE")
+
+
+def register_model(arch: str, model: Any):
+    """
+    Registers a model class for a given architecture name.
+
+    Args:
+        arch: The name of the architecture (e.g., "LlamaForCausalLM").
+        model: The model class to register.
+    """
+    # TODO: Support lazy loading (like vllm)
+    # TODO: Also call vllm's `ModelRegistry.register_model`.
+    _MODEL_REGISTRY[arch] = model
