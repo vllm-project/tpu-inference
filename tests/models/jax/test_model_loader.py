@@ -19,11 +19,21 @@ from tpu_commons.models.jax.qwen3 import Qwen3ForCausalLM
 
 
 class MockModelA:
-    pass
+
+    def __init__(self, vllm_config, rng=None, mesh=None):
+        pass
+
+    def __call__(self, kv_caches, input_ids, attention_metadata):
+        pass
 
 
 class MockModelB:
-    pass
+
+    def __init__(self, vllm_config, rng=None, mesh=None):
+        pass
+
+    def __call__(self, kv_caches, input_ids, attention_metadata):
+        pass
 
 
 @pytest.fixture(scope="module")
@@ -77,6 +87,52 @@ def clear_model_registry_after_test():
     """Clear the model registry after each test to prevent side effects."""
     yield
     model_loader._MODEL_REGISTRY.clear()
+
+
+def test_register_model_validation():
+    """Tests that register_model validates the model interface."""
+
+    class ValidModel:
+
+        def __init__(self, vllm_config, rng=None, mesh=None):
+            pass
+
+        def __call__(self, kv_caches, input_ids, attention_metadata, **kwargs):
+            pass
+
+    class MissingInitArgModel:
+
+        def __init__(self, rng=None, mesh=None):  # Missing vllm_config
+            pass
+
+        def __call__(self, kv_caches, input_ids, attention_metadata):
+            pass
+
+    class MissingCallArgModel:
+
+        def __init__(self, vllm_config, rng=None, mesh=None):
+            pass
+
+        def __call__(self, kv_caches, input_ids):  # Missing attention_metadata
+            pass
+
+    class NoCallModel:
+
+        def __init__(self, vllm_config, rng=None, mesh=None):
+            pass
+
+    # This should succeed
+    model_loader.register_model("ValidModel", ValidModel)
+
+    # These should fail
+    with pytest.raises(TypeError, match="vllm_config"):
+        model_loader.register_model("InvalidInit", MissingInitArgModel)
+
+    with pytest.raises(TypeError, match="attention_metadata"):
+        model_loader.register_model("InvalidCall", MissingCallArgModel)
+
+    with pytest.raises(TypeError, match="__call__ method"):
+        model_loader.register_model("NoCallModel", NoCallModel)
 
 
 def test_register_model_new_arch():
