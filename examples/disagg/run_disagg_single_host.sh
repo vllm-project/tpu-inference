@@ -32,7 +32,6 @@ cleanup_instances() {
 
 mkdir -p $HOME/logs
 
-KV_IP="127.0.0.1"
 
 # Start prefill instances
 for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
@@ -43,13 +42,16 @@ for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
     TPU_CHIPS_PER_PROCESS_BOUNDS=1,1,1 \
     TPU_PROCESS_BOUNDS=1,1,1 \
     TPU_VISIBLE_CHIPS=0 \
+    \
+    TPU_KV_TRANSFER_PORT=$KV_PORT \
     TPU_SIDE_CHANNEL_PORT=$SIDE_PORT \
     SKIP_JAX_PRECOMPILE=1 \
+    \
     vllm serve $MODEL \
     --port $PORT \
     --gpu-memory-utilization 0.2 \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
-    --kv-transfer-config "{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_commons.distributed.tpu_connector\",\"kv_role\":\"kv_producer\",\"kv_ip\":\"$KV_IP\",\"kv_port\":\"$KV_PORT\"}" \
+    --kv-transfer-config "{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_commons.distributed.tpu_connector\",\"kv_role\":\"kv_producer\"}" \
     > $HOME/logs/prefill_$i.txt 2>&1 &
 
     PREFILL_HOSTS+=("localhost")
@@ -61,18 +63,22 @@ done
 for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
     PORT=$((8200 + i))
     KV_PORT=$((7200 + i))
+    # Same as prefill SIDE_PORT
     SIDE_PORT=$((6100 + i))
 
     TPU_CHIPS_PER_PROCESS_BOUNDS=1,1,1 \
     TPU_PROCESS_BOUNDS=1,1,1 \
     TPU_VISIBLE_CHIPS=1 \
+    \
+    TPU_KV_TRANSFER_PORT=$KV_PORT \
     TPU_SIDE_CHANNEL_PORT=$SIDE_PORT \
     SKIP_JAX_PRECOMPILE=1 \
+    \
     vllm serve $MODEL \
     --port $PORT \
     --gpu-memory-utilization 0.2 \
     --tensor-parallel-size $DECODER_TP_SIZE \
-    --kv-transfer-config "{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_commons.distributed.tpu_connector\",\"kv_role\":\"kv_consumer\",\"kv_ip\":\"$KV_IP\",\"kv_port\":\"$KV_PORT\"}" \
+    --kv-transfer-config "{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_commons.distributed.tpu_connector\",\"kv_role\":\"kv_consumer\"}" \
     > $HOME/logs/decode_$i.txt 2>&1 &
 
     DECODE_HOSTS+=("localhost")
@@ -114,5 +120,5 @@ http://127.0.0.1:7080/v1/completions \
 
 >> Stop the proxy server and all prefill/decode instances:
 
-pkill -f "vllm serve" && pkill -f "toy_proxy_server" && pkill -f "run_disagg_servers"
+pkill -f "vllm serve" && pkill -f "toy_proxy_server" && pkill -f "run_disagg_single_host"
 EOF
