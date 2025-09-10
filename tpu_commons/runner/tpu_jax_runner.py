@@ -390,6 +390,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     scheduler_output) as kv_connector_output:
                 # NOTE(Wenlong): It takes both `input_ids` and `inputs_embeds`,
                 # but one of them would be `None`
+                # xw32: print(self.state),
                 self.kv_caches, hidden_states = self.model_fn(
                     self.state,
                     self.kv_caches,

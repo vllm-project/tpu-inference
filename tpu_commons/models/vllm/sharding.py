@@ -194,6 +194,7 @@ def shard_and_move_tensor_to_tpu(tensor, mesh):
 
 
 def shard_and_move_lora_to_tpu(layer: torch.nn.Module, mesh: Mesh):
+    # Note, lora_a_stacked[i] has shape [max_loras, 1, num_out_features, num_in_features]
     sharded_lora_a_tpu = []
     sharded_lora_b_tpu = []
     sharded_lora_bias_tpu = []

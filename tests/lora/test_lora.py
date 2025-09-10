@@ -41,7 +41,6 @@ def test_single_lora():
     We run "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_2_adapter" which
     will force Qwen2.5-3B-Instruct to claim 1+1=2.
     """
-
     llm = setup_vllm(1)
 
     prompt = "What is 1+1? \n"
@@ -60,7 +59,6 @@ def test_single_lora():
     assert int(answer) == 2
 
 
-@pytest.mark.skip("Not supported yet.")
 def test_lora_hotswapping():
     """
     This test ensures we can run multiple LoRA adapters on the TPU backend, even
@@ -85,9 +83,10 @@ def test_lora_hotswapping():
         output = llm.generate(prompt,
                               sampling_params=vllm.SamplingParams(
                                   max_tokens=256, temperature=0),
-                              lora_request=req)[0].outputs[0].text
-        answer = output.strip()[0]
+                              lora_request=req)
+        answer = output[0].outputs[0].text.strip()[0]
 
+        print(f'xw32 test {answer=}')
         assert answer.isdigit()
         assert int(answer) == i + 1, f"Expected {i + 1}, got {answer}"
 
