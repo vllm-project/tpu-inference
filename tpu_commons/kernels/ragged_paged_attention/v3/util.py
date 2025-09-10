@@ -53,7 +53,7 @@ def get_device_name(num_devices: int | None = None):
         kind = kind[:-len(' lite')] + 'e'
     if kind == 'TPU7x':
         kind = 'TPU v7'
-    assert kind[:-1] == 'TPU v', kind
+    assert kind[:5] == 'TPU v', kind
     if num_devices is not None:
         kind += f'-{num_devices}'
     return kind
