@@ -40,7 +40,6 @@ def create_kv_caches(
     """
     # TODO(xiang): fix this together with get_kv_cache_spec
     # cache_dtype = kv_cache_spec.dtype
-    num_blocks = num_blocks // 2
     cache_shape = rpa.get_kv_cache_shape(num_blocks, block_size, num_kv_heads,
                                          head_size, cache_dtype)
 

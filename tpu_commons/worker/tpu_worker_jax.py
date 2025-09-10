@@ -148,7 +148,7 @@ class TPUWorker(AbstractTpuWorker):
         hbm_free = [limit - used for used, limit in hbm_usage]
         total_hbm_free = sum(hbm_free)
         taxed_hbm = total_hbm_free * self.cache_config.gpu_memory_utilization
-        return taxed_hbm
+        return taxed_hbm / 5
 
     def execute_model(
         self,
