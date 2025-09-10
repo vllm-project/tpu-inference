@@ -21,7 +21,8 @@ from tpu_commons import utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.utils import file_utils
 from tpu_commons.models.jax.utils.quantization.quantization_utils import (
-    awq_dict_to_qarray, reverse_awq_order, unpack_awq_weight_to_int4)
+    awq_dict_to_qarray, bnb_dict_to_qarray, reverse_awq_order,
+    unpack_awq_weight_to_int4)
 
 logger = init_logger(__name__)
 
@@ -277,6 +278,7 @@ def _load_hf_weights_on_thread(vllm_config,
         shardings = params
 
     awq_dict = {"scales": [], "qzeros": [], "qweight": []}
+    bnb_dict = {"scales": [], "weight": []}
     qwix_weight = False
 
     for hf_key, hf_weight in model_weights_single_file_generator(
@@ -290,7 +292,27 @@ def _load_hf_weights_on_thread(vllm_config,
         # is_gptq_layer = any(hf_key.endswith(k) for k in gptq_keywords)
         is_awq_layer = any(hf_key.endswith(k) for k in awq_keywords)
 
-        # scales is always last
+        bnb_keywords = ["SCB"]
+        is_bnb_layer = any(hf_key.endswith(k) for k in bnb_keywords)
+
+        # TODO:
+        if "weight_format" in hf_key:
+            continue
+
+        # weight is always last
+        # TODO: weights is used for both quant and unquant params, so need better way to differentiate
+        # than != []
+        if is_bnb_layer or isinstance(bnb_dict["scales"], jax.Array):
+            if hf_key.endswith("SCB"):
+                bnb_dict["scales"] = hf_weight
+                continue
+            else:
+                bnb_dict["weight"] = hf_weight
+                qwix_weight = True
+                # TODO: need to clean this up
+                is_bnb_layer = True
+            # TODO: transpose?
+
         if is_awq_layer:
             awq_dict[hf_key.split(".")[-1]] = hf_weight
             if hf_key.endswith("scales"):
@@ -353,7 +375,7 @@ def _load_hf_weights_on_thread(vllm_config,
         else:
             for key in reshape_keys:
                 if key in hf_key:
-                    if qwix_weight:
+                    if qwix_weight and is_awq_layer:
                         scale_zeros_reshape = list(reshape_keys[key])
                         scale_zeros_reshape[
                             -1] = scale_zeros_reshape[-1] // awq_group_size
@@ -363,6 +385,12 @@ def _load_hf_weights_on_thread(vllm_config,
                             awq_dict["scales"], scale_zeros_reshape)
                         awq_dict["qzeros"] = jnp.reshape(
                             awq_dict["qzeros"], scale_zeros_reshape)
+                    elif qwix_weight and is_bnb_layer:
+                        bnb_dict["weight"] = jnp.reshape(
+                            bnb_dict["weight"], reshape_keys[key])
+                        # TODO?
+                        # bnb_dict["scales"] = jnp.reshape(
+                        #     bnb_dict["scales"], reshape_keys[key])
                     else:
                         hf_weight = jnp.reshape(hf_weight, reshape_keys[key])
                     # TODO: GPTQ
@@ -377,7 +405,7 @@ def _load_hf_weights_on_thread(vllm_config,
                     break
             for key in transpose_keys:
                 if key in hf_key:
-                    if qwix_weight:
+                    if qwix_weight and is_awq_layer:
                         # TODO: skip for AWQ?
                         assert all(
                             [value is not None for value in awq_dict.values()])
@@ -387,6 +415,14 @@ def _load_hf_weights_on_thread(vllm_config,
                             awq_dict["qzeros"], transpose_keys[key])
                         awq_dict["scales"] = jnp.transpose(
                             awq_dict["scales"], transpose_keys[key])
+                    elif qwix_weight and is_bnb_layer:
+                        assert all(
+                            [value is not None for value in awq_dict.values()])
+                        bnb_dict["weight"] = jnp.transpose(
+                            bnb_dict["weight"], transpose_keys[key])
+                        # NOTE: scales are 1d
+                        # bnb_dict["scales"] = jnp.transpose(
+                        #     bnb_dict["scales"], transpose_keys[key])
                     else:
                         hf_weight = jnp.transpose(hf_weight,
                                                   transpose_keys[key])
@@ -423,7 +459,7 @@ def _load_hf_weights_on_thread(vllm_config,
                 assert test_model_weight.value.shape == hf_weight.shape, f"{hf_key}: {test_model_weight.value.shape} != {hf_weight.shape}"
 
         # Update the model weight
-        if qwix_weight:
+        if qwix_weight and is_awq_layer:
             qwix_qarray = awq_dict_to_qarray(awq_dict, jnp.uint4)
             qvalue_spec = model_weight.array.qvalue.sharding.spec if isinstance(
                 model_weight.array.qvalue.sharding,
@@ -441,6 +477,46 @@ def _load_hf_weights_on_thread(vllm_config,
             model_weight.array.zero_point.value = shard(
                 qwix_qarray.zero_point, zero_point_spec)
             qwix_weight = False
+        elif qwix_weight and is_bnb_layer:
+            asa = hf_key.split(".")[-1]
+            INT8_ABSMAX_SCALER = 127
+            if asa == "k_proj":
+                bnb_dict["scales"] = jnp.reshape(
+                    bnb_dict["scales"], (1, 8, 128)) / INT8_ABSMAX_SCALER
+            elif asa == "o_proj":
+                bnb_dict["scales"] = jnp.reshape(
+                    bnb_dict["scales"], (1, 1, 4096)) / INT8_ABSMAX_SCALER
+            elif asa == "v_proj":
+                bnb_dict["scales"] = jnp.reshape(
+                    bnb_dict["scales"], (1, 8, 128)) / INT8_ABSMAX_SCALER
+            elif asa == "q_proj":
+                bnb_dict["scales"] = jnp.reshape(
+                    bnb_dict["scales"], (1, 32, 128)) / INT8_ABSMAX_SCALER
+            elif asa == "down_proj":
+                bnb_dict["scales"] = jnp.reshape(
+                    bnb_dict["scales"], (1, 4096)) / INT8_ABSMAX_SCALER
+            elif asa == "up_proj":
+                bnb_dict["scales"] = jnp.reshape(
+                    bnb_dict["scales"], (1, 14336)) / INT8_ABSMAX_SCALER
+            elif asa == "gate_proj":
+                bnb_dict["scales"] = jnp.reshape(
+                    bnb_dict["scales"], (1, 14336)) / INT8_ABSMAX_SCALER
+
+            qwix_qarray = bnb_dict_to_qarray(bnb_dict, jnp.int8)
+            qvalue_spec = model_weight.array.qvalue.sharding.spec if isinstance(
+                model_weight.array.qvalue.sharding,
+                NamedSharding) else model_weight.array.qvalue.sharding
+            scale_spec = model_weight.array.scale.sharding.spec if isinstance(
+                model_weight.array.scale.sharding,
+                NamedSharding) else model_weight.array.scale.sharding
+            model_weight.array.qvalue.value = shard(qwix_qarray.qvalue,
+                                                    qvalue_spec)
+
+            # TODO: bf16?
+            model_weight.array.scale.value = shard(
+                qwix_qarray.scale.astype(jnp.bfloat16), scale_spec)
+            qwix_weight = False
+            bnb_dict = {"scales": [], "weight": []}
         else:
             # TODO: do we want this?
             hf_weight = hf_weight.astype(model_weight.value.dtype)

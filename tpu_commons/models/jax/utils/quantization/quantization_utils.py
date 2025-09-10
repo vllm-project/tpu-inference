@@ -367,3 +367,22 @@ def awq_dict_to_qarray(weight_dict: dict,
     qzeros = weight_dict['qzeros']
     scales = weight_dict['scales']
     return qpl.QArray(qweight, scales, qzeros, qarray_dtype)
+
+
+def bnb_dict_to_qarray(weight_dict: dict,
+                       qarray_dtype: jnp.dtype) -> qpl.QArray:
+    """
+    Converts a dictioanry containing BNB weights (weights, scales) to a Qwix
+    QArray object.
+
+    Args:
+        weight_dict: a dictionary containing the BnB weights
+        qarray_dtype: the dtype of the QArray
+
+    Returns:
+        a Qwix QArray
+    """
+    qweight = weight_dict['weight']
+    scales = weight_dict['scales']
+    # NOTE: BnB checkpoints don't have any zero points
+    return qpl.QArray(qweight, scales, None, qarray_dtype)
