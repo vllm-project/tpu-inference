@@ -220,7 +220,10 @@ class KVCacheManager:
     @functools.partial(
         jax.jit,
         static_argnames=("block_size"),
-        donate_argnames=("kv_cache_slices", ),
+        donate_argnames=(
+            "kv_caches",
+            "kv_cache_slices",
+        ),
     )
     def _jitted_insert_kv_cache(
         block_size,
@@ -251,7 +254,10 @@ class KVCacheManager:
     @functools.partial(
         jax.jit,
         static_argnames=("block_size"),
-        donate_argnames=("kv_cache_slices", ),
+        donate_argnames=(
+            "kv_caches",
+            "kv_cache_slices",
+        ),
     )
     def _jitted_insert_continuous_kv_cache(
         block_size,
