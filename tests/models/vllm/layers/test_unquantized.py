@@ -8,10 +8,13 @@ import utils as test_utils
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.interop import torch_view
 from torchax.ops.mappings import j2t, t2j
-from vllm.config import set_current_vllm_config
+from vllm.config import ParallelConfig, set_current_vllm_config
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.engine.arg_utils import EngineArgs
+from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe.moe_torch_iterative import \
+    fused_moe as torch_moe
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase,
                                                MergedColumnParallelLinear,
@@ -21,7 +24,8 @@ from vllm.model_executor.model_loader import get_model as vllm_get_model
 
 from tpu_commons.models.vllm.quantization import get_tpu_quantization_config
 from tpu_commons.models.vllm.quantization.unquantized import (
-    JaxUnquantizedConfig, JaxUnquantizedLinearMethod)
+    JaxUnquantizedConfig, JaxUnquantizedFusedMoEMethod,
+    JaxUnquantizedLinearMethod)
 
 P = PartitionSpec
 MODELS = ["Qwen/Qwen2-1.5B-Instruct"]
@@ -396,3 +400,82 @@ def test_jax_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
         jax_output = j2t(jax_output.to(torch.float32)).to(dtype)
 
     torch.testing.assert_close(output, jax_output)
+
+
+@pytest.mark.parametrize("use_ep", [True, False])
+@pytest.mark.parametrize("mesh", [
+    test_utils.get_spmd_mesh(1),
+    test_utils.get_spmd_mesh(jax.local_device_count())
+])
+@pytest.mark.parametrize("num_tokens", [8])
+@pytest.mark.parametrize("intermediate_size", [1024, 2048])
+@pytest.mark.parametrize("hidden_size", [128, 512])
+@pytest.mark.parametrize("num_experts", [8])
+@pytest.mark.parametrize("topk", [2])
+def test_jax_fused_moe(use_ep, mesh, num_tokens, intermediate_size,
+                       hidden_size, num_experts, topk):
+    dtype = torch.bfloat16
+
+    a = torch.randn((num_tokens, hidden_size), dtype=dtype) / 10
+    w1 = torch.randn(
+        (num_experts, 2 * intermediate_size, hidden_size), dtype=dtype) / 10
+    w2 = torch.randn(
+        (num_experts, hidden_size, intermediate_size), dtype=dtype) / 10
+    score = torch.randn((num_tokens, num_experts), dtype=dtype)
+
+    torch_output = torch_moe(
+        hidden_states=a,
+        w1=w1,
+        w2=w2,
+        gating_output=score,
+        topk=topk,
+        global_num_experts=num_experts,
+        expert_map=None,
+        renormalize=False,
+    )
+
+    engine_args = EngineArgs(
+        model="Qwen/Qwen2-1.5B-Instruct",
+        max_model_len=64,
+        max_num_batched_tokens=64,
+        max_num_seqs=4,
+    )
+    vllm_config = engine_args.create_engine_config()
+    vllm_config.model_config.dtype = dtype
+    vllm_config.parallel_config = ParallelConfig(enable_expert_paralle=use_ep)
+
+    quant_config = get_tpu_quantization_config(vllm_config, mesh)
+    with set_current_vllm_config(vllm_config):
+        vllm_fused_moe = FusedMoE(
+            num_experts=num_experts,
+            top_k=topk,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            reduce_results=False,
+            renormalize=False,
+            tp_size=1,
+            dp_size=1,
+            quant_config=quant_config,
+        )
+    vllm_fused_moe.w13_weight.data = w1
+    vllm_fused_moe.w2_weight.data = w2
+
+    jax_a = torch_view(t2j(a, use_dlpack=False))
+    jax_a.apply_jax_(jax.device_put, NamedSharding(mesh, P(None, None)))
+    score = torch_view(t2j(score))
+    score.apply_jax_(jax.device_put, NamedSharding(mesh, P(None, None)))
+
+    with torchax.default_env():
+        assert isinstance(vllm_fused_moe.quant_method,
+                          JaxUnquantizedFusedMoEMethod)
+        vllm_fused_moe.quant_method.process_weights_after_loading(
+            vllm_fused_moe)
+        jax_output = vllm_fused_moe(jax_a, score)
+        jax_output = j2t(jax_output.to(torch.float32)).to(dtype)
+
+    torch.testing.assert_close(
+        torch_output,
+        jax_output,
+        atol=1e-2,
+        rtol=1e-2,
+    )

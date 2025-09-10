@@ -1,14 +1,19 @@
-from typing import Any, Optional
+import functools
+from typing import Any, Callable, Optional, Union
 
 import jax
 import jax.numpy as jnp
 import torch
-from jax.sharding import NamedSharding, PartitionSpec
-from torchax.interop import torch_view
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from torch.nn.parameter import Parameter
+from torchax.interop import jax_view, torch_view
+from torchax.ops.mappings import t2j
 from vllm.attention.layer import Attention
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE, UnquantizedFusedMoEMethod)
+    FusedMoE, FusedMoEConfig, UnquantizedFusedMoEMethod)
+from vllm.model_executor.layers.fused_moe.modular_kernel import (
+    FusedMoEPermuteExpertsUnpermute, FusedMoEPrepareAndFinalize)
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import \
@@ -16,7 +21,9 @@ from vllm.model_executor.layers.quantization import \
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 
+from tpu_commons.models.vllm.jax_fused_moe import jax_fused_moe_func_padded
 from tpu_commons.models.vllm.jax_linear_common import (
+    reorder_concatenated_tensor_for_sharding,
     slice_sharded_tensor_for_concatenation, torch_to_jax_param)
 from tpu_commons.models.vllm.quantization.common import (JaxCommonConfig,
                                                          JaxCommonLinearConfig)
@@ -54,7 +61,7 @@ class JaxUnquantizedConfig(QuantizationConfig, JaxCommonConfig):
             linear_config = self.get_linear_config(layer)
             return JaxUnquantizedLinearMethod(linear_config)
         if isinstance(layer, FusedMoE):
-            return UnquantizedFusedMoEMethod(layer.moe_config)
+            return JaxUnquantizedFusedMoEMethod(layer.moe_config, self.mesh)
         if isinstance(layer, Attention):
             return None
         return None
@@ -144,3 +151,103 @@ class JaxUnquantizedLinearMethod(UnquantizedLinearMethod):
             outs.append(out)
         out = jnp.concatenate(outs, axis=-1)
         return torch_view(out)
+
+
+class JaxUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
+
+    def __init__(self, moe: FusedMoEConfig, mesh: Mesh):
+        super().__init__(moe)
+        self.mesh = mesh
+
+    def select_gemm_impl(
+        self,
+        prepare_finalize: FusedMoEPrepareAndFinalize,
+        moe: FusedMoEConfig,
+        layer: torch.nn.Module,
+    ) -> FusedMoEPermuteExpertsUnpermute:
+        raise NotImplementedError(
+            "Selecting gemm implementation is currently not supported.")
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        assert isinstance(layer, FusedMoE)
+
+        w2_weight = t2j(layer.w2_weight, use_dlpack=False)
+        w13_weight = t2j(layer.w13_weight, use_dlpack=False)
+
+        if layer.use_ep:
+            w13_weight = jax.device_put(
+                w13_weight, NamedSharding(self.mesh, P('model', None, None)))
+            w2_weight = jax.device_put(
+                w2_weight, NamedSharding(self.mesh, P('model', None, None)))
+        else:
+            intermediate_size = w13_weight.shape[1] // 2
+            assert intermediate_size == w2_weight.shape[-1]
+            output_sizes = [intermediate_size, intermediate_size]
+            n_shards = self.mesh.shape['model']
+            assert intermediate_size % n_shards == 0
+            w13_weight = reorder_concatenated_tensor_for_sharding(w13_weight,
+                                                                  output_sizes,
+                                                                  n_shards,
+                                                                  dim=1)
+            w13_weight = jax.device_put(
+                w13_weight, NamedSharding(self.mesh, P(None, 'model', None)))
+            w2_weight = jax.device_put(
+                w2_weight, NamedSharding(self.mesh, P(None, None, 'model')))
+        w13_weight = Parameter(torch_view(w13_weight), requires_grad=False)
+        w2_weight = Parameter(torch_view(w2_weight), requires_grad=False)
+
+        layer.w13_weight = w13_weight
+        layer.w2_weight = w2_weight
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        top_k: int,
+        renormalize: bool,
+        use_grouped_topk: bool = False,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
+        activation: str = "silu",
+        enable_eplb: bool = False,
+        expert_load_view: Optional[torch.Tensor] = None,
+        logical_to_physical_map: Optional[torch.Tensor] = None,
+        logical_replica_count: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        assert isinstance(layer, FusedMoE)
+        if activation != "silu":
+            raise NotImplementedError(
+                "Only silu is supported for activation function.")
+        if scoring_func != "softmax":
+            raise NotImplementedError(
+                "Only softmax is supported for scoring_func")
+
+        _fused_moe_func = functools.partial(
+            jax.jit(jax_fused_moe_func_padded,
+                    static_argnames=[
+                        "topk", "global_num_experts", "renormalize",
+                        "reduce_results", "mesh", "use_ep"
+                    ]),
+            topk=top_k,
+            global_num_experts=global_num_experts,
+            renormalize=renormalize,
+            reduce_results=layer.reduce_results,
+            mesh=self.mesh,
+            use_ep=layer.use_ep)
+
+        output = _fused_moe_func(
+            jax_view(x),
+            jax_view(layer.w13_weight),
+            jax_view(layer.w2_weight),
+            jax_view(router_logits),
+        )
+
+        return torch_view(output)
