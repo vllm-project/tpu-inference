@@ -9,8 +9,7 @@ import jax.numpy as jnp
 import qwix
 import yaml
 from flax import nnx
-from jax.sharding import Mesh
-from qwix import pallas as qpl
+from jax.sharding import Mesh, NamedSharding
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -30,6 +29,14 @@ DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS = 256
 DEFAULT_MAX_NUM_BLOCKS_PER_REQ = 16
 
 AWQ_REVERSE_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
+
+BNB_INT8_ABSMAX_SCALER = 127
+
+QUANTIZATION_SCHEME_KEYS_TO_SKIP = {
+    "bnb": ["weight_format"],
+}
+
+DEFAULT_SCALE_DTYPE = "bfloat16"
 
 
 def parse_qwix_config_to_rules(
@@ -350,39 +357,105 @@ def reverse_awq_order(matrix: jnp.ndarray, bits: int) -> jnp.ndarray:
     return matrix[:, reverse_order_tensor]
 
 
-def awq_dict_to_qarray(weight_dict: dict,
-                       qarray_dtype: jnp.dtype) -> qpl.QArray:
+def set_quantized_weight(model_weight: nnx.State, quantization_scheme: str,
+                         quantization_weight_dict: dict, shard: Callable,
+                         vllm_config: "VllmConfig"):
     """
-    Converts a dictioanry containing AWQ weights (qweight, qzeros, scales) to a Qwix
-    QArray object.
+    Utility for `_load_hf_weights_on_thread` which will set Qwix-quantized weights on an abstract FlaxNNX model.
 
     Args:
-        weight_dict: a dictionary containing the AWQ weights
-        qarray_dtype: the dtype of the QArray
+        model_weight: the model weight to set -- should be quantized via Qwix
+        quantization_scheme: the quantization scheme (e.g. "bwq" or "awq")
+        quantization_weight_dict: the quantization weight dict
+            For AWQ, should contain qweight, scales and qzeros
+            For BNB, should contain qweight and scales
+        shard: the shard function
+        vllm_config: the vllm config
 
-    Returns:
-        a Qwix QArray
     """
-    qweight = weight_dict['qweight']
-    qzeros = weight_dict['qzeros']
-    scales = weight_dict['scales']
-    return qpl.QArray(qweight, scales, qzeros, qarray_dtype)
+    qwix_config = vllm_config.additional_config.get("quantization",
+                                                    {}).get("qwix", {})
+    scale_dtype = getattr(jnp,
+                          qwix_config.get("scale_dtype", DEFAULT_SCALE_DTYPE))
+    if quantization_scheme == "awq":
+        assert all(
+            awq_weight_name in quantization_weight_dict.keys()
+            for awq_weight_name in ["qweight", "scales", "qzeros"]
+        ), "AWQ quantization weight dict must contain qweight, scales and qzeros"
+        assert vllm_config.model_config.hf_config.quantization_config.get(
+            "bits") == 4, "Only 4-bit quantization supported for now for AWQ"
+        qvalue_spec = model_weight.array.qvalue.sharding.spec if isinstance(
+            model_weight.array.qvalue.sharding,
+            NamedSharding) else model_weight.array.qvalue.sharding
+        scale_spec = model_weight.array.scale.sharding.spec if isinstance(
+            model_weight.array.scale.sharding,
+            NamedSharding) else model_weight.array.scale.sharding
+        zero_point_spec = model_weight.array.zero_point.sharding.spec if isinstance(
+            model_weight.array.zero_point.sharding,
+            NamedSharding) else model_weight.array.zero_point.sharding
+        model_weight.array.qvalue.value = shard(
+            quantization_weight_dict["qweight"], qvalue_spec)
+        model_weight.array.scale.value = shard(
+            quantization_weight_dict["scales"].astype(scale_dtype), scale_spec)
+        model_weight.array.zero_point.value = shard(
+            quantization_weight_dict["qzeros"], zero_point_spec)
+        quantization_weight_dict = {"qweight": [], "scales": [], "qzeros": []}
+    elif quantization_scheme == "bnb":
+        assert all(
+            bnb_weight_name in quantization_weight_dict.keys()
+            for bnb_weight_name in ["scales", "qweight"]
+        ), "BNB quantization weight dict must contain scales and qweight"
+        assert vllm_config.model_config.hf_config.quantization_config.get(
+            "load_in_8bit"
+        ), "Only 8-bit quantization supported for now for BnB"
+        qvalue_spec = model_weight.array.qvalue.sharding.spec if isinstance(
+            model_weight.array.qvalue.sharding,
+            NamedSharding) else model_weight.array.qvalue.sharding
+        scale_spec = model_weight.array.scale.sharding.spec if isinstance(
+            model_weight.array.scale.sharding,
+            NamedSharding) else model_weight.array.scale.sharding
+        model_weight.array.qvalue.value = shard(
+            quantization_weight_dict["qweight"], qvalue_spec)
+
+        model_weight.array.scale.value = shard(
+            quantization_weight_dict["scales"].astype(scale_dtype) /
+            BNB_INT8_ABSMAX_SCALER, scale_spec)
+        quantization_weight_dict = {"scales": [], "qweight": []}
+    else:
+        raise ValueError(
+            f"Quantization scheme {quantization_scheme} is not supported")
 
 
-def bnb_dict_to_qarray(weight_dict: dict,
-                       qarray_dtype: jnp.dtype) -> qpl.QArray:
+def log_quantization_weight_shape(hf_key: str, quantization_dict: dict,
+                                  model_key: str, model_weight: nnx.State,
+                                  model_sharding: NamedSharding,
+                                  quantization_scheme: str,
+                                  after_transform: bool) -> None:
     """
-    Converts a dictioanry containing BNB weights (weights, scales) to a Qwix
-    QArray object.
+    Log the quantization weight shapes for the various quantization schemes
 
     Args:
-        weight_dict: a dictionary containing the BnB weights
-        qarray_dtype: the dtype of the QArray
-
-    Returns:
-        a Qwix QArray
+        hf_key: the key of the quantization weight dict
+        quantization_dict: the quantization weight dict
+        model_key: the key of the model weight
+        model_weight: the model weight
+        model_sharding: the sharding of the model weight
+        quantization_scheme: the quantization scheme (e.g. "bwq" or "awq")
     """
-    qweight = weight_dict['weight']
-    scales = weight_dict['scales']
-    # NOTE: BnB checkpoints don't have any zero points
-    return qpl.QArray(qweight, scales, None, qarray_dtype)
+    before_or_after_str = "after" if after_transform else "before"
+    if quantization_scheme == "awq":
+        logger.debug(
+            f"{before_or_after_str} transform | "
+            f"{hf_key} qweight: {quantization_dict['qweight'].shape}  -->  {model_key}: {model_weight.array.qvalue.shape} {model_sharding}"
+            f"{hf_key} scale: {quantization_dict['scales'].shape}  -->  {model_key}: {model_weight.array.scale.shape} {model_sharding}"
+            f"{hf_key} zero_point: {quantization_dict['qzeros'].shape}  -->  {model_key}: {model_weight.array.zero_point.shape} {model_sharding}"
+        )
+    elif quantization_scheme == "bnb":
+        logger.debug(
+            f"{before_or_after_str} transform | "
+            f"{hf_key} qweight: {quantization_dict['qweight'].shape}  -->  {model_key}: {model_weight.array.qvalue.shape} {model_sharding}"
+            f"{hf_key} scale: {quantization_dict['scales'].shape}  -->  {model_key}: {model_weight.array.scale.shape} {model_sharding}"
+        )
+    else:
+        raise ValueError(
+            f"Quantization scheme {quantization_scheme} is not supported")

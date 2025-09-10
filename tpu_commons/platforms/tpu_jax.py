@@ -44,7 +44,7 @@ class TpuPlatform(Platform):
     simple_compile_backend: str = "openxla"
 
     supported_quantization: list[str] = [
-        "tpu_int8", "compressed-tensors", "awq"
+        "tpu_int8", "compressed-tensors", "awq", "bitsandbytes"
     ]
 
     additional_env_vars: list[str] = [

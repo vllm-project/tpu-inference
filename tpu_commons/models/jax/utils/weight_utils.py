@@ -21,7 +21,7 @@ from tpu_commons import utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.utils import file_utils
 from tpu_commons.models.jax.utils.quantization.quantization_utils import (
-    awq_dict_to_qarray, bnb_dict_to_qarray, reverse_awq_order,
+    log_quantization_weight_shape, reverse_awq_order, set_quantized_weight,
     unpack_awq_weight_to_int4)
 
 logger = init_logger(__name__)
@@ -34,6 +34,8 @@ class MetadataMap:
     name_map: dict[str, str] = field(default_factory=dict)
     transpose_map: dict[str, tuple[int, ...]] = field(default_factory=dict)
     reshape_map: dict[str, tuple[int, ...]] = field(default_factory=dict)
+    bnb_scales_reshape_map: dict[str, tuple[int,
+                                            ...]] = field(default_factory=dict)
     bias_reshape_map: dict[str, tuple[int, ...]] = field(default_factory=dict)
     pad_map: dict[str, tuple[int, ...]] = field(default_factory=dict)
     bias_pad_map: dict[str, tuple[int, ...]] = field(default_factory=dict)
@@ -166,6 +168,7 @@ def get_param_and_sharding(params: nnx.State, shardings: Any,
                 slevel = slevel[key]
             else:
                 raise ValueError(f"{path} is not a valid param path")
+    # Handles the case where the model is quantized with Qwix and thus the variable is a QArray
     slevel = slevel.array.qvalue if hasattr(slevel, "array") else slevel
     return plevel, slevel.value
 
@@ -190,6 +193,7 @@ def get_default_maps(vllm_config, mesh: Mesh,
     num_heads = hf_config.num_attention_heads
     num_kv_heads = hf_config.num_key_value_heads
     hidden_size = model_config.get_hidden_size()
+    intermediate_size = hf_config.intermediate_size
 
     # Pad head_dim for kernel performance.
     head_dim_original = model_config.get_head_size()
@@ -205,6 +209,19 @@ def get_default_maps(vllm_config, mesh: Mesh,
         "k_proj.bias": (num_kv_heads, head_dim_original),
         "v_proj.bias": (num_kv_heads, head_dim_original)
     }
+    # For BitsAndBytes-quantized checkpoints, we'll
+    # need to reshape the 1D scales to a 2D array
+    # to match the rank of the original weight
+    bnb_scales_reshape_keys: dict[str, tuple[int, ...]] = {
+        "gate_proj": (1, intermediate_size),
+        "up_proj": (1, intermediate_size),
+        "down_proj": (1, hidden_size),
+        "q_proj": (1, num_heads, head_dim_original),
+        "k_proj": (1, num_kv_heads, head_dim_original),
+        "v_proj": (1, num_kv_heads, head_dim_original),
+        "o_proj": (1, 1, hidden_size),
+    }
+
     transpose_keys: dict[str, tuple[int, ...]] = {
         "lm_head": (1, 0),
         "gate_proj": (1, 0),
@@ -241,6 +258,7 @@ def get_default_maps(vllm_config, mesh: Mesh,
 
     return MetadataMap(name_map=name_map,
                        reshape_map=reshape_keys,
+                       bnb_scales_reshape_map=bnb_scales_reshape_keys,
                        bias_reshape_map=bias_reshape_keys,
                        transpose_map=transpose_keys,
                        pad_map=pad_keys,
@@ -255,6 +273,7 @@ def _load_hf_weights_on_thread(vllm_config,
                                filter_regex: str | None = None):
     name_map = metadata_map.name_map
     reshape_keys = metadata_map.reshape_map
+    bnb_scales_reshape_keys = metadata_map.bnb_scales_reshape_map
     bias_reshape_keys = metadata_map.bias_reshape_map
     transpose_keys = metadata_map.transpose_map
     pad_keys = metadata_map.pad_map
@@ -269,16 +288,18 @@ def _load_hf_weights_on_thread(vllm_config,
     head_dim = utils.get_padded_head_dim(head_dim_original)
     head_dim_pad = head_dim - head_dim_original
 
-    # TODO
-    awq_group_size = 128
+    hf_config = model_config.hf_config
+    group_size = hf_config.quantization_config.get(
+        "group_size", None) if hasattr(hf_config,
+                                       "quantization_config") else None
 
     try:
         shardings = nnx.get_named_sharding(params, mesh)
     except TypeError:
         shardings = params
 
-    awq_dict = {"scales": [], "qzeros": [], "qweight": []}
-    bnb_dict = {"scales": [], "weight": []}
+    awq_weight_dict = {"scales": [], "qzeros": [], "qweight": []}
+    bnb_weight_dict = {"scales": [], "qweight": []}
     qwix_weight = False
 
     for hf_key, hf_weight in model_weights_single_file_generator(
@@ -287,9 +308,7 @@ def _load_hf_weights_on_thread(vllm_config,
             hf_key = hf_key.removesuffix(".weight")
 
         # Find the corresponding model key using the HF key
-        # gptq_keywords = ["g_idx", "scales", "qzeros", "qweight"]
         awq_keywords = ["scales", "qzeros", "qweight"]
-        # is_gptq_layer = any(hf_key.endswith(k) for k in gptq_keywords)
         is_awq_layer = any(hf_key.endswith(k) for k in awq_keywords)
 
         bnb_keywords = ["SCB"]
@@ -302,36 +321,37 @@ def _load_hf_weights_on_thread(vllm_config,
         # weight is always last
         # TODO: weights is used for both quant and unquant params, so need better way to differentiate
         # than != []
-        if is_bnb_layer or isinstance(bnb_dict["scales"], jax.Array):
+        if is_bnb_layer or isinstance(bnb_weight_dict["scales"], jax.Array):
             if hf_key.endswith("SCB"):
-                bnb_dict["scales"] = hf_weight
+                bnb_weight_dict["scales"] = hf_weight
                 continue
             else:
-                bnb_dict["weight"] = hf_weight
+                bnb_weight_dict["qweight"] = hf_weight
                 qwix_weight = True
                 # TODO: need to clean this up
                 is_bnb_layer = True
-            # TODO: transpose?
 
         if is_awq_layer:
-            awq_dict[hf_key.split(".")[-1]] = hf_weight
+            awq_weight_dict[hf_key.split(".")[-1]] = hf_weight
             if hf_key.endswith("scales"):
                 qwix_weight = True
                 hf_key = hf_key.removesuffix(".scales")
 
-                awq_dict["qweight"] = unpack_awq_weight_to_int4(
-                    awq_dict["qweight"], bits=4)
-                awq_dict["qweight"] = reverse_awq_order(awq_dict["qweight"],
-                                                        bits=4)
-                awq_dict["qzeros"] = unpack_awq_weight_to_int4(
-                    awq_dict["qzeros"], bits=4)
-                awq_dict["qzeros"] = reverse_awq_order(awq_dict["qzeros"],
-                                                       bits=4)
+                awq_weight_dict["qweight"] = unpack_awq_weight_to_int4(
+                    awq_weight_dict["qweight"], bits=4)
+                awq_weight_dict["qweight"] = reverse_awq_order(
+                    awq_weight_dict["qweight"], bits=4)
+                awq_weight_dict["qzeros"] = unpack_awq_weight_to_int4(
+                    awq_weight_dict["qzeros"], bits=4)
+                awq_weight_dict["qzeros"] = reverse_awq_order(
+                    awq_weight_dict["qzeros"], bits=4)
 
-                # if "q_proj" in hf_key:
-                awq_dict["qweight"] = awq_dict["qweight"].transpose()
-                awq_dict["qzeros"] = awq_dict["qzeros"].transpose()
-                awq_dict["scales"] = awq_dict["scales"].transpose()
+                awq_weight_dict["qweight"] = awq_weight_dict[
+                    "qweight"].transpose()
+                awq_weight_dict["qzeros"] = awq_weight_dict[
+                    "qzeros"].transpose()
+                awq_weight_dict["scales"] = awq_weight_dict[
+                    "scales"].transpose()
             else:
                 continue
 
@@ -354,17 +374,29 @@ def _load_hf_weights_on_thread(vllm_config,
         model_weight, model_sharding = get_param_and_sharding(
             params, shardings, model_key)
 
-        test_model_weight = model_weight
         if qwix_weight:
-            test_model_weight = model_weight.array.qvalue
+            # TODO: dedup
+            quantization_weight_dict = awq_weight_dict if is_awq_layer else bnb_weight_dict
+            quantization_scheme = "awq" if is_awq_layer else "bnb"
+            log_quantization_weight_shape(hf_key,
+                                          quantization_weight_dict,
+                                          model_key,
+                                          model_weight,
+                                          model_sharding,
+                                          quantization_scheme,
+                                          after_transform=False)
+        else:
+            logger.debug(
+                "before transform | "
+                f"{hf_key}: {hf_weight.shape}  -->  {model_key}: {model_weight.value.shape} {model_sharding}"
+            )
 
-        logger.debug(
-            "before transform | "
-            f"{hf_key}: {hf_weight.shape}  -->  {model_key}: {test_model_weight.value.shape} {model_sharding}"
-        )
-
-        # TODO: GPTQ
         if hf_key.endswith(".bias"):
+            if is_bnb_layer or is_awq_layer:
+                # TODO (jacobplatin): add bias support
+                raise NotImplementedError(
+                    "Bias weights are not currently supported for BNB and AWQ quantized checkpoints"
+                )
             for key in bias_reshape_keys:
                 if key in hf_key:
                     hf_weight = jnp.reshape(hf_weight, bias_reshape_keys[key])
@@ -376,25 +408,27 @@ def _load_hf_weights_on_thread(vllm_config,
             for key in reshape_keys:
                 if key in hf_key:
                     if qwix_weight and is_awq_layer:
+                        assert group_size is not None, "Expected AWQ Group Size (from HF config) to be set!"
                         scale_zeros_reshape = list(reshape_keys[key])
                         scale_zeros_reshape[
-                            -1] = scale_zeros_reshape[-1] // awq_group_size
-                        awq_dict["qweight"] = jnp.reshape(
-                            awq_dict["qweight"], reshape_keys[key])
-                        awq_dict["scales"] = jnp.reshape(
-                            awq_dict["scales"], scale_zeros_reshape)
-                        awq_dict["qzeros"] = jnp.reshape(
-                            awq_dict["qzeros"], scale_zeros_reshape)
+                            -1] = scale_zeros_reshape[-1] // group_size
+                        awq_weight_dict["qweight"] = jnp.reshape(
+                            awq_weight_dict["qweight"], reshape_keys[key])
+                        awq_weight_dict["scales"] = jnp.reshape(
+                            awq_weight_dict["scales"], scale_zeros_reshape)
+                        awq_weight_dict["qzeros"] = jnp.reshape(
+                            awq_weight_dict["qzeros"], scale_zeros_reshape)
                     elif qwix_weight and is_bnb_layer:
-                        bnb_dict["weight"] = jnp.reshape(
-                            bnb_dict["weight"], reshape_keys[key])
-                        # TODO?
-                        # bnb_dict["scales"] = jnp.reshape(
-                        #     bnb_dict["scales"], reshape_keys[key])
+                        bnb_weight_dict["qweight"] = jnp.reshape(
+                            bnb_weight_dict["qweight"], reshape_keys[key])
                     else:
                         hf_weight = jnp.reshape(hf_weight, reshape_keys[key])
-                    # TODO: GPTQ
                     if head_dim_pad > 0:
+                        # TODO (jacobplatin): add head dimension padding support
+                        if is_bnb_layer or is_awq_layer:
+                            raise NotImplementedError(
+                                "Head dimension padding is not currently supported for BNB and AWQ quantized checkpoints"
+                            )
                         if "o_proj" in key:
                             hf_weight = jnp.pad(hf_weight, ((0, 0), (0, 0),
                                                             (0, head_dim_pad)))
@@ -406,31 +440,42 @@ def _load_hf_weights_on_thread(vllm_config,
             for key in transpose_keys:
                 if key in hf_key:
                     if qwix_weight and is_awq_layer:
-                        # TODO: skip for AWQ?
-                        assert all(
-                            [value is not None for value in awq_dict.values()])
-                        awq_dict["qweight"] = jnp.transpose(
-                            awq_dict["qweight"], transpose_keys[key])
-                        awq_dict["qzeros"] = jnp.transpose(
-                            awq_dict["qzeros"], transpose_keys[key])
-                        awq_dict["scales"] = jnp.transpose(
-                            awq_dict["scales"], transpose_keys[key])
+                        assert all([
+                            isinstance(value, jax.Array)
+                            for value in awq_weight_dict.values()
+                        ]), "Expected all AWQ weights to be set!"
+                        awq_weight_dict["qweight"] = jnp.transpose(
+                            awq_weight_dict["qweight"], transpose_keys[key])
+                        awq_weight_dict["qzeros"] = jnp.transpose(
+                            awq_weight_dict["qzeros"], transpose_keys[key])
+                        awq_weight_dict["scales"] = jnp.transpose(
+                            awq_weight_dict["scales"], transpose_keys[key])
                     elif qwix_weight and is_bnb_layer:
-                        assert all(
-                            [value is not None for value in awq_dict.values()])
-                        bnb_dict["weight"] = jnp.transpose(
-                            bnb_dict["weight"], transpose_keys[key])
-                        # NOTE: scales are 1d
-                        # bnb_dict["scales"] = jnp.transpose(
-                        #     bnb_dict["scales"], transpose_keys[key])
+                        assert all([
+                            isinstance(value, jax.Array)
+                            for value in bnb_weight_dict.values()
+                        ]), "Expected all BNB weights to be set!"
+                        bnb_weight_dict["qweight"] = jnp.transpose(
+                            bnb_weight_dict["qweight"], transpose_keys[key])
                     else:
                         hf_weight = jnp.transpose(hf_weight,
                                                   transpose_keys[key])
                     break
 
+            for key in bnb_scales_reshape_keys:
+                if key in hf_key:
+                    if qwix_weight and is_bnb_layer:
+                        bnb_weight_dict["scales"] = jnp.reshape(
+                            bnb_weight_dict["scales"],
+                            bnb_scales_reshape_keys[key])
+
         # Pad num-kv-heads
-        # TODO: GPTQ
         if hf_key.endswith(".bias"):
+            if is_bnb_layer or is_awq_layer:
+                # TODO (jacobplatin): add bias support
+                raise NotImplementedError(
+                    "Bias weights are not currently supported for BNB and AWQ quantized checkpoints"
+                )
             for key, value in bias_pad_keys.items():
                 dim = value[0]
                 dim_size = value[1]
@@ -445,78 +490,43 @@ def _load_hf_weights_on_thread(vllm_config,
                     hf_weight = jnp.repeat(hf_weight, dim_size, axis=dim)
                     break
 
-        logger.debug(
-            "after transform | "
-            f"{hf_key}: {hf_weight.shape}  -->  {model_key}: {test_model_weight.value.shape} {model_sharding}"
-        )
+        if qwix_weight:
+            # TODO: dedup
+            quantization_weight_dict = awq_weight_dict if is_awq_layer else bnb_weight_dict
+            log_quantization_weight_shape(hf_key,
+                                          quantization_weight_dict,
+                                          model_key,
+                                          model_weight,
+                                          model_sharding,
+                                          quantization_scheme,
+                                          after_transform=True)
+        else:
+            logger.debug(
+                "after transform | "
+                f"{hf_key}: {hf_weight.shape}  -->  {model_key}: {model_weight.value.shape} {model_sharding}"
+            )
 
         if head_dim_pad == 0:
+            # For Qwix weights, we'll only check that the weight (not scales, zeroes, etc.) is the same shape
             if qwix_weight:
-                # TODO: make more extensive
-                pass
-                # assert test_model_weight.value.shape == gptq_dict["qweight"].shape, f"{hf_key}: {test_model_weight.value.shape} != {gptq_dict["qweight"].shape}"
+                # TODO: dedup with below
+                quantization_weight_dict = awq_weight_dict if is_awq_layer else bnb_weight_dict
+                assert model_weight.array.qvalue.value.shape == quantization_weight_dict[
+                    'qweight'].shape, f"{hf_key} qvalue: {model_weight.array.qvalue.value.shape} != {quantization_weight_dict['qweight'].shape}"
+
             else:
-                assert test_model_weight.value.shape == hf_weight.shape, f"{hf_key}: {test_model_weight.value.shape} != {hf_weight.shape}"
+                assert model_weight.value.shape == hf_weight.shape, f"{hf_key}: {model_weight.value.shape} != {hf_weight.shape}"
 
         # Update the model weight
-        if qwix_weight and is_awq_layer:
-            qwix_qarray = awq_dict_to_qarray(awq_dict, jnp.uint4)
-            qvalue_spec = model_weight.array.qvalue.sharding.spec if isinstance(
-                model_weight.array.qvalue.sharding,
-                NamedSharding) else model_weight.array.qvalue.sharding
-            scale_spec = model_weight.array.scale.sharding.spec if isinstance(
-                model_weight.array.scale.sharding,
-                NamedSharding) else model_weight.array.scale.sharding
-            zero_point_spec = model_weight.array.zero_point.sharding.spec if isinstance(
-                model_weight.array.zero_point.sharding,
-                NamedSharding) else model_weight.array.zero_point.sharding
-            model_weight.array.qvalue.value = shard(qwix_qarray.qvalue,
-                                                    qvalue_spec)
-            model_weight.array.scale.value = shard(
-                qwix_qarray.scale.astype(jnp.bfloat16), scale_spec)
-            model_weight.array.zero_point.value = shard(
-                qwix_qarray.zero_point, zero_point_spec)
+        if qwix_weight:
+            quantization_scheme = "awq" if is_awq_layer else "bnb"
+            quantization_weight_dict = awq_weight_dict if is_awq_layer else bnb_weight_dict
+            set_quantized_weight(model_weight, quantization_scheme,
+                                 quantization_weight_dict, shard, vllm_config)
+            # TODO
+            bnb_weight_dict = {"scales": [], "qweight": []}
+            awq_weight_dict = {"qweight": [], "scales": [], "qzeros": []}
             qwix_weight = False
-        elif qwix_weight and is_bnb_layer:
-            asa = hf_key.split(".")[-1]
-            INT8_ABSMAX_SCALER = 127
-            if asa == "k_proj":
-                bnb_dict["scales"] = jnp.reshape(
-                    bnb_dict["scales"], (1, 8, 128)) / INT8_ABSMAX_SCALER
-            elif asa == "o_proj":
-                bnb_dict["scales"] = jnp.reshape(
-                    bnb_dict["scales"], (1, 1, 4096)) / INT8_ABSMAX_SCALER
-            elif asa == "v_proj":
-                bnb_dict["scales"] = jnp.reshape(
-                    bnb_dict["scales"], (1, 8, 128)) / INT8_ABSMAX_SCALER
-            elif asa == "q_proj":
-                bnb_dict["scales"] = jnp.reshape(
-                    bnb_dict["scales"], (1, 32, 128)) / INT8_ABSMAX_SCALER
-            elif asa == "down_proj":
-                bnb_dict["scales"] = jnp.reshape(
-                    bnb_dict["scales"], (1, 4096)) / INT8_ABSMAX_SCALER
-            elif asa == "up_proj":
-                bnb_dict["scales"] = jnp.reshape(
-                    bnb_dict["scales"], (1, 14336)) / INT8_ABSMAX_SCALER
-            elif asa == "gate_proj":
-                bnb_dict["scales"] = jnp.reshape(
-                    bnb_dict["scales"], (1, 14336)) / INT8_ABSMAX_SCALER
-
-            qwix_qarray = bnb_dict_to_qarray(bnb_dict, jnp.int8)
-            qvalue_spec = model_weight.array.qvalue.sharding.spec if isinstance(
-                model_weight.array.qvalue.sharding,
-                NamedSharding) else model_weight.array.qvalue.sharding
-            scale_spec = model_weight.array.scale.sharding.spec if isinstance(
-                model_weight.array.scale.sharding,
-                NamedSharding) else model_weight.array.scale.sharding
-            model_weight.array.qvalue.value = shard(qwix_qarray.qvalue,
-                                                    qvalue_spec)
-
-            # TODO: bf16?
-            model_weight.array.scale.value = shard(
-                qwix_qarray.scale.astype(jnp.bfloat16), scale_spec)
-            qwix_weight = False
-            bnb_dict = {"scales": [], "weight": []}
         else:
             # TODO: do we want this?
             hf_weight = hf_weight.astype(model_weight.value.dtype)
