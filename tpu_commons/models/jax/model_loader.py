@@ -45,7 +45,7 @@ def _apply_qwix_quantization(vllm_config: VllmConfig, model: nnx.Module,
         # NOTE: it's REALLY important this is jitted, or else you'll run into hanging
         qwix_quantize_nnx_model_with_config = functools.partial(
             qwix_quantize_nnx_model, qwix_config=qwix_config)
-        model = nnx.jit(qwix_quantize_nnx_model_with_config,
+        model = jax.jit(qwix_quantize_nnx_model_with_config,
                         donate_argnums=(0, ),
                         static_argnames=(
                             "mesh",
@@ -108,7 +108,7 @@ def _get_nnx_model(
         if not os.getenv("NEW_MODEL_DESIGN", False):
             # TODO: currently Qwen2ForCausalLM is using legacy model implementation
             # will merge the random init logic when all model are migrated to new model implementation
-            @nnx.jit
+            @jax.jit
             def create_sharded_model():
                 model = model_class(vllm_config, rng, mesh)
                 state = nnx.state(model)
@@ -147,7 +147,8 @@ def _get_nnx_model(
         # Although the created model can already work, we still need to jit
         # the model creation again, otherwise the model forward will have
         # non-trivial overhead in PjitFunction.
-        @nnx.jit(donate_argnums=(0, ))
+        # @nnx.jit(donate_argnums=(0, ))
+        @functools.partial(jax.jit, donate_argnums=(0, ))
         def create_jit_model(model):
             state = nnx.state(model)
             nnx.update(model, state)
