@@ -17,7 +17,6 @@ import jax
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.tasks import POOLING_TASKS
-from vllm.utils import get_hash_fn_by_name
 from vllm.v1.core.kv_cache_utils import (get_request_block_hasher,
                                          init_none_hash)
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
@@ -36,6 +35,7 @@ from tpu_commons.interfaces.config import IConfig
 from tpu_commons.interfaces.engine import IEngineCore
 from tpu_commons.interfaces.request import IRequest
 from tpu_commons.runner.utils import LatencyTracker
+from tpu_commons.utils import get_hash_fn_by_name
 
 from .adapters import VllmConfigAdapter, VllmEngineAdapter, VllmRequestAdapter
 
