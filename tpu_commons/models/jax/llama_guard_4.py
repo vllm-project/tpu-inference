@@ -218,13 +218,13 @@ class LlamaGuard4ForCausalLM(nnx.Module):
     ) -> Tuple[List[KVCacheType], jax.Array]:
         is_prefill = False
 
-        # Debug print the input_ids to ensure they're being passed correctly
+        # # Debug print the input_ids to ensure they're being passed correctly
         jax.debug.print("Input IDs: {}", input_ids)
 
         x_TD = self.embedder.encode(input_ids)
 
-        # Add debug print to check the embeddings
-        jax.debug.print("Input embedding {}", x_TD)
+        # # Add debug print to check the embeddings
+        # jax.debug.print("Input embedding {}", x_TD)
 
         for (i, block) in enumerate(self.layers):
             kv_cache = kv_caches[i]
@@ -233,8 +233,11 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             jax.block_until_ready(x_TD)
             kv_caches[i] = new_kv_cache
 
-        jax.debug.print("Final layer before norm: {}", x_TD)
+        # jax.debug.print("Final layer before norm: {}", x_TD)
         final_activation_TD = self.final_norm(x_TD)
+
+        # --- ADD THIS LINE TO PRINT THE FINAL HIDDEN STATES ---
+        jax.debug.print("\nJAX Final Hidden States:\n{}", final_activation_TD)
 
         return kv_caches, final_activation_TD
 
@@ -344,9 +347,9 @@ class LlamaGuard4WeightLoader:
         model_params = nnx.state(model_for_loading)
         with jax.default_device(jax.devices("cpu")[0]):
             for loaded_name, loaded_weight in self.names_and_weights_generator:
-                jax.debug.print(
-                    f"Loaded: {loaded_name} - Shape: {loaded_weight.shape} - Values:\n{loaded_weight}"
-                )
+                # jax.debug.print(
+                #     f"Loaded: {loaded_name} - Shape: {loaded_weight.shape} - Values:\n{loaded_weight}"
+                # )
 
                 if loaded_name.endswith(".bias"):
                     continue
@@ -365,41 +368,41 @@ class LlamaGuard4WeightLoader:
                                                      self._transpose_map)
 
                 # --- Print key model weights here ---
-                if "embed_tokens" in loaded_name:
-                    jax.debug.print("JAX Embedding Table:\n{}", loaded_weight)
+                # if "embed_tokens" in loaded_name:
+                #     jax.debug.print("JAX Embedding Table:\n{}", loaded_weight)
 
-                if "layers.0.self_attn.q_proj" in loaded_name:
-                    jax.debug.print("JAX layers.0 q_proj.weight:\n{}",
-                                    loaded_weight)
+                # if "layers.0.self_attn.q_proj" in loaded_name:
+                #     jax.debug.print("JAX layers.0 q_proj.weight:\n{}",
+                #                     loaded_weight)
 
-                if "layers.0.self_attn.k_proj" in loaded_name:
-                    jax.debug.print("JAX layers.0 k_proj.weight:\n{}",
-                                    loaded_weight)
+                # if "layers.0.self_attn.k_proj" in loaded_name:
+                #     jax.debug.print("JAX layers.0 k_proj.weight:\n{}",
+                #                     loaded_weight)
 
-                if "layers.0.self_attn.v_proj" in loaded_name:
-                    jax.debug.print("JAX layers.0 v_proj.weight:\n{}",
-                                    loaded_weight)
+                # if "layers.0.self_attn.v_proj" in loaded_name:
+                #     jax.debug.print("JAX layers.0 v_proj.weight:\n{}",
+                #                     loaded_weight)
 
-                if "layers.0.feed_forward.gate_proj" in loaded_name:
-                    jax.debug.print("JAX layers.0 gate_proj.weight:\n{}",
-                                    loaded_weight)
+                # if "layers.0.feed_forward.gate_proj" in loaded_name:
+                #     jax.debug.print("JAX layers.0 gate_proj.weight:\n{}",
+                #                     loaded_weight)
 
-                if "layers.0.feed_forward.down_proj" in loaded_name:
-                    jax.debug.print("JAX layers.0 down_proj.weight:\n{}",
-                                    loaded_weight)
+                # if "layers.0.feed_forward.down_proj" in loaded_name:
+                #     jax.debug.print("JAX layers.0 down_proj.weight:\n{}",
+                #                     loaded_weight)
 
-                if "layers.0.feed_forward.up_proj" in loaded_name:
-                    jax.debug.print("JAX layers.0 up_proj.weight:\n{}",
-                                    loaded_weight)
+                # if "layers.0.feed_forward.up_proj" in loaded_name:
+                #     jax.debug.print("JAX layers.0 up_proj.weight:\n{}",
+                #                     loaded_weight)
 
                 if model_weight.value.shape != loaded_weight.shape:
                     raise ValueError(
                         f"Loaded shape for {loaded_name}: {loaded_weight.shape} "
                         f"does not match model shape for {mapped_name}: {model_weight.value.shape}!"
                     )
-                logger.info(
-                    f"Transformed parameter {loaded_name} to {mapped_name}: {loaded_weight.shape} --> {model_weight.value.shape}"
-                )
+                # logger.info(
+                #     f"Transformed parameter {loaded_name} to {mapped_name}: {loaded_weight.shape} --> {model_weight.value.shape}"
+                # )
 
                 # some of the model_weight.sharding entries were tuples and not NamedSharding objects
                 sharding_spec = model_weight.sharding
