@@ -45,6 +45,7 @@ class SpeculativeDecodingManager:
         self,
         sampled_token_ids: list[list[int]],
     ) -> None:
+        # TODO(ranlihao): Support eagle proposer.
         self._draft_token_ids = self.propose_ngram_draft_token_ids(
             sampled_token_ids)
 

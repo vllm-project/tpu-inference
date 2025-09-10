@@ -54,6 +54,7 @@ from tpu_commons.runner.speculative_decoding_manager import \
     SpeculativeDecodingManager
 from tpu_commons.runner.structured_decoding_manager import \
     StructuredDecodingManager
+from tpu_commons.spec_decode.jax.eagle3 import EagleProposer
 from tpu_commons.utils import device_array, make_optimized_mesh
 
 logger = init_logger(__name__)
@@ -186,9 +187,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.uses_mrope = self.model_config.uses_mrope
 
     def _init_speculative_decoding(self) -> None:
+        self.drafter = None
         if self.speculative_config:
             if self.speculative_config.method == "ngram":
                 self.drafter = NgramProposer(self.vllm_config)
+            elif self.speculative_config.method == "eagle3":
+                self.drafter = EagleProposer(self.vllm_config, self)
             else:
                 raise NotImplementedError(
                     "Unsupported speculative decoding method: "
@@ -292,6 +296,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.rng_key,
             self.mesh,
         )
+
+        if self.drafter is not None:
+            logger.info("Loading drafter model...")
+            self.drafter.load_model()
+
         self.rng_params_for_sampling = nnx.Rngs(
             jax.random.key(self.model_config.seed)).params()
         self.is_multimodal_model = (self.model_config.is_multimodal_model

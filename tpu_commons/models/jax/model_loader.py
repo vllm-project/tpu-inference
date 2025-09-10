@@ -25,6 +25,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
 
     from tpu_commons.models.jax.deepseek_v3 import DeepSeekV3
     from tpu_commons.models.jax.llama4 import Llama4ForCausalLM
+    from tpu_commons.models.jax.llama_eagle3 import EagleLlama3ForCausalLM
     from tpu_commons.models.jax.phi3 import Phi3ForCausalLM
     from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
     from tpu_commons.models.jax.qwen2_5_vl import \
@@ -45,6 +46,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     _MODEL_REGISTRY[
         "Qwen2_5_VLForConditionalGeneration"] = Qwen2_5_VLForConditionalGeneration
     _MODEL_REGISTRY["Phi3ForCausalLM"] = Phi3ForCausalLM
+    _MODEL_REGISTRY["Eagle3LlamaForCausalLM"] = EagleLlama3ForCausalLM
 
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
@@ -146,8 +148,14 @@ def get_flax_model(
     vllm_config: VllmConfig,
     rng: jax.Array,
     mesh: Mesh,
+    is_draft_model: bool = False,
 ) -> nnx.Module:
-    model_class = _get_model_architecture(vllm_config.model_config.hf_config)
+    if is_draft_model:
+        model_class = _get_model_architecture(
+            vllm_config.speculative_config.draft_model_config.hf_config)
+    else:
+        model_class = _get_model_architecture(
+            vllm_config.model_config.hf_config)
     jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh)
     kv_cache_sharding = NamedSharding(mesh, PartitionSpec(None, None, "model"))
     hidden_states_sharding = NamedSharding(mesh, PartitionSpec(None,
@@ -233,11 +241,12 @@ def get_model(
     vllm_config: VllmConfig,
     rng: jax.Array,
     mesh: Mesh,
+    is_draft_model: bool = False,
 ) -> Any:
     impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
     logger.info(f"Loading model with MODEL_IMPL_TYPE={impl}")
     if impl == "flax_nnx":
-        return get_flax_model(vllm_config, rng, mesh)
+        return get_flax_model(vllm_config, rng, mesh, is_draft_model)
     elif impl == "vllm":
         return get_vllm_model(vllm_config, rng, mesh)
     else:

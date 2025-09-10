@@ -6,7 +6,7 @@ from jax.sharding import Mesh
 from vllm.config import CacheConfig
 
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.spec_decode.jax.eagle import EagleProposer
+from tpu_commons.spec_decode.jax.eagle3 import EagleProposer
 
 
 class MockModel(nnx.Module):
