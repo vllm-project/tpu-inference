@@ -290,12 +290,17 @@ class CompilationManager:
             block_numbers = list(range(1, num_blocks + 1))
             kv_cache_slices = self.runner.kv_cache_manager.get_kv_cache_for_block_ids(
                 block_numbers)
+            # Prevent the slices from getting freed by insert before finishing this operation
+            for layer_cache in kv_cache_slices:
+                layer_cache.block_until_ready()
             self.runner.kv_caches = self.runner.kv_cache_manager._jitted_insert_continuous_kv_cache(
                 block_size,
                 self.runner.kv_caches,
                 kv_cache_slices,
                 block_numbers[0],
             )
+            for layer_cache in self.runner.kv_caches:
+                layer_cache.block_until_ready()
 
     def _precompile_gather_logprobs(self) -> None:
         logger.info("Compiling gather_logprobs with different input shapes.")
