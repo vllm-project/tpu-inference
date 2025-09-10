@@ -195,9 +195,9 @@ def shard_and_move_tensor_to_tpu(tensor, mesh):
 
 def shard_and_move_lora_to_tpu(layer: torch.nn.Module, mesh: Mesh):
     # Note, lora_a_stacked[i] has shape [max_loras, 1, num_out_features, num_in_features]
-    sharded_lora_a_tpu = []
-    sharded_lora_b_tpu = []
-    sharded_lora_bias_tpu = []
+    sharded_lora_a_tpu = torch.nn.ParameterList()
+    sharded_lora_b_tpu = torch.nn.ParameterList()
+    sharded_lora_bias_tpu = torch.nn.ParameterList()
 
     for i in range(layer.n_slices):
         sharded_lora_a_tpu.append(
@@ -208,10 +208,10 @@ def shard_and_move_lora_to_tpu(layer: torch.nn.Module, mesh: Mesh):
             sharded_lora_bias_tpu.append(
                 shard_and_move_tensor_to_tpu(layer.lora_bias_stacked[i], mesh))
 
-    layer.lora_a_stacked = tuple(sharded_lora_a_tpu)
-    layer.lora_b_stacked = tuple(sharded_lora_b_tpu)
+    layer.lora_a_stacked = sharded_lora_a_tpu
+    layer.lora_b_stacked = sharded_lora_b_tpu
     if layer.lora_bias_stacked is not None:
-        layer.lora_bias_stacked = tuple(sharded_lora_bias_tpu)
+        layer.lora_bias_stacked = sharded_lora_bias_tpu
 
 
 def partition_column_parallel_linear_lora(layer: torch.nn.Module,

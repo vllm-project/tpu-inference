@@ -5,7 +5,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 from vllm.lora.request import LoRARequest
 
-from tpu_commons.models.vllm.sharding import shard_lora_weights_and_move_to_tpu
+from tpu_commons.models.vllm.sharding import (
+    extract_all_buffers, shard_lora_weights_and_move_to_tpu)
 
 if TYPE_CHECKING:
     from tpu_commons.runner.tpu_jax_runner import TPUModelRunner
@@ -39,3 +40,6 @@ class LoraUtils:
 
         shard_lora_weights_and_move_to_tpu(self.runner.model.model,
                                            self.runner.mesh)
+
+        params, buffers, _ = extract_all_buffers(self.runner.model.model)
+        self.runner.state = {**params, **buffers}
