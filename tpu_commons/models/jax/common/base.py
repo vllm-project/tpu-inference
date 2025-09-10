@@ -5,13 +5,19 @@ from typing import Any, Callable, Mapping
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from jax.sharding import NamedSharding
+from flax.typing import Sharding
+from jax.sharding import PartitionSpec as P
 
 from tpu_commons.logger import init_logger
 
 # Type alias for Initializer for cleaner type hints
 Initializer = Callable[..., jax.Array]
 logger = init_logger(__name__)
+
+# Define singleton initializers to avoid re-compilation.
+_scale_initializer = nnx.initializers.ones
+_sharded_initializer = nnx.initializers.xavier_normal()
+_init_fn = nnx.initializers.uniform()
 
 
 @dataclass
@@ -126,47 +132,20 @@ class Config:
         self.maybe_apply_overrides()
 
 
-@dataclasses.dataclass
-class ParamFactory:
-    """A factory for creating nnx.Param objects with shared RNGs and initializers.
+def create_param(rngs: nnx.Rngs,
+                 shape: tuple[int, ...],
+                 sharding: Sharding = (),
+                 dtype: Any = jnp.float32,
+                 random_init=False) -> nnx.Param:
+    key = rngs.params()
+    if random_init:
+        initializer = _scale_initializer if len(
+            shape) == 1 else _sharded_initializer
 
-    This class simplifies the creation of parameters by holding common
-    configuration like the RNG stream and the weight initialization function.
-
-    Attributes:
-        rngs: An `nnx.Rngs` object to provide RNG streams for parameter initialization.
-        initializer: A callable (e.g., a kernel initializer from JAX) used to
-            generate parameter data.
-    """
-    kernel_initializer: Initializer
-    scale_initializer: Initializer
-    random_init: bool
-
-    def _create_param(self,
-                      initializer: Initializer,
-                      rngs: nnx.Rngs,
-                      shape: tuple[int, ...],
-                      sharding: NamedSharding,
-                      dtype: Any = jnp.float32) -> nnx.Param:
-        """Private helper to create a sharded parameter with a given initializer."""
-        sharded_initializer = jax.jit(initializer,
-                                      static_argnames=('shape', 'dtype'),
-                                      out_shardings=sharding)
-        key = rngs.params()
-        if self.random_init:
-            param_data = sharded_initializer(key, shape, dtype)
-            return nnx.Param(param_data, sharding=sharding)
-        else:
-            param_struct = jax.ShapeDtypeStruct(shape=shape, dtype=dtype)
-            return nnx.Param(param_struct, sharding=sharding)
-
-    def create_kernel_param(self, *args, **kwargs) -> nnx.Param:
-        """Creates a kernel/weight parameter using the kernel_initializer."""
-        return self._create_param(self.kernel_initializer, *args, **kwargs)
-
-    def create_scale_param(self, *args, **kwargs) -> nnx.Param:
-        """Creates a scale/gain parameter using the scale_initializer."""
-        return self._create_param(self.scale_initializer, *args, **kwargs)
-
-
-# TODO: Add an AdditionalConfig class that documents which parameters can be passed and what they do.
+        jitted_initializer = jax.jit(initializer,
+                                     static_argnames=('shape', 'dtype'),
+                                     out_shardings=P(*sharding))
+        param_data = jitted_initializer(key, shape, dtype)
+        return nnx.Param(param_data, sharding=sharding)
+    else:
+        return nnx.Param(_init_fn(key, shape, dtype), sharding=sharding)

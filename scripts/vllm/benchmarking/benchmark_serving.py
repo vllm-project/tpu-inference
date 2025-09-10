@@ -11,7 +11,7 @@ On the server side, run one of the following commands:
         --disable-log-requests
 
 On the client side, run:
-    python benchmarks/benchmark_serving.py \
+    vllm bench serve \
         --backend <backend> \
         --model <your_model> \
         --dataset-name sharegpt \

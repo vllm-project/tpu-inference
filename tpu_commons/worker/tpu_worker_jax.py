@@ -1,35 +1,45 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import copy
 import os
+import tempfile
 from typing import Callable, Dict, Optional, Tuple, Union
 
 import jax
+import jax.numpy as jnp
 import jaxtyping
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
-                                          get_kv_transfer_group,
                                           has_kv_transfer_group)
+from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
+                                             init_distributed_environment)
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
+from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 
 from tpu_commons import utils
 from tpu_commons.di.abstracts import (AbstractKVCacheConfig,
                                       AbstractLoRARequest,
                                       AbstractSchedulerOutput)
 from tpu_commons.di.interfaces import HostInterface
+from tpu_commons.distributed.utils import (get_host_ip, get_kv_transfer_port,
+                                           get_node_id)
 from tpu_commons.logger import init_logger
-from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
+from tpu_commons.runner.tpu_jax_runner import TPUModelRunner
 from tpu_commons.worker._temporary_vllm_compat import (
     adapt_kv_cache_config_if_needed, adapt_lora_request_if_needed,
     adapt_scheduler_output_if_needed)
 from tpu_commons.worker.base import AbstractTpuWorker
 
 logger = init_logger(__name__)
+
+_DTYPE: dict[str, jnp.dtype] = {
+    "bfloat16": jnp.bfloat16,
+    "float": jnp.float32,
+    "float32": jnp.float32,
+}
 
 
 class TPUWorker(AbstractTpuWorker):
@@ -43,6 +53,22 @@ class TPUWorker(AbstractTpuWorker):
                  devices=None,
                  host_interface: Optional[HostInterface] = None):
         super().__init__(host_interface)
+
+        # If we use vLLM's model implementation in PyTorch, we should set it
+        # with torch version of the dtype.
+        impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
+        if impl != "vllm":  # vllm-pytorch implementation does not need this conversion
+
+            # NOTE(wenlong): because sometimes mm needs to use torch for preprocessing
+            if not isinstance(vllm_config.model_config.dtype, str):
+                logger.warning(
+                    "The model dtype is not properly set for JAX backend. "
+                    "Overwriting it to jnp.bfloat16")
+                vllm_config.model_config.dtype = jnp.bfloat16
+            else:
+                vllm_config.model_config.dtype = _DTYPE.get(
+                    vllm_config.model_config.dtype, jnp.bfloat16)
+
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.parallel_config = vllm_config.parallel_config
@@ -71,10 +97,9 @@ class TPUWorker(AbstractTpuWorker):
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         self.profile_dir)
 
-        logger.info(f"Pre-sliced devices by engine: {self.devices}")
-
         use_jax_profiler_server = os.getenv("USE_JAX_PROFILER_SERVER", False)
-        if use_jax_profiler_server:
+        # Only one instance of profiler is allowed
+        if use_jax_profiler_server and jax.devices()[0] == self.devices[0]:
             jax_profiler_server_port = int(
                 os.getenv("JAX_PROFILER_SERVER_PORT", 9999))
             logger.info(
@@ -88,7 +113,6 @@ class TPUWorker(AbstractTpuWorker):
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
     def init_device(self):
-        ensure_kv_transfer_initialized(self.vllm_config)
         if not self.devices:
             try:
                 device_indexes = self.vllm_config.additional_config[
@@ -97,11 +121,29 @@ class TPUWorker(AbstractTpuWorker):
             except KeyError:
                 tp = self.parallel_config.tensor_parallel_size
                 self.devices = jax.devices()[:tp]
-        logger.info(f"Init devices | "
-                    f"devices={self.devices} | "
-                    f"hbm={utils.hbm_usage_gb(self.devices)}Gb")
 
+        # Initialize the vLLM distribution layer as a single chip environment,
+        # we'll swap the model's parallel modules with TPU SPMD equivalents.
+        with set_current_vllm_config(self.vllm_config):
+            temp_file = tempfile.mkstemp()[1]
+            init_distributed_environment(
+                world_size=1,
+                rank=0,
+                local_rank=0,
+                distributed_init_method=f"file://{temp_file}",
+                backend="gloo",
+            )
+            ensure_model_parallel_initialized(
+                tensor_model_parallel_size=1,
+                pipeline_model_parallel_size=1,
+            )
+        ensure_kv_transfer_initialized(self.vllm_config)
         self.model_runner = TPUModelRunner(self.vllm_config, self.devices)
+        logger.info(f"Init worker | "
+                    f"rank={self.rank} | "
+                    f"node_id={get_node_id()} | "
+                    f"is_driver_worker={self.is_driver_worker} | "
+                    f"hbm={utils.hbm_usage_gb(self.devices)}Gb")
 
     def determine_available_memory(self) -> int:
         hbm_usage = utils.hbm_usage_bytes(self.devices)
@@ -127,23 +169,14 @@ class TPUWorker(AbstractTpuWorker):
         vllm_scheduler_output = adapted_scheduler_output.vllm_scheduler_output
         output = self.model_runner.execute_model(vllm_scheduler_output)
 
+        # With a connector, the scheduler expects output from all workers
         if has_kv_transfer_group():
-            finished_sending, finished_recving = (
-                get_kv_transfer_group().get_finished(
-                    scheduler_output.finished_req_ids))
-            if finished_sending or finished_recving:
-                if output is EMPTY_MODEL_RUNNER_OUTPUT:
-                    output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
-                output.finished_sending = finished_sending
-                output.finished_recving = finished_recving
-
-            # Clear KVConnector state for this step.
-            get_kv_transfer_group().clear_connector_metadata()
-
-            # with a connector, the scheduler expects output from all workers
             return output
 
         return output if self.is_driver_worker else None
+
+    def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
+        return self.model_runner.take_draft_token_ids()
 
     def add_lora(
         self,
@@ -207,6 +240,12 @@ class TPUWorker(AbstractTpuWorker):
         vllm_kv_cache_config = adapted_kv_cache_config.vllm_kv_cache_config
         self.model_runner.initialize_kv_cache(vllm_kv_cache_config)
 
+    def get_node_kv_ip_port(self) -> tuple[int, str, int]:
+        node_id = get_node_id()
+        ip = get_host_ip()
+        port = get_kv_transfer_port()
+        return (int(node_id), ip, int(port))
+
     def check_health(self) -> None:
         # worker will always be healthy as long as it's running.
         return
@@ -224,3 +263,6 @@ class TPUWorker(AbstractTpuWorker):
                                                mappings=mappings,
                                                transpose_keys=transpose_keys,
                                                reshard_fn=reshard_fn)
+
+    def shutdown(self) -> None:
+        return

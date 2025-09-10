@@ -1,8 +1,6 @@
 import json
 from dataclasses import dataclass
-from typing import Any, List
 
-import jax
 import numpy as np
 from jax.sharding import Mesh
 from vllm.config import VllmConfig
@@ -63,14 +61,10 @@ class ShardingRulesConfig:
     activation_q_td: tuple = (None, None)
     # Attention Out activation after projection: (Batch * Sequence, NumHeads, HeadDim)
     attn_o_tnh: tuple = (None, None, None)
-    # Ragged attention v3 Out: (actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim)
-    attn_o_ktnph: tuple = (None, None, None, None, None)
     # Q vector: (Batch * Sequence, NumHeads, HeadDim)
     query_tnh: tuple = (None, None, None)
     # K/V vector: (Batch * Sequence, NumKVHeads, HeadDim)
     keyvalue_skh: tuple = (None, None, None)
-    # query for ragged attention v3 kernel: (actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim)
-    query_ktnph: tuple = (None, None, None, None, None)
 
     # Attention Q weight: (Dim, NumHeads, HeadDim)
     attn_q_weight_dnh: tuple = (None, None, None)
@@ -80,11 +74,6 @@ class ShardingRulesConfig:
     attn_v_weight_dkh: tuple = (None, None, None)
     # Attention Out weight: (NumHeads, HeadDim, Dim)
     attn_o_weight_nhd: tuple = (None, None, None)
-
-    # K/V cache for generation: (NumKVHeads, Batch * Sequence, HeadDim)
-    keyvalue_cache_lskh: tuple = (None, None, None)
-    # K/V cache for ragged attention v3 kernel: (total_num_pages, page_size, num_kv_heads_x2 // kv_packing, kv_packing, head_dim)
-    keyvalue_cache_nbkph: tuple = (None, None, None, None, None)
 
     # Activation for ffw input: (Batch * Sequence, Dim)
     activation_ffw_td: tuple = (None, None)
@@ -174,50 +163,69 @@ class ShardingConfig:
         )
 
 
+def build_mesh(devices, strategy: dict[str, int]) -> Mesh:
+    """Constructs a JAX device mesh from a sharding strategy.
+
+    This method creates a logical grid of devices based on the parallelism
+    degrees defined in the strategy. The logical axis names ('dp', 'ep',
+    'sp', 'tp') are used to map tensor dimensions to the physical device grid.
+
+    Args:
+        strategy: A dictionary from upper level config.
+
+    Returns:
+        A JAX `Mesh` object.
+    """
+
+    axis_order = {
+        "data": strategy.get("data_parallelism", 1),
+        "expert": strategy.get("expert_parallelism", 1),
+        "seq": strategy.get("sequence_parallelism", 1),
+        "model": strategy.get("tensor_parallelism", 1),
+    }
+    # TODO: add logic to infer axis when the degree is -1
+    mesh_axis_names = []
+    mesh_shape = []
+    for axis, dim in axis_order.items():
+        mesh_axis_names.append(axis)
+        mesh_shape.append(dim)
+
+    if not mesh_shape:
+        mesh_shape = [1]
+        mesh_axis_names = [
+            'data'
+        ]  # default to data parallelism if no other strategy is specified
+
+    devices = np.asarray(devices).reshape(mesh_shape)
+    return Mesh(devices, axis_names=tuple(mesh_axis_names))
+
+
 class Sharding:
     """Generates and manages sharding configurations based on a high-level strategy.
 
-    This class takes a `ShardingStrategy`, builds the corresponding JAX `Mesh`
-    of devices, and populates a `ShardingConfig` with detailed tensor sharding
+    This class populates a `ShardingConfig` with detailed tensor sharding
     rules for both prefill and generation phases. It also allows for runtime
     overrides of these rules.
 
     Attributes:
-        sharding_strategy: The high-level `ShardingStrategy` instance.
         sharding_cfg: The generated `ShardingConfig` with detailed rules.
-        mesh: The JAX `Mesh` object representing the device grid.
     """
 
     def __init__(self,
-                 strategy_dict: dict,
                  prefill_rules: dict | None = None,
                  generate_rules: dict | None = None,
-                 mesh: Mesh = None,
-                 devices: List[Any] = None,
                  default_rules_cls=ShardingRulesConfig,
                  vllm_config: VllmConfig = None):
         """Initializes the Sharding manager.
 
         Args:
-            strategy_dict: A dictionary mapping parallelism types (e.g.,
-                'tensor_parallelism') to their degrees.
             prefill_rules: A dictionary of overrides for the prefill
                 sharding config. Keys are attribute names in `ShardingRulesConfig`,
                 and values are the new sharding tuples.
             generate_rules: A dictionary of overrides for the generate
                 sharding config.
-            mesh: A jax mesh to use for the sharding.
         """
-        self.sharding_strategy = ShardingStrategy(**strategy_dict)
         self.vllm_config = vllm_config
-        if devices:
-            self.devices = devices
-        else:
-            self.devices = jax.devices()
-        if mesh:
-            self.mesh = mesh
-        else:
-            self.mesh = self.build_mesh(self.sharding_strategy)
         self.default_rules_cls = default_rules_cls
         self.sharding_cfg = self.make_sharding_config(
             default_rules_cls=default_rules_cls,
@@ -263,42 +271,6 @@ class Sharding:
         """Returns the generated sharding configuration."""
         return self.sharding_cfg
 
-    def build_mesh(self, strategy: ShardingStrategy) -> Mesh:
-        """Constructs a JAX device mesh from a sharding strategy.
-
-        This method creates a logical grid of devices based on the parallelism
-        degrees defined in the strategy. The logical axis names ('dp', 'ep',
-        'sp', 'tp') are used to map tensor dimensions to the physical device grid.
-
-        Args:
-            strategy: The `ShardingStrategy` defining the mesh shape.
-
-        Returns:
-            A JAX `Mesh` object.
-        """
-
-        axis_order = {
-            "data": strategy.data_parallelism,
-            "expert": strategy.expert_parallelism,
-            "seq": strategy.sequence_parallelism,
-            "model": strategy.tensor_parallelism,
-        }
-        # TODO: add logic to infer axis when the degree is -1
-        mesh_axis_names = []
-        mesh_shape = []
-        for axis, dim in axis_order.items():
-            mesh_axis_names.append(axis)
-            mesh_shape.append(dim)
-
-        if not mesh_shape:
-            mesh_shape = [1]
-            mesh_axis_names = [
-                'data'
-            ]  # default to data parallelism if no other strategy is specified
-
-        devices = np.asarray(self.devices).reshape(mesh_shape)
-        return Mesh(devices, axis_names=tuple(mesh_axis_names))
-
     def _apply_overrides(self, config_obj: ShardingRulesConfig,
                          overrides: dict | None):
         """Applies runtime overrides to a sharding configuration object.
@@ -337,8 +309,6 @@ class Sharding:
         prefill_rules.query_tnh = (DATA_AXIS_NAME, ATTN_HEAD_AXIS_NAME, None)
         prefill_rules.keyvalue_skh = (DATA_AXIS_NAME, ATTN_HEAD_AXIS_NAME,
                                       None)
-        prefill_rules.keyvalue_cache_lskh = (None, None, ATTN_HEAD_AXIS_NAME,
-                                             None)
 
         # Populate Generate (Decode) Config
         # During decode, batch size is the large dimension, so we shard along the batch axis.
@@ -354,9 +324,6 @@ class Sharding:
         generate_rules.query_tnh = (DATA_AXIS_NAME, ATTN_HEAD_AXIS_NAME, None)
         generate_rules.keyvalue_skh = (DATA_AXIS_NAME, ATTN_HEAD_AXIS_NAME,
                                        None)
-        # The KV Cache is of shape (L, S, 2 * K, H), we shard on the head dim, but need to optimize on 2*K dim
-        generate_rules.keyvalue_cache_lskh = (None, None, ATTN_HEAD_AXIS_NAME,
-                                              None)
         generate_rules.attn_q_weight_dnh = (None, ATTN_HEAD_AXIS_NAME,
                                             ATTN_TENSOR_AXIS_NAME)
         generate_rules.attn_k_weight_dkh = (None, ATTN_HEAD_AXIS_NAME,

@@ -19,11 +19,9 @@ the process.
 import glob
 import multiprocessing
 import os
-from typing import List, Tuple
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 import requests
 from jax.experimental.transfer import start_transfer_server
 from jax.sharding import Mesh, NamedSharding
@@ -79,17 +77,24 @@ def get_mesh() -> Mesh:
     return jax.make_mesh((sharding_size, ), ("model", ))
 
 
-def get_kv_spec(mesh: Mesh) -> List[int]:
-    # (num_blocks, block_size, num_kv_heads, head_dim)
-    shape = (10, 32, 8, 128)
+def get_kv_spec(mesh: Mesh) -> list[int]:
+    num_blocks = 10
+    block_size = 32
+    num_kv_heads = 8
+    head_dim = 128
+
+    import tpu_commons.kernels.ragged_paged_attention.v3.kernel as rpa
+    shape = rpa.get_kv_cache_shape(num_blocks, block_size, num_kv_heads,
+                                   head_dim, jnp.bfloat16)
     dtype = jnp.bfloat16
-    sharding = NamedSharding(mesh, P(None, None, "model", None))
-    return jax.ShapeDtypeStruct(shape, dtype, sharding=sharding)
+    sharding = NamedSharding(mesh, P(None, None, "model"))
+    num_layers = 4
+    return [jax.ShapeDtypeStruct(shape, dtype, sharding=sharding)] * num_layers
 
 
-def get_mean_std(x: jax.Array) -> Tuple[float, float]:
-    mean = np.array(jnp.mean(x)).tolist()
-    std = np.array(jnp.std(x)).tolist()
+def get_mean_std(x: list[jax.Array]) -> tuple[float, float]:
+    mean = jax.tree.reduce(jnp.add, jax.tree.map(jnp.mean, x)).tolist()
+    std = jax.tree.reduce(jnp.add, jax.tree.map(jnp.std, x)).tolist()
     return mean, std
 
 
@@ -118,26 +123,34 @@ def prefill_worker(squeue: multiprocessing.Queue):
 
     kv_spec = get_kv_spec(mesh)
     key = jax.random.PRNGKey(0)
-    kv = jax.device_put(
-        jax.random.uniform(key, shape=kv_spec.shape, dtype=kv_spec.dtype),
-        kv_spec.sharding)
+
+    def _create_layer_kv(spec):
+        return jax.device_put(
+            jax.random.uniform(key, shape=spec.shape, dtype=spec.dtype),
+            spec.sharding)
+
+    kv = jax.tree.map(_create_layer_kv, kv_spec)
+    mean, std = get_mean_std(kv)
+    log(f"kv | shape={len(kv)} * {kv[0].shape} | sharding={kv[0].sharding} | mean={mean} | std={std}"
+        )
 
     s = start_transfer_server(
         jax.local_devices()[0].client,
-        '0.0.0.0:7080',
-        ['0.0.0.0:0'],
+        '127.0.0.1:7080',
+        ['127.0.0.1:0'],
+        use_raw_buffers=False,
     )
-    server_addr = s.address()
-    log(f"Launched server on {server_addr}")
-    squeue.put(s.address())
+    log(f"Launched server on {s.address()}")
 
-    log("Awaiting pull...")
     uuid = get_uuid()
     s.await_pull(uuid, kv)
+    log("Awaiting pull...")
 
-    mean, std = get_mean_std(kv)
-    log(f"kv | shape={kv.shape} | sharding={kv.sharding} | mean={mean} | std={std}"
-        )
+    # If set use_raw_buffers=True, kv can be safely deleted here
+    # jax.tree.map(lambda x: x.delete(), kv); del kv
+
+    # Wait until kv pulled by D
+    assert squeue.get() == 1
     log("Done")
 
 
@@ -159,23 +172,24 @@ def decode_worker(squeue: multiprocessing.Queue):
 
     s = start_transfer_server(
         jax.local_devices()[0].client,
-        '0.0.0.0:7081',
-        ['0.0.0.0:0'],
+        '127.0.0.1:7081',
+        ['127.0.0.1:0'],
     )
     server_addr = s.address()
     log(f"Launched server on {server_addr}")
 
-    prefill_addr = squeue.get()
+    prefill_addr = "127.0.0.1:7080"
     conn = s.connect(prefill_addr)
     log(f"Created connection with {prefill_addr}")
 
     log("Pulling...")
     uuid = get_uuid()
     kv = conn.pull(uuid, kv_spec)
-    mean, std = get_mean_std(kv)
-    log(f"kv | shape={kv.shape} | sharding={kv.sharding} | mean={mean} | std={std}"
-        )
 
+    mean, std = get_mean_std(kv)
+    log(f"kv | shape={len(kv)} * {kv[0].shape} | sharding={kv[0].sharding} | mean={mean} | std={std}"
+        )
+    squeue.put(1)
     log("Done")
 
 
@@ -189,6 +203,7 @@ def main():
     )
     assert tpu_type == "v6e-8"
 
+    # Use this queue to send pulling complete signal.
     squeue = multiprocessing.Queue()
     # NOTE: Must be "fork" otherwise will be jax coredump during start_transfer_server
     prefill = multiprocessing.get_context("fork").Process(

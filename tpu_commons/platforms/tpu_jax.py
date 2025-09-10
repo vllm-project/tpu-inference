@@ -43,32 +43,32 @@ class TpuPlatform(Platform):
     device_control_env_var: str = "TPU_VISIBLE_CHIPS"
     simple_compile_backend: str = "openxla"
 
-    supported_quantization: list[str] = ["tpu_int8", "compressed-tensors"]
+    supported_quantization: list[str] = [
+        "tpu_int8", "compressed-tensors", "awq"
+    ]
 
     additional_env_vars: list[str] = [
-        "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS", "TPU_BACKEND_TYPE",
-        "TPU_MULTIHOST_BACKEND"
+        "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS", "TPU_MULTIHOST_BACKEND"
     ]
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: jnp.dtype, kv_cache_dtype: Optional[str],
-                             block_size: int, use_v1: bool,
-                             use_mla: bool) -> str:
+                             block_size: int, use_v1: bool, use_mla: bool,
+                             has_sink: bool) -> str:
         if (selected_backend != _Backend.PALLAS
                 and selected_backend != _Backend.PALLAS_VLLM_V1):
             logger.info("Cannot use %s backend on TPU.", selected_backend)
 
         if use_v1:
             logger.info("Using Pallas V1 backend.")
-            return "vllm.v1.attention.backends.pallas.PallasAttentionBackend"
+            return "tpu_commons.attention.backends.pallas_torchax.PallasAttentionBackend"
         else:
             logger.info("Using Pallas backend.")
             return "vllm.attention.backends.pallas.PallasAttentionBackend"
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
-        logger.info(jax.lib.xla_bridge.get_backend().platform_version)
         try:
             if envs.VLLM_TPU_USING_PATHWAYS:
                 return jax.local_devices()[0].device_kind
@@ -89,7 +89,7 @@ class TpuPlatform(Platform):
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
-        return "vllm.lora.punica_wrapper.punica_tpu.PunicaWrapperTPU"
+        return "tpu_commons.lora.torch_punica_tpu.PunicaWrapperTPU"
 
     @classmethod
     def get_infinity_values(cls, dtype: jnp.dtype) -> Tuple[float, float]:
@@ -133,26 +133,29 @@ class TpuPlatform(Platform):
         if compilation_config.backend == "":
             compilation_config.backend = "openxla"
 
-        assert vllm_config.speculative_config is None, \
-            "TPU does not support speculative decoding"
-
-        # NOTE(xiang): convert dtype to jnp.dtype
-        if not isinstance(vllm_config.model_config.dtype, str):
-            logger.warning(
-                "The model dtype is not properly set for JAX backend. "
-                "Overwriting it to bfloat16")
-            vllm_config.model_config.dtype = jnp.bfloat16
-        else:
-            vllm_config.model_config.dtype = _DTYPE.get(
-                vllm_config.model_config.dtype, jnp.bfloat16)
-
         # If we use vLLM's model implementation in PyTorch, we should set it with torch version of the dtype.
         impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
+
+        # NOTE(xiang): convert dtype to jnp.dtype
+        # NOTE(wenlong): skip this logic for mm model preprocessing
+        # For mm model preprocessors, it may need the output dtype to be torch.
+        # In order to avoid a PR to vLLM, we postpone the dtype checking during tpu_worker initialization
+        if not vllm_config.scheduler_config.is_multimodal_model or impl == "vllm":
+            if not isinstance(vllm_config.model_config.dtype, str):
+                logger.warning(
+                    "The model dtype is not properly set for JAX backend. "
+                    "Overwriting it to jnp.bfloat16")
+                vllm_config.model_config.dtype = jnp.bfloat16
+            else:
+                vllm_config.model_config.dtype = _DTYPE.get(
+                    vllm_config.model_config.dtype, jnp.bfloat16)
+
         if impl == "vllm":
             vllm_config.model_config.dtype = j2t_dtype(
                 vllm_config.model_config.dtype.dtype)
 
         if envs.VLLM_USE_V1:
+            # TODO(cuiq): remove this dependency.
             from vllm.v1.attention.backends.pallas import \
                 PallasAttentionBackend
             cache_config.block_size = PallasAttentionBackend.get_page_size(
@@ -189,9 +192,6 @@ class TpuPlatform(Platform):
                 "Using uniproc_executor.")
             parallel_config.distributed_executor_backend = "uni"
 
-        assert not vllm_config.speculative_config, (
-            "Speculative decoding is not yet supported for TPU backend")
-
         if scheduler_config.is_multimodal_model and not \
             scheduler_config.disable_chunked_mm_input:
             logger.warning("TPU does not support running Multimodal models"\
@@ -199,15 +199,22 @@ class TpuPlatform(Platform):
             "Forcing --disable_chunked_mm_input.")
             scheduler_config.disable_chunked_mm_input = True
 
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if kv_transfer_config is not None:
+            assert kv_transfer_config.kv_connector == "TPUConnector"
+
         # Validate additional config
         if additional_config := vllm_config.additional_config:
             # Try loading/parsing the quantization config so that we can fail fast
-            if quantization_file_name := additional_config.get("quantization"):
+            if quantization_config := additional_config.get("quantization"):
                 try:
-                    quantization_dict = quantization_config_file_path_to_dict(
-                        quantization_file_name)
+                    # NOTE: Qwix quantization supports two paths: 1. quantization config file (which we need to parse)
+                    #  2. quantization config JSON
+                    if isinstance(quantization_config, str):
+                        quantization_config = quantization_config_file_path_to_dict(
+                            quantization_config)
                     parse_qwix_config_to_rules(
-                        quantization_dict["qwix"]["rules"])
+                        quantization_config["qwix"]["rules"])
                 except Exception as e:
                     raise ValueError(
                         f"Invalid quantization config; please see README for details on quantization config: {e}"
@@ -245,3 +252,8 @@ class TpuPlatform(Platform):
                                  f"{cls.device_name} V0.")
             if params.sampling_type == SamplingType.RANDOM_SEED:
                 raise ValueError("JAX does not support per-request seed.")
+
+    @classmethod
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
+                                    model_config: ModelConfig) -> bool:
+        return True

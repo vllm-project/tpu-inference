@@ -1,2 +1,3 @@
 [run]
-omit = */ragged_paged_attention/v3/*
+omit =
+    tpu_commons/kernels/*

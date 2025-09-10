@@ -1,15 +1,14 @@
-from dataclasses import dataclass, make_dataclass
+from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
+from jax.sharding import Sharding
 
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.common.attention.attention import (Attention,
-                                                               AttentionConfig,
                                                                KVCache)
-from tpu_commons.models.jax.common.constants import HuggingFaceArgNames
 from tpu_commons.models.jax.layers.rope import apply_rope
 
 logger = init_logger(__name__)
@@ -31,28 +30,14 @@ class L2Norm(nnx.Module):
             jnp.mean(x**2, axis=-1, keepdims=True) + self.eps)
 
 
-Llama4AttentionConfig = make_dataclass(
-    "Llama4AttentionConfig",
-    [(HuggingFaceArgNames.USE_QK_NORM.value, bool),
-     (HuggingFaceArgNames.TEMPERATURE_TUNING.value, bool),
-     (HuggingFaceArgNames.TEMPERATURE_TUNING_SCALE.value, float),
-     (HuggingFaceArgNames.TEMPERATURE_TUNING_FLOOR_SCALE.value, float)],
-    bases=(AttentionConfig, ),
-    kw_only=True)
-Llama4AttentionConfig.__doc__ = f"""Llama4-specific attention layer which performs layer norm on the Query and Keys after RoPE.
-Additional Args:
-  {HuggingFaceArgNames.USE_QK_NORM.value}: bool whether to use Llama4 normalization of query & keys
-  {HuggingFaceArgNames.TEMPERATURE_TUNING.value}: bool whether to use temperature tuning
-  {HuggingFaceArgNames.TEMPERATURE_TUNING_SCALE.value}: float temperature tuning scale
-  {HuggingFaceArgNames.TEMPERATURE_TUNING_FLOOR_SCALE.value}: float temperature tuning floor scale
-
-Inherits AttentionConfig docstring:
-{AttentionConfig.__doc__}
-"""
-
-
-@dataclass
+@dataclass(kw_only=True)
 class Llama4Attention(Attention):
+    use_qk_norm: bool
+    temperature_tuning: bool
+    temperature_tuning_floor_scale: float
+    temperature_tuning_scale: float
+    activation_attention_td: Sharding
+    activation_attention_out_td: Sharding
 
     def __call__(self,
                  x,
@@ -82,17 +67,13 @@ class Llama4Attention(Attention):
                 - The attention output tensor of shape
                   `(batch_size, seq_len, d_model)`.
         """
-        op_mode = "prefill" if is_prefill else "generate"
         md = attention_metadata
-        x = jnp.asarray(x, self.cfg.dtype)
-        x_SD = nnx.with_sharding_constraint(
-            x, self.activation_attention_td[op_mode])
-        x_q_TD = nnx.with_sharding_constraint(x, self.activation_q_td[op_mode])
-        rope_scaling = getattr(self.cfg,
-                               HuggingFaceArgNames.ROPE_SCALING.value)
-        rope_theta = getattr(self.cfg, HuggingFaceArgNames.ROPE_THETA.value)
-        rope_input_ordering = self.cfg.rope_input_ordering
-        H = getattr(self.cfg, HuggingFaceArgNames.HEAD_DIM.value)
+        x = jnp.asarray(x, self.dtype)
+        x_SD = nnx.with_sharding_constraint(x, self.activation_attention_td)
+        x_q_TD = nnx.with_sharding_constraint(x, self.activation_q_td)
+        rope_scaling = self.rope_scaling
+        rope_theta = self.rope_theta
+        H = self.head_dim
         l2_norm = L2Norm()
 
         with jax.named_scope("q_proj"):
@@ -100,35 +81,32 @@ class Llama4Attention(Attention):
                                self.kernel_q_proj_DNH.value)
             if use_attention_rope:
                 q_TNH = apply_rope(q_TNH, md.input_positions, H, rope_theta,
-                                   rope_scaling, rope_input_ordering)
+                                   rope_scaling, self.rope_input_ordering)
 
                 # Apply normaliation after RoPE
-                if self.cfg.use_qk_norm:
+                if self.use_qk_norm:
                     q_TNH = l2_norm(q_TNH)
             else:
-                if self.cfg.temperature_tuning:
+                if self.temperature_tuning:
                     q_TNH = self.apply_temperature_tuning(md, q_TNH)
 
-            q_TNH = nnx.with_sharding_constraint(q_TNH,
-                                                 self.query_tnh[op_mode])
+            q_TNH = nnx.with_sharding_constraint(q_TNH, self.query_tnh)
         with jax.named_scope("k_proj"):
             k_SKH = jnp.einsum('SD,DKH -> SKH', x_SD,
                                self.kernel_k_proj_DKH.value)
             if use_attention_rope:
                 k_SKH = apply_rope(k_SKH, md.input_positions, H, rope_theta,
-                                   rope_scaling, rope_input_ordering)
+                                   rope_scaling, self.rope_input_ordering)
 
                 # Apply normaliation after RoPE
-                if self.cfg.use_qk_norm:
+                if self.use_qk_norm:
                     k_SKH = l2_norm(k_SKH)
-            k_SKH = nnx.with_sharding_constraint(k_SKH,
-                                                 self.keyvalue_skh[op_mode])
+            k_SKH = nnx.with_sharding_constraint(k_SKH, self.keyvalue_skh)
 
         with jax.named_scope("v_proj"):
             v_SKH = jnp.einsum('SD,DKH -> SKH', x_SD,
                                self.kernel_v_proj_DKH.value)
-            v_SKH = nnx.with_sharding_constraint(v_SKH,
-                                                 self.keyvalue_skh[op_mode])
+            v_SKH = nnx.with_sharding_constraint(v_SKH, self.keyvalue_skh)
 
         with jax.named_scope("attn_op"):
             new_kv_cache, outputs_TNH = self.attention(
@@ -145,7 +123,7 @@ class Llama4Attention(Attention):
             o_TD = jnp.einsum('TNH,NHD -> TD', outputs_TNH,
                               self.kernel_o_proj_NHD.value)
             o_TD = nnx.with_sharding_constraint(
-                o_TD, self.activation_attention_out_td[op_mode])
+                o_TD, self.activation_attention_out_td)
         return new_kv_cache, o_TD
 
     def apply_temperature_tuning(self, md: AttentionMetadata,
@@ -156,7 +134,7 @@ class Llama4Attention(Attention):
             input_arr_TNH: Input array of shape (T, N, H) which will have scaled temperatures applied.
         """
         attn_scales = (jnp.log(
-            jnp.floor((md.input_positions.astype(self.cfg.dtype) + 1.0) /
-                      self.cfg.temperature_tuning_floor_scale) + 1.0) *
-                       self.cfg.temperature_tuning_scale + 1.0)
+            jnp.floor((md.input_positions.astype(self.dtype) + 1.0) /
+                      self.temperature_tuning_floor_scale) + 1.0) *
+                       self.temperature_tuning_scale + 1.0)
         return input_arr_TNH * attn_scales[:, None, None]

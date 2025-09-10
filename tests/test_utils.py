@@ -6,8 +6,8 @@ import pytest
 
 # Import the functions to be tested
 from tpu_commons.utils import (GBYTES, enable_megacore, get_megacore,
-                               get_num_kv_heads_by_tp, get_padded_head_dim,
-                               hbm_usage_bytes, hbm_usage_gb)
+                               get_padded_head_dim, hbm_usage_bytes,
+                               hbm_usage_gb)
 
 
 def test_enable_and_get_megacore():
@@ -15,33 +15,6 @@ def test_enable_and_get_megacore():
     assert not get_megacore()
     enable_megacore()
     assert get_megacore()
-
-
-@pytest.mark.parametrize(
-    "num_kv_heads, tp_size, expected",
-    [
-        (8, 2, 8),  # tp_size divides num_kv_heads
-        (8, 8, 8),  # tp_size equals num_kv_heads
-        (4, 8, 8),  # num_kv_heads divides tp_size
-        (1, 4, 4),  # num_kv_heads is 1
-    ],
-)
-def test_get_num_kv_heads_by_tp_valid_inputs(num_kv_heads, tp_size, expected):
-    """Tests get_num_kv_heads_by_tp with valid inputs."""
-    assert get_num_kv_heads_by_tp(num_kv_heads, tp_size) == expected
-
-
-@pytest.mark.parametrize(
-    "num_kv_heads, tp_size",
-    [
-        (8, 3),  # Neither divides the other
-        (5, 2),
-    ],
-)
-def test_get_num_kv_heads_by_tp_invalid_inputs(num_kv_heads, tp_size):
-    """Tests get_num_kv_heads_by_tp with invalid inputs (assertions)."""
-    with pytest.raises(AssertionError):
-        get_num_kv_heads_by_tp(num_kv_heads, tp_size)
 
 
 @patch.dict(os.environ, {"TPU_MULTIHOST_BACKEND": "ray"})

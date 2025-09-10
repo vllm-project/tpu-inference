@@ -27,6 +27,9 @@ TARGET_ROUGE1="40"
 TARGET_THROUGHPUT="1500"
 
 model_list="Qwen/Qwen2.5-1.5B-Instruct Qwen/Qwen2.5-0.5B-Instruct meta-llama/Llama-3.1-8B-Instruct"
+if [ "$USE_V6E8_QUEUE" == "True" ]; then
+    model_list="meta-llama/Llama-4-Scout-17B-16E-Instruct"
+fi
 
 extra_serve_args=()
 if [ "$QUANTIZATION" = "True" ]; then
@@ -52,7 +55,7 @@ helpFunction()
    echo -e "\t-r The path your root directory containing both 'vllm' and 'tpu_commons' (default: /workspace/, which is used in the Dockerfile)"
    echo -e "\t-d The dataset name (default: mlperf, which will download the dataset)"
    echo -e "\t-p The path to the processed MLPerf dataset (default: None, which will download the dataset)"
-   echo -e "\t-m A space-separated list of HuggingFace model ids to use (default: Qwen/Qwen2.5-1.5B-Instruct, Qwen/Qwen2.5-0.5B-Instruct, and meta-llama/Llama-3.1-8B-Instruct)"
+   echo -e "\t-m A space-separated list of HuggingFace model ids to use (default: Qwen/Qwen2.5-1.5B-Instruct, Qwen/Qwen2.5-0.5B-Instruct, meta-llama/Llama-3.1-8B-Instruct and meta-llama/Llama-4-Scout-17B-16E-Instruct)"
    echo -e "\t-n Number of prompts to use for the benchmark (default: 10)"
    exit 1
 }
@@ -214,7 +217,6 @@ checkThroughputAndRouge() {
     fi
 }
 
-
 for model_name in $model_list; do
     echo "--------------------------------------------------"
     echo "Running benchmark for model: $model_name"
@@ -236,9 +238,20 @@ for model_name in $model_list; do
         continue
     fi
 
+    # Define model-specific arguments
+    current_serve_args=("${extra_serve_args[@]}")
+    max_batched_tokens=8192
+    if [ "$USE_V6E8_QUEUE" == "True" ]; then
+        current_serve_args+=(--tensor-parallel-size 8)
+        max_batched_tokens=1024
+        if [ "$model_name" == "meta-llama/Llama-4-Scout-17B-16E-Instruct" ]; then
+            current_serve_args+=(--hf-overrides '{"architectures": ["Llama4ForCausalLM"]}')
+        fi
+    fi
+
     # Spin up the vLLM server
     echo "Spinning up the vLLM server..."
-    (vllm serve "$model_name" --max-model-len=1024 --disable-log-requests --max-num-batched-tokens 8192 "${extra_serve_args[@]}" 2>&1 | tee -a "$LOG_FILE") &
+    (vllm serve "$model_name" --max-model-len=1024 --disable-log-requests --max-num-batched-tokens "$max_batched_tokens" "${current_serve_args[@]}" 2>&1 | tee -a "$LOG_FILE") &
 
 
 
@@ -269,7 +282,7 @@ for model_name in $model_list; do
     if $did_find_ready_message; then
         echo "Starting the benchmark for $model_name..."
         echo "Current working directory: $(pwd)"
-        python benchmarks/benchmark_serving.py \
+        vllm bench serve \
         --backend vllm \
         --model "$model_name" \
         --dataset-name "$dataset_name" \

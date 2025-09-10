@@ -1,16 +1,6 @@
-# Copyright 2025 The JAX Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-License-Identifier: Apache-2.0
+
+import re
 
 import jax
 
@@ -130,7 +120,7 @@ TUNED_BLOCK_SIZES = {
     (6, 2048, 28672, 4096, 'bfloat16', True): (2048, 1024, 4096),
     (6, 2048, 3584, 18944, 'bfloat16', True): (2048, 3584, 512),
     (6, 2048, 3584, 3584, 'bfloat16', True): (2048, 512, 3584),
-    (6, 2048, 3584, 8192, 'bfloat16', True): (1024, 512, 8192),
+    (6, 2048, 3584, 8192, 'bfloat16', True): (2048, 256, 8192),
     (6, 2048, 37888, 3584, 'bfloat16', True): (2048, 1024, 3584),
     (6, 2048, 4096, 14336, 'bfloat16', True): (2048, 4096, 512),
     (6, 2048, 4096, 4096, 'bfloat16', True): (2048, 512, 4096),
@@ -276,12 +266,10 @@ TUNED_BLOCK_SIZES = {
 def get_tpu_version() -> int:
     """Returns the numeric version of the TPU, or -1 if not on TPU."""
     kind = jax.devices()[0].device_kind
-    if 'TPU' not in kind:
+    match = re.match(r'^TPU[^\d]*(\d+)', kind)
+    if match is None:
         return -1
-    if kind.endswith(' lite'):
-        kind = kind[:-len(' lite')]
-    assert kind[:-1] == 'TPU v', kind
-    return int(kind[-1])
+    return int(match.group(1))
 
 
 def get_key(
@@ -330,11 +318,11 @@ def get_tuned_block_sizes(
         activation_dtype,
         quantize_activation,
     )
-    tuned_sizes = TUNED_BLOCK_SIZES.get(key, None)
+    tuned_sizes = TUNED_BLOCK_SIZES.get(key)
     if tuned_sizes is None:
-        logger.warn(
-            f"Couldn't find tuned sizes for the quantized matmul kernel with {key=}"
-        )
+        logger.warning(
+            "Couldn't find tuned sizes for the quantized matmul kernel with %s",
+            key)
         return (128, 128, 128)
     else:
         return tuned_sizes

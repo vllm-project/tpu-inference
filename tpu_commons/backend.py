@@ -18,8 +18,8 @@ from typing import Optional
 from tpu_commons.adapters.vllm_adapters import (VllmLoRARequestAdapter,
                                                 VllmSchedulerOutputAdapter)
 from tpu_commons.di.interfaces import BackendInterface, HostInterface
-from tpu_commons.worker import get_tpu_worker_cls
 from tpu_commons.worker.base import AbstractTpuWorker
+from tpu_commons.worker.tpu_worker_jax import TPUWorker
 
 
 class TPUBackend(BackendInterface):
@@ -42,8 +42,7 @@ class TPUBackend(BackendInterface):
             **worker_kwargs: Additional keyword arguments to be passed to the
                             worker's constructor.
         """
-        tpu_worker_cls = get_tpu_worker_cls()
-        self.worker: AbstractTpuWorker = tpu_worker_cls(
+        self.worker: AbstractTpuWorker = TPUWorker(
             host_interface=host_interface, **worker_kwargs)
 
     def launch_tpu_batch(self, batch_to_launch):

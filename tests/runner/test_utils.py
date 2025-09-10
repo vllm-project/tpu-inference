@@ -2,51 +2,20 @@
 import io
 import logging
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, mock_open, patch
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 from jax._src.interpreters import pxla
-from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
-from tpu_commons.runner.utils import (ForbidCompile, LatencyTracker,
-                                      create_kv_caches, determine_do_sampling,
-                                      get_padded_num_reqs_with_upper_limit,
-                                      get_padded_token_len, get_req_paddings,
-                                      get_token_paddings, pad_to_multiple)
-
-
-def test_determine_do_sampling():
-    """Tests the determine_do_sampling function."""
-    assert not determine_do_sampling(top_k=50, temperature=0.0)
-    assert not determine_do_sampling(top_k=1, temperature=0.7)
-    assert not determine_do_sampling(top_k=1, temperature=0.0)
-    assert determine_do_sampling(top_k=10, temperature=0.5)
-
-
-def test_pad_to_multiple():
-    """Tests the pad_to_multiple function."""
-    assert pad_to_multiple(16, 8) == 16
-    assert pad_to_multiple(17, 8) == 24
-    assert pad_to_multiple(24, 8) == 24
-    assert pad_to_multiple(1, 8) == 8
-
-    # Test with max_limit
-    assert pad_to_multiple(17, 8, max_limit=20) == 20
-    assert pad_to_multiple(17, 8, max_limit=30) == 24
-    assert pad_to_multiple(25, 8, max_limit=30) == 30
-
-    # Test with keep_one
-    assert pad_to_multiple(1, 8, keep_one=True) == 1
-    assert pad_to_multiple(2, 8, keep_one=True) == 8
-    assert pad_to_multiple(1, 8, keep_one=False) == 8
-
-    # Test invalid inputs
-    with pytest.raises(AssertionError):
-        pad_to_multiple(0, 8)
-    with pytest.raises(AssertionError):
-        pad_to_multiple(-5, 8)
+from tpu_commons.runner.utils import (
+    PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR, ForbidCompile, InferencePhase,
+    LatencyTracker, PhasedBasedProfiler,
+    determine_phase_from_batch_composition_stats, get_batch_composition_stats,
+    get_padded_num_reqs_with_upper_limit, get_padded_token_len,
+    get_req_paddings, get_token_paddings)
 
 
 def test_get_padded_num_reqs_with_upper_limit():
@@ -241,50 +210,202 @@ def test_forbid_compile_raises_on_new_shape(jitted_function, jnp_array_input,
             jitted_function(jnp_array_input_new)
 
 
+class MockInputBatch:
+
+    def __init__(self, req_ids, num_computed_tokens_cpu):
+        self.req_ids = req_ids
+        self.num_computed_tokens_cpu = np.array(num_computed_tokens_cpu)
+
+
+class MockSchedulerOutput:
+
+    def __init__(self, num_scheduled_tokens):
+        self.num_scheduled_tokens = num_scheduled_tokens
+
+
+@pytest.mark.parametrize(
+    "scenario, num_reqs, req_ids, computed, scheduled, expected_prefill, expected_decode",
+    [
+        ("prefill_only", 2, [101, 102], [0, 0], {
+            101: 50,
+            102: 100
+        }, 150, 0),
+        ("decode_only", 3, [201, 202, 203], [10, 20, 5], {
+            201: 1,
+            202: 1,
+            203: 1
+        }, 0, 3),
+        ("mixed_batch", 4, [301, 302, 303, 304], [0, 10, 0, 20], {
+            301: 100,
+            302: 1,
+            303: 50,
+            304: 1
+        }, 150, 2),
+        ("chunked_prefill", 2, [401, 402], [50, 10], {
+            401: 50,
+            402: 1
+        }, 50, 1),
+    ])
+def test_get_batch_composition_stats(scenario, num_reqs, req_ids, computed,
+                                     scheduled, expected_prefill,
+                                     expected_decode):
+    """Tests get_batch_composition_stats for various scenarios."""
+    input_batch = MockInputBatch(req_ids, computed)
+    scheduler_output = MockSchedulerOutput(scheduled)
+    total_tokens = sum(scheduled.values())
+
+    stats = get_batch_composition_stats(
+        input_batch=input_batch,
+        total_num_scheduled_tokens=total_tokens,
+        num_reqs=num_reqs,
+        padded_total_num_scheduled_tokens=total_tokens + 8,
+        scheduler_output=scheduler_output)
+
+    assert stats["num_prefill_tokens"] == expected_prefill
+    assert stats["num_decode_tokens"] == expected_decode
+    assert stats["num_reqs"] == num_reqs
+    assert stats["total_num_scheduled_tokens"] == total_tokens
+
+
+@pytest.mark.parametrize("prefill_tokens, total_tokens, expected_phase", [
+    (90, 100, InferencePhase.PREFILL_HEAVY),
+    (89, 100, InferencePhase.AMBIGUOUS),
+    (15, 100, InferencePhase.DECODE_HEAVY),
+    (50, 100, InferencePhase.BALANCED),
+    (70, 100, InferencePhase.AMBIGUOUS),
+    (30, 100, InferencePhase.AMBIGUOUS),
+    (40, 100, InferencePhase.BALANCED),
+    (50, 100, InferencePhase.BALANCED),
+    (60, 100, InferencePhase.BALANCED),
+    (100, 100, InferencePhase.PREFILL_HEAVY),
+    (20, 100, InferencePhase.DECODE_HEAVY),
+    (21, 100, InferencePhase.AMBIGUOUS),
+    (0, 100, InferencePhase.DECODE_HEAVY),
+])
+def test_determine_phase_from_batch_composition_stats(prefill_tokens,
+                                                      total_tokens,
+                                                      expected_phase):
+    """Tests the phase determination logic based on prefill ratios."""
+    stats = {
+        "num_prefill_tokens": prefill_tokens,
+        "total_num_scheduled_tokens": total_tokens
+    }
+    phase = determine_phase_from_batch_composition_stats(stats)
+    assert phase == expected_phase
+
+
 @pytest.fixture
-def mesh():
-    devices = jax.devices()
-    return Mesh(devices, axis_names=("model", ))
+def profiler_fixture(tmp_path):
+    """Fixture to set up a PhasedBasedProfiler with mocked dependencies."""
+    target_module = "tpu_commons.runner.utils"
+    with patch(f"{target_module}.jax.profiler.start_trace") as mock_start, \
+         patch(f"{target_module}.jax.profiler.stop_trace") as mock_stop, \
+         patch("builtins.open", mock_open()) as mock_file, \
+         patch(f"{target_module}.datetime") as mock_datetime, \
+         patch(f"{target_module}.InferencePhase", InferencePhase), \
+         patch(f"{target_module}.determine_phase_from_batch_composition_stats") as mock_determine_phase:
+
+        mock_now = MagicMock()
+        mock_now.strftime.return_value = "2024_01_01_12_00_00"
+        mock_datetime.datetime.now.return_value = mock_now
+
+        profiler = PhasedBasedProfiler(profile_dir=str(tmp_path))
+        profiler.num_steps_to_profile_for = PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR
+
+        yield {
+            "profiler": profiler,
+            "mock_start": mock_start,
+            "mock_stop": mock_stop,
+            "mock_file": mock_file,
+            "mock_determine_phase": mock_determine_phase,
+        }
 
 
-def test_create_kv_caches(mesh: Mesh):
-    """
-    Tests that `create_kv_caches` correctly allocates and shards the KV caches
-    for all specified layers.
-    """
-    num_blocks = 64
-    block_size = 16
-    num_kv_heads = 8
-    head_size = 128
-    layer_names = ["decoder.0", "decoder.1", "decoder.2"]  # Test with 3 layers
-    devices = jax.devices()
+def test_phased_profiler_full_cycle(profiler_fixture):
+    """Tests a full start-step-stop profiling cycle for one phase."""
+    profiler = profiler_fixture["profiler"]
+    mock_start = profiler_fixture["mock_start"]
+    mock_stop = profiler_fixture["mock_stop"]
+    mock_file = profiler_fixture["mock_file"]
+    mock_determine_phase = profiler_fixture["mock_determine_phase"]
 
-    expected_shape = (num_blocks, block_size, num_kv_heads * 2, head_size)
-    expected_sharding = NamedSharding(mesh, PartitionSpec(None, None, "model"))
-    expected_dtype = jnp.bfloat16
+    stats = {"num_reqs": 2, "total_num_scheduled_tokens": 100}
 
-    with patch("tpu_commons.logger.init_logger",
-               return_value=MagicMock()), patch(
-                   "tpu_commons.runner.utils.utils.hbm_usage_gb",
-                   return_value=[(0.0, 0.0), (0.0, 0.0)]):
-        kv_caches = create_kv_caches(
-            num_blocks=num_blocks,
-            block_size=block_size,
-            num_kv_heads=num_kv_heads,
-            head_size=head_size,
-            mesh=mesh,
-            layer_names=layer_names,
-            devices=devices,
-        )
+    # 1. Start profiling on PREFILL_HEAVY phase
+    mock_determine_phase.return_value = InferencePhase.PREFILL_HEAVY
+    profiler.step(stats)
+    mock_start.assert_called_once()
+    assert profiler.profiling_n_steps_left == PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR
+    assert profiler.current_phase == "prefill_heavy"
+    assert profiler.inference_phase_seen[InferencePhase.PREFILL_HEAVY]
+    assert mock_file().write.call_count == 1  # Wrote stats on start
 
-        assert isinstance(kv_caches, list)
-        assert len(kv_caches) == len(layer_names)
+    # 2. Step profiling (N-1 steps)
+    for i in range(PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR - 1):
+        profiler.step(stats)
+        assert profiler.profiling_n_steps_left == PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR - 1 - i
+        mock_start.assert_called_once()  # Not called again
+        mock_stop.assert_not_called()
 
-        for cache_array in kv_caches:
-            assert isinstance(cache_array, jax.Array)
-            assert cache_array.shape == expected_shape
-            assert cache_array.dtype == expected_dtype
-            assert cache_array.sharding == expected_sharding
+    # 3. Final step stops profiling
+    profiler.step(stats)
+    mock_stop.assert_called_once()
+    assert profiler.profiling_n_steps_left == 0
+    assert profiler.current_phase == ""
+    assert mock_file(
+    ).write.call_count == PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR + 1
 
-        # Ensure that separate array objects were created for each layer
-        assert kv_caches[0] is not kv_caches[1]
+
+def test_phased_profiler_ignores_initial_request(profiler_fixture):
+    """Tests that profiling is not triggered for initial small requests."""
+    profiler = profiler_fixture["profiler"]
+    mock_start = profiler_fixture["mock_start"]
+    mock_determine_phase = profiler_fixture["mock_determine_phase"]
+
+    mock_determine_phase.return_value = InferencePhase.PREFILL_HEAVY
+
+    profiler.step({"num_reqs": 1, "total_num_scheduled_tokens": 1})
+    mock_start.assert_not_called()
+
+    profiler.step({"num_reqs": 1, "total_num_scheduled_tokens": 100})
+    mock_start.assert_called_once()
+
+    profiler.step({"num_reqs": 2, "total_num_scheduled_tokens": 1})
+    mock_start.assert_called_once()
+
+    profiler.step({"num_reqs": 2, "total_num_scheduled_tokens": 2})
+    mock_start.assert_called_once()
+
+
+def test_phased_profiler_handles_all_phases(profiler_fixture):
+    """Tests that the profiler can profile all defined phases sequentially."""
+    profiler = profiler_fixture["profiler"]
+    mock_start = profiler_fixture["mock_start"]
+    mock_stop = profiler_fixture["mock_stop"]
+    mock_determine_phase = profiler_fixture["mock_determine_phase"]
+
+    stats = {"num_reqs": 2, "total_num_scheduled_tokens": 100}
+    phases_to_profile = [
+        InferencePhase.PREFILL_HEAVY, InferencePhase.DECODE_HEAVY,
+        InferencePhase.BALANCED
+    ]
+
+    for i, phase in enumerate(phases_to_profile):
+        # Start profiling for the new phase
+        mock_determine_phase.return_value = phase
+        profiler.step(stats)
+        assert mock_start.call_count == i + 1
+        assert profiler.current_phase == phase.name.lower()
+        assert profiler.inference_phase_seen[phase]
+
+        # Step until profiling stops for this phase
+        for _ in range(PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR):
+            profiler.step(stats)
+
+        assert mock_stop.call_count == i + 1
+        assert profiler.current_phase == ""
+
+    # After all phases seen, should not start again
+    mock_determine_phase.return_value = InferencePhase.PREFILL_HEAVY
+    profiler.step(stats)
+    assert mock_start.call_count == len(phases_to_profile)

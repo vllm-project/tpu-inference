@@ -126,7 +126,6 @@ BASE_CMD="sudo bash ${REMOTE_SCRIPT_PATH} \
     %ROLE% \
     '${HF_CACHE_PATH}' \
     -e HF_TOKEN='${HF_TOKEN}' \
-    -e TPU_BACKEND_TYPE=jax \
     -e TPU_MULTIHOST_BACKEND=ray \
     -e JAX_PLATFORMS=''"
 

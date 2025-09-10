@@ -2,7 +2,6 @@ import unittest
 from unittest.mock import MagicMock
 
 import jax
-from jax.sharding import Mesh
 
 from tpu_commons.models.jax.common.sharding import (Sharding, ShardingConfig,
                                                     ShardingRulesConfig,
@@ -48,32 +47,9 @@ class TestSharding(unittest.TestCase):
         self.assertEqual(config_with_rules.prefill_rules.activation_ffw_td,
                          ("model", None))
 
-    def test_sharding_init_and_mesh_build(self):
-        """Tests the Sharding class initialization and mesh construction."""
-        strategy_dict = {
-            "tensor_parallelism": 2,
-            "expert_parallelism": 4,
-            "data_parallelism": 1,
-            "sequence_parallelism": 1,
-        }
-        sharding = Sharding(
-            strategy_dict=strategy_dict,
-            devices=self.mock_devices,
-            prefill_rules={},
-            generate_rules={},
-        )
-
-        self.assertIsInstance(sharding.mesh, Mesh)
-        self.assertEqual(sharding.mesh.devices.shape, (1, 4, 1, 2))
-        self.assertEqual(sharding.mesh.axis_names,
-                         ("data", "expert", "seq", "model"))
-        self.assertIsInstance(sharding.sharding_cfg, ShardingConfig)
-
     def test_apply_overrides(self):
         """Tests the _apply_overrides method for valid and invalid keys."""
         sharding = Sharding(
-            strategy_dict={"tensor_parallelism": 8},
-            devices=self.mock_devices,
             prefill_rules={},
             generate_rules={},
         )
@@ -89,10 +65,7 @@ class TestSharding(unittest.TestCase):
 
     def test_default_sharding_config(self):
         """Tests that default sharding rules are created correctly."""
-        strategy_dict = {"tensor_parallelism": 4, "expert_parallelism": 2}
         sharding = Sharding(
-            strategy_dict=strategy_dict,
-            devices=self.mock_devices,
             prefill_rules={},
             generate_rules={},
         )
@@ -105,18 +78,13 @@ class TestSharding(unittest.TestCase):
         self.assertEqual(generate_rules.moe_router_de, (None, "expert"))
         self.assertEqual(generate_rules.attn_q_weight_dnh,
                          (None, "model", None))
-        self.assertEqual(generate_rules.keyvalue_cache_lskh,
-                         (None, None, "model", None))
 
     def test_sharding_init_with_overrides(self):
         """Tests Sharding initialization with programmatic overrides."""
-        strategy_dict = {"tensor_parallelism": 8}
         generate_overrides = {"logits_tv": ("data", "model")}
 
         sharding = Sharding(
-            strategy_dict=strategy_dict,
             generate_rules=generate_overrides,
-            devices=self.mock_devices,
             prefill_rules={},
         )
 
@@ -128,7 +96,6 @@ class TestSharding(unittest.TestCase):
 
     def test_get_overrides_from_vllm_config(self):
         """Tests fetching sharding overrides from a mock VllmConfig."""
-        strategy_dict = {"tensor_parallelism": 8}
 
         mock_vllm_config_prefill = MagicMock()
         mock_vllm_config_prefill.additional_config = {
@@ -144,9 +111,7 @@ class TestSharding(unittest.TestCase):
             }
         }
         sharding_prefill = Sharding(
-            strategy_dict=strategy_dict,
             vllm_config=mock_vllm_config_prefill,
-            devices=self.mock_devices,
             prefill_rules={},
             generate_rules={},
         )
@@ -170,9 +135,7 @@ class TestSharding(unittest.TestCase):
             }
         }
         sharding_generate = Sharding(
-            strategy_dict=strategy_dict,
             vllm_config=mock_vllm_config_generate,
-            devices=self.mock_devices,
             prefill_rules={},
             generate_rules={},
         )

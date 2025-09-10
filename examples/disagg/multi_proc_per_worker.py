@@ -21,11 +21,9 @@ each process.
 import glob
 import multiprocessing
 import os
-from typing import Tuple
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 import requests
 from jax.experimental.transfer import start_transfer_server
 from jax.sharding import Mesh, NamedSharding
@@ -85,26 +83,42 @@ def get_mesh() -> Mesh:
     return jax.make_mesh((sharding_size, ), ("model", ))
 
 
+def get_kv_shape(mesh: Mesh, per_shard: bool = False) -> tuple[int, ...]:
+    num_blocks = 10
+    block_size = 32
+    num_kv_heads = 8
+    head_dim = 128
+
+    if per_shard:
+        shard_size = mesh.shape["model"]
+        num_kv_heads = num_kv_heads // shard_size
+
+    import tpu_commons.kernels.ragged_paged_attention.v3.kernel as rpa
+    shape = rpa.get_kv_cache_shape(num_blocks, block_size, num_kv_heads,
+                                   head_dim, jnp.bfloat16)
+    return shape
+
+
 def get_kv_spec(mesh: Mesh) -> jax.ShapeDtypeStruct:
-    # (num_blocks, block_size, num_kv_heads, head_dim)
-    shape = (10, 32, 8, 128)
+    shape = get_kv_shape(mesh)
     dtype = jnp.bfloat16
-    sharding = NamedSharding(mesh, P(None, None, "model", None))
-    return jax.ShapeDtypeStruct(shape, dtype, sharding=sharding)
+    sharding = NamedSharding(mesh, P(None, None, "model"))
+    num_layers = 4
+    return [jax.ShapeDtypeStruct(shape, dtype, sharding=sharding)] * num_layers
 
 
 # Hard code the shard spec, it could have been calculated.
-def get_kv_shard_spec() -> jax.ShapeDtypeStruct:
-    # (num_blocks, block_size, num_kv_heads, head_dim)
-    shape = (10, 32, 2, 128)
+def get_kv_shard_spec(mesh: Mesh) -> jax.ShapeDtypeStruct:
+    shape = get_kv_shape(mesh, per_shard=True)
     dtype = jnp.bfloat16
     sharding = SingleDeviceSharding(jax.local_devices()[0])
-    return jax.ShapeDtypeStruct(shape, dtype, sharding=sharding)
+    num_layers = 4
+    return [jax.ShapeDtypeStruct(shape, dtype, sharding=sharding)] * num_layers
 
 
-def get_mean_std(x: jax.Array) -> Tuple[float, float]:
-    mean = np.array(jnp.mean(x)).tolist()
-    std = np.array(jnp.std(x)).tolist()
+def get_mean_std(x: list[jax.Array]) -> tuple[float, float]:
+    mean = jax.tree.reduce(jnp.add, jax.tree.map(jnp.mean, x)).tolist()
+    std = jax.tree.reduce(jnp.add, jax.tree.map(jnp.std, x)).tolist()
     return mean, std
 
 
@@ -119,11 +133,11 @@ def prefill_worker(pid: int, squeue: multiprocessing.Queue):
 
     def _get_p2p_server_addr(pid: int):
         ports = [8576, 8577, 8578, 8579]
-        return f"0.0.0.0:{ports[pid]}"
+        return f"127.0.0.1:{ports[pid]}"
 
     def _get_ip(pid: int):
         port = _get_port(pid)
-        return f"localhost:{port}"
+        return f"127.0.0.1:{port}"
 
     def _get_ips():
         ips = [_get_ip(i) for i in range(4)]
@@ -146,31 +160,35 @@ def prefill_worker(pid: int, squeue: multiprocessing.Queue):
 
     kv_spec = get_kv_spec(mesh)
     key = jax.random.PRNGKey(0)
-    kv = jax.device_put(
-        jax.random.uniform(key, shape=kv_spec.shape, dtype=kv_spec.dtype),
-        kv_spec.sharding)
+
+    def _create_layer_kv(spec):
+        return jax.device_put(
+            jax.random.uniform(key, shape=spec.shape, dtype=spec.dtype),
+            spec.sharding)
+
+    kv = jax.tree.map(_create_layer_kv, kv_spec)
+    mean, std = get_mean_std(kv)
+    log(f"kv | shape={len(kv)} * {kv[0].shape} | sharding={kv[0].sharding} | mean={mean} | std={std}"
+        )
 
     # Fetch the shard on this chip only.
     # NOTE: index must be 0, because each process only sees its local data.
-    kv_shard = kv.addressable_data(0)
-    log(f"kv_shard | shape={kv_shard.shape} | sharding={kv_shard.sharding}")
+    kv_shard = [_kv.addressable_data(0) for _kv in kv]
 
     s = start_transfer_server(
         jax.local_devices()[0].client,
         _get_p2p_server_addr(pid),
-        ['0.0.0.0:0'],
+        ['127.0.0.1:0'],
     )
     server_addr = s.address()
     log(f"Launched server on {server_addr}")
-    squeue.put(s.address())
 
-    log("Awaiting pull...")
     uuid = get_uuid(pid)
     s.await_pull(uuid, kv_shard)
+    log("Awaiting pull...")
 
-    mean, std = get_mean_std(kv)
-    log(f"kv | shape={kv.shape} | sharding={kv.sharding} | mean={mean} | std={std}"
-        )
+    # Wait until kv pulled by D
+    assert squeue.get() == 1
     log("Done")
 
 
@@ -185,11 +203,15 @@ def decode_worker(pid: int, squeue: multiprocessing.Queue):
 
     def _get_p2p_server_addr(pid: int):
         ports = [8586, 8587, 8588, 8589]
-        return f"0.0.0.0:{ports[pid]}"
+        return f"127.0.0.1:{ports[pid]}"
+
+    def _get_prefill_p2p_server_addr(pid: int):
+        ports = [8576, 8577, 8578, 8579]
+        return f"127.0.0.1:{ports[pid]}"
 
     def _get_ip(pid: int):
         port = _get_port(pid)
-        return f"localhost:{port}"
+        return f"127.0.0.1:{port}"
 
     def _get_ips():
         ips = [_get_ip(i) for i in range(4)]
@@ -210,28 +232,31 @@ def decode_worker(pid: int, squeue: multiprocessing.Queue):
     s = start_transfer_server(
         jax.local_devices()[0].client,
         _get_p2p_server_addr(pid),
-        ['0.0.0.0:0'],
+        ['127.0.0.1:0'],
     )
     server_addr = s.address()
     log(f"Launched server on {server_addr}")
 
-    prefill_addr = squeue.get()
+    prefill_addr = _get_prefill_p2p_server_addr(pid)
     conn = s.connect(prefill_addr)
     log(f"Created connection with {prefill_addr}")
 
     log("Pulling...")
     uuid = get_uuid(pid)
-    kv_shard_spec = get_kv_shard_spec()
+    kv_shard_spec = get_kv_shard_spec(mesh)
     kv_shard = conn.pull(uuid, kv_shard_spec)
-    log(f"kv_shard | shape={kv_shard.shape} | sharding={kv_shard.sharding}")
 
     kv_spec = get_kv_spec(mesh)
-    kv = jax.make_array_from_process_local_data(kv_spec.sharding, kv_shard,
-                                                kv_spec.shape)
-    mean, std = get_mean_std(kv)
-    log(f"kv | shape={kv.shape} | sharding={kv.sharding} | mean={mean} | std={std}"
-        )
+    kv = []
+    for spec, shard in zip(kv_spec, kv_shard):
+        kv.append(
+            jax.make_array_from_process_local_data(spec.sharding, shard,
+                                                   spec.shape))
 
+    mean, std = get_mean_std(kv)
+    log(f"kv | shape={len(kv)} * {kv[0].shape} | sharding={kv[0].sharding} | mean={mean} | std={std}"
+        )
+    squeue.put(1)
     log("Done")
 
 
