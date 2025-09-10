@@ -204,7 +204,7 @@ def test_get_flax_model(vllm_config, mesh):
     rng = jax.random.PRNGKey(42)
 
     # 1. Get the compiled model and logit computation functions
-    model_fn, compute_logits_fn, _, _, _ = model_loader.get_flax_model(
+    model_fn, compute_logits_fn, *_ = model_loader.get_flax_model(
         vllm_config, rng, mesh)
 
     assert callable(model_fn)
@@ -237,7 +237,7 @@ def test_get_vllm_model(mesh):
             pipeline_model_parallel_size=1,
         )
 
-    model_fn, compute_logits_fn, _, _, _ = model_loader.get_vllm_model(
+    model_fn, compute_logits_fn, *_ = model_loader.get_vllm_model(
         vllm_config, rng, mesh)
 
     assert callable(model_fn)
@@ -273,7 +273,7 @@ def test_get_vllm_model_random_weights(mesh, set_in_config):
     with patch(
             "vllm.model_executor.model_loader.dummy_loader.DummyModelLoader.load_weights"
     ) as mock_load:
-        model_fn, compute_logits_fn, _, _, _ = model_loader.get_vllm_model(
+        model_fn, compute_logits_fn, *_ = model_loader.get_vllm_model(
             vllm_config, rng, mesh)
 
     assert callable(model_fn)
