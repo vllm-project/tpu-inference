@@ -241,7 +241,7 @@ class VllmModelWrapper:
         ]
 
         kv_caches = create_kv_caches(
-            num_blocks=2,
+            num_blocks=4434,
             block_size=block_size,
             num_kv_heads=num_kv_heads,
             head_size=head_size,
@@ -260,6 +260,12 @@ class VllmModelWrapper:
                                                  attn_metadata)
         inputs_embeds = None  # The torchax code path doesn't support Multi-modal models yet.
 
+        params_and_buffers_original_format = jax.tree.map(
+            lambda w: w.format,
+            params_and_buffers,
+        )
+        print(f"jit_step_func {params_and_buffers_original_format=}")
+
         params_and_buffers_format = jax.tree.map(
             lambda w: Format(layout=Layout.AUTO, sharding=w.sharding),
             params_and_buffers,
@@ -276,10 +282,10 @@ class VllmModelWrapper:
             step_fun,
             donate_argnums=(1, ),  # donate kv_cache
             compiler_options={
-                "xla_tpu_all_gather_collective_matmul_mode":
-                "post_spmd_conservative",
-                "xla_tpu_reduce_scatter_collective_matmul_mode":
-                "post_spmd_conservative",
+                # "xla_tpu_all_gather_collective_matmul_mode":
+                # "post_spmd_conservative",
+                # "xla_tpu_reduce_scatter_collective_matmul_mode":
+                # "post_spmd_conservative",
                 # "xla_early_exit_with_layouts": True,
             },
             in_shardings=(params_and_buffers_format, kv_caches_sharding,
