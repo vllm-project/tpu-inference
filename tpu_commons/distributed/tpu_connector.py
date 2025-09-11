@@ -85,11 +85,13 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
 
+from tpu_commons.distributed.utils import (get_host_ip, get_kv_ips,
+                                           get_kv_ports, get_kv_transfer_port,
+                                           get_node_id, get_side_channel_port)
 from tpu_commons.logger import init_logger
 from tpu_commons.runner.tpu_jax_runner import TPUModelRunner
 from tpu_commons.utils import device_array
 
-EngineId = str
 ReqId = str
 
 # Feature requests:
@@ -116,8 +118,8 @@ class LoadMeta:
     uuid: int
     local_block_ids: list[int]
     remote_block_ids: list[int]
-    remote_host: str
-    remote_port: int
+    remote_host: str | list[str]
+    remote_port: int | list[int]
 
 
 @dataclass
@@ -128,8 +130,10 @@ class _kv_transfer_params:
     """
     uuid: int
     remote_block_ids: list[int]
-    remote_host: str
-    remote_port: int
+    # A single IP for single-host, or a list of IPs for mult-host.
+    remote_host: str | list[str]
+    # A single port for single-host, or a list of ports for mult-host.
+    remote_port: int | list[int]
 
 
 # The metadata used for communicating between scheduler and worker connectors.
@@ -237,9 +241,6 @@ class TPUConnectorScheduler():
 
         self.block_size = vllm_config.cache_config.block_size
 
-        self.kv_transfer_host = self.config.kv_ip
-        self.kv_transfer_port = self.config.kv_port
-
         # This is updated in self.update_state_after_alloc() for D,
         # each request that needs to pull KV cache from remote will be added to it.
         self.reqs_to_send: dict[ReqId, SendMeta] = {}
@@ -247,6 +248,11 @@ class TPUConnectorScheduler():
         # This is updated in self.request_finished() for P,
         # each request that finished prefilling will be added to it.
         self.reqs_to_load: dict[ReqId, LoadMeta] = {}
+
+        self.kv_ip = get_kv_ips()
+        self.kv_port = get_kv_ports()
+        logger.info(
+            f"Scheduler --> kv_ip={self.kv_ip} | kv_port={self.kv_port}")
 
     def get_num_new_matched_tokens(
         self,
@@ -283,7 +289,6 @@ class TPUConnectorScheduler():
         # NOTE(xiang): Although the JAX P2P pulling is a blocking op, we will run it in a
         # separte thread to make it async, so we are safe to return True here.
         if count > 0:
-            logger.info(f"Scheduler ---->  get_num_new_matched_tokens={count}")
             return count, True
         return 0, False
 
@@ -325,7 +330,6 @@ class TPUConnectorScheduler():
                 remote_host=params["remote_host"],
                 remote_port=params["remote_port"],
             )
-            logger.info(f"Scheduler ---->  reqs_to_load={self.reqs_to_load}")
         else:
             # This branch means two cases:
             # 1. We don't need to load KV-cache from remote because of full local cache.
@@ -338,6 +342,7 @@ class TPUConnectorScheduler():
                 remote_host=params["remote_host"],
                 remote_port=params["remote_port"],
             )
+        logger.info(f"Scheduler -->  reqs_to_load={self.reqs_to_load}")
 
     def build_connector_meta(self) -> TPUConnectorMetadata:
         """
@@ -400,11 +405,12 @@ class TPUConnectorScheduler():
                 uuid=uuid,
                 local_block_ids=computed_block_ids,
                 expiration_time=expiration_time)
-            logger.info(f"Scheduler ---->  reqs_to_send={self.reqs_to_send}")
             kv_transfer_params = dict(uuid=uuid,
                                       remote_block_ids=computed_block_ids,
-                                      remote_host=self.kv_transfer_host,
-                                      remote_port=self.kv_transfer_port)
+                                      remote_host=self.kv_ip,
+                                      remote_port=self.kv_port)
+            logger.info(f"Scheduler ---->  reqs_to_send={self.reqs_to_send} | "
+                        f"kv_transfer_params={kv_transfer_params}")
         else:
             kv_transfer_params = {}
 
@@ -420,20 +426,25 @@ class TPUConnectorWorker:
 
         self.runner: TPUModelRunner = None
         self.mesh: Mesh = None
+        self.multi_host = os.getenv("TPU_MULTIHOST_BACKEND",
+                                    "").lower() == "ray"
+        # NOTE(xiang): This can not be the worker rank set in RayDistributedExecutor.
+        # The worker rank is assigned with vLLM's sorting logic, which does not work
+        # for TPU host topology.
+        self.node_id = get_node_id()
 
         # req_id: (kv, expiration_time)
         self.reqs_wait_pull: dict[ReqId, list[list[jax.Array], float]] = {}
         # req_id: thread_future
         self.reqs_pulling: dict[ReqId, Future] = {}
 
-        self.host = self.config.kv_ip
-        self.kv_transfer_port = self.config.kv_port
+        self.host_ip = get_host_ip()
+        self.kv_transfer_port = get_kv_transfer_port()
+        self.side_channel_port = get_side_channel_port()
+
         self.kv_transfer_server = None
         self._maybe_start_p2p_server()
-
         self.zmq_cxt = zmq.Context()
-        self.side_channel_port = os.getenv("TPU_SIDE_CHANNEL_PORT", 9527)
-
         if self.is_producer:
             ready_event = threading.Event()
             self.pull_notify_listener_t = threading.Thread(
@@ -444,9 +455,14 @@ class TPUConnectorWorker:
             self.pull_notify_listener_t.start()
             ready_event.wait()
         else:
-            self.pull_executor = ThreadPoolExecutor(max_workers=32)
+            self.pull_executor = ThreadPoolExecutor(max_workers=64)
             self.pull_conns: dict[str, Any] = {}
             self.notif_sockets: dict[str, zmq.Socket] = {}
+
+        logger.info(f"Worker {self.node_id} --> init | "
+                    f"ip={self.host_ip} | "
+                    f"kv_transfer_port={self.kv_transfer_port} | "
+                    f"side_channel_port={self.side_channel_port}")
 
     def __del__(self):
         if self.is_producer:
@@ -470,8 +486,8 @@ class TPUConnectorWorker:
     def _maybe_start_p2p_server(self):
         if self.kv_transfer_server is not None:
             return
-        server_addr = f"{self.host}:{self.kv_transfer_port}"
-        transport_addr = f'{self.host}:0'
+        server_addr = f"{self.host_ip}:{self.kv_transfer_port}"
+        transport_addr = f'{self.host_ip}:0'
         self.kv_transfer_server = start_transfer_server(
             jax.local_devices()[0].client,
             server_addr,
@@ -480,19 +496,25 @@ class TPUConnectorWorker:
             transfer_size=256 * 1024 * 1024,
             use_raw_buffers=False,
         )
+        logger.info(
+            f"Worker {self.node_id} --> kv transfer | addr={self.kv_transfer_server.address()}"
+        )
 
     def _pull_notify_listener(self, ready_event: threading.Event):
+        sock_path = make_zmq_path("tcp", "*", self.side_channel_port)
         sock = make_zmq_socket(ctx=self.zmq_cxt,
-                               path=make_zmq_path("tcp", "*",
-                                                  self.side_channel_port),
+                               path=sock_path,
                                socket_type=zmq.ROUTER,
                                bind=True)
         ready_event.set()
+        logger.info(
+            f"Worker {self.node_id} --> zmq listener | sock_path={sock_path}")
 
         while True:
             client_id, req_id_bytes = sock.recv_multipart()
             req_id = req_id_bytes.decode('utf-8')
-            logger.info(f"Worker ----> socket recived {req_id}")
+            logger.info(
+                f"Worker {self.node_id} --> zmq recieve | req_id={req_id}")
             if req_id in self.reqs_wait_pull:
                 # Set the expiration time of this request to -1, mark to be done
                 self.reqs_wait_pull[req_id][1] = -1
@@ -512,14 +534,14 @@ class TPUConnectorWorker:
         reqs = metadata.reqs_to_send
         if reqs:
             assert self.is_producer
-            logger.info(f"Worker ---->  reqs_to_send={reqs}")
+            logger.info(f"Worker {self.node_id} -->  reqs_to_send={reqs}")
         for req_id, req_meta in reqs.items():
             self._prepare_kv_and_wait(req_id, req_meta)
 
         reqs = metadata.reqs_to_load
         if reqs:
             assert not self.is_producer
-            logger.info(f"Worker ---->  reqs_to_load={reqs}")
+            logger.info(f"Worker {self.node_id} -->  reqs_to_load={reqs}")
         for req_id, req_meta in reqs.items():
             if req_meta.remote_block_ids is not None:
                 # The request requires to pull KV from P, build the connection and pull
@@ -553,6 +575,9 @@ class TPUConnectorWorker:
         else:
             conn = self.kv_transfer_server.connect(remote_addr)
             self.pull_conns[remote_addr] = conn
+            logger.info(
+                f"Worker {self.node_id} --> kv transfer | connect={remote_addr}"
+            )
         return conn
 
     def _pull_kv(self, conn: Any, req_meta: LoadMeta):
@@ -568,7 +593,9 @@ class TPUConnectorWorker:
         # TODO(xiang): pad block_ids to avoid recompilation
         indices = device_array(self.mesh, np.array(local_block_ids))
         kv = conn.pull(req_meta.uuid, kv_spec)
-        logger.info(f"Worker ----> pull kv uuid={req_meta.uuid}")
+        logger.info(
+            f"Worker {self.node_id} --> kv transfer | pull uuid={req_meta.uuid}"
+        )
         return kv, indices
 
     def _get_kv_spec(self, num_blocks: int) -> list[jax.ShapeDtypeStruct]:
@@ -589,10 +616,13 @@ class TPUConnectorWorker:
                                    path=sock_path,
                                    socket_type=zmq.DEALER,
                                    bind=False)
+            logger.info(
+                f"Worker {self.node_id} --> zmq notify | sock_path={sock_path}"
+            )
         return sock
 
     def _notify_pull_done(self, sock: zmq.Socket, req_id: str):
-        logger.info(f"Worker ----> socket sent {req_id}")
+        logger.info(f"Worker {self.node_id} --> zmq notify | req_id={req_id}")
         sock.send_string(req_id)
         # The response is not really needed.
         # ack = sock.recv_string()
@@ -625,9 +655,11 @@ class TPUConnectorWorker:
                 del self.reqs_wait_pull[req_id]
                 done_sending.add(req_id)
         if done_sending:
-            logger.info(f"Worker ---->  done_sending={done_sending}")
+            logger.info(
+                f"Worker {self.node_id} -->  done_sending={done_sending}")
         if done_recving:
-            logger.info(f"Worker ---->  done_recving={done_recving}")
+            logger.info(
+                f"Worker {self.node_id} -->  done_recving={done_recving}")
         return done_sending, done_recving
 
 

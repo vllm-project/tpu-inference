@@ -12,17 +12,28 @@ from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.engine.arg_utils import EngineArgs
+from vllm.model_executor.models.registry import ModelRegistry
 
 from tpu_commons.models.jax import model_loader
 from tpu_commons.models.jax.qwen3 import Qwen3ForCausalLM
 
 
 class MockModelA:
-    pass
+
+    def __init__(self, vllm_config, rng=None, mesh=None):
+        pass
+
+    def __call__(self, kv_caches, input_ids, attention_metadata):
+        pass
 
 
 class MockModelB:
-    pass
+
+    def __init__(self, vllm_config, rng=None, mesh=None):
+        pass
+
+    def __call__(self, kv_caches, input_ids, attention_metadata):
+        pass
 
 
 @pytest.fixture(scope="module")
@@ -78,27 +89,110 @@ def clear_model_registry_after_test():
     model_loader._MODEL_REGISTRY.clear()
 
 
+def test_register_model_validation():
+    """Tests that register_model validates the model interface."""
+
+    class ValidModel:
+
+        def __init__(self, vllm_config, rng=None, mesh=None):
+            pass
+
+        def __call__(self, kv_caches, input_ids, attention_metadata, **kwargs):
+            pass
+
+    class MissingInitArgModel:
+
+        def __init__(self, rng=None, mesh=None):  # Missing vllm_config
+            pass
+
+        def __call__(self, kv_caches, input_ids, attention_metadata):
+            pass
+
+    class MissingCallArgModel:
+
+        def __init__(self, vllm_config, rng=None, mesh=None):
+            pass
+
+        def __call__(self, kv_caches, input_ids):  # Missing attention_metadata
+            pass
+
+    class NoCallModel:
+
+        def __init__(self, vllm_config, rng=None, mesh=None):
+            pass
+
+    # This should succeed
+    model_loader.register_model("ValidModel", ValidModel)
+
+    # These should fail
+    with pytest.raises(TypeError, match="vllm_config"):
+        model_loader.register_model("InvalidInit", MissingInitArgModel)
+
+    with pytest.raises(TypeError, match="attention_metadata"):
+        model_loader.register_model("InvalidCall", MissingCallArgModel)
+
+    with pytest.raises(TypeError, match="__call__ method"):
+        model_loader.register_model("NoCallModel", NoCallModel)
+
+
 def test_register_model_new_arch():
     """Tests registering a new model architecture."""
-    model_loader.register_model("NewArch", MockModelA)
-    config = PretrainedConfig(architectures=["NewArch"])
+    arch = "NewArch"
+    model_loader.register_model(arch, MockModelA)
+
+    # Check tpu_commons registry
+    config = PretrainedConfig(architectures=[arch])
     model_class = model_loader._get_model_architecture(config)
     assert model_class == MockModelA
+
+    # Check vLLM registry
+    vllm_model_class = ModelRegistry._try_load_model_cls(arch)
+    assert vllm_model_class is not None
+    assert vllm_model_class.__name__ == f"VllmCompatible{MockModelA.__name__}"
+    assert issubclass(vllm_model_class, MockModelA)
+    assert issubclass(vllm_model_class, torch.nn.Module)
 
 
 def test_register_model_update_arch():
     """Tests updating an existing registered model architecture."""
-    # 1. Register initial model
-    model_loader.register_model("UpdatableArch", MockModelA)
-    config = PretrainedConfig(architectures=["UpdatableArch"])
-    # 2. Verify initial registration
+    arch = "UpdatableArch"
+    config = PretrainedConfig(architectures=[arch])
+
+    # Register initial model
+    model_loader.register_model(arch, MockModelA)
+
+    # Verify initial registration in both registries
     model_class_1 = model_loader._get_model_architecture(config)
     assert model_class_1 == MockModelA
-    # 3. Update the registration
-    model_loader.register_model("UpdatableArch", MockModelB)
-    # 4. Verify the update
+    vllm_model_class_1 = ModelRegistry._try_load_model_cls(arch)
+    assert vllm_model_class_1.__name__ == f"VllmCompatible{MockModelA.__name__}"
+    assert issubclass(vllm_model_class_1, MockModelA)
+
+    # Update the registration
+    model_loader.register_model(arch, MockModelB)
+
+    # Verify the update in both registries
     model_class_2 = model_loader._get_model_architecture(config)
     assert model_class_2 == MockModelB
+    vllm_model_class_2 = ModelRegistry._try_load_model_cls(arch)
+    assert vllm_model_class_2.__name__ == f"VllmCompatible{MockModelB.__name__}"
+    assert issubclass(vllm_model_class_2, MockModelB)
+
+
+def test_register_model_vllm_wrapper_methods():
+    """Tests that the vLLM wrapper has correct dummy methods."""
+    arch = "WrapperMethodTestArch"
+    model_loader.register_model(arch, MockModelA)
+
+    vllm_model_class = ModelRegistry._try_load_model_cls(arch)
+    instance = vllm_model_class()
+
+    # `forward` should be unimplemented.
+    with pytest.raises(NotImplementedError, match="JAX model"):
+        instance.forward(input_ids=None, positions=None)
+
+    # `load_weights` should be a no-op that returns None.
+    assert instance.load_weights() is None
 
 
 def test_get_flax_model(vllm_config, mesh):
@@ -110,7 +204,7 @@ def test_get_flax_model(vllm_config, mesh):
     rng = jax.random.PRNGKey(42)
 
     # 1. Get the compiled model and logit computation functions
-    model_fn, compute_logits_fn, _, _, _ = model_loader.get_flax_model(
+    model_fn, compute_logits_fn, *_ = model_loader.get_flax_model(
         vllm_config, rng, mesh)
 
     assert callable(model_fn)
@@ -143,7 +237,7 @@ def test_get_vllm_model(mesh):
             pipeline_model_parallel_size=1,
         )
 
-    model_fn, compute_logits_fn, _, _, _ = model_loader.get_vllm_model(
+    model_fn, compute_logits_fn, *_ = model_loader.get_vllm_model(
         vllm_config, rng, mesh)
 
     assert callable(model_fn)
@@ -179,7 +273,7 @@ def test_get_vllm_model_random_weights(mesh, set_in_config):
     with patch(
             "vllm.model_executor.model_loader.dummy_loader.DummyModelLoader.load_weights"
     ) as mock_load:
-        model_fn, compute_logits_fn, _, _, _ = model_loader.get_vllm_model(
+        model_fn, compute_logits_fn, *_ = model_loader.get_vllm_model(
             vllm_config, rng, mesh)
 
     assert callable(model_fn)

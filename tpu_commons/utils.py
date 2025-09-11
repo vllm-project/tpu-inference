@@ -2,7 +2,7 @@
 import os
 from collections import defaultdict
 from collections.abc import Sequence
-from typing import Any, List, Tuple
+from typing import Any, Callable, List, Tuple
 
 import jax
 import numpy as np
@@ -11,7 +11,7 @@ from jax._src import mesh as mesh_lib
 from jax._src import xla_bridge as xb
 from jax._src.lib import xla_client as xc
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from vllm import envs
+from vllm import envs, utils
 
 from tpu_commons.logger import init_logger
 
@@ -189,3 +189,12 @@ def device_array(mesh: Mesh, *args, sharding=None, **kwargs) -> jax.Array:
     if sharding is None:
         sharding = NamedSharding(mesh, PartitionSpec(None))
     return jax.device_put(*args, device=sharding, **kwargs)
+
+
+def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], bytes]:
+    """
+    A wrapper function of vllm.utils.get_hash_fn_by_name to support builtin
+    """
+    if hash_fn_name == "builtin":
+        return hash
+    return utils.get_hash_fn_by_name(hash_fn_name)

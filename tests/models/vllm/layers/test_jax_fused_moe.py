@@ -82,10 +82,9 @@ def test_jax_fused_moe(use_ep, mesh, num_tokens, intermediate_size,
         # j2t() doens't support bfloat16, so we cast it into float32 as an intermedate step.
         jax_output = j2t(jax_output.to(torch.float32)).to(dtype)
 
-    # The error margins are adapted from vllm tests/tpu/test_moe_pallas.py
     torch.testing.assert_close(
         torch_output,
         jax_output,
-        atol=2e-2,
-        rtol=0,
+        atol=1e-2,
+        rtol=1e-2,
     )

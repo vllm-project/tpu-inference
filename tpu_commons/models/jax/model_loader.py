@@ -1,12 +1,14 @@
 import functools
 import os
-from typing import Any
+from typing import Any, Optional
 
 import jax
+import torch
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
+from vllm.utils import supports_kw
 
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.utils.quantization.quantization_utils import (
@@ -23,6 +25,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
 
     from tpu_commons.models.jax.deepseek_v3 import DeepSeekV3
     from tpu_commons.models.jax.llama4 import Llama4ForCausalLM
+    from tpu_commons.models.jax.llama_eagle3 import EagleLlama3ForCausalLM
     from tpu_commons.models.jax.phi3 import Phi3ForCausalLM
     from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
     from tpu_commons.models.jax.qwen2_5_vl import \
@@ -43,6 +46,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     _MODEL_REGISTRY[
         "Qwen2_5_VLForConditionalGeneration"] = Qwen2_5_VLForConditionalGeneration
     _MODEL_REGISTRY["Phi3ForCausalLM"] = Phi3ForCausalLM
+    _MODEL_REGISTRY["Eagle3LlamaForCausalLM"] = EagleLlama3ForCausalLM
 
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
@@ -116,7 +120,6 @@ def _get_nnx_model(
                 mesh,
                 apply_to_abstract_model=True)
         model = nnx.eval_shape(abstract_model_fn)
-        model.load_weights(rng)
         # Although the created model can already work, we still need to jit
         # the model creation again, otherwise the model forward will have
         # non-trivial overhead in PjitFunction.
@@ -136,6 +139,7 @@ def _get_nnx_model(
             return model
 
         with mesh:
+            model.load_weights(rng)
             jit_model = create_jit_model(model)
     return jit_model
 
@@ -144,8 +148,14 @@ def get_flax_model(
     vllm_config: VllmConfig,
     rng: jax.Array,
     mesh: Mesh,
+    is_draft_model: bool = False,
 ) -> nnx.Module:
-    model_class = _get_model_architecture(vllm_config.model_config.hf_config)
+    if is_draft_model:
+        model_class = _get_model_architecture(
+            vllm_config.speculative_config.draft_model_config.hf_config)
+    else:
+        model_class = _get_model_architecture(
+            vllm_config.model_config.hf_config)
     jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh)
     kv_cache_sharding = NamedSharding(mesh, PartitionSpec(None, None, "model"))
     hidden_states_sharding = NamedSharding(mesh, PartitionSpec(None,
@@ -203,7 +213,8 @@ def get_flax_model(
         run_get_multimodal_embeddings, graphdef)
     get_input_embeddings_fn = functools.partial(run_get_input_embeddings,
                                                 graphdef)
-    return model_fn, compute_logits_fn, get_multimodal_embeddings_fn, get_input_embeddings_fn, state
+    lora_manager, model = None, None
+    return model_fn, compute_logits_fn, get_multimodal_embeddings_fn, get_input_embeddings_fn, state, lora_manager, model
 
 
 def get_vllm_model(
@@ -218,36 +229,132 @@ def get_vllm_model(
         rng=rng,
         mesh=mesh,
     )
-    params = model.load_weights()
+    params, lora_manager = model.load_weights()
 
     jit_model = model.jit_step_func()
     compute_logits_fn = model.jit_compute_logits_func()
-    return jit_model, compute_logits_fn, None, None, params
+    # the model needs to be returned because lora weights are neither torch.nn.parameter nor torch.nn.buffer. After we load the lora weights and set it to the torch.nn.Module, we can shard it and move it to TPU.
+    return jit_model, compute_logits_fn, None, None, params, lora_manager, model
 
 
 def get_model(
     vllm_config: VllmConfig,
     rng: jax.Array,
     mesh: Mesh,
+    is_draft_model: bool = False,
 ) -> Any:
     impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
     logger.info(f"Loading model with MODEL_IMPL_TYPE={impl}")
     if impl == "flax_nnx":
-        return get_flax_model(vllm_config, rng, mesh)
+        return get_flax_model(vllm_config, rng, mesh, is_draft_model)
     elif impl == "vllm":
         return get_vllm_model(vllm_config, rng, mesh)
     else:
         raise NotImplementedError("Unsupported MODEL_IMPL_TYPE")
 
 
-def register_model(arch: str, model: Any):
+def _validate_model_interface(model: Any) -> None:
+    """Validates that the model class has the required methods and signatures.
+
+    A valid model must have:
+    - An __init__ method that accepts a 'vllm_config' keyword argument.
+    - A __call__ method that accepts 'kv_caches', 'input_ids', and
+      'attention_metadata' keyword arguments.
+
+    Args:
+        model: The model class to validate.
+
+    Raises:
+        TypeError: If the model does not meet the interface requirements.
+    """
+    # Check for __init__ with vllm_config
+    model_init = getattr(model, "__init__", None)
+    if not callable(model_init):
+        raise TypeError(
+            f"Model {model.__name__} must have an __init__ method.")
+
+    if not supports_kw(model_init, "vllm_config"):
+        raise TypeError(
+            f"Model {model.__name__} __init__ method must accept a "
+            "'vllm_config' keyword argument.")
+
+    # Check for __call__ with required arguments
+    model_call = getattr(model, "__call__", None)
+    # A class object is always callable (it produces an instance).
+    # We need to check if the class _explicitly_ defines a __call__ method for its
+    # instance, which is different from `type.__call__`.
+    has_defined_call = False
+    if isinstance(model, type):
+        if any("__call__" in C.__dict__ for C in model.__mro__):
+            has_defined_call = True
+    elif callable(model_call):
+        # For an instance, a simple callable check is sufficient.
+        has_defined_call = True
+
+    if not has_defined_call:
+        raise TypeError(f"Model {model.__name__} must have a __call__ method.")
+
+    required_call_args = ("kv_caches", "input_ids", "attention_metadata")
+    missing_args = tuple(arg for arg in required_call_args
+                         if not supports_kw(model_call, arg))
+
+    if missing_args:
+        raise TypeError(
+            f"Model {model.__name__} __call__ method is missing required "
+            f"keyword arguments: {missing_args}")
+
+
+def register_model(arch: str, model: Any) -> None:
     """
     Registers a model class for a given architecture name.
 
+    This function registers the model with both the tpu_commons registry
+    and the vLLM registry. For vLLM, it creates a compatible wrapper
+    around the JAX model.
+
     Args:
         arch: The name of the architecture (e.g., "LlamaForCausalLM").
-        model: The model class to register.
+        model: The JAX model class to register (e.g., a flax.nnx.Module).
     """
-    # TODO: Support lazy loading (like vllm)
-    # TODO: Also call vllm's `ModelRegistry.register_model`.
+    _validate_model_interface(model)
+
+    # Register with tpu_commons registry for the JAX backend
     _MODEL_REGISTRY[arch] = model
+
+    # Create a vLLM-compatible wrapper for the JAX model class.
+    # This wrapper inherits from the JAX model and torch.nn.Module
+    # to pass vLLM's type checks. It is not meant to be instantiated
+    # or executed by vLLM's PyTorch backend.
+    def unimplemented_forward(
+        self,
+        input_ids: "torch.Tensor",
+        positions: "torch.Tensor",
+        intermediate_tensors: Optional[Any] = None,
+        inputs_embeds: Optional["torch.Tensor"] = None,
+    ) -> None:
+        raise NotImplementedError(
+            "This is a JAX model and does not implement the PyTorch forward method."
+        )
+
+    # We need a custom __init__ that only calls torch.nn.Module's init,
+    # to avoid triggering JAX logic when vLLM inspects the class.
+    def wrapper_init(self, *args, **kwargs):
+        torch.nn.Module.__init__(self)
+
+    # Dynamically create the wrapper class that is a subclass of both the
+    # JAX model and torch.nn.Module.
+    VllmCompatibleModel = type(
+        f"VllmCompatible{model.__name__}",
+        (model, torch.nn.Module),
+        {
+            "__init__": wrapper_init,
+            "forward": unimplemented_forward,
+            # Prevent vLLM from trying to load weights into this dummy class.
+            "load_weights": lambda self, *args, **kwargs: None,
+        })
+
+    # Register the wrapped model with vLLM's registry.
+    from vllm.model_executor.models.registry import ModelRegistry
+    ModelRegistry.register_model(arch, VllmCompatibleModel)
+    logger.info(
+        f"Registered JAX model {arch} with tpu_commons and vLLM registries.")

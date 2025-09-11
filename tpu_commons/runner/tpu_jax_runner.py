@@ -5,10 +5,13 @@ from contextlib import nullcontext
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 import jax
+import jax.numpy as jnp
 import jaxtyping
 import numpy as np
+import torch
 import vllm.envs as envs
 from flax import nnx
+from torchax.ops.mappings import j2t_dtype
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
@@ -24,6 +27,7 @@ from vllm.v1.request import Request
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.worker.kv_connector_model_runner_mixin import \
     KVConnectorModelRunnerMixin
+from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from tpu_commons import utils as common_utils
 from tpu_commons.logger import init_logger
@@ -43,12 +47,14 @@ from tpu_commons.runner import utils as runner_utils
 from tpu_commons.runner.compilation_manager import CompilationManager
 from tpu_commons.runner.input_batch_jax import CachedRequestState, InputBatch
 from tpu_commons.runner.kv_cache_manager import KVCacheManager
+from tpu_commons.runner.lora_utils import LoraUtils
 from tpu_commons.runner.multimodal_manager import MultiModalManager
 from tpu_commons.runner.persistent_batch_manager import PersistentBatchManager
 from tpu_commons.runner.speculative_decoding_manager import \
     SpeculativeDecodingManager
 from tpu_commons.runner.structured_decoding_manager import \
     StructuredDecodingManager
+from tpu_commons.spec_decode.jax.eagle3 import EagleProposer
 from tpu_commons.utils import device_array, make_optimized_mesh
 
 logger = init_logger(__name__)
@@ -63,8 +69,19 @@ DUMMY_METADATA = AttentionMetadata(
     request_distribution=[0, 0, 0],
 )
 
+TPU_STR_DTYPE_TO_TORCH_DTYPE = {
+    "half": torch.half,
+    "bfloat16": torch.bfloat16,
+    "float": torch.float,
+    "fp8": torch.float8_e4m3fn,
+    "fp8_e4m3": torch.float8_e4m3fn,
+    "fp8_e5m2": torch.float8_e5m2,
+    "int8": torch.int8,
+    "uint8": torch.uint8,
+}
 
-class TPUModelRunner(KVConnectorModelRunnerMixin):
+
+class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
     def __init__(
         self,
@@ -104,6 +121,24 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         self.persistent_batch_manager = PersistentBatchManager(
             self.requests, self.input_batch, self.encoder_cache,
             self.uses_mrope, self.model_config)
+        self.lora_utils = LoraUtils(self)
+
+        cache_config = self.cache_config
+        if cache_config.cache_dtype == "auto":
+            model_dtype = self.dtype
+            if isinstance(model_dtype, str):
+                self.kv_cache_dtype = TPU_STR_DTYPE_TO_TORCH_DTYPE[model_dtype]
+            elif isinstance(getattr(model_dtype, 'dtype', None), jnp.dtype):
+                self.kv_cache_dtype = j2t_dtype(model_dtype.dtype)
+            elif isinstance(model_dtype, torch.dtype):
+                self.kv_cache_dtype = model_dtype
+            else:
+                raise ValueError(
+                    "KV cache is unsupported for model_dtype of %s",
+                    model_dtype)
+        else:
+            self.kv_cache_dtype = TPU_STR_DTYPE_TO_TORCH_DTYPE[
+                cache_config.cache_dtype]
 
     def _init_random(self):
         if self.model_config.seed is None:
@@ -152,9 +187,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
         self.uses_mrope = self.model_config.uses_mrope
 
     def _init_speculative_decoding(self) -> None:
+        self.drafter = None
         if self.speculative_config:
             if self.speculative_config.method == "ngram":
                 self.drafter = NgramProposer(self.vllm_config)
+            elif self.speculative_config.method == "eagle3":
+                self.drafter = EagleProposer(self.vllm_config, self)
             else:
                 raise NotImplementedError(
                     "Unsupported speculative decoding method: "
@@ -228,6 +266,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
 
         # tensors for structured decoding
         self.vocab_size = self.model_config.get_vocab_size()
+        if self.lora_config is not None:
+            # lora_config.lora_extra_vocab_size is the "Maximum size of extra vocabulary that can be present in a LoRA adapter" per https://github.com/vanbasten23/vllm/blob/7f4a8b6705622fde952a2e633e86716f902d6e1b/vllm/config.py#L3040
+            self.vocab_size += self.lora_config.lora_extra_vocab_size
         self.grammar_bitmask_cpu = np.zeros(
             (self.max_num_reqs, cdiv(self.vocab_size, 32)),
             dtype=np.int32,
@@ -250,11 +291,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                                             dtype=np.int64)
 
     def load_model(self):
-        self.model_fn, self.compute_logits_fn, self.get_multimodal_embeddings_fn, self.get_input_embeddings_fn, self.state = get_model(
+        self.model_fn, self.compute_logits_fn, self.get_multimodal_embeddings_fn, self.get_input_embeddings_fn, self.state, self.lora_manager, self.model = get_model(
             self.vllm_config,
             self.rng_key,
             self.mesh,
         )
+
+        if self.drafter is not None:
+            logger.info("Loading drafter model...")
+            self.drafter.load_model()
+
         self.rng_params_for_sampling = nnx.Rngs(
             jax.random.key(self.model_config.seed)).params()
         self.is_multimodal_model = (self.model_config.is_multimodal_model
@@ -329,7 +375,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
             input_ids, mm_embeds)
 
         # TODO: Disable this for now
-        if self.is_multimodal_model:
+        if self.is_multimodal_model or self.lora_config is not None:
             self.maybe_forbid_compile = nullcontext()
 
         # TODO: make _get_input_ids_embeds within this context
@@ -389,11 +435,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
                 next_tokens = self.rejection_sampler(
                     draft_token_ids=spec_decode_metadata.draft_token_ids,
                     num_draft_tokens=spec_decode_metadata.draft_lengths,
-                    max_spec_len=spec_decode_metadata.max_spec_len,
                     draft_probs=None,
                     target_logits=target_logits,
                     bonus_token_ids=bonus_token_ids,
                     sampling_metadata=tpu_sampling_metadata,
+                    key=self.rng_params_for_sampling,
                 )
 
             if tpu_sampling_metadata.logprobs:
@@ -624,6 +670,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin):
          logits_indices, request_distribution) = device_array(
              self.mesh, (input_ids, positions, block_tables, query_start_loc,
                          seq_lens, logits_indices, request_distribution))
+
+        if self.lora_config is not None:
+            self.lora_utils.set_active_loras(
+                num_scheduled_tokens_per_req, total_num_scheduled_tokens,
+                padded_total_num_scheduled_tokens)
 
         return (
             input_ids,

@@ -23,8 +23,8 @@ def get_test_prompts():
 @pytest.fixture
 def sampling_config():
     return SamplingParams(temperature=0,
-                          max_tokens=10,
-                          ignore_eos=False,
+                          max_tokens=32,
+                          ignore_eos=True,
                           repetition_penalty=1,
                           frequency_penalty=0,
                           presence_penalty=0,
@@ -37,19 +37,21 @@ def model_name():
     return "Qwen/Qwen2.5-0.5B-Instruct"
 
 
-def test_ngram_correctness(
+# TODO(pooyam): run vLLM engine with InProcClient (`VLLM_ENABLE_V1_MULTIPROCESSING = 0`) mode to avoid TPU contention among processes.
+def _test_ngram_correctness_helper(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
     model_name: str,
 ):
     '''
+    Helper function to test ngram correctness.
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using ngram speculative decoding.
     '''
     with monkeypatch.context():
         test_prompts = get_test_prompts()
 
-        ref_llm = LLM(model=model_name, max_model_len=1024)
+        ref_llm = LLM(model=model_name, max_model_len=1024, max_num_seqs=4)
         ref_outputs = ref_llm.generate(test_prompts, sampling_config)
 
         del ref_llm
@@ -81,15 +83,47 @@ def test_ngram_correctness(
         assert misses == 0
         del spec_llm
 
+        # Waiting for TPUs to be released.
+        time.sleep(10)
 
-def test_speculative_decoding_performance(
+
+def test_ngram_correctness_greedy(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
+    model_name: str,
 ):
     '''
-    Test that speculative decoding provides significant performance improvement.
+    Compare the outputs of a original LLM and a speculative LLM
+    should be the same when using ngram speculative decoding with greedy sampling.
+    '''
+    _test_ngram_correctness_helper(monkeypatch, sampling_config, model_name)
+
+
+def test_ngram_correctness_random(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+    model_name: str,
+):
+    '''
+    Compare the outputs of a original LLM and a speculative LLM
+    should be the same when using ngram speculative decoding with random sampling.
+    '''
+    # Modify sampling config for random sampling
+    sampling_config.temperature = 0.01
+    sampling_config.top_p = 0.9
+    sampling_config.top_k = 5
+
+    _test_ngram_correctness_helper(monkeypatch, sampling_config, model_name)
+
+
+def _test_ngram_performance_helper(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+    min_speedup: float,
+):
+    '''
+    Helper function to test ngram performance.
     Compares timing between reference LLM and speculative LLM using Llama 3 8B.
-    Expects spec_llm to be at least Yx faster than ref_llm.
     '''
     model_name = "meta-llama/Llama-3.1-8B-Instruct"
 
@@ -98,7 +132,10 @@ def test_speculative_decoding_performance(
         test_prompts = get_test_prompts()
 
         # Test reference LLM timing
-        ref_llm = LLM(model=model_name, max_model_len=1024, max_num_seqs=1)
+        ref_llm = LLM(model=model_name,
+                      max_model_len=1024,
+                      max_num_seqs=1,
+                      enable_prefix_caching=False)
 
         start_time = time.time()
         _ = ref_llm.generate(test_prompts, sampling_config)
@@ -115,16 +152,19 @@ def test_speculative_decoding_performance(
                            "method": "ngram",
                            "prompt_lookup_max": 2,
                            "prompt_lookup_min": 2,
-                           "num_speculative_tokens": 3,
+                           "num_speculative_tokens": 4,
                        },
                        max_model_len=1024,
-                       max_num_seqs=1)
+                       max_num_seqs=1,
+                       enable_prefix_caching=False)
 
         start_time = time.time()
         _ = spec_llm.generate(test_prompts, sampling_config)
         spec_time = time.time() - start_time
 
         del spec_llm
+        # Waiting for TPUs to be released
+        time.sleep(10)
 
         speedup = ref_time / spec_time
         print(f"Reference LLM time: {ref_time:.2f}s")
@@ -132,4 +172,32 @@ def test_speculative_decoding_performance(
         print(f"Speedup: {speedup:.2f}x")
 
         # TODO(pooyam): Make this tighter once we have better performance.
-        assert speedup >= 2.0, f"Expected at least 2x speedup, got {speedup:.2f}x"
+        assert speedup >= min_speedup, f"Expected at least {min_speedup}x speedup, got {speedup:.2f}x"
+
+
+def test_ngram_performance_greedy(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+):
+    '''
+    Test that speculative decoding provides significant performance improvement.
+    Compares timing between reference LLM and speculative LLM using Llama 3 8B.
+    Expects spec_llm to be at least 3.x faster than ref_llm.
+    '''
+    _test_ngram_performance_helper(monkeypatch, sampling_config, 3.8)
+
+
+def test_ngram_performance_random(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+):
+    '''
+    Test that speculative decoding provides significant performance improvement.
+    Compares timing between reference LLM and speculative LLM using Llama 3 8B.
+    Expects spec_llm to be at least 3.x faster than ref_llm.
+    '''
+    sampling_config.temperature = 0.01
+    sampling_config.top_p = 0.9
+    sampling_config.top_k = 5
+
+    _test_ngram_performance_helper(monkeypatch, sampling_config, 3.8)
