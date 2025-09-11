@@ -102,7 +102,10 @@ def _get_nnx_model(
                 apply_to_abstract_model=True)
 
             model = nnx.eval_shape(abstract_model_fn)
-            model.init_random_weights(rng)
+            # NOTE: if using JAX_RANDOM_WEIGHTS on a pre-quantized model (e.g. DeepSeek),
+            # then it's expected that the model has a `load_random_weights` method
+            # that initializes the Qwix QArrays
+            model.load_random_weights(rng)
             with mesh:
                 jit_model = create_jit_model(model,
                                              use_qwix_on_abstract_model=True)

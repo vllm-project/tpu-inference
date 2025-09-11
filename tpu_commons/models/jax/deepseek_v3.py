@@ -82,7 +82,6 @@ class DeepSeekV3(nnx.Module):
         self.random_init = force_random_weights or self.vllm_config.additional_config.get(
             "random_weights", False)
         self.mesh = mesh
-        self.scale_dtype = scale_dtype
 
         self.weight_loader = DeepSeekV3WeightLoader(
             vllm_config=vllm_config,
@@ -296,72 +295,17 @@ class DeepSeekV3(nnx.Module):
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         return self.lm_head.decode(hidden_states)
 
-    def init_random_weights(self, rng: PRNGKey):
+    def load_random_weights(self, rng: PRNGKey):
         """
         Initializes the model with random weights, respecting the QArray
         structure for quantized parameters. This is used when
         JAX_RANDOM_WEIGHTS is true for models that require abstract
         quantization (like FP8).
         """
+        logger.info("Initializing model with random weights...")
         self.rng = nnx.Rngs(rng)
         state = nnx.state(self)
-
-        logger.info(
-            "Initializing model with random weights (Qwix FP8 structure)...")
-
-        def _get_random_sharded_array(key, param, param_shape, dtype):
-            weight = jax.random.normal(key, param_shape, dtype)
-
-            def get_slice(index):
-                return weight[index]
-
-            try:
-                sharded_array = jax.make_array_from_callback(
-                    param_shape, NamedSharding(self.mesh, P(*param.sharding)),
-                    get_slice)
-            except:
-                print("WARNING: failed to shard, skipping...", param_shape,
-                      param.sharding)
-                sharded_array = jax.make_array_from_callback(
-                    param_shape, NamedSharding(self.mesh, P()), get_slice)
-
-            return sharded_array
-
-        # Iterate through all variables and initialize them
-        prev_path, prev_param_shape = None, None
-        for path, param in nnx.iter_graph(state):
-            if not isinstance(param, nnx.Variable) or path[0] == 'rng':
-                continue
-
-            is_qwix_scale = (path[-1] == 'scale' and path[-2] == "array")
-            param_dtype = self.scale_dtype if is_qwix_scale else param.value.dtype
-            param_shape = param.value.shape
-            # TODO: refactor this
-            if is_qwix_scale:
-                if path[3] == "kernel_kv_down_proj_DA":
-                    param_shape = (56, 576)
-                # kv_b_proj
-                elif path[3] == "kernel_kv_up_proj_ANH":
-                    param_shape = (4, 128, 2)
-                # q_b_proj
-                elif path[3] == "kernel_q_up_proj_ANH":
-                    param_shape = (12, 1, 192)
-                # o_proj
-                elif path[3] == "kernel_o_proj_NHD":
-                    param_shape = (128, 1, 56)
-                # mlp.experts.*.down_proj.weight":
-                elif path[3] == "kernel_down_proj_EFD":
-                    param_shape = (256, 16, 56)
-                # mlp.experts.*.up/gate_proj.weight":
-                elif path[3] in ["kernel_up_proj_EDF", "kernel_gating_EDF"]:
-                    param_shape = (256, 56, 16)
-                else:
-                    param_shape = tuple(dim // 128 for dim in prev_param_shape)
-
-            param.value = _get_random_sharded_array(self.rng.params(), param,
-                                                    param_shape, param_dtype)
-            prev_path, prev_param_shape = path, param_shape
-
+        self.weight_loader.load_random_weights(self.rng, state, self.mesh)
         self.initialize_cache()
         logger.info("Random weight initialization complete.")
 
@@ -480,7 +424,7 @@ class DeepSeekV3WeightLoader:
         qwix_config = vllm_config.additional_config.get("quantization",
                                                         {}).get("qwix", {})
         self.scale_dtype = getattr(jnp,
-                                   qwix_config.get("scale_dtype", "float32"))
+                                   qwix_config.get("scale_dtype", "bfloat16"))
         # NOTE (jacobplatin): this is certainly a bit hacky, but I don't think there's any
         # super clean way to get the desired quantization dtype
         self.quant_dtype = None
@@ -769,6 +713,76 @@ class DeepSeekV3WeightLoader:
         del quantized_scales
         # TODO: validate that all of the model_params were accounted for as well.
         nnx.update(model_for_loading, model_params)
+
+    def load_random_weights(self, rng: PRNGKey, state: nnx.State, mesh: Mesh):
+
+        def _get_random_sharded_array(key: PRNGKey, param: nnx.Param,
+                                      param_shape: tuple, dtype: jnp.dtype,
+                                      param_name: str) -> jax.Array:
+            """
+            Returns a random sharded array for the given parameter for the given shape.
+
+            Args:
+                key: The random key.
+                param: The parameter.
+                param_shape: The shape of the parameter.
+                dtype: The dtype of the parameter.
+                param_name: The name of the parameter.
+
+            Returns:
+                A random sharded array for the given parameter for the given shape.
+            """
+            weight = jax.random.normal(key, param_shape, dtype)
+
+            def get_slice(index):
+                return weight[index]
+
+            try:
+                sharded_array = jax.make_array_from_callback(
+                    param_shape, NamedSharding(mesh, P(*param.sharding)),
+                    get_slice)
+            except ValueError:
+                logger.warning(
+                    f"Could not create sharded scale for {param_name} with shape {param_shape} and sharding {param.sharding}, skipping..."
+                )
+                sharded_array = jax.make_array_from_callback(
+                    param_shape, NamedSharding(mesh, P()), get_slice)
+
+            return sharded_array
+
+        # Iterate through all variables and initialize them
+        prev_param_shape = None
+        for path, param in nnx.iter_graph(state):
+            if not isinstance(param, nnx.Variable) or path[0] == 'rng':
+                continue
+            is_qwix_scale = (path[-1] == 'scale' and path[-2] == "array")
+            param_dtype = self.scale_dtype if is_qwix_scale else param.value.dtype
+            param_shape = param.value.shape
+            # TODO: refactor this
+            if is_qwix_scale:
+                if path[3] == "kernel_kv_down_proj_DA":
+                    param_shape = (56, 576)
+                # kv_b_proj
+                elif path[3] == "kernel_kv_up_proj_ANH":
+                    param_shape = (4, 128, 2)
+                # q_b_proj
+                elif path[3] == "kernel_q_up_proj_ANH":
+                    param_shape = (12, 1, 192)
+                # o_proj
+                elif path[3] == "kernel_o_proj_NHD":
+                    param_shape = (128, 1, 56)
+                # mlp.experts.*.down_proj.weight":
+                elif path[3] == "kernel_down_proj_EFD":
+                    param_shape = (256, 16, 56)
+                # mlp.experts.*.up/gate_proj.weight":
+                elif path[3] in ["kernel_up_proj_EDF", "kernel_gating_EDF"]:
+                    param_shape = (256, 56, 16)
+                else:
+                    param_shape = tuple(dim // 128 for dim in prev_param_shape)
+            param.value = _get_random_sharded_array(
+                rng.params(), param, param_shape, param_dtype,
+                ".".join([str(x) for x in path]))
+            prev_param_shape = param_shape
 
 
 def weights_dequant_cpu(x: torch.Tensor,
