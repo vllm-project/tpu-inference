@@ -400,6 +400,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     tuple(self.layer_name_to_kvcache_index.items()),
                 )
 
+            print('xw32 fwd finished')
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)
             logits = self.compute_logits_fn(self.state, hidden_states)

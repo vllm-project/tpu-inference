@@ -8,7 +8,7 @@ import torch
 import torchax
 from jax.sharding import NamedSharding, PartitionSpec
 from torch.utils import _pytree as pytree
-from torchax.interop import torch_view
+from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
 from vllm.lora.request import LoRARequest
 
@@ -76,4 +76,4 @@ class LoraUtils:
                                                _move_to_tpu_replicated,
                                                (params, buffers))
         params_and_buffers = {**params, **buffers}
-        return params_and_buffers
+        return jax_view(params_and_buffers)
