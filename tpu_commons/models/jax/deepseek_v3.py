@@ -278,7 +278,7 @@ class DeepSeekV3(nnx.Module):
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
         *args,
-    ) -> Tuple[List[KVCacheType], jax.Array]:
+    ) -> Tuple[List[KVCacheType], jax.Array, List[jax.Array]]:
         is_prefill = False
         x = self.embedder.encode(input_ids)
         for (i, block) in enumerate(self.layers):
@@ -289,7 +289,7 @@ class DeepSeekV3(nnx.Module):
 
         final_activation = self.final_norm(x)
 
-        return kv_caches, final_activation
+        return kv_caches, final_activation, []
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         return self.lm_head.decode(hidden_states)

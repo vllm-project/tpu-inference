@@ -155,6 +155,8 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
             None,  # TPUModelRunner.get_multimodal_embeddings_fn
             None,  # TPUModelRunner.get_input_embeddings_fn
             MagicMock(),  # TPUModelRunner.state (model params)
+            None,  # TPUModelRunner.lora_manager
+            None,  # TPUModelRunner.model
         )
 
     def test_is_multimodal_model(self):
