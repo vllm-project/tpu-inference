@@ -158,7 +158,7 @@ class TestEagleLlama3ForCausalLM:
         assert call_args["is_draft_model"] is True
 
         metadata_map = call_args["metadata_map"]
-        assert "layers.*.hidden_norm" in metadata_map.name_map
+        assert "midlayer.hidden_norm" in metadata_map.name_map
         assert "lm_head" in metadata_map.name_map
         assert "d2t" in metadata_map.name_map
         assert "q_proj" in metadata_map.reshape_map
