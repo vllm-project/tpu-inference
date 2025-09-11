@@ -41,7 +41,7 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct --max-model-len=1024 --disable-log-r
 Once the server has begun -- you should see a message such as `INFO:     Application startup complete.` -- you can now run the client benchmarking command (in a new terminal) in your local vLLM repo:
 
 ```
-vllm bench serve \
+ python benchmarks/benchmark_serving.py \
     --backend vllm \
     --model meta-llama/Llama-3.1-8B-Instruct \
     --dataset-name mlperf \
