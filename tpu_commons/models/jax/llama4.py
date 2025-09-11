@@ -251,7 +251,7 @@ class Llama4ForCausalLM(nnx.Module):
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
         *args,
-    ) -> Tuple[List[KVCacheType], jax.Array, jax.Array]:
+    ) -> Tuple[List[KVCacheType], jax.Array, List[jax.Array]]:
         is_prefill = False
         x_TD = self.embedder.encode(input_ids)
         for (i, block) in enumerate(self.layers):
@@ -263,7 +263,7 @@ class Llama4ForCausalLM(nnx.Module):
 
         final_activation_TD = self.final_norm(x_TD)
 
-        return kv_caches, final_activation_TD
+        return kv_caches, final_activation_TD, []
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         logits_TV = jnp.dot(hidden_states,

@@ -129,8 +129,8 @@ class TestEagleLlama3ForCausalLM:
             layer_names=["layer"] * hf_config.num_hidden_layers,
         )
 
-        _, output_hidden_states, _ = model(kv_caches, input_ids, hidden_states,
-                                           attention_metadata)
+        _, output_hidden_states, aux_hidden_states = model(
+            kv_caches, input_ids, hidden_states, attention_metadata)
 
         logits = model.compute_logits(output_hidden_states)
 
@@ -140,6 +140,8 @@ class TestEagleLlama3ForCausalLM:
             input_ids.shape[0], draft_model_config.get_hidden_size())
         assert logits.shape == (input_ids.shape[0],
                                 target_model_config.get_vocab_size())
+        assert len(aux_hidden_states) == 1
+        assert aux_hidden_states[0].shape == output_hidden_states.shape
 
     @patch("tpu_commons.models.jax.llama_eagle3.load_hf_weights")
     def test_load_weights(self, mock_load_hf_weights: MagicMock,

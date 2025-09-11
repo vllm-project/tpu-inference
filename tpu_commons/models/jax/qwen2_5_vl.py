@@ -1,6 +1,7 @@
 import math
 from functools import partial
-from typing import Callable, Literal, NamedTuple, Optional, TypedDict, Union
+from typing import (Callable, List, Literal, NamedTuple, Optional, TypedDict,
+                    Union)
 
 import jax
 import jax.numpy as jnp
@@ -834,7 +835,7 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         attention_metadata: AttentionMetadata,
         inputs_embeds: Optional[jax.Array] = None,
         *args,
-    ) -> tuple[list[jax.Array], jax.Array]:
+    ) -> tuple[list[jax.Array], jax.Array, List[jax.Array]]:
         # The logic of choosing between input_ids and inputs_embeds is
         # handled inside self.language_model.__call__
         kv_caches, x = self.language_model(
@@ -843,7 +844,7 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             attention_metadata=attention_metadata,
             inputs_embeds=inputs_embeds,
         )
-        return kv_caches, x
+        return kv_caches, x, []
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         return self.language_model.compute_logits(hidden_states)

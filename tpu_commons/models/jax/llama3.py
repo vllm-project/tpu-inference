@@ -237,14 +237,26 @@ class LlamaModel(nnx.Module):
                 sharding=(None, "model"),
             )
 
+        self.aux_hidden_state_layers = []
+        if vllm_config.speculative_config and vllm_config.speculative_config.method == "eagle3":
+            self.aux_hidden_state_layers = self.get_eagle3_aux_hidden_state_layers(
+            )
+
+    def get_eagle3_aux_hidden_state_layers(self):
+        num_layers = len(self.layers)
+        return (2, num_layers // 2, num_layers - 3)
+
     def __call__(
         self,
         kv_caches: List[jax.Array],
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
-    ) -> Tuple[List[jax.Array], jax.Array]:
+    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
         x = self.embed(input_ids)
+        aux_hidden_states = []
         for i, layer in enumerate(self.layers):
+            if i in self.aux_hidden_state_layers:
+                aux_hidden_states.append(x)
             kv_cache = kv_caches[i]
             kv_cache, x = layer(
                 kv_cache,
@@ -253,7 +265,7 @@ class LlamaModel(nnx.Module):
             )
             kv_caches[i] = kv_cache
         x = self.norm(x)
-        return kv_caches, x
+        return kv_caches, x, aux_hidden_states
 
 
 class LlamaForCausalLM(nnx.Module):
@@ -276,13 +288,13 @@ class LlamaForCausalLM(nnx.Module):
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
         *args,
-    ) -> Tuple[List[jax.Array], jax.Array]:
-        kv_caches, x = self.model(
+    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
+        kv_caches, x, aux_hidden_states = self.model(
             kv_caches,
             input_ids,
             attention_metadata,
         )
-        return kv_caches, x
+        return kv_caches, x, aux_hidden_states
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         if self.vllm_config.model_config.hf_config.tie_word_embeddings:

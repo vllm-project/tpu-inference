@@ -529,7 +529,7 @@ class TestQwen2_5_VLForConditionalGeneration:
                           jnp.ones((1, 10, model.config.hidden_size)))
         model.language_model.return_value = mock_lm_output
 
-        new_kvs, x = model(kv_caches, input_ids, attn_meta)
+        new_kvs, x, aux_hidden_states = model(kv_caches, input_ids, attn_meta)
         model.language_model.assert_called_once_with(
             kv_caches=kv_caches,
             input_ids=input_ids,
@@ -537,6 +537,7 @@ class TestQwen2_5_VLForConditionalGeneration:
             inputs_embeds=None)
         assert len(new_kvs) == 1
         assert x.shape == (1, 10, model.config.hidden_size)
+        assert len(aux_hidden_states) == 0
 
     def test_compute_logits(self, model: Qwen2_5_VLForConditionalGeneration,
                             rng: PRNGKey):
