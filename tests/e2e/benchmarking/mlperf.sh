@@ -282,7 +282,7 @@ for model_name in $model_list; do
     if $did_find_ready_message; then
         echo "Starting the benchmark for $model_name..."
         echo "Current working directory: $(pwd)"
-        vllm bench serve \
+        python benchmarks/benchmark_serving.py \
         --backend vllm \
         --model "$model_name" \
         --dataset-name "$dataset_name" \
