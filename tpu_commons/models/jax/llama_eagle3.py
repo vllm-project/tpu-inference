@@ -155,7 +155,7 @@ class Eagle3LlamaModel(nnx.Module):
         input_ids: jax.Array,
         hidden_states: jax.Array,
         attention_metadata: AttentionMetadata,
-    ) -> Tuple[List[jax.Array], jax.Array, jax.Array]:
+    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
         embeds = self.embed_tokens(input_ids)
         assert hidden_states.shape[-1] == embeds.shape[-1]
 
@@ -173,7 +173,7 @@ class Eagle3LlamaModel(nnx.Module):
         hidden_states = hidden_states + residual
         residual = hidden_states
         hidden_states = self.norm(hidden_states)
-        return kv_caches, hidden_states, residual
+        return kv_caches, hidden_states, [residual]
 
 
 def update_reshape_map_for_eagle3(vllm_config: VllmConfig,

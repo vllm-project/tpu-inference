@@ -170,6 +170,7 @@ def get_flax_model(
         out_shardings=(
             kv_cache_sharding,
             hidden_states_sharding,
+            hidden_states_sharding,  # aux hidden states
         ),
         donate_argnums=2,  # 0 is graphdef, 1 is state, 2 is kv_cache
         static_argnums=6,  #6 is layer_name_to_kvcache_index
