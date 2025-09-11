@@ -36,7 +36,6 @@ from tpu_commons.interfaces.engine import IEngineCore
 from tpu_commons.interfaces.request import IRequest
 from tpu_commons.runner.utils import LatencyTracker
 from tpu_commons.utils import get_hash_fn_by_name
-from tpu_commons import utils as common_utils
 
 from .adapters import VllmConfigAdapter, VllmEngineAdapter, VllmRequestAdapter
 

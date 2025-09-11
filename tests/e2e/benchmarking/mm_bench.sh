@@ -118,7 +118,7 @@ done
 if $did_find_ready_message; then
     echo "Starting the benchmark for $model_name..."
     echo "Current working directory: $(pwd)"
-    vllm bench serve \
+    python /workspace/vllm/benchmarks/benchmark_serving.py \
     --backend openai-chat \
     --model "$model_name" \
     --dataset-name "$dataset_name" \
