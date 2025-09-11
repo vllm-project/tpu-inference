@@ -6,7 +6,8 @@ import pytest
 import torch
 import torchax
 import utils as test_utils
-from jax.sharding import NamedSharding, PartitionSpec
+from compressed_tensors.quantization import QuantizationStrategy
+from jax.sharding import PartitionSpec
 from torchax.interop import torch_view
 from torchax.ops.mappings import j2t, t2j
 from vllm.config import set_current_vllm_config
@@ -23,31 +24,143 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 
 from tpu_commons.models.vllm.quantization import get_tpu_quantization_config
+from tpu_commons.models.vllm.quantization.common import JaxCommonLinearConfig
 from tpu_commons.models.vllm.quantization.compressed_tensors.compressed_tensors import \
     JaxCompressedTensorsConfig
-from tpu_commons.models.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_int8 import \
-    JaxCompressedTensorsW8A8Int8
+from tpu_commons.models.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import (
+    JaxCompressedTensorsW8A8Fp8, requantize_with_max_scale)
 
 P = PartitionSpec
-MODELS = ["RedHatAI/Qwen2.5-1.5B-quantized.w8a8"]
+MODELS = [
+    "RedHatAI/Llama-3.2-1B-Instruct-FP8-dynamic",
+    "RedHatAI/Llama-3.2-1B-Instruct-FP8"
+]
 
 
-def ref_quantize_int8(x: torch.Tensor):
-    x_abs_max = torch.amax(torch.abs(x), dim=1, keepdim=True)
-    x_s = x_abs_max / 127
-    x_q = torch.round(x / x_s).to(torch.int8)
+def ref_quantize_fp8(x: torch.Tensor,
+                     dtype: torch.dtype,
+                     per_tensor: bool = False):
+    dtype_info = torch.finfo(dtype)
+    dtype_max = float(dtype_info.max)
+    dtype_min = float(dtype_info.min)
+
+    dim = () if per_tensor else 1
+    x_abs_max = torch.amax(torch.abs(x), dim=dim, keepdim=True)
+    if per_tensor:
+        x_abs_max = torch.squeeze(x_abs_max, dim=-1)
+    x_s = x_abs_max / dtype_max
+    x_q = torch.clip(x / x_s, dtype_min, dtype_max).to(dtype)
     return x_q, x_s.to(torch.float32)
 
 
-def ref_w8a8_int8(x: torch.Tensor, w_q: torch.Tensor, w_s: torch.Tensor,
-                  b: Optional[torch.Tensor]):
-    x_q, x_s = ref_quantize_int8(x)
+def ref_w8a8_fp8_dynamic(x: torch.Tensor, w_q: torch.Tensor, w_s: torch.Tensor,
+                         b: Optional[torch.Tensor]):
+    x_q, x_s = ref_quantize_fp8(x, w_q.dtype)
     out = torch.einsum('bd,fd->bf', x_q.to(torch.float32),
                        w_q.to(torch.float32))
     out = (out * x_s) * w_s.T
     if b is not None:
         out += b
     return out.to(x.dtype)
+
+
+def ref_w8a8_fp8_static(x: torch.Tensor, x_s: torch.Tensor, w_q: torch.Tensor,
+                        w_s: torch.Tensor, b: Optional[torch.Tensor]):
+    dtype_info = torch.finfo(w_q.dtype)
+    dtype_max = float(dtype_info.max)
+    dtype_min = float(dtype_info.min)
+
+    x_q = torch.clamp(x / x_s, dtype_min, dtype_max).to(w_q.dtype)
+    out = torch.einsum('bd,fd->bf', x_q.to(torch.float32),
+                       w_q.to(torch.float32))
+    out = (out * x_s) * w_s.T
+    if b is not None:
+        out += b
+    return out.to(x.dtype)
+
+
+def return_ref_and_layer_output(layer: torch.nn.Module, batch_size: int = 16):
+    assert isinstance(layer, LinearBase)
+    scheme = layer.scheme
+    assert isinstance(scheme, JaxCompressedTensorsW8A8Fp8)
+    quant_config = scheme.jax_config
+    assert isinstance(quant_config, JaxCommonLinearConfig)
+    quant_method = layer.quant_method
+    assert isinstance(quant_method, CompressedTensorsLinearMethod)
+    per_tensor = scheme.strategy == QuantizationStrategy.TENSOR
+    is_static_input_scheme = scheme.is_static_input_scheme
+
+    input_tensor = torch.rand(
+        batch_size, layer.input_size, dtype=torch.bfloat16) / 10
+    input_tensor = input_tensor.to('cpu')
+
+    weight_scale, weight = layer.weight_scale, layer.weight
+    input_scale = getattr(layer, 'input_scale', None)
+    # For per_tensor with merged layers, vLLM requenzites them so all merged
+    # layers shared the same scale values.
+    if per_tensor:
+        weight_scale, weight = requantize_with_max_scale(
+            layer.weight, layer.weight_scale, quant_config.output_sizes)
+        if input_scale is not None:
+            input_scale = input_scale.max()
+
+    # Run reference implementation
+    if is_static_input_scheme:
+        ref_output = ref_w8a8_fp8_static(
+            input_tensor,
+            input_scale,
+            weight,
+            weight_scale,
+            layer.bias,
+        )
+    else:
+        ref_output = ref_w8a8_fp8_dynamic(
+            input_tensor,
+            weight,
+            weight_scale,
+            layer.bias,
+        )
+
+    # Run torchax/jax function
+    with torchax.default_env():
+        quant_method.process_weights_after_loading(layer)
+
+        jax_input_tensor = torch_view(t2j(input_tensor, use_dlpack=False))
+        layer_output = layer(jax_input_tensor)
+        layer_output = j2t(layer_output.to(torch.float32)).to(torch.bfloat16)
+
+    return ref_output, layer_output
+
+
+def initialize_layer_weights(layer: torch.nn.Module):
+    assert isinstance(layer, LinearBase)
+    scheme = layer.scheme
+    assert isinstance(scheme, JaxCompressedTensorsW8A8Fp8)
+    quant_config = scheme.jax_config
+    assert isinstance(quant_config, JaxCommonLinearConfig)
+    per_tensor = scheme.strategy == QuantizationStrategy.TENSOR
+
+    weight_list = []
+    weight_scale_list = []
+    for output_size in quant_config.output_sizes:
+        weight = torch.rand(
+            (output_size, layer.input_size), dtype=torch.bfloat16) / 10
+        weight_, weight_scale_ = ref_quantize_fp8(weight, torch.float8_e4m3fn,
+                                                  per_tensor)
+        weight_list.append(weight_)
+        weight_scale_list.append(weight_scale_)
+
+    weight = torch.concatenate(weight_list)
+    weight_scale = torch.concatenate(weight_scale_list)
+
+    assert layer.weight.data.shape == weight.shape
+    assert layer.weight_scale.data.shape == weight_scale.shape
+
+    layer.weight.data = weight
+    layer.weight_scale.data = weight_scale
+
+    if layer.bias is not None:
+        layer.bias.data = torch.rand_like(layer.bias.data)
 
 
 @pytest.fixture(autouse=True)
@@ -118,7 +231,7 @@ def test_loading_model(model, mesh):
     for layer in layers:
         assert isinstance(layer.quant_config, JaxCompressedTensorsConfig)
         assert isinstance(layer.quant_method, CompressedTensorsLinearMethod)
-        assert isinstance(layer.scheme, JaxCompressedTensorsW8A8Int8)
+        assert isinstance(layer.scheme, JaxCompressedTensorsW8A8Fp8)
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -140,11 +253,10 @@ def test_jax_row_parallel_linear(model, bias, mesh, enable_sp):
     vllm_config = engine_args.create_engine_config()
     vllm_config.compilation_config.pass_config.enable_sequence_parallelism = enable_sp
 
-    # Call tpu_commons code
     vllm_config.model_config.dtype = dtype
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
     with set_current_vllm_config(vllm_config):
-        jax_row_linear = RowParallelLinear(
+        linear_layer = RowParallelLinear(
             input_size=4096,
             output_size=8192,
             bias=bias,
@@ -153,42 +265,9 @@ def test_jax_row_parallel_linear(model, bias, mesh, enable_sp):
             quant_config=quant_config,
         )
 
-    weight_data_float = torch.rand(
-        (jax_row_linear.output_size, jax_row_linear.input_size),
-        dtype=dtype) / 10
-    weight_data, weight_scale_data = ref_quantize_int8(weight_data_float)
-    if bias:
-        bias_data = torch.rand_like(jax_row_linear.bias.data)
-
-    jax_row_linear.weight.data = weight_data
-    jax_row_linear.weight_scale.data = weight_scale_data
-    if bias:
-        jax_row_linear.bias.data = bias_data
-
-    input_tensor = torch.rand(10, 4096, dtype=dtype) / 10
-    input_tensor = input_tensor.to('cpu')
-
-    jax_input_tensor = torch_view(t2j(input_tensor, use_dlpack=False))
-    jax_input_tensor.apply_jax_(jax.device_put,
-                                NamedSharding(mesh, P(None, None)))
-    with torchax.default_env():
-        assert isinstance(jax_row_linear.quant_method,
-                          CompressedTensorsLinearMethod)
-        assert isinstance(jax_row_linear.scheme, JaxCompressedTensorsW8A8Int8)
-        jax_row_linear.quant_method.process_weights_after_loading(
-            jax_row_linear)
-        jax_output = jax_row_linear(jax_input_tensor)
-        jax_output = j2t(jax_output.to(torch.float32)).to(dtype)
-
-    # Call reference w8a8 int8
-    output = ref_w8a8_int8(
-        input_tensor,
-        weight_data,
-        weight_scale_data,
-        bias_data if bias else None,
-    )
-
-    torch.testing.assert_close(output, jax_output)
+    initialize_layer_weights(linear_layer)
+    ref_output, layer_output = return_ref_and_layer_output(linear_layer)
+    torch.testing.assert_close(ref_output, layer_output)
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -214,7 +293,7 @@ def test_jax_column_parallel_linear(model, bias, mesh, enable_sp):
     vllm_config.model_config.dtype = torch.bfloat16
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
     with set_current_vllm_config(vllm_config):
-        jax_column_linear = ColumnParallelLinear(
+        linear_layer = ColumnParallelLinear(
             input_size=4096,
             output_size=8192,
             bias=bias,
@@ -223,43 +302,9 @@ def test_jax_column_parallel_linear(model, bias, mesh, enable_sp):
             quant_config=quant_config,
         )
 
-    weight_data_float = torch.rand(
-        (jax_column_linear.output_size, jax_column_linear.input_size),
-        dtype=dtype) / 10
-    weight_data, weight_scale_data = ref_quantize_int8(weight_data_float)
-    if bias:
-        bias_data = torch.rand_like(jax_column_linear.bias.data)
-
-    jax_column_linear.weight.data = weight_data
-    jax_column_linear.weight_scale.data = weight_scale_data
-    if bias:
-        jax_column_linear.bias.data = bias_data
-
-    input_tensor = torch.rand(10, 4096, dtype=dtype) / 10
-    input_tensor = input_tensor.to('cpu')
-
-    jax_input_tensor = torch_view(t2j(input_tensor, use_dlpack=False))
-    jax_input_tensor.apply_jax_(jax.device_put,
-                                NamedSharding(mesh, P(None, None)))
-    with torchax.default_env():
-        assert isinstance(jax_column_linear.quant_method,
-                          CompressedTensorsLinearMethod)
-        assert isinstance(jax_column_linear.scheme,
-                          JaxCompressedTensorsW8A8Int8)
-        jax_column_linear.quant_method.process_weights_after_loading(
-            jax_column_linear)
-        jax_output = jax_column_linear(jax_input_tensor)
-        jax_output = j2t(jax_output.to(torch.float32)).to(dtype)
-
-    # Call reference w8a8 int8
-    output = ref_w8a8_int8(
-        input_tensor,
-        weight_data,
-        weight_scale_data,
-        bias_data if bias else None,
-    )
-
-    torch.testing.assert_close(output, jax_output)
+    initialize_layer_weights(linear_layer)
+    ref_output, layer_output = return_ref_and_layer_output(linear_layer)
+    torch.testing.assert_close(ref_output, layer_output)
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -286,7 +331,7 @@ def test_jax_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
     vllm_config.model_config.dtype = torch.bfloat16
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
     with set_current_vllm_config(vllm_config):
-        jax_qkv_linear = QKVParallelLinear(
+        linear_layer = QKVParallelLinear(
             hidden_size=4096,
             head_size=128,
             total_num_heads=32,
@@ -296,44 +341,11 @@ def test_jax_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
             return_bias=False,
             quant_config=quant_config,
         )
-        jax_qkv_linear.quant_method.fuse_matmuls = fuse_matmuls
+        linear_layer.quant_method.fuse_matmuls = fuse_matmuls
 
-    weight_data_float = torch.rand(
-        (jax_qkv_linear.output_size, jax_qkv_linear.input_size),
-        dtype=dtype) / 10
-    weight_data, weight_scale_data = ref_quantize_int8(weight_data_float)
-    if bias:
-        bias_data = torch.rand_like(jax_qkv_linear.bias.data)
-
-    jax_qkv_linear.weight.data = weight_data
-    jax_qkv_linear.weight_scale.data = weight_scale_data
-    if bias:
-        jax_qkv_linear.bias.data = bias_data
-
-    input_tensor = torch.rand(10, 4096, dtype=dtype) / 10
-    input_tensor = input_tensor.to('cpu')
-
-    jax_input_tensor = torch_view(t2j(input_tensor, use_dlpack=False))
-    jax_input_tensor.apply_jax_(jax.device_put,
-                                NamedSharding(mesh, P(None, None)))
-    with torchax.default_env():
-        assert isinstance(jax_qkv_linear.quant_method,
-                          CompressedTensorsLinearMethod)
-        assert isinstance(jax_qkv_linear.scheme, JaxCompressedTensorsW8A8Int8)
-        jax_qkv_linear.quant_method.process_weights_after_loading(
-            jax_qkv_linear)
-        jax_output = jax_qkv_linear(jax_input_tensor)
-        jax_output = j2t(jax_output.to(torch.float32)).to(dtype)
-
-    # Call reference w8a8 int8
-    output = ref_w8a8_int8(
-        input_tensor,
-        weight_data,
-        weight_scale_data,
-        bias_data if bias else None,
-    )
-
-    torch.testing.assert_close(output, jax_output)
+    initialize_layer_weights(linear_layer)
+    ref_output, layer_output = return_ref_and_layer_output(linear_layer)
+    torch.testing.assert_close(ref_output, layer_output)
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -361,7 +373,7 @@ def test_jax_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
     vllm_config.model_config.dtype = torch.bfloat16
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
     with set_current_vllm_config(vllm_config):
-        jax_merged_column_linear = MergedColumnParallelLinear(
+        linear_layer = MergedColumnParallelLinear(
             input_size=4096,
             output_sizes=[14336] * 2,
             bias=bias,
@@ -369,42 +381,8 @@ def test_jax_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
             return_bias=False,
             quant_config=quant_config,
         )
-        jax_merged_column_linear.quant_method.fuse_matmuls = fuse_matmuls
+        linear_layer.quant_method.fuse_matmuls = fuse_matmuls
 
-    weight_data_float = torch.rand((jax_merged_column_linear.output_size,
-                                    jax_merged_column_linear.input_size),
-                                   dtype=dtype) / 10
-    weight_data, weight_scale_data = ref_quantize_int8(weight_data_float)
-    if bias:
-        bias_data = torch.rand_like(jax_merged_column_linear.bias.data)
-
-    jax_merged_column_linear.weight.data = weight_data
-    jax_merged_column_linear.weight_scale.data = weight_scale_data
-    if bias:
-        jax_merged_column_linear.bias.data = bias_data
-
-    input_tensor = torch.rand(10, 4096, dtype=dtype) / 10
-    input_tensor = input_tensor.to('cpu')
-
-    jax_input_tensor = torch_view(t2j(input_tensor, use_dlpack=False))
-    jax_input_tensor.apply_jax_(jax.device_put,
-                                NamedSharding(mesh, P(None, None)))
-    with torchax.default_env():
-        assert isinstance(jax_merged_column_linear.quant_method,
-                          CompressedTensorsLinearMethod)
-        assert isinstance(jax_merged_column_linear.scheme,
-                          JaxCompressedTensorsW8A8Int8)
-        jax_merged_column_linear.quant_method.process_weights_after_loading(
-            jax_merged_column_linear)
-        jax_output = jax_merged_column_linear(jax_input_tensor)
-        jax_output = j2t(jax_output.to(torch.float32)).to(dtype)
-
-    # Call reference w8a8 int8
-    output = ref_w8a8_int8(
-        input_tensor,
-        weight_data,
-        weight_scale_data,
-        bias_data if bias else None,
-    )
-
-    torch.testing.assert_close(output, jax_output)
+    initialize_layer_weights(linear_layer)
+    ref_output, layer_output = return_ref_and_layer_output(linear_layer)
+    torch.testing.assert_close(ref_output, layer_output)
