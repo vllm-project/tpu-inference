@@ -2,14 +2,23 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import jax
 import numpy as np
+import torch
+import torchax
+from jax.sharding import NamedSharding, PartitionSpec
+from torch.utils import _pytree as pytree
+from torchax.interop import torch_view
+from torchax.ops.mappings import t2j
 from vllm.lora.request import LoRARequest
 
 from tpu_commons.models.vllm.sharding import (
-    extract_all_buffers, shard_lora_weights_and_move_to_tpu)
+    extract_all_params_buffers_v2, shard_lora_weights_and_move_to_tpu)
 
 if TYPE_CHECKING:
     from tpu_commons.runner.tpu_jax_runner import TPUModelRunner
+
+P = PartitionSpec
 
 
 class LoraUtils:
@@ -41,5 +50,30 @@ class LoraUtils:
         shard_lora_weights_and_move_to_tpu(self.runner.model.model,
                                            self.runner.mesh)
 
-        params, buffers, _ = extract_all_buffers(self.runner.model.model)
-        self.runner.state = {**params, **buffers}
+        # params, buffers, _ = extract_all_buffers(self.runner.model.model)
+        # params_and_buffers = shard_model_to_tpu(self.runner.model.model, self.runner.mesh, self.runner.vllm_config)
+        params_and_buffers = self._process_params_and_buffers(
+            self.runner.model.model, self.runner.mesh)
+        self.runner.state = params_and_buffers
+
+    def _process_params_and_buffers(self, model, mesh):
+
+        def _is_unmoved_tensor(x):
+            # tensors haven't been turned into torchax tensor are the ones not moved to TPU yet.
+            return isinstance(
+                x, torch.Tensor) and not isinstance(x, torchax.tensor.Tensor)
+
+        def _move_to_tpu_replicated(x):
+            # In certain cases, if t2j puts the tensor on CPU first and then device_put it to TPU, the tensor layout get messed up. To avoid that, we set jax default_device to TPU.
+            with jax.default_device(jax.devices("tpu")[0]):
+                x = t2j(x, use_dlpack=False)
+            return torch_view(x).apply_jax_(jax.device_put,
+                                            NamedSharding(mesh, P()))
+
+        # Merely doing extract_all_buffers is not enough because we need to change the lora weights to torchax tensor.
+        params, buffers = extract_all_params_buffers_v2(model)
+        params, buffers = pytree.tree_map_only(_is_unmoved_tensor,
+                                               _move_to_tpu_replicated,
+                                               (params, buffers))
+        params_and_buffers = {**params, **buffers}
+        return params_and_buffers

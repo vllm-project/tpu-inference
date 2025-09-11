@@ -114,23 +114,36 @@ def shard_model_to_tpu(model: torch.nn.Module, mesh: Mesh,
         shard_parallel_layers_to_tpu(model, mesh, vllm_config)
 
         # For other weight tensors, repliate them on all the TPU chips.
-        params, buffers, variables = extract_all_buffers(model)
+        # params, buffers, variables = extract_all_buffers(model)
+        params, buffers = extract_all_params_buffers_v2(model)
 
         fmt_size = functools.partial(humanize.naturalsize, binary=True)
-        for qual_name, x in {**params, **buffers, **variables}.items():
+        for qual_name, x in {**params, **buffers}.items():
             if _is_unmoved_tensor(x):
                 tensor_size = fmt_size(x.nbytes)
                 logger.debug(
                     f"{qual_name=} is not sharded, {tensor_size=}, {x.shape=}, {x.dtype=}"
                 )
 
-        params, buffers, variables = pytree.tree_map_only(
-            _is_unmoved_tensor, _move_to_tpu_replicated,
-            (params, buffers, variables))
-        set_all_buffers(model, {}, {}, variables)
+        params, buffers = pytree.tree_map_only(_is_unmoved_tensor,
+                                               _move_to_tpu_replicated,
+                                               (params, buffers))
+        # set_all_buffers(model, {}, {}, variables)
         params_and_buffers = {**params, **buffers}
 
         return params_and_buffers
+
+
+def extract_all_params_buffers_v2(m: torch.nn.Module):
+    params = {}
+    buffers = {}
+
+    for name, param in m.named_parameters(remove_duplicate=False):
+        params[name] = param
+    for name, buf in m.named_buffers(remove_duplicate=False):
+        buffers[name] = buf
+
+    return params, buffers
 
 
 def extract_all_buffers(m: torch.nn.Module):
@@ -145,6 +158,15 @@ def extract_all_buffers(m: torch.nn.Module):
                 continue
 
             qual_name = prefix + k
+            # print(qual_name)
+            # module_params = {name for name, _ in module.named_parameters()}
+            # if k in module_params:
+            #     if isinstance(v, torch.nn.ParameterList):
+            #         for i, param in enumerate(v):
+            #             params[qual_name + f'.{i}'] = param
+            #     else:
+            #         # sometime, v is not torch.nn.Parameter. Rather it's Tensor(<class 'jax._src.interpreters.partial_eval.DynamicJaxprTracer'> JitTracer<bfloat16[151936,2048]>)
+            #         params[qual_name] = v
             if isinstance(v, torch.nn.Parameter) and k in module._parameters:
                 params[qual_name] = v
             elif isinstance(v, torch.nn.ParameterList):
