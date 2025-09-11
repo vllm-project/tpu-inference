@@ -2,13 +2,19 @@ import torchax
 from jax.sharding import Mesh, PartitionSpec
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear, LinearBase, MergedColumnParallelLinear,
-    QKVParallelLinear, ReplicatedLinear, RowParallelLinear)
+# yapf: disable
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               LinearBase,
+                                               MergedColumnParallelLinear,
+                                               QKVParallelLinear,
+                                               ReplicatedLinear,
+                                               RowParallelLinear)
 
 from tpu_commons.models.vllm.jax_merged_column_parallel_linear_fusion_assignments import \
     get_model_matmul_fusion_assignment
 from tpu_commons.utils import TPU_SECOND_LAST_MINOR
+
+# yapf: enable
 
 P = PartitionSpec
 

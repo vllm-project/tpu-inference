@@ -5,6 +5,7 @@ This implementation follows the same algorithm as the GPU version but is
 designed for JAX/TPU compatibility. It currently only supports greedy sampling.
 """
 
+import functools
 from typing import Optional
 
 import jax
@@ -14,10 +15,6 @@ import numpy as np
 from tpu_commons.models.jax.layers.binary_search import topk_mask, topp_mask
 from tpu_commons.models.jax.layers.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
-
-# Maximum number of speculative draft tokens allowed per request in a single
-# step. This value is chosen to be large enough to handle typical use cases.
-MAX_SPEC_LEN = 32
 
 # Placeholder token ID for rejected tokens
 PLACEHOLDER_TOKEN_ID = -1
@@ -41,7 +38,6 @@ class RejectionSampler:
         draft_token_ids: jnp.ndarray,
         # [batch_size] - number of draft tokens per request
         num_draft_tokens: jnp.ndarray,
-        max_spec_len: int,
         # [num_tokens, vocab_size] - flattened format
         draft_probs: Optional[jnp.ndarray],
         # [num_tokens, vocab_size] - flattened format
@@ -57,7 +53,6 @@ class RejectionSampler:
         Args:
             draft_token_ids: Draft token IDs in flattened format [num_tokens].
             num_draft_tokens: Number of draft tokens per request [batch_size].
-            max_spec_len: Maximum number of speculative tokens.
             draft_probs: Draft probabilities in flattened format [num_tokens, vocab_size].
             target_probs: Target probabilities in flattened format [num_tokens, vocab_size].
             bonus_token_ids: Bonus token IDs [batch_size].
@@ -70,7 +65,6 @@ class RejectionSampler:
         return self.forward(
             draft_token_ids=draft_token_ids,
             num_draft_tokens=num_draft_tokens,
-            max_spec_len=max_spec_len,
             draft_probs=draft_probs,
             target_logits=target_logits,
             bonus_token_ids=bonus_token_ids,
@@ -78,13 +72,13 @@ class RejectionSampler:
             key=key,
         )
 
+    @functools.partial(jax.jit, static_argnums=(0, ))
     def forward(
         self,
         # [num_tokens] - flattened format
         draft_token_ids: jnp.ndarray,
         # [batch_size] - number of draft tokens per request
         num_draft_tokens: jnp.ndarray,
-        max_spec_len: int,
         # [num_tokens, vocab_size] - flattened format
         draft_probs: Optional[jnp.ndarray],
         # [num_tokens, vocab_size] - flattened format
@@ -100,7 +94,6 @@ class RejectionSampler:
         Args:
             draft_token_ids: Draft token IDs in flattened format [num_tokens].
             num_draft_tokens: Number of draft tokens per request [batch_size].
-            max_spec_len: Maximum number of speculative tokens.
             draft_probs: Draft probabilities in flattened format [num_tokens, vocab_size].
             target_logits: Target logits in flattened format [num_tokens, vocab_size].
             bonus_token_ids: Bonus token IDs [batch_size].
@@ -110,7 +103,6 @@ class RejectionSampler:
         Returns:
             output_token_ids: A tensor containing the final output token IDs.
         """
-        assert max_spec_len <= MAX_SPEC_LEN
 
         if sampling_metadata.do_sampling:
             target_probs = _compute_probs(target_logits, num_draft_tokens,
@@ -121,7 +113,6 @@ class RejectionSampler:
         output_token_ids = rejection_sample(
             draft_token_ids,
             num_draft_tokens,
-            max_spec_len,
             draft_probs,
             target_probs,
             bonus_token_ids,
@@ -249,7 +240,6 @@ def _get_segment_info(num_draft_tokens: jax.Array, total_tokens: int):
     return segment_ids, group_indices
 
 
-@jax.jit
 def _sample_recovered_tokens(
     draft_token_ids: jax.Array,
     draft_probs: Optional[jax.Array],
@@ -285,7 +275,6 @@ def rejection_sample(
     draft_token_ids: jnp.ndarray,
     # [batch_size] - JAX array
     num_draft_tokens: jnp.ndarray,
-    max_spec_len: int,
     # [num_tokens, vocab_size] - flattened format
     draft_probs: Optional[jnp.ndarray],
     # [num_tokens, vocab_size] - flattened format
@@ -301,7 +290,6 @@ def rejection_sample(
     Args:
         draft_token_ids: Draft token IDs in flattened format [num_tokens].
         num_draft_tokens: Number of draft tokens per request [batch_size].
-        max_spec_len: Maximum number of speculative tokens.
         draft_probs: Draft probabilities in flattened format [num_tokens, vocab_size].
         target_probs: Target probabilities in flattened format [num_tokens, vocab_size].
         bonus_token_ids: Bonus token IDs [batch_size].
@@ -333,7 +321,6 @@ def rejection_sample(
     return random_output
 
 
-@jax.jit
 def _random_rejection_sample_with_segment(
     draft_token_ids: jax.Array,
     draft_probs: Optional[jax.Array],
@@ -425,7 +412,6 @@ def _random_rejection_sample_with_segment(
 # - Scan based approach.
 # Overall, I expect XLA to optimize the scan-based approach pretty well, but
 # it would be good to compare performance against other methods.
-@jax.jit
 def _greedy_rejection_sample_with_segment(
     draft_token_ids: jax.Array,
     target_probs: jax.Array,

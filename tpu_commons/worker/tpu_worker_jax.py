@@ -24,6 +24,8 @@ from tpu_commons.di.abstracts import (AbstractKVCacheConfig,
                                       AbstractLoRARequest,
                                       AbstractSchedulerOutput)
 from tpu_commons.di.interfaces import HostInterface
+from tpu_commons.distributed.utils import (get_host_ip, get_kv_transfer_port,
+                                           get_node_id)
 from tpu_commons.logger import init_logger
 from tpu_commons.runner.tpu_jax_runner import TPUModelRunner
 from tpu_commons.worker._temporary_vllm_compat import (
@@ -95,8 +97,6 @@ class TPUWorker(AbstractTpuWorker):
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         self.profile_dir)
 
-        logger.info(f"Pre-sliced devices by engine: {self.devices}")
-
         use_jax_profiler_server = os.getenv("USE_JAX_PROFILER_SERVER", False)
         # Only one instance of profiler is allowed
         if use_jax_profiler_server and jax.devices()[0] == self.devices[0]:
@@ -121,9 +121,6 @@ class TPUWorker(AbstractTpuWorker):
             except KeyError:
                 tp = self.parallel_config.tensor_parallel_size
                 self.devices = jax.devices()[:tp]
-        logger.info(f"Init devices | "
-                    f"devices={self.devices} | "
-                    f"hbm={utils.hbm_usage_gb(self.devices)}Gb")
 
         # Initialize the vLLM distribution layer as a single chip environment,
         # we'll swap the model's parallel modules with TPU SPMD equivalents.
@@ -142,6 +139,11 @@ class TPUWorker(AbstractTpuWorker):
             )
         ensure_kv_transfer_initialized(self.vllm_config)
         self.model_runner = TPUModelRunner(self.vllm_config, self.devices)
+        logger.info(f"Init worker | "
+                    f"rank={self.rank} | "
+                    f"node_id={get_node_id()} | "
+                    f"is_driver_worker={self.is_driver_worker} | "
+                    f"hbm={utils.hbm_usage_gb(self.devices)}Gb")
 
     def determine_available_memory(self) -> int:
         hbm_usage = utils.hbm_usage_bytes(self.devices)
@@ -238,6 +240,12 @@ class TPUWorker(AbstractTpuWorker):
         vllm_kv_cache_config = adapted_kv_cache_config.vllm_kv_cache_config
         self.model_runner.initialize_kv_cache(vllm_kv_cache_config)
 
+    def get_node_kv_ip_port(self) -> tuple[int, str, int]:
+        node_id = get_node_id()
+        ip = get_host_ip()
+        port = get_kv_transfer_port()
+        return (int(node_id), ip, int(port))
+
     def check_health(self) -> None:
         # worker will always be healthy as long as it's running.
         return
@@ -255,3 +263,6 @@ class TPUWorker(AbstractTpuWorker):
                                                mappings=mappings,
                                                transpose_keys=transpose_keys,
                                                reshard_fn=reshard_fn)
+
+    def shutdown(self) -> None:
+        return

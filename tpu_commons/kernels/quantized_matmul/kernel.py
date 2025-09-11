@@ -9,23 +9,31 @@ from jax._src import dtypes
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-from tpu_commons.kernels.quantized_matmul.tuned_block_sizes import \
-    get_tuned_block_sizes
+from tpu_commons.kernels.quantized_matmul.tuned_block_sizes import (
+    get_device_vmem_limit, get_tuned_block_sizes)
 from tpu_commons.kernels.quantized_matmul.util import (get_kernel_name,
                                                        next_multiple,
                                                        unfold_args)
 
 
 def quantize_array(
-        x: jax.Array,  # [bs_block_size, in_block_size]
-        x_abs_max: jax.Array,  # [1, bs_block_size]
+    x: jax.Array,  # [bs_block_size, in_block_size]
+    x_abs_max: jax.Array,  # [1, bs_block_size]
+    quant_dtype: jnp.dtype,
 ):
-    n_bits = 8
-    int_max = 2**(n_bits - 1) - 1
+    is_float = jnp.issubdtype(quant_dtype, jnp.floating)
+    dtype_info = jnp.finfo(quant_dtype) if is_float else jnp.iinfo(quant_dtype)
+    dtype_max = float(dtype_info.max)
+
     # TODO(kyuyeunk): Investigate performance gain from non xlu transpose.
-    scale = jnp.transpose(x_abs_max / int_max)  # [bs_block_size, 1]
-    x_int = jnp.round(x / scale).astype(jnp.int8)
-    return x_int, scale.astype(jnp.float32)
+    scale = jnp.transpose(x_abs_max / dtype_max)
+    x_q = x / scale
+    if is_float:
+        dtype_min = float(dtype_info.min)
+        x_q = jnp.clip(x_q, dtype_min, dtype_max)
+    else:
+        x_q = jnp.round(x_q)
+    return x_q.astype(quant_dtype), scale.astype(jnp.float32)
 
 
 def get_vmem_limit(
@@ -42,7 +50,7 @@ def get_vmem_limit(
     acc_dtype: jnp.dtype,
     save_acc: bool,
     save_x_q: bool,
-    upper_limit_bytes: int = 96 * 1024 * 1024,
+    upper_limit_bytes: int,
 ):
     # Calculate in/out VMEM size.
     x_size = batch_block_size * in_block_size * dtypes.bit_width(x_dtype)
@@ -100,15 +108,13 @@ def validate_inputs(
             f'{x_abs_max.shape=} must be equal to (1, {x.shape[0]=})')
     if x.shape[0] % batch_block_size != 0:
         raise ValueError(
-            f'{x.shape[0]=} must be a multiple of block size {batch_block_size=}'
-        )
+            f'{x.shape[0]=} must be a multiple of {batch_block_size=}')
     if w_q.shape[0] % out_block_size != 0:
         raise ValueError(
-            f'{w_q.shape[0]=} must be a multiple of block size {out_block_size=}'
-        )
+            f'{w_q.shape[0]=} must be a multiple of {out_block_size=}')
     if x.shape[1] % in_block_size != 0:
         raise ValueError(
-            f'{x.shape[1]=} must be a multiple of block size {in_block_size=}')
+            f'{x.shape[1]=} must be a multiple of {in_block_size=}')
 
 
 def matmul_kernel(
@@ -149,15 +155,24 @@ def matmul_kernel(
         is_first_step = True
         is_last_step = True
 
+    acc_dtype = jnp.float32
+    if quantize_activation and jnp.issubdtype(w_q_ref.dtype, jnp.integer):
+        acc_dtype = jnp.int32
+
     # Start of actual computation logic.
     def matmul_body(quant: bool, is_first_step: bool, is_last_step: bool):
         if quantize_activation:
             if quant:
-                x_q_tmp, x_scale_tmp = quantize_array(x_ref[...],
-                                                      x_abs_max_ref[...])
+                x_q_tmp, x_scale_tmp = quantize_array(
+                    x_ref[...],
+                    x_abs_max_ref[...],
+                    w_q_ref.dtype,
+                )
+
                 if save_x_q:
                     x_q_scratch[...] = x_q_tmp
                     x_scale_scratch[...] = x_scale_tmp
+
             else:
                 assert save_x_q
                 x_q_tmp = x_q_scratch[...]
@@ -168,14 +183,14 @@ def matmul_kernel(
                 x_q_tmp,
                 w_q_ref[...],
                 (((1, ), (1, )), ((), ())),
-                preferred_element_type=jnp.int32,
+                preferred_element_type=acc_dtype,
             )
         else:
             acc = jax.lax.dot_general(
                 x_ref[...],
                 w_q_ref[...],
                 (((1, ), (1, )), ((), ())),
-                preferred_element_type=jnp.float32,
+                preferred_element_type=acc_dtype,
             )
 
         if not is_first_step:
@@ -237,7 +252,7 @@ def quantized_matmul_kernel(
             orig_bs,
             orig_out_features,
             orig_in_features,
-            jnp.dtype(x.dtype).name,
+            jnp.dtype(w_q.dtype).name,
             quantize_activation,
         )
 
@@ -272,7 +287,9 @@ def quantized_matmul_kernel(
     # used per batch.
     save_x_q = quantize_activation and n_in == 1 and n_out > 1
 
-    acc_dtype = jnp.int32 if quantize_activation else jnp.float32
+    acc_dtype = jnp.float32
+    if quantize_activation and jnp.issubdtype(w_q.dtype, jnp.integer):
+        acc_dtype = jnp.int32
 
     vmem_limit_bytes = get_vmem_limit(
         n_bs=n_bs,
@@ -288,6 +305,7 @@ def quantized_matmul_kernel(
         acc_dtype=acc_dtype,
         save_acc=save_acc,
         save_x_q=save_x_q,
+        upper_limit_bytes=get_device_vmem_limit(),
     )
 
     kernel = pl.pallas_call(

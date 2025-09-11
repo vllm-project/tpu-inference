@@ -51,17 +51,29 @@ DOCKER_HF_HOME="/tmp/hf_home"
 
 # Cleanup of existing containers and images.
 echo "Starting cleanup for vllm-tpu..."
-leftover_containers=$(docker ps -a -q --filter "ancestor=vllm-tpu")
-if [ -n "$leftover_containers" ]; then
-  echo "Removing leftover containers using vllm-tpu image(s)..."
-  docker rm -f "$leftover_containers"
-fi
-old_images=$(docker images vllm-tpu -q)
+# Get all unique image IDs for the repository 'vllm-tpu'
+old_images=$(docker images vllm-tpu -q | uniq)
+total_containers=""
 
 if [ -n "$old_images" ]; then
-  echo "Removing old vllm-tpu image(s)..."
-  docker rmi -f "$old_images"
+    echo "Found old vllm-tpu images. Checking for dependent containers..."
+    # Loop through each image ID and find any containers (running or not) using it.
+    for img_id in $old_images; do
+        total_containers="$total_containers $(docker ps -a -q --filter "ancestor=$img_id")"
+    done
+
+    # Remove any found containers
+    if [ -n "$total_containers" ]; then
+        echo "Removing leftover containers using vllm-tpu image(s)..."
+        echo "$total_containers" | xargs -n1 | sort -u | xargs -r docker rm -f
+    fi
+
+    echo "Removing old vllm-tpu image(s)..."
+    docker rmi -f "$old_images"
+else
+    echo "No vllm-tpu images found to clean up."
 fi
+
 echo "Cleanup complete."
 
 docker build --no-cache -f docker/Dockerfile -t "vllm-tpu:${BUILDKITE_COMMIT}" .
@@ -75,7 +87,7 @@ exec docker run \
   -e HF_HOME="$DOCKER_HF_HOME" \
   -e MODEL_IMPL_TYPE="$MODEL_IMPL_TYPE" \
   -e HF_TOKEN="$HF_TOKEN" \
-  -e VLLM_XLA_CACHE_PATH= \
+  -e VLLM_XLA_CACHE_PATH="$DOCKER_HF_HOME/.cache/jax_cache" \
   -e VLLM_USE_V1=1 \
   -e VLLM_XLA_CHECK_RECOMPILATION=1 \
   ${QUANTIZATION:+-e QUANTIZATION="$QUANTIZATION"} \

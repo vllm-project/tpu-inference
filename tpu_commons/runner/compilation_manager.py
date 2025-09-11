@@ -2,8 +2,10 @@ import os
 import time
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple
 
+import jax
 import jax.numpy as jnp
 import numpy as np
+import vllm.envs as envs
 from jax.sharding import NamedSharding, PartitionSpec
 
 from tpu_commons.logger import init_logger
@@ -26,6 +28,10 @@ class CompilationManager:
 
     def __init__(self, runner: "TPUModelRunner"):
         self.runner = runner
+        if not envs.VLLM_DISABLE_COMPILE_CACHE:
+            logger.info("Enabling JAX compile cache.")
+            jax.config.update("jax_compilation_cache_dir",
+                              envs.VLLM_XLA_CACHE_PATH)
 
     def _create_dummy_tensor(self,
                              shape: Tuple[int, ...],
@@ -284,12 +290,17 @@ class CompilationManager:
             block_numbers = list(range(1, num_blocks + 1))
             kv_cache_slices = self.runner.kv_cache_manager.get_kv_cache_for_block_ids(
                 block_numbers)
+            # Prevent the slices from getting freed by insert before finishing this operation
+            for layer_cache in kv_cache_slices:
+                layer_cache.block_until_ready()
             self.runner.kv_caches = self.runner.kv_cache_manager._jitted_insert_continuous_kv_cache(
                 block_size,
                 self.runner.kv_caches,
                 kv_cache_slices,
                 block_numbers[0],
             )
+            for layer_cache in self.runner.kv_caches:
+                layer_cache.block_until_ready()
 
     def _precompile_gather_logprobs(self) -> None:
         logger.info("Compiling gather_logprobs with different input shapes.")
@@ -323,16 +334,14 @@ class CompilationManager:
                                                             jnp.int32)
 
                 for do_sampling in (False, True):
+                    draft_probs = None
                     if do_sampling:
                         compilation_name = "random_rejection_sampler"
-                        draft_probs = self._create_dummy_tensor(
-                            (num_logits, vocab_size), jnp.bfloat16, sharding)
-                        key = self.runner.rng_params_for_sampling
-                        temperature = self._create_dummy_tensor((num_logits, ),
+                        temperature = self._create_dummy_tensor((num_reqs, ),
                                                                 np.float32)
-                        top_k = self._create_dummy_tensor((num_logits, ),
+                        top_k = self._create_dummy_tensor((num_reqs, ),
                                                           np.int32)
-                        top_p = self._create_dummy_tensor((num_logits, ),
+                        top_p = self._create_dummy_tensor((num_reqs, ),
                                                           np.float32)
                         sampling_metadata = TPUSupportedSamplingMetadata(
                             temperature=temperature,
@@ -341,8 +350,6 @@ class CompilationManager:
                             do_sampling=do_sampling)
                     else:
                         compilation_name = "greedy_rejection_sampler"
-                        draft_probs = None
-                        key = None
                         sampling_metadata = TPUSupportedSamplingMetadata(
                             do_sampling=do_sampling)
 
@@ -351,12 +358,11 @@ class CompilationManager:
                         self.runner.rejection_sampler,
                         draft_token_ids,
                         num_draft_tokens,
-                        -1,  # max_spec_len
                         draft_probs,
                         target_probs,
                         bonus_token_ids,
                         sampling_metadata,
-                        key,
+                        self.runner.rng_params_for_sampling,
                         num_logits=num_logits,
                         num_reqs=num_reqs,
                         do_sampling=do_sampling,

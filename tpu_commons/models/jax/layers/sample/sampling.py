@@ -10,6 +10,8 @@ from tpu_commons.models.jax.layers.binary_search import topk_mask, topp_mask
 from tpu_commons.models.jax.layers.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 
+_SAMPLING_EPS = 1e-5
+
 
 @functools.partial(
     jax.jit,
@@ -26,9 +28,9 @@ def sample(
         # Unshard the logits explicity to avoid latency increase.
         logits = jax.lax.with_sharding_constraint(
             logits, NamedSharding(mesh, P(None, None)))
-
+    greedy_sampled = jnp.argmax(logits, axis=-1)
     if not tpu_sampling_metadata.do_sampling:
-        return jnp.argmax(logits, axis=-1)
+        return greedy_sampled
 
     logits = logits.astype(jnp.float32)
     logits = topk_mask(logits, tpu_sampling_metadata.top_k, replace_val=-1e12)
@@ -40,7 +42,10 @@ def sample(
 
     # (batch_size,)
     next_tokens = jax.random.categorical(rng, logits)
-    return next_tokens
+    # Note: avoid using the sample result when temperature < _SAMPLING_EPS
+    # If temperature < 0, logits /= temperatures will flip the result, causing error.
+    return jnp.where(tpu_sampling_metadata.temperature < _SAMPLING_EPS,
+                     greedy_sampled, next_tokens)
 
 
 def compute_logprobs(logits: jax.Array) -> jax.Array:
