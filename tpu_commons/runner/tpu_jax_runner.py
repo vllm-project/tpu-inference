@@ -390,14 +390,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     scheduler_output) as kv_connector_output:
                 # NOTE(Wenlong): It takes both `input_ids` and `inputs_embeds`,
                 # but one of them would be `None`
-                self.kv_caches, hidden_states = self.model_fn(
-                    self.state,
-                    self.kv_caches,
-                    input_ids,
-                    attn_metadata,
-                    inputs_embeds,
-                    tuple(self.layer_name_to_kvcache_index.items()),
-                )
+                (self.kv_caches, hidden_states,
+                 aux_hidden_states) = self.model_fn(
+                     self.state,
+                     self.kv_caches,
+                     input_ids,
+                     attn_metadata,
+                     inputs_embeds,
+                     tuple(self.layer_name_to_kvcache_index.items()),
+                 )
 
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)
