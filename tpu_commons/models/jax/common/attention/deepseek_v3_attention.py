@@ -36,7 +36,6 @@ class MLA(nnx.Module):
     rope_theta: float
     rope_scaling: dict[str, Any]
     dtype: jnp.dtype
-    unquant_dtype: jnp.dtype
     mesh: Mesh
 
     q_lora_rank: int
@@ -134,7 +133,7 @@ class MLA(nnx.Module):
             dims=self.q_lora_rank,
             epsilon=self.rms_norm_eps,
             with_scale=True,
-            dtype=self.unquant_dtype,
+            dtype=self.dtype,
             random_init=self.random_init,
             rngs=rngs,
         )
@@ -144,7 +143,7 @@ class MLA(nnx.Module):
             random_init=self.random_init,
             epsilon=self.rms_norm_eps,
             with_scale=True,
-            dtype=self.unquant_dtype,
+            dtype=self.dtype,
             rngs=rngs,
         )
 

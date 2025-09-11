@@ -9,6 +9,7 @@ from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
+from torchax.ops.mappings import j2t_dtype
 from vllm.config import VllmConfig
 
 from tpu_commons import utils
@@ -49,8 +50,6 @@ class DeepSeekV3(nnx.Module):
         vocab_size: int = 129280
         hidden_size: int = 7168
         dtype: jnp.dtype = jnp.bfloat16
-        unquant_dtype: jnp.dtype = jnp.bfloat16
-        scale_dtype: jnp.dtype = jnp.float32
         num_attention_heads: int = 128
         num_key_value_heads: int = 128
         ffw_intermediate_size: int = 18432
@@ -93,12 +92,11 @@ class DeepSeekV3(nnx.Module):
             qk_nope_head_dim=qk_nope_head_dim,
             qk_rope_head_dim=qk_rope_head_dim,
             v_head_dim=v_head_dim,
-            num_local_experts=num_local_experts,
-            scale_dtype=scale_dtype)
+            num_local_experts=num_local_experts)
 
         self.embedder = Embedder(vocab_size=vocab_size,
                                  hidden_size=hidden_size,
-                                 dtype=unquant_dtype,
+                                 dtype=dtype,
                                  rngs=self.rng,
                                  vd_sharding=(('data', 'expert', 'model'),
                                               None),
@@ -123,7 +121,6 @@ class DeepSeekV3(nnx.Module):
                 num_key_value_heads=num_key_value_heads,
                 head_dim=v_head_dim,  # MLA uses v_head_dim as head_dim
                 dtype=dtype,
-                unquant_dtype=unquant_dtype,
                 rngs=self.rng,
                 activation_attention_td=(None, 'model'),
                 activation_q_td=(None, 'model'),
@@ -143,7 +140,7 @@ class DeepSeekV3(nnx.Module):
                     random_init=self.random_init,
                     epsilon=rms_norm_eps,
                     with_scale=True,
-                    dtype=unquant_dtype,
+                    dtype=dtype,
                     rngs=self.rng,
                 ),
                 pre_mlp_norm=RMSNorm(
@@ -151,7 +148,7 @@ class DeepSeekV3(nnx.Module):
                     random_init=self.random_init,
                     epsilon=rms_norm_eps,
                     with_scale=True,
-                    dtype=unquant_dtype,
+                    dtype=dtype,
                     rngs=self.rng,
                 ),
                 attn=_create_mla(),
@@ -181,7 +178,6 @@ class DeepSeekV3(nnx.Module):
                 dtype=dtype,
                 activation_ffw_td=('data', None),
                 ed_sharding=('expert', None),
-                kernel_dtype=unquant_dtype,
                 e_sharding=('expert', ))
             custom_module = MoE(dtype=dtype,
                                 num_local_experts=num_local_experts,
@@ -221,7 +217,7 @@ class DeepSeekV3(nnx.Module):
                 random_init=self.random_init,
                 epsilon=rms_norm_eps,
                 with_scale=True,
-                dtype=unquant_dtype,
+                dtype=dtype,
             )
 
             pre_mlp_norm = RMSNorm(
@@ -230,7 +226,7 @@ class DeepSeekV3(nnx.Module):
                 random_init=self.random_init,
                 epsilon=rms_norm_eps,
                 with_scale=True,
-                dtype=unquant_dtype,
+                dtype=dtype,
             )
 
             block = SharedExpertsTransformerBlock(
@@ -247,12 +243,12 @@ class DeepSeekV3(nnx.Module):
             random_init=self.random_init,
             epsilon=rms_norm_eps,
             with_scale=True,
-            dtype=unquant_dtype,
+            dtype=dtype,
         )
 
         self.lm_head = LMhead(vocab_size=vocab_size,
                               hidden_size=hidden_size,
-                              dtype=unquant_dtype,
+                              dtype=dtype,
                               rngs=self.rng,
                               vd_sharding=(('data', 'expert', 'model'), None),
                               dv_sharding=(None, ('data', 'expert', 'model')),
@@ -304,7 +300,7 @@ class DeepSeekV3WeightLoader:
 
     def __init__(self, vllm_config: VllmConfig, num_layers, hidden_size,
                  q_lora_rank, kv_lora_rank, attn_heads, qk_nope_head_dim,
-                 qk_rope_head_dim, v_head_dim, num_local_experts, scale_dtype):
+                 qk_rope_head_dim, v_head_dim, num_local_experts):
 
         self.num_layers = num_layers
         self.names_and_weights_generator = model_weights_generator(
@@ -409,7 +405,12 @@ class DeepSeekV3WeightLoader:
             "layers.*.shared_experts.kernel_up_proj_DF",
         }
 
-        self.scale_dtype = scale_dtype
+        # NOTE: this will only be used for loading in quantized weights (via Qwix)
+        qwix_config = self.vllm_config.additional_config.get("qwix_config", None)
+        self.scale_dtype = getattr(jnp, self.vllm_config.additional_config.get(
+            "scale_dtype", "float32"))
+        self.quant_dtype = pass # TODO
+
 
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
         # Find the corresponding model key using the HF key

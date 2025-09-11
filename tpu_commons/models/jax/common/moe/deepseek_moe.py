@@ -26,7 +26,6 @@ class DeepSeekV3Router(nnx.Module):
     norm_topk_prob: bool
     routed_scaling_factor: float
     dtype: jnp.dtype
-    kernel_dtype: jnp.dtype
     rngs: InitVar[nnx.Rngs]
 
     # Sharding Attributes
@@ -102,7 +101,7 @@ class DeepSeekV3Router(nnx.Module):
         E = self.num_experts
         self.kernel_DE = create_param(rngs,
                                       shape=(D, E),
-                                      dtype=self.kernel_dtype,
+                                      dtype=self.dtype,
                                       sharding=self.ed_sharding,
                                       random_init=self.random_init)
         self.bias_E = create_param(rngs,

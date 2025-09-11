@@ -1,5 +1,9 @@
 qwix:
+  # This is needed because we want to quantize the abstract model first and then load the weights
+  # in
   use_abstract_model: True
+  # This signifies that the scales to be loaded in are in fp32
+  scale_dtype: 'float32'
   rules:
     # NOTE: each entry corresponds to a qwix.QuantizationRule
     - module_path: '.*.custom_module.router.*'
