@@ -838,7 +838,7 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
     ) -> tuple[list[jax.Array], jax.Array, List[jax.Array]]:
         # The logic of choosing between input_ids and inputs_embeds is
         # handled inside self.language_model.__call__
-        kv_caches, x = self.language_model(
+        kv_caches, x, [] = self.language_model(
             kv_caches=kv_caches,
             input_ids=input_ids,
             attention_metadata=attention_metadata,

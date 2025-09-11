@@ -1,9 +1,10 @@
+from unittest.mock import MagicMock
+
 import jax
 import jax.numpy as jnp
 import pytest
 from flax import nnx
-from jax.sharding import Mesh
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, ModelConfig
 
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.spec_decode.jax.eagle3 import EagleProposer
@@ -32,35 +33,28 @@ class MockModel(nnx.Module):
         return jax.nn.one_hot(token_ids, self.vocab_size)
 
 
+class MockVllmConfig:
+
+    def __init__(self, model: str):
+        self.model_config = ModelConfig(model)
+        self.model_config.dtype = jnp.bfloat16
+        self.load_config = MagicMock()
+        self.load_config.download_dir = None
+        self.speculative_config = MagicMock(
+            num_speculative_tokens=3,
+            method="eagle",
+        )
+        self.cache_config = CacheConfig(block_size=16)
+
+
 @pytest.fixture
-def proposer():
-    # Mock vllm_config
-    class MockVllmConfig:
+def mock_vllm_config() -> MockVllmConfig:
+    return MockVllmConfig(model="meta-llama/Llama-3.2-1B")
 
-        def __init__(self):
-            self.speculative_config = self.MockSpeculativeConfig()
-            self.model_config = self.MockModelConfig()
-            self.cache_config = CacheConfig(block_size=16)
 
-        class MockSpeculativeConfig:
-
-            def __init__(self):
-                self.num_speculative_tokens = 3
-                self.method = "eagle"
-                self.draft_model_config = self.MockDraftModelConfig()
-
-            class MockDraftModelConfig:
-                pass
-
-        class MockModelConfig:
-            pass
-
-    class MockRunner:
-
-        def __init__(self):
-            self.mesh = Mesh(jax.devices(), ('model', ))
-
-    proposer = EagleProposer(MockVllmConfig(), MockRunner())
+@pytest.fixture
+def proposer(mock_vllm_config):
+    proposer = EagleProposer(mock_vllm_config, MagicMock())
     proposer.model = MockModel(vocab_size=100, hidden_size=4, rngs=nnx.Rngs(0))
     return proposer
 
