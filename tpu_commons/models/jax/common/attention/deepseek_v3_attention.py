@@ -288,7 +288,7 @@ class MLA(nnx.Module):
             self.query_tnh,  # q
             self.keyvalue_skh,  # k
             self.keyvalue_skh,  # v
-            P(None, None, "model"),  # kv_cache: Replicated
+            P(None, None, "model"),  # kv_cache
             P(),  # md.seq_lens: Replicated
             P(),  # page_indices_flat: Replicated
             P(),  # query_start_loc: Replicated
