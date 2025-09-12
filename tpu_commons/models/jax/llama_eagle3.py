@@ -247,8 +247,7 @@ class EagleLlama3ForCausalLM(nnx.Module):
         logits = self.lm_head(hidden_states)
 
         target_vocab_size = self.vllm_config.model_config.get_vocab_size()
-        draft_vocab_size = self.vllm_config.speculative_config.draft_model_config.get_vocab_size(
-        )
+        draft_vocab_size = self.vllm_config.speculative_config.draft_model_config.hf_config.draft_vocab_size
 
         base = jnp.arange(draft_vocab_size, dtype=jnp.int32)
         targets = base + self.draft_id_to_target_id.value
