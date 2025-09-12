@@ -62,7 +62,7 @@ class Llama4ForCausalLM(nnx.Module):
         num_layers: int = 48
         self.interleave_moe_layer_step = 1  # All layers are MoE for Scout
         intermediate_size_moe: int = 8192
-        num_local_experts: int = 16
+        num_local_experts: int = 128
         hidden_act: str = "silu"
         self.no_rope_layer_interval = 4
 
