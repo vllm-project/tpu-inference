@@ -413,6 +413,7 @@ class DeepSeekV3WeightLoader:
                                    qwix_config.get("scale_dtype", "bfloat16"))
         # TODO (jacobplatin): we shouldn't hard-code this, but the logic to obtain the true quantized dtype
         # is non-trivial and the default checkpoints all use this dtype
+        # NOTE: this is only used if `skip_quantization` is False (the default)
         self.quant_dtype = jnp.float8_e4m3fn
         # NOTE (jacobplatin): this is certainly a bit hacky, but I don't think there's any
         # super clean way to get the desired quantization dtype
@@ -557,9 +558,12 @@ class DeepSeekV3WeightLoader:
                 )
             # NOTE: Despite the fact that scale has the name `scale_inv` in it, we don't need to
             # inverse it
+            assert base_model_weight.array.scale.value.dtype == maybe_sharded_scale.dtype, "Expected dtype for model weight scale with name {mapped_name} and dtype ({base_model_weight.array.scale.value.dtype}) to match that of the incoming weight scale ({maybe_sharded_scale.dtype})"
+            assert base_model_weight.array.qvalue.value.dtype == sharded_array.dtype, "Expected dtype for model weight with name {mapped_name} and dtype ({base_model_weight.array.qvalue.value.dtype}) to match that of the incoming weight ({sharded_array.dtype})"
             base_model_weight.array.scale.value = maybe_sharded_scale
             base_model_weight.array.qvalue.value = sharded_array
         else:
+            assert model_weight.value.dtype == sharded_array.dtype, f"Expected dtype for model weight with name {mapped_name} and dtype ({model_weight.value.dtype}) to match that of the incoming weight ({sharded_array.dtype})"
             model_weight.value = sharded_array
 
         model_weight_size_bytes = model_weight.nbytes / 1e9
@@ -651,7 +655,6 @@ class DeepSeekV3WeightLoader:
                         # assuming weights are loaded before scales.
                         weight_name = loaded_name.replace(
                             ".weight_scale_inv", ".weight")
-                        print("dequantizing", weight_name)
                         loaded_weight = weights_dequant_cpu(
                             quantized_weights[weight_name], loaded_weight)
                         loaded_name = weight_name
