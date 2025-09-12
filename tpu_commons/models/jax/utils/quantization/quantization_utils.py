@@ -219,9 +219,6 @@ def apply_qwix_quantization(
     qwix_config = None
     if quantization_config := vllm_config.additional_config.get(
             "quantization"):
-        if isinstance(quantization_config, str):
-            quantization_config = quantization_config_file_path_to_dict(
-                quantization_config)
         qwix_config = quantization_config.get("qwix").get("rules")
     if not qwix_config:
         return model_or_model_fn
@@ -299,10 +296,5 @@ def apply_qwix_on_abstract_model(vllm_config: "VllmConfig") -> bool:
     Returns:
         whether to apply Qwix quantization on the abstract model
     """
-    quantization_config = None
-    if quantization_config := vllm_config.additional_config.get(
-            "quantization", {}):
-        if isinstance(quantization_config, str):
-            quantization_config = quantization_config_file_path_to_dict(
-                quantization_config)
+    quantization_config = vllm_config.additional_config.get("quantization", {})
     return quantization_config.get("qwix", {}).get("use_abstract_model", False)

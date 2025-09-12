@@ -213,6 +213,9 @@ class TpuPlatform(Platform):
                     if isinstance(quantization_config, str):
                         quantization_config = quantization_config_file_path_to_dict(
                             quantization_config)
+                        # NOTE: unpack the quantization config now so we don't need to keep doing this every time
+                        vllm_config.additional_config[
+                            "quantization"] = quantization_config
                     parse_qwix_config_to_rules(
                         quantization_config["qwix"]["rules"])
                 except Exception as e:
