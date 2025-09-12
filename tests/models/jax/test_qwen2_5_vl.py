@@ -526,7 +526,7 @@ class TestQwen2_5_VLForConditionalGeneration:
                                        model.config.vocab_size)
         attn_meta = MagicMock(spec=AttentionMetadata)
         mock_lm_output = ([MagicMock()],
-                          jnp.ones((1, 10, model.config.hidden_size)))
+                          jnp.ones((1, 10, model.config.hidden_size)), [])
         model.language_model.return_value = mock_lm_output
 
         new_kvs, x, aux_hidden_states = model(kv_caches, input_ids, attn_meta)

@@ -355,14 +355,7 @@ class DeepSeekV3WeightLoader:
             (attn_heads, qk_nope_head_dim + v_head_dim, kv_lora_rank),
             "o_proj": (hidden_size, attn_heads, v_head_dim)
         }
-        # NOTE: this is only needed for pre-quantized models
-        self._scale_shape_map = {
-            "q_b_proj":
-            (1, qk_nope_head_dim + qk_rope_head_dim, q_lora_rank // 128),
-            "kv_b_proj": (attn_heads, (qk_nope_head_dim + v_head_dim) // 128,
-                          kv_lora_rank // 128),
-            "o_proj": (hidden_size // 128, attn_heads, v_head_dim // 128),
-        }
+
         # Set the mappings from loaded parameter keys to standardized names.
         self._loaded_to_standardized_keys = {
             # encode & decode
@@ -420,31 +413,47 @@ class DeepSeekV3WeightLoader:
             "layers.*.shared_experts.kernel_up_proj_DF",
         }
 
-        # NOTE: this will only be used for loading in quantized weights (via Qwix)
-        qwix_config = vllm_config.additional_config.get("quantization",
-                                                        {}).get("qwix", {})
-        self.scale_dtype = getattr(jnp,
-                                   qwix_config.get("scale_dtype", "bfloat16"))
-        # NOTE (jacobplatin): this is certainly a bit hacky, but I don't think there's any
-        # super clean way to get the desired quantization dtype
-        self.quant_dtype = None
-        self.is_model_quantized = vllm_config.hf_config.get(
-            "quantization_config",
-            {}).get("quant_method", "") != "" if hasattr(
-                vllm_config.hf_config, "quantization_config") else False
-        for rule in qwix_config.get("rules", []):
-            if rule.get("module_path") == ".*":
-                quant_dtype_str = rule.get("weight_qtype", "")
-                assert quant_dtype_str, "Quantization dtype not found in Qwix config! We currently expect your Qwix config to have a rule with module_path '.*' and a weight_qtype."
-                self.quant_dtype = getattr(jnp, quant_dtype_str)
-                logger.info(
-                    f"Quantizing DeepSeek with quantization dtype: {self.quant_dtype} and scale dtype: {self.scale_dtype}"
-                )
+        # TODO (jacobplatin): we shouldn't hard-code this, but the logic to obtain the true quantized dtype
+        # is non-trivial and the default checkpoints all use this dtype
+        self.quant_dtype = jnp.float8_e4m3fn
+
+        self.is_model_quantized = not vllm_config.additional_config.get(
+            "skip_quantization", False)
         if self.is_model_quantized:
-            if not self.quant_dtype:
-                raise ValueError(
-                    "No quantization dtype found in Qwix config! We currently expect your Qwix config to have a rule with module_path '.*' and a weight_qtype."
-                )
+            # NOTE: this will only be used for loading in quantized weights (via Qwix)
+            qwix_config = vllm_config.additional_config.get(
+                "quantization", {}).get("qwix", {})
+            self.scale_dtype = getattr(
+                jnp, qwix_config.get("scale_dtype", "bfloat16"))
+            # NOTE (jacobplatin): this is certainly a bit hacky, but I don't think there's any
+            # super clean way to get the desired quantization dtype
+            for rule in qwix_config.get("rules", []):
+                if rule.get("module_path") == ".*":
+                    quant_dtype_str = rule.get("weight_qtype", "")
+                    assert quant_dtype_str, "Quantization dtype not found in Qwix config! We currently expect your Qwix config to have a rule with module_path '.*' and a weight_qtype."
+                    self.quant_dtype = getattr(jnp, quant_dtype_str)
+                    logger.info(
+                        f"Quantizing DeepSeek with quantization dtype: {self.quant_dtype} and scale dtype: {self.scale_dtype}"
+                    )
+
+            quantization_block_sizes = vllm_config.model_config.hf_config.quantization_config[
+                "weight_block_size"]
+            # TODO (jacobplatin): we should handle the case where these aren't all the same
+            self.quantization_block_size = quantization_block_sizes[0]
+            assert all(block_size == self.quantization_block_size
+                       for block_size in quantization_block_sizes)
+
+            # NOTE: this is only needed for pre-quantized models
+            self._scale_shape_map = {
+                "q_b_proj": (1, qk_nope_head_dim + qk_rope_head_dim,
+                             q_lora_rank // self.quantization_block_size),
+                "kv_b_proj": (attn_heads, (qk_nope_head_dim + v_head_dim) //
+                              self.quantization_block_size,
+                              kv_lora_rank // self.quantization_block_size),
+                "o_proj":
+                (hidden_size // self.quantization_block_size, attn_heads,
+                 v_head_dim // self.quantization_block_size),
+            }
 
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
         # Find the corresponding model key using the HF key
@@ -536,11 +545,22 @@ class DeepSeekV3WeightLoader:
         weight_np = self._transpose_params(name, weight_np)
         if scale is not None:
             scale = self._transpose_params(name, scale)
-            # This handles a weird case where the scale is not cleanly divisible by 128
-            # (the base weight shape is 576 and the block size is 128), so we'll repeat
-            # the scale to bypass this
-            if "attn.kernel_kv_down_proj_DA" in mapped_name:
-                scale = scale.repeat(128, axis=1)[:, :576]
+            weight_shape = weight_np.shape
+            scale_shape = scale.shape
+            assert len(weight_shape) == len(scale_shape)
+            for idx, (weight_dim,
+                      scale_dim) in enumerate(zip(weight_shape, scale_shape)):
+                if weight_dim // self.quantization_block_size != scale_dim and weight_dim // scale_dim != 1:
+                    old_scale_shape = scale.shape
+                    scale = scale.repeat(self.quantization_block_size,
+                                         axis=idx)[:, :weight_dim]
+                    logger.warning(
+                        f"Got a weight with shape {weight_shape} and scale with shape {old_scale_shape} "
+                        f"where the scale_dim {scale_dim} does not match the weight_dim {weight_dim} "
+                        f"multiplied by the quantization block size {self.quantization_block_size}. "
+                        f"Repeating the scale to new shape {scale.shape} along axis {idx} with repeat size {self.quantization_block_size}."
+                    )
+                    break
 
         if model_weight.value.shape != weight_np.shape:
             raise ValueError(
@@ -576,9 +596,12 @@ class DeepSeekV3WeightLoader:
                 )
             # NOTE: Despite the fact that scale has the name `scale_inv` in it, we don't need to
             # inverse it
+            assert base_model_weight.array.scale.value.dtype == maybe_sharded_scale.dtype, "Expected dtype for model weight scale with name {mapped_name} and dtype ({base_model_weight.array.scale.value.dtype}) to match that of the incoming weight scale ({maybe_sharded_scale.dtype})"
+            assert base_model_weight.array.qvalue.value.dtype == sharded_array.dtype, "Expected dtype for model weight with name {mapped_name} and dtype ({base_model_weight.array.qvalue.value.dtype}) to match that of the incoming weight ({sharded_array.dtype})"
             base_model_weight.array.scale.value = maybe_sharded_scale
             base_model_weight.array.qvalue.value = sharded_array
         else:
+            assert model_weight.value.dtype == sharded_array.dtype, f"Expected dtype for model weight with name {mapped_name} and dtype ({model_weight.value.dtype}) to match that of the incoming weight ({sharded_array.dtype})"
             model_weight.value = sharded_array
 
         model_weight_size_bytes = model_weight.nbytes / 1e9
@@ -637,28 +660,43 @@ class DeepSeekV3WeightLoader:
                         continue
                 # NOTE: loaded_weight will be a Torch tensor, so we need to convert it to the
                 # equivalent jnp dtype
-                if self.is_model_quantized and loaded_weight.dtype == j2t_dtype(
-                        self.quant_dtype.dtype):
-                    scale_name = loaded_name.replace(".weight",
-                                                     ".weight_scale_inv")
-                    if scale_name in quantized_scales:
-                        scale = quantized_scales[scale_name]
-                        del quantized_scales[scale_name]
+                scale = None
+                if loaded_weight.dtype == j2t_dtype(self.quant_dtype.dtype):
+                    if self.is_model_quantized:
+                        scale_name = loaded_name.replace(
+                            ".weight", ".weight_scale_inv")
+                        if scale_name in quantized_scales:
+                            scale = quantized_scales[scale_name]
+                            del quantized_scales[scale_name]
+                        else:
+                            quantized_weights[loaded_name] = loaded_weight
+                            continue
                     else:
                         quantized_weights[loaded_name] = loaded_weight
                         continue
-                scale = None
+
                 if loaded_name.endswith(".weight_scale_inv"):
-                    weight_name = loaded_name.replace(".weight_scale_inv",
-                                                      ".weight")
-                    if weight_name in quantized_weights:
-                        scale = loaded_weight
-                        loaded_weight = quantized_weights[weight_name]
+                    if self.is_model_quantized:
+                        weight_name = loaded_name.replace(
+                            ".weight_scale_inv", ".weight")
+                        if weight_name in quantized_weights:
+                            scale = loaded_weight
+                            loaded_weight = quantized_weights[weight_name]
+                            loaded_name = weight_name
+                            del quantized_weights[weight_name]
+                        else:
+                            quantized_scales[loaded_name] = loaded_weight
+                            continue
+                    # In the case that we don't want to use the quantized weights,
+                    # we'll dequantize the weights using the loaded scale on-the-fly
+                    else:
+                        # assuming weights are loaded before scales.
+                        weight_name = loaded_name.replace(
+                            ".weight_scale_inv", ".weight")
+                        loaded_weight = weights_dequant_cpu(
+                            quantized_weights[weight_name], loaded_weight)
                         loaded_name = weight_name
                         del quantized_weights[weight_name]
-                    else:
-                        quantized_scales[loaded_name] = loaded_weight
-                        continue
                 # concat mlp.experts weights
                 stacked_scales = None
                 stacked_weights = None

@@ -13,8 +13,8 @@ from vllm.platforms.interface import Platform, PlatformEnum, _Backend
 from vllm.sampling_params import SamplingParams, SamplingType
 
 from tpu_commons.logger import init_logger
-from tpu_commons.models.jax.utils.quantization.quantization_utils import (
-    parse_qwix_config_to_rules, quantization_config_file_path_to_dict)
+from tpu_commons.models.jax.utils.quantization.quantization_utils import \
+    update_vllm_config_for_qwix_quantization
 
 if TYPE_CHECKING:
     from vllm.config import BlockSize, ModelConfig, VllmConfig
@@ -203,25 +203,7 @@ class TpuPlatform(Platform):
         if kv_transfer_config is not None:
             assert kv_transfer_config.kv_connector == "TPUConnector"
 
-        # Validate additional config
-        if additional_config := vllm_config.additional_config:
-            # Try loading/parsing the quantization config so that we can fail fast
-            if quantization_config := additional_config.get("quantization"):
-                try:
-                    # NOTE: Qwix quantization supports two paths: 1. quantization config file (which we need to parse)
-                    #  2. quantization config JSON
-                    if isinstance(quantization_config, str):
-                        quantization_config = quantization_config_file_path_to_dict(
-                            quantization_config)
-                        # NOTE: unpack the quantization config now so we don't need to keep doing this every time
-                        vllm_config.additional_config[
-                            "quantization"] = quantization_config
-                    parse_qwix_config_to_rules(
-                        quantization_config["qwix"]["rules"])
-                except Exception as e:
-                    raise ValueError(
-                        f"Invalid quantization config; please see README for details on quantization config: {e}"
-                    )
+        update_vllm_config_for_qwix_quantization(vllm_config)
 
     @classmethod
     def is_pin_memory_available(cls):
