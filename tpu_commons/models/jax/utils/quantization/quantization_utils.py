@@ -342,3 +342,52 @@ def get_default_qwix_quantization_config(
         return None
     if model_type == "deepseek_v3" and quant_method == "fp8":
         return DEFAULT_DEEPSEEK_FP8_CONFIG
+
+
+def update_vllm_config_for_qwix_quantization(vllm_config: "VllmConfig"):
+    """
+    Updates the vLLM config to unpack the Qwix quantization config if it exists.
+    By default, we'll check if the checkpoint is quantized and update the
+    Qwix quantization config to use the default quantization config if it exists,
+    but we'll override this if the user passes in a quantization config via `additional_config`.
+    """
+    # Automatically detect whether checkpoint is quantized and update the
+    # Qwix quantization config accordingly
+    # NOTE: if a Qwix config is provided (via the`additional_config`), we'll
+    # use that instead
+    model_type = vllm_config.model_config.hf_config.model_type.lower(
+    ) if hasattr(vllm_config.model_config.hf_config, "model_type") else None
+    quant_method = vllm_config.model_config.hf_config.quantization_config[
+        "quant_method"] if hasattr(vllm_config.model_config.hf_config,
+                                   "quantization_config") else None
+    default_quantization_config = get_default_qwix_quantization_config(
+        model_type, quant_method,
+        vllm_config.additional_config.get("skip_quantization", False))
+
+    if default_quantization_config is not None:
+        vllm_config.additional_config[
+            "quantization"] = default_quantization_config
+
+    # Validate additional config
+    if additional_config := vllm_config.additional_config:
+        # Try loading/parsing the quantization config so that we can fail fast
+        if quantization_config := additional_config.get("quantization"):
+            try:
+                if default_quantization_config is not None:
+                    logger.warning(
+                        "Overwriting default Qwix quantization config with "
+                        "user provided quantization config.")
+                # NOTE: Qwix quantization supports two paths: 1. quantization config file (which we need to parse)
+                #  2. quantization config JSON
+                if isinstance(quantization_config, str):
+                    quantization_config = quantization_config_file_path_to_dict(
+                        quantization_config)
+                    # NOTE: unpack the quantization config now so we don't need to keep doing this every time
+                    vllm_config.additional_config[
+                        "quantization"] = quantization_config
+                parse_qwix_config_to_rules(
+                    quantization_config["qwix"]["rules"])
+            except Exception as e:
+                raise ValueError(
+                    f"Invalid quantization config; please see README for details on quantization config: {e}"
+                )
