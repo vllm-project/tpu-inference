@@ -3,7 +3,7 @@ qwix:
   # in
   use_abstract_model: True
   # This signifies that the scales to be loaded in are in fp32
-  scale_dtype: 'float32'
+  scale_dtype: 'bfloat16'
   rules:
     # NOTE: each entry corresponds to a qwix.QuantizationRule
     - module_path: '.*.custom_module.router.*'

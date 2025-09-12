@@ -758,27 +758,19 @@ class DeepSeekV3WeightLoader:
             is_qwix_scale = (path[-1] == 'scale' and path[-2] == "array")
             param_dtype = self.scale_dtype if is_qwix_scale else param.value.dtype
             param_shape = param.value.shape
-            # TODO: refactor this
+            # TODO (jacobplatin): I'd like to make this more dynamic/abstract
             if is_qwix_scale:
-                if path[3] == "kernel_kv_down_proj_DA":
-                    param_shape = (56, 576)
-                # kv_b_proj
-                elif path[3] == "kernel_kv_up_proj_ANH":
-                    param_shape = (4, 128, 2)
-                # q_b_proj
-                elif path[3] == "kernel_q_up_proj_ANH":
-                    param_shape = (12, 1, 192)
-                # o_proj
-                elif path[3] == "kernel_o_proj_NHD":
-                    param_shape = (128, 1, 56)
-                # mlp.experts.*.down_proj.weight":
-                elif path[3] == "kernel_down_proj_EFD":
-                    param_shape = (256, 16, 56)
-                # mlp.experts.*.up/gate_proj.weight":
-                elif path[3] in ["kernel_up_proj_EDF", "kernel_gating_EDF"]:
-                    param_shape = (256, 56, 16)
-                else:
-                    param_shape = tuple(dim // 128 for dim in prev_param_shape)
+                shape_mapping = {
+                    "kernel_kv_down_proj_DA": (56, 576),
+                    "kernel_kv_up_proj_ANH": (4, 128, 2),
+                    "kernel_q_up_proj_ANH": (12, 1, 192),
+                    "kernel_o_proj_NHD": (128, 1, 56),
+                    "kernel_down_proj_EFD": (256, 16, 56),
+                    "kernel_up_proj_EDF": (256, 56, 16),
+                    "kernel_gating_EDF": (256, 56, 16),
+                }
+                param_shape = shape_mapping.get(
+                    path[3], tuple(dim // 128 for dim in prev_param_shape))
             param.value = _get_random_sharded_array(
                 rng.params(), param, param_shape, param_dtype,
                 ".".join([str(x) for x in path]))
