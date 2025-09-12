@@ -28,6 +28,26 @@ DEFAULT_NUM_TOKENS_FOR_MODEL_INPUTS = 512
 DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS = 256
 DEFAULT_MAX_NUM_BLOCKS_PER_REQ = 16
 
+DEFAULT_DEEPSEEK_FP8_CONFIG = {
+    "qwix": {
+        "use_abstract_model":
+        True,
+        "scale_dtype":
+        "bfloat16",
+        "rules": [
+            {
+                "module_path": ".*.custom_module.router.*",
+                "weight_qtype": None,
+            },
+            {
+                "module_path": ".*",
+                "weight_qtype": "float8_e4m3fn",
+                "act_qtype": "float8_e4m3fn",
+            },
+        ],
+    }
+}
+
 
 def parse_qwix_config_to_rules(
         qwix_config: List[dict]) -> List[qwix.QuantizationRule]:
@@ -298,3 +318,27 @@ def apply_qwix_on_abstract_model(vllm_config: "VllmConfig") -> bool:
     """
     quantization_config = vllm_config.additional_config.get("quantization", {})
     return quantization_config.get("qwix", {}).get("use_abstract_model", False)
+
+
+def get_default_qwix_quantization_config(
+        model_type: str, quant_method: str,
+        skip_quantization: bool) -> dict | None:
+    """
+    Some models are pre-quantized and in those cases, we want to return a default set of
+    Qwix quantization rules (instead of forcing the user to pass in a quantization config each time).
+
+    Note that if a user passes in a quantization config (via `additional_config`), then
+    we'll use that instead of this function.
+
+    Args:
+        model_type: the name of the model
+        quant_method: the quantization method
+        skip_quantization: whether to skip quantization.  In this case, we'll return None
+
+    Returns:
+        a dictionary containing the default Qwix quantization rules
+    """
+    if skip_quantization:
+        return None
+    if model_type == "deepseek_v3" and quant_method == "fp8":
+        return DEFAULT_DEEPSEEK_FP8_CONFIG

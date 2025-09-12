@@ -411,13 +411,11 @@ class DeepSeekV3WeightLoader:
                                                         {}).get("qwix", {})
         self.scale_dtype = getattr(jnp,
                                    qwix_config.get("scale_dtype", "bfloat16"))
+        # TODO (jacobplatin): we shouldn't hard-code this, but the logic to obtain the true quantized dtype
+        # is non-trivial and the default checkpoints all use this dtype
+        self.quant_dtype = jnp.float8_e4m3fn
         # NOTE (jacobplatin): this is certainly a bit hacky, but I don't think there's any
         # super clean way to get the desired quantization dtype
-        self.quant_dtype = None
-        self.is_model_quantized = vllm_config.hf_config.get(
-            "quantization_config",
-            {}).get("quant_method", "") != "" if hasattr(
-                vllm_config.hf_config, "quantization_config") else False
         for rule in qwix_config.get("rules", []):
             if rule.get("module_path") == ".*":
                 quant_dtype_str = rule.get("weight_qtype", "")
@@ -426,11 +424,8 @@ class DeepSeekV3WeightLoader:
                 logger.info(
                     f"Quantizing DeepSeek with quantization dtype: {self.quant_dtype} and scale dtype: {self.scale_dtype}"
                 )
-        if self.is_model_quantized:
-            if not self.quant_dtype:
-                raise ValueError(
-                    "No quantization dtype found in Qwix config! We currently expect your Qwix config to have a rule with module_path '.*' and a weight_qtype."
-                )
+        self.is_model_quantized = not vllm_config.additional_config.get(
+            "skip_quantization", False)
 
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
         # Find the corresponding model key using the HF key
@@ -623,28 +618,44 @@ class DeepSeekV3WeightLoader:
                         continue
                 # NOTE: loaded_weight will be a Torch tensor, so we need to convert it to the
                 # equivalent jnp dtype
-                if self.is_model_quantized and loaded_weight.dtype == j2t_dtype(
-                        self.quant_dtype.dtype):
-                    scale_name = loaded_name.replace(".weight",
-                                                     ".weight_scale_inv")
-                    if scale_name in quantized_scales:
-                        scale = quantized_scales[scale_name]
-                        del quantized_scales[scale_name]
+                scale = None
+                if loaded_weight.dtype == j2t_dtype(self.quant_dtype.dtype):
+                    if self.is_model_quantized:
+                        scale_name = loaded_name.replace(
+                            ".weight", ".weight_scale_inv")
+                        if scale_name in quantized_scales:
+                            scale = quantized_scales[scale_name]
+                            del quantized_scales[scale_name]
+                        else:
+                            quantized_weights[loaded_name] = loaded_weight
+                            continue
                     else:
                         quantized_weights[loaded_name] = loaded_weight
                         continue
-                scale = None
+
                 if loaded_name.endswith(".weight_scale_inv"):
-                    weight_name = loaded_name.replace(".weight_scale_inv",
-                                                      ".weight")
-                    if weight_name in quantized_weights:
-                        scale = loaded_weight
-                        loaded_weight = quantized_weights[weight_name]
+                    if self.is_model_quantized:
+                        weight_name = loaded_name.replace(
+                            ".weight_scale_inv", ".weight")
+                        if weight_name in quantized_weights:
+                            scale = loaded_weight
+                            loaded_weight = quantized_weights[weight_name]
+                            loaded_name = weight_name
+                            del quantized_weights[weight_name]
+                        else:
+                            quantized_scales[loaded_name] = loaded_weight
+                            continue
+                    # In the case that we don't want to use the quantized weights,
+                    # we'll dequantize the weights using the loaded scale on-the-fly
+                    else:
+                        # assuming weights are loaded before scales.
+                        weight_name = loaded_name.replace(
+                            ".weight_scale_inv", ".weight")
+                        print("dequantizing", weight_name)
+                        loaded_weight = weights_dequant_cpu(
+                            quantized_weights[weight_name], loaded_weight)
                         loaded_name = weight_name
                         del quantized_weights[weight_name]
-                    else:
-                        quantized_scales[loaded_name] = loaded_weight
-                        continue
                 # concat mlp.experts weights
                 stacked_scales = None
                 stacked_weights = None
