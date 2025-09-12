@@ -414,6 +414,10 @@ class DeepSeekV3WeightLoader:
         # NOTE (jacobplatin): this is certainly a bit hacky, but I don't think there's any
         # super clean way to get the desired quantization dtype
         self.quant_dtype = None
+        self.is_model_quantized = vllm_config.hf_config.get(
+            "quantization_config",
+            {}).get("quant_method", "") != "" if hasattr(
+                vllm_config.hf_config, "quantization_config") else False
         for rule in qwix_config.get("rules", []):
             if rule.get("module_path") == ".*":
                 quant_dtype_str = rule.get("weight_qtype", "")
@@ -422,10 +426,11 @@ class DeepSeekV3WeightLoader:
                 logger.info(
                     f"Quantizing DeepSeek with quantization dtype: {self.quant_dtype} and scale dtype: {self.scale_dtype}"
                 )
-        if not self.quant_dtype:
-            raise ValueError(
-                "No quantization dtype found in Qwix config! We currently expect your Qwix config to have a rule with module_path '.*' and a weight_qtype."
-            )
+        if self.is_model_quantized:
+            if not self.quant_dtype:
+                raise ValueError(
+                    "No quantization dtype found in Qwix config! We currently expect your Qwix config to have a rule with module_path '.*' and a weight_qtype."
+                )
 
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
         # Find the corresponding model key using the HF key
@@ -618,7 +623,8 @@ class DeepSeekV3WeightLoader:
                         continue
                 # NOTE: loaded_weight will be a Torch tensor, so we need to convert it to the
                 # equivalent jnp dtype
-                if loaded_weight.dtype == j2t_dtype(self.quant_dtype.dtype):
+                if self.is_model_quantized and loaded_weight.dtype == j2t_dtype(
+                        self.quant_dtype.dtype):
                     scale_name = loaded_name.replace(".weight",
                                                      ".weight_scale_inv")
                     if scale_name in quantized_scales:
@@ -640,25 +646,32 @@ class DeepSeekV3WeightLoader:
                         quantized_scales[loaded_name] = loaded_weight
                         continue
                 # concat mlp.experts weights
+                stacked_scales = None
+                stacked_weights = None
                 if "mlp.experts" in loaded_name:
                     if "down_proj" in loaded_name:
                         stacked_weights = self._process_moe_weights(
                             loaded_name, loaded_weight,
                             mlp_experts_down_proj_weights)
-                        stacked_scales = self._process_moe_weights(
-                            loaded_name, scale, mlp_experts_down_proj_scales)
+                        if scale is not None:
+                            stacked_scales = self._process_moe_weights(
+                                loaded_name, scale,
+                                mlp_experts_down_proj_scales)
                     if "gate_proj" in loaded_name:
                         stacked_weights = self._process_moe_weights(
                             loaded_name, loaded_weight,
                             mlp_experts_gate_proj_weights)
-                        stacked_scales = self._process_moe_weights(
-                            loaded_name, scale, mlp_experts_gate_proj_scales)
+                        if scale is not None:
+                            stacked_scales = self._process_moe_weights(
+                                loaded_name, scale,
+                                mlp_experts_gate_proj_scales)
                     if "up_proj" in loaded_name:
                         stacked_weights = self._process_moe_weights(
                             loaded_name, loaded_weight,
                             mlp_experts_up_proj_weights)
-                        stacked_scales = self._process_moe_weights(
-                            loaded_name, scale, mlp_experts_up_proj_scales)
+                        if scale is not None:
+                            stacked_scales = self._process_moe_weights(
+                                loaded_name, scale, mlp_experts_up_proj_scales)
                     if stacked_weights is not None:
                         weight_bytes, weight_shards = self._load_individual_weight(
                             loaded_name,
