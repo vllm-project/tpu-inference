@@ -6,11 +6,11 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import (MultiModalBatchedField,
-                                    MultiModalFieldElem, MultiModalKwargsItem,
-                                    PlaceholderRange)
+                                    MultiModalFeatureSpec, MultiModalFieldElem,
+                                    MultiModalKwargsItem, PlaceholderRange)
 from vllm.sampling_params import SamplingType
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
-from vllm.multimodal.inputs import MultiModalFeatureSpec
+
 from tpu_commons.runner.input_batch_jax import CachedRequestState
 from tpu_commons.runner.tpu_jax_runner import TPUModelRunner
 
@@ -92,7 +92,13 @@ class TestMultiModalManager:
             sampling_params=MagicMock(),
             block_ids=(),
             num_computed_tokens=0,
-            mm_features=[MultiModalFeatureSpec(data=mm_item,identifier="req-1",modality="image",mm_position=PlaceholderRange(offset=0, length=1))],
+            mm_features=[
+                MultiModalFeatureSpec(data=mm_item,
+                                      identifier="req-1",
+                                      modality="image",
+                                      mm_position=PlaceholderRange(offset=0,
+                                                                   length=1))
+            ],
             lora_request=None,
             pooling_params=None,
             generator=None,
@@ -171,7 +177,13 @@ class TestMultiModalManager:
             sampling_params=MagicMock(),
             block_ids=(),
             num_computed_tokens=0,
-            mm_features=[MultiModalFeatureSpec(data=mm_item_1,identifier="req-1",modality="image",mm_position=PlaceholderRange(offset=0, length=1))],
+            mm_features=[
+                MultiModalFeatureSpec(data=mm_item_1,
+                                      identifier="req-1",
+                                      modality="image",
+                                      mm_position=PlaceholderRange(offset=0,
+                                                                   length=1))
+            ],
             lora_request=None,
             pooling_params=None,
             generator=None)
@@ -192,7 +204,13 @@ class TestMultiModalManager:
             sampling_params=MagicMock(),
             block_ids=(),
             num_computed_tokens=0,
-            mm_features=[MultiModalFeatureSpec(data=mm_item_2,identifier="req-2",modality="image",mm_position=PlaceholderRange(offset=0, length=1))],
+            mm_features=[
+                MultiModalFeatureSpec(data=mm_item_2,
+                                      identifier="req-2",
+                                      modality="image",
+                                      mm_position=PlaceholderRange(offset=0,
+                                                                   length=1))
+            ],
             lora_request=None,
             pooling_params=None,
             generator=None)
@@ -264,7 +282,13 @@ class TestMultiModalManager:
             sampling_params=mock_sampling_params,
             block_ids=([], ),
             num_computed_tokens=0,  # This will be updated per step
-            mm_features=[MultiModalFeatureSpec(data=None,identifier=req_id,modality="image",mm_position=PlaceholderRange(offset=10, length=56))],
+            mm_features=[
+                MultiModalFeatureSpec(data=None,
+                                      identifier=req_id,
+                                      modality="image",
+                                      mm_position=PlaceholderRange(offset=10,
+                                                                   length=56))
+            ],
             lora_request=None,
             pooling_params=None,
             generator=None,

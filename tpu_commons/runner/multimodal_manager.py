@@ -87,8 +87,7 @@ class MultiModalManager:
                 mm_feature = req_state.mm_features[mm_input_id]
                 mm_hash = mm_feature.identifier
                 mm_kwargs.append(mm_feature.data)
-                mm_hashes_pos.append(
-                    (mm_hash, mm_feature.mm_position))
+                mm_hashes_pos.append((mm_hash, mm_feature.mm_position))
 
         # Batch mm inputs as much as we can: if a request in the batch has
         # multiple modalities or a different modality than the previous one,
