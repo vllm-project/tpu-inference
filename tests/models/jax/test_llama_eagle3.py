@@ -115,7 +115,6 @@ class TestEagleLlama3ForCausalLM:
         """Tests the forward pass of the EagleLlama3ForCausalLM model."""
         draft_model_config = mock_vllm_config.speculative_config.draft_model_config
         hf_config = draft_model_config.hf_config
-        hf_config.draft_vocab_size = 128256
         model = EagleLlama3ForCausalLM(mock_vllm_config, rng, mesh)
 
         input_ids, hidden_states, attention_metadata = mock_model_inputs
