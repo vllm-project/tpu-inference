@@ -66,7 +66,7 @@ def create_kv_caches(
                                                num_kv_heads, head_size,
                                                cache_dtype)
 
-    sharding = NamedSharding(mesh, PartitionSpec(None, None, "model"))
+    sharding = NamedSharding(mesh, PartitionSpec("data", None, "model"))
 
     def _allocate() -> jax.Array:
         return jnp.empty(

@@ -1,3 +1,4 @@
+from collections import defaultdict
 import functools
 import os
 import random
@@ -209,6 +210,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # InputBatch needs to work with sampling tensors greater than padding
         # to avoid dynamic shapes. Also, avoid suboptimal alignment.
         self.max_num_reqs = max(scheduler_config.max_num_seqs, MIN_NUM_SEQS)
+        self.max_num_reqs_per_dp = self.max_num_reqs // self.mesh.shape["data"]
         # [16, 32, 64, 128, 256, 512, 1024, 2048]
         self.num_tokens_paddings = runner_utils.get_token_paddings(
             min_token_size=16,
@@ -555,101 +557,222 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        
         assert total_num_scheduled_tokens > 0
+        breakpoint()
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
 
+        # Fake DP scheduler output
+        dp_size = 2 
+        self.input_batch.req_dp_ranks = []
+        for i in range(len(self.input_batch.req_ids)):
+            self.input_batch.req_dp_ranks.append(i%2)
+
+        # Sort requests into DP ranks 
+        req_ids_dp = defaultdict(list)
+        req_indices_dp  = defaultdict(list)
+        num_scheduled_tokens_per_dp_rank = defaultdict(int)
+        scheduled_tokens_per_dp_rank = defaultdict(list)
+        num_req_per_dp_rank = defaultdict(int)
+        for req_id, dp_rank in zip(self.input_batch.req_ids[:num_reqs], self.input_batch.req_dp_ranks[:num_reqs]):
+            req_ids_dp[dp_rank].append(req_id)
+            req_indices_dp[dp_rank].append(self.input_batch.req_id_to_index[req_id])
+            num_scheduled_tokens_per_dp_rank[dp_rank] += scheduler_output.num_scheduled_tokens[req_id]
+            scheduled_tokens_per_dp_rank[dp_rank].append(scheduler_output.num_scheduled_tokens[req_id])
+            num_req_per_dp_rank[dp_rank] += 1
+            
+        num_req_each_dp_rank_list = [num_req_per_dp_rank[dp_rank] for dp_rank in range(dp_size)]
+        cum_num_req_each_dp_rank_list = np.cumsum([0] + num_req_each_dp_rank_list)
+        
+        
+        breakpoint()
+        # Find maximum number of scheduled tokens across DP ranks
+        max_num_scheduled_tokens_across_dp = max(num_scheduled_tokens_per_dp_rank.values())
+        
+        padded_num_scheduled_tokens_per_dp_rank = runner_utils.get_padded_token_len(
+            self.num_tokens_paddings, max_num_scheduled_tokens_across_dp)
+        
+        padded_total_num_scheduled_tokens = padded_num_scheduled_tokens_per_dp_rank * dp_size
+        
+        assert max_num_scheduled_tokens_across_dp > 0
+       
+        # Find maximum number of requests across DP ranks 
+        max_num_reqs_across_dp = max(len(req_ids) for req_ids in req_ids_dp.values())
+        padded_num_reqs_per_dp_rank = runner_utils.get_padded_num_reqs_with_upper_limit(
+            max_num_reqs_across_dp, self.max_num_reqs_per_dp)
+        padded_num_reqs = padded_num_reqs_per_dp_rank * dp_size
+        
+        # # Insert dummy requests to pad each DP rank to have the same number of tokens 
+        # for dp_rank in range(dp_size):
+        #     num_scheduled_tokens = num_scheduled_tokens_per_dp_rank[dp_rank]
+        #     padding_tokens = padded_num_scheduled_tokens_per_dp_rank - num_scheduled_tokens
+        #     if padding_tokens > 0:
+        #         req_ids_dp[dp_rank].append(("dummy", padding_tokens))
+        
+        # # Insert dummy requests to pad each DP rank to have the same number of requests
+        # for dp_rank in range(dp_size):
+        #     num_reqs = len(req_ids_dp[dp_rank])
+        #     padding_reqs = padded_num_reqs_per_dp_rank - num_reqs
+        #     for _ in range(padding_reqs):
+        #         req_ids_dp[dp_rank].append(("dummy", 0))
+        
+        # # Flatten the sorted and padded req_ids
+        # sorted_padded_req_ids = []
+        # num_scheduled_tokens_per_req = []
+        # dummy_request_mask = []
+        # for dp_rank in range(dp_size):
+        #     for req_id in req_ids_dp[dp_rank]:
+        #         sorted_padded_req_ids.append(req_id)
+        #         num_scheduled_tokens_per_req.append(scheduler_output.num_scheduled_tokens[req_id] if not isinstance(req_id, tuple) else req_id[1])
+        #         dummy_request_mask.append(1 if isinstance(req_id, tuple) else 0)
+        # breakpoint()
+        
         # Get the number of scheduled tokens for each request.
-        num_scheduled_tokens_per_req = []
-        max_num_scheduled_tokens_all_reqs = 0
-        for req_id in self.input_batch.req_ids[:num_reqs]:
-            assert req_id is not None
-            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            num_scheduled_tokens_per_req.append(num_tokens)
-            max_num_scheduled_tokens_all_reqs = max(
-                max_num_scheduled_tokens_all_reqs, num_tokens)
-        num_scheduled_tokens_per_req = np.array(num_scheduled_tokens_per_req,
-                                                dtype=np.int32)
-        assert max_num_scheduled_tokens_all_reqs > 0
-        padded_num_reqs = runner_utils.get_padded_num_reqs_with_upper_limit(
-            num_reqs, self.max_num_reqs)
-
-        # Get request indices.
-        # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
-        # For each scheduled token, what are the corresponding req index.
-        req_indices = np.repeat(self.arange_cpu[:num_reqs],
-                                num_scheduled_tokens_per_req)
-
-        # Get batched arange.
-        # E.g., [2, 5, 3] -> [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        # For each scheduled token, what is its position in corresponding req.
-        arange = np.concatenate(
-            [self.arange_cpu[:n] for n in num_scheduled_tokens_per_req])
-
-        # Get positions.
-        positions_np = self.positions_cpu[:total_num_scheduled_tokens]
-        np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
+        # num_scheduled_tokens_per_req = []
+        # max_num_scheduled_tokens_all_reqs = 0
+        
+        # for req_id in self.input_batch.req_ids[:num_reqs]:
+        #     assert req_id is not None
+        #     num_tokens = scheduler_output.num_scheduled_tokens[req_id]
+        #     num_scheduled_tokens_per_req.append(num_tokens)
+        #     max_num_scheduled_tokens_all_reqs = max(
+        #         max_num_scheduled_tokens_all_reqs, num_tokens)
+        # num_scheduled_tokens_per_req = np.array(num_scheduled_tokens_per_req,
+        #                                         dtype=np.int32)
+        # assert max_num_scheduled_tokens_all_reqs > 0
+        
+        
+        ############# get self.input_ids_cpu #############
+        # populate self.input_ids_cpu and self.positions_cpu
+        for dp_rank in range(dp_size):
+            
+            token_offset = padded_num_scheduled_tokens_per_dp_rank*dp_rank 
+            req_indices = np.repeat(req_indices_dp[dp_rank], scheduled_tokens_per_dp_rank[dp_rank])
+            arange = np.concatenate(
+                [self.arange_cpu[:n] for n in scheduled_tokens_per_dp_rank[dp_rank]])
+            
+            positions_np = self.positions_cpu[token_offset : token_offset + num_scheduled_tokens_per_dp_rank[dp_rank]]
+            np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
                arange,
                out=positions_np)
-
-        # Multi-modal support
-        # Calculate M-RoPE positions.
-        # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
-        if self.uses_mrope:
-            self.mm_manager.calc_mrope_positions(scheduler_output)
-
-        # Get token indices.
-        # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
-        # where M is the max_model_len.
-        token_indices = (positions_np +
+            token_indices = (positions_np +
                          req_indices * self.input_batch.token_ids_cpu.shape[1])
-
-        # NOTE(woosuk): We use torch.index_select instead of np.take here
-        # because torch.index_select is much faster than np.take for large
-        # tensors.
-        np.take(self.input_batch.token_ids_cpu.flatten(),
+            np.take(self.input_batch.token_ids_cpu.flatten(),
                 token_indices,
-                out=self.input_ids_cpu[:total_num_scheduled_tokens])
+                out=self.input_ids_cpu[token_offset:token_offset + num_scheduled_tokens_per_dp_rank[dp_rank]])
 
-        # Prepare the attention metadata.
-        self.query_start_loc_cpu[0] = 0
-        np.cumsum(num_scheduled_tokens_per_req,
-                  out=self.query_start_loc_cpu[1:num_reqs + 1])
-        self.query_start_loc_cpu[num_reqs + 1:] = 1
+            
+            self.input_ids_cpu[token_offset + num_scheduled_tokens_per_dp_rank[dp_rank]:padded_num_scheduled_tokens_per_dp_rank*dp_rank] = 0
+            
+        # # Get request indices.
+        # # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
+        # # For each scheduled token, what are the corresponding req index.
+        # req_indices = np.repeat(self.arange_cpu[:padded_num_reqs],num_scheduled_tokens_per_req)
+        # breakpoint()
+        # # Get batched arange.
+        # # E.g., [2, 5, 3] -> [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+        # # For each scheduled token, what is its position in corresponding req.
+        # arange = np.concatenate(
+        #     [self.arange_cpu[:n] for n in num_scheduled_tokens_per_req])
+        # breakpoint()
+        # # Get positions.
+        # positions_np = self.positions_cpu[:padded_total_num_scheduled_tokens]
+        # np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
+        #        arange,
+        #        out=positions_np)
+        # breakpoint()
+        # # Multi-modal support
+        # # Calculate M-RoPE positions.
+        # # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
+        # if self.uses_mrope:
+        #     self.mm_manager.calc_mrope_positions(scheduler_output)
 
-        self.seq_lens_cpu[:num_reqs] = (
-            self.input_batch.num_computed_tokens_cpu[:num_reqs] +
-            num_scheduled_tokens_per_req)
+        # # Get token indices.
+        # # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+        # # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
+        # # where M is the max_model_len.
+        # token_indices = (positions_np +
+        #                  req_indices * self.input_batch.token_ids_cpu.shape[1])
+        # breakpoint()
+        # # NOTE(woosuk): We use torch.index_select instead of np.take here
+        # # because torch.index_select is much faster than np.take for large
+        # # tensors.
+        # np.take(self.input_batch.token_ids_cpu.flatten(),
+        #         token_indices,
+        #         out=self.input_ids_cpu[:total_num_scheduled_tokens])
+        
+        # print("token_indices", token_indices)
+        # breakpoint()
+        
+        ##########################
+        # populate self.query_start_loc_cpu and self.seq_lens_cpu
+        start_loc = 0 
+        for dp_rank in range(dp_size):
+            req_offset = dp_rank * (self.max_num_reqs_per_dp +1 )
+            # Prepare the attention metadata.
+            query_start_loc_cpu = self.query_start_loc_cpu[req_offset: req_offset+self.max_num_reqs_per_dp + 1]
+            _num_reqs_so_far = cum_num_req_each_dp_rank_list[dp_rank]
+            _num_reqs = num_req_per_dp_rank[dp_rank]
+            query_start_loc_cpu[0] = start_loc
+            
+            np.cumsum(scheduled_tokens_per_dp_rank[dp_rank],
+                    out=query_start_loc_cpu[1:_num_reqs + 1])
+            query_start_loc_cpu[1:_num_reqs + 1] += start_loc
+            query_start_loc_cpu[_num_reqs + 1:] = 1
+            self.seq_lens_cpu[req_offset:req_offset+_num_reqs] = (
+                self.input_batch.num_computed_tokens_cpu[_num_reqs_so_far:_num_reqs_so_far + _num_reqs] +
+                scheduled_tokens_per_dp_rank[dp_rank])
+            self.seq_lens_cpu[req_offset+_num_reqs:req_offset+self.max_num_reqs_per_dp] = 0 
+            start_loc = query_start_loc_cpu[_num_reqs]
+            
+        
+        ############# padding logic starts #############
+        # # Do the padding and copy the tensors to the TPU.
+        # padded_total_num_scheduled_tokens = runner_utils.get_padded_token_len(
+        #     self.num_tokens_paddings, total_num_scheduled_tokens)
+        # # Zero out to avoid spurious values from prev iteration (last cp chunk)
+        # self.input_ids_cpu[
+        #     total_num_scheduled_tokens:padded_total_num_scheduled_tokens] = 0
 
-        # Do the padding and copy the tensors to the TPU.
-        padded_total_num_scheduled_tokens = runner_utils.get_padded_token_len(
-            self.num_tokens_paddings, total_num_scheduled_tokens)
-        # Zero out to avoid spurious values from prev iteration (last cp chunk)
-        self.input_ids_cpu[
-            total_num_scheduled_tokens:padded_total_num_scheduled_tokens] = 0
+        # # Please see runner_utils.PhasedBasedProfiler for details
+        # if self.phase_based_profiler:
+        #     batch_composition_stats = runner_utils.get_batch_composition_stats(
+        #         self.input_batch, total_num_scheduled_tokens, num_reqs,
+        #         padded_total_num_scheduled_tokens, scheduler_output)
 
-        # Please see runner_utils.PhasedBasedProfiler for details
-        if self.phase_based_profiler:
-            batch_composition_stats = runner_utils.get_batch_composition_stats(
-                self.input_batch, total_num_scheduled_tokens, num_reqs,
-                padded_total_num_scheduled_tokens, scheduler_output)
-
-            self.phase_based_profiler.step(batch_composition_stats)
+        #     self.phase_based_profiler.step(batch_composition_stats)
 
         # Inputs
         input_ids = self.input_ids_cpu[:padded_total_num_scheduled_tokens]
         positions = self.positions_cpu[:padded_total_num_scheduled_tokens]
         mrope_positions = self.mrope_positions_cpu[:, :
                                                    padded_total_num_scheduled_tokens]
+        
+        ############# padding logic ends #############
+        
+        ############# block table logic starts #############
+        
         block_tables = self.block_table_cpu[:self.max_num_reqs]
-        block_tables[:num_reqs, :self.max_num_blocks_per_req] = (
-            self.input_batch.block_table[0].get_cpu_tensor()[:num_reqs])
-
-        # TODO(pooyam): Some paddings are up to `num_reqs_paddings` (spec decoding, select hidden states, etc) and some other are to `max_num_reqs` (block table, seq_lens). We should stick to one of them maybe?
-        query_start_loc = self.query_start_loc_cpu[:self.max_num_reqs + 1]
+        for dp_rank in range(dp_size):
+            req_offset = self.max_num_reqs_per_dp * dp_rank
+            _num_reqs = num_req_per_dp_rank[dp_rank]
+            
+            block_tables[req_offset:req_offset+_num_reqs, :self.max_num_blocks_per_req] = (
+                self.input_batch.block_table[0].get_cpu_tensor()[req_indices_dp[dp_rank]])
+            breakpoint()
+        
+        ############# block table logic ends #############
+        
+        query_start_loc = self.query_start_loc_cpu[:self.max_num_reqs + dp_size]
         seq_lens = self.seq_lens_cpu[:self.max_num_reqs]
+        
+        
         request_distribution = np.array(self.input_batch.request_distribution)
+        
+        
+        padded_num_reqs = self.max_num_reqs
+        
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
