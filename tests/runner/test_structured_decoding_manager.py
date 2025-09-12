@@ -100,9 +100,7 @@ class TestStructuredDecodingManager:
                 block_ids=([1], ),
                 num_computed_tokens=1,
                 lora_request=None,
-                mm_kwargs=[],
-                mm_hashes=[],
-                mm_positions=[],
+                mm_features=[],
                 pooling_params=None,
                 generator=None,
             )
@@ -114,9 +112,7 @@ class TestStructuredDecodingManager:
                 block_ids=([2], ),
                 num_computed_tokens=1,
                 lora_request=None,
-                mm_kwargs=[],
-                mm_hashes=[],
-                mm_positions=[],
+                mm_features=[],
                 pooling_params=None,
                 generator=None,
             )
@@ -128,9 +124,7 @@ class TestStructuredDecodingManager:
                 block_ids=([3], ),
                 num_computed_tokens=1,
                 lora_request=None,
-                mm_kwargs=[],
-                mm_hashes=[],
-                mm_positions=[],
+                mm_features=[],
                 pooling_params=None,
                 generator=None,
             )
