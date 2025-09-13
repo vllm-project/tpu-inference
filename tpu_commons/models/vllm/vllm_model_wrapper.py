@@ -1,8 +1,9 @@
 import copy
 import functools
 import os
+from collections.abc import Sequence
 from contextlib import nullcontext
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Any, List, Optional, Tuple
 from unittest.mock import patch
 
 import jax
@@ -214,7 +215,7 @@ class VllmModelWrapper:
             # code to consume.
             hidden_states = jax_view(hidden_states)
 
-            return new_kv_caches, hidden_states
+            return new_kv_caches, hidden_states, []
 
         return step_fun
 

@@ -11,23 +11,14 @@ from torch.utils import _pytree as pytree
 from torchax.interop import torch_view
 from torchax.ops.mappings import t2j
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 
 from tpu_commons.logger import init_logger
-from tpu_commons.models.vllm.jax_fused_moe import JaxFusedMoE
 
 P = PartitionSpec
 
 logger = init_logger(__name__)
-
-
-def shard_fused_moe(layer: torch.nn.Module, mesh: Mesh,
-                    vllm_config: VllmConfig):
-    assert isinstance(layer, FusedMoE)
-    jax_layer = JaxFusedMoE(layer, mesh, vllm_config.parallel_config)
-    return jax_layer
 
 
 def shard_vocab_parallel_embedding(layer: torch.nn.Module, mesh: Mesh,
@@ -41,8 +32,8 @@ def shard_vocab_parallel_embedding(layer: torch.nn.Module, mesh: Mesh,
 
 def shard_lm_head(layer: torch.nn.Module, mesh: Mesh, vllm_config: VllmConfig):
     # TODO(qihqi): currently this is not handling case of tie_word_weights=True.
-    # if that config is set, then we should not create new weights but reuse the weight
-    # from VocabParallelEmbedding
+    # if that config is set, then we should not create new weights but reuse the
+    # weight from VocabParallelEmbedding
     assert isinstance(layer, ParallelLMHead)
     w = Parameter(torch_view(t2j(layer.weight)), requires_grad=False)
     layer.weight = w.apply_jax_(jax.device_put,
@@ -55,8 +46,6 @@ def shard_lm_head(layer: torch.nn.Module, mesh: Mesh, vllm_config: VllmConfig):
 
 
 MODULE_TYPE_TO_WRAPPING_FUNC = {
-    # TODO(kyuyeunk): Refactor this layer to use vLLM APIs.
-    FusedMoE: shard_fused_moe,
     VocabParallelEmbedding: shard_vocab_parallel_embedding,
     ParallelLMHead: shard_lm_head,
 }
@@ -99,14 +88,13 @@ def shard_model_to_tpu(model: torch.nn.Module, mesh: Mesh,
     """
 
     def _is_unmoved_tensor(x):
-        # tensors haven't been turned into torchax tensor are the ones not moved to TPU yet.
+        # tensors haven't been turned into torchax tensor are the ones not moved
+        # to TPU yet.
         return isinstance(
             x, torch.Tensor) and not isinstance(x, torchax.tensor.Tensor)
 
     def _move_to_tpu_replicated(x):
-        # In certain cases, if t2j puts the tensor on CPU first and then device_put it to TPU, the tensor layout get messed up. To avoid that, we set jax default_device to TPU.
-        with jax.default_device(jax.devices("tpu")[0]):
-            x = t2j(x, use_dlpack=False)
+        x = t2j(x, use_dlpack=False)
         return torch_view(x).apply_jax_(jax.device_put,
                                         NamedSharding(mesh, P()))
 

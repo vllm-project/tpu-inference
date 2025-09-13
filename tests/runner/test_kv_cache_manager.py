@@ -120,9 +120,7 @@ class TestKVCacheManager:
             block_ids=tuple([prefill_block_ids]),
             num_computed_tokens=0,
             lora_request=None,
-            mm_kwargs=[],
-            mm_hashes=[],
-            mm_positions=[],
+            mm_features=[],
             pooling_params=None,
             generator=None,
         )

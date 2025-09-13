@@ -21,6 +21,7 @@ class MockVllmConfig:
         self.model_config.dtype = jnp.bfloat16
         self.load_config = MagicMock()
         self.load_config.download_dir = None
+        self.speculative_config = None
 
 
 @pytest.fixture
@@ -136,9 +137,10 @@ class TestLlamaForCausalLM:
         )
         # 1 seq with 16 tokens
         input_ids, attention_metadata, indices_do_sample = mock_model_inputs
-        kv_caches, hidden_states = model(kv_caches, input_ids,
-                                         attention_metadata)
+        kv_caches, hidden_states, aux_hidden_states = model(
+            kv_caches, input_ids, attention_metadata)
         assert hidden_states.shape == (8, hidden_size)
+        assert len(aux_hidden_states) == 0
 
         hidden_states = hidden_states[indices_do_sample]
         assert hidden_states.shape == (1, hidden_size)

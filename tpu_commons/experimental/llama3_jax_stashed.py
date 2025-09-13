@@ -178,7 +178,7 @@ class LlamaForCausalLM(nnx.Module):
                 "llama_final_norm"):  #Norm after last transformer block
             final_activation_TD = self.final_norm(x_TD)
 
-        return kv_caches, final_activation_TD
+        return kv_caches, final_activation_TD, []
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         with jax.named_scope("llama_lm_head_projection"

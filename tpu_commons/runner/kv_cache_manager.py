@@ -412,9 +412,7 @@ class KVCacheManager:
             block_ids=tuple(block_ids),
             num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
-            mm_kwargs=getattr(request, "mm_kwargs", []),
-            mm_positions=getattr(request, "mm_positions", []),
-            mm_hashes=getattr(request, "mm_hashes", []),
+            mm_features=getattr(request, "mm_features", []),
             pooling_params=getattr(request, "pooling_params", None),
             generator=None,
         )

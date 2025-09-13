@@ -122,7 +122,7 @@ class CompilationManager:
                 inputs_embeds,
                 layer_name_to_kvcache_index,
             ):
-                kv_caches, hidden_states = self.runner.model_fn(
+                kv_caches, hidden_states, aux_hidden_states = self.runner.model_fn(
                     state, kv_caches, input_ids, attention_metadata,
                     inputs_embeds, layer_name_to_kvcache_index)
                 self.runner.kv_caches = kv_caches
