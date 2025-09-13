@@ -138,12 +138,21 @@ def extract_all_params_buffers_v2(m: torch.nn.Module):
     params = {}
     buffers = {}
 
-    for name, param in m.named_parameters(remove_duplicate=False):
+    for name, param in m.named_parameters(remove_duplicate=True):
+        # print(f'xw32 line142 extract_all_params_buffers_v2 parameter: {name=}')
         params[name] = param
-    for name, buf in m.named_buffers(remove_duplicate=False):
+    for name, buf in m.named_buffers(remove_duplicate=True):
+        # print(f'xw32 line144 extract_all_params_buffers_v2 buffer: {name=}')
         buffers[name] = buf
 
     return params, buffers
+
+
+# def clear_tracer(m: torch.nn.Module):
+#     for name, param in m.named_parameters(remove_duplicate=False):
+#         if param.jax() is
+#     for name, buf in m.named_buffers(remove_duplicate=False):
+#         buffers[name] = buf
 
 
 def extract_all_buffers(m: torch.nn.Module):

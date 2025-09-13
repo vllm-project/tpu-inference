@@ -206,7 +206,7 @@ class VllmModelWrapper:
                         "inputs_embeds": None,
                     },
                     tie_weights=False,
-                    strict=True,
+                    strict=False,
                 )
                 vllm_model_wrapper_context = get_vllm_model_wrapper_context()
                 new_kv_caches = vllm_model_wrapper_context.kv_caches
@@ -238,7 +238,7 @@ class VllmModelWrapper:
                         "hidden_state": torch_view(hidden_states),
                     },
                     tie_weights=False,
-                    strict=True,
+                    strict=False,
                 )
             return jax_view(logits)
 
