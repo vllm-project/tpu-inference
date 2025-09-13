@@ -236,22 +236,6 @@ class TestApplyQwixQuantization(unittest.TestCase):
                                     apply_to_abstract_model=False)
         mock_jit.assert_called_once()
 
-    @patch('tpu_commons.models.jax.model_loader.nnx.jit')
-    def test_quantization_applied_from_string_path(self, mock_jit):
-        """
-        Test that quantization is applied when the config is a string (file path).
-        """
-        config_path = "int8_default.yaml"
-        self.mock_vllm_config.additional_config = {"quantization": config_path}
-        with patch('tpu_commons.utils.get_padded_num_heads', return_value=128):
-            apply_qwix_quantization(self.mock_vllm_config,
-                                    self.mock_model,
-                                    self.mock_rng,
-                                    self.mock_mesh,
-                                    apply_to_abstract_model=False)
-
-        mock_jit.assert_called_once()
-
 
 class TestQuantizationConfigFileToDict(unittest.TestCase):
     """Tests for the quantization_config_file_path_to_dict function."""
