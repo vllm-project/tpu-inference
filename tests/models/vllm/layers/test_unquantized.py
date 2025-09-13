@@ -414,6 +414,7 @@ def test_jax_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
 @pytest.mark.parametrize("topk", [2])
 def test_jax_fused_moe(use_ep, mesh, num_tokens, intermediate_size,
                        hidden_size, num_experts, topk):
+    torch.manual_seed(42)
     dtype = torch.bfloat16
 
     a = torch.randn((num_tokens, hidden_size), dtype=dtype) / 10
