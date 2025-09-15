@@ -333,6 +333,12 @@ class Llama4WeightLoader:
             "layers.*.shared_experts.kernel_gating_DF",
             "language_model.model.layers.*.feed_forward.shared_expert.up_proj.weight":
             "layers.*.shared_experts.kernel_up_proj_DF",
+            "language_model.model.layers.*.feed_forward.down_proj.weight": # Add for Llama-4-Maverick-17B-128E-Instruct
+            "layers.*.custom_module.kernel_down_proj_FD",
+            "language_model.model.layers.*.feed_forward.up_proj.weight": # Add for Llama-4-Maverick-17B-128E-Instruct
+            "layers.*.custom_module.kernel_up_proj_DF",
+            "language_model.model.layers.*.feed_forward.gate_proj.weight": # Add for Llama-4-Maverick-17B-128E-Instruct
+            "layers.*.custom_module.kernel_gating_DF",
         }
 
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
