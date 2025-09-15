@@ -21,6 +21,7 @@ from tpu_commons.models.jax.common.layers import (DenseFFW, Embedder, LMhead,
                                                   RMSNorm)
 from tpu_commons.models.jax.common.moe.deepseek_moe import (DeepSeekV3Router,
                                                             SparseMoE)
+from tpu_commons.models.jax.common.moe.moe import MoE
 from tpu_commons.models.jax.common.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
 from tpu_commons.models.jax.utils.weight_utils import (get_param,
@@ -45,7 +46,7 @@ class DeepSeekV3(nnx.Module):
         self.vllm_config = vllm_config
         self.rng = nnx.Rngs(rng)
 
-        num_layers: int = 61
+        num_layers: int = 20
         num_local_experts: int = 256
 
         vocab_size: int = 129280
@@ -82,6 +83,18 @@ class DeepSeekV3(nnx.Module):
 
         self.random_init = force_random_weights or self.vllm_config.additional_config.get(
             "random_weights", False)
+        self.sparse_matmul = self.vllm_config.additional_config.get(
+            "sparse_matmul", False)
+
+        if isinstance(self.sparse_matmul, str):
+            self.sparse_matmul = self.sparse_matmul.lower() == "true"
+        else:
+            self.sparse_matmul = bool(self.sparse_matmul)
+
+        if self.sparse_matmul:
+            logger.info("sparse matmul is enabled")
+        else:
+            logger.info("sparse matmul is disabled, using dense matmul")
         self.mesh = mesh
 
         self.weight_loader = DeepSeekV3WeightLoader(
@@ -183,30 +196,54 @@ class DeepSeekV3(nnx.Module):
                 activation_ffw_td=('data', None),
                 ed_sharding=('model', None),
                 e_sharding=('model', ))
-            custom_module = SparseMoE(
-                dtype=dtype,
-                num_local_experts=num_local_experts,
-                apply_expert_weight_before_computation=False,
-                hidden_size=hidden_size,
-                intermediate_size_moe=moe_intermediate_size,
-                num_experts_per_tok=num_experts_per_token,
-                mesh=self.mesh,
-                hidden_act=hidden_act,
-                rngs=self.rng,
-                random_init=self.random_init,
-                activation_ffw_td=('data', None),
-                activation_ffw_ted=('data', None, None),
-                edf_sharding=('model', None, None),
-                efd_sharding=('model', None, None),
-                router=router) if is_moe_layer else DenseFFW(
+            if self.sparse_matmul:
+                custom_module = SparseMoE(
                     dtype=dtype,
-                    hidden_act=hidden_act,
+                    num_local_experts=num_local_experts,
+                    apply_expert_weight_before_computation=False,
                     hidden_size=hidden_size,
-                    intermediate_size=ffw_intermediate_size,
+                    intermediate_size_moe=moe_intermediate_size,
+                    num_experts_per_tok=num_experts_per_token,
+                    mesh=self.mesh,
+                    hidden_act=hidden_act,
                     rngs=self.rng,
                     random_init=self.random_init,
-                    df_sharding=(None, ('model', 'expert')),
-                    fd_sharding=(('model', 'expert'), None))
+                    activation_ffw_td=('data', None),
+                    activation_ffw_ted=('data', None, None),
+                    edf_sharding=('model', None, None),
+                    efd_sharding=('model', None, None),
+                    router=router) if is_moe_layer else DenseFFW(
+                        dtype=dtype,
+                        hidden_act=hidden_act,
+                        hidden_size=hidden_size,
+                        intermediate_size=ffw_intermediate_size,
+                        rngs=self.rng,
+                        random_init=self.random_init,
+                        df_sharding=(None, ('model', 'expert')),
+                        fd_sharding=(('model', 'expert'), None))
+            else:
+                custom_module = MoE(
+                    dtype=dtype,
+                    num_local_experts=num_local_experts,
+                    apply_expert_weight_before_computation=False,
+                    hidden_size=hidden_size,
+                    intermediate_size_moe=moe_intermediate_size,
+                    hidden_act=hidden_act,
+                    rngs=self.rng,
+                    random_init=self.random_init,
+                    activation_ffw_td=('data', None),
+                    activation_ffw_ted=('data', None, None),
+                    edf_sharding=('model', None, None),
+                    efd_sharding=('model', None, None),
+                    router=router) if is_moe_layer else DenseFFW(
+                        dtype=dtype,
+                        hidden_act=hidden_act,
+                        hidden_size=hidden_size,
+                        intermediate_size=ffw_intermediate_size,
+                        rngs=self.rng,
+                        random_init=self.random_init,
+                        df_sharding=(None, ('model', 'expert')),
+                        fd_sharding=(('model', 'expert'), None))
 
             shared_experts = DenseFFW(dtype=dtype,
                                       hidden_act=hidden_act,
