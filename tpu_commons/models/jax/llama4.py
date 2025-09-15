@@ -83,29 +83,31 @@ class Llama4ForCausalLM(nnx.Module):
 
         # Dynamically retrieve model parameters from the Hugging Face configuration.
         # This approach replaces hard-coded values with flexible ones
-        num_layers: int = text_config.get("num_hidden_layers", 48)
-        intermediate_size_moe: int = text_config.get("intermediate_size", 8192)
+        num_layers: int = getattr(text_config, "num_hidden_layers", 48)
+        intermediate_size_moe: int = getattr(text_config, "intermediate_size", 8192)
 
         # num_local_experts uses 128 experts specifically for Llama-4-Maverick-17B-128E-Instruct.
         # while Llama-4-Scout-17B-16E-Instruct uses 16 experts.
-        num_local_experts: int = text_config.get("num_local_experts", 128)
-        hidden_act: str = text_config.get("hidden_act", "silu")
-        self.no_rope_layer_interval = text_config.get("no_rope_layers_interval", 4)
+        num_local_experts: int = getattr(text_config, "num_local_experts", 128)
+        hidden_act: str = getattr(text_config, "hidden_act", "silu")
+
+        # Note: The original config files show "no_rope_layers", not "no_rope_layers_interval"
+        self.no_rope_layer_interval = getattr(text_config, "no_rope_layers", []) 
 
         # interleave_moe_layer_step has a layer step of 2 to interleave MoE and dense layers for Llama-4-Maverick-17B-128E-Instruct.
         # The default value is set to 1 for compatibility with Llama-4-Scout.
-        self.interleave_moe_layer_step = text_config.get("interleave_moe_layer_step", 1)
+        self.interleave_moe_layer_step = getattr(text_config, "interleave_moe_layer_step", 1)
 
         # Specifically for Llama-4-Maverick-17B-128E-Instruct, which uses 16384 as the intermediate size for its MLP layers.
         # But in Llama-4-Scout-17B-16E-Instruct config file, it has the same value.
-        self.intermediate_size_mlp = text_config.get("intermediate_size_mlp", 16384)
+        self.intermediate_size_mlp = getattr(text_config, "intermediate_size_mlp", 16384)
 
-        self.num_attention_heads = text_config.get("num_attention_heads", 40)
-        self.num_key_value_heads = text_config.get("num_key_value_heads", 8)
-        self.head_dim = text_config.get("head_dim", 128)
+        self.num_attention_heads = getattr(text_config, "num_attention_heads", 40)
+        self.num_key_value_heads = getattr(text_config, "num_key_value_heads", 8)
+        self.head_dim = getattr(text_config, "head_dim", 128)
 
-        num_shared_experts = text_config.get("num_shared_experts", 1)
-        rms_norm_eps = text_config.get("rms_norm_eps", 1e-5)
+        num_shared_experts = getattr(text_config, "num_shared_experts", 1)
+        rms_norm_eps = getattr(text_config, "rms_norm_eps", 1e-5)
 
         self.embedder = Embedder(vocab_size=vocab_size,
                                  hidden_size=self.hidden_size,
