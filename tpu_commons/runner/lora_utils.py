@@ -13,7 +13,7 @@ from torchax.ops.mappings import t2j
 from vllm.lora.request import LoRARequest
 
 from tpu_commons.models.vllm.sharding import (
-    extract_all_params_buffers_v2, shard_lora_weights_and_move_to_tpu)
+    extract_all_params_buffers, shard_lora_weights_and_move_to_tpu)
 
 if TYPE_CHECKING:
     from tpu_commons.runner.tpu_jax_runner import TPUModelRunner
@@ -50,8 +50,6 @@ class LoraUtils:
         shard_lora_weights_and_move_to_tpu(self.runner.model.model,
                                            self.runner.mesh)
 
-        # params, buffers, _ = extract_all_buffers(self.runner.model.model)
-        # params_and_buffers = shard_model_to_tpu(self.runner.model.model, self.runner.mesh, self.runner.vllm_config)
         params_and_buffers = self._process_params_and_buffers(
             self.runner.model.model, self.runner.mesh)
         self.runner.state = params_and_buffers
@@ -71,7 +69,7 @@ class LoraUtils:
                                             NamedSharding(mesh, P()))
 
         # Merely doing extract_all_buffers is not enough because we need to change the lora weights to torchax tensor.
-        params, buffers = extract_all_params_buffers_v2(model)
+        params, buffers = extract_all_params_buffers(model)
         params, buffers = pytree.tree_map_only(_is_unmoved_tensor,
                                                _move_to_tpu_replicated,
                                                (params, buffers))

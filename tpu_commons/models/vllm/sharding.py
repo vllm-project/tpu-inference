@@ -102,8 +102,7 @@ def shard_model_to_tpu(model: torch.nn.Module, mesh: Mesh,
         shard_parallel_layers_to_tpu(model, mesh, vllm_config)
 
         # For other weight tensors, repliate them on all the TPU chips.
-        # params, buffers, variables = extract_all_buffers(model)
-        params, buffers = extract_all_params_buffers_v2(model)
+        params, buffers = extract_all_params_buffers(model)
 
         fmt_size = functools.partial(humanize.naturalsize, binary=True)
         for qual_name, x in {**params, **buffers}.items():
@@ -116,88 +115,21 @@ def shard_model_to_tpu(model: torch.nn.Module, mesh: Mesh,
         params, buffers = pytree.tree_map_only(_is_unmoved_tensor,
                                                _move_to_tpu_replicated,
                                                (params, buffers))
-        # set_all_buffers(model, {}, {}, variables)
         params_and_buffers = {**params, **buffers}
 
         return params_and_buffers
 
 
-def extract_all_params_buffers_v2(m: torch.nn.Module):
+def extract_all_params_buffers(m: torch.nn.Module):
     params = {}
     buffers = {}
 
     for name, param in m.named_parameters(remove_duplicate=True):
-        # print(f'xw32 line142 extract_all_params_buffers_v2 parameter: {name=}')
         params[name] = param
     for name, buf in m.named_buffers(remove_duplicate=True):
-        # print(f'xw32 line144 extract_all_params_buffers_v2 buffer: {name=}')
         buffers[name] = buf
 
     return params, buffers
-
-
-# def clear_tracer(m: torch.nn.Module):
-#     for name, param in m.named_parameters(remove_duplicate=False):
-#         if param.jax() is
-#     for name, buf in m.named_buffers(remove_duplicate=False):
-#         buffers[name] = buf
-
-
-def extract_all_buffers(m: torch.nn.Module):
-    params = {}
-    buffers = {}
-    variables = {}
-
-    def extract_one(module, prefix):
-        for k in dir(module):
-            v = getattr(module, k, None)
-            if v is None:
-                continue
-
-            qual_name = prefix + k
-            # print(qual_name)
-            # module_params = {name for name, _ in module.named_parameters()}
-            # if k in module_params:
-            #     if isinstance(v, torch.nn.ParameterList):
-            #         for i, param in enumerate(v):
-            #             params[qual_name + f'.{i}'] = param
-            #     else:
-            #         # sometime, v is not torch.nn.Parameter. Rather it's Tensor(<class 'jax._src.interpreters.partial_eval.DynamicJaxprTracer'> JitTracer<bfloat16[151936,2048]>)
-            #         params[qual_name] = v
-            if isinstance(v, torch.nn.Parameter) and k in module._parameters:
-                params[qual_name] = v
-            elif isinstance(v, torch.nn.ParameterList):
-                for i, param in enumerate(v):
-                    params[qual_name + f'.{i}'] = param
-            elif k in module._buffers:
-                buffers[qual_name] = v
-            elif isinstance(v, torch.Tensor):
-                variables[qual_name] = v
-
-        for name, child in module.named_children():
-            extract_one(child, prefix + name + '.')
-
-    extract_one(m, '')
-    return params, buffers, variables
-
-
-def set_all_buffers(m, params, buffers, variables):
-
-    def set_one(module, prefix):
-        for k in dir(module):
-            qual_name = prefix + k
-            if (potential_v := buffers.get(qual_name)) is not None or (
-                    potential_v := variables.get(qual_name)) is not None:
-                if getattr(module, k, None) is None:
-                    setattr(module, k, potential_v)
-            elif (potential_v := params.get(qual_name)) is not None:
-                # print(k, potential_v)
-                # setattr(module, k, torch.nn.Parameter(potential_v))
-                module.register_parameter(k, potential_v)
-        for name, child in module.named_children():
-            set_one(child, prefix + name + '.')
-
-    set_one(m, '')
 
 
 def shard_and_move_tensor_to_tpu(tensor, mesh):

@@ -145,7 +145,7 @@ class VllmModelWrapper:
                                         lora_config: LoRAConfig) -> None:
 
         def _process_module(module, name=None, parent=None):
-            if get_fqn(module) in LORA_MODULE_TYPE_TO_WRAPPING_FUNC.keys():
+            if get_fqn(module) in LORA_MODULE_TYPE_TO_WRAPPING_FUNC:
                 assert parent is not None and name is not None, (
                     "Top Level module is not expected to be LoRA wrapper")
                 module.lora_a_stacked = torch.nn.ParameterList([
@@ -207,7 +207,6 @@ class VllmModelWrapper:
                         "inputs_embeds": None,
                     },
                     tie_weights=False,
-                    strict=False,
                 )
                 vllm_model_wrapper_context = get_vllm_model_wrapper_context()
                 new_kv_caches = vllm_model_wrapper_context.kv_caches
@@ -239,7 +238,6 @@ class VllmModelWrapper:
                         "hidden_state": torch_view(hidden_states),
                     },
                     tie_weights=False,
-                    strict=False,
                 )
             return jax_view(logits)
 
