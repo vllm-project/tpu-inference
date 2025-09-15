@@ -27,6 +27,7 @@ from vllm.v1.engine.core import EngineCoreProc as vLLMEngineCoreProc
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import RequestStatus
 
+from tpu_commons import utils as common_utils
 from tpu_commons.core import disagg_executor, disagg_utils
 # ======================================================================================
 # Imports for _DisaggOrchestrator (decoupled from vLLM)
@@ -35,7 +36,6 @@ from tpu_commons.interfaces.config import IConfig
 from tpu_commons.interfaces.engine import IEngineCore
 from tpu_commons.interfaces.request import IRequest
 from tpu_commons.runner.utils import LatencyTracker
-from tpu_commons.utils import get_hash_fn_by_name
 
 from .adapters import VllmConfigAdapter, VllmEngineAdapter, VllmRequestAdapter
 
@@ -97,10 +97,22 @@ class _DisaggOrchestrator:
         self._transfer_backlogs = [
             queue.Queue(4) for i in range(len(self._prefill_engines))
         ]
-        self._decode_backlogs = {
-            idx: queue.Queue(self._config.scheduler_config.max_num_seqs)
-            for idx, engine in enumerate(self._decode_engines)
-        }
+
+        self._decode_backlogs = {}
+        for idx, engine in enumerate(self._decode_engines):
+            # Determine the decode backlog len by remaning hbm dividing max kv cache size of a single request
+            runner = engine.model_executor.driver_worker.model_runner
+            hbm_usage = common_utils.hbm_usage_bytes(
+                engine.model_executor.driver_worker.devices)
+            hbm_free = [limit - used for used, limit in hbm_usage]
+            max_kv_bytes = len(runner.kv_caches) * (
+                runner.max_model_len // runner.cache_config.block_size) * (
+                    runner.kv_caches[0][0].nbytes) // len(hbm_free)
+            max_queue_len = min(hbm_free[0] // max_kv_bytes,
+                                self._config.scheduler_config.max_num_seqs)
+            logger.debug(
+                f"max kv bytes: {max_kv_bytes}, max_queue_len {max_queue_len}")
+            self._decode_backlogs[idx] = queue.Queue(max_queue_len)
 
         self._prefill_threads = [
             JetThread(
@@ -490,7 +502,7 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
                 is not None):
 
             block_size = vllm_config.cache_config.block_size
-            caching_hash_fn = get_hash_fn_by_name(
+            caching_hash_fn = common_utils.get_hash_fn_by_name(
                 vllm_config.cache_config.prefix_caching_hash_algo)
             init_none_hash(caching_hash_fn)
 
