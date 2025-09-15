@@ -104,6 +104,10 @@ class _DisaggOrchestrator:
             runner = engine.model_executor.driver_worker.model_runner
             hbm_usage = common_utils.hbm_usage_bytes(
                 engine.model_executor.driver_worker.devices)
+            if not hbm_usage:
+                self._decode_backlogs[idx] = queue.Queue(
+                    self._config.scheduler_config.max_num_seqs)
+                continue
             hbm_free = [limit - used for used, limit in hbm_usage]
             max_kv_bytes = len(runner.kv_caches) * (
                 runner.max_model_len // runner.cache_config.block_size) * (
