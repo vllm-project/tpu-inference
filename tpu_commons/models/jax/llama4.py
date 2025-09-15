@@ -326,6 +326,7 @@ class Llama4WeightLoader:
             "k_proj": (2, 0, 1),
             "v_proj": (2, 0, 1),
             "router": (1, 0),
+            "down_proj": (1, 0), # add a transposition step specifically for the down_proj weight
             "shared_expert.down_proj": (1, 0),
             "shared_expert.gate_proj": (1, 0),
             "shared_expert.up_proj": (1, 0),
