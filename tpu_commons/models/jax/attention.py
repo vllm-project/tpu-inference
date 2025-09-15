@@ -21,17 +21,17 @@ def sharded_ragged_paged_attention(
     v_scale: float | None = None,
 ):
     """Shards along KV heads."""
-    qkv_spec = P(None, "model", None)
-    kv_cache_spec = P(None, None, "model")
+    qkv_spec = P("data", "model", None)
+    kv_cache_spec = P("data", None, "model")
     in_specs = (
         qkv_spec,  # q
         qkv_spec,  # k
         qkv_spec,  # v
         kv_cache_spec,  # kv cache
-        P(),  # kv_lens
-        P(),  # page_indices
-        P(),  # cu_q_lens
-        P(),  # distribution
+        P("data", ),  # kv_lens
+        P("data",),  # page_indices
+        P("data",),  # cu_q_lens
+        P("data",),  # distribution
     )
     out_specs = (qkv_spec, kv_cache_spec)
 
