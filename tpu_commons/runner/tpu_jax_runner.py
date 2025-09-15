@@ -29,7 +29,8 @@ from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.worker.kv_connector_model_runner_mixin import \
     KVConnectorModelRunnerMixin
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
-
+from jax.sharding import NamedSharding, PartitionSpec
+	
 from tpu_commons import utils as common_utils
 from tpu_commons.layers.common.attention_metadata import AttentionMetadata
 from tpu_commons.layers.jax.sample.rejection_sampler import RejectionSampler
@@ -138,6 +139,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         else:
             self.kv_cache_dtype = TPU_STR_DTYPE_TO_TORCH_DTYPE[
                 cache_config.cache_dtype]
+            
+        self.data_parallel_sharding = NamedSharding(self.mesh, PartitionSpec("data"))
 
     def _init_random(self):
         if self.model_config.seed is None:
@@ -559,7 +562,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         
         assert total_num_scheduled_tokens > 0
-        breakpoint()
+        # breakpoint()
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
 
@@ -575,6 +578,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         num_scheduled_tokens_per_dp_rank = defaultdict(int)
         scheduled_tokens_per_dp_rank = defaultdict(list)
         num_req_per_dp_rank = defaultdict(int)
+        
         for req_id, dp_rank in zip(self.input_batch.req_ids[:num_reqs], self.input_batch.req_dp_ranks[:num_reqs]):
             req_ids_dp[dp_rank].append(req_id)
             req_indices_dp[dp_rank].append(self.input_batch.req_id_to_index[req_id])
@@ -582,11 +586,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             scheduled_tokens_per_dp_rank[dp_rank].append(scheduler_output.num_scheduled_tokens[req_id])
             num_req_per_dp_rank[dp_rank] += 1
             
+            
         num_req_each_dp_rank_list = [num_req_per_dp_rank[dp_rank] for dp_rank in range(dp_size)]
         cum_num_req_each_dp_rank_list = np.cumsum([0] + num_req_each_dp_rank_list)
         
         
-        breakpoint()
+        # breakpoint()
         # Find maximum number of scheduled tokens across DP ranks
         max_num_scheduled_tokens_across_dp = max(num_scheduled_tokens_per_dp_rank.values())
         
@@ -753,6 +758,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         
         ############# block table logic starts #############
         
+        
         block_tables = self.block_table_cpu[:self.max_num_reqs]
         for dp_rank in range(dp_size):
             req_offset = self.max_num_reqs_per_dp * dp_rank
@@ -760,16 +766,22 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             
             block_tables[req_offset:req_offset+_num_reqs, :self.max_num_blocks_per_req] = (
                 self.input_batch.block_table[0].get_cpu_tensor()[req_indices_dp[dp_rank]])
-            breakpoint()
+            # breakpoint()
         
         ############# block table logic ends #############
         
         query_start_loc = self.query_start_loc_cpu[:self.max_num_reqs + dp_size]
         seq_lens = self.seq_lens_cpu[:self.max_num_reqs]
         
+        ############# request_distribution logic starts #############
         
-        request_distribution = np.array(self.input_batch.request_distribution)
+        _request_distribution = []
+        for dp_rank in range(dp_size):
+            _num_reqs = num_req_per_dp_rank[dp_rank]
+            _request_distribution.append([0, 0, _num_reqs])
+        request_distribution = np.array(_request_distribution)
         
+        ############# request_distribution logic ends #############
         
         padded_num_reqs = self.max_num_reqs
         
@@ -793,7 +805,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         # Put to device
         sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
-            self.mesh, self.input_batch, padded_num_reqs)
+            self.mesh, self.input_batch, padded_num_reqs, sharding=self.data_parallel_sharding)
         if self.uses_mrope:
             positions = mrope_positions
 
@@ -805,7 +817,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         (input_ids, positions, block_tables, query_start_loc, seq_lens,
          logits_indices, request_distribution) = device_array(
              self.mesh, (input_ids, positions, block_tables, query_start_loc,
-                         seq_lens, logits_indices, request_distribution))
+                         seq_lens, logits_indices, request_distribution), sharding=self.data_parallel_sharding )
+
+        print()
+        print("DP input_ids ", input_ids.shape, input_ids.sharding)
+        print("DP positions", positions.shape, positions.sharding)  
+        print("DP block_tables", block_tables.shape, block_tables.sharding)
+        print("DP query_start_loc", query_start_loc.shape, query_start_loc.sharding)
+        print("DP seq_lens", seq_lens.shape, seq_lens.sharding) 
+        print("DP logits_indices", logits_indices.shape, logits_indices.sharding)
+        print("DP request_distribution", request_distribution.shape, request_distribution.sharding)
+        print("DP sampling_metadata", sampling_metadata.temperature.shape, sampling_metadata.temperature.sharding)
+        
 
         if self.lora_config is not None:
             self.lora_utils.set_active_loras(

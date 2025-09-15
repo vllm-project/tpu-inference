@@ -14,7 +14,9 @@ def create_parser():
     parser = FlexibleArgumentParser()
     # Add engine args
     EngineArgs.add_cli_args(parser)
-    parser.set_defaults(model="/home/wenxindong_google_com/.cache/huggingface/hub/models--meta-llama--Llama-3.1-8B/snapshots/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b")
+    # parser.set_defaults(model="/home/wenxindong_google_com/.cache/huggingface/hub/models--meta-llama--Llama-3.1-8B/snapshots/d04e592bb4f6aa9cfee91e2e20afa771667e1d4b")
+   
+    parser.set_defaults(model="meta-llama/Llama-3.2-1B-Instruct")
     parser.set_defaults(max_model_len=1024)
 
     # Add sampling params

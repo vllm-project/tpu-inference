@@ -1160,11 +1160,13 @@ def static_validate_inputs(
         raise ValueError(
             f"Expected {num_page_indices=} to be divisible by {max_num_seqs=}."
         )
-    if cu_q_lens.shape != (max_num_seqs + 1, ):
+    # hard coding for now
+    dp_size = 2
+    if cu_q_lens.shape != (max_num_seqs + dp_size, ):
         raise ValueError(
-            f"Expected {cu_q_lens.shape=} to be ({max_num_seqs + 1},).")
-    if distribution.shape != (3, ):
-        raise ValueError(f"Expected {distribution.shape=} to be (3,).")
+            f"Expected {cu_q_lens.shape=} to be ({max_num_seqs + dp_size},).")
+    if distribution.shape != (dp_size, 3):
+        raise ValueError(f"Expected {distribution.shape=} to be ({dp_size}, 3).")
 
     if page_size % kv_packing != 0:
         raise ValueError(f"{page_size=} must be divisible by {kv_packing=}.")
