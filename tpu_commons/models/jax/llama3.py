@@ -8,6 +8,8 @@ from transformers import LlamaConfig, modeling_flax_utils
 from vllm.config import VllmConfig
 
 from tpu_commons import utils
+from tpu_commons.attention.backends.pallas_torchax import \
+    TPU_STR_DTYPE_TO_JAX_DTYPE
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention import attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
@@ -112,6 +114,39 @@ class LlamaAttention(nnx.Module):
             rngs=rng,
         )
 
+        self._q_scale = 1.0
+        self._k_scale = 1.0
+        self._v_scale = 1.0
+        self.kv_cache_quantized_dtype = None
+        # TODO
+        kv_cache_dtype = "bf16"
+        if kv_cache_dtype != "auto":
+            self.kv_cache_quantized_dtype = TPU_STR_DTYPE_TO_JAX_DTYPE.get(
+                kv_cache_dtype.lower().strip())
+
+    def quantize_kv(self, key: jax.Array,
+                    value: jax.Array) -> Tuple[jax.Array, jax.Array]:
+        """
+        Quantize the key and value tensors.
+
+        Args:
+            key: The key tensor to quantize.
+            value: The value tensor to quantize.
+
+        Returns:
+            Tuple[jax.Array, jax.Array]: The quantized key and value tensors.
+        """
+        dtype_info = jnp.finfo(self.kv_cache_quantized_dtype)
+        minval, maxval = float(dtype_info.min), float(dtype_info.max)
+        key = key.astype(jnp.float32) / self._k_scale
+        key = jnp.clip(key, minval, maxval)
+        key = key.astype(self.kv_cache_quantized_dtype)
+        value = value.astype(jnp.float32) / self._v_scale
+        value = jnp.clip(value, minval, maxval)
+        value = value.astype(self.kv_cache_quantized_dtype)
+
+        return key, value
+
     def __call__(
         self,
         kv_cache: Optional[jax.Array],
@@ -130,6 +165,12 @@ class LlamaAttention(nnx.Module):
         # v: (T, K, H)
         v = self.v_proj(x)
         # o: (T, N, H)
+        q_scale = k_scale = v_scale = None
+        if self.kv_cache_quantized_dtype:
+            k, v = self.quantize_kv(k, v)
+            q_scale = self._q_scale
+            k_scale = self._k_scale
+            v_scale = self._v_scale
         new_kv_cache, outputs = attention(
             kv_cache,
             q,
@@ -138,6 +179,9 @@ class LlamaAttention(nnx.Module):
             attention_metadata,
             self.mesh,
             self.head_dim_original,
+            q_scale=q_scale,
+            k_scale=k_scale,
+            v_scale=v_scale,
         )
         # (T, D)
         o = self.o_proj(outputs)
