@@ -334,7 +334,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         scheduler_output: "VllmSchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> ModelRunnerOutput:
-        return self._execute_model(scheduler_output)[1]
+        with jax.disable_jit():
+            return self._execute_model(scheduler_output)[1]
 
     def _execute_model(
         self,
@@ -402,6 +403,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                      tuple(self.layer_name_to_kvcache_index.items()),
                      lora_metadata,
                  )
+                jax.block_until_ready(hidden_states)
 
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)
@@ -560,9 +562,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        
         assert total_num_scheduled_tokens > 0
-        # breakpoint()
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
 
@@ -591,7 +591,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         cum_num_req_each_dp_rank_list = np.cumsum([0] + num_req_each_dp_rank_list)
         
         
-        # breakpoint()
         # Find maximum number of scheduled tokens across DP ranks
         max_num_scheduled_tokens_across_dp = max(num_scheduled_tokens_per_dp_rank.values())
         
@@ -608,30 +607,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             max_num_reqs_across_dp, self.max_num_reqs_per_dp)
         padded_num_reqs = padded_num_reqs_per_dp_rank * dp_size
         
-        # # Insert dummy requests to pad each DP rank to have the same number of tokens 
-        # for dp_rank in range(dp_size):
-        #     num_scheduled_tokens = num_scheduled_tokens_per_dp_rank[dp_rank]
-        #     padding_tokens = padded_num_scheduled_tokens_per_dp_rank - num_scheduled_tokens
-        #     if padding_tokens > 0:
-        #         req_ids_dp[dp_rank].append(("dummy", padding_tokens))
-        
-        # # Insert dummy requests to pad each DP rank to have the same number of requests
-        # for dp_rank in range(dp_size):
-        #     num_reqs = len(req_ids_dp[dp_rank])
-        #     padding_reqs = padded_num_reqs_per_dp_rank - num_reqs
-        #     for _ in range(padding_reqs):
-        #         req_ids_dp[dp_rank].append(("dummy", 0))
-        
-        # # Flatten the sorted and padded req_ids
-        # sorted_padded_req_ids = []
-        # num_scheduled_tokens_per_req = []
-        # dummy_request_mask = []
-        # for dp_rank in range(dp_size):
-        #     for req_id in req_ids_dp[dp_rank]:
-        #         sorted_padded_req_ids.append(req_id)
-        #         num_scheduled_tokens_per_req.append(scheduler_output.num_scheduled_tokens[req_id] if not isinstance(req_id, tuple) else req_id[1])
-        #         dummy_request_mask.append(1 if isinstance(req_id, tuple) else 0)
-        # breakpoint()
         
         # Get the number of scheduled tokens for each request.
         # num_scheduled_tokens_per_req = []
@@ -766,7 +741,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             
             block_tables[req_offset:req_offset+_num_reqs, :self.max_num_blocks_per_req] = (
                 self.input_batch.block_table[0].get_cpu_tensor()[req_indices_dp[dp_rank]])
-            # breakpoint()
+        print("block_tables for dp rank 0", block_tables[:20, :10])
+        print("block_tables for dp rank 1", block_tables[self.max_num_reqs_per_dp: self.max_num_reqs_per_dp + 20, :10])
+        
         
         ############# block table logic ends #############
         
@@ -779,7 +756,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         for dp_rank in range(dp_size):
             _num_reqs = num_req_per_dp_rank[dp_rank]
             _request_distribution.append([0, 0, _num_reqs])
-        request_distribution = np.array(_request_distribution)
+        request_distribution = np.array(_request_distribution).flatten()
         
         ############# request_distribution logic ends #############
         
