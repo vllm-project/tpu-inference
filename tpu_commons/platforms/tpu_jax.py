@@ -158,18 +158,17 @@ class TpuPlatform(Platform):
             # TODO(cuiq): remove this dependency.
             from vllm.v1.attention.backends.pallas import \
                 PallasAttentionBackend
-            cache_config.block_size = PallasAttentionBackend.get_page_size(
-                vllm_config)  # type: ignore[assignment]
+            cache_config.block_size = 128
             min_page_size = PallasAttentionBackend.get_min_page_size(
                 vllm_config)
-            if min_page_size > cache_config.block_size:
-                logger.warning(
-                    "Increase the page size from %s to %s to make sure there's"
-                    "no SMEM OOM",
-                    cache_config.block_size,
-                    min_page_size,
-                )
-                cache_config.block_size = min_page_size  # type: ignore[assignment]
+            # if min_page_size > cache_config.block_size:
+            #     logger.warning(
+            #         "Increase the page size from %s to %s to make sure there's"
+            #         "no SMEM OOM",
+            #         cache_config.block_size,
+            #         min_page_size,
+            #     )
+            #     cache_config.block_size = min_page_size  # type: ignore[assignment]
 
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config

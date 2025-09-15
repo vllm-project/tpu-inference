@@ -1,0 +1,2 @@
+# bsz = 512
+SKIP_JAX_PRECOMPILE=0 PROMPTS=512 VLLM_XLA_CHECK_RECOMPILATION=1 python examples/offline_inference.py --model=Qwen/Qwen3-32B --tensor-parallel-size=8 --max-model-len=5120 --max-num-seqs=512 --max-num-batched-tokens=4096
