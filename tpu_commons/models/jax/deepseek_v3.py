@@ -22,9 +22,13 @@ from tpu_commons.models.jax.common.layers import (DenseFFW, Embedder, LMhead,
 from tpu_commons.models.jax.common.moe.deepseek_moe import (DeepSeekV3Router,
                                                             SparseMoE)
 <<<<<<< HEAD
+<<<<<<< HEAD
 from tpu_commons.models.jax.common.moe.moe import MoE
 =======
 >>>>>>> a1aaa359 (Implement the SparseMatmul for DeepSeek)
+=======
+from tpu_commons.models.jax.common.moe.moe import MoE
+>>>>>>> 8cbe9352 (add unit test; add flag to support switching between dense/sparse matmul)
 from tpu_commons.models.jax.common.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
 from tpu_commons.models.jax.utils.weight_utils import (get_param,
@@ -56,7 +60,7 @@ class DeepSeekV3(nnx.Module):
         self.vllm_config = vllm_config
         self.rng = nnx.Rngs(rng)
 
-        num_layers: int = 61
+        num_layers: int = 20
         num_local_experts: int = 256
 
         vocab_size: int = 129280
