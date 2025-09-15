@@ -19,14 +19,15 @@ from tpu_commons.models.jax.common.attention.deepseek_v3_attention import MLA
 from tpu_commons.models.jax.common.constants import KVCacheType
 from tpu_commons.models.jax.common.layers import (DenseFFW, Embedder, LMhead,
                                                   RMSNorm)
-from tpu_commons.models.jax.common.moe.deepseek_moe import DeepSeekV3Router
-from tpu_commons.models.jax.common.moe.moe import MoE
+from tpu_commons.models.jax.common.moe.deepseek_moe import (DeepSeekV3Router,
+                                                            SparseMoE)
 from tpu_commons.models.jax.common.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
 from tpu_commons.models.jax.utils.weight_utils import (get_param,
                                                        model_weights_generator,
                                                        print_param_info,
                                                        reshape_params)
+from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -125,11 +126,11 @@ class DeepSeekV3(nnx.Module):
                 # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype,
                 rngs=self.rng,
-                activation_attention_td=(None, 'model'),
-                activation_q_td=(None, 'model'),
+                activation_attention_td=(None, None),
+                activation_q_td=(None, None),
                 query_tnh=P(None, 'model', None),
                 keyvalue_skh=P(None, 'model', None),
-                activation_attention_out_td=(None, 'model'),
+                activation_attention_out_td=(None, None),
                 attn_o_tnh=P(None, 'model', None),
                 q_da_sharding=(None, 'model'),
                 anh_sharding=(None, 'model', None),
@@ -180,29 +181,32 @@ class DeepSeekV3(nnx.Module):
                 routed_scaling_factor=2.5,
                 dtype=dtype,
                 activation_ffw_td=('data', None),
-                ed_sharding=('expert', None),
-                e_sharding=('expert', ))
-            custom_module = MoE(dtype=dtype,
-                                num_local_experts=num_local_experts,
-                                apply_expert_weight_before_computation=False,
-                                hidden_size=hidden_size,
-                                intermediate_size_moe=moe_intermediate_size,
-                                hidden_act=hidden_act,
-                                rngs=self.rng,
-                                random_init=self.random_init,
-                                activation_ffw_td=('data', None),
-                                activation_ffw_ted=('data', 'expert', None),
-                                edf_sharding=('expert', None, 'model'),
-                                efd_sharding=('expert', 'model', None),
-                                router=router) if is_moe_layer else DenseFFW(
-                                    dtype=dtype,
-                                    hidden_act=hidden_act,
-                                    hidden_size=hidden_size,
-                                    intermediate_size=ffw_intermediate_size,
-                                    rngs=self.rng,
-                                    random_init=self.random_init,
-                                    df_sharding=(None, ('model', 'expert')),
-                                    fd_sharding=(('model', 'expert'), None))
+                ed_sharding=('model', None),
+                e_sharding=('model', ))
+            custom_module = SparseMoE(
+                dtype=dtype,
+                num_local_experts=num_local_experts,
+                apply_expert_weight_before_computation=False,
+                hidden_size=hidden_size,
+                intermediate_size_moe=moe_intermediate_size,
+                num_experts_per_tok=num_experts_per_token,
+                mesh=self.mesh,
+                hidden_act=hidden_act,
+                rngs=self.rng,
+                random_init=self.random_init,
+                activation_ffw_td=('data', None),
+                activation_ffw_ted=('data', None, None),
+                edf_sharding=('model', None, None),
+                efd_sharding=('model', None, None),
+                router=router) if is_moe_layer else DenseFFW(
+                    dtype=dtype,
+                    hidden_act=hidden_act,
+                    hidden_size=hidden_size,
+                    intermediate_size=ffw_intermediate_size,
+                    rngs=self.rng,
+                    random_init=self.random_init,
+                    df_sharding=(None, ('model', 'expert')),
+                    fd_sharding=(('model', 'expert'), None))
 
             shared_experts = DenseFFW(dtype=dtype,
                                       hidden_act=hidden_act,
