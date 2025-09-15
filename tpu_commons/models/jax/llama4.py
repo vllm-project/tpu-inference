@@ -124,7 +124,8 @@ class Llama4ForCausalLM(nnx.Module):
             # This can be adjusted for other variants.
             is_moe_layer = (i + 1) % \
                             self.interleave_moe_layer_step == 0
-            use_attention_rope = (i + 1) % self.no_rope_layer_interval != 0
+            # use_attention_rope = (i + 1) % self.no_rope_layer_interval != 0
+            use_attention_rope = (i + 1) not in self.no_rope_layer_interval # Llama-4-Scout config: It has "no_rope_layers": []
 
             router = Router(dtype=dtype,
                             hidden_size=self.hidden_size,
