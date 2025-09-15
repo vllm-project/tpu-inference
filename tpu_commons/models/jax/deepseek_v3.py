@@ -21,13 +21,17 @@ from tpu_commons.models.jax.common.layers import (DenseFFW, Embedder, LMhead,
                                                   RMSNorm)
 from tpu_commons.models.jax.common.moe.deepseek_moe import (DeepSeekV3Router,
                                                             SparseMoE)
+<<<<<<< HEAD
 from tpu_commons.models.jax.common.moe.moe import MoE
+=======
+>>>>>>> a1aaa359 (Implement the SparseMatmul for DeepSeek)
 from tpu_commons.models.jax.common.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
 from tpu_commons.models.jax.utils.weight_utils import (get_param,
                                                        model_weights_generator,
                                                        print_param_info,
                                                        reshape_params)
+from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
