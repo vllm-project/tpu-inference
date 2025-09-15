@@ -66,7 +66,7 @@ class LlamaMLP(nnx.Module):
 class LlamaAttention(nnx.Module):
 
     def __init__(self, config: LlamaConfig, dtype: jnp.dtype, rng: nnx.Rngs,
-                 mesh: Mesh):
+                 mesh: Mesh, kv_cache_dtype: str):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
@@ -118,8 +118,6 @@ class LlamaAttention(nnx.Module):
         self._k_scale = 1.0
         self._v_scale = 1.0
         self.kv_cache_quantized_dtype = None
-        # TODO
-        kv_cache_dtype = "bf16"
         if kv_cache_dtype != "auto":
             self.kv_cache_quantized_dtype = TPU_STR_DTYPE_TO_JAX_DTYPE.get(
                 kv_cache_dtype.lower().strip())
@@ -191,7 +189,7 @@ class LlamaAttention(nnx.Module):
 class LlamaDecoderLayer(nnx.Module):
 
     def __init__(self, config: LlamaConfig, dtype: jnp.dtype, rng: nnx.Rngs,
-                 mesh: Mesh):
+                 mesh: Mesh, kv_cache_dtype: str):
         rms_norm_eps = config.rms_norm_eps
         hidden_size = config.hidden_size
 
@@ -205,7 +203,8 @@ class LlamaDecoderLayer(nnx.Module):
         self.self_attn = LlamaAttention(config=config,
                                         dtype=dtype,
                                         rng=rng,
-                                        mesh=mesh)
+                                        mesh=mesh,
+                                        kv_cache_dtype=kv_cache_dtype)
         self.post_attention_layernorm = nnx.RMSNorm(
             hidden_size,
             epsilon=rms_norm_eps,
@@ -264,7 +263,8 @@ class LlamaModel(nnx.Module):
                 dtype=dtype,
                 rng=rng,
                 mesh=mesh,
-            ) for _ in range(hf_config.num_hidden_layers)
+                kv_cache_dtype=vllm_config.cache_config.cache_dtype)
+            for _ in range(hf_config.num_hidden_layers)
         ]
         self.norm = nnx.RMSNorm(
             hidden_size,
