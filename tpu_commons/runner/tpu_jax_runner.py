@@ -336,8 +336,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         scheduler_output: "VllmSchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> ModelRunnerOutput:
-        with jax.disable_jit():
-            return self._execute_model(scheduler_output)[1]
+        # with jax.disable_jit():
+        return self._execute_model(scheduler_output)[1]
 
     def _execute_model(
         self,
@@ -405,7 +405,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                      tuple(self.layer_name_to_kvcache_index.items()),
                      lora_metadata,
                  )
-                jax.block_until_ready(hidden_states)
 
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)
@@ -690,6 +689,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         ##########################
         # populate self.query_start_loc_cpu and self.seq_lens_cpu
         start_loc = 0 
+        _logits_indices = []
         for dp_rank in range(dp_size):
             req_offset = dp_rank * (self.max_num_reqs_per_dp +1 )
             # Prepare the attention metadata.
@@ -702,12 +702,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     out=query_start_loc_cpu[1:_num_reqs + 1])
             query_start_loc_cpu[1:_num_reqs + 1] += start_loc
             query_start_loc_cpu[_num_reqs + 1:] = 1
+            start_loc = query_start_loc_cpu[_num_reqs]
+            _logits_indices.append(query_start_loc_cpu[1:] - 1)
+            
+        for dp_rank in range(dp_size):
+            req_offset = dp_rank * (self.max_num_reqs_per_dp)
+            _num_reqs_so_far = cum_num_req_each_dp_rank_list[dp_rank]
             self.seq_lens_cpu[req_offset:req_offset+_num_reqs] = (
                 self.input_batch.num_computed_tokens_cpu[_num_reqs_so_far:_num_reqs_so_far + _num_reqs] +
                 scheduled_tokens_per_dp_rank[dp_rank])
             self.seq_lens_cpu[req_offset+_num_reqs:req_offset+self.max_num_reqs_per_dp] = 0 
-            start_loc = query_start_loc_cpu[_num_reqs]
-            
+
         
         ############# padding logic starts #############
         # # Do the padding and copy the tensors to the TPU.
@@ -743,8 +748,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             
             block_tables[req_offset:req_offset+_num_reqs, :self.max_num_blocks_per_req] = (
                 self.input_batch.block_table[0].get_cpu_tensor()[req_indices_dp[dp_rank]])
-        print("block_tables for dp rank 0", block_tables[:20, :10])
-        print("block_tables for dp rank 1", block_tables[self.max_num_reqs_per_dp: self.max_num_reqs_per_dp + 20, :10])
+        # print("block_tables for dp rank 0", block_tables[:20, :10])
+        # print("block_tables for dp rank 1", block_tables[self.max_num_reqs_per_dp: self.max_num_reqs_per_dp + 20, :10])
         
         
         ############# block table logic ends #############
@@ -767,8 +772,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
-            logits_indices = self.query_start_loc_cpu[1:padded_num_reqs +
-                                                      1] - 1
+            # logits_indices = self.query_start_loc_cpu[1:padded_num_reqs +
+                                                    #   1] - 1
+            logits_indices = np.array(_logits_indices).flatten()
             spec_decode_metadata = None
         else:
             num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
@@ -797,16 +803,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
          logits_indices, request_distribution) = device_array(
              self.mesh, (input_ids, positions, block_tables, query_start_loc,
                          seq_lens, logits_indices, request_distribution), sharding=self.data_parallel_sharding )
-
-        print()
-        print("DP input_ids ", input_ids.shape, input_ids.sharding)
-        print("DP positions", positions.shape, positions.sharding)  
-        print("DP block_tables", block_tables.shape, block_tables.sharding)
-        print("DP query_start_loc", query_start_loc.shape, query_start_loc.sharding)
-        print("DP seq_lens", seq_lens.shape, seq_lens.sharding) 
-        print("DP logits_indices", logits_indices.shape, logits_indices.sharding)
-        print("DP request_distribution", request_distribution.shape, request_distribution.sharding)
-        print("DP sampling_metadata", sampling_metadata.temperature.shape, sampling_metadata.temperature.sharding)
+        # breakpoint()
+        # print()
+        # print("DP input_ids ", input_ids.shape, input_ids.sharding)
+        # print("DP positions", positions.shape, positions.sharding)  
+        # print("DP block_tables", block_tables.shape, block_tables.sharding)
+        # print("DP query_start_loc", query_start_loc.shape, query_start_loc.sharding)
+        # print("DP seq_lens", seq_lens.shape, seq_lens.sharding) 
+        # print("DP logits_indices", logits_indices.shape, logits_indices.sharding)
+        # print("DP request_distribution", request_distribution.shape, request_distribution.sharding)
+        # print("DP sampling_metadata", sampling_metadata.temperature.shape, sampling_metadata.temperature.sharding)
         
 
         if self.lora_config is not None:

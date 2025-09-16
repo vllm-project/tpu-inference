@@ -313,6 +313,7 @@ class MLA(nnx.Module):
                   `(seq, num_q_heads, head_dim)`.
         """
         md = attention_metadata
+        # TODO(wenxindongwork): Support DP
         in_specs = (
             self.query_tnh,  # q
             self.keyvalue_skh,  # k
