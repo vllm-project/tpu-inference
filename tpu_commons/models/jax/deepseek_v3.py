@@ -28,7 +28,6 @@ from tpu_commons.models.jax.utils.weight_utils import (get_param,
                                                        model_weights_generator,
                                                        print_param_info,
                                                        reshape_params)
-from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -46,7 +45,7 @@ class DeepSeekV3(nnx.Module):
         self.vllm_config = vllm_config
         self.rng = nnx.Rngs(rng)
 
-        num_layers: int = 20
+        num_layers: int = 61
         num_local_experts: int = 256
 
         vocab_size: int = 129280
