@@ -299,7 +299,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         if self.drafter is not None:
             logger.info("Loading drafter model...")
-            self.drafter.load_model()
+            self.drafter.load_model(self.state)
 
         self.rng_params_for_sampling = nnx.Rngs(
             jax.random.key(self.model_config.seed)).params()
