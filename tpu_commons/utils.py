@@ -120,6 +120,8 @@ def make_optimized_mesh(axis_shapes: Sequence[int],
                         devices: Sequence[xc.Device] | None = None):
     if devices is None:
         devices = xb.devices()
+    # Sort the devices in case it's passed in an arbitary order
+    devices = sorted(devices, key=lambda x: x.coords)
 
     def _is_1D(axis_shapes):
         return sum(x > 1 for x in axis_shapes) == 1
@@ -142,13 +144,13 @@ def make_optimized_mesh(axis_shapes: Sequence[int],
             if device_num == 8:
                 ordered_devices = np.array([
                     devices[0],
-                    devices[2],
-                    devices[4],
-                    devices[6],
-                    devices[7],
-                    devices[5],
-                    devices[3],
                     devices[1],
+                    devices[2],
+                    devices[3],
+                    devices[7],
+                    devices[6],
+                    devices[5],
+                    devices[4],
                 ])
             # NOTE(chengjiyao):
             # The coords of v6e-4 are
@@ -159,9 +161,9 @@ def make_optimized_mesh(axis_shapes: Sequence[int],
             elif device_num == 4:
                 ordered_devices = np.array([
                     devices[0],
-                    devices[2],
-                    devices[3],
                     devices[1],
+                    devices[3],
+                    devices[2],
                 ])
             if ordered_devices is not None:
                 ordered_devices = np.array(ordered_devices)
