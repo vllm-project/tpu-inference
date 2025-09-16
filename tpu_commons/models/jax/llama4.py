@@ -462,11 +462,9 @@ class Llama4WeightLoader:
                                                   loaded_weight)
                     continue
 
-                # --- Step 1: Map loaded name to model name ---
-                mapped_name = self.map_loaded_to_standardized_name(loaded_name)
-                model_weight = get_param(model_params, mapped_name)
+                # Standardize weight key.
+                hf_key = loaded_name.removesuffix(".weight") if loaded_name.endswith(".weight") else loaded_name
 
-                # --- Step 2: Determine if the layer is MoE or Dense ---
                 is_moe_layer = False
                 layer_num_match = re.search(r"layers\.(\d+)", loaded_name)
                 if layer_num_match:
@@ -479,32 +477,42 @@ class Llama4WeightLoader:
                     if interleave_moe_layer_step > 0:
                         is_moe_layer = (layer_num + 1) % interleave_moe_layer_step == 0
 
-                if not loaded_name.endswith(".bias"):
-                    if is_moe_layer and "experts.down_proj" in loaded_name:
+                mapped_name = self.map_loaded_to_standardized_name(hf_key)
+                model_weight = get_param(model_params, mapped_name)
+
+                current_weight = loaded_weight
+
+                # --- Conditional Transformation Logic ---
+                # This is the key change. We check the key and layer type before transforming.
+                if not hf_key.endswith(".bias"):
+                    if is_moe_layer and "experts." in hf_key:
+                        # These are MoE expert weights. Their loaded shape already matches the model's needs.
+                        # No reshaping or transposing is needed for MoE's experts' weights.
                         pass
-                    else:
-                        loaded_weight = reshape_params(loaded_name, loaded_weight,
-                                                        self._weight_shape_map)
-                        loaded_weight = transpose_params(loaded_name, loaded_weight,
-                                                          self._transpose_map)
+                    elif "q_proj" in hf_key or "k_proj" in hf_key or "v_proj" in hf_key or "o_proj" in hf_key:
+                        # These are attention weights. They need reshaping and transposing.
+                        current_weight = reshape_params(hf_key, current_weight, self._weight_shape_map)
+                        current_weight = transpose_params(hf_key, current_weight, self._transpose_map)
+                    elif not is_moe_layer and any(s in hf_key for s in ["down_proj", "up_proj", "gate_proj"]):
+                        # These are dense layer weights. They need a standard transpose.
+                        current_weight = jnp.transpose(current_weight, (1, 0))
+                    # For `shared_expert` weights, a different approach might be needed depending on the exact shape.
+                    elif "shared_expert" in hf_key:
+                        current_weight = jnp.transpose(current_weight, (1, 0))
 
-                    # loaded_weight = reshape_params(loaded_name, loaded_weight,
-                    #                             self._weight_shape_map)
-                    # loaded_weight = transpose_params(loaded_name, loaded_weight,
-                    #                                 self._transpose_map)
-
-                if model_weight.value.shape != loaded_weight.shape:
+                # Validate the final shape.
+                if model_weight.value.shape != current_weight.shape:
                     raise ValueError(
                         f"Loaded shape for {loaded_name}: {loaded_weight.shape} "
                         f"does not match model shape for {mapped_name}: {model_weight.value.shape}!"
                     )
-                logger.debug(
-                    f"Transformed parameter {loaded_name} to {mapped_name}: {loaded_weight.shape} --> {model_weight.value.shape}"
-                )
-                model_weight.value = shard_put(loaded_weight,
-                                               model_weight.sharding,
-                                               mesh=model_for_loading.mesh)
+
+                # Load the transformed weight.
+                model_weight.value = shard_put(current_weight,
+                                            model_weight.sharding,
+                                            mesh=model_for_loading.mesh)
+                
                 if self.is_verbose:
-                    print_param_info(model_weight, loaded_name)
+                    print_param_info(model_weight, hf_key)
 
         nnx.update(model_for_loading, model_params)
