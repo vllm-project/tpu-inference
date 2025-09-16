@@ -354,3 +354,29 @@ class TestKVCacheManager:
             assert self.runner.layer_name_to_kvcache_index[f'layer.{i}'] == i
             assert self.runner.layer_name_to_kvcache_index[
                 f'layer.{i + 10}'] == i
+
+    def test_get_kv_cache_spec_with_eagle3(self):
+        # tests we create kv cache spec for eagle3 draft model
+        self.runner.vllm_config.compilation_config.static_forward_context = {}
+        mock_speculative_config = MagicMock()
+        mock_speculative_config.method = "eagle3"
+        mock_draft_model_config = MagicMock()
+        mock_hf_config = MagicMock()
+        mock_hf_config.num_key_value_heads = 4
+        mock_hf_config.hidden_size = 1024
+        mock_hf_config.num_attention_heads = 8
+        mock_draft_model_config.hf_config = mock_hf_config
+        mock_speculative_config.draft_model_config = mock_draft_model_config
+        self.runner.speculative_config = mock_speculative_config
+
+        kv_cache_spec = self.runner.get_kv_cache_spec()
+
+        assert "draft_layer.0" in kv_cache_spec
+        draft_spec = kv_cache_spec["draft_layer.0"]
+        assert isinstance(draft_spec, FullAttentionSpec)
+        assert draft_spec.block_size == self.runner.vllm_config.cache_config.block_size
+        assert draft_spec.num_kv_heads == common_utils.get_padded_num_heads(
+            4, self.runner.mesh.shape["model"])
+        assert draft_spec.head_size == common_utils.get_padded_head_dim(128)
+        assert draft_spec.dtype == torch.bfloat16
+        assert draft_spec.use_mla == self.runner.vllm_config.model_config.use_mla

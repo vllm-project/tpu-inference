@@ -169,15 +169,16 @@ class Eagle3LlamaModel(nnx.Module):
         embeds = self.embed_tokens(input_ids)
         assert hidden_states.shape[-1] == embeds.shape[-1]
 
-        for i, layer in enumerate(self.layers):
-            kv_cache = kv_caches[i]
-            kv_cache, hidden_states, residual = layer(
-                kv_cache,
-                embeds,
-                hidden_states,
-                attention_metadata,
-            )
-            kv_caches[i] = kv_cache
+        assert len(self.layers) == 1
+        # The first N - 1 KV caches are for the target model, and the last one is for the draft model.
+        # N is the number of layers in the target model.
+        # The draft model has only 1 layer.
+        kv_caches[-1], hidden_states, residual = self.layers[0](
+            kv_caches[-1],
+            embeds,
+            hidden_states,
+            attention_metadata,
+        )
 
         # TODO(ranlihao): Check if this residual connection is correct.
         hidden_states = hidden_states + residual
@@ -245,7 +246,7 @@ class EagleLlama3ForCausalLM(nnx.Module):
         input_ids: jax.Array,
         hidden_states: jax.Array,
         attention_metadata: AttentionMetadata,
-    ) -> Tuple[List[jax.Array], jax.Array]:
+    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
         return self.model(
             kv_caches,
             input_ids,
@@ -301,8 +302,9 @@ class EagleLlama3ForCausalLM(nnx.Module):
             "d2t": "draft_id_to_target_id",
         }
 
+        # Define keys to keep in original dtype (e.g., float32 for stability)
         keep_original_dtype_keys_regex = [
-            r".*draft_id_to_target_id.*",
+            r".*d2t.*",
         ]
 
         metadata_map = get_default_maps(self.vllm_config, self.mesh, mappings)
