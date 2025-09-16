@@ -8,8 +8,6 @@ from transformers import Qwen3Config
 from vllm.config import VllmConfig
 
 from tpu_commons import utils
-from tpu_commons.attention.backends.pallas_torchax import \
-    TPU_STR_DTYPE_TO_JAX_DTYPE
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention import attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
@@ -96,7 +94,7 @@ class Qwen3Attention(nnx.Module):
         self._v_scale = 1.0
         self.kv_cache_quantized_dtype = None
         if kv_cache_dtype != "auto":
-            self.kv_cache_quantized_dtype = TPU_STR_DTYPE_TO_JAX_DTYPE.get(
+            self.kv_cache_quantized_dtype = utils.TPU_STR_DTYPE_TO_JAX_DTYPE.get(
                 kv_cache_dtype.lower().strip())
 
     def quantize_kv(self, key: jax.Array,
@@ -146,10 +144,11 @@ class Qwen3Attention(nnx.Module):
         # o: (T, N, H)
         q_scale = k_scale = v_scale = None
         if self.kv_cache_quantized_dtype:
-            k, v = self.quantize_kv(k, v)
             q_scale = self._q_scale
             k_scale = self._k_scale
             v_scale = self._v_scale
+            k, v = utils.quantize_kv(k, v, self.kv_cache_quantized_dtype,
+                                     k_scale, v_scale)
         new_kv_cache, outputs = attention(
             kv_cache,
             q,

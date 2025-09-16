@@ -56,7 +56,7 @@ class Phi3MLP(nnx.Module):
 class Phi3Attention(nnx.Module):
 
     def __init__(self, config: Phi3Config, dtype: jnp.dtype, rng: nnx.Rngs,
-                 mesh: Mesh):
+                 mesh: Mesh, kv_cache_dtype: str):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
@@ -93,6 +93,14 @@ class Phi3Attention(nnx.Module):
             rngs=rng,
         )
 
+        self._q_scale = 1.0
+        self._k_scale = 1.0
+        self._v_scale = 1.0
+        self.kv_cache_quantized_dtype = None
+        if kv_cache_dtype != "auto":
+            self.kv_cache_quantized_dtype = utils.TPU_STR_DTYPE_TO_JAX_DTYPE.get(
+                kv_cache_dtype.lower().strip())
+
     def __call__(
         self,
         kv_cache: Optional[jax.Array],
@@ -119,6 +127,13 @@ class Phi3Attention(nnx.Module):
             k = apply_rope(k, md.input_positions, self.head_dim_original,
                            self.rope_theta, self.rope_scaling)
         # o: (T, N, H)
+        q_scale = k_scale = v_scale = None
+        if self.kv_cache_quantized_dtype:
+            q_scale = self._q_scale
+            k_scale = self._k_scale
+            v_scale = self._v_scale
+            k, v = utils.quantize_kv(k, v, self.kv_cache_quantized_dtype,
+                                     k_scale, v_scale)
         new_kv_cache, outputs = attention(
             kv_cache,
             q,
@@ -127,6 +142,9 @@ class Phi3Attention(nnx.Module):
             attention_metadata,
             self.mesh,
             self.head_dim_original,
+            q_scale=q_scale,
+            k_scale=k_scale,
+            v_scale=v_scale,
         )
         # (T, D)
         o = self.o_proj(outputs)
@@ -136,7 +154,7 @@ class Phi3Attention(nnx.Module):
 class Phi3DecoderLayer(nnx.Module):
 
     def __init__(self, config: Phi3Config, dtype: jnp.dtype, rng: nnx.Rngs,
-                 mesh: Mesh):
+                 mesh: Mesh, kv_cache_dtype: str):
         rms_norm_eps = config.rms_norm_eps
         hidden_size = config.hidden_size
 
@@ -150,7 +168,8 @@ class Phi3DecoderLayer(nnx.Module):
         self.self_attn = Phi3Attention(config=config,
                                        dtype=dtype,
                                        rng=rng,
-                                       mesh=mesh)
+                                       mesh=mesh,
+                                       kv_cache_dtype=kv_cache_dtype)
         self.post_attention_layernorm = nnx.RMSNorm(
             hidden_size,
             epsilon=rms_norm_eps,
@@ -209,7 +228,8 @@ class Phi3Model(nnx.Module):
                 dtype=dtype,
                 rng=rng,
                 mesh=mesh,
-            ) for _ in range(hf_config.num_hidden_layers)
+                kv_cache_dtype=vllm_config.cache_config.cache_dtype)
+            for _ in range(hf_config.num_hidden_layers)
         ]
         self.norm = nnx.RMSNorm(
             hidden_size,

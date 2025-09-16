@@ -9,6 +9,7 @@ from jax.experimental import shard_map
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
+from tpu_commons import utils
 from tpu_commons.kernels.ragged_paged_attention.v3.kernel import \
     ragged_paged_attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
@@ -39,6 +40,7 @@ class Attention(nnx.Module):
     rope_scaling: dict[str, Any]
     dtype: jnp.dtype
     mesh: Mesh
+    kv_cache_dtype: str
 
     dnh_sharding: Sharding = ()
     dkh_sharding: Sharding = ()
@@ -54,6 +56,10 @@ class Attention(nnx.Module):
     random_init: bool = False
     attention_chunk_size: int | None = None
     rope_input_ordering: str = "split"
+
+    q_scale: float = 1
+    k_scale: float = 1
+    v_scale: float = 1
 
     def __post_init__(self, rngs: nnx.Rngs):
         """Initializes the weight kernels for Q, K, V, and O projections."""
@@ -78,6 +84,11 @@ class Attention(nnx.Module):
                                               self.nhd_sharding,
                                               self.dtype,
                                               random_init=self.random_init)
+
+        self.kv_cache_quantized_dtype = None
+        if self.kv_cache_dtype != "auto":
+            self.kv_cache_quantized_dtype = utils.TPU_STR_DTYPE_TO_JAX_DTYPE.get(
+                self.kv_cache_dtype.lower().strip())
 
     def __call__(self,
                  x,
@@ -130,6 +141,15 @@ class Attention(nnx.Module):
             v_SKH = jnp.einsum('SD,DKH -> SKH', x_SD,
                                self.kernel_v_proj_DKH.value)
 
+        q_scale = k_scale = v_scale = None
+        if self.kv_cache_quantized_dtype:
+            q_scale = self._q_scale
+            k_scale = self._k_scale
+            v_scale = self._v_scale
+            k_SKH, v_SKH = utils.quantize_kv(k_SKH, v_SKH,
+                                             self.kv_cache_quantized_dtype,
+                                             k_scale, v_scale)
+
         with jax.named_scope("attn_op"):
             new_kv_cache, outputs_TNH = self.attention(
                 is_prefill,
@@ -139,6 +159,9 @@ class Attention(nnx.Module):
                 v_SKH,
                 attention_metadata,
                 self.mesh,
+                q_scale=q_scale,
+                k_scale=k_scale,
+                v_scale=v_scale,
             )
 
         with jax.named_scope("o_proj"):
@@ -155,6 +178,9 @@ class Attention(nnx.Module):
         v_SKH: jax.Array,
         attention_metadata: AttentionMetadata,
         mesh: Mesh,
+        q_scale: float | None = None,
+        k_scale: float | None = None,
+        v_scale: float | None = None,
     ) -> Tuple[KVCache, jax.Array]:
         """Performs scaled dot-product attention and updates the KV cache.
 
@@ -172,6 +198,9 @@ class Attention(nnx.Module):
             attention_metadata: Metadata containing sequence lengths.
             mesh: The JAX device mesh (unused in this specific function but
                 kept for potential future use or API consistency).
+            q_scale: Quantization scale for q.
+            k_scale: Quantization scale for k.
+            v_scale: Quantization scale for v.
 
         Returns:
             A tuple containing:
@@ -198,6 +227,9 @@ class Attention(nnx.Module):
             return ragged_paged_attention(
                 *args,
                 sm_scale=q_TNH.shape[-1]**-0.5,
+                q_scale=q_scale,
+                k_scale=k_scale,
+                v_scale=v_scale,
             )
 
         output_TNH, kv_cache = jax.jit(
