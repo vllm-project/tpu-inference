@@ -474,30 +474,27 @@ class Llama4WeightLoader:
                                                   loaded_weight)
                     continue
 
-                # Standardize weight key.
-                hf_key = loaded_name.removesuffix(".weight") if loaded_name.endswith(".weight") else loaded_name
-
-                mapped_name = self.map_loaded_to_standardized_name(hf_key)
+                mapped_name = self.map_loaded_to_standardized_name(loaded_name)
                 model_weight = get_param(model_params, mapped_name)
 
                 current_weight = loaded_weight
 
                 # --- Conditional Transformation Logic ---
                 # This is the key change. We check the key and layer type before transforming.
-                if not hf_key.endswith(".bias"):
-                    if is_moe_layer and "experts." in hf_key:
+                if not loaded_name.endswith(".bias"):
+                    if is_moe_layer and "experts." in loaded_name:
                         # These are MoE expert weights. Their loaded shape already matches the model's needs.
                         # No reshaping or transposing is needed for MoE's experts' weights.
                         pass
-                    elif "q_proj" in hf_key or "k_proj" in hf_key or "v_proj" in hf_key or "o_proj" in hf_key:
+                    elif "q_proj" in loaded_name or "k_proj" in loaded_name or "v_proj" in loaded_name or "o_proj" in loaded_name:
                         # These are attention weights. They need reshaping and transposing.
-                        current_weight = reshape_params(hf_key, current_weight, self._weight_shape_map)
-                        current_weight = transpose_params(hf_key, current_weight, self._transpose_map)
-                    elif not is_moe_layer and any(s in hf_key for s in ["down_proj", "up_proj", "gate_proj"]):
+                        current_weight = reshape_params(loaded_name, current_weight, self._weight_shape_map)
+                        current_weight = transpose_params(loaded_name, current_weight, self._transpose_map)
+                    elif not is_moe_layer and any(s in loaded_name for s in ["down_proj", "up_proj", "gate_proj"]):
                         # These are dense layer weights. They need a standard transpose.
                         current_weight = jnp.transpose(current_weight, (1, 0))
                     # For `shared_expert` weights, a different approach might be needed depending on the exact shape.
-                    elif "shared_expert" in hf_key:
+                    elif "shared_expert" in loaded_name:
                         current_weight = jnp.transpose(current_weight, (1, 0))
 
                 # Validate the final shape.
@@ -513,6 +510,6 @@ class Llama4WeightLoader:
                                             mesh=model_for_loading.mesh)
                 
                 if self.is_verbose:
-                    print_param_info(model_weight, hf_key)
+                    print_param_info(model_weight, loaded_name)
 
         nnx.update(model_for_loading, model_params)
