@@ -473,10 +473,18 @@ class Llama4WeightLoader:
                         is_moe_layer = (layer_num + 1) % interleave_moe_layer_step == 0
 
                 if not loaded_name.endswith(".bias"):
-                        loaded_weight = reshape_params(loaded_name, loaded_weight,
-                                                    self._weight_shape_map)
-                        loaded_weight = transpose_params(loaded_name, loaded_weight,
-                                                        self._transpose_map)
+                    if is_moe_layer and "experts.down_proj" in loaded_name:
+                        pass
+                    else:
+                        current_weight = reshape_params(loaded_name, current_weight,
+                                                        self._weight_shape_map)
+                        current_weight = transpose_params(loaded_name, current_weight,
+                                                          self._transpose_map)
+                    # loaded_weight = reshape_params(loaded_name, loaded_weight,
+                    #                             self._weight_shape_map)
+                    # loaded_weight = transpose_params(loaded_name, loaded_weight,
+                    #                                 self._transpose_map)
+
                 if model_weight.value.shape != loaded_weight.shape:
                     raise ValueError(
                         f"Loaded shape for {loaded_name}: {loaded_weight.shape} "
