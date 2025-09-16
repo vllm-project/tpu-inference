@@ -484,7 +484,7 @@ class Llama4WeightLoader:
                         # These are MoE expert weights. Their loaded shape already matches the model's needs.
                         # No reshaping or transposing is needed for MoE's experts' weights.
                         pass
-                    elif "q_proj" in loaded_name or "k_proj" in loaded_name or "v_proj" in loaded_name or "o_proj" in loaded_name:
+                    elif "q_proj" in loaded_name or "k_proj" in loaded_name or "v_proj" in loaded_name or "o_proj" in loaded_name or "router" in loaded_name:
                         # These are attention weights. They need reshaping and transposing.
                         current_weight = reshape_params(loaded_name, current_weight, self._weight_shape_map)
                         current_weight = transpose_params(loaded_name, current_weight, self._transpose_map)
