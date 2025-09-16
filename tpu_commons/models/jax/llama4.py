@@ -437,120 +437,120 @@ class Llama4WeightLoader:
     def load_weights(self, model_for_loading: nnx.Module):
         model_params = nnx.state(model_for_loading)
 
-        # Get the interleave step from the model config to decide if a layer is MoE
-        interleave_moe_layer_step = getattr(
-            model_for_loading.vllm_config.model_config.hf_config.text_config, 
-            "interleave_moe_layer_step", 1
-        )
+        # # Get the interleave step from the model config to decide if a layer is MoE
+        # interleave_moe_layer_step = getattr(
+        #     model_for_loading.vllm_config.model_config.hf_config.text_config, 
+        #     "interleave_moe_layer_step", 1
+        # )
 
         with jax.default_device(jax.devices("cpu")[0]):
             for loaded_name, loaded_weight in self.names_and_weights_generator:
-                if loaded_name.endswith(".weight"):
-                    hf_key = loaded_name.removesuffix(".weight")
-                else:
-                    hf_key = loaded_name
+                # if loaded_name.endswith(".weight"):
+                #     hf_key = loaded_name.removesuffix(".weight")
+                # else:
+                #     hf_key = loaded_name
 
-                # --- Step 1: Map loaded name to model name ---
-                mapped_name = self.map_loaded_to_standardized_name(hf_key)
+                # # --- Step 1: Map loaded name to model name ---
+                # mapped_name = self.map_loaded_to_standardized_name(hf_key)
                 
-                # Special case: 'gate_up_proj' is for MoE layers
-                if "gate_up_proj" in hf_key:
-                    # This function already handles splitting and mapping, so we can skip
-                    # the rest of the loop for this weight.
-                    self._map_llama4_gate_up_proj(model_for_loading,
-                                                model_params,
-                                                loaded_name,
-                                                loaded_weight)
-                    continue
-
-                # --- Step 2: Determine if the layer is MoE or Dense ---
-                is_moe_layer = False
-                layer_num_match = re.search(r"layers\.(\d+)", hf_key)
-                if layer_num_match:
-                    layer_num = int(layer_num_match.group(1))
-                    if interleave_moe_layer_step > 0:
-                        is_moe_layer = (layer_num + 1) % interleave_moe_layer_step == 0
-
-                # --- Step 3: Apply transformations based on layer and weight type ---
-                current_weight = loaded_weight
-
-                # MoE experts down_proj has a shape that is already correct.
-                # No reshaping or transposing is needed for MoE's experts weights.
-                if "experts.down_proj" in hf_key and is_moe_layer:
-                    # The loaded shape (E, F, D) matches the model's expected shape.
-                    # No transformations needed.
-                    pass
-                
-                # This is a generic dense layer or shared expert down_proj
-                elif "down_proj" in hf_key and not "experts" in hf_key:
-                    current_weight = jnp.transpose(current_weight, (1, 0))
-
-                # This is a generic dense layer or shared expert up/gating_proj
-                elif "up_proj" in hf_key or "gate_proj" in hf_key:
-                    current_weight = jnp.transpose(current_weight, (1, 0))
-
-                # This is a generic dense layer or shared expert up/gating_proj
-                elif "up_proj" in hf_key or "gate_proj" in hf_key:
-                    current_weight = jnp.transpose(current_weight, (1, 0))
-                
-                elif "o_proj" in hf_key:
-                    # Assuming o_proj also needs a specific reshape and transpose
-                    current_weight = reshape_params(hf_key, current_weight, self._weight_shape_map)
-                    current_weight = transpose_params(hf_key, current_weight, self._transpose_map)
-                
-                elif any(s in hf_key for s in ["q_proj", "k_proj", "v_proj"]):
-                    # Assuming attention layers need specific reshape and transpose
-                    current_weight = reshape_params(hf_key, current_weight, self._weight_shape_map)
-                    current_weight = transpose_params(hf_key, current_weight, self._transpose_map)
-                    
-                # --- Step 4: Final checks and loading ---
-                try:
-                    model_weight = get_param(model_params, mapped_name)
-                except ValueError:
-                    # Skip if the parameter path doesn't exist in the model
-                    logger.warning(f"Skipping weight {hf_key} as its path {mapped_name} does not exist in the model.")
-                    continue
-
-                if model_weight.value.shape != current_weight.shape:
-                    raise ValueError(
-                        f"Shape mismatch: loaded '{hf_key}' has {current_weight.shape}, "
-                        f"but model path '{mapped_name}' expects {model_weight.value.shape}!"
-                    )
-                
-                # Update the model weight
-                model_weight.value = shard_put(current_weight,
-                                            model_weight.sharding,
-                                            mesh=model_for_loading.mesh)
-
-                if self.is_verbose:
-                    print_param_info(model_weight, hf_key)
-                
-                # if "gate_up_proj" in loaded_name:
+                # # Special case: 'gate_up_proj' is for MoE layers
+                # if "gate_up_proj" in hf_key:
+                #     # This function already handles splitting and mapping, so we can skip
+                #     # the rest of the loop for this weight.
                 #     self._map_llama4_gate_up_proj(model_for_loading,
-                #                                   model_params, loaded_name,
-                #                                   loaded_weight)
+                #                                 model_params,
+                #                                 loaded_name,
+                #                                 loaded_weight)
                 #     continue
-                # mapped_name = self.map_loaded_to_standardized_name(loaded_name)
-                # model_weight = get_param(model_params, mapped_name)
 
-                # if not loaded_name.endswith(".bias"):
-                #     loaded_weight = reshape_params(loaded_name, loaded_weight,
-                #                                    self._weight_shape_map)
-                #     loaded_weight = transpose_params(loaded_name,
-                #                                      loaded_weight,
-                #                                      self._transpose_map)
-                # if model_weight.value.shape != loaded_weight.shape:
+                # # --- Step 2: Determine if the layer is MoE or Dense ---
+                # is_moe_layer = False
+                # layer_num_match = re.search(r"layers\.(\d+)", hf_key)
+                # if layer_num_match:
+                #     layer_num = int(layer_num_match.group(1))
+                #     if interleave_moe_layer_step > 0:
+                #         is_moe_layer = (layer_num + 1) % interleave_moe_layer_step == 0
+
+                # # --- Step 3: Apply transformations based on layer and weight type ---
+                # current_weight = loaded_weight
+
+                # # MoE experts down_proj has a shape that is already correct.
+                # # No reshaping or transposing is needed for MoE's experts weights.
+                # if "experts.down_proj" in hf_key and is_moe_layer:
+                #     # The loaded shape (E, F, D) matches the model's expected shape.
+                #     # No transformations needed.
+                #     pass
+                
+                # # This is a generic dense layer or shared expert down_proj
+                # elif "down_proj" in hf_key and not "experts" in hf_key:
+                #     current_weight = jnp.transpose(current_weight, (1, 0))
+
+                # # This is a generic dense layer or shared expert up/gating_proj
+                # elif "up_proj" in hf_key or "gate_proj" in hf_key:
+                #     current_weight = jnp.transpose(current_weight, (1, 0))
+
+                # # This is a generic dense layer or shared expert up/gating_proj
+                # elif "up_proj" in hf_key or "gate_proj" in hf_key:
+                #     current_weight = jnp.transpose(current_weight, (1, 0))
+                
+                # elif "o_proj" in hf_key:
+                #     # Assuming o_proj also needs a specific reshape and transpose
+                #     current_weight = reshape_params(hf_key, current_weight, self._weight_shape_map)
+                #     current_weight = transpose_params(hf_key, current_weight, self._transpose_map)
+                
+                # elif any(s in hf_key for s in ["q_proj", "k_proj", "v_proj"]):
+                #     # Assuming attention layers need specific reshape and transpose
+                #     current_weight = reshape_params(hf_key, current_weight, self._weight_shape_map)
+                #     current_weight = transpose_params(hf_key, current_weight, self._transpose_map)
+                    
+                # # --- Step 4: Final checks and loading ---
+                # try:
+                #     model_weight = get_param(model_params, mapped_name)
+                # except ValueError:
+                #     # Skip if the parameter path doesn't exist in the model
+                #     logger.warning(f"Skipping weight {hf_key} as its path {mapped_name} does not exist in the model.")
+                #     continue
+
+                # if model_weight.value.shape != current_weight.shape:
                 #     raise ValueError(
-                #         f"Loaded shape for {loaded_name}: {loaded_weight.shape} "
-                #         f"does not match model shape for {mapped_name}: {model_weight.value.shape}!"
+                #         f"Shape mismatch: loaded '{hf_key}' has {current_weight.shape}, "
+                #         f"but model path '{mapped_name}' expects {model_weight.value.shape}!"
                 #     )
-                # logger.debug(
-                #     f"Transformed parameter {loaded_name} to {mapped_name}: {loaded_weight.shape} --> {model_weight.value.shape}"
-                # )
-                # model_weight.value = shard_put(loaded_weight,
-                #                                model_weight.sharding,
-                #                                mesh=model_for_loading.mesh)
+                
+                # # Update the model weight
+                # model_weight.value = shard_put(current_weight,
+                #                             model_weight.sharding,
+                #                             mesh=model_for_loading.mesh)
+
                 # if self.is_verbose:
-                #     print_param_info(model_weight, loaded_name)
+                #     print_param_info(model_weight, hf_key)
+                
+                if "gate_up_proj" in loaded_name:
+                    self._map_llama4_gate_up_proj(model_for_loading,
+                                                  model_params, loaded_name,
+                                                  loaded_weight)
+                    continue
+                mapped_name = self.map_loaded_to_standardized_name(loaded_name)
+                model_weight = get_param(model_params, mapped_name)
+
+                if not loaded_name.endswith(".bias"):
+                    loaded_weight = reshape_params(loaded_name, loaded_weight,
+                                                   self._weight_shape_map)
+                    loaded_weight = transpose_params(loaded_name,
+                                                     loaded_weight,
+                                                     self._transpose_map)
+                if model_weight.value.shape != loaded_weight.shape:
+                    raise ValueError(
+                        f"Loaded shape for {loaded_name}: {loaded_weight.shape} "
+                        f"does not match model shape for {mapped_name}: {model_weight.value.shape}!"
+                    )
+                logger.debug(
+                    f"Transformed parameter {loaded_name} to {mapped_name}: {loaded_weight.shape} --> {model_weight.value.shape}"
+                )
+                model_weight.value = shard_put(loaded_weight,
+                                               model_weight.sharding,
+                                               mesh=model_for_loading.mesh)
+                if self.is_verbose:
+                    print_param_info(model_weight, loaded_name)
 
         nnx.update(model_for_loading, model_params)
