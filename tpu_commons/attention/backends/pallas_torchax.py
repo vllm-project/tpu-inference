@@ -4,13 +4,13 @@ import functools
 from typing import Optional, Tuple
 
 import jax
-import jax.numpy as jnp
 import torch
 from jax.sharding import Mesh
 from torchax.interop import jax_view, torch_view
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 
+from tpu_commons import utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention import attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
@@ -19,14 +19,6 @@ from tpu_commons.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context
 
 logger = init_logger(__name__)
-
-TPU_STR_DTYPE_TO_JAX_DTYPE = {
-    "bfloat16": jnp.bfloat16,
-    "fp8": jnp.float8_e4m3fn,
-    "fp8_e4m3": jnp.float8_e4m3,
-    "fp8_e5m2": jnp.float8_e5m2,
-    "int8": jnp.int8,
-}
 
 
 class PallasAttentionBackend(AttentionBackend):
@@ -73,7 +65,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
             raise NotImplementedError("Alibi slopes is not supported.")
         self.kv_cache_quantized_dtype = None
         if kv_cache_dtype != "auto":
-            self.kv_cache_quantized_dtype = TPU_STR_DTYPE_TO_JAX_DTYPE.get(
+            self.kv_cache_quantized_dtype = utils.TPU_STR_DTYPE_TO_JAX_DTYPE.get(
                 kv_cache_dtype.lower().strip())
 
         if attn_type != AttentionType.DECODER:
@@ -81,20 +73,6 @@ class PallasAttentionBackendImpl(AttentionImpl):
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
                                       "PallasAttentionBackendImpl")
-
-    def quantize_kv(self, layer: AttentionLayer, key: jax.Array,
-                    value: jax.Array):
-        dtype_info = jnp.finfo(self.kv_cache_quantized_dtype)
-        minval, maxval = float(dtype_info.min), float(dtype_info.max)
-        # TODO(kyuyeunk): Add support for jnp.Tensor (layer._k_scale) scale
-        key = key.astype(jnp.float32) / layer._k_scale_float
-        key = jnp.clip(key, minval, maxval)
-        key = key.astype(self.kv_cache_quantized_dtype)
-        value = value.astype(jnp.float32) / layer._v_scale_float
-        value = jnp.clip(value, minval, maxval)
-        value = value.astype(self.kv_cache_quantized_dtype)
-
-        return key, value
 
     def forward(
         self,
@@ -129,9 +107,10 @@ class PallasAttentionBackendImpl(AttentionImpl):
         query, key, value = jax_view(query), jax_view(key), jax_view(value)
         q_scale = k_scale = v_scale = None
         if self.kv_cache_quantized_dtype:
-            key, value = self.quantize_kv(layer, key, value)
-            # TODO(kyuyeunk): Add query quantization support for w8a8 attention
-            # q_scale = layer._q_scale
+            key, value = utils.quantize_kv(key, value,
+                                           self.kv_cache_quantized_dtype,
+                                           layer._k_scale, layer._v_scale)
+            q_scale = layer._q_scale_float
             k_scale = layer._k_scale_float
             v_scale = layer._v_scale_float
 
