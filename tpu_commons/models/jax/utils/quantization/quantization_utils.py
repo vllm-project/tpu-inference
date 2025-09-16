@@ -96,6 +96,7 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
         head_size=kv_cache_head_size,
         mesh=mesh,
         layer_names=[f"layer.{i}" for i in range(num_hidden_layers)],
+        cache_dtype=jnp.float8_e4m3fn  # TODO
     )
 
     # NOTE: the inputs don't need to match the actual ones, as long as the consumed weights are the same
