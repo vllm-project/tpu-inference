@@ -490,7 +490,7 @@ class Llama4WeightLoader:
                         # These are attention weights. They need reshaping and transposing.
                         current_weight = reshape_params(loaded_name, current_weight, self._weight_shape_map)
                         current_weight = transpose_params(loaded_name, current_weight, self._transpose_map)
-                    elif not is_moe_layer and any(s in loaded_name for s in ["down_proj", "up_proj", "gate_proj"]):
+                    elif not is_moe_layer and any(s in loaded_name for s in ["down_proj", "up_proj", "gate_proj"]) or "lm_head" in loaded_name:
                         # These are dense layer weights. They need a standard transpose.
                         current_weight = jnp.transpose(current_weight, (1, 0))
                     # For `shared_expert` weights, a different approach might be needed depending on the exact shape.
