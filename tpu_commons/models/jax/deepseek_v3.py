@@ -406,13 +406,16 @@ class DeepSeekV3WeightLoader:
         self.is_model_quantized = not vllm_config.additional_config.get(
             "skip_quantization", False)
         if self.is_model_quantized:
+            # TODO (jacobplatin): expand support eventually
+            quantization_type = vllm_config.model_config.hf_config.quantization_config[
+                "quant_method"]
+            assert quantization_type == "fp8", "DeepSeek only supports the fp8 quantization method for now"
             # NOTE: this will only be used for loading in quantized weights (via Qwix)
             qwix_config = vllm_config.additional_config.get(
                 "quantization", {}).get("qwix", {})
             self.scale_dtype = getattr(
                 jnp, qwix_config.get("scale_dtype", "bfloat16"))
-            # NOTE (jacobplatin): this is certainly a bit hacky, but I don't think there's any
-            # super clean way to get the desired quantization dtype
+            # TODO (jacobplatin): move this out of DeepSeek class to a utility function
             for rule in qwix_config.get("rules", []):
                 if rule.get("module_path") == ".*":
                     quant_dtype_str = rule.get("weight_qtype", "")
@@ -424,21 +427,23 @@ class DeepSeekV3WeightLoader:
 
             quantization_block_sizes = vllm_config.model_config.hf_config.quantization_config[
                 "weight_block_size"]
-            # TODO (jacobplatin): we should handle the case where these aren't all the same
-            self.quantization_block_size = quantization_block_sizes[0]
-            assert all(block_size == self.quantization_block_size
-                       for block_size in quantization_block_sizes)
-
+            assert len(
+                quantization_block_sizes
+            ) == 2, f"Expected only 2 quantization block sizes but got {quantization_block_sizes}"
+            self.quantization_block_size_n = quantization_block_sizes[0]
+            self.quantization_block_size_k = quantization_block_sizes[1]
+            # TODO (jacobplatin): remove this check in the future
+            assert self.quantization_block_size_n == self.quantization_block_size_k, "Quantization block size n and k must be the same!"
             # NOTE: this is only needed for pre-quantized models
             self._scale_shape_map = {
                 "q_b_proj": (1, qk_nope_head_dim + qk_rope_head_dim,
-                             q_lora_rank // self.quantization_block_size),
+                             q_lora_rank // self.quantization_block_size_n),
                 "kv_b_proj": (attn_heads, (qk_nope_head_dim + v_head_dim) //
-                              self.quantization_block_size,
-                              kv_lora_rank // self.quantization_block_size),
+                              self.quantization_block_size_n,
+                              kv_lora_rank // self.quantization_block_size_n),
                 "o_proj":
-                (hidden_size // self.quantization_block_size, attn_heads,
-                 v_head_dim // self.quantization_block_size),
+                (hidden_size // self.quantization_block_size_n, attn_heads,
+                 v_head_dim // self.quantization_block_size_n),
             }
 
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
@@ -536,15 +541,15 @@ class DeepSeekV3WeightLoader:
             assert len(weight_shape) == len(scale_shape)
             for idx, (weight_dim,
                       scale_dim) in enumerate(zip(weight_shape, scale_shape)):
-                if weight_dim // self.quantization_block_size != scale_dim and weight_dim // scale_dim != 1:
+                if weight_dim // self.quantization_block_size_n != scale_dim and weight_dim // scale_dim != 1:
                     old_scale_shape = scale.shape
-                    scale = scale.repeat(self.quantization_block_size,
+                    scale = scale.repeat(self.quantization_block_size_n,
                                          axis=idx)[:, :weight_dim]
                     logger.warning(
                         f"Got a weight with shape {weight_shape} and scale with shape {old_scale_shape} "
                         f"where the scale_dim {scale_dim} does not match the weight_dim {weight_dim} "
-                        f"multiplied by the quantization block size {self.quantization_block_size}. "
-                        f"Repeating the scale to new shape {scale.shape} along axis {idx} with repeat size {self.quantization_block_size}."
+                        f"multiplied by the quantization block size {self.quantization_block_size_n}. "
+                        f"Repeating the scale to new shape {scale.shape} along axis {idx} with repeat size {self.quantization_block_size_n}."
                     )
                     break
 
@@ -578,7 +583,7 @@ class DeepSeekV3WeightLoader:
                     get_slice_scale)
             except ValueError:
                 logger.warning(
-                    f"Could not create sharded scale for {name} with shape {scale.shape} and sharding {sharding}, skipping..."
+                    f"Could not create sharded scale for {name} with shape {scale.shape} and sharding {sharding}, skipping sharding..."
                 )
             # NOTE: Despite the fact that scale has the name `scale_inv` in it, we don't need to
             # inverse it
@@ -646,6 +651,8 @@ class DeepSeekV3WeightLoader:
                         continue
                 # NOTE: loaded_weight will be a Torch tensor, so we need to convert it to the
                 # equivalent jnp dtype
+                # TODO (jacobplatin): refactor this so that we instead change / update `model_weights_generator`
+                # instead of checking "weight_scale_inv" and assuming quantization method is fp8
                 scale = None
                 if loaded_weight.dtype == j2t_dtype(self.quant_dtype.dtype):
                     if self.is_model_quantized:

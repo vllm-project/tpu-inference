@@ -340,6 +340,7 @@ def get_default_qwix_quantization_config(
     """
     if skip_quantization:
         return None
+    # TODO (jacobplatin): remove this so that we can support various quantization types
     if model_type == "deepseek_v3" and quant_method == "fp8":
         return DEFAULT_DEEPSEEK_FP8_CONFIG
 
@@ -364,7 +365,12 @@ def update_vllm_config_for_qwix_quantization(vllm_config: "VllmConfig"):
         model_type, quant_method,
         vllm_config.additional_config.get("skip_quantization", False))
 
-    if default_quantization_config is not None:
+    maybe_existing_quantization_config = vllm_config.additional_config.get(
+        "quantization")
+    if maybe_existing_quantization_config:
+        logger.warning("Overwriting default Qwix quantization config with "
+                       "user provided quantization config.")
+    elif default_quantization_config is not None:
         vllm_config.additional_config[
             "quantization"] = default_quantization_config
 
@@ -373,11 +379,8 @@ def update_vllm_config_for_qwix_quantization(vllm_config: "VllmConfig"):
         # Try loading/parsing the quantization config so that we can fail fast
         if quantization_config := additional_config.get("quantization"):
             try:
-                if default_quantization_config is not None:
-                    logger.warning(
-                        "Overwriting default Qwix quantization config with "
-                        "user provided quantization config.")
-                # NOTE: Qwix quantization supports two paths: 1. quantization config file (which we need to parse)
+                # NOTE: Qwix quantization supports two paths:
+                #  1. quantization config file (which we need to parse to a dictionary)
                 #  2. quantization config JSON
                 if isinstance(quantization_config, str):
                     quantization_config = quantization_config_file_path_to_dict(

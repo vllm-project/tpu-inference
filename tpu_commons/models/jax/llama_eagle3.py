@@ -24,12 +24,14 @@ class Eagle3LlamaDecoderLayer(LlamaDecoderLayer):
     def __init__(self, config: LlamaConfig, dtype: jnp.dtype, rng: nnx.Rngs,
                  mesh: Mesh):
         super().__init__(config, dtype=dtype, rng=rng, mesh=mesh)
+        self.config = config
         # Override qkv
         hidden_size = 2 * self.self_attn.hidden_size
         self.self_attn.q_proj = nnx.Einsum(
             "TD,DNH->TNH",
             (hidden_size, self.self_attn.num_heads, self.self_attn.head_dim),
             param_dtype=dtype,
+            dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             rngs=rng,
         )
@@ -38,6 +40,7 @@ class Eagle3LlamaDecoderLayer(LlamaDecoderLayer):
             (hidden_size, self.self_attn.num_kv_heads,
              self.self_attn.head_dim),
             param_dtype=dtype,
+            dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             rngs=rng,
         )
@@ -46,7 +49,17 @@ class Eagle3LlamaDecoderLayer(LlamaDecoderLayer):
             (hidden_size, self.self_attn.num_kv_heads,
              self.self_attn.head_dim),
             param_dtype=dtype,
+            dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
+            rngs=rng,
+        )
+        # Override input layernorm and specify dtype to avoid unexpected upcasting.
+        self.input_layernorm = nnx.RMSNorm(
+            config.hidden_size,
+            epsilon=config.rms_norm_eps,
+            param_dtype=dtype,
+            dtype=dtype,
+            scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
         )
         self.hidden_norm = nnx.RMSNorm(
@@ -56,11 +69,6 @@ class Eagle3LlamaDecoderLayer(LlamaDecoderLayer):
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
         )
-
-        if getattr(config, "norm_before_residual", False):
-            self._residual_norm = self._norm_before_residual
-        else:
-            self._residual_norm = self._norm_after_residual
 
     def _norm_before_residual(
             self, hidden_states: jax.Array) -> tuple[jax.Array, jax.Array]:
@@ -82,10 +90,12 @@ class Eagle3LlamaDecoderLayer(LlamaDecoderLayer):
         attention_metadata: AttentionMetadata,
     ) -> Tuple[jax.Array, jax.Array, jax.Array]:
         embeds = self.input_layernorm(embeds)
-
-        hidden_states, residual = self._residual_norm(
-            hidden_states=hidden_states)
-
+        if getattr(self.config, "norm_before_residual", False):
+            hidden_states, residual = self._norm_before_residual(
+                hidden_states=hidden_states)
+        else:
+            hidden_states, residual = self._norm_after_residual(
+                hidden_states=hidden_states)
         hidden_states = jnp.concatenate([embeds, hidden_states], axis=-1)
 
         kv_cache, attn_output = self.self_attn(
@@ -247,8 +257,7 @@ class EagleLlama3ForCausalLM(nnx.Module):
         logits = self.lm_head(hidden_states)
 
         target_vocab_size = self.vllm_config.model_config.get_vocab_size()
-        draft_vocab_size = self.vllm_config.speculative_config.draft_model_config.get_vocab_size(
-        )
+        draft_vocab_size = self.vllm_config.speculative_config.draft_model_config.hf_config.draft_vocab_size
 
         base = jnp.arange(draft_vocab_size, dtype=jnp.int32)
         targets = base + self.draft_id_to_target_id.value
@@ -301,3 +310,11 @@ class EagleLlama3ForCausalLM(nnx.Module):
                         metadata_map=metadata_map,
                         mesh=self.mesh,
                         is_draft_model=True)
+
+        # If the embedding is not initialized, initialize it with a dummpy array here to pass jit compilation. The real weights will be shared from the target model in eagle3 class.
+        if isinstance(self.model.embed_tokens.embedding.value,
+                      jax.ShapeDtypeStruct):
+            self.model.embed_tokens.embedding.value = jnp.zeros(
+                self.model.embed_tokens.embedding.shape,
+                dtype=self.model.embed_tokens.embedding.dtype,
+            )
