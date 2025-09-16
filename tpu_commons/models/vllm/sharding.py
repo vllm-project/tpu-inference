@@ -121,15 +121,7 @@ def shard_model_to_tpu(model: torch.nn.Module, mesh: Mesh,
 
 
 def extract_all_params_buffers(m: torch.nn.Module):
-    params = {}
-    buffers = {}
-
-    for name, param in m.named_parameters():
-        params[name] = param
-    for name, buf in m.named_buffers():
-        buffers[name] = buf
-
-    return params, buffers
+    return dict(m.named_parameters()), dict(m.named_buffers())
 
 
 def shard_and_move_tensor_to_tpu(tensor, mesh):
