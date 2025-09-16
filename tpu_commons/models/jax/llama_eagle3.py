@@ -301,6 +301,10 @@ class EagleLlama3ForCausalLM(nnx.Module):
             "d2t": "draft_id_to_target_id",
         }
 
+        keep_original_dtype_keys_regex = [
+            r".*draft_id_to_target_id.*",
+        ]
+
         metadata_map = get_default_maps(self.vllm_config, self.mesh, mappings)
 
         update_reshape_map_for_eagle3(self.vllm_config, metadata_map)
@@ -309,7 +313,8 @@ class EagleLlama3ForCausalLM(nnx.Module):
                         model=self,
                         metadata_map=metadata_map,
                         mesh=self.mesh,
-                        is_draft_model=True)
+                        is_draft_model=True,
+                        keep_original_dtype_keys_regex=keep_original_dtype_keys_regex)
 
         # If the embedding is not initialized, initialize it with a dummpy array here to pass jit compilation. The real weights will be shared from the target model in eagle3 class.
         if isinstance(self.model.embed_tokens.embedding.value,
