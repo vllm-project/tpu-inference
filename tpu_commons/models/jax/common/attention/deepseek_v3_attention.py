@@ -288,13 +288,13 @@ class MLA(nnx.Module):
             self.query_tnh,  # q
             self.keyvalue_skh,  # k
             self.keyvalue_skh,  # v
-            P(),  # kv_cache: Replicated
+            P(None, None, "model"),  # kv_cache
             P(),  # md.seq_lens: Replicated
             P(),  # page_indices_flat: Replicated
             P(),  # query_start_loc: Replicated
             P(),  # distribution: Replicated
         )
-        out_specs = (self.attn_o_tnh, P())
+        out_specs = (self.attn_o_tnh, P(None, None, "model"))
 
         def _ragged_paged_attention(*args):
             return ragged_paged_attention(

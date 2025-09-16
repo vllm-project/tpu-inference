@@ -13,6 +13,6 @@ jaxlib==0.7.1.dev20250813
 libtpu==0.0.21.dev20250813+nightly
 jaxtyping
 flax==0.11.1
-torchax==0.0.5
+torchax==0.0.7
 qwix @ git+https://github.com/google/qwix@main
 pathwaysutils

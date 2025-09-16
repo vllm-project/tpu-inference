@@ -1,20 +1,13 @@
 import functools
 
 import jax
-import torch
 from jax import numpy as jnp
 from jax.experimental.pallas.ops.tpu.megablox.gmm import gmm
 from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from torch.nn.parameter import Parameter
-from torchax.interop import jax_view, torch_view
-from torchax.ops.mappings import t2j
-from vllm.config import ParallelConfig
-from vllm.model_executor.layers.fused_moe import FusedMoE
 
-from tpu_commons.models.vllm.jax_linear_common import (
-    reorder_concatenated_tensor_for_sharding,
-    slice_sharded_tensor_for_concatenation)
+from tpu_commons.models.vllm.jax_linear_common import \
+    slice_sharded_tensor_for_concatenation
 
 P = PartitionSpec
 
@@ -404,86 +397,3 @@ def jax_fused_moe_func_padded(hidden_states: jax.Array, w1: jax.Array,
         return jax_fused_moe_func(hidden_states, w1, w2, gating_output, topk,
                                   global_num_experts, renormalize,
                                   reduce_results, mesh, use_ep)
-
-
-class JaxFusedMoE(torch.nn.Module):
-
-    def __init__(self, fused_moe: torch.nn.Module, mesh: Mesh,
-                 vllm_parallel_config: ParallelConfig):
-        super().__init__()
-        assert isinstance(fused_moe, FusedMoE)
-
-        self.mesh = mesh
-        self.top_k = fused_moe.top_k
-        self.global_num_experts = fused_moe.global_num_experts
-        self.renormalize = fused_moe.renormalize
-        self.reduce_results = fused_moe.reduce_results
-        self.use_ep = vllm_parallel_config.enable_expert_parallel
-
-        self.w13_weight: Parameter
-        self.w2_weight: Parameter
-
-        self._load_weights_from_vllm_layer(fused_moe)
-        self._shard_weight(mesh)
-
-    def _shard_weight(self, mesh: Mesh):
-        if self.use_ep:
-            # Shard both of the weight tensors by the expert dim, which is the 0th dim.
-            self.w13_weight.apply_jax_(
-                jax.device_put, NamedSharding(mesh, P('model', None, None)))
-            self.w2_weight.apply_jax_(
-                jax.device_put, NamedSharding(mesh, P('model', None, None)))
-        else:
-            # Shard both of the weight tensors by the intermediate_size dim.
-            self.w13_weight.apply_jax_(
-                jax.device_put, NamedSharding(mesh, P(None, 'model', None)))
-            self.w2_weight.apply_jax_(
-                jax.device_put, NamedSharding(mesh, P(None, None, 'model')))
-
-    def _load_weights_from_vllm_layer(self, fused_moe: torch.nn.Module):
-        w2_weight = torch_view(t2j(fused_moe.w2_weight.data))
-        w2_weight = Parameter(w2_weight, requires_grad=False)
-        self.register_parameter("w2_weight", w2_weight)
-
-        if self.use_ep:
-            w13_weight = torch_view(t2j(fused_moe.w13_weight.data))
-            w13_weight = Parameter(w13_weight, requires_grad=False)
-            self.register_parameter("w13_weight", w13_weight)
-        else:
-            w13_weight = t2j(fused_moe.w13_weight.data)
-            intermediate_size = w13_weight.shape[1] // 2
-            assert intermediate_size == w2_weight.shape[-1]
-            output_sizes = [intermediate_size, intermediate_size]
-            n_shards = self.mesh.shape['model']
-            assert intermediate_size % n_shards == 0
-            w13_weight = reorder_concatenated_tensor_for_sharding(w13_weight,
-                                                                  output_sizes,
-                                                                  n_shards,
-                                                                  dim=1)
-            w13_weight = Parameter(torch_view(w13_weight), requires_grad=False)
-            self.register_parameter("w13_weight", w13_weight)
-
-    def forward(self, hidden_states: torch.Tensor,
-                router_logits: torch.Tensor):
-
-        _fused_moe_func = functools.partial(
-            jax.jit(jax_fused_moe_func_padded,
-                    static_argnames=[
-                        "topk", "global_num_experts", "renormalize",
-                        "reduce_results", "mesh", "use_ep"
-                    ]),
-            topk=self.top_k,
-            global_num_experts=self.global_num_experts,
-            renormalize=self.renormalize,
-            reduce_results=self.reduce_results,
-            mesh=self.mesh,
-            use_ep=self.use_ep)
-
-        output = _fused_moe_func(
-            jax_view(hidden_states),
-            jax_view(self.w13_weight),
-            jax_view(self.w2_weight),
-            jax_view(router_logits),
-        )
-
-        return torch_view(output)

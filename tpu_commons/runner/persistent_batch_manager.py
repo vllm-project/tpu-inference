@@ -120,9 +120,7 @@ class PersistentBatchManager:
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
-                mm_kwargs=new_req_data.mm_kwargs,
-                mm_positions=new_req_data.mm_positions,
-                mm_hashes=new_req_data.mm_hashes,
+                mm_features=new_req_data.mm_features,
                 sampling_params=sampling_params,
                 pooling_params=None,
                 generator=None,
@@ -141,7 +139,10 @@ class PersistentBatchManager:
                 second_per_grid_ts = []
                 audio_feature_lengths = []
                 use_audio_in_video = False
-                for item in self.requests[req_id].mm_kwargs:
+                for mm_feature in self.requests[req_id].mm_features:
+                    item = mm_feature.data
+                    if item is None:
+                        continue
                     mm_input = item.get_data()
                     if mm_input.get("image_grid_thw") is not None:
                         image_grid_thw.append(

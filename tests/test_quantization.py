@@ -236,22 +236,6 @@ class TestApplyQwixQuantization(unittest.TestCase):
                                     apply_to_abstract_model=False)
         mock_jit.assert_called_once()
 
-    @patch('tpu_commons.models.jax.model_loader.nnx.jit')
-    def test_quantization_applied_from_string_path(self, mock_jit):
-        """
-        Test that quantization is applied when the config is a string (file path).
-        """
-        config_path = "int8_default.yaml"
-        self.mock_vllm_config.additional_config = {"quantization": config_path}
-        with patch('tpu_commons.utils.get_padded_num_heads', return_value=128):
-            apply_qwix_quantization(self.mock_vllm_config,
-                                    self.mock_model,
-                                    self.mock_rng,
-                                    self.mock_mesh,
-                                    apply_to_abstract_model=False)
-
-        mock_jit.assert_called_once()
-
 
 class TestQuantizationConfigFileToDict(unittest.TestCase):
     """Tests for the quantization_config_file_path_to_dict function."""
@@ -410,47 +394,48 @@ class TestDetermineWhetherToApplyQwixOnAbstractModel(unittest.TestCase):
     def setUp(self):
         self.mock_vllm_config = MagicMock()
         self.mock_vllm_config.additional_config = {
-            "quantization": "some_config.yaml"
+            "quantization": {
+                "qwix": {
+                    "use_abstract_model": True,
+                    "rules": [{
+                        "module_path": ".*",
+                        "weight_qtype": "int8"
+                    }]
+                }
+            }
+        }
+
+        self.mock_vllm_config_no_abstract_model = MagicMock()
+        self.mock_vllm_config_no_abstract_model.additional_config = {
+            "quantization": {
+                "qwix": {
+                    "rules": [{
+                        "module_path": ".*",
+                        "weight_qtype": "int8"
+                    }]
+                }
+            }
         }
 
         self.mock_vllm_config_no_additional_config = MagicMock()
         self.mock_vllm_config_no_additional_config.additional_config = {}
 
-    @patch(
-        "tpu_commons.models.jax.utils.quantization.quantization_utils.quantization_config_file_path_to_dict"
-    )
-    def test_returns_true_when_config_is_true(self, mock_load_dict):
-        """Test it returns True when use_abstract_model is True in config."""
-        mock_load_dict.return_value = {"qwix": {"use_abstract_model": True}}
-        result = quantize_qwix.apply_qwix_on_abstract_model(
-            self.mock_vllm_config)
-        self.assertTrue(result)
-        mock_load_dict.assert_called_once_with("some_config.yaml")
-
-    @patch(
-        "tpu_commons.models.jax.utils.quantization.quantization_utils.quantization_config_file_path_to_dict"
-    )
-    def test_returns_false_when_config_is_false(self, mock_load_dict):
-        """Test it returns False when use_abstract_model is False in config."""
-        mock_load_dict.return_value = {"qwix": {"use_abstract_model": False}}
-        result = quantize_qwix.apply_qwix_on_abstract_model(
-            self.mock_vllm_config)
-        self.assertFalse(result)
-
-    @patch(
-        "tpu_commons.models.jax.utils.quantization.quantization_utils.quantization_config_file_path_to_dict"
-    )
-    def test_returns_false_when_key_is_missing(self, mock_load_dict):
-        """Test it defaults to False when use_abstract_model key is missing."""
-        mock_load_dict.return_value = {"qwix": {"rules": []}}
-        result = quantize_qwix.apply_qwix_on_abstract_model(
-            self.mock_vllm_config)
-        self.assertFalse(result)
-
     def test_returns_false_when_additional_config_is_missing(self):
         """Test it returns False when additional_config is missing."""
         result = quantize_qwix.apply_qwix_on_abstract_model(
             self.mock_vllm_config_no_additional_config)
+        self.assertFalse(result)
+
+    def test_returns_true_when_additional_config_is_present(self):
+        """Test it returns False when additional_config is missing."""
+        result = quantize_qwix.apply_qwix_on_abstract_model(
+            self.mock_vllm_config)
+        self.assertTrue(result)
+
+    def test_returns_false_when_use_abstract_model_is_false(self):
+        """Test it returns False when use_abstract_model is False."""
+        result = quantize_qwix.apply_qwix_on_abstract_model(
+            self.mock_vllm_config_no_abstract_model)
         self.assertFalse(result)
 
 

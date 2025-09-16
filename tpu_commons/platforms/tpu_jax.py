@@ -44,7 +44,7 @@ class TpuPlatform(Platform):
     simple_compile_backend: str = "openxla"
 
     supported_quantization: list[str] = [
-        "tpu_int8", "compressed-tensors", "awq"
+        "tpu_int8", "compressed-tensors", "awq", "fp8"
     ]
 
     additional_env_vars: list[str] = [
@@ -89,7 +89,7 @@ class TpuPlatform(Platform):
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
-        return "vllm.lora.punica_wrapper.punica_tpu.PunicaWrapperTPU"
+        return "tpu_commons.lora.torch_punica_tpu.PunicaWrapperTPU"
 
     @classmethod
     def get_infinity_values(cls, dtype: jnp.dtype) -> Tuple[float, float]:
@@ -213,6 +213,9 @@ class TpuPlatform(Platform):
                     if isinstance(quantization_config, str):
                         quantization_config = quantization_config_file_path_to_dict(
                             quantization_config)
+                        # NOTE: unpack the quantization config now so we don't need to keep doing this every time
+                        vllm_config.additional_config[
+                            "quantization"] = quantization_config
                     parse_qwix_config_to_rules(
                         quantization_config["qwix"]["rules"])
                 except Exception as e:
@@ -252,3 +255,8 @@ class TpuPlatform(Platform):
                                  f"{cls.device_name} V0.")
             if params.sampling_type == SamplingType.RANDOM_SEED:
                 raise ValueError("JAX does not support per-request seed.")
+
+    @classmethod
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
+                                    model_config: ModelConfig) -> bool:
+        return True

@@ -2,7 +2,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 
 from tpu_commons.core.disagg_executor import DisaggExecutor
 
@@ -13,7 +13,11 @@ class DisaggExecutorTest(unittest.TestCase):
         """Set up the test environment by mocking dependencies."""
         # Mock configurations
         self.mock_vllm_config = MagicMock(spec=VllmConfig)
-        self.mock_vllm_config.model_config = MagicMock()
+        self.mock_vllm_config.model_config = ModelConfig(
+            tokenizer_mode="auto",
+            trust_remote_code=False,
+            seed=0,
+            dtype='bfloat16')
         self.mock_vllm_config.cache_config = MagicMock()
         self.mock_vllm_config.scheduler_config = MagicMock()
         self.mock_vllm_config.load_config = MagicMock()

@@ -3,8 +3,8 @@ from typing import TYPE_CHECKING, Dict, List
 
 import jax
 import jax.numpy as jnp
-import torch
 from jax.sharding import NamedSharding, PartitionSpec
+from torchax.ops.mappings import t2j_dtype
 from vllm.attention import Attention
 from vllm.attention.backends.abstract import AttentionType
 from vllm.config import get_layers_from_vllm_config
@@ -60,7 +60,7 @@ class KVCacheManager:
                     block_size=block_size,
                     num_kv_heads=num_kv_heads,
                     head_size=head_size,
-                    dtype=torch.bfloat16,
+                    dtype=self.runner.kv_cache_dtype,
                     use_mla=use_mla,
                 )
         else:
@@ -88,7 +88,7 @@ class KVCacheManager:
                                 self.runner.mesh.shape["model"]),
                             head_size=common_utils.get_padded_head_dim(
                                 attn_module.head_size),
-                            dtype=torch.bfloat16,
+                            dtype=self.runner.kv_cache_dtype,
                             sliding_window=attn_module.sliding_window,
                             use_mla=use_mla)
                     else:
@@ -99,7 +99,7 @@ class KVCacheManager:
                                 self.runner.mesh.shape["model"]),
                             head_size=common_utils.get_padded_head_dim(
                                 attn_module.head_size),
-                            dtype=torch.bfloat16,
+                            dtype=self.runner.kv_cache_dtype,
                             use_mla=use_mla,
                         )
                 elif attn_module.attn_type in (AttentionType.ENCODER,
@@ -154,7 +154,9 @@ class KVCacheManager:
                 num_kv_heads=representative_spec.num_kv_heads,
                 head_size=representative_spec.head_size,
                 mesh=self.runner.mesh,
-                layer_names=[f'kv_cache_tensor.{i}'])[0]
+                layer_names=[f'kv_cache_tensor.{i}'],
+                cache_dtype=t2j_dtype(representative_spec.dtype),
+            )[0]
             kv_caches.append(kv_cache)
             num_blocks_list.append(num_blocks)
             for layer_name in kv_cache_tensor.shared_by:
@@ -333,7 +335,7 @@ class KVCacheManager:
             f"Transferring kv cache shape {len(kv_cache_slices)} * {kv_cache_slices[0].shape} sharding {kv_cache_slices[0].sharding} size {kv_cache_slices[0].nbytes * len(kv_cache_slices)/1024/1024} Mbytes"
         )
         sharding = NamedSharding(self.runner.mesh,
-                                 PartitionSpec(None, None, "model"))
+                                 PartitionSpec(None, "model"))
         transferred_kv_cache = jax.device_put(kv_cache_slices, sharding)
         for cache in transferred_kv_cache:
             cache.block_until_ready()
@@ -410,9 +412,7 @@ class KVCacheManager:
             block_ids=tuple(block_ids),
             num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
-            mm_kwargs=getattr(request, "mm_kwargs", []),
-            mm_positions=getattr(request, "mm_positions", []),
-            mm_hashes=getattr(request, "mm_hashes", []),
+            mm_features=getattr(request, "mm_features", []),
             pooling_params=getattr(request, "pooling_params", None),
             generator=None,
         )

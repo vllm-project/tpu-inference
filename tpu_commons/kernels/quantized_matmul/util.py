@@ -29,13 +29,18 @@ def unfold_args(
             )
 
 
-def quantize_tensor(x: jax.Array, n_bits: int = 8, dim: int = -1):
+def quantize_tensor(x: jax.Array, dtype: jnp.dtype, dim: int = -1):
+    if jnp.issubdtype(dtype, jnp.floating):
+        dtype_info = jnp.finfo(dtype)
+    else:
+        dtype_info = jnp.iinfo(dtype)
+    dtype_max = float(dtype_info.max)
+    dtype_min = float(dtype_info.min)
+
     max_val = jnp.max(jnp.abs(x), axis=dim, keepdims=True)
-    int_min = -(2**(n_bits - 1))
-    int_max = 2**(n_bits - 1) - 1
-    scale = max_val / int_max
-    x_int = jnp.clip(jnp.rint(x / scale), int_min, int_max).astype(jnp.int8)
-    return x_int, scale.astype(jnp.float32)
+    scale = max_val / dtype_max
+    x_q = jnp.clip(x / scale, dtype_min, dtype_max).astype(dtype)
+    return x_q, scale.astype(jnp.float32)
 
 
 def next_multiple(x, multiple):
