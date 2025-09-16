@@ -326,12 +326,12 @@ class Llama4WeightLoader:
             "k_proj": (2, 0, 1),
             "v_proj": (2, 0, 1),
             "router": (1, 0),
-            "down_proj": (1, 0), # This is for DenseFFW layers, add a transposition step specifically for the down_proj weight
+            # "down_proj": (1, 0), # This is for DenseFFW layers, add a transposition step specifically for the down_proj weight
             "shared_expert.down_proj": (1, 0),
             "shared_expert.gate_proj": (1, 0),
             "shared_expert.up_proj": (1, 0),
             "o_proj": (1, 2, 0),
-            "experts.down_proj": (0, 2, 1), # Assumed transpose for the MoE layer
+            # "experts.down_proj": (0, 2, 1), # Assumed transpose for the MoE layer
             "lm_head": (1, 0),
         }
         self._weight_shape_map = {
