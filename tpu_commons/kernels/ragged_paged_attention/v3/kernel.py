@@ -256,8 +256,10 @@ def _ragged_paged_attention_kernel(
     chunk_prefill_size: int | None = None,
     bkv_p,
     bq_sz,
-    debug_mode: bool = False,
+    debug_mode: bool = True,
 ):
+    debug_mode = True
+    # breakpoint()
     assert q_hbm_ref.shape == o_hbm_ref.shape
     assert q_hbm_ref.shape[-1] == kv_cache_hbm_ref.shape[-1]
     (
@@ -839,7 +841,8 @@ def _ragged_paged_attention_kernel(
         lax.fori_loop(0, num_bq, compute_with_bq, None, unroll=False)
 
     ### ------- Kernel start ------- ###
-
+    # breakpoint()
+    # 
     @pl.when(seq_idx == 0)
     def prologue():
         start_fetch_bq(0, 0, 0)
@@ -1272,6 +1275,7 @@ def ragged_paged_attention(
   Returns:
     The output of the attention.
   """
+    print("WenXin Debug: Entering ragged_paged_attention")
     q, k, v = queries, keys, values
     static_validate_inputs(
         q,
@@ -1403,6 +1407,8 @@ def ragged_paged_attention(
     )
 
     scope_name = f"RPA-bq_{bq_sz}-bkvp_{bkv_p}-p_{page_size}"
+    # breakpoint()
+    print("before entering kernel")
     kernel = jax.named_scope(scope_name)(
         pl.pallas_call(
             functools.partial(
@@ -1443,7 +1449,8 @@ def ragged_paged_attention(
             },
             name=scope_name,
         ))
-
+    # breakpoint()
+    print("after exiting kernel")
     output, updated_kv_cache = kernel(*scalar_prefetches, q, kv, kv_cache)
     return (
         prepare_outputs(output, actual_num_q_heads_per_kv_head,
