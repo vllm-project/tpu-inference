@@ -115,9 +115,7 @@ class TestSpeculativeDecodingManager:
                     block_ids=([1], ),
                     num_computed_tokens=10,
                     lora_request=None,
-                    mm_hashes=[],
-                    mm_kwargs=[],
-                    mm_positions=[],
+                    mm_features=[],
                     pooling_params=None,
                     generator=None,
                 )
@@ -231,9 +229,7 @@ class TestSpeculativeDecodingManager:
                                   block_ids=([1], ),
                                   num_computed_tokens=1,
                                   lora_request=None,
-                                  mm_kwargs=[],
-                                  mm_hashes=[],
-                                  mm_positions=[],
+                                  mm_features=[],
                                   pooling_params=None,
                                   generator=None)
         req2 = CachedRequestState(req_id="req-2",
@@ -243,9 +239,7 @@ class TestSpeculativeDecodingManager:
                                   block_ids=([2], ),
                                   num_computed_tokens=1,
                                   lora_request=None,
-                                  mm_kwargs=[],
-                                  mm_hashes=[],
-                                  mm_positions=[],
+                                  mm_features=[],
                                   pooling_params=None,
                                   generator=None)
         self.runner.input_batch.add_request(req1)

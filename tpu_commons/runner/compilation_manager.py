@@ -8,6 +8,7 @@ import numpy as np
 import vllm.envs as envs
 from jax.sharding import NamedSharding, PartitionSpec
 
+from tpu_commons.core.disagg_utils import is_disagg_enabled
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.layers.sample.sampling import sample
@@ -281,6 +282,8 @@ class CompilationManager:
                 )
 
     def _precompile_disagg_utils(self) -> None:
+        if not is_disagg_enabled():
+            return
         logger.info(
             "Compiling disaggregated util with different input shapes.")
         block_size = self.runner.block_size

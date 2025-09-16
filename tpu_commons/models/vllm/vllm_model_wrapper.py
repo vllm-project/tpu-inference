@@ -25,7 +25,8 @@ from vllm.sequence import IntermediateTensors
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.vllm.quantization import get_tpu_quantization_config
-from tpu_commons.models.vllm.sharding import shard_model_to_tpu
+from tpu_commons.models.vllm.sharding import (
+    LORA_MODULE_TYPE_TO_WRAPPING_FUNC, get_fqn, shard_model_to_tpu)
 from tpu_commons.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 
@@ -125,6 +126,8 @@ class VllmModelWrapper:
                     vllm_config_for_load.scheduler_config,
                     vllm_config_for_load.lora_config,
                     device="jax")
+                self._register_lora_weights_as_param(
+                    vllm_model, vllm_config_for_load.lora_config)
             replace_set_lora(vllm_model)
 
         self.model = _VllmRunner(vllm_model)
@@ -137,6 +140,32 @@ class VllmModelWrapper:
 
         # Returning to the jax land, so we need to wrap it into a JaxValue.
         return jax_view(params_and_buffers), lora_manager
+
+    def _register_lora_weights_as_param(self, model: torch.nn.Module,
+                                        lora_config: LoRAConfig) -> None:
+
+        def _process_module(module, name=None, parent=None):
+            if get_fqn(module) in LORA_MODULE_TYPE_TO_WRAPPING_FUNC:
+                assert parent is not None and name is not None, (
+                    "Top Level module is not expected to be LoRA wrapper")
+                module.lora_a_stacked = torch.nn.ParameterList([
+                    torch.nn.Parameter(module.lora_a_stacked[i])
+                    for i in range(module.n_slices)
+                ])
+                module.lora_b_stacked = torch.nn.ParameterList([
+                    torch.nn.Parameter(module.lora_b_stacked[i])
+                    for i in range(module.n_slices)
+                ])
+                if lora_config.bias_enabled:
+                    module.lora_bias_stacked = torch.nn.ParameterList([
+                        torch.nn.Parameter(module.lora_bias_stacked[i])
+                        for i in range(module.n_slices)
+                    ])
+
+            for child_name, child_module in list(module.named_children()):
+                _process_module(child_module, child_name, module)
+
+        _process_module(model)
 
     def jit_step_func(self):
 
@@ -178,7 +207,6 @@ class VllmModelWrapper:
                         "inputs_embeds": None,
                     },
                     tie_weights=False,
-                    strict=True,
                 )
                 vllm_model_wrapper_context = get_vllm_model_wrapper_context()
                 new_kv_caches = vllm_model_wrapper_context.kv_caches
@@ -210,7 +238,6 @@ class VllmModelWrapper:
                         "hidden_state": torch_view(hidden_states),
                     },
                     tie_weights=False,
-                    strict=True,
                 )
             return jax_view(logits)
 

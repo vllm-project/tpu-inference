@@ -41,11 +41,12 @@ class EagleProposer:
         self.block_size = vllm_config.cache_config.block_size
         self.rng_key = jax.random.key(self.vllm_config.model_config.seed)
 
-    def load_model(self) -> None:
+    def load_model(self, target_model: Any) -> None:
         """Loads the draft model."""
-        # TODO(ranlihao): Sharing embedding and lm_head weights between the target and draft
         self.model_fn, self.compute_logits_fn, _, _, self.state, _, _ = get_model(
             self.vllm_config, self.rng_key, self.mesh, is_draft_model=True)
+        del self.state.model['embed_tokens']
+        self.state.model.embed_tokens = target_model.model.embed
 
     def prepare_inputs(self, ) -> tuple[jnp.ndarray]:
         """Prepares inputs for the speculative decoding step.
