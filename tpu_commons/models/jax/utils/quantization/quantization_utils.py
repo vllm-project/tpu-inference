@@ -51,7 +51,8 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
                             rng: jax.Array, mesh: Mesh, num_hidden_layers: int,
                             kv_cache_block_size: int,
                             kv_cache_num_kv_heads: int,
-                            kv_cache_head_size: int) -> nnx.Module:
+                            kv_cache_head_size: int,
+                            kv_cache_dtype: str) -> nnx.Module:
     """
     Quantizes a Flax NNX model using Qwix.
 
@@ -77,9 +78,7 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
         kv_cache_page_size: the page size of the kv cache
         kv_cache_num_kv_heads: the number of kv heads
         head_size: the head size of the kv cache
-        rules_file_path: the path to the YAML file containing the quantization rules.
-            See the README for more information on how to create/use this file.
-            (optional)
+        kv_cache_dtype: the dtype of the kv cache
 
     Returns:
         model: the quantized model
@@ -89,6 +88,9 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
     logger.info(f"Memory usage before applying quantization of params: "
                 f"hbm={utils.hbm_usage_gb(jax.local_devices())}Gb")
 
+    kv_cache_jnp_dtype = utils.TPU_STR_DTYPE_TO_JAX_DTYPE.get(
+        kv_cache_dtype.lower().strip())
+
     kv_caches = create_kv_caches(
         num_blocks=DEFAULT_NUM_BLOCKS_FOR_JIT_KV_CACHE,
         block_size=kv_cache_block_size,
@@ -96,7 +98,7 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
         head_size=kv_cache_head_size,
         mesh=mesh,
         layer_names=[f"layer.{i}" for i in range(num_hidden_layers)],
-    )
+        cache_dtype=kv_cache_jnp_dtype)
 
     # NOTE: the inputs don't need to match the actual ones, as long as the consumed weights are the same
     input_ids = jax.random.randint(rng,
@@ -238,6 +240,8 @@ def apply_qwix_quantization(
     head_size = model_config.get_head_size()
     head_size = utils.get_padded_head_dim(head_size)
 
+    kv_cache_dtype = vllm_config.cache_config.cache_dtype
+
     if not apply_to_abstract_model:
         assert isinstance(model_or_model_fn, nnx.Module)
         qwix_quantize_nnx_model_with_config = functools.partial(
@@ -253,6 +257,7 @@ def apply_qwix_quantization(
                 "kv_cache_block_size",
                 "kv_cache_num_kv_heads",
                 "kv_cache_head_size",
+                "kv_cache_dtype",
             ))(model=model_or_model_fn,
                rng=rng,
                mesh=mesh,
@@ -260,7 +265,8 @@ def apply_qwix_quantization(
                num_hidden_layers,
                kv_cache_block_size=block_size,
                kv_cache_num_kv_heads=num_kv_heads,
-               kv_cache_head_size=head_size)
+               kv_cache_head_size=head_size,
+               kv_cache_dtype=kv_cache_dtype)
 
         return model_or_model_fn
 
