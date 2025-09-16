@@ -476,9 +476,9 @@ class Llama4WeightLoader:
                     if is_moe_layer and "experts.down_proj" in loaded_name:
                         pass
                     else:
-                        current_weight = reshape_params(loaded_name, current_weight,
+                        loaded_weight = reshape_params(loaded_name, loaded_weight,
                                                         self._weight_shape_map)
-                        current_weight = transpose_params(loaded_name, current_weight,
+                        loaded_weight = transpose_params(loaded_name, loaded_weight,
                                                           self._transpose_map)
                     # loaded_weight = reshape_params(loaded_name, loaded_weight,
                     #                             self._weight_shape_map)
