@@ -446,6 +446,8 @@ class Llama4WeightLoader:
     def load_weights(self, model_for_loading: nnx.Module):
         model_params = nnx.state(model_for_loading)
 
+        num_model_layers = len(model_for_loading.layers)
+
         # Get the interleave step from the model config to decide if a layer is MoE
         interleave_moe_layer_step = getattr(
             model_for_loading.vllm_config.model_config.hf_config.text_config, 
@@ -469,6 +471,11 @@ class Llama4WeightLoader:
                 layer_num_match = re.search(r"layers\.(\d+)", loaded_name)
                 if layer_num_match:
                     layer_num = int(layer_num_match.group(1))
+                    if layer_num >= num_model_layers:
+                        logger.warning(
+                            f"Skipping weight for layer {layer_num} as the model only has {num_model_layers} layers."
+                        )
+                        continue
                     if interleave_moe_layer_step > 0:
                         is_moe_layer = (layer_num + 1) % interleave_moe_layer_step == 0
 
