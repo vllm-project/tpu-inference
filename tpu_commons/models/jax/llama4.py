@@ -456,15 +456,6 @@ class Llama4WeightLoader:
 
         with jax.default_device(jax.devices("cpu")[0]):
             for loaded_name, loaded_weight in self.names_and_weights_generator:
-                if "gate_up_proj" in loaded_name:
-                    self._map_llama4_gate_up_proj(model_for_loading,
-                                                  model_params, loaded_name,
-                                                  loaded_weight)
-                    continue
-
-                # Standardize weight key.
-                hf_key = loaded_name.removesuffix(".weight") if loaded_name.endswith(".weight") else loaded_name
-
                 is_moe_layer = False
                 layer_num_match = re.search(r"layers\.(\d+)", loaded_name)
                 if layer_num_match:
@@ -476,6 +467,15 @@ class Llama4WeightLoader:
                         continue
                     if interleave_moe_layer_step > 0:
                         is_moe_layer = (layer_num + 1) % interleave_moe_layer_step == 0
+
+                if "gate_up_proj" in loaded_name:
+                    self._map_llama4_gate_up_proj(model_for_loading,
+                                                  model_params, loaded_name,
+                                                  loaded_weight)
+                    continue
+
+                # Standardize weight key.
+                hf_key = loaded_name.removesuffix(".weight") if loaded_name.endswith(".weight") else loaded_name
 
                 mapped_name = self.map_loaded_to_standardized_name(hf_key)
                 model_weight = get_param(model_params, mapped_name)
