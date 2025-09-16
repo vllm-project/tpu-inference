@@ -32,14 +32,13 @@ if _platform == "tpu":
                     f"num_cores_per_chip={ti.get_num_cores_per_chip()}")
     except Exception as e:
         logger.error(f"Error occurred while logging TPU info: {e}")
+elif _platform == "cpu":
+    logger.info("Running vLLM on CPU.")
 elif _platform== "pathways":
     logger.info("Running vLLM on TPU via Pathways proxy.")
     import pathwaysutils
     pathwaysutils.initialize()
     logger.info("Running vLLM with Pathways. "
                 "Module pathwaysutils is imported.")
-elif _platform == "cpu":
-    logger.info("Running vLLM on CPU.")
-
 else:
     logger.error(f"Unsupported platform: {_platform}")
