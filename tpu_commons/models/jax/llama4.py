@@ -478,6 +478,7 @@ class Llama4WeightLoader:
                                                         self._weight_shape_map)
                         loaded_weight = transpose_params(loaded_name, loaded_weight,
                                                           self._transpose_map)
+
                     # loaded_weight = reshape_params(loaded_name, loaded_weight,
                     #                             self._weight_shape_map)
                     # loaded_weight = transpose_params(loaded_name, loaded_weight,
