@@ -69,15 +69,20 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
     scaling_factor: float
     beta_fast: int = 32
     beta_slow: int = 1
-    mscale: float = 1
+    mscale_value: float = 1
     mscale_all_dim: float = 0
 
     def initialize_cache(self):
         """Computes and caches the sin/cos embeddings."""
-        if self.sin_cos_cache is not None:
+        # The second condition is for the Qwix case, where we need to call `initialize_cache` on
+        # the abstract model.  Thus, when we go to call `initialize_cache` on the concrete model,
+        # this method will have been called already, but we need to recompute the cache so that
+        # it's concrete (otherwise, it'll still be a jax.ShapeDtypeStruct).
+        if self.sin_cos_cache is not None and not isinstance(
+                self.sin_cos_cache, jax.ShapeDtypeStruct):
             return
         self.mscale = _yarn_get_mscale(
-            self.scaling_factor, self.mscale) / _yarn_get_mscale(
+            self.scaling_factor, self.mscale_value) / _yarn_get_mscale(
                 self.scaling_factor, self.mscale_all_dim)
         self.sin_cos_cache = self._compute_sin_cos()
 
