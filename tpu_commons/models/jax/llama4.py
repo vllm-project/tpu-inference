@@ -83,13 +83,13 @@ class Llama4ForCausalLM(nnx.Module):
 
         # Dynamically retrieve model parameters from the Hugging Face configuration.
         # This approach replaces hard-coded values with flexible ones
-        num_layers: int = getattr(text_config, "num_hidden_layers", 48)
+        # num_layers: int = getattr(text_config, "num_hidden_layers", 48)
 
-        # # Get the total number of layers from the config
-        # total_num_layers: int = getattr(text_config, "num_hidden_layers", 48)
-        # # Use the new parameter to limit the number of layers
-        # num_layers_to_run = 8
-        # num_layers: int = min(total_num_layers, num_layers_to_run)
+        # Get the total number of layers from the config
+        total_num_layers: int = getattr(text_config, "num_hidden_layers", 48)
+        # Use the new parameter to limit the number of layers
+        num_layers_to_run = 8
+        num_layers: int = min(total_num_layers, num_layers_to_run)
 
         intermediate_size_moe: int = getattr(text_config, "intermediate_size", 8192)
 
@@ -446,7 +446,7 @@ class Llama4WeightLoader:
 
         all_relevant_keys = set(self._transpose_map.keys()).union(self._weight_shape_map.keys())
 
-        # num_model_layers = len(model_for_loading.layers)
+        num_model_layers = len(model_for_loading.layers)
 
         # Get the interleave step from the model config to decide if a layer is MoE
         interleave_moe_layer_step = getattr(
@@ -460,11 +460,11 @@ class Llama4WeightLoader:
                 layer_num_match = re.search(r"layers\.(\d+)", loaded_name)
                 if layer_num_match:
                     layer_num = int(layer_num_match.group(1))
-                    # if layer_num >= num_model_layers:
-                    #     logger.warning(
-                    #         f"Skipping weight for layer {layer_num} as the model only has {num_model_layers} layers."
-                    #     )
-                    #     continue
+                    if layer_num >= num_model_layers:
+                        logger.warning(
+                            f"Skipping weight for layer {layer_num} as the model only has {num_model_layers} layers."
+                        )
+                        continue
                     if interleave_moe_layer_step > 0:
                         is_moe_layer = (layer_num + 1) % interleave_moe_layer_step == 0
 
