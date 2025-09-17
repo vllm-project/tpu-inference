@@ -10,6 +10,21 @@ from tpu_commons.logger import init_logger
 logger = init_logger(__name__)
 
 
+def get_kv_cache_shape_with_mesh(mesh: Mesh, total_num_pages: int,
+                                 page_size: int, actual_num_kv_heads: int,
+                                 actual_head_dim: int, kv_dtype: any):
+    """Gets the KV cache shape based on the mesh configuration."""
+
+    model_cnt = mesh.shape["model"]
+    assert actual_num_kv_heads % model_cnt == 0
+    shape = list(
+        rpa.get_kv_cache_shape(total_num_pages, page_size,
+                               actual_num_kv_heads // model_cnt,
+                               actual_head_dim, kv_dtype))
+    shape[2] *= model_cnt
+    return tuple(shape)
+
+
 def create_kv_caches(
     num_blocks: int,
     block_size: int,
@@ -41,8 +56,9 @@ def create_kv_caches(
     # TODO(xiang): fix this together with get_kv_cache_spec
     # cache_dtype = kv_cache_spec.dtype
 
-    cache_shape = rpa.get_kv_cache_shape(num_blocks, block_size, num_kv_heads,
-                                         head_size, cache_dtype)
+    cache_shape = get_kv_cache_shape_with_mesh(mesh, num_blocks, block_size,
+                                               num_kv_heads, head_size,
+                                               cache_dtype)
 
     sharding = NamedSharding(mesh, PartitionSpec(None, None, "model"))
 

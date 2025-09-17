@@ -5,18 +5,9 @@ from jax.experimental import shard_map
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
-from tpu_commons.kernels.ragged_paged_attention.v3.kernel import (
-    get_kv_cache_shape, ragged_paged_attention)
+from tpu_commons.kernels.ragged_paged_attention.v3.kernel import \
+    ragged_paged_attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-
-
-def get_kv_cache_shape_with_mesh(mesh: Mesh, total_num_pages: int,
-                                 page_size: int, actual_num_kv_heads: int,
-                                 actual_head_dim: int, kv_dtype: any):
-    """Gets the KV cache shape based on the mesh configuration."""
-
-    return get_kv_cache_shape(total_num_pages, page_size, actual_num_kv_heads,
-                              actual_head_dim, kv_dtype)
 
 
 def sharded_ragged_paged_attention(
