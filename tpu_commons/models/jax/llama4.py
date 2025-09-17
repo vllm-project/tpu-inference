@@ -444,7 +444,9 @@ class Llama4WeightLoader:
     def load_weights(self, model_for_loading: nnx.Module):
         model_params = nnx.state(model_for_loading)
 
-        num_model_layers = len(model_for_loading.layers)
+        all_relevant_keys = set(self._transpose_map.keys()).union(self._weight_shape_map.keys())
+
+        # num_model_layers = len(model_for_loading.layers)
 
         # Get the interleave step from the model config to decide if a layer is MoE
         interleave_moe_layer_step = getattr(
@@ -476,24 +478,37 @@ class Llama4WeightLoader:
                 model_weight = get_param(model_params, mapped_name)
 
                 current_weight = loaded_weight
+                matched_key = None
+                for key in all_relevant_keys:
+                    if loaded_name.endswith(key) or loaded_name.endswith(key + ".weight"):
+                        matched_key = key
+                        break
 
-                # --- Conditional Transformation Logic ---
-                # This is the key change. We check the key and layer type before transforming.
-                if not loaded_name.endswith(".bias"):
-                    if is_moe_layer and "experts." in loaded_name:
-                        # These are MoE expert weights. Their loaded shape already matches the model's needs.
-                        # No reshaping or transposing is needed for MoE's experts' weights.
-                        pass
-                    elif "q_proj" in loaded_name or "k_proj" in loaded_name or "v_proj" in loaded_name or "o_proj" in loaded_name or "router" in loaded_name:
-                        # These are attention weights. They need reshaping and transposing.
-                        current_weight = reshape_params(loaded_name, current_weight, self._weight_shape_map)
-                        current_weight = transpose_params(loaded_name, current_weight, self._transpose_map)
-                    elif not is_moe_layer and any(s in loaded_name for s in ["down_proj", "up_proj", "gate_proj"]) or "lm_head" in loaded_name:
-                        # These are dense layer weights. They need a standard transpose.
-                        current_weight = jnp.transpose(current_weight, (1, 0))
-                    # For `shared_expert` weights, a different approach might be needed depending on the exact shape.
-                    elif "shared_expert" in loaded_name:
-                        current_weight = jnp.transpose(current_weight, (1, 0))
+                # # --- Conditional Transformation Logic ---
+                # # This is the key change. We check the key and layer type before transforming.
+                # if not loaded_name.endswith(".bias"):
+                #     if is_moe_layer and "experts." in loaded_name:
+                #         # These are MoE expert weights. Their loaded shape already matches the model's needs.
+                #         # No reshaping or transposing is needed for MoE's experts' weights.
+                #         pass
+                #     elif "q_proj" in loaded_name or "k_proj" in loaded_name or "v_proj" in loaded_name or "o_proj" in loaded_name or "router" in loaded_name:
+                #         # These are attention weights. They need reshaping and transposing.
+                #         current_weight = reshape_params(loaded_name, current_weight, self._weight_shape_map)
+                #         current_weight = transpose_params(loaded_name, current_weight, self._transpose_map)
+                #     elif not is_moe_layer and any(s in loaded_name for s in ["down_proj", "up_proj", "gate_proj"]) or "lm_head" in loaded_name:
+                #         # These are dense layer weights. They need a standard transpose.
+                #         current_weight = transpose_params(loaded_name, current_weight, self._transpose_map)
+                #         current_weight = jnp.transpose(current_weight, (1, 0))
+                #     # For `shared_expert` weights, a different approach might be needed depending on the exact shape.
+                #     elif "shared_expert" in loaded_name:
+                #         current_weight = jnp.transpose(current_weight, (1, 0))
+
+                if not loaded_name.endswith(".bias") and matched_key:
+                    if matched_key in self._weight_shape_map:
+                        current_weight = reshape_params(matched_key, current_weight, self._weight_shape_map)
+                        current_weight = transpose_params(matched_key, current_weight, self._transpose_map)
+                    elif matched_key in self._transpose_map:
+                        current_weight = transpose_params(matched_key, current_weight, self._transpose_map)
 
                 # Validate the final shape.
                 if model_weight.value.shape != current_weight.shape:
