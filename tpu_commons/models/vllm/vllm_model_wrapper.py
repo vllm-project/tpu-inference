@@ -29,6 +29,7 @@ from tpu_commons.models.vllm.sharding import (
     LORA_MODULE_TYPE_TO_WRAPPING_FUNC, get_fqn, shard_model_to_tpu)
 from tpu_commons.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
+from tpu_commons.runner.lora_utils import replace_lora_metadata
 
 logger = init_logger(__name__)
 
@@ -162,6 +163,22 @@ class VllmModelWrapper:
                         for i in range(module.n_slices)
                     ])
 
+                assert module.punica_wrapper is not None, "punica_wrapper should have been initialized for LoRA modules"
+                module.punica_wrapper._token_lora_indices = torch.nn.Buffer(
+                    module.punica_wrapper._token_lora_indices)
+                module.punica_wrapper._sampler_indices = torch.nn.Buffer(
+                    module.punica_wrapper._sampler_indices)
+                module.punica_wrapper._sampler_indices_padded = torch.nn.Buffer(
+                    module.punica_wrapper._sampler_indices_padded)
+                module.punica_wrapper._embeddings_indices = torch.nn.Buffer(
+                    module.punica_wrapper._embeddings_indices)
+                module.punica_wrapper._seq_start_locs = torch.nn.Buffer(
+                    module.punica_wrapper._seq_start_locs)
+                module.punica_wrapper._seq_lengths = torch.nn.Buffer(
+                    module.punica_wrapper._seq_lengths)
+                module.punica_wrapper._lora_indices_per_batch = torch.nn.Buffer(
+                    module.punica_wrapper._lora_indices_per_batch)
+
             for child_name, child_module in list(module.named_children()):
                 _process_module(child_module, child_name, module)
 
@@ -178,7 +195,7 @@ class VllmModelWrapper:
                 "xla_tpu_reduce_scatter_collective_matmul_mode":
                 "post_spmd_conservative"
             },
-            static_argnames=('layer_name_to_kvcache_index', ))
+            static_argnames=('layer_name_to_kvcache_index', 'lora_metadata'))
         def step_fun(
             params_and_buffers,  # this has been wrapped into a torchax TorchValue
             kv_caches: List[jax.Array],
@@ -186,9 +203,11 @@ class VllmModelWrapper:
             attn_metadata: AttentionMetadata,
             input_embeds: jax.Array,
             layer_name_to_kvcache_index: Sequence[Tuple[str, int]],
+            lora_metadata=None,
             *args,
         ) -> Tuple[List[jax.Array], jax.Array]:
             layer_name_to_kvcache_index = dict(layer_name_to_kvcache_index)
+            lora_metadata = dict(lora_metadata)
             with torchax.default_env(), set_vllm_model_wrapper_context(
                     kv_caches=kv_caches,
                     mesh=self.mesh,
@@ -197,6 +216,8 @@ class VllmModelWrapper:
                                    vllm_config=self.vllm_config):
                 # We need to wrap args from jax land into TorchValue with
                 # torch_view in order to call the Torch function.
+                original_lora_metadata = replace_lora_metadata(
+                    self.model, lora_metadata)
                 hidden_states = torch.func.functional_call(
                     self.model,
                     torch_view(params_and_buffers),
@@ -208,6 +229,7 @@ class VllmModelWrapper:
                     },
                     tie_weights=False,
                 )
+                replace_lora_metadata(self.model, original_lora_metadata)
                 vllm_model_wrapper_context = get_vllm_model_wrapper_context()
                 new_kv_caches = vllm_model_wrapper_context.kv_caches
             # Wrap the hidden_states from torch land into a JaxValue for the jax

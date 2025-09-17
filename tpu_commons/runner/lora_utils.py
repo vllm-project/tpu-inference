@@ -13,7 +13,8 @@ from torchax.ops.mappings import t2j
 from vllm.lora.request import LoRARequest
 
 from tpu_commons.models.vllm.sharding import (
-    extract_all_params_buffers, shard_lora_weights_and_move_to_tpu)
+    LORA_MODULE_TYPE_TO_WRAPPING_FUNC, extract_all_params_buffers, get_fqn,
+    shard_lora_weights_and_move_to_tpu)
 
 if TYPE_CHECKING:
     from tpu_commons.runner.tpu_jax_runner import TPUModelRunner
@@ -75,3 +76,52 @@ class LoraUtils:
                                                (params, buffers))
         params_and_buffers = {**params, **buffers}
         return jax_view(params_and_buffers)
+
+    def extract_lora_metadata(self):
+        metadata = {}
+
+        def extract_one(module, prefix):
+            # vars does not show inherited methods or class attributes but this is fine.
+            module_qualname = get_fqn(module)
+            if module_qualname in LORA_MODULE_TYPE_TO_WRAPPING_FUNC:
+                for k in vars(module.punica_wrapper):
+                    v = getattr(module.punica_wrapper, k, None)
+                    if isinstance(v, torchax.tensor.Tensor):
+                        continue
+                    if k == 'indices_len':  # it's a list so it is unhashable. jax.jit static arg requires arg to be hashable. So we need to convert to a tuple.
+                        v = tuple(v)
+
+                    qual_name = prefix + 'punica_wrapper.' + k
+                    metadata[qual_name] = v
+
+            for name, child in module.named_children():
+                extract_one(child, prefix + name + '.')
+
+        extract_one(self.runner.model.model, '')
+        return metadata
+
+
+def replace_lora_metadata(model, lora_metadata: dict) -> dict:
+    original_lora_metadata = {}
+
+    def replace_one(module, prefix):
+        # vars does not show inherited methods or class attributes but this is fine.
+        module_qualname = get_fqn(module)
+        if module_qualname in LORA_MODULE_TYPE_TO_WRAPPING_FUNC:
+            for k in vars(module.punica_wrapper):
+                original_v = getattr(module.punica_wrapper, k, None)
+                if isinstance(original_v, torchax.tensor.Tensor):
+                    continue
+                qual_name = prefix + 'punica_wrapper.' + k
+                original_lora_metadata[qual_name] = original_v
+                assert qual_name in lora_metadata, f"{qual_name} not in lora_metadata. {type(original_v)=}"
+                v = lora_metadata[qual_name]
+                if k == 'indices_len':
+                    v = list(v)
+                setattr(module.punica_wrapper, k, v)
+
+        for name, child in module.named_children():
+            replace_one(child, prefix + name + '.')
+
+    replace_one(model, '')
+    return original_lora_metadata

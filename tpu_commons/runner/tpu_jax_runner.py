@@ -381,6 +381,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # TODO: make _get_input_ids_embeds within this context
         # NOTE: right now, mm model will use embeddings as the input,
         # but text-only model will use input_ids
+        lora_metadata = None
+        if self.lora_config is not None:
+            lora_metadata = self.lora_utils.extract_lora_metadata()
+            # lora_metadata_tuple = tuple(lora_metadata.items())
         with self.maybe_forbid_compile:
 
             with set_forward_context(
@@ -390,15 +394,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     scheduler_output) as kv_connector_output:
                 # NOTE(Wenlong): It takes both `input_ids` and `inputs_embeds`,
                 # but one of them would be `None`
-                (self.kv_caches, hidden_states,
-                 aux_hidden_states) = self.model_fn(
-                     self.state,
-                     self.kv_caches,
-                     input_ids,
-                     attn_metadata,
-                     inputs_embeds,
-                     tuple(self.layer_name_to_kvcache_index.items()),
-                 )
+                (
+                    self.kv_caches, hidden_states, aux_hidden_states
+                ) = self.model_fn(
+                    self.state,
+                    self.kv_caches,
+                    input_ids,
+                    attn_metadata,
+                    inputs_embeds,
+                    tuple(self.layer_name_to_kvcache_index.items()),
+                    # The reason why we convert dict to tuple is that we need to mark lora_metadata as static arg for jax.jit because it contains python primitive (str) and a static arg must be hashable. But a dict is not hashable.
+                    # frozendict doesn't work because lora_metadata contains list and frozendict() would complain list is not hashable.
+                    tuple(lora_metadata.items()),
+                )
 
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)
