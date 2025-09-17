@@ -5,9 +5,11 @@ from jax.experimental import shard_map
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
-from tpu_commons.kernels.ragged_paged_attention.v3.kernel import \
-    ragged_paged_attention
+import tpu_commons.kernels.ragged_paged_attention.v3.kernel as rpa
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
+
+ragged_paged_attention = rpa.ragged_paged_attention
+get_kv_cache_shape = rpa.get_kv_cache_shape
 
 
 def sharded_ragged_paged_attention(
