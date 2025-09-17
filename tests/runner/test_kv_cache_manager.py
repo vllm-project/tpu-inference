@@ -23,7 +23,7 @@ class TestKVCacheManager:
 
     def setup_method(self):
         # Mock JAX dependencies
-        self.mock_devices = [MagicMock()] * 4
+        self.mock_devices = [MagicMock(coords=i) for i in range(4)]
         self.mock_rng_key = MagicMock()
 
         # create 1x1 mesh
