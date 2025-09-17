@@ -445,6 +445,11 @@ class Llama4WeightLoader:
     def load_weights(self, model_for_loading: nnx.Module):
         model_params = nnx.state(model_for_loading)
 
+        breakpoint()
+
+        # inpsect model_params
+        # inspect loaded_name and self.names_and_weights_generator
+
         all_relevant_keys = set(self._transpose_map.keys()).union(self._weight_shape_map.keys())
 
         num_model_layers = len(model_for_loading.layers)
@@ -477,6 +482,7 @@ class Llama4WeightLoader:
 
                 mapped_name = self.map_loaded_to_standardized_name(loaded_name)
                 model_weight = get_param(model_params, mapped_name)
+                breakpoint()
 
                 current_weight = loaded_weight
                 matched_key = None
@@ -537,3 +543,5 @@ class Llama4WeightLoader:
                     print_param_info(model_weight, loaded_name)
 
         nnx.update(model_for_loading, model_params)
+        breakpoint()
+        # inpsect model_params
