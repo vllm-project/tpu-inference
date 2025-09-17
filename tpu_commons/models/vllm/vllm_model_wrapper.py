@@ -246,13 +246,18 @@ class VllmModelWrapper:
             jax.jit,
             out_shardings=(NamedSharding(self.mesh,
                                          PartitionSpec(None, "model"))),
+            static_argnames=('lora_metadata'),
         )
         def compute_logits_func(
             params_and_buffers: Any,
             hidden_states: jax.Array,
+            lora_metadata=None,
         ) -> jax.Array:
+            lora_metadata = dict(lora_metadata)
             with torchax.default_env(), set_vllm_model_wrapper_context(
                     kv_caches=None, mesh=self.mesh):
+                original_lora_metadata = replace_lora_metadata(
+                    self.model, lora_metadata)
                 logits = torch.func.functional_call(
                     self.model,
                     torch_view(params_and_buffers),
@@ -261,6 +266,7 @@ class VllmModelWrapper:
                     },
                     tie_weights=False,
                 )
+                replace_lora_metadata(self.model, original_lora_metadata)
             return jax_view(logits)
 
         return compute_logits_func
