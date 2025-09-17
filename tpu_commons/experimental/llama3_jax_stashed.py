@@ -97,6 +97,8 @@ class LlamaForCausalLM(nnx.Module):
                         rope_scaling={},
                         rngs=self.rng,
                         dtype=dtype,
+                        kv_cache_dtype=self.vllm_config.cache_config.
+                        cache_dtype,
                         mesh=self.mesh,
                         random_init=force_random_weights,
                         dnh_sharding=(None, "model", None),

@@ -122,6 +122,7 @@ class DeepSeekV3(nnx.Module):
                 num_key_value_heads=num_key_value_heads,
                 head_dim=v_head_dim,  # MLA uses v_head_dim as head_dim
                 dtype=dtype,
+                kv_cache_dtype=vllm_config.cache_config.cache_dtype,
                 rngs=self.rng,
                 activation_attention_td=(None, 'model'),
                 activation_q_td=(None, 'model'),

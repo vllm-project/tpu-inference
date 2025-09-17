@@ -19,7 +19,8 @@ if TYPE_CHECKING:
 from tpu_commons import utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.runner.kv_cache import create_kv_caches
+from tpu_commons.runner.kv_cache import (DEFAULT_KV_CACHE_DTYPE,
+                                         create_kv_caches)
 from tpu_commons.utils import device_array
 
 logger = init_logger(__name__)
@@ -112,6 +113,11 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
 
     kv_cache_jnp_dtype = utils.TPU_STR_DTYPE_TO_JAX_DTYPE.get(
         kv_cache_dtype.lower().strip())
+
+    # Handle the case where kv_cache_dtype is "auto"
+    if kv_cache_jnp_dtype is None:
+        assert kv_cache_dtype == "auto", "kv_cache_dtype must be 'auto' if kv_cache_jnp_dtype is None"
+        kv_cache_jnp_dtype = DEFAULT_KV_CACHE_DTYPE
 
     kv_caches = create_kv_caches(
         num_blocks=DEFAULT_NUM_BLOCKS_FOR_JIT_KV_CACHE,
@@ -299,7 +305,8 @@ def apply_qwix_quantization(
         num_hidden_layers=vllm_config.model_config.hf_config.num_hidden_layers,
         kv_cache_block_size=block_size,
         kv_cache_num_kv_heads=num_kv_heads,
-        kv_cache_head_size=head_size)
+        kv_cache_head_size=head_size,
+        kv_cache_dtype=kv_cache_dtype)
 
     def create_and_quantize_model_factory() -> Callable:
         """

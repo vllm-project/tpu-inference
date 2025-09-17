@@ -57,9 +57,9 @@ class Attention(nnx.Module):
     attention_chunk_size: int | None = None
     rope_input_ordering: str = "split"
 
-    q_scale: float = 1
-    k_scale: float = 1
-    v_scale: float = 1
+    _q_scale: float = 1
+    _k_scale: float = 1
+    _v_scale: float = 1
 
     def __post_init__(self, rngs: nnx.Rngs):
         """Initializes the weight kernels for Q, K, V, and O projections."""
