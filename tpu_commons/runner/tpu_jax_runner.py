@@ -54,6 +54,7 @@ from tpu_commons.runner.speculative_decoding_manager import \
     SpeculativeDecodingManager
 from tpu_commons.runner.structured_decoding_manager import \
     StructuredDecodingManager
+from tpu_commons.runner.utils import LatencyTracker
 from tpu_commons.spec_decode.jax.eagle3 import Eagle3Proposer
 from tpu_commons.utils import device_array, make_optimized_mesh
 
@@ -331,7 +332,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         scheduler_output: "VllmSchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> ModelRunnerOutput:
-        return self._execute_model(scheduler_output)[1]
+        logger.debug(
+            f"scheduler_output: {scheduler_output.num_scheduled_tokens} computed tokens: {scheduler_output.scheduled_cached_reqs.num_computed_tokens}"
+        )
+        with LatencyTracker("Execute model"):
+            return self._execute_model(scheduler_output)[1]
 
     def _execute_model(
         self,
