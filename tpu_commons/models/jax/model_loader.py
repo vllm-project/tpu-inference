@@ -144,6 +144,7 @@ def _get_nnx_model(
     return jit_model
 
 
+# TODO(pooyam): We need to refactor this. This is returning a bunch of functions that do not work with all models and this is not very easy to see from the code.
 def get_flax_model(
     vllm_config: VllmConfig,
     rng: jax.Array,
@@ -208,6 +209,15 @@ def get_flax_model(
         model = nnx.merge(graphdef, state)
         return model.get_input_embeddings(*args, **kwargs)
 
+    # For models that want to work with EAGLE-3 speculative decoding
+    @functools.partial(
+        jax.jit,
+        out_shardings=(logits_sharding),
+    )
+    def combine_hidden_states(graphdef, state, hidden_states):
+        model = nnx.merge(graphdef, state)
+        return model.combine_hidden_states(hidden_states)
+
     model_fn = functools.partial(run_model, graphdef)
     compute_logits_fn = functools.partial(run_compute_logits, graphdef)
     get_multimodal_embeddings_fn = functools.partial(
@@ -215,7 +225,10 @@ def get_flax_model(
     get_input_embeddings_fn = functools.partial(run_get_input_embeddings,
                                                 graphdef)
     lora_manager, model = None, None
-    return model_fn, compute_logits_fn, get_multimodal_embeddings_fn, get_input_embeddings_fn, state, lora_manager, model
+    combine_hidden_states_fn = functools.partial(combine_hidden_states,
+                                                 graphdef)
+
+    return model_fn, compute_logits_fn, combine_hidden_states_fn, get_multimodal_embeddings_fn, get_input_embeddings_fn, state, lora_manager, model
 
 
 def get_vllm_model(
@@ -235,7 +248,8 @@ def get_vllm_model(
     jit_model = model.jit_step_func()
     compute_logits_fn = model.jit_compute_logits_func()
     # the model needs to be returned because lora weights are neither torch.nn.parameter nor torch.nn.buffer. After we load the lora weights and set it to the torch.nn.Module, we can shard it and move it to TPU.
-    return jit_model, compute_logits_fn, None, None, params, lora_manager, model
+    combine_hidden_states_fn = None
+    return jit_model, compute_logits_fn, combine_hidden_states_fn, None, None, params, lora_manager, model
 
 
 def get_model(

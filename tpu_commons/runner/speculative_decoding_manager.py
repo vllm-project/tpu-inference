@@ -5,13 +5,16 @@ from typing import TYPE_CHECKING, Optional
 
 import jax.numpy as jnp
 import numpy as np
+from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.outputs import DraftTokenIds
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
 from tpu_commons.runner import utils as runner_utils
+from tpu_commons.spec_decode.jax.eagle3 import Eagle3Proposer
 from tpu_commons.utils import device_array
 
 if TYPE_CHECKING:
+    from tpu_commons.models.jax.attention_metadata import AttentionMetadata
     from tpu_commons.runner.tpu_jax_runner import TPUModelRunner
 
 
@@ -28,7 +31,7 @@ class SpecDecodeMetadata:
 
 class SpeculativeDecodingManager:
 
-    def __init__(self, runner: "TPUModelRunner"):
+    def __init__(self, runner: TPUModelRunner):
         self.runner = runner
         # Cached draft tokens.
         self._draft_token_ids: Optional[list[list[int]]] = None
@@ -44,10 +47,97 @@ class SpeculativeDecodingManager:
     def propose_draft_token_ids(
         self,
         sampled_token_ids: list[list[int]],
+        aux_hidden_states: Optional[tuple[jnp.ndarray, ...]],
+        attn_metadata: AttentionMetadata,
+        spec_decode_metadata: Optional[SpecDecodeMetadata],
+        scheduler_output: Optional[VllmSchedulerOutput] = None,
+        input_ids: Optional[jnp.ndarray] = None,
     ) -> None:
-        # TODO(ranlihao): Support eagle proposer.
-        self._draft_token_ids = self.propose_ngram_draft_token_ids(
-            sampled_token_ids)
+        if self.runner.speculative_config.method == "ngram":
+            self._draft_token_ids = self.propose_ngram_draft_token_ids(
+                sampled_token_ids)
+        elif self.runner.speculative_config.method == "eagle3":
+            self._draft_token_ids = self.propose_eagle3_draft_token_ids(
+                sampled_token_ids,
+                aux_hidden_states,
+                attn_metadata,
+                spec_decode_metadata,
+                scheduler_output,
+                input_ids,
+            )
+        else:
+            raise NotImplementedError(
+                f"Speculative decoding method "
+                f"'{self.runner.speculative_config.method}' is not supported.")
+
+    def propose_eagle3_draft_token_ids(
+        self,
+        sampled_token_ids: list[list[int]],
+        aux_hidden_states: Optional[tuple[jnp.ndarray, ...]],
+        attn_metadata: AttentionMetadata,
+        spec_decode_metadata: Optional[SpecDecodeMetadata],
+        scheduler_output: VllmSchedulerOutput,
+        input_ids: jnp.ndarray,
+    ) -> list[list[int]]:
+        assert isinstance(self.runner.drafter, Eagle3Proposer)
+
+        # TODO(woosuk): Refactor the loop.
+        req_ids = self.runner.input_batch.req_ids
+        next_token_ids: list[int] = []
+        for i, token_ids in enumerate(sampled_token_ids):
+            if token_ids:
+                # Common case.
+                next_token_id = token_ids[-1]
+            else:
+                # Partial prefill (rare case).
+                # Get the next token id from the request state.
+                req_id = req_ids[i]
+                req_state = self.runner.requests[req_id]
+                seq_len = (req_state.num_computed_tokens +
+                           scheduler_output.num_scheduled_tokens[req_id])
+                next_token_id = req_state.get_token_id(seq_len)
+            next_token_ids.append(next_token_id)
+
+        # Pad the batch size to match with existing padding for target model
+        pad_len = attn_metadata.seq_lens.shape[0] - len(next_token_ids)
+        assert pad_len >= 0
+        next_token_ids += [0] * pad_len
+
+        next_token_ids = jnp.array(next_token_ids, dtype=jnp.int32)
+        (next_token_ids, ) = device_array(self.runner.mesh, (next_token_ids, ))
+
+        if spec_decode_metadata is None:
+            num_rejected_tokens = None
+        else:
+            num_draft_tokens = spec_decode_metadata.draft_lengths_cpu
+            num_rejected_tokens = [
+                n + 1 - len(sampled_token_ids[i]) if n > 0 else 0
+                for i, n in enumerate(num_draft_tokens)
+            ]
+
+            pad_len = self.runner.max_num_reqs - len(num_rejected_tokens)
+            num_rejected_tokens += [0] * pad_len
+
+            num_rejected_tokens = jnp.array(num_rejected_tokens)
+            (num_rejected_tokens, ) = device_array(self.runner.mesh,
+                                                   (num_rejected_tokens, ))
+
+        attn_metadata, target_token_ids, target_hidden_states = self.runner.drafter.prepare_inputs(
+            attn_metadata,
+            input_ids,
+            aux_hidden_states,
+            num_rejected_tokens,
+        )
+        self.runner.kv_caches, draft_token_ids = self.runner.drafter.propose(
+            kv_caches=self.runner.kv_caches,
+            next_token_ids=next_token_ids,
+            attn_metadata=attn_metadata,
+            input_ids=input_ids,
+            target_token_ids=target_token_ids,
+            target_hidden_states=target_hidden_states,
+        )
+        result = draft_token_ids.tolist()
+        return result
 
     def propose_ngram_draft_token_ids(
         self,
