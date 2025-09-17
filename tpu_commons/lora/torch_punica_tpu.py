@@ -40,7 +40,16 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             dtype=torch.int32)
 
     def _get_token_lora_indices(self, x: torch.Tensor) -> torch.IntTensor:
-        return torch.narrow(self._token_lora_indices, 0, 0, x.size(0))
+        # The line below fails due to
+        # (EngineCore_DP0 pid=18960)     return torch.narrow(self._token_lora_indices, 0, 0, x.size(0))
+        # (EngineCore_DP0 pid=18960)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        # (EngineCore_DP0 pid=18960) TypeError: narrow() received an invalid combination of arguments - got (DynamicJaxprTracer, int, int, int), but expected one of:
+        # (EngineCore_DP0 pid=18960)  * (Tensor input, int dim, Tensor start, int length)
+        # (EngineCore_DP0 pid=18960)       didn't match because some of the arguments have invalid types: (!DynamicJaxprTracer!, int, !int!, int)
+        # (EngineCore_DP0 pid=18960)  * (Tensor input, int dim, int start, int length)
+        # (EngineCore_DP0 pid=18960)       didn't match because some of the arguments have invalid types: (!DynamicJaxprTracer!, int, int, int)
+        # return torch.narrow(self._token_lora_indices, 0, 0, x.size(0))
+        return self._token_lora_indices[0:x.shape[0]]
 
     @property
     def embeddings_indices(self) -> torch.Tensor:
@@ -327,9 +336,11 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                                  token_lora_tensor: torch.Tensor) -> None:
         with torchax.default_env():
             self.batch_size = 1
+            print(f'xw32 line339 why? {type(self._lora_indices_per_batch)=}')
             self._lora_indices_per_batch[:self.
                                          batch_size] = token_lora_tensor[:self.
                                                                          batch_size]
+            # self._lora_indices_per_batch.at[:self.batch_size].set(token_lora_tensor[:self.batch_size])
 
     def _pad_prompt_mapping(
             self, prompt_mapping: tuple[int, ...]) -> tuple[int, ...]:

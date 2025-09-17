@@ -381,9 +381,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # TODO: make _get_input_ids_embeds within this context
         # NOTE: right now, mm model will use embeddings as the input,
         # but text-only model will use input_ids
-        lora_metadata = None
+        lora_static_metadata, lora_dynamic_metadata = None, None
         if self.lora_config is not None:
-            lora_metadata = self.lora_utils.extract_lora_metadata()
+            lora_static_metadata, lora_dynamic_metadata = self.lora_utils.extract_lora_metadata(
+            )
             # lora_metadata_tuple = tuple(lora_metadata.items())
         with self.maybe_forbid_compile:
 
@@ -405,13 +406,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     tuple(self.layer_name_to_kvcache_index.items()),
                     # The reason why we convert dict to tuple is that we need to mark lora_metadata as static arg for jax.jit because it contains python primitive (str) and a static arg must be hashable. But a dict is not hashable.
                     # frozendict doesn't work because lora_metadata contains list and frozendict() would complain list is not hashable.
-                    tuple(lora_metadata.items()),
+                    tuple(lora_static_metadata.items()),
+                    lora_dynamic_metadata,
                 )
 
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)
-            logits = self.compute_logits_fn(self.state, hidden_states,
-                                            tuple(lora_metadata.items()))
+            logits = self.compute_logits_fn(
+                self.state, hidden_states, tuple(lora_static_metadata.items()),
+                lora_dynamic_metadata)
             if scheduler_output.grammar_bitmask is not None:
                 (
                     require_struct_decoding, grammar_bitmask_padded, arange

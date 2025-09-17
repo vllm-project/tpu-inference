@@ -163,21 +163,31 @@ class VllmModelWrapper:
                         for i in range(module.n_slices)
                     ])
 
-                assert module.punica_wrapper is not None, "punica_wrapper should have been initialized for LoRA modules"
-                module.punica_wrapper._token_lora_indices = torch.nn.Buffer(
-                    module.punica_wrapper._token_lora_indices)
-                module.punica_wrapper._sampler_indices = torch.nn.Buffer(
-                    module.punica_wrapper._sampler_indices)
-                module.punica_wrapper._sampler_indices_padded = torch.nn.Buffer(
-                    module.punica_wrapper._sampler_indices_padded)
-                module.punica_wrapper._embeddings_indices = torch.nn.Buffer(
-                    module.punica_wrapper._embeddings_indices)
-                module.punica_wrapper._seq_start_locs = torch.nn.Buffer(
-                    module.punica_wrapper._seq_start_locs)
-                module.punica_wrapper._seq_lengths = torch.nn.Buffer(
-                    module.punica_wrapper._seq_lengths)
-                module.punica_wrapper._lora_indices_per_batch = torch.nn.Buffer(
-                    module.punica_wrapper._lora_indices_per_batch)
+                # TODO(xw32): below doesn't register as nn.Buffer. Need to do something else.
+                # assert module.punica_wrapper is not None, "punica_wrapper should have been initialized for LoRA modules"
+                # module.punica_wrapper._token_lora_indices = torch.nn.Buffer(
+                #     module.punica_wrapper._token_lora_indices)
+                # module.punica_wrapper._sampler_indices = torch.nn.Buffer(
+                #     module.punica_wrapper._sampler_indices)
+                # module.punica_wrapper._sampler_indices_padded = torch.nn.Buffer(
+                #     module.punica_wrapper._sampler_indices_padded)
+                # module.punica_wrapper._embeddings_indices = torch.nn.Buffer(
+                #     module.punica_wrapper._embeddings_indices)
+                # module.punica_wrapper._seq_start_locs = torch.nn.Buffer(
+                #     module.punica_wrapper._seq_start_locs)
+                # module.punica_wrapper._seq_lengths = torch.nn.Buffer(
+                #     module.punica_wrapper._seq_lengths)
+                # module.punica_wrapper._lora_indices_per_batch = torch.nn.Buffer(
+                #     module.punica_wrapper._lora_indices_per_batch)
+
+                # Below also doesn't work because module.register_buffer complains: KeyError: 'buffer name can\'t contain "."'
+                # module.register_buffer("punica_wrapper._token_lora_indices", module.punica_wrapper._token_lora_indices)
+                # module.register_buffer("punica_wrapper._sampler_indices", module.punica_wrapper._sampler_indices)
+                # module.register_buffer("punica_wrapper._sampler_indices_padded", module.punica_wrapper._sampler_indices_padded)
+                # module.register_buffer("punica_wrapper._embeddings_indices", module.punica_wrapper._embeddings_indices)
+                # module.register_buffer("punica_wrapper._seq_start_locs", module.punica_wrapper._seq_start_locs)
+                # module.register_buffer("punica_wrapper._seq_lengths", module.punica_wrapper._seq_lengths)
+                # module.register_buffer("punica_wrapper._lora_indices_per_batch", module.punica_wrapper._lora_indices_per_batch)
 
             for child_name, child_module in list(module.named_children()):
                 _process_module(child_module, child_name, module)
@@ -195,7 +205,8 @@ class VllmModelWrapper:
                 "xla_tpu_reduce_scatter_collective_matmul_mode":
                 "post_spmd_conservative"
             },
-            static_argnames=('layer_name_to_kvcache_index', 'lora_metadata'))
+            static_argnames=('layer_name_to_kvcache_index',
+                             'lora_static_metadata'))
         def step_fun(
             params_and_buffers,  # this has been wrapped into a torchax TorchValue
             kv_caches: List[jax.Array],
@@ -203,11 +214,16 @@ class VllmModelWrapper:
             attn_metadata: AttentionMetadata,
             input_embeds: jax.Array,
             layer_name_to_kvcache_index: Sequence[Tuple[str, int]],
-            lora_metadata=None,
+            lora_static_metadata=None,
+            lora_dynamic_metadata=None,
             *args,
         ) -> Tuple[List[jax.Array], jax.Array]:
             layer_name_to_kvcache_index = dict(layer_name_to_kvcache_index)
-            lora_metadata = dict(lora_metadata)
+            lora_static_metadata = dict(lora_static_metadata)
+            lora_metadata = torch_view({
+                **lora_static_metadata,
+                **lora_dynamic_metadata
+            })
             with torchax.default_env(), set_vllm_model_wrapper_context(
                     kv_caches=kv_caches,
                     mesh=self.mesh,
@@ -246,14 +262,19 @@ class VllmModelWrapper:
             jax.jit,
             out_shardings=(NamedSharding(self.mesh,
                                          PartitionSpec(None, "model"))),
-            static_argnames=('lora_metadata'),
+            static_argnames=('lora_static_metadata'),
         )
         def compute_logits_func(
             params_and_buffers: Any,
             hidden_states: jax.Array,
-            lora_metadata=None,
+            lora_static_metadata=None,
+            lora_dynamic_metadata=None,
         ) -> jax.Array:
-            lora_metadata = dict(lora_metadata)
+            lora_static_metadata = dict(lora_static_metadata)
+            lora_metadata = torch_view({
+                **lora_static_metadata,
+                **lora_dynamic_metadata
+            })
             with torchax.default_env(), set_vllm_model_wrapper_context(
                     kv_caches=None, mesh=self.mesh):
                 original_lora_metadata = replace_lora_metadata(
