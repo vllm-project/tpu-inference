@@ -9,7 +9,9 @@ import jax.numpy as jnp
 import qwix
 import yaml
 from flax import nnx
-from jax.sharding import Mesh
+from flax.typing import PRNGKey
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -394,3 +396,97 @@ def update_vllm_config_for_qwix_quantization(vllm_config: "VllmConfig"):
                 raise ValueError(
                     f"Invalid quantization config; please see README for details on quantization config: {e}"
                 )
+
+
+# TODO (jacobplatin): make quantization_block_size configurable
+def load_random_weights_into_qwix_abstract_model(
+        rng: PRNGKey,
+        state: nnx.State,
+        mesh: Mesh,
+        scale_dtype: jnp.dtype,
+        scale_shape_map: dict,
+        quantization_block_size: int = 128):
+    """
+    Loads random weights for an abstract, Qwix-quantized model.
+
+    Args:
+        rng: The random key.
+        state: The state of the model.
+        mesh: The mesh.
+        scale_dtype: The dtype of the scales.
+        scale_shape_map: a mapping from parameter name to scale shape, e.g.:
+            {
+                "kernel_kv_down_proj_DA": (56, 576),
+                "kernel_kv_up_proj_ANH": (4, 128, 2),
+                "kernel_q_up_proj_ANH": (12, 1, 192),
+                "kernel_o_proj_NHD": (128, 1, 56),
+                "kernel_down_proj_EFD": (256, 16, 56),
+                "kernel_up_proj_EDF": (256, 56, 16),
+                "kernel_gating_EDF": (256, 56, 16),
+            }
+        quantization_block_size: The size of the quantization block.
+    """
+
+    def _get_random_sharded_array(key: PRNGKey, param: nnx.Param,
+                                  param_shape: tuple, dtype: jnp.dtype,
+                                  param_name: str) -> jax.Array:
+        """
+        Returns a random sharded array for the given parameter for the given shape.
+
+        Args:
+            key: The random key.
+            param: The parameter.
+            param_shape: The shape of the parameter.
+            dtype: The dtype of the parameter.
+            param_name: The name of the parameter.
+
+        Returns:
+            A random sharded array for the given parameter for the given shape.
+        """
+        is_int = jnp.issubdtype(dtype, jnp.integer)
+        if is_int:
+            # These need to be JAX arrays or else you'll run into an overflow error
+            minval = jnp.array(jnp.iinfo(dtype).min, dtype=dtype)
+            maxval = jnp.array(jnp.iinfo(dtype).max, dtype=dtype)
+            weight = jax.random.randint(key, param_shape, minval, maxval,
+                                        dtype)
+        else:
+            weight = jax.random.normal(key, param_shape, dtype)
+
+        def get_slice(index):
+            return weight[index]
+
+        try:
+            sharded_array = jax.make_array_from_callback(
+                param_shape, NamedSharding(mesh, P(*param.sharding)),
+                get_slice)
+        except (ValueError, TypeError):
+            logger.warning(
+                f"Could not create sharded scale for {param_name} with shape {param_shape} and sharding {param.sharding}, skipping sharding..."
+            )
+            sharded_array = jax.make_array_from_callback(
+                param_shape, NamedSharding(mesh, P()), get_slice)
+
+        return sharded_array
+
+    # Iterate through all variables and initialize them
+    prev_param_shape = None
+    for path, param in nnx.iter_graph(state):
+        if not isinstance(param, nnx.Variable):
+            continue
+        if path[0] == 'rng' and path[-1] == "key":
+            param.value = rng
+            continue
+        is_qwix_scale = (path[-1] == 'scale' and path[-2] == "array")
+        param_dtype = scale_dtype if is_qwix_scale else param.value.dtype
+        param_shape = param.value.shape
+        # TODO (jacobplatin): I'd like to make this more dynamic/abstract
+        if is_qwix_scale:
+            param_shape = scale_shape_map.get(
+                path[3],
+                tuple(dim // quantization_block_size
+                      for dim in prev_param_shape))
+        param.value = _get_random_sharded_array(
+            rng, param, param_shape, param_dtype,
+            ".".join([str(x) for x in path]))
+        prev_param_shape = param_shape

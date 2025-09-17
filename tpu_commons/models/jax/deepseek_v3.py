@@ -459,6 +459,17 @@ class DeepSeekV3WeightLoader:
                 (hidden_size // self.quantization_block_size_n, attn_heads,
                  v_head_dim // self.quantization_block_size_n),
             }
+            # NOTE: this is only needed for pre-quantized models when doing random weight loading
+            # TODO (jacobplatin): remove or clean this up
+            self.scale_shap_map_for_random_weight_loading = {
+                "kernel_kv_down_proj_DA": (56, 576),
+                "kernel_kv_up_proj_ANH": (4, 128, 2),
+                "kernel_q_up_proj_ANH": (12, 1, 192),
+                "kernel_o_proj_NHD": (128, 1, 56),
+                "kernel_down_proj_EFD": (256, 16, 56),
+                "kernel_up_proj_EDF": (256, 56, 16),
+                "kernel_gating_EDF": (256, 56, 16),
+            }
 
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
         # Find the corresponding model key using the HF key
@@ -771,68 +782,6 @@ class DeepSeekV3WeightLoader:
         del quantized_scales
         # TODO: validate that all of the model_params were accounted for as well.
         nnx.update(model_for_loading, model_params)
-
-    def load_random_weights(self, rng: PRNGKey, state: nnx.State, mesh: Mesh):
-
-        def _get_random_sharded_array(key: PRNGKey, param: nnx.Param,
-                                      param_shape: tuple, dtype: jnp.dtype,
-                                      param_name: str) -> jax.Array:
-            """
-            Returns a random sharded array for the given parameter for the given shape.
-
-            Args:
-                key: The random key.
-                param: The parameter.
-                param_shape: The shape of the parameter.
-                dtype: The dtype of the parameter.
-                param_name: The name of the parameter.
-
-            Returns:
-                A random sharded array for the given parameter for the given shape.
-            """
-            weight = jax.random.normal(key, param_shape, dtype)
-
-            def get_slice(index):
-                return weight[index]
-
-            try:
-                sharded_array = jax.make_array_from_callback(
-                    param_shape, NamedSharding(mesh, P(*param.sharding)),
-                    get_slice)
-            except ValueError:
-                logger.warning(
-                    f"Could not create sharded scale for {param_name} with shape {param_shape} and sharding {param.sharding}, skipping..."
-                )
-                sharded_array = jax.make_array_from_callback(
-                    param_shape, NamedSharding(mesh, P()), get_slice)
-
-            return sharded_array
-
-        # Iterate through all variables and initialize them
-        prev_param_shape = None
-        for path, param in nnx.iter_graph(state):
-            if not isinstance(param, nnx.Variable) or path[0] == 'rng':
-                continue
-            is_qwix_scale = (path[-1] == 'scale' and path[-2] == "array")
-            param_dtype = self.scale_dtype if is_qwix_scale else param.value.dtype
-            param_shape = param.value.shape
-            # TODO (jacobplatin): I'd like to make this more dynamic/abstract
-            if is_qwix_scale:
-                shape_mapping = {
-                    "kernel_kv_down_proj_DA": (56, 576),
-                    "kernel_kv_up_proj_ANH": (4, 128, 2),
-                    "kernel_q_up_proj_ANH": (12, 1, 192),
-                    "kernel_o_proj_NHD": (128, 1, 56),
-                    "kernel_down_proj_EFD": (256, 16, 56),
-                    "kernel_up_proj_EDF": (256, 56, 16),
-                    "kernel_gating_EDF": (256, 56, 16),
-                }
-                param_shape = shape_mapping.get(
-                    path[3], tuple(dim // 128 for dim in prev_param_shape))
-            param.value = _get_random_sharded_array(
-                rng.params(), param, param_shape, param_dtype,
-                ".".join([str(x) for x in path]))
-            prev_param_shape = param_shape
 
 
 def weights_dequant_cpu(x: torch.Tensor,

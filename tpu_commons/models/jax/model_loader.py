@@ -12,7 +12,8 @@ from vllm.utils import supports_kw
 
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.utils.quantization.quantization_utils import (
-    apply_qwix_on_abstract_model, apply_qwix_quantization)
+    apply_qwix_on_abstract_model, apply_qwix_quantization,
+    load_random_weights_into_qwix_abstract_model)
 
 logger = init_logger(__name__)
 
@@ -105,7 +106,20 @@ def _get_nnx_model(
             # NOTE: if using JAX_RANDOM_WEIGHTS on a pre-quantized model (e.g. DeepSeek),
             # then it's expected that the model has a `load_random_weights` method
             # that initializes the Qwix QArrays
-            model.load_random_weights(rng)
+            scale_dtype = model.weight_loader.scale_dtype
+            # TODO (jacobplatin): clean up this logic
+            scale_map = model.weight_loader.scale_shap_map_for_random_weight_loading if hasattr(
+                model.weight_loader,
+                'scale_shap_map_for_random_weight_loading') else None
+            logger.info(
+                "Initializing Qwix-quantized model with random weights...")
+            load_random_weights_into_qwix_abstract_model(
+                rng, model, mesh, scale_dtype, scale_map)
+            # Handles the DeepSeek case, where this needs to be called to make the cache weights
+            # concrete
+            if hasattr(model, 'initialize_cache'):
+                model.initialize_cache()
+            logger.info("Random weight initialization complete.")
             with mesh:
                 jit_model = create_jit_model(model,
                                              use_qwix_on_abstract_model=True)
