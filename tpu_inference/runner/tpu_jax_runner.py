@@ -165,8 +165,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             except KeyError:
                 tp = len(self.devices)
 
-            axis_names = ("data", "model")
-            mesh_shape = (dp, tp)
+            axis_names = ("data", "kv", "model")
+            mesh_shape = (dp, 4, tp // 4)
 
             self.mesh = make_optimized_mesh(mesh_shape,
                                             axis_names,

@@ -198,7 +198,8 @@ class VllmModelWrapper:
         @functools.partial(
             jax.jit,
             out_shardings=(NamedSharding(self.mesh,
-                                         PartitionSpec(None, "model"))),
+                                         PartitionSpec(None,
+                                                       ("kv", "model")))),
         )
         def compute_logits_func(
             params_and_buffers: Any,

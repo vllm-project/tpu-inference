@@ -248,7 +248,7 @@ class CompilationManager:
                 indices_paddings=self.runner.num_reqs_paddings,
                 hidden_dim=vocab_size,
                 sharding=NamedSharding(self.runner.mesh,
-                                       PartitionSpec(None, "model")),
+                                       PartitionSpec(None, ("kv", "model"))),
             )
             self._precompile_select_from_array_helper(
                 name="select target tokens for spec decoding",
@@ -256,7 +256,7 @@ class CompilationManager:
                 indices_paddings=self.runner.num_logits_paddings,
                 hidden_dim=vocab_size,
                 sharding=NamedSharding(self.runner.mesh,
-                                       PartitionSpec(None, "model")),
+                                       PartitionSpec(None, ("kv", "model"))),
                 only_equal_paddings=True,
             )
 
@@ -285,7 +285,7 @@ class CompilationManager:
         hsize = self.runner.model_config.get_vocab_size()
         for num_reqs in self.runner.num_reqs_paddings:
             sharding = NamedSharding(self.runner.mesh,
-                                     PartitionSpec(None, "model"))
+                                     PartitionSpec(None, ("kv", "model")))
             logits = self._create_dummy_tensor((num_reqs, hsize), jnp.bfloat16,
                                                sharding)
             for do_sampling in (True, False):
@@ -363,7 +363,7 @@ class CompilationManager:
         for num_logits in self.runner.num_logits_paddings:
             for num_reqs in self.runner.num_reqs_paddings:
                 sharding = NamedSharding(self.runner.mesh,
-                                         PartitionSpec(None, "model"))
+                                         PartitionSpec(None, ("kv", "model")))
                 target_probs = self._create_dummy_tensor(
                     (num_logits, vocab_size), jnp.bfloat16, sharding)
                 draft_token_ids = self._create_dummy_tensor((num_logits, ),
