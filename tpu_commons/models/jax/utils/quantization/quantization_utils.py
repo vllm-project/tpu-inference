@@ -398,14 +398,9 @@ def update_vllm_config_for_qwix_quantization(vllm_config: "VllmConfig"):
                 )
 
 
-# TODO (jacobplatin): make quantization_block_size configurable
-def load_random_weights_into_qwix_abstract_model(
-        rng: PRNGKey,
-        state: nnx.State,
-        mesh: Mesh,
-        scale_dtype: jnp.dtype,
-        scale_shape_map: dict,
-        quantization_block_size: int = 128):
+def load_random_weights_into_qwix_abstract_model(rng: PRNGKey,
+                                                 model: nnx.Module, mesh: Mesh,
+                                                 quantization_config: dict):
     """
     Loads random weights for an abstract, Qwix-quantized model.
 
@@ -413,19 +408,21 @@ def load_random_weights_into_qwix_abstract_model(
         rng: The random key.
         state: The state of the model.
         mesh: The mesh.
-        scale_dtype: The dtype of the scales.
-        scale_shape_map: a mapping from parameter name to scale shape, e.g.:
-            {
-                "kernel_kv_down_proj_DA": (56, 576),
-                "kernel_kv_up_proj_ANH": (4, 128, 2),
-                "kernel_q_up_proj_ANH": (12, 1, 192),
-                "kernel_o_proj_NHD": (128, 1, 56),
-                "kernel_down_proj_EFD": (256, 16, 56),
-                "kernel_up_proj_EDF": (256, 56, 16),
-                "kernel_gating_EDF": (256, 56, 16),
-            }
-        quantization_block_size: The size of the quantization block.
+        model: The model.
+        quantization_config: The quantization config for the model.
     """
+    logger.info("Initializing Qwix-quantized model with random weights...")
+    # TODO (jacobplatin): clean up this logic
+    scale_dtype = model.weight_loader.scale_dtype
+    scale_shape_map = model.weight_loader.scale_shap_map_for_random_weight_loading if hasattr(
+        model.weight_loader,
+        'scale_shap_map_for_random_weight_loading') else {}
+    quantization_block_sizes = quantization_config["weight_block_size"]
+    assert len(
+        quantization_block_sizes
+    ) == 2, f"Expected only 2 quantization block sizes but got {quantization_block_sizes}"
+    quantization_block_size_n, _ = quantization_block_sizes[
+        0], quantization_block_sizes[1]
 
     def _get_random_sharded_array(key: PRNGKey, param: nnx.Param,
                                   param_shape: tuple, dtype: jnp.dtype,
@@ -471,7 +468,7 @@ def load_random_weights_into_qwix_abstract_model(
 
     # Iterate through all variables and initialize them
     prev_param_shape = None
-    for path, param in nnx.iter_graph(state):
+    for path, param in nnx.iter_graph(model):
         if not isinstance(param, nnx.Variable):
             continue
         if path[0] == 'rng' and path[-1] == "key":
@@ -480,13 +477,19 @@ def load_random_weights_into_qwix_abstract_model(
         is_qwix_scale = (path[-1] == 'scale' and path[-2] == "array")
         param_dtype = scale_dtype if is_qwix_scale else param.value.dtype
         param_shape = param.value.shape
-        # TODO (jacobplatin): I'd like to make this more dynamic/abstract
+        # TODO (jacobplatin): clean this up
         if is_qwix_scale:
             param_shape = scale_shape_map.get(
                 path[3],
-                tuple(dim // quantization_block_size
+                tuple(dim // quantization_block_size_n
                       for dim in prev_param_shape))
         param.value = _get_random_sharded_array(
             rng, param, param_shape, param_dtype,
             ".".join([str(x) for x in path]))
         prev_param_shape = param_shape
+
+    # Handles the DeepSeek case, where this needs to be called to make the cache weights
+    # concrete
+    if hasattr(model, 'initialize_cache'):
+        model.initialize_cache()
+    logger.info("Done initializing Qwix-quantized model with random weights")

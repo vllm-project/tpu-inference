@@ -11,6 +11,7 @@ from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from tpu_commons.runner.input_batch_jax import CachedRequestState, InputBatch
 from tpu_commons.runner.speculative_decoding_manager import SpecDecodeMetadata
 from tpu_commons.runner.tpu_jax_runner import TPUModelRunner
+from tpu_commons.spec_decode.jax.eagle3 import Eagle3Proposer
 
 
 class TestSpeculativeDecodingManager:
@@ -60,13 +61,40 @@ class TestSpeculativeDecodingManager:
             self.runner = TPUModelRunner(vllm_config,
                                          devices=self.mock_devices)
 
+    def test_propose_draft_token_ids_dispatches_to_eagle(self):
+        """Tests that propose_draft_token_ids calls the correct eagle method."""
+        # 1. ===== Setup =====
+        # Set the drafter to be an Eagle3Proposer
+        self.runner.drafter = MagicMock(spec=Eagle3Proposer)
+        self.runner.speculative_config.method = "eagle3"
+
+        # Mock the eagle-specific proposal method
+        with patch.object(self.runner.speculative_decoding_manager,
+                          'propose_eagle3_draft_token_ids',
+                          return_value=[[10, 11]]) as mock_propose_eagle:
+
+            # 2. ===== Act =====
+            self.runner.speculative_decoding_manager.propose_draft_token_ids(
+                sampled_token_ids=[[1]],
+                aux_hidden_states=None,
+                attn_metadata=MagicMock(),
+                spec_decode_metadata=None,
+            )
+
+            # 3. ===== Assert =====
+            mock_propose_eagle.assert_called_once()
+            assert self.runner.speculative_decoding_manager._draft_token_ids == [
+                [10, 11]
+            ]
+
     def test_propose_draft_token_ids_wrong_drafter_type(self):
         """Tests that an assertion is raised if the drafter is not an NgramProposer."""
         # The default drafter is NgramProposer, so we replace it with a generic mock
         self.runner.drafter = MagicMock()
+        self.runner.speculative_config.method = "ngram"
         with pytest.raises(AssertionError):
             self.runner.speculative_decoding_manager.propose_draft_token_ids(
-                [[1]])
+                [[1]], None, MagicMock(), None)
 
     def test_propose_ngram_draft_token_ids(self):
         """Tests the logic for proposing N-gram draft tokens under various conditions."""
@@ -371,3 +399,68 @@ class TestSpeculativeDecodingManager:
             padded_num_reqs - len(num_draft_tokens))
         assert np.asarray(metadata.draft_lengths).tolist(
         ) == expected_padded_num_draft_tokens
+
+    @pytest.mark.parametrize("spec_decode_metadata_is_none", [True, False])
+    def test_propose_eagle3_draft_token_ids(self,
+                                            spec_decode_metadata_is_none):
+        """Tests the logic for proposing Eagle3 draft tokens."""
+        # 1. ===== Setup =====
+        self.runner.drafter = MagicMock(spec=Eagle3Proposer)
+        self.runner.speculative_config.method = "eagle3"
+
+        # Mock TPUModelRunner attributes
+        self.runner.input_batch = MagicMock()
+        self.runner.input_batch.req_ids = ["req-1", "req-2"]
+        self.runner.requests = {
+            "req-1": MagicMock(),
+            "req-2": MagicMock(),
+        }
+        self.runner.mesh = self.mock_mesh
+        self.runner.kv_caches = MagicMock()
+
+        # Mock drafter methods
+        mock_attn_metadata = MagicMock()
+        mock_target_token_ids = MagicMock()
+        mock_target_hidden_states = MagicMock()
+        self.runner.drafter.prepare_inputs.return_value = (
+            mock_attn_metadata,
+            mock_target_token_ids,
+            mock_target_hidden_states,
+        )
+        mock_draft_token_ids = MagicMock()
+        mock_draft_token_ids.tolist.return_value = [[10, 11], [20, 21]]
+        self.runner.drafter.propose.return_value = (
+            self.runner.kv_caches,
+            mock_draft_token_ids,
+        )
+
+        # Inputs
+        sampled_token_ids = [[1], [2]]
+        aux_hidden_states = MagicMock()
+        attn_metadata = MagicMock()
+        attn_metadata.seq_lens.shape = [2]
+        if spec_decode_metadata_is_none:
+            spec_decode_metadata = None
+        else:
+            spec_decode_metadata = MagicMock(spec=SpecDecodeMetadata)
+            spec_decode_metadata.draft_lengths_cpu = np.array([2, 3])
+        scheduler_output = MagicMock()
+        input_ids = MagicMock()
+
+        # 2. ===== Act =====
+        with patch(
+                "tpu_commons.runner.speculative_decoding_manager.device_array",
+                side_effect=lambda mesh, x: x):
+            result = self.runner.speculative_decoding_manager.propose_eagle3_draft_token_ids(
+                sampled_token_ids,
+                aux_hidden_states,
+                attn_metadata,
+                spec_decode_metadata,
+                scheduler_output,
+                input_ids,
+            )
+
+        # 3. ===== Assert =====
+        assert result == [[10, 11], [20, 21]]
+        self.runner.drafter.prepare_inputs.assert_called_once()
+        self.runner.drafter.propose.assert_called_once()

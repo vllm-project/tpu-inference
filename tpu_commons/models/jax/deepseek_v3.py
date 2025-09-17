@@ -295,20 +295,6 @@ class DeepSeekV3(nnx.Module):
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         return self.lm_head.decode(hidden_states)
 
-    def load_random_weights(self, rng: PRNGKey):
-        """
-        Initializes the model with random weights, respecting the QArray
-        structure for quantized parameters. This is used when
-        JAX_RANDOM_WEIGHTS is true for models that require abstract
-        quantization (like FP8).
-        """
-        logger.info("Initializing model with random weights...")
-        self.rng = nnx.Rngs(rng)
-        state = nnx.state(self)
-        self.weight_loader.load_random_weights(self.rng, state, self.mesh)
-        self.initialize_cache()
-        logger.info("Random weight initialization complete.")
-
 
 @dataclass
 class DeepSeekV3WeightLoader:

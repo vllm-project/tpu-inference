@@ -45,6 +45,7 @@ class KVCacheManager:
         # If use pure jax (MODEL_IMPL_TYPE=flax_nnx), we don't register
         # attention into compilation config.
         # Use FullAttentionSpec for each layer
+        # TODO(pooyam): Is it possible to merge the logic for vllm and non-vllm models?
         if len(self.runner.vllm_config.compilation_config.
                static_forward_context) == 0:
             model_config = self.runner.model_config
@@ -63,6 +64,24 @@ class KVCacheManager:
                     dtype=self.runner.kv_cache_dtype,
                     use_mla=use_mla,
                 )
+            if self.runner.speculative_config and self.runner.speculative_config.method == "eagle3":
+                draft_model_config = self.runner.speculative_config.draft_model_config
+                hf_config = draft_model_config.hf_config
+                num_kv_heads = common_utils.get_padded_num_heads(
+                    hf_config.num_key_value_heads,
+                    self.runner.mesh.shape["model"])
+                head_size = common_utils.get_padded_head_dim(
+                    hf_config.hidden_size // hf_config.num_attention_heads)
+
+                # Eagle3 has only 1 layer
+                for i in range(1):
+                    kv_cache_spec[f"draft_layer.{i}"] = FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=num_kv_heads,
+                        head_size=head_size,
+                        dtype=self.runner.kv_cache_dtype,
+                        use_mla=use_mla,
+                    )
         else:
             # Else propagate attention modules from compilation config.
             layers = get_layers_from_vllm_config(self.runner.vllm_config,
