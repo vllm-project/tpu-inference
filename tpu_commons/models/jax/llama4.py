@@ -503,11 +503,21 @@ class Llama4WeightLoader:
                 #     elif "shared_expert" in loaded_name:
                 #         current_weight = jnp.transpose(current_weight, (1, 0))
 
-                if not loaded_name.endswith(".bias") and matched_key:
-                    if matched_key in self._weight_shape_map:
+                if not loaded_name.endswith(".bias"):
+                    if is_moe_layer and "experts." in loaded_name:
+                        # MoE expert weights. No transpose is typically needed as their shape is already correct.
+                        # This check is crucial to prevent applying 2D transpose rules to 3D tensors.
+                        pass
+                    elif "shared_expert" in loaded_name:
+                        # Shared experts are 2D dense layers, which need a transpose.
+                        current_weight = jnp.transpose(current_weight, (1, 0))
+                    elif matched_key in self._weight_shape_map:
+                        # This block handles attention weights (q_proj, k_proj, v_proj, o_proj)
+                        # as well as the MoE router.
                         current_weight = reshape_params(matched_key, current_weight, self._weight_shape_map)
                         current_weight = transpose_params(matched_key, current_weight, self._transpose_map)
                     elif matched_key in self._transpose_map:
+                        # This block handles all other 2D weights (e.g., dense layer down_proj/up_proj/gate_proj, lm_head).
                         current_weight = transpose_params(matched_key, current_weight, self._transpose_map)
 
                 # Validate the final shape.
