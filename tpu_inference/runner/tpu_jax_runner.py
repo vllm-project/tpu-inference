@@ -277,8 +277,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             except KeyError:
                 tp = len(self.devices)
 
-            axis_names = ("data", "model")
-            mesh_shape = (dp, tp)
+            axis_names = ("data", "kv", "model")
+            mesh_shape = (dp, 4, tp // 4)
 
             if enforce_device_order:
                 self.mesh = jax.make_mesh(mesh_shape,

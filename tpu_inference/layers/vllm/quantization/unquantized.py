@@ -162,7 +162,7 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def __init__(self,
                  moe: FusedMoEConfig,
                  mesh: Mesh,
-                 ep_axis_name: str = 'model'):
+                 ep_axis_name: str = ("kv", "model")):
         super().__init__(moe)
         self.mesh = mesh
         self.use_kernel = bool(int(os.getenv("USE_MOE_EP_KERNEL", "0")))
@@ -216,12 +216,15 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             # Apply EP sharding
             w13_weight = jax.device_put(
                 w13_weight,
-                Format(Layout((0, 1, 2, 3)),
-                       NamedSharding(self.mesh, P("model", None, None, None))))
+                Format(
+                    Layout((0, 1, 2, 3)),
+                    NamedSharding(self.mesh,
+                                  P(("kv", "model"), None, None, None))))
             w2_weight_transposed = jax.device_put(
                 w2_weight_transposed,
-                Format(Layout((0, 1, 2)),
-                       NamedSharding(self.mesh, P("model", None, None))))
+                Format(
+                    Layout((0, 1, 2)),
+                    NamedSharding(self.mesh, P(("kv", "model"), None, None))))
 
             layer.w13_weight = Parameter(torch_view(w13_weight),
                                          requires_grad=False)
@@ -232,28 +235,36 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             if layer.use_ep:
                 w13_weight = jax.device_put(
                     w13_weight,
-                    Format(Layout((0, 1, 2)),
-                           NamedSharding(self.mesh, P("model", None, None))))
+                    Format(
+                        Layout((0, 1, 2)),
+                        NamedSharding(self.mesh, P(("kv", "model"), None,
+                                                   None))))
                 w2_weight = jax.device_put(
                     w2_weight,
-                    Format(Layout((0, 1, 2)),
-                           NamedSharding(self.mesh, P("model", None, None))))
+                    Format(
+                        Layout((0, 1, 2)),
+                        NamedSharding(self.mesh, P(("kv", "model"), None,
+                                                   None))))
             else:
                 intermediate_size = w13_weight.shape[1] // 2
                 assert intermediate_size == w2_weight.shape[-1]
                 output_sizes = [intermediate_size, intermediate_size]
-                n_shards = self.mesh.shape["model"]
+                n_shards = self.mesh.shape["model"] * self.mesh.shape["kv"]
                 assert intermediate_size % n_shards == 0
                 w13_weight = reorder_concatenated_tensor_for_sharding(
                     w13_weight, output_sizes, n_shards, dim=1)
                 w13_weight = jax.device_put(
                     w13_weight,
-                    Format(Layout((0, 1, 2)),
-                           NamedSharding(self.mesh, P(None, "model", None))))
+                    Format(
+                        Layout((0, 1, 2)),
+                        NamedSharding(self.mesh, P(None, ("kv", "model"),
+                                                   None))))
                 w2_weight = jax.device_put(
                     w2_weight,
-                    Format(Layout((0, 1, 2)),
-                           NamedSharding(self.mesh, P(None, None, "model"))))
+                    Format(
+                        Layout((0, 1, 2)),
+                        NamedSharding(self.mesh, P(None, None,
+                                                   ("kv", "model")))))
 
             layer.w13_weight = Parameter(torch_view(w13_weight),
                                          requires_grad=False)

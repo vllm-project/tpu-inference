@@ -36,13 +36,13 @@ class JaxCommonLinearConfig:
         self.output_sharding = None
 
         if isinstance(layer, RowParallelLinear):
-            self.weight_sharding = P(None, "model")
+            self.weight_sharding = P(None, ('kv', "model"))
             if self.enable_sequence_parallelism:
-                self.output_sharding = P("model", None)
+                self.output_sharding = P(('kv', "model"), None)
         elif isinstance(layer, ColumnParallelLinear):
-            self.weight_sharding = P("model", None)
+            self.weight_sharding = P(('kv', "model"), None)
             if self.enable_sequence_parallelism:
-                self.input_sharding = P("model", None)
+                self.input_sharding = P(('kv', "model"), None)
 
             if isinstance(layer, MergedColumnParallelLinear) or isinstance(
                     layer, QKVParallelLinear):
