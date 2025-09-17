@@ -340,7 +340,6 @@ class Llama4WeightLoader:
             "shared_expert.gate_proj": (1, 0),
             "shared_expert.up_proj": (1, 0),
             "o_proj": (1, 2, 0),
-            # "experts.down_proj": (0, 2, 1), # Assumed transpose for the MoE layer
             "lm_head": (1, 0),
         }
         self._weight_shape_map = {
@@ -426,11 +425,11 @@ class Llama4WeightLoader:
             mapped_name = re.sub(r"layers\.\*", f"layers.{layer_num}",
                                  mapped_name)
             mapped_model_weight = get_param(model_params, mapped_name)
-            if not loaded_name.endswith(".bias"):
-                loaded_weight = reshape_params(loaded_name, loaded_weight,
-                                               self._weight_shape_map)
-                loaded_weight = transpose_params(loaded_name, loaded_weight,
-                                                 self._transpose_map)
+            # if not loaded_name.endswith(".bias"):
+            #     loaded_weight = reshape_params(loaded_name, loaded_weight,
+            #                                    self._weight_shape_map)
+            #     loaded_weight = transpose_params(loaded_name, loaded_weight,
+            #                                      self._transpose_map)
             if mapped_model_weight.value.shape != loaded_weight.shape:
                 raise ValueError(
                     f"Loaded shape for {split_loaded_name}: {loaded_weight.shape} "
