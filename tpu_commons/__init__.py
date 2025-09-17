@@ -39,9 +39,14 @@ elif _platform == "cpu":
 elif _platform == "pathways":
     logger.info("Running vLLM on TPU via Pathways proxy.")
     # Must run pathwaysutils.initialize() before any JAX operations
-    import pathwaysutils
-    pathwaysutils.initialize()
-    logger.info("Module pathwaysutils is imported.")
-    logger.info(f"TPU type: {jax.devices()[0].device_kind}")
+    try:
+        import pathwaysutils
+        pathwaysutils.initialize()
+        logger.info("Module pathwaysutils is imported.")
+        logger.info(f"TPU type: {jax.devices()[0].device_kind}")
+    except Exception as e:
+        logger.error(
+            f"Error occurred while importing pathwaysutils or logging TPU info: {e}"
+        )
 else:
     logger.error(f"Unsupported platform: {_platform}")
