@@ -334,6 +334,8 @@ class Llama4WeightLoader:
             "v_proj": (2, 0, 1),
             "router": (1, 0),
             "down_proj": (1, 0), # This is for DenseFFW layers, add a transposition step specifically for the down_proj weight
+            "gate_proj": (1, 0), # Add this entry for DenseFFW gate
+            "up_proj": (1, 0),   # Add this entry for DenseFFW up
             "shared_expert.down_proj": (1, 0),
             "shared_expert.gate_proj": (1, 0),
             "shared_expert.up_proj": (1, 0),
