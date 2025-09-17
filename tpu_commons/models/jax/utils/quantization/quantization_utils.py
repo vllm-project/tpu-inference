@@ -398,6 +398,49 @@ def update_vllm_config_for_qwix_quantization(vllm_config: "VllmConfig"):
                 )
 
 
+def get_random_sharded_array(key: PRNGKey, mesh: Mesh, param: nnx.Param,
+                             param_shape: tuple, dtype: jnp.dtype,
+                             param_name: str) -> jax.Array:
+    """
+    Returns a random sharded array for the given parameter for the given shape.
+
+    Args:
+        key: The random key.
+        mesh: The mesh to use for sharding.
+        param: The parameter.
+        param_shape: The shape of the parameter.
+        dtype: The dtype of the parameter.
+        param_name: The name of the parameter.
+
+    Returns:
+        A random sharded array for the given parameter for the given shape.
+    """
+    is_int = jnp.issubdtype(dtype, jnp.integer)
+    if is_int:
+        # These need to be JAX arrays or else you'll run into an overflow error
+        minval = jnp.array(jnp.iinfo(dtype).min, dtype=dtype)
+        maxval = jnp.array(jnp.iinfo(dtype).max, dtype=dtype)
+        weight = jax.random.randint(key, param_shape, minval, maxval, dtype)
+    else:
+        weight = jax.random.normal(key, param_shape, dtype)
+
+    def get_slice(index):
+        return weight[index]
+
+    try:
+        sharded_array = jax.make_array_from_callback(
+            param_shape, NamedSharding(mesh, P(*param.sharding)), get_slice)
+    except (ValueError, TypeError):
+        logger.warning(
+            f"Could not create sharded scale for {param_name} with shape {param_shape} and sharding {param.sharding}, skipping sharding..."
+        )
+        sharded_array = jax.make_array_from_callback(param_shape,
+                                                     NamedSharding(mesh, P()),
+                                                     get_slice)
+
+    return sharded_array
+
+
 def load_random_weights_into_qwix_abstract_model(rng: PRNGKey,
                                                  model: nnx.Module, mesh: Mesh,
                                                  quantization_config: dict):
@@ -424,48 +467,6 @@ def load_random_weights_into_qwix_abstract_model(rng: PRNGKey,
     quantization_block_size_n, _ = quantization_block_sizes[
         0], quantization_block_sizes[1]
 
-    def _get_random_sharded_array(key: PRNGKey, param: nnx.Param,
-                                  param_shape: tuple, dtype: jnp.dtype,
-                                  param_name: str) -> jax.Array:
-        """
-        Returns a random sharded array for the given parameter for the given shape.
-
-        Args:
-            key: The random key.
-            param: The parameter.
-            param_shape: The shape of the parameter.
-            dtype: The dtype of the parameter.
-            param_name: The name of the parameter.
-
-        Returns:
-            A random sharded array for the given parameter for the given shape.
-        """
-        is_int = jnp.issubdtype(dtype, jnp.integer)
-        if is_int:
-            # These need to be JAX arrays or else you'll run into an overflow error
-            minval = jnp.array(jnp.iinfo(dtype).min, dtype=dtype)
-            maxval = jnp.array(jnp.iinfo(dtype).max, dtype=dtype)
-            weight = jax.random.randint(key, param_shape, minval, maxval,
-                                        dtype)
-        else:
-            weight = jax.random.normal(key, param_shape, dtype)
-
-        def get_slice(index):
-            return weight[index]
-
-        try:
-            sharded_array = jax.make_array_from_callback(
-                param_shape, NamedSharding(mesh, P(*param.sharding)),
-                get_slice)
-        except (ValueError, TypeError):
-            logger.warning(
-                f"Could not create sharded scale for {param_name} with shape {param_shape} and sharding {param.sharding}, skipping sharding..."
-            )
-            sharded_array = jax.make_array_from_callback(
-                param_shape, NamedSharding(mesh, P()), get_slice)
-
-        return sharded_array
-
     # Iterate through all variables and initialize them
     prev_param_shape = None
     for path, param in nnx.iter_graph(model):
@@ -483,8 +484,8 @@ def load_random_weights_into_qwix_abstract_model(rng: PRNGKey,
                 path[3],
                 tuple(dim // quantization_block_size_n
                       for dim in prev_param_shape))
-        param.value = _get_random_sharded_array(
-            rng, param, param_shape, param_dtype,
+        param.value = get_random_sharded_array(
+            rng, mesh, param, param_shape, param_dtype,
             ".".join([str(x) for x in path]))
         prev_param_shape = param_shape
 
