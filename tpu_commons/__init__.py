@@ -1,8 +1,9 @@
 import os
 
+import jax
+
 from tpu_commons import tpu_info as ti
 from tpu_commons.logger import init_logger
-import jax 
 
 logger = init_logger(__name__)
 
@@ -18,8 +19,9 @@ logger.warn(PROD_WARNING)
 def detect_platform() -> str:
     if "proxy" in os.environ.get('JAX_PLATFORMS', '').lower():
         return "pathways"
-    return jax.lib.xla_bridge.get_backend().platform # 'tpu' or 'cpu'
-        
+    return jax.lib.xla_bridge.get_backend().platform  # 'tpu' or 'cpu'
+
+
 _platform = detect_platform()
 
 if _platform == "tpu":
@@ -34,11 +36,12 @@ if _platform == "tpu":
         logger.error(f"Error occurred while logging TPU info: {e}")
 elif _platform == "cpu":
     logger.info("Running vLLM on CPU.")
-elif _platform== "pathways":
+elif _platform == "pathways":
     logger.info("Running vLLM on TPU via Pathways proxy.")
+    # Must run pathwaysutils.initialize() before any JAX operations
     import pathwaysutils
     pathwaysutils.initialize()
-    logger.info("Running vLLM with Pathways. "
-                "Module pathwaysutils is imported.")
+    logger.info("Module pathwaysutils is imported.")
+    logger.info(f"TPU type: {jax.devices()[0].device_kind}")
 else:
     logger.error(f"Unsupported platform: {_platform}")
