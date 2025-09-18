@@ -22,7 +22,8 @@ if "proxy" in os.environ.get('JAX_PLATFORMS', '').lower():
         import pathwaysutils
         pathwaysutils.initialize()
         logger.info("Module pathwaysutils is imported.")
-        logger.info(f"TPU type: {jax.devices()[0].device_kind}")
+        logger.info(f"TPU type: {jax.devices()[0].device_kind} |"
+                     f"num_chips={len(jax.devices())} ")
     except Exception as e:
         logger.error(
             f"Error occurred while importing pathwaysutils or logging TPU info: {e}"
