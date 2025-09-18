@@ -242,3 +242,10 @@ class TpuPlatform(Platform):
     def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
                                     model_config: ModelConfig) -> bool:
         return True
+
+    @classmethod
+    def use_sync_weight_loader(cls) -> bool:
+        """
+        Returns if the current platform needs to sync weight loader.
+        """
+        return True
