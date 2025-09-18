@@ -163,7 +163,7 @@ class VllmModelWrapper:
                         for i in range(module.n_slices)
                     ])
 
-                # TODO(xw32): below doesn't register as nn.Buffer. Need to do something else.
+                # TODO(xw32): I first tried to register the punica metadata as nn.Buffer but it doesn't work. It's probably because 'module' is nn.Module but module.punica_wrapper is not. And it's module.punica_wrapper.attr that I am trying to register as nn.Buffer.
                 # assert module.punica_wrapper is not None, "punica_wrapper should have been initialized for LoRA modules"
                 # module.punica_wrapper._token_lora_indices = torch.nn.Buffer(
                 #     module.punica_wrapper._token_lora_indices)
@@ -232,8 +232,14 @@ class VllmModelWrapper:
                                    vllm_config=self.vllm_config):
                 # We need to wrap args from jax land into TorchValue with
                 # torch_view in order to call the Torch function.
+                print(
+                    f'Before the 1st replace, {self.model.vllm_model.model.layers[0].self_attn.qkv_proj.punica_wrapper._lora_indices_per_batch=}'
+                )
                 original_lora_metadata = replace_lora_metadata(
                     self.model, lora_metadata)
+                print(
+                    f'After the 1st replace, {self.model.vllm_model.model.layers[0].self_attn.qkv_proj.punica_wrapper._lora_indices_per_batch=}'
+                )
                 hidden_states = torch.func.functional_call(
                     self.model,
                     torch_view(params_and_buffers),
@@ -245,7 +251,13 @@ class VllmModelWrapper:
                     },
                     tie_weights=False,
                 )
+                print(
+                    f'Before the 2nd replace, {self.model.vllm_model.model.layers[0].self_attn.qkv_proj.punica_wrapper._lora_indices_per_batch=}'
+                )
                 replace_lora_metadata(self.model, original_lora_metadata)
+                print(
+                    f'After the 2nd replace, {self.model.vllm_model.model.layers[0].self_attn.qkv_proj.punica_wrapper._lora_indices_per_batch=}'
+                )
                 vllm_model_wrapper_context = get_vllm_model_wrapper_context()
                 new_kv_caches = vllm_model_wrapper_context.kv_caches
             # Wrap the hidden_states from torch land into a JaxValue for the jax
