@@ -1,25 +1,32 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass
-from typing import Optional
+import functools
+from typing import Optional, Tuple
 
+import jax
+import jax.numpy as jnp
 import torch
-from jax.tree_util import register_pytree_node_class
-from torchax.interop import call_jax
+from jax.sharding import Mesh
+from torchax.interop import jax_view, torch_view
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
-from vllm.attention.backends.utils import CommonAttentionState
-from vllm.config import VllmConfig
-from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.utils import cdiv, next_power_of_2
 
 from tpu_commons.logger import init_logger
+from tpu_commons.models.jax.attention import attention
+from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 # Register custom op dispatcher.
-from tpu_commons.models.torchax.torchax_wrapper import (kv_cache_update,
-                                                        ragged_paged_attention)
-from tpu_commons.utils import TPU_HEAD_SIZE_ALIGNMENT
+from tpu_commons.models.vllm.vllm_model_wrapper_context import \
+    get_vllm_model_wrapper_context
 
 logger = init_logger(__name__)
+
+TPU_STR_DTYPE_TO_JAX_DTYPE = {
+    "bfloat16": jnp.bfloat16,
+    "fp8": jnp.float8_e4m3fn,
+    "fp8_e4m3": jnp.float8_e4m3,
+    "fp8_e5m2": jnp.float8_e5m2,
+    "int8": jnp.int8,
+}
 
 
 class PallasAttentionBackend(AttentionBackend):
@@ -31,90 +38,6 @@ class PallasAttentionBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["PallasAttentionBackendImpl"]:
         return PallasAttentionBackendImpl
-
-    @staticmethod
-    def get_metadata_cls() -> type["PallasMetadata"]:
-        return PallasMetadata
-
-    @staticmethod
-    def get_state_cls() -> type["CommonAttentionState"]:
-        return CommonAttentionState
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-    ) -> tuple[int, ...]:
-        padded_head_size = cdiv(
-            head_size, TPU_HEAD_SIZE_ALIGNMENT) * TPU_HEAD_SIZE_ALIGNMENT
-        return (num_blocks, block_size, num_kv_heads * 2, padded_head_size)
-
-    @staticmethod
-    def swap_blocks(
-        src_kv_cache: torch.Tensor,
-        dst_kv_cache: torch.Tensor,
-        src_to_dst: torch.Tensor,
-    ) -> None:
-        raise RuntimeError("swap_blocks is not used for the TPU backend.")
-
-    # In recent TPU generations, up to v6e, the SMEM size is 1MB. The
-    # block_tables within the PallasMetadata constitute almost the entire SMEM
-    # requirement. Its size is max_num_seqs * num_page_per_seq * 4 (Int). Here
-    # we simply make sure that the size is smaller than half of SMEM capacity.
-    @staticmethod
-    def get_min_page_size(vllm_config: VllmConfig) -> int:
-        max_num_page_per_req = (1024 * 1024 // 2 //
-                                vllm_config.scheduler_config.max_num_seqs // 4)
-        min_page_size = cdiv(vllm_config.model_config.max_model_len,
-                             max_num_page_per_req)
-        min_page_size = 1 << (min_page_size - 1).bit_length()
-        return min_page_size
-
-    # TPU has limited SREGs (scalar registers), if page_size is too small, we
-    # can spill SREGs easily which leads to bad performance. The strategy we
-    # apply here is trying to split max-model-len to 16 pages which make the
-    # spill less likely. Meanwhile we make sure the page size is in [16, 256].
-    @staticmethod
-    def get_page_size(vllm_config: VllmConfig) -> int:
-        page_size = next_power_of_2(
-            vllm_config.model_config.max_model_len) // 16
-        if page_size <= 16:
-            return 16
-        if page_size >= 256:
-            return 256
-        return page_size
-
-
-@dataclass
-@register_pytree_node_class
-class PallasMetadata:
-    # NOTE(sang): Definition of context_len, query_len, and seq_len.
-    # |---------- N-1 iteration --------|
-    # |---------------- N iteration ---------------------|
-    # |- tokenA -|......................|-- newTokens ---|
-    # |---------- context_len ----------|
-    # |-------------------- seq_len ---------------------|
-    #                                   |-- query_len ---|
-
-    # Used in the PallasAttentionBackendImpl
-    slot_mapping: torch.Tensor
-    block_tables: torch.Tensor
-    context_lens: torch.Tensor
-    query_start_loc: torch.Tensor
-    num_seqs: torch.Tensor
-    num_slices: torch.Tensor
-
-    def tree_flatten(self):
-        children = (self.slot_mapping, self.block_tables, self.context_lens,
-                    self.query_start_loc, self.num_seqs, self.num_slices)
-        aux_data = None
-        return (children, aux_data)
-
-    @classmethod
-    def tree_unflatten(cls, aux_data, children):
-        return cls(*children)
 
 
 class PallasAttentionBackendImpl(AttentionImpl):
@@ -148,14 +71,30 @@ class PallasAttentionBackendImpl(AttentionImpl):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         if alibi_slopes is not None:
             raise NotImplementedError("Alibi slopes is not supported.")
+        self.kv_cache_quantized_dtype = None
         if kv_cache_dtype != "auto":
-            raise NotImplementedError("FP8 KV cache dtype is not supported.")
+            self.kv_cache_quantized_dtype = TPU_STR_DTYPE_TO_JAX_DTYPE.get(
+                kv_cache_dtype.lower().strip())
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
                                       "PallasAttentionBackendImpl")
+
+    def quantize_kv(self, layer: AttentionLayer, key: jax.Array,
+                    value: jax.Array):
+        dtype_info = jnp.finfo(self.kv_cache_quantized_dtype)
+        minval, maxval = float(dtype_info.min), float(dtype_info.max)
+        # TODO(kyuyeunk): Add support for jnp.Tensor (layer._k_scale) scale
+        key = key.astype(jnp.float32) / layer._k_scale_float
+        key = jnp.clip(key, minval, maxval)
+        key = key.astype(self.kv_cache_quantized_dtype)
+        value = value.astype(jnp.float32) / layer._v_scale_float
+        value = jnp.clip(value, minval, maxval)
+        value = value.astype(self.kv_cache_quantized_dtype)
+
+        return key, value
 
     def forward(
         self,
@@ -164,114 +103,102 @@ class PallasAttentionBackendImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: PallasMetadata,
+        attn_metadata: AttentionMetadata,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Forward pass with Pallas attention.
-
-        Args:
-            query: shape = [num_tokens, num_heads * head_size]
-            key: shape = [num_tokens, num_kv_heads * head_size]
-            value: shape = [num_tokens, num_kv_heads * head_size]
-            kv_cache = [num_blocks, block_size, num_kv_heads * 2, head_size]
-            attn_metadata: Metadata for attention.
-        Returns:
-            shape = [num_tokens, num_heads * head_size]
-        """
         if output_scale is not None:
             raise NotImplementedError(
-                "fused output quantization is not yet supported"
-                " for PallasAttentionBackendImpl")
+                "fused output quantization is not yet supported for "
+                "PallasAttentionBackendImpl")
 
-        # For determine_available_memory case.
-        if kv_cache.numel() == 0:
-            if output is None:
-                output = torch.ones_like(query)
-            return output
+        if kv_cache.numel():
+            raise RuntimeError(
+                "KV cache from vLLM Attention layer should be empty but has "
+                "the size of %s.", kv_cache.numel())
 
-        assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
-        num_tokens, hidden_size = query.shape
-        query = query.view(num_tokens, self.num_heads, self.head_size)
-        key = key.view(-1, self.num_kv_heads, self.head_size)
-        value = value.view(-1, self.num_kv_heads, self.head_size)
-        if self.head_size % TPU_HEAD_SIZE_ALIGNMENT != 0:
-            padded_head_size = cdiv(
-                self.head_size,
-                TPU_HEAD_SIZE_ALIGNMENT) * TPU_HEAD_SIZE_ALIGNMENT
-            query = torch.nn.functional.pad(
-                query, (0, padded_head_size - self.head_size), value=0.0)
-            key = torch.nn.functional.pad(
-                key, (0, padded_head_size - self.head_size), value=0.0)
-            value = torch.nn.functional.pad(
-                value, (0, padded_head_size - self.head_size), value=0.0)
+        del kv_cache  # Use kv_cache from vllm wrapper context values instead.
 
-        if self.kv_sharing_target_layer_name is None and kv_cache.numel() > 0:
-            # Write input keys and values to the KV cache.
-            # Skip this if sharing KV cache with an earlier attention layer.
-            slot_mapping = attn_metadata.slot_mapping
-            kv_cache = write_to_kv_cache(key, value, kv_cache, slot_mapping,
-                                         attn_metadata.num_slices)
-            forward_context: ForwardContext = get_forward_context()
-            layer.kv_cache[forward_context.virtual_engine] = kv_cache
+        vllm_model_wrapper_context = get_vllm_model_wrapper_context()
+        kv_cache_index = vllm_model_wrapper_context.layer_name_to_kvcache_index[
+            layer.layer_name]
+        kv_cache = vllm_model_wrapper_context.kv_caches[kv_cache_index]
 
-        ragged_paged_attention_op = ragged_paged_attention
+        mesh = vllm_model_wrapper_context.mesh
 
-        output = ragged_paged_attention_op(
-            query,
-            kv_cache,
-            attn_metadata.context_lens,
-            attn_metadata.block_tables,
-            attn_metadata.query_start_loc,
-            attn_metadata.num_seqs,
-            # By default, the system utilizes optimized block size and
-            # vmem_limit_bytes parameters from the kernel repository. However,
-            # these can be manually adjusted for debugging if necessary.
-            num_kv_pages_per_block=None,
-            num_queries_per_block=None,
-            vmem_limit_bytes=100 * 1024 * 1024,
-            use_kernel=True,
-            sm_scale=self.scale,
-            sliding_window=self.sliding_window,
-            soft_cap=self.logits_soft_cap,
-        )
+        query, key, value = jax_view(query), jax_view(key), jax_view(value)
+        q_scale = k_scale = v_scale = None
+        if self.kv_cache_quantized_dtype:
+            key, value = self.quantize_kv(layer, key, value)
+            # TODO(kyuyeunk): Enable w8a8 when VREG spill issue is resolved.
+            # q_scale = layer._q_scale_float
+            k_scale = layer._k_scale_float
+            v_scale = layer._v_scale_float
 
-        if self.head_size % TPU_HEAD_SIZE_ALIGNMENT != 0:
-            output = output[:, :, :self.head_size]
+        new_kv_cache, outputs = _jax_attn_func(kv_cache, query, key, value,
+                                               attn_metadata, mesh, self.scale,
+                                               self.head_size, self.num_heads,
+                                               self.num_kv_heads, q_scale,
+                                               k_scale, v_scale)
+        vllm_model_wrapper_context.kv_caches[kv_cache_index] = new_kv_cache
 
-        return output.reshape(num_tokens, hidden_size)
+        return torch_view(outputs)
 
 
-def write_to_kv_cache(key: torch.Tensor, value: torch.Tensor,
-                      kv_cache: torch.Tensor, slot_mapping: torch.Tensor,
-                      num_slices: torch.Tensor) -> torch.Tensor:
-    """ Write the key and values to the KV cache.
+@functools.partial(
+    jax.jit,
+    static_argnums=(
+        5, 6, 7, 8, 9, 10, 11, 12
+    ),  # mesh, scale, head_size, num_heads, num_kv_heads, q_scale, k_scale, v_scale
+    donate_argnums=(0, ),  # donate kv_cache
+)
+def _jax_attn_func(
+    kv_cache: jax.Array,
+    q: jax.Array,
+    k: jax.Array,
+    v: jax.Array,
+    attention_metadata: AttentionMetadata,
+    mesh: Mesh,
+    scale: float,
+    head_size: int,
+    num_heads: int,
+    num_kv_heads: int,
+    q_scale: Optional[float] = None,
+    k_scale: Optional[float] = None,
+    v_scale: Optional[float] = None,
+) -> Tuple[jax.Array, jax.Array]:
+    del scale  # Unused for now, as the attention function applies a default scale.
 
-    Args:
-        key: shape = [num_tokens, num_kv_heads * head_size]
-        value: shape = [num_tokens, num_kv_heads *  head_size]
-        kv_cache = [num_blocks, block_size, num_kv_heads * 2, head_size]
-        slot_mapping = [3, padded_num_slices]
-        num_slices = [1]
+    # Get shapes from vllm
+    q_len, q_compute_dim = q.shape
+    k_len, k_compute_dim = k.shape
+    assert k.shape == v.shape
+    assert q_compute_dim == head_size * num_heads
+    assert k_compute_dim == head_size * num_kv_heads
 
-    """
-    num_blocks, block_size, num_combined_kv_heads, head_size = kv_cache.shape
-    head_size = cdiv(head_size,
-                     TPU_HEAD_SIZE_ALIGNMENT) * TPU_HEAD_SIZE_ALIGNMENT
-    num_kv_heads = num_combined_kv_heads // 2
+    # Convert the shapes from vLLM's convetion to what the attention function expects
+    # bs, num_heads, q_len, head_size
+    q = q.reshape(q_len, num_heads, head_size)
+    # bs, num_kv_heads, k_len, head_size
+    k = k.reshape(k_len, num_kv_heads, head_size)
+    v = v.reshape(k_len, num_kv_heads, head_size)
 
-    key = key.view(-1, num_kv_heads, head_size)
-    value = value.view(-1, num_kv_heads, head_size)
-    kv = torch.cat([key, value], axis=-1).reshape(-1, num_combined_kv_heads,
-                                                  head_size)
+    new_kv_cache, outputs = attention(
+        kv_cache,
+        q,
+        k,
+        v,
+        attention_metadata,
+        mesh,
+        q_scale=q_scale,
+        k_scale=k_scale,
+        v_scale=v_scale,
+    )
 
-    kv_cache = kv_cache.reshape(-1, num_combined_kv_heads, head_size)
-    kv_cache = call_jax(kv_cache_update,
-                        kv,
-                        slot_mapping,
-                        kv_cache,
-                        num_slices,
-                        page_size=block_size)
-    kv_cache = kv_cache.reshape(num_blocks, block_size, num_combined_kv_heads,
-                                head_size)
-    return kv_cache
+    # Convert the shape back to vLLM's convention
+    assert outputs.shape[0] == q_len
+    assert outputs.shape[1] == num_heads
+    assert outputs.shape[2] == head_size
+    outputs = outputs.reshape(q_len, q_compute_dim)
+
+    return new_kv_cache, outputs

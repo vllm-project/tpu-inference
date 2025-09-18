@@ -6,9 +6,9 @@ import numpy as np
 import pytest
 from jax.sharding import Mesh
 
-from tpu_commons.models.jax.attention import (attention,
-                                              get_kv_cache_shape_with_mesh)
+from tpu_commons.models.jax.attention import attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
+from tpu_commons.runner.kv_cache import get_kv_cache_shape_with_mesh
 
 # ---- Test Configuration & Constants ----
 

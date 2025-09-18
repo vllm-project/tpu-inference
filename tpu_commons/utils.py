@@ -2,7 +2,7 @@
 import os
 from collections import defaultdict
 from collections.abc import Sequence
-from typing import Any, List, Tuple
+from typing import Any, Callable, List, Tuple
 
 import jax
 import numpy as np
@@ -11,7 +11,7 @@ from jax._src import mesh as mesh_lib
 from jax._src import xla_bridge as xb
 from jax._src.lib import xla_client as xc
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from vllm import envs
+from vllm import envs, utils
 
 from tpu_commons.logger import init_logger
 
@@ -97,7 +97,6 @@ def hbm_usage_gb(devices: Any) -> List[Tuple[float, float]]:
 
 def get_padded_head_dim(head_dim: int) -> int:
     """Pads head_dim up to the nearest multiple of 128 for kernel performance."""
-    # Details can be seen at: tpu_commons/kernels/ragged_kv_cache_update.py::_kv_cache_update()
     return (head_dim + 127) // 128 * 128
 
 
@@ -121,6 +120,8 @@ def make_optimized_mesh(axis_shapes: Sequence[int],
                         devices: Sequence[xc.Device] | None = None):
     if devices is None:
         devices = xb.devices()
+    # Sort the devices in case it's passed in an arbitary order
+    devices = sorted(devices, key=lambda x: x.coords)
 
     def _is_1D(axis_shapes):
         return sum(x > 1 for x in axis_shapes) == 1
@@ -143,13 +144,13 @@ def make_optimized_mesh(axis_shapes: Sequence[int],
             if device_num == 8:
                 ordered_devices = np.array([
                     devices[0],
-                    devices[2],
-                    devices[4],
-                    devices[6],
-                    devices[7],
-                    devices[5],
-                    devices[3],
                     devices[1],
+                    devices[2],
+                    devices[3],
+                    devices[7],
+                    devices[6],
+                    devices[5],
+                    devices[4],
                 ])
             # NOTE(chengjiyao):
             # The coords of v6e-4 are
@@ -160,9 +161,9 @@ def make_optimized_mesh(axis_shapes: Sequence[int],
             elif device_num == 4:
                 ordered_devices = np.array([
                     devices[0],
-                    devices[2],
-                    devices[3],
                     devices[1],
+                    devices[3],
+                    devices[2],
                 ])
             if ordered_devices is not None:
                 ordered_devices = np.array(ordered_devices)
@@ -190,3 +191,12 @@ def device_array(mesh: Mesh, *args, sharding=None, **kwargs) -> jax.Array:
     if sharding is None:
         sharding = NamedSharding(mesh, PartitionSpec(None))
     return jax.device_put(*args, device=sharding, **kwargs)
+
+
+def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], bytes]:
+    """
+    A wrapper function of vllm.utils.get_hash_fn_by_name to support builtin
+    """
+    if hash_fn_name == "builtin":
+        return hash
+    return utils.get_hash_fn_by_name(hash_fn_name)

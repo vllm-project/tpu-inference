@@ -17,7 +17,6 @@ import jax
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.tasks import POOLING_TASKS
-from vllm.utils import get_hash_fn_by_name
 from vllm.v1.core.kv_cache_utils import (get_request_block_hasher,
                                          init_none_hash)
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
@@ -28,6 +27,7 @@ from vllm.v1.engine.core import EngineCoreProc as vLLMEngineCoreProc
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import RequestStatus
 
+from tpu_commons import utils as common_utils
 from tpu_commons.core import disagg_executor, disagg_utils
 # ======================================================================================
 # Imports for _DisaggOrchestrator (decoupled from vLLM)
@@ -97,10 +97,26 @@ class _DisaggOrchestrator:
         self._transfer_backlogs = [
             queue.Queue(4) for i in range(len(self._prefill_engines))
         ]
-        self._decode_backlogs = {
-            idx: queue.Queue(self._config.scheduler_config.max_num_seqs)
-            for idx, engine in enumerate(self._decode_engines)
-        }
+
+        self._decode_backlogs = {}
+        for idx, engine in enumerate(self._decode_engines):
+            # Determine the decode backlog len by remaning hbm dividing max kv cache size of a single request
+            runner = engine.model_executor.driver_worker.model_runner
+            hbm_usage = common_utils.hbm_usage_bytes(
+                engine.model_executor.driver_worker.devices)
+            if not hbm_usage:
+                self._decode_backlogs[idx] = queue.Queue(
+                    self._config.scheduler_config.max_num_seqs)
+                continue
+            hbm_free = [limit - used for used, limit in hbm_usage]
+            max_kv_bytes = len(runner.kv_caches) * (
+                runner.max_model_len // runner.cache_config.block_size) * (
+                    runner.kv_caches[0][0].nbytes) // len(hbm_free)
+            max_queue_len = min(hbm_free[0] // max_kv_bytes,
+                                self._config.scheduler_config.max_num_seqs)
+            logger.debug(
+                f"max kv bytes: {max_kv_bytes}, max_queue_len {max_queue_len}")
+            self._decode_backlogs[idx] = queue.Queue(max_queue_len)
 
         self._prefill_threads = [
             JetThread(
@@ -182,13 +198,11 @@ class _DisaggOrchestrator:
                         request = self._requests[req_id]
                         block_ids = (prefill_engine.scheduler.kv_cache_manager.
                                      get_block_ids(req_id))
-                        with LatencyTracker(
-                                f"ExtractKVCache-{req_id}-{block_ids}"):
-                            # Assume one KV cache group for now.
-                            kv_cache_map[req_id] = (
-                                prefill_engine.model_executor.driver_worker.
-                                model_runner.get_kv_cache_for_block_ids(
-                                    block_ids[0]), request.block_hashes)
+                        # Assume one KV cache group for now.
+                        kv_cache_map[req_id] = (
+                            prefill_engine.model_executor.driver_worker.
+                            model_runner.get_kv_cache_for_block_ids(
+                                block_ids[0]), request.block_hashes)
                         logger.debug(f"prefill done: for {req_id}")
                 transfer_backlog.put(kv_cache_map, block=True)
 
@@ -320,14 +334,13 @@ class _DisaggOrchestrator:
                 )
                 vllm_request.num_computed_tokens = prompt_tokens
                 new_block_ids = kv_cache_manager.get_block_ids(req_id)
-                logger.warning(
+                logger.debug(
                     f"decoding {req_id} new_block_ids {new_block_ids}")
                 assert (len(new_block_ids[0]) == math.ceil(
                     prompt_tokens / self._config.cache_config.block_size))
 
-                with LatencyTracker(f"KVCacheInsert-{len(new_block_ids[0])}"):
-                    decode_engine.model_executor.driver_worker.model_runner.insert_request_with_kv_cache(
-                        vllm_request, kv_cache, new_block_ids)
+                decode_engine.model_executor.driver_worker.model_runner.insert_request_with_kv_cache(
+                    vllm_request, kv_cache, new_block_ids)
 
                 vllm_request.status = RequestStatus.RUNNING
                 block_hashes = prefill_output["block_hashes"]
@@ -339,10 +352,10 @@ class _DisaggOrchestrator:
 
             scheduler_output = decode_engine.scheduler.schedule()
 
-            logger.info(f'''decode-{idx}: scheduler_output -
+            logger.debug(f'''decode-{idx}: scheduler_output -
                 {scheduler_output.scheduled_cached_reqs.num_computed_tokens},
                 new block ids - {scheduler_output.scheduled_cached_reqs.new_block_ids}'''
-                        )
+                         )
 
             with LatencyTracker(f"decode-{idx}"):
                 model_output = decode_engine.execute_model_with_error_logging(
@@ -397,6 +410,7 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
         # engine core to be executed, instead we create other instance of
         # engine cores and let them do the work.
         self.vllm_config = vllm_config
+        self.vllm_config.cache_config.gpu_memory_utilization = self.vllm_config.cache_config.gpu_memory_utilization - 0.1
 
         # We should be taking the input from the client, the code below is forked from
         # vllm.v1.engine.core.EngineCoreProc.
@@ -486,18 +500,20 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
                 raise RuntimeError("Input socket thread died during startup")
             if addresses.coordinator_input is not None:
                 logger.info("Waiting for READY message from DP Coordinator...")
-
+        self.request_block_hasher = None
         if (self.vllm_config.cache_config.enable_prefix_caching
-                or self.scheduler.get_kv_connector() is not None):
+                or self._prefill_engines[0].scheduler.get_kv_connector()
+                is not None):
 
             block_size = vllm_config.cache_config.block_size
-            caching_hash_fn = get_hash_fn_by_name(
+            caching_hash_fn = common_utils.get_hash_fn_by_name(
                 vllm_config.cache_config.prefix_caching_hash_algo)
             init_none_hash(caching_hash_fn)
 
             self.request_block_hasher = get_request_block_hasher(
                 block_size, caching_hash_fn)
 
+        self.mm_receiver_cache = None
         self._orchestrator = _DisaggOrchestrator(
             config=VllmConfigAdapter(vllm_config),
             output_queue=self.output_queue,

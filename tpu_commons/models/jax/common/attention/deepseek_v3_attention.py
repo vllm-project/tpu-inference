@@ -36,7 +36,6 @@ class MLA(nnx.Module):
     rope_theta: float
     rope_scaling: dict[str, Any]
     dtype: jnp.dtype
-    unquant_dtype: jnp.dtype
     mesh: Mesh
 
     q_lora_rank: int
@@ -134,7 +133,7 @@ class MLA(nnx.Module):
             dims=self.q_lora_rank,
             epsilon=self.rms_norm_eps,
             with_scale=True,
-            dtype=self.unquant_dtype,
+            dtype=self.dtype,
             random_init=self.random_init,
             rngs=rngs,
         )
@@ -144,7 +143,7 @@ class MLA(nnx.Module):
             random_init=self.random_init,
             epsilon=self.rms_norm_eps,
             with_scale=True,
-            dtype=self.unquant_dtype,
+            dtype=self.dtype,
             rngs=rngs,
         )
 
@@ -176,11 +175,11 @@ class MLA(nnx.Module):
         with jax.named_scope("q_proj"):
             # Query down projection.
             q_TA = jnp.einsum("TD,DA -> TA", x_q_TD,
-                              self.kernel_q_down_proj_DA)
+                              self.kernel_q_down_proj_DA.value)
             q_TA = self.q_rms_norm(q_TA)
             # Query up projection.
             q_TNH = jnp.einsum("TA,ANH -> TNH", q_TA,
-                               self.kernel_q_up_proj_ANH)
+                               self.kernel_q_up_proj_ANH.value)
             # Split the query into nope and rope.
             q_nope_TNH = q_TNH[..., :self.qk_nope_head_dim]
             q_rope_TNH = q_TNH[..., self.qk_nope_head_dim:]
@@ -193,7 +192,7 @@ class MLA(nnx.Module):
         with jax.named_scope("kv_proj"):
             # KV down projection.
             kv_SA = jnp.einsum("SD,DA -> SA", x_SD,
-                               self.kernel_kv_down_proj_DA)
+                               self.kernel_kv_down_proj_DA.value)
             # Split the key and value into latent kv vector and k rope vector.
             k_rope_SH = kv_SA[..., self.kv_lora_rank:]
             # Reshape k_rope_BSH to include head dimension for RoPE application
@@ -206,7 +205,7 @@ class MLA(nnx.Module):
             kv_SA = self.kv_rms_norm(kv_SA)
             # KV up projection.
             kv_nope_SNH = jnp.einsum("SA,ANH -> SNH", kv_SA,
-                                     self.kernel_kv_up_proj_ANH)
+                                     self.kernel_kv_up_proj_ANH.value)
             # Split the latent kv vector into k nope vector and v vector.
             k_nope_SNH = kv_nope_SNH[..., :self.qk_nope_head_dim]
             v_SNH = kv_nope_SNH[..., self.qk_nope_head_dim:]
@@ -246,7 +245,7 @@ class MLA(nnx.Module):
 
         with jax.named_scope("o_proj"):
             o_TD = jnp.einsum("TNH,NHD -> TD", outputs_TNH,
-                              self.kernel_o_proj_NHD)
+                              self.kernel_o_proj_NHD.value)
             o_TD = nnx.with_sharding_constraint(
                 o_TD, self.activation_attention_out_td)
         return new_kv_cache, o_TD
@@ -289,13 +288,13 @@ class MLA(nnx.Module):
             self.query_tnh,  # q
             self.keyvalue_skh,  # k
             self.keyvalue_skh,  # v
-            P(),  # kv_cache: Replicated
+            P(None, None, "model"),  # kv_cache
             P(),  # md.seq_lens: Replicated
             P(),  # page_indices_flat: Replicated
             P(),  # query_start_loc: Replicated
             P(),  # distribution: Replicated
         )
-        out_specs = (self.attn_o_tnh, P())
+        out_specs = (self.attn_o_tnh, P(None, None, "model"))
 
         def _ragged_paged_attention(*args):
             return ragged_paged_attention(

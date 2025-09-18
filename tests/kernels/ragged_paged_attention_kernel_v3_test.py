@@ -197,7 +197,7 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
     @parameterized.product(
         q_dtype=[jnp.bfloat16],
         kv_dtype=[jnp.float8_e5m2, jnp.float8_e4m3fn],
-        kv_scales=[(0.5, 0.5), (None, None)],
+        kv_scales=[(0.5, 0.5), (1.0, 1.0)],
     )
     def test_ragged_paged_attention_quantized_kv_cache(self, q_dtype, kv_dtype,
                                                        kv_scales):
@@ -223,10 +223,10 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         )
 
     @parameterized.product(
-        q_dtype=[jnp.float8_e5m2, jnp.float8_e4m3fn],
+        q_dtype=[jnp.bfloat16],
         kv_dtype=[jnp.float8_e5m2, jnp.float8_e4m3fn],
-        q_scale=[0.5, None],
-        kv_scales=[(0.5, 0.5), (None, None)],
+        q_scale=[0.5, 1.0],
+        kv_scales=[(0.5, 0.5), (1.0, 1.0)],
     )
     def test_ragged_paged_attention_quantized_attention(
             self, q_dtype, kv_dtype, q_scale, kv_scales):

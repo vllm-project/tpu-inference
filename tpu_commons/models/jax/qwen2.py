@@ -289,14 +289,14 @@ class Qwen2ForCausalLM(nnx.Module):
         attention_metadata: AttentionMetadata,
         inputs_embeds: Optional[jax.Array] = None,
         *args,
-    ) -> Tuple[List[jax.Array], jax.Array, jax.Array]:
+    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
         kv_caches, x = self.model(
             kv_caches,
             input_ids,
             attention_metadata,
             inputs_embeds,
         )
-        return kv_caches, x
+        return kv_caches, x, []
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         if self.vllm_config.model_config.hf_config.tie_word_embeddings:

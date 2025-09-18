@@ -13,8 +13,8 @@ from vllm.platforms.interface import Platform, PlatformEnum, _Backend
 from vllm.sampling_params import SamplingParams, SamplingType
 
 from tpu_commons.logger import init_logger
-from tpu_commons.models.jax.utils.quantization.quantization_utils import (
-    parse_qwix_config_to_rules, quantization_config_file_path_to_dict)
+from tpu_commons.models.jax.utils.quantization.quantization_utils import \
+    update_vllm_config_for_qwix_quantization
 
 if TYPE_CHECKING:
     from vllm.config import BlockSize, ModelConfig, VllmConfig
@@ -43,11 +43,12 @@ class TpuPlatform(Platform):
     device_control_env_var: str = "TPU_VISIBLE_CHIPS"
     simple_compile_backend: str = "openxla"
 
-    supported_quantization: list[str] = ["tpu_int8", "compressed-tensors"]
+    supported_quantization: list[str] = [
+        "tpu_int8", "compressed-tensors", "awq", "fp8"
+    ]
 
     additional_env_vars: list[str] = [
-        "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS", "TPU_BACKEND_TYPE",
-        "TPU_MULTIHOST_BACKEND", "JAX_RANDOM_WEIGHTS", "VLLM_MLA_DISABLE", "NEW_MODEL_DESIGN", "SKIP_JAX_PRECOMPILE"
+        "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS", "TPU_MULTIHOST_BACKEND"
     ]
 
     @classmethod
@@ -61,7 +62,7 @@ class TpuPlatform(Platform):
 
         if use_v1:
             logger.info("Using Pallas V1 backend.")
-            return "vllm.v1.attention.backends.pallas.PallasAttentionBackend"
+            return "tpu_commons.attention.backends.pallas_torchax.PallasAttentionBackend"
         else:
             logger.info("Using Pallas backend.")
             return "vllm.attention.backends.pallas.PallasAttentionBackend"
@@ -88,7 +89,7 @@ class TpuPlatform(Platform):
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
-        return "vllm.lora.punica_wrapper.punica_tpu.PunicaWrapperTPU"
+        return "tpu_commons.lora.torch_punica_tpu.PunicaWrapperTPU"
 
     @classmethod
     def get_infinity_values(cls, dtype: jnp.dtype) -> Tuple[float, float]:
@@ -154,6 +155,7 @@ class TpuPlatform(Platform):
                 vllm_config.model_config.dtype.dtype)
 
         if envs.VLLM_USE_V1:
+            # TODO(cuiq): remove this dependency.
             from vllm.v1.attention.backends.pallas import \
                 PallasAttentionBackend
             cache_config.block_size = PallasAttentionBackend.get_page_size(
@@ -201,22 +203,7 @@ class TpuPlatform(Platform):
         if kv_transfer_config is not None:
             assert kv_transfer_config.kv_connector == "TPUConnector"
 
-        # Validate additional config
-        if additional_config := vllm_config.additional_config:
-            # Try loading/parsing the quantization config so that we can fail fast
-            if quantization_config := additional_config.get("quantization"):
-                try:
-                    # NOTE: Qwix quantization supports two paths: 1. quantization config file (which we need to parse)
-                    #  2. quantization config JSON
-                    if isinstance(quantization_config, str):
-                        quantization_config = quantization_config_file_path_to_dict(
-                            quantization_config)
-                    parse_qwix_config_to_rules(
-                        quantization_config["qwix"]["rules"])
-                except Exception as e:
-                    raise ValueError(
-                        f"Invalid quantization config; please see README for details on quantization config: {e}"
-                    )
+        update_vllm_config_for_qwix_quantization(vllm_config)
 
     @classmethod
     def is_pin_memory_available(cls):
@@ -250,3 +237,8 @@ class TpuPlatform(Platform):
                                  f"{cls.device_name} V0.")
             if params.sampling_type == SamplingType.RANDOM_SEED:
                 raise ValueError("JAX does not support per-request seed.")
+
+    @classmethod
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
+                                    model_config: ModelConfig) -> bool:
+        return True

@@ -1,15 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import tempfile
 from typing import Callable, Dict, Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
 import jaxtyping
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
                                           has_kv_transfer_group)
+from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
+                                             init_distributed_environment)
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -21,8 +24,10 @@ from tpu_commons.di.abstracts import (AbstractKVCacheConfig,
                                       AbstractLoRARequest,
                                       AbstractSchedulerOutput)
 from tpu_commons.di.interfaces import HostInterface
+from tpu_commons.distributed.utils import (get_host_ip, get_kv_transfer_port,
+                                           get_node_id)
 from tpu_commons.logger import init_logger
-from tpu_commons.runner.jax.tpu_jax_runner import TPUModelRunner
+from tpu_commons.runner.tpu_jax_runner import TPUModelRunner
 from tpu_commons.worker._temporary_vllm_compat import (
     adapt_kv_cache_config_if_needed, adapt_lora_request_if_needed,
     adapt_scheduler_output_if_needed)
@@ -49,7 +54,8 @@ class TPUWorker(AbstractTpuWorker):
                  host_interface: Optional[HostInterface] = None):
         super().__init__(host_interface)
 
-        # If we use vLLM's model implementation in PyTorch, we should set it with torch version of the dtype.
+        # If we use vLLM's model implementation in PyTorch, we should set it
+        # with torch version of the dtype.
         impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
         if impl != "vllm":  # vllm-pytorch implementation does not need this conversion
 
@@ -91,10 +97,9 @@ class TPUWorker(AbstractTpuWorker):
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         self.profile_dir)
 
-        logger.info(f"Pre-sliced devices by engine: {self.devices}")
-
         use_jax_profiler_server = os.getenv("USE_JAX_PROFILER_SERVER", False)
-        if use_jax_profiler_server:
+        # Only one instance of profiler is allowed
+        if use_jax_profiler_server and jax.devices()[0] == self.devices[0]:
             jax_profiler_server_port = int(
                 os.getenv("JAX_PROFILER_SERVER_PORT", 9999))
             logger.info(
@@ -116,13 +121,29 @@ class TPUWorker(AbstractTpuWorker):
             except KeyError:
                 tp = self.parallel_config.tensor_parallel_size
                 self.devices = jax.devices()[:tp]
-        logger.info(f"Init devices | "
-                    f"devices={self.devices} | "
-                    f"hbm={utils.hbm_usage_gb(self.devices)}Gb")
 
-        # Need to call connector's init after jax.devices.
+        # Initialize the vLLM distribution layer as a single chip environment,
+        # we'll swap the model's parallel modules with TPU SPMD equivalents.
+        with set_current_vllm_config(self.vllm_config):
+            temp_file = tempfile.mkstemp()[1]
+            init_distributed_environment(
+                world_size=1,
+                rank=0,
+                local_rank=0,
+                distributed_init_method=f"file://{temp_file}",
+                backend="gloo",
+            )
+            ensure_model_parallel_initialized(
+                tensor_model_parallel_size=1,
+                pipeline_model_parallel_size=1,
+            )
         ensure_kv_transfer_initialized(self.vllm_config)
         self.model_runner = TPUModelRunner(self.vllm_config, self.devices)
+        logger.info(f"Init worker | "
+                    f"rank={self.rank} | "
+                    f"node_id={get_node_id()} | "
+                    f"is_driver_worker={self.is_driver_worker} | "
+                    f"hbm={utils.hbm_usage_gb(self.devices)}Gb")
 
     def determine_available_memory(self) -> int:
         hbm_usage = utils.hbm_usage_bytes(self.devices)
@@ -219,6 +240,12 @@ class TPUWorker(AbstractTpuWorker):
         vllm_kv_cache_config = adapted_kv_cache_config.vllm_kv_cache_config
         self.model_runner.initialize_kv_cache(vllm_kv_cache_config)
 
+    def get_node_kv_ip_port(self) -> tuple[int, str, int]:
+        node_id = get_node_id()
+        ip = get_host_ip()
+        port = get_kv_transfer_port()
+        return (int(node_id), ip, int(port))
+
     def check_health(self) -> None:
         # worker will always be healthy as long as it's running.
         return
@@ -236,3 +263,6 @@ class TPUWorker(AbstractTpuWorker):
                                                mappings=mappings,
                                                transpose_keys=transpose_keys,
                                                reshard_fn=reshard_fn)
+
+    def shutdown(self) -> None:
+        return

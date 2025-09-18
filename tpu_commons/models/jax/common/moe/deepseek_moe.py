@@ -26,7 +26,6 @@ class DeepSeekV3Router(nnx.Module):
     norm_topk_prob: bool
     routed_scaling_factor: float
     dtype: jnp.dtype
-    kernel_dtype: jnp.dtype
     rngs: InitVar[nnx.Rngs]
 
     # Sharding Attributes
@@ -35,6 +34,8 @@ class DeepSeekV3Router(nnx.Module):
     e_sharding: Sharding = ()
 
     random_init: bool = False
+
+    router_bias_dtype: jnp.dtype = jnp.float32
 
     def get_topk_indices(self, scores_TE: Float) -> Float:
         """Get the topk indices of the scores.
@@ -102,11 +103,11 @@ class DeepSeekV3Router(nnx.Module):
         E = self.num_experts
         self.kernel_DE = create_param(rngs,
                                       shape=(D, E),
-                                      dtype=self.kernel_dtype,
+                                      dtype=self.dtype,
                                       sharding=self.ed_sharding,
                                       random_init=self.random_init)
         self.bias_E = create_param(rngs,
                                    shape=(E, ),
-                                   dtype=jnp.float32,
+                                   dtype=self.router_bias_dtype,
                                    sharding=self.e_sharding,
                                    random_init=self.random_init)

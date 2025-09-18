@@ -1,9 +1,0 @@
-qwix:
-  use_abstract_model: True
-  rules:
-    # NOTE: each entry corresponds to a qwix.QuantizationRule
-    - module_path: '.*.custom_module.router.*'
-      weight_qtype: null
-    - module_path: '.*'
-      weight_qtype: 'float8_e4m3fn'
-      act_qtype: 'float8_e4m3fn'

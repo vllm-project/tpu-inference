@@ -1,16 +1,4 @@
-# Copyright 2025 The JAX Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-License-Identifier: Apache-2.0
 
 import functools
 
@@ -30,14 +18,23 @@ jax.config.parse_flags_with_absl()
 
 
 @functools.partial(jax.jit, static_argnames=["quantize_activation"])
-def reference_quantized_matmul(x, w_q, w_scale, quantize_activation=True):
+def reference_quantized_matmul(
+    x: jax.Array,
+    w_q: jax.Array,
+    w_scale: jax.Array,
+    quantize_activation=True,
+):
     if quantize_activation:
-        x_q, x_scale = quantize_tensor(x)
+        acc_dtype = jnp.float32
+        if quantize_activation and jnp.issubdtype(w_q.dtype, jnp.integer):
+            acc_dtype = jnp.int32
+
+        x_q, x_scale = quantize_tensor(x, w_q.dtype)
         out = jax.lax.dot_general(
             x_q,
             w_q,
             dimension_numbers=(((1, ), (1, )), ((), ())),
-            preferred_element_type=jnp.int32,
+            preferred_element_type=acc_dtype,
         ).astype(jnp.float32)
         out *= x_scale
     else:
@@ -61,16 +58,17 @@ class QuantizedMatmulKernelTest(jtu.JaxTestCase):
 
     def _test_quantized_matmul(
         self,
-        dtype,
-        bs,
-        n_input_features,
-        n_output_features,
-        quantize_activation,
+        dtype: jnp.dtype,
+        q_dtype: jnp.dtype,
+        bs: int,
+        n_input_features: int,
+        n_output_features: int,
+        quantize_activation: bool,
         batch_block_size=None,
         out_block_size=None,
         in_block_size=None,
-        atol=2e-1,
-        rtol=1e-1,
+        atol=0.5,
+        rtol=0.5,
     ):
 
         prng_key = jax.random.key(1234)
@@ -86,7 +84,7 @@ class QuantizedMatmulKernelTest(jtu.JaxTestCase):
             minval=-1,
             maxval=1,
         )
-        w_q, w_scale = quantize_tensor(w)
+        w_q, w_scale = quantize_tensor(w, q_dtype)
         w_scale = jnp.squeeze(w_scale)
         assert w_scale.shape == (n_output_features, )
 
@@ -110,17 +108,24 @@ class QuantizedMatmulKernelTest(jtu.JaxTestCase):
 
     @parameterized.product(
         dtype=[jnp.bfloat16, jnp.float32],
+        q_dtype=[jnp.int8, jnp.float8_e4m3fn],
         bs=[128, 256, 512],
         n_input_features=[128, 256, 512],
         n_output_features=[128, 256, 512],
         quantize_activation=[True],
     )
-    def test_quantized_matmul_various_input_shapes(self, dtype, bs,
-                                                   n_input_features,
-                                                   n_output_features,
-                                                   quantize_activation):
+    def test_quantized_matmul_various_input_shapes(
+        self,
+        dtype: jnp.dtype,
+        q_dtype: jnp.dtype,
+        bs: int,
+        n_input_features: int,
+        n_output_features: int,
+        quantize_activation: bool,
+    ):
         self._test_quantized_matmul(
             dtype,
+            q_dtype,
             bs,
             n_input_features,
             n_output_features,
@@ -132,17 +137,24 @@ class QuantizedMatmulKernelTest(jtu.JaxTestCase):
 
     @parameterized.product(
         dtype=[jnp.bfloat16, jnp.float32],
+        q_dtype=[jnp.int8, jnp.float8_e4m3fn],
         bs=[64, 192],
         n_input_features=[64, 192],
         n_output_features=[64, 192],
         quantize_activation=[True],
     )
-    def test_quantized_matmul_unaligned_input_shapes(self, dtype, bs,
-                                                     n_input_features,
-                                                     n_output_features,
-                                                     quantize_activation):
+    def test_quantized_matmul_unaligned_input_shapes(
+        self,
+        dtype: jnp.dtype,
+        q_dtype: jnp.dtype,
+        bs: int,
+        n_input_features: int,
+        n_output_features: int,
+        quantize_activation: bool,
+    ):
         self._test_quantized_matmul(
             dtype,
+            q_dtype,
             bs,
             n_input_features,
             n_output_features,
@@ -153,21 +165,27 @@ class QuantizedMatmulKernelTest(jtu.JaxTestCase):
         )
 
     @parameterized.parameters(
-        (jnp.bfloat16, 128, 1280, 8192, True),
-        (jnp.bfloat16, 128, 28672, 4096, True),
-        (jnp.bfloat16, 128, 4096, 14336, True),
-        (jnp.bfloat16, 128, 4096, 4096, True),
-        (jnp.bfloat16, 128, 6144, 4096, True),
-        (jnp.bfloat16, 128, 7168, 8192, True),
-        (jnp.bfloat16, 128, 8192, 1024, True),
-        (jnp.bfloat16, 128, 8192, 3584, True),
+        (jnp.bfloat16, jnp.int8, 128, 1280, 8192, True),
+        (jnp.bfloat16, jnp.int8, 128, 28672, 4096, True),
+        (jnp.bfloat16, jnp.int8, 128, 4096, 14336, True),
+        (jnp.bfloat16, jnp.int8, 128, 4096, 4096, True),
+        (jnp.bfloat16, jnp.int8, 128, 6144, 4096, True),
+        (jnp.bfloat16, jnp.int8, 128, 7168, 8192, True),
+        (jnp.bfloat16, jnp.int8, 128, 8192, 1024, True),
+        (jnp.bfloat16, jnp.int8, 128, 8192, 3584, True),
     )
-    def test_quantized_matmul_use_tuned_block_sizes(self, dtype, bs,
-                                                    n_input_features,
-                                                    n_output_features,
-                                                    quantize_activation):
+    def test_quantized_matmul_use_tuned_block_sizes(
+        self,
+        dtype: jnp.dtype,
+        q_dtype: jnp.dtype,
+        bs: int,
+        n_input_features: int,
+        n_output_features: int,
+        quantize_activation: bool,
+    ):
         self._test_quantized_matmul(
             dtype,
+            q_dtype,
             bs,
             n_input_features,
             n_output_features,

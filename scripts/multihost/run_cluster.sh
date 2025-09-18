@@ -13,7 +13,6 @@
 #         --head \
 #         /abs/path/to/huggingface/cache \
 #         -e HF_TOKEN=<your_hf_token> \
-#         -e TPU_BACKEND_TYPE=jax \
 #         -e TPU_MULTIHOST_BACKEND=ray
 #         -e JAX_PLATFORMS=''
 
@@ -24,7 +23,6 @@
 #         --worker \
 #         /abs/path/to/huggingface/cache \
 #         -e HF_TOKEN=<your_hf_token> \
-#         -e TPU_BACKEND_TYPE=jax \
 #         -e TPU_MULTIHOST_BACKEND=ray
 #         -e JAX_PLATFORMS=''
 #
