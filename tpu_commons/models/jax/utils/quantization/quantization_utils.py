@@ -9,7 +9,9 @@ import jax.numpy as jnp
 import qwix
 import yaml
 from flax import nnx
-from jax.sharding import Mesh
+from flax.typing import PRNGKey
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -394,3 +396,101 @@ def update_vllm_config_for_qwix_quantization(vllm_config: "VllmConfig"):
                 raise ValueError(
                     f"Invalid quantization config; please see README for details on quantization config: {e}"
                 )
+
+
+def get_random_sharded_array(key: PRNGKey, mesh: Mesh, param: nnx.Param,
+                             param_shape: tuple, dtype: jnp.dtype,
+                             param_name: str) -> jax.Array:
+    """
+    Returns a random sharded array for the given parameter for the given shape.
+
+    Args:
+        key: The random key.
+        mesh: The mesh to use for sharding.
+        param: The parameter.
+        param_shape: The shape of the parameter.
+        dtype: The dtype of the parameter.
+        param_name: The name of the parameter.
+
+    Returns:
+        A random sharded array for the given parameter for the given shape.
+    """
+    is_int = jnp.issubdtype(dtype, jnp.integer)
+    if is_int:
+        # These need to be JAX arrays or else you'll run into an overflow error
+        minval = jnp.array(jnp.iinfo(dtype).min, dtype=dtype)
+        maxval = jnp.array(jnp.iinfo(dtype).max, dtype=dtype)
+        weight = jax.random.randint(key, param_shape, minval, maxval, dtype)
+    else:
+        weight = jax.random.normal(key, param_shape, dtype)
+
+    def get_slice(index):
+        return weight[index]
+
+    try:
+        sharded_array = jax.make_array_from_callback(
+            param_shape, NamedSharding(mesh, P(*param.sharding)), get_slice)
+    except (ValueError, TypeError):
+        logger.warning(
+            f"Could not create sharded scale for {param_name} with shape {param_shape} and sharding {param.sharding}, skipping sharding..."
+        )
+        sharded_array = jax.make_array_from_callback(param_shape,
+                                                     NamedSharding(mesh, P()),
+                                                     get_slice)
+
+    return sharded_array
+
+
+def load_random_weights_into_qwix_abstract_model(rng: PRNGKey,
+                                                 model: nnx.Module, mesh: Mesh,
+                                                 quantization_config: dict):
+    """
+    Loads random weights for an abstract, Qwix-quantized model.
+
+    Args:
+        rng: The random key.
+        state: The state of the model.
+        mesh: The mesh.
+        model: The model.
+        quantization_config: The quantization config for the model.
+    """
+    logger.info("Initializing Qwix-quantized model with random weights...")
+    # TODO (jacobplatin): clean up this logic
+    scale_dtype = model.weight_loader.scale_dtype
+    scale_shape_map = model.weight_loader.scale_shap_map_for_random_weight_loading if hasattr(
+        model.weight_loader,
+        'scale_shap_map_for_random_weight_loading') else {}
+    quantization_block_sizes = quantization_config["weight_block_size"]
+    assert len(
+        quantization_block_sizes
+    ) == 2, f"Expected only 2 quantization block sizes but got {quantization_block_sizes}"
+    quantization_block_size_n, _ = quantization_block_sizes[
+        0], quantization_block_sizes[1]
+
+    # Iterate through all variables and initialize them
+    prev_param_shape = None
+    for path, param in nnx.iter_graph(model):
+        if not isinstance(param, nnx.Variable):
+            continue
+        if path[0] == 'rng' and path[-1] == "key":
+            param.value = rng
+            continue
+        is_qwix_scale = (path[-1] == 'scale' and path[-2] == "array")
+        param_dtype = scale_dtype if is_qwix_scale else param.value.dtype
+        param_shape = param.value.shape
+        # TODO (jacobplatin): clean this up
+        if is_qwix_scale:
+            param_shape = scale_shape_map.get(
+                path[3],
+                tuple(dim // quantization_block_size_n
+                      for dim in prev_param_shape))
+        param.value = get_random_sharded_array(
+            rng, mesh, param, param_shape, param_dtype,
+            ".".join([str(x) for x in path]))
+        prev_param_shape = param_shape
+
+    # Handles the DeepSeek case, where this needs to be called to make the cache weights
+    # concrete
+    if hasattr(model, 'initialize_cache'):
+        model.initialize_cache()
+    logger.info("Done initializing Qwix-quantized model with random weights")

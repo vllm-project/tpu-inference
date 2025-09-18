@@ -445,6 +445,17 @@ class DeepSeekV3WeightLoader:
                 (hidden_size // self.quantization_block_size_n, attn_heads,
                  v_head_dim // self.quantization_block_size_n),
             }
+            # NOTE: this is only needed for pre-quantized models when doing random weight loading
+            # TODO (jacobplatin): remove or clean this up
+            self.scale_shap_map_for_random_weight_loading = {
+                "kernel_kv_down_proj_DA": (56, 576),
+                "kernel_kv_up_proj_ANH": (4, 128, 2),
+                "kernel_q_up_proj_ANH": (12, 1, 192),
+                "kernel_o_proj_NHD": (128, 1, 56),
+                "kernel_down_proj_EFD": (256, 16, 56),
+                "kernel_up_proj_EDF": (256, 56, 16),
+                "kernel_gating_EDF": (256, 56, 16),
+            }
 
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
         # Find the corresponding model key using the HF key
