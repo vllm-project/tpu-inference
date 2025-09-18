@@ -94,20 +94,17 @@ class LoraUtils:
         # vars does not show inherited methods or class attributes but this is fine because we only care about instance attributes.
         for k in vars(punica_wrapper):
             v = getattr(punica_wrapper, k, None)
-            if k == "device":
+            if k == "device":  # this is str and jax.jit doesn't like it and we don't need to replace it.
                 continue
-            elif v is not None and isinstance(v, list):
-                v = tuple(v)
             metadata[k] = v
         return metadata
 
 
-# xw32: what's the type of the model here?
 def replace_lora_metadata(model, metadata: dict) -> dict:
     original_metadata = {}
 
     punica_wrapper = None
-    for m_name, m in model.named_modules():
+    for _, m in model.named_modules():
         module_qualname = get_fqn(m)
         if module_qualname in LORA_MODULE_TYPE_TO_WRAPPING_FUNC:
             assert getattr(

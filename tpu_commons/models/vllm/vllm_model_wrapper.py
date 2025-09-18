@@ -179,7 +179,7 @@ class VllmModelWrapper:
                 "xla_tpu_reduce_scatter_collective_matmul_mode":
                 "post_spmd_conservative"
             },
-            static_argnames=('layer_name_to_kvcache_index'))
+            static_argnames=('layer_name_to_kvcache_index', ))
         def step_fun(
             params_and_buffers,  # this has been wrapped into a torchax TorchValue
             kv_caches: List[jax.Array],
@@ -191,7 +191,7 @@ class VllmModelWrapper:
             *args,
         ) -> Tuple[List[jax.Array], jax.Array]:
             layer_name_to_kvcache_index = dict(layer_name_to_kvcache_index)
-            lora_metadata = torch_view(dict(lora_metadata))
+            lora_metadata = torch_view(lora_metadata)
             with torchax.default_env(), set_vllm_model_wrapper_context(
                     kv_caches=kv_caches,
                     mesh=self.mesh,
@@ -200,14 +200,8 @@ class VllmModelWrapper:
                                    vllm_config=self.vllm_config):
                 # We need to wrap args from jax land into TorchValue with
                 # torch_view in order to call the Torch function.
-                print(
-                    f'Before the 1st replace, {self.model.vllm_model.model.layers[0].self_attn.qkv_proj.punica_wrapper._lora_indices_per_batch=}'
-                )
                 original_lora_metadata = replace_lora_metadata(
                     self.model, lora_metadata)
-                print(
-                    f'After the 1st replace, {self.model.vllm_model.model.layers[0].self_attn.qkv_proj.punica_wrapper._lora_indices_per_batch=}'
-                )
                 hidden_states = torch.func.functional_call(
                     self.model,
                     torch_view(params_and_buffers),
@@ -219,13 +213,7 @@ class VllmModelWrapper:
                     },
                     tie_weights=False,
                 )
-                print(
-                    f'Before the 2nd replace, {self.model.vllm_model.model.layers[0].self_attn.qkv_proj.punica_wrapper._lora_indices_per_batch=}'
-                )
                 replace_lora_metadata(self.model, original_lora_metadata)
-                print(
-                    f'After the 2nd replace, {self.model.vllm_model.model.layers[0].self_attn.qkv_proj.punica_wrapper._lora_indices_per_batch=}'
-                )
                 vllm_model_wrapper_context = get_vllm_model_wrapper_context()
                 new_kv_caches = vllm_model_wrapper_context.kv_caches
             # Wrap the hidden_states from torch land into a JaxValue for the jax
@@ -248,7 +236,7 @@ class VllmModelWrapper:
             hidden_states: jax.Array,
             lora_metadata=None,
         ) -> jax.Array:
-            lora_metadata = torch_view(dict(lora_metadata))
+            lora_metadata = torch_view(lora_metadata)
             with torchax.default_env(), set_vllm_model_wrapper_context(
                     kv_caches=None, mesh=self.mesh):
                 original_lora_metadata = replace_lora_metadata(
