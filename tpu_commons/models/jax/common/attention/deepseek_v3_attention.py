@@ -243,7 +243,8 @@ class MLA(nnx.Module):
                                     (0, multiple_of_128 - self.v_head_dim)))
             q_scale = k_scale = v_scale = None
             if self.kv_cache_quantized_dtype:
-                q_scale = self._q_scale
+                # TODO(kyuyeunk/jacobplatin): Enable w8a8 when VREG spill issue is resolved.
+                # q_scale = self._q_scale
                 k_scale = self._k_scale
                 v_scale = self._v_scale
                 k_SNH, v_SNH = utils.quantize_kv(k_SNH, v_SNH,
