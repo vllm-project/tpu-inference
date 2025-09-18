@@ -259,8 +259,8 @@ def _ragged_paged_attention_kernel(
     bq_sz,
     debug_mode: bool = True,
 ):
-    debug_mode = True
-    breakpoint()  # BP2
+    # debug_mode = True
+    # breakpoint()  # BP2
     assert q_hbm_ref.shape == o_hbm_ref.shape
     assert q_hbm_ref.shape[-1] == kv_cache_hbm_ref.shape[-1]
     (
