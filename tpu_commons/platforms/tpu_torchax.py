@@ -172,3 +172,10 @@ class TpuPlatform(Platform):
             if params.sampling_type == SamplingType.RANDOM_SEED:
                 raise ValueError(
                     "Torch XLA does not support per-request seed.")
+
+    @classmethod
+    def use_sync_weight_loader(cls) -> bool:
+        """
+        Returns if the current platform needs to sync weight loader.
+        """
+        return True
