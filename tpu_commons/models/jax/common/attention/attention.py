@@ -241,7 +241,7 @@ class Attention(nnx.Module):
                 in_specs=in_specs,
                 out_specs=out_specs,
                 check_rep=False,
-            ))(
+            ), compile_options={'xla_tpu_enable_log_recorder': 'true'})(
                 q_TNH,
                 k_SKH,
                 v_SKH,

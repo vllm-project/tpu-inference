@@ -143,7 +143,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 cache_config.cache_dtype]
             
         self.data_parallel_sharding = NamedSharding(self.mesh, PartitionSpec("data"))
-
+        self.scheduler_dp_cache = {}
     def _init_random(self):
         if self.model_config.seed is None:
             self.model_config.seed = 0
@@ -336,8 +336,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         scheduler_output: "VllmSchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> ModelRunnerOutput:
-        # with jax.disable_jit():
-        return self._execute_model(scheduler_output)[1]
+        if os.getenv("VLLM_TPU_DISABLE_JIT", "0") == "0":
+            return self._execute_model(scheduler_output)[1]
+        with jax.disable_jit():
+            return self._execute_model(scheduler_output)[1]
 
     def _execute_model(
         self,
@@ -405,7 +407,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                      tuple(self.layer_name_to_kvcache_index.items()),
                      lora_metadata,
                  )
-
+            print("hidden_states after forward fn", hidden_states.ravel()[:10])
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)
             logits = self.compute_logits_fn(
@@ -568,14 +570,21 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         assert num_reqs > 0
 
         # Fake DP scheduler output
-        dp_size = 2 
+        dp_size = self.mesh.shape["data"]
+        print(f"dp_size: {dp_size}")
         self.input_batch.req_dp_ranks = []
-        for i in range(len(self.input_batch.req_ids)):
-            self.input_batch.req_dp_ranks.append(i%2)
-
+        for i, id in enumerate(self.input_batch.req_ids):
+            # if id in self.scheduler_dp_cache:
+            #     self.input_batch.req_dp_ranks.append(self.scheduler_dp_cache[id])
+            # else:
+            #     self.input_batch.req_dp_ranks.append(i % dp_size)
+            #     self.scheduler_dp_cache[id] = i % dp_size
+            dp_rank = scheduler_output.preferred_device[id]
+            self.input_batch.req_dp_ranks.append(dp_rank)
+        print("self.input_batch.req_dp_ranks", self.input_batch.req_dp_ranks)
         # Sort requests into DP ranks 
         req_ids_dp = defaultdict(list)
-        req_indices_dp  = defaultdict(list)
+        req_indices_dp = defaultdict(list)
         num_scheduled_tokens_per_dp_rank = defaultdict(int)
         scheduled_tokens_per_dp_rank = defaultdict(list)
         num_req_per_dp_rank = defaultdict(int)
@@ -696,14 +705,20 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             query_start_loc_cpu = self.query_start_loc_cpu[req_offset: req_offset+self.max_num_reqs_per_dp + 1]
             _num_reqs_so_far = cum_num_req_each_dp_rank_list[dp_rank]
             _num_reqs = num_req_per_dp_rank[dp_rank]
-            query_start_loc_cpu[0] = start_loc
+            query_start_loc_cpu[0] = 0
             
             np.cumsum(scheduled_tokens_per_dp_rank[dp_rank],
                     out=query_start_loc_cpu[1:_num_reqs + 1])
-            query_start_loc_cpu[1:_num_reqs + 1] += start_loc
+            # query_start_loc_cpu[1:_num_reqs + 1] += start_loc
             query_start_loc_cpu[_num_reqs + 1:] = 1
-            start_loc = query_start_loc_cpu[_num_reqs]
-            _logits_indices.append(query_start_loc_cpu[1:] - 1)
+            
+            _logits_indices_rank = query_start_loc_cpu.copy()
+            _logits_indices_rank[1:_num_reqs + 1] += start_loc
+            start_loc = _logits_indices_rank[_num_reqs]
+            
+            _logits_indices.append(_logits_indices_rank[1:] - 1)
+            
+            
             
         for dp_rank in range(dp_size):
             req_offset = dp_rank * (self.max_num_reqs_per_dp)
@@ -803,7 +818,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
          logits_indices, request_distribution) = device_array(
              self.mesh, (input_ids, positions, block_tables, query_start_loc,
                          seq_lens, logits_indices, request_distribution), sharding=self.data_parallel_sharding )
-        # breakpoint()
         # print()
         # print("DP input_ids ", input_ids.shape, input_ids.sharding)
         # print("DP positions", positions.shape, positions.sharding)  

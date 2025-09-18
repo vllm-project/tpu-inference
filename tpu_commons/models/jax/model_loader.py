@@ -216,6 +216,7 @@ def get_flax_model(
         ),
         donate_argnums=2,  # 0 is graphdef, 1 is state, 2 is kv_cache
         static_argnums=6,  #6 is layer_name_to_kvcache_index
+        compiler_options={'xla_tpu_enable_log_recorder': 'true'}
     )
     def run_model(graphdef, state, *args):
         model = nnx.merge(graphdef, state)

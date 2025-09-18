@@ -203,7 +203,6 @@ class LlamaDecoderLayer(nnx.Module):
     ) -> Tuple[jax.Array, jax.Array]:
         hidden_states = self.input_layernorm(x)
         jax.block_until_ready(hidden_states)
-        print("wenxin got past the input layernorm")
         
         kv_cache, attn_output = self.self_attn(
             kv_cache,
@@ -211,6 +210,8 @@ class LlamaDecoderLayer(nnx.Module):
             attention_metadata,
         )
         jax.block_until_ready(attn_output)
+        print("attn_output", attn_output[:, :5])
+        print("did kv cache got updated?", kv_cache[1, :5, 0, 0, :5].ravel()[:10])
         # breakpoint()
         print("wenxin got past the self attention")
         attn_output += x

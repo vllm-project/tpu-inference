@@ -12,6 +12,7 @@ import jax.numpy as jnp
 from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
+import numpy as np
 
 from tpu_commons.kernels.ragged_paged_attention.v3.tuned_block_sizes import \
     get_tuned_block_sizes
@@ -259,7 +260,7 @@ def _ragged_paged_attention_kernel(
     debug_mode: bool = True,
 ):
     debug_mode = True
-    # breakpoint()
+    breakpoint()  # BP2
     assert q_hbm_ref.shape == o_hbm_ref.shape
     assert q_hbm_ref.shape[-1] == kv_cache_hbm_ref.shape[-1]
     (
@@ -1275,7 +1276,6 @@ def ragged_paged_attention(
   Returns:
     The output of the attention.
   """
-    print("WenXin Debug: Entering ragged_paged_attention")
     q, k, v = queries, keys, values
     static_validate_inputs(
         q,
@@ -1405,10 +1405,17 @@ def ragged_paged_attention(
         # (bkv_sem_0_seq_idx, bkv_sem_1_seq_idx, bkv_sem_0_offset, bkv_sem_1_offset, bkv_sem_0_sz, bkv_sem_1_sz)
         jnp.full((6, ), -1, jnp.int32),
     )
+    
+    print("kv_cache", kv_cache.shape)
+    print("query vector", q.shape, q)
+    print("key vector",k.shape, k)
+    print("value vector",v.shape, v)
+    print("page_indices", page_indices.shape, page_indices)
+    print("cu_q_lens", cu_q_lens.shape, cu_q_lens)
+    print("kv_lens", kv_lens.shape, kv_lens)
+    print("distribution", distribution)
 
     scope_name = f"RPA-bq_{bq_sz}-bkvp_{bkv_p}-p_{page_size}"
-    # breakpoint()
-    print("before entering kernel")
     kernel = jax.named_scope(scope_name)(
         pl.pallas_call(
             functools.partial(
@@ -1448,9 +1455,10 @@ def ragged_paged_attention(
                 9: 1
             },
             name=scope_name,
+            # interpret=pltpu.InterpretParams()
         ))
-    # breakpoint()
-    print("after exiting kernel")
+    breakpoint()
+    
     output, updated_kv_cache = kernel(*scalar_prefetches, q, kv, kv_cache)
     return (
         prepare_outputs(output, actual_num_q_heads_per_kv_head,
