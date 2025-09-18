@@ -379,6 +379,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.is_multimodal_model or self.lora_config is not None:
             self.maybe_forbid_compile = nullcontext()
 
+        lora_metadata = None
+        if self.lora_config is not None:
+            lora_metadata = self.lora_utils.extract_lora_metadata()
         # TODO: make _get_input_ids_embeds within this context
         # NOTE: right now, mm model will use embeddings as the input,
         # but text-only model will use input_ids
@@ -399,6 +402,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                      attn_metadata,
                      inputs_embeds,
                      tuple(self.layer_name_to_kvcache_index.items()),
+                     lora_metadata,
+                     # tuple(lora_metadata.items()),
                  )
 
             hidden_states = self._select_from_array_fn(hidden_states,

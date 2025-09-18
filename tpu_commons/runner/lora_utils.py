@@ -13,7 +13,8 @@ from torchax.ops.mappings import t2j
 from vllm.lora.request import LoRARequest
 
 from tpu_commons.models.vllm.sharding import (
-    extract_all_params_buffers, shard_lora_weights_and_move_to_tpu)
+    LORA_MODULE_TYPE_TO_WRAPPING_FUNC, extract_all_params_buffers, get_fqn,
+    shard_lora_weights_and_move_to_tpu)
 
 if TYPE_CHECKING:
     from tpu_commons.runner.tpu_jax_runner import TPUModelRunner
@@ -75,3 +76,27 @@ class LoraUtils:
                                                (params, buffers))
         params_and_buffers = {**params, **buffers}
         return jax_view(params_and_buffers)
+
+    def extract_lora_metadata(self):
+        metadata = {}
+
+        punica_wrapper = None
+        for m_name, m in self.runner.model.model.named_modules():
+            module_qualname = get_fqn(m)
+            if module_qualname in LORA_MODULE_TYPE_TO_WRAPPING_FUNC:
+                assert getattr(
+                    m, 'punica_wrapper', None
+                ) is not None, 'A lora wrapper should have contained a punica_wrapper'
+                punica_wrapper = m.punica_wrapper
+                break
+        assert punica_wrapper is not None, "Should have been able to find a punica wrapper from the Lora wrapper."
+
+        # vars does not show inherited methods or class attributes but this is fine because we only care about instance attributes.
+        for k in vars(punica_wrapper):
+            v = getattr(punica_wrapper, k, None)
+            if k == "device":
+                continue
+            elif v is not None and isinstance(v, list):
+                v = tuple(v)
+            metadata[k] = v
+        return metadata

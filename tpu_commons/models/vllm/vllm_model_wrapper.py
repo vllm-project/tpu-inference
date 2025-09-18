@@ -178,7 +178,7 @@ class VllmModelWrapper:
                 "xla_tpu_reduce_scatter_collective_matmul_mode":
                 "post_spmd_conservative"
             },
-            static_argnames=('layer_name_to_kvcache_index', ))
+            static_argnames=('layer_name_to_kvcache_index'))
         def step_fun(
             params_and_buffers,  # this has been wrapped into a torchax TorchValue
             kv_caches: List[jax.Array],
@@ -186,9 +186,11 @@ class VllmModelWrapper:
             attn_metadata: AttentionMetadata,
             input_embeds: jax.Array,
             layer_name_to_kvcache_index: Sequence[Tuple[str, int]],
+            lora_metadata=None,
             *args,
         ) -> Tuple[List[jax.Array], jax.Array]:
             layer_name_to_kvcache_index = dict(layer_name_to_kvcache_index)
+            lora_metadata = torch_view(dict(lora_metadata))
             with torchax.default_env(), set_vllm_model_wrapper_context(
                     kv_caches=kv_caches,
                     mesh=self.mesh,
