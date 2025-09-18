@@ -100,3 +100,25 @@ class LoraUtils:
                 v = tuple(v)
             metadata[k] = v
         return metadata
+
+
+# xw32: what's the type of the model here?
+def replace_lora_metadata(model, metadata: dict) -> dict:
+    original_metadata = {}
+
+    punica_wrapper = None
+    for m_name, m in model.named_modules():
+        module_qualname = get_fqn(m)
+        if module_qualname in LORA_MODULE_TYPE_TO_WRAPPING_FUNC:
+            assert getattr(
+                m, 'punica_wrapper', None
+            ) is not None, 'A lora wrapper should have contained a punica_wrapper'
+            punica_wrapper = m.punica_wrapper
+            break
+    assert punica_wrapper is not None, "Should have been able to find a punica wrapper from the Lora wrapper."
+
+    for k in vars(punica_wrapper):
+        if k in metadata:
+            original_metadata[k] = getattr(punica_wrapper, k)
+            setattr(punica_wrapper, k, metadata[k])
+    return original_metadata

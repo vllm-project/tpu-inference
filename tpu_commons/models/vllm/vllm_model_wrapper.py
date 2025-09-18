@@ -29,6 +29,7 @@ from tpu_commons.models.vllm.sharding import (
     LORA_MODULE_TYPE_TO_WRAPPING_FUNC, get_fqn, shard_model_to_tpu)
 from tpu_commons.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
+from tpu_commons.runner.lora_utils import replace_lora_metadata
 
 logger = init_logger(__name__)
 
@@ -199,6 +200,14 @@ class VllmModelWrapper:
                                    vllm_config=self.vllm_config):
                 # We need to wrap args from jax land into TorchValue with
                 # torch_view in order to call the Torch function.
+                print(
+                    f'Before the 1st replace, {self.model.vllm_model.model.layers[0].self_attn.qkv_proj.punica_wrapper._lora_indices_per_batch=}'
+                )
+                original_lora_metadata = replace_lora_metadata(
+                    self.model, lora_metadata)
+                print(
+                    f'After the 1st replace, {self.model.vllm_model.model.layers[0].self_attn.qkv_proj.punica_wrapper._lora_indices_per_batch=}'
+                )
                 hidden_states = torch.func.functional_call(
                     self.model,
                     torch_view(params_and_buffers),
@@ -209,6 +218,13 @@ class VllmModelWrapper:
                         "inputs_embeds": None,
                     },
                     tie_weights=False,
+                )
+                print(
+                    f'Before the 2nd replace, {self.model.vllm_model.model.layers[0].self_attn.qkv_proj.punica_wrapper._lora_indices_per_batch=}'
+                )
+                replace_lora_metadata(self.model, original_lora_metadata)
+                print(
+                    f'After the 2nd replace, {self.model.vllm_model.model.layers[0].self_attn.qkv_proj.punica_wrapper._lora_indices_per_batch=}'
                 )
                 vllm_model_wrapper_context = get_vllm_model_wrapper_context()
                 new_kv_caches = vllm_model_wrapper_context.kv_caches
@@ -230,9 +246,13 @@ class VllmModelWrapper:
         def compute_logits_func(
             params_and_buffers: Any,
             hidden_states: jax.Array,
+            lora_metadata=None,
         ) -> jax.Array:
+            lora_metadata = torch_view(dict(lora_metadata))
             with torchax.default_env(), set_vllm_model_wrapper_context(
                     kv_caches=None, mesh=self.mesh):
+                original_lora_metadata = replace_lora_metadata(
+                    self.model, lora_metadata)
                 logits = torch.func.functional_call(
                     self.model,
                     torch_view(params_and_buffers),
@@ -241,6 +261,7 @@ class VllmModelWrapper:
                     },
                     tie_weights=False,
                 )
+                replace_lora_metadata(self.model, original_lora_metadata)
             return jax_view(logits)
 
         return compute_logits_func

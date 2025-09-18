@@ -408,7 +408,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)
-            logits = self.compute_logits_fn(self.state, hidden_states)
+            logits = self.compute_logits_fn(self.state, hidden_states,
+                                            lora_metadata)
             if scheduler_output.grammar_bitmask is not None:
                 (
                     require_struct_decoding, grammar_bitmask_padded, arange
