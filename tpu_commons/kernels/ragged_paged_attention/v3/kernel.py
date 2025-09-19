@@ -12,7 +12,6 @@ import jax.numpy as jnp
 from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
-import numpy as np
 
 from tpu_commons.kernels.ragged_paged_attention.v3.tuned_block_sizes import \
     get_tuned_block_sizes
@@ -840,7 +839,7 @@ def _ragged_paged_attention_kernel(
         lax.fori_loop(0, num_bq, compute_with_bq, None, unroll=False)
 
     ### ------- Kernel start ------- ###
-    # 
+    #
     @pl.when(seq_idx == 0)
     def prologue():
         start_fetch_bq(0, 0, 0)
@@ -1402,7 +1401,7 @@ def ragged_paged_attention(
         # (bkv_sem_0_seq_idx, bkv_sem_1_seq_idx, bkv_sem_0_offset, bkv_sem_1_offset, bkv_sem_0_sz, bkv_sem_1_sz)
         jnp.full((6, ), -1, jnp.int32),
     )
-    
+
     # print("kv_cache", kv_cache.shape)
     # print("query vector", q.shape, q)
     # print("key vector",k.shape, k)
@@ -1454,7 +1453,7 @@ def ragged_paged_attention(
             name=scope_name,
             # interpret=pltpu.InterpretParams()
         ))
-    
+
     output, updated_kv_cache = kernel(*scalar_prefetches, q, kv, kv_cache)
     return (
         prepare_outputs(output, actual_num_q_heads_per_kv_head,
