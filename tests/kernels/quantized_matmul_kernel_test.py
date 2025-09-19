@@ -64,9 +64,7 @@ class QuantizedMatmulKernelTest(jtu.JaxTestCase):
         n_input_features: int,
         n_output_features: int,
         quantize_activation: bool,
-        batch_block_size=None,
-        out_block_size=None,
-        in_block_size=None,
+        tuned_value=None,
         atol=0.5,
         rtol=0.5,
     ):
@@ -88,14 +86,13 @@ class QuantizedMatmulKernelTest(jtu.JaxTestCase):
         w_scale = jnp.squeeze(w_scale)
         assert w_scale.shape == (n_output_features, )
 
+        x_q_dtype = w_q.dtype if quantize_activation else dtype
         output = quantized_matmul_kernel(
             x,
             w_q,
             w_scale,
-            quantize_activation=quantize_activation,
-            batch_block_size=batch_block_size,
-            out_block_size=out_block_size,
-            in_block_size=in_block_size,
+            x_q_dtype=x_q_dtype,
+            tuned_value=tuned_value,
         )
         expected = reference_quantized_matmul(
             x, w_q, w_scale, quantize_activation=quantize_activation)
@@ -130,9 +127,7 @@ class QuantizedMatmulKernelTest(jtu.JaxTestCase):
             n_input_features,
             n_output_features,
             quantize_activation=quantize_activation,
-            batch_block_size=128,
-            out_block_size=128,
-            in_block_size=128,
+            tuned_value=None,
         )
 
     @parameterized.product(
@@ -159,9 +154,7 @@ class QuantizedMatmulKernelTest(jtu.JaxTestCase):
             n_input_features,
             n_output_features,
             quantize_activation=quantize_activation,
-            batch_block_size=128,
-            out_block_size=128,
-            in_block_size=128,
+            tuned_value=None,
         )
 
     @parameterized.parameters(
@@ -190,9 +183,7 @@ class QuantizedMatmulKernelTest(jtu.JaxTestCase):
             n_input_features,
             n_output_features,
             quantize_activation=quantize_activation,
-            batch_block_size=None,
-            out_block_size=None,
-            in_block_size=None,
+            tuned_value=None,
         )
 
 
