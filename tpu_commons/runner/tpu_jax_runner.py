@@ -405,6 +405,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                      tuple(self.layer_name_to_kvcache_index.items()),
                      lora_metadata,
                  )
+            
             print("hidden_states after forward fn", hidden_states.ravel()[:10])
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)
@@ -467,12 +468,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         discard_sampled_tokens_req_indices = []
         for i, req_id in zip(range(num_reqs), self.input_batch.req_ids):
             assert req_id is not None
+            print("req_id", req_id)
             req_state = self.requests[req_id]
             seq_len = (req_state.num_computed_tokens +
                        scheduler_output.num_scheduled_tokens[req_id])
             if seq_len >= req_state.num_tokens:
                 request_seq_lens.append((i, req_state, seq_len))
             else:
+                print("Partial request, rewind the sampled token. why here?")
                 # Ignore the sampled token from the partial request.
                 # Rewind the generator state as if the token was not sampled.
                 generator = self.input_batch.generators.get(i)
@@ -495,6 +498,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         if spec_decode_metadata is None:
             next_tokens = np.asarray(jax.device_get(next_tokens))
+            # mask out tokens where logit_indices = 0 
+            next_tokens = next_tokens[logits_indices!=-1]
             selected_token_ids = np.expand_dims(next_tokens[:num_reqs], 1)
             valid_sampled_token_ids = selected_token_ids.tolist()
         else:
@@ -507,7 +512,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         for i in discard_sampled_tokens_req_indices:
             valid_sampled_token_ids[i].clear()
         # Append sampled tokens
+        # breakpoint()
         for req_idx, req_state, _ in request_seq_lens:
+            
             sampled_ids = valid_sampled_token_ids[req_idx]
             if not sampled_ids:
                 continue
@@ -657,19 +664,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
         # # For each scheduled token, what are the corresponding req index.
         # req_indices = np.repeat(self.arange_cpu[:padded_num_reqs],num_scheduled_tokens_per_req)
-        # breakpoint()
         # # Get batched arange.
         # # E.g., [2, 5, 3] -> [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # # For each scheduled token, what is its position in corresponding req.
         # arange = np.concatenate(
         #     [self.arange_cpu[:n] for n in num_scheduled_tokens_per_req])
-        # breakpoint()
         # # Get positions.
         # positions_np = self.positions_cpu[:padded_total_num_scheduled_tokens]
         # np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
         #        arange,
         #        out=positions_np)
-        # breakpoint()
         # # Multi-modal support
         # # Calculate M-RoPE positions.
         # # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -682,7 +686,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # # where M is the max_model_len.
         # token_indices = (positions_np +
         #                  req_indices * self.input_batch.token_ids_cpu.shape[1])
-        # breakpoint()
         # # NOTE(woosuk): We use torch.index_select instead of np.take here
         # # because torch.index_select is much faster than np.take for large
         # # tensors.
@@ -691,12 +694,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         #         out=self.input_ids_cpu[:total_num_scheduled_tokens])
         
         # print("token_indices", token_indices)
-        # breakpoint()
         
         ##########################
         # populate self.query_start_loc_cpu and self.seq_lens_cpu
-        start_loc = 0 
-        _logits_indices = []
+         
         for dp_rank in range(dp_size):
             req_offset = dp_rank * (self.max_num_reqs_per_dp +1 )
             # Prepare the attention metadata.
@@ -707,16 +708,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             
             np.cumsum(scheduled_tokens_per_dp_rank[dp_rank],
                     out=query_start_loc_cpu[1:_num_reqs + 1])
-            # query_start_loc_cpu[1:_num_reqs + 1] += start_loc
             query_start_loc_cpu[_num_reqs + 1:] = 1
+        
+        # populate logits_indices
+        _logits_indices = []
+        for dp_rank in range(dp_size):
+            req_offset = dp_rank * self.max_num_reqs_per_dp
+            token_offset = padded_num_scheduled_tokens_per_dp_rank*dp_rank
+            _num_reqs = num_req_per_dp_rank[dp_rank]
             
-            _logits_indices_rank = query_start_loc_cpu.copy()
-            _logits_indices_rank[1:_num_reqs + 1] += start_loc
-            start_loc = _logits_indices_rank[_num_reqs]
-            
-            _logits_indices.append(_logits_indices_rank[1:] - 1)
-            
-            
+            _logits_indices_rank = np.ones(self.max_num_reqs_per_dp, dtype=np.int32) * -1
+            _logits_indices_rank[:_num_reqs] = self.query_start_loc_cpu[req_offset+dp_rank + 1: req_offset+dp_rank+_num_reqs+1] - 1
+            _logits_indices_rank[:_num_reqs] += token_offset
+            _logits_indices.append(_logits_indices_rank)
             
         for dp_rank in range(dp_size):
             req_offset = dp_rank * (self.max_num_reqs_per_dp)
@@ -787,7 +791,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if not use_spec_decode:
             # logits_indices = self.query_start_loc_cpu[1:padded_num_reqs +
                                                     #   1] - 1
-            logits_indices = np.array(_logits_indices).flatten()
+            logits_indices = np.concatenate(_logits_indices, axis=0)
             spec_decode_metadata = None
         else:
             num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
