@@ -15,38 +15,28 @@ PROD_WARNING = (
 
 logger.warn(PROD_WARNING)
 
-
-def detect_platform() -> str:
-    if "proxy" in os.environ.get('JAX_PLATFORMS', '').lower():
-        return "pathways"
-    return jax.lib.xla_bridge.get_backend().platform  # 'tpu' or 'cpu'
-
-
-_platform = detect_platform()
-
-if _platform == "tpu":
-    try:
-        logger.info("Running vLLM on TPU.")
-        logger.info(f"TPU info: node_name={ti.get_node_name()} | "
-                    f"tpu_type={ti.get_tpu_type()} | "
-                    f"worker_id={ti.get_node_worker_id()} | "
-                    f"num_chips={ti.get_num_chips()} | "
-                    f"num_cores_per_chip={ti.get_num_cores_per_chip()}")
-    except Exception as e:
-        logger.error(f"Error occurred while logging TPU info: {e}")
-elif _platform == "cpu":
-    logger.info("Running vLLM on CPU.")
-elif _platform == "pathways":
+if "proxy" in os.environ.get('JAX_PLATFORMS', '').lower():
     logger.info("Running vLLM on TPU via Pathways proxy.")
     # Must run pathwaysutils.initialize() before any JAX operations
     try:
         import pathwaysutils
         pathwaysutils.initialize()
         logger.info("Module pathwaysutils is imported.")
-        logger.info(f"TPU type: {jax.devices()[0].device_kind}")
+        logger.info(f"TPU type: {jax.devices()[0].device_kind} |"
+                    f"num_chips={len(jax.devices())} ")
     except Exception as e:
         logger.error(
             f"Error occurred while importing pathwaysutils or logging TPU info: {e}"
         )
 else:
-    logger.error(f"Unsupported platform: {_platform}")
+    # Either running on TPU or CPU
+    try:
+        logger.info(f"TPU info: node_name={ti.get_node_name()} | "
+                    f"tpu_type={ti.get_tpu_type()} | "
+                    f"worker_id={ti.get_node_worker_id()} | "
+                    f"num_chips={ti.get_num_chips()} | "
+                    f"num_cores_per_chip={ti.get_num_cores_per_chip()}")
+    except Exception as e:
+        logger.error(
+            f"Error occurred while logging TPU info: {e}. Are you running on CPU?"
+        )

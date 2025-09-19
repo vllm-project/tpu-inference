@@ -23,7 +23,7 @@ _SAMPLING_EPS = 1e-5
 @dataclass
 class CachedRequestState(NewRequestData):
 
-    output_token_ids: list[int]
+    output_token_ids: Optional[list[int]] = None
     generator: Optional[Any] = None
     mrope_positions: Optional[jax.Array] = None
     mrope_position_delta: Optional[int] = None
