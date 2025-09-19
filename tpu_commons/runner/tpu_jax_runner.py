@@ -514,7 +514,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         for i in discard_sampled_tokens_req_indices:
             valid_sampled_token_ids[i].clear()
         # Append sampled tokens
-        # breakpoint()
+        breakpoint()
         for req_idx, req_state, _ in request_seq_lens:
 
             sampled_ids = valid_sampled_token_ids[req_idx]
