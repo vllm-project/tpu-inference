@@ -207,7 +207,6 @@ def get_flax_model(
     # https://flax.readthedocs.io/en/latest/guides/performance.html
     graphdef, state = nnx.split(jit_model)
 
-    # wenxindong TODO
     @functools.partial(
         jax.jit,
         out_shardings=(

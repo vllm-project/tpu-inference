@@ -233,7 +233,7 @@ class Attention(nnx.Module):
                 k_scale=k_scale,
                 v_scale=v_scale,
             )
-        # wenxindong TODO
+
         output_TNH, kv_cache = jax.jit(
             shard_map.shard_map(
                 _ragged_paged_attention,
@@ -241,7 +241,7 @@ class Attention(nnx.Module):
                 in_specs=in_specs,
                 out_specs=out_specs,
                 check_rep=False,
-            ), compile_options={'xla_tpu_enable_log_recorder': 'true'})(
+            ))(
                 q_TNH,
                 k_SKH,
                 v_SKH,

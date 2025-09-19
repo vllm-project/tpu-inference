@@ -53,13 +53,15 @@ class MLA(nnx.Module):
     anh_sharding: Sharding = ()
     kv_da_sharding: Sharding = ()
 
-    activation_attention_td: Sharding = ()
-    activation_q_td: Sharding = ()
-    query_tnh: P = P()
-    keyvalue_skh: P = P()
+    activation_attention_td: Sharding = ("data", )
+    activation_q_td: Sharding = ("data", )
+    query_tnh: P = P("data", "model", None)
+    keyvalue_skh: P = P("data", "model", None)
 
-    attn_o_tnh: P = P()
-    activation_attention_out_td: Sharding = ()
+    attn_o_tnh: P = P("data", "model", None)
+    activation_attention_out_td: Sharding = ("data", )
+    
+    kv_cache_sharding: Sharding = P("data", None, "model")
 
     random_init: bool = False
     attention_chunk_size: int | None = None
@@ -313,18 +315,17 @@ class MLA(nnx.Module):
                   `(seq, num_q_heads, head_dim)`.
         """
         md = attention_metadata
-        # TODO(wenxindongwork): Support DP
         in_specs = (
             self.query_tnh,  # q
             self.keyvalue_skh,  # k
             self.keyvalue_skh,  # v
-            P(None, None, "model"),  # kv_cache
-            P(),  # md.seq_lens: Replicated
-            P(),  # page_indices_flat: Replicated
-            P(),  # query_start_loc: Replicated
-            P(),  # distribution: Replicated
+            self.kv_cache_sharding,  # kv_cache
+            P("data", ),  # md.seq_lens 
+            P("data", ),  # page_indices_flat 
+            P("data", ),  # query_start_loc 
+            P("data", ),  # distribution
         )
-        out_specs = (self.attn_o_tnh, P(None, None, "model"))
+        out_specs = (self.attn_o_tnh, self.kv_cache_sharding)
 
         def _ragged_paged_attention(*args):
             return ragged_paged_attention(
