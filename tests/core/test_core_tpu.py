@@ -130,7 +130,7 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
         mock_request.mm_kwargs = []
         mock_request.use_structured_output = False
         mock_request.pooling_params = None
-        mock_request.sampling_params.guided_decoding = None
+        mock_request.sampling_params.structured_outputs = None
         mock_request.block_hashes = []
 
         mock_engine_request, _ = proc.preprocess_add_request(mock_request)
@@ -176,7 +176,7 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
         mock_request.mm_kwargs = []
         mock_request.use_structured_output = False
         mock_request.pooling_params = None
-        mock_request.sampling_params.guided_decoding = None
+        mock_request.sampling_params.structured_outputs = None
         mock_request.block_hashes = []
         mock_request = proc.preprocess_add_request(mock_request)
 
