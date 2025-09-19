@@ -393,7 +393,9 @@ def _ragged_paged_attention_kernel(
             return
         cp = pltpu.make_async_copy(src, dst, sem)
         if wait:
-            cp.wait()
+            # Wait on a dummy DMA on dst ref to save SREGs used for
+            # index/offset calculation.
+            pltpu.make_async_copy(dst, dst, sem).wait()
         else:
             cp.start()
 
