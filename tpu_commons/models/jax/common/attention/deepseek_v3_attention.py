@@ -155,8 +155,8 @@ class MLA(nnx.Module):
 
         self.kv_cache_quantized_dtype = None
         if self.kv_cache_dtype != "auto":
-            self.kv_cache_quantized_dtype = utils.TPU_STR_DTYPE_TO_JAX_DTYPE.get(
-                self.kv_cache_dtype.lower().strip())
+            self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
+                self.kv_cache_dtype)
 
     def __call__(self,
                  x,

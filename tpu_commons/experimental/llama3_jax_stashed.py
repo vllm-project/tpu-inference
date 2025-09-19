@@ -97,6 +97,7 @@ class LlamaForCausalLM(nnx.Module):
                         rope_scaling={},
                         rngs=self.rng,
                         dtype=dtype,
+                        # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
                         kv_cache_dtype=self.vllm_config.cache_config.
                         cache_dtype,
                         mesh=self.mesh,

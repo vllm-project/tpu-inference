@@ -65,8 +65,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
             raise NotImplementedError("Alibi slopes is not supported.")
         self.kv_cache_quantized_dtype = None
         if kv_cache_dtype != "auto":
-            self.kv_cache_quantized_dtype = utils.TPU_STR_DTYPE_TO_JAX_DTYPE.get(
-                kv_cache_dtype.lower().strip())
+            self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
+                kv_cache_dtype)
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "

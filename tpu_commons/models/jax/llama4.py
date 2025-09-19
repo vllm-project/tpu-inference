@@ -128,6 +128,7 @@ class Llama4ForCausalLM(nnx.Module):
             attn = Llama4Attention(
                 hidden_size=self.hidden_size,
                 dtype=dtype,
+                # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype,
                 num_attention_heads=40,
                 num_key_value_heads=8,

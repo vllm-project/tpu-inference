@@ -123,8 +123,8 @@ class Qwen2Attention(nnx.Module):
         self._v_scale = 1.0
         self.kv_cache_quantized_dtype = None
         if kv_cache_dtype != "auto":
-            self.kv_cache_quantized_dtype = utils.TPU_STR_DTYPE_TO_JAX_DTYPE.get(
-                kv_cache_dtype.lower().strip())
+            self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
+                kv_cache_dtype)
 
     def __call__(
         self,
@@ -248,6 +248,7 @@ class Qwen2Model(nnx.Module):
                 dtype=dtype,
                 rng=rng,
                 mesh=mesh,
+                # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype)
             for _ in range(hf_config.num_hidden_layers)
         ]

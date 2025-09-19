@@ -57,9 +57,11 @@ class Attention(nnx.Module):
     attention_chunk_size: int | None = None
     rope_input_ordering: str = "split"
 
-    _q_scale: float = 1
-    _k_scale: float = 1
-    _v_scale: float = 1
+    _q_scale: float = 1.0
+    _k_scale: float = 1.0
+    _v_scale: float = 1.0
+
+    kv_cache_quantized_dtype = None
 
     def __post_init__(self, rngs: nnx.Rngs):
         """Initializes the weight kernels for Q, K, V, and O projections."""
@@ -85,10 +87,9 @@ class Attention(nnx.Module):
                                               self.dtype,
                                               random_init=self.random_init)
 
-        self.kv_cache_quantized_dtype = None
         if self.kv_cache_dtype != "auto":
-            self.kv_cache_quantized_dtype = utils.TPU_STR_DTYPE_TO_JAX_DTYPE.get(
-                self.kv_cache_dtype.lower().strip())
+            self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
+                self.kv_cache_dtype)
 
     def __call__(self,
                  x,

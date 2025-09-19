@@ -20,6 +20,9 @@ GBYTES = 1024 * 1024 * 1024
 TPU_HEAD_SIZE_ALIGNMENT = 128
 TPU_SECOND_LAST_MINOR = 8
 
+# This is used to translate from a string name for a dtype
+# to formal jax.numpy DType.  One use case for this is
+# converting the `--kv_cache_dtype` flag to a dtype.
 TPU_STR_DTYPE_TO_JAX_DTYPE = {
     "bfloat16": jnp.bfloat16,
     "fp8": jnp.float8_e4m3fn,
@@ -238,3 +241,17 @@ def quantize_kv(key: jax.Array, value: jax.Array,
     value = value.astype(kv_cache_quantized_dtype)
 
     return key, value
+
+
+def get_jax_dtype_from_str_dtype(str_dtype: str) -> jnp.dtype:
+    """
+    Get the JAX dtype from a string dtype.
+
+    Args:
+        str_dtype: The string dtype to get the JAX dtype from.
+
+    Returns:
+        jnp.dtype: The JAX dtype.
+    """
+    str_dtype = str_dtype.lower().strip()
+    return TPU_STR_DTYPE_TO_JAX_DTYPE.get(str_dtype)
