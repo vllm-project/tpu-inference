@@ -257,10 +257,8 @@ def _ragged_paged_attention_kernel(
     chunk_prefill_size: int | None = None,
     bkv_p,
     bq_sz,
-    debug_mode: bool = True,
+    debug_mode: bool = False,
 ):
-    # debug_mode = True
-    # breakpoint()  # BP2
     assert q_hbm_ref.shape == o_hbm_ref.shape
     assert q_hbm_ref.shape[-1] == kv_cache_hbm_ref.shape[-1]
     (
@@ -842,7 +840,6 @@ def _ragged_paged_attention_kernel(
         lax.fori_loop(0, num_bq, compute_with_bq, None, unroll=False)
 
     ### ------- Kernel start ------- ###
-    # breakpoint()
     # 
     @pl.when(seq_idx == 0)
     def prologue():
@@ -1406,14 +1403,14 @@ def ragged_paged_attention(
         jnp.full((6, ), -1, jnp.int32),
     )
     
-    print("kv_cache", kv_cache.shape)
-    print("query vector", q.shape, q)
-    print("key vector",k.shape, k)
-    print("value vector",v.shape, v)
-    print("page_indices", page_indices.shape, page_indices)
-    print("cu_q_lens", cu_q_lens.shape, cu_q_lens)
-    print("kv_lens", kv_lens.shape, kv_lens)
-    print("distribution", distribution)
+    # print("kv_cache", kv_cache.shape)
+    # print("query vector", q.shape, q)
+    # print("key vector",k.shape, k)
+    # print("value vector",v.shape, v)
+    # print("page_indices", page_indices.shape, page_indices)
+    # print("cu_q_lens", cu_q_lens.shape, cu_q_lens)
+    # print("kv_lens", kv_lens.shape, kv_lens)
+    # print("distribution", distribution)
 
     scope_name = f"RPA-bq_{bq_sz}-bkvp_{bkv_p}-p_{page_size}"
     kernel = jax.named_scope(scope_name)(
@@ -1457,7 +1454,6 @@ def ragged_paged_attention(
             name=scope_name,
             # interpret=pltpu.InterpretParams()
         ))
-    breakpoint()
     
     output, updated_kv_cache = kernel(*scalar_prefetches, q, kv, kv_cache)
     return (

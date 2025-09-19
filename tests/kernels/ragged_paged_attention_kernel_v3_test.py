@@ -226,14 +226,14 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         distribution = jnp.array([0, 0, 1], dtype=jnp.int32)
         kv_cache = jnp.zeros((16, 64, 8, 2, 128), dtype=kv_dtype)
 
-        print("kv_cache", kv_cache.shape)
-        print("query vector", q.shape, jnp.sum(q), q)
-        print("key vector",k.shape, jnp.sum(k), k)
-        print("value vector",v.shape, jnp.sum(v), v)
-        print("page_indices", page_indices.shape, page_indices)
-        print("cu_q_lens", cu_q_lens.shape, cu_q_lens)
-        print("kv_lens", kv_lens.shape, kv_lens)
-        print("distribution", distribution)
+        # print("kv_cache", kv_cache.shape)
+        # print("query vector", q.shape, jnp.sum(q), q)
+        # print("key vector",k.shape, jnp.sum(k), k)
+        # print("value vector",v.shape, jnp.sum(v), v)
+        # print("page_indices", page_indices.shape, page_indices)
+        # print("cu_q_lens", cu_q_lens.shape, cu_q_lens)
+        # print("kv_lens", kv_lens.shape, kv_lens)
+        # print("distribution", distribution)
 
         args = (
             q,

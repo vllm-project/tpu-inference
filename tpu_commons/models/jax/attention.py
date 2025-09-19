@@ -86,7 +86,7 @@ def attention(
     md = attention_metadata
 
     # (T, N, H)
-    breakpoint() # BP1
+    # breakpoint() # BP1
     output, kv_cache = sharded_ragged_paged_attention(
         head_dim_original**-0.5, mesh, attention_chunk_size, q_scale, k_scale,
         v_scale)(
@@ -99,5 +99,7 @@ def attention(
             md.query_start_loc,
             md.request_distribution,
         )
+    print("updated kv cache sum", jax.numpy.sum(kv_cache, dtype=jax.numpy.float32))
 
+    # breakpoint() # BP2
     return kv_cache, output
