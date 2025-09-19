@@ -97,7 +97,7 @@ class LoraUtils:
             if k == "device":  # this is str and jax.jit doesn't like it and we don't need to replace it.
                 continue
             metadata[k] = v
-        return metadata
+        return jax_view(metadata)
 
 
 def replace_lora_metadata(model, metadata: dict) -> dict:
