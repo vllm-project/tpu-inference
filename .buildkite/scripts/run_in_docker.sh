@@ -49,34 +49,21 @@ DOCKER_HF_HOME="/tmp/hf_home"
 # (TODO): Consider creating a remote registry to cache and share between agents.
 # Subsequent builds on the same host should be cached.
 
-# Cleanup of existing containers and images.
-echo "Starting cleanup for vllm-tpu..."
-# Get all unique image IDs for the repository 'vllm-tpu'
-old_images=$(docker images vllm-tpu -q | uniq)
-total_containers=""
+export LOCATION="us-central1"
+gcloud auth configure-docker ${LOCATION}-docker.pkg.dev -q
 
-if [ -n "$old_images" ]; then
-    echo "Found old vllm-tpu images. Checking for dependent containers..."
-    # Loop through each image ID and find any containers (running or not) using it.
-    for img_id in $old_images; do
-        total_containers="$total_containers $(docker ps -a -q --filter "ancestor=$img_id")"
-    done
+buildkite-agent artifact download image_tag.txt .
+export IMAGE_TAG=$(cat image_tag.txt)
 
-    # Remove any found containers
-    if [ -n "$total_containers" ]; then
-        echo "Removing leftover containers using vllm-tpu image(s)..."
-        echo "$total_containers" | xargs -n1 | sort -u | xargs -r docker rm -f
-    fi
-
-    echo "Removing old vllm-tpu image(s)..."
-    docker rmi -f "$old_images"
-else
-    echo "No vllm-tpu images found to clean up."
+if [ -z "$IMAGE_TAG" ]; then
+    echo "Error：Can't get Image Tag"
+    exit 1
 fi
 
-echo "Cleanup complete."
+echo "Image to pull: ${IMAGE_TAG}"
+docker pull "${IMAGE_TAG}"
 
-docker build --no-cache -f docker/Dockerfile -t "vllm-tpu:${BUILDKITE_COMMIT}" .
+echo "--- Running Docker Container ---"
 
 exec docker run \
   --privileged \
@@ -93,5 +80,5 @@ exec docker run \
   ${QUANTIZATION:+-e QUANTIZATION="$QUANTIZATION"} \
   ${NEW_MODEL_DESIGN:+-e NEW_MODEL_DESIGN="$NEW_MODEL_DESIGN"} \
   ${USE_V6E8_QUEUE:+-e USE_V6E8_QUEUE="$USE_V6E8_QUEUE"} \
-  "vllm-tpu:${BUILDKITE_COMMIT}" \
+  "${IMAGE_TAG}" \
   "$@" # Pass all script arguments as the command to run in the container

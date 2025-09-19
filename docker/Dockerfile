@@ -1,5 +1,6 @@
 ARG NIGHTLY_DATE="20250714"
 ARG BASE_IMAGE="us-central1-docker.pkg.dev/tpu-pytorch-releases/docker/xla:nightly_3.12_tpuvm_$NIGHTLY_DATE"
+ARG VLLM_COMMIT_HASH="None"
 
 FROM $BASE_IMAGE
 
@@ -14,7 +15,7 @@ RUN apt-get update && apt-get install -y \
 # Build vLLM
 WORKDIR /workspace/vllm
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-RUN git clone $VLLM_REPO /workspace/vllm
+RUN git clone $VLLM_REPO /workspace/vllm && git checkout $VLLM_COMMIT_HASH
 RUN pip install -r requirements/tpu.txt
 RUN VLLM_TARGET_DEVICE="tpu" pip install -e .
 
