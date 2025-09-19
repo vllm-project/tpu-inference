@@ -38,11 +38,12 @@ class Qwen3Attention(nnx.Module):
                                          self.hidden_size // self.num_heads)
         self.head_dim = utils.get_padded_head_dim(self.head_dim_original)
 
-        sharding_size = mesh.shape["model"]
-        self.num_heads = utils.get_padded_num_heads(self.num_heads,
-                                                    sharding_size)
-        self.num_kv_heads = utils.get_padded_num_heads(self.num_kv_heads,
-                                                       sharding_size)
+        # TODO(wenxindong): with DP attention the following may not be needed anymore.
+        # sharding_size = mesh.shape["model"] 
+        # self.num_heads = utils.get_padded_num_heads(self.num_heads,
+        #                                             sharding_size)
+        # self.num_kv_heads = utils.get_padded_num_heads(self.num_kv_heads,
+        #                                                sharding_size)
 
         self.mesh = mesh
 
@@ -110,7 +111,7 @@ class Qwen3Attention(nnx.Module):
         q = apply_rope(q, md.input_positions, self.head_dim_original,
                        self.rope_theta, self.rope_scaling)
 
-        # k: (T, K, H)
+        # k: (T,self.data_parallel_sharding K, H)
         k = self.k_proj(x)
         k = self.k_norm(k)
         k = apply_rope(k, md.input_positions, self.head_dim_original,

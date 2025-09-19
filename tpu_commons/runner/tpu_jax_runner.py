@@ -336,10 +336,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         scheduler_output: "VllmSchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> ModelRunnerOutput:
-        if os.getenv("VLLM_TPU_DISABLE_JIT", "0") == "0":
-            return self._execute_model(scheduler_output)[1]
-        with jax.disable_jit():
-            return self._execute_model(scheduler_output)[1]
+        return self._execute_model(scheduler_output)[1]
 
     def _execute_model(
         self,
@@ -408,7 +405,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                      lora_metadata,
                  )
 
-            print("hidden_states after forward fn", hidden_states.ravel()[:10])
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)
             logits = self.compute_logits_fn(
@@ -848,6 +844,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
              self.mesh, (input_ids, positions, block_tables, query_start_loc,
                          seq_lens, logits_indices, request_distribution),
              sharding=self.data_parallel_sharding)
+        
         # print()
         # print("DP input_ids ", input_ids.shape, input_ids.sharding)
         # print("DP positions", positions.shape, positions.sharding)
