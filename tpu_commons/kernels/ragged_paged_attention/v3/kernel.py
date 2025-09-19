@@ -391,13 +391,12 @@ def _ragged_paged_attention_kernel(
         if debug_mode:
             # Skip DMA if debug mode is enabled.
             return
-        cp = pltpu.make_async_copy(src, dst, sem)
         if wait:
             # Wait on a dummy DMA on dst ref to save SREGs used for
             # index/offset calculation.
             pltpu.make_async_copy(dst, dst, sem).wait()
         else:
-            cp.start()
+            pltpu.make_async_copy(src, dst, sem).start()
 
     def _fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx, *, wait=False):
         sem = sems.at[0, bkv_sem_idx]
