@@ -31,7 +31,6 @@ if "proxy" in os.environ.get('JAX_PLATFORMS', '').lower():
 else:
     # Either running on TPU or CPU
     try:
-        logger.info("Running vLLM on TPU.")
         logger.info(f"TPU info: node_name={ti.get_node_name()} | "
                     f"tpu_type={ti.get_tpu_type()} | "
                     f"worker_id={ti.get_node_worker_id()} | "
