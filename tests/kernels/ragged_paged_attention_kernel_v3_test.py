@@ -193,8 +193,6 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             num_pages,
         )
 
-
-
     def test_wenxin_rpa(self):
 
         kv_dtype = jnp.bfloat16
@@ -206,22 +204,26 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         num_kv_heads = 8
         num_kv_pages_per_block = 8
         num_queries_per_block = 64
-        vmem_limit_bytes=100 * 1024 * 1024
+        vmem_limit_bytes = 100 * 1024 * 1024
 
         def gen_random(shape, dtype):
-            x = jax.numpy.arange(np.prod(shape), dtype=dtype).reshape(shape) / 1000.0
+            x = jax.numpy.arange(np.prod(shape),
+                                 dtype=dtype).reshape(shape) / 1000.0
             return x.astype(dtype)
 
-        q = gen_random((max_num_batched_tokens, num_q_heads, head_dim), q_dtype)
-        k = gen_random((max_num_batched_tokens, num_kv_heads, head_dim), kv_dtype)
-        v = gen_random((max_num_batched_tokens, num_kv_heads, head_dim), kv_dtype)
+        q = gen_random((max_num_batched_tokens, num_q_heads, head_dim),
+                       q_dtype)
+        k = gen_random((max_num_batched_tokens, num_kv_heads, head_dim),
+                       kv_dtype)
+        v = gen_random((max_num_batched_tokens, num_kv_heads, head_dim),
+                       kv_dtype)
 
-        page_indices = jnp.zeros((512,), dtype=jnp.int32)
+        page_indices = jnp.zeros((512, ), dtype=jnp.int32)
         page_indices = page_indices.at[0].set(1)
-        cu_q_lens = jnp.ones((33,), dtype=jnp.int32)
+        cu_q_lens = jnp.ones((33, ), dtype=jnp.int32)
         cu_q_lens = cu_q_lens.at[0].set(0)
         cu_q_lens = cu_q_lens.at[1].set(6)
-        kv_lens = jnp.zeros((32,), dtype=jnp.int32)
+        kv_lens = jnp.zeros((32, ), dtype=jnp.int32)
         kv_lens = kv_lens.at[0].set(6)
         distribution = jnp.array([0, 0, 1], dtype=jnp.int32)
         kv_cache = jnp.zeros((16, 64, 8, 2, 128), dtype=kv_dtype)
@@ -262,11 +264,9 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             vmem_limit_bytes=vmem_limit_bytes,
         )
 
-        output = output[: cu_q_lens[distribution[-1]]]
+        output = output[:cu_q_lens[distribution[-1]]]
         print("output", output.ravel()[:10])
-        print("updated_kv_cache",jnp.sum(updated_kv_cache))
-
-
+        print("updated_kv_cache", jnp.sum(updated_kv_cache))
 
     # TODO: support integer (int8, int4) and fp4 kv cache
     @parameterized.product(

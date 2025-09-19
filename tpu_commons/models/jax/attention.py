@@ -29,9 +29,9 @@ def sharded_ragged_paged_attention(
         qkv_spec,  # v
         kv_cache_spec,  # kv cache
         P("data", ),  # kv_lens
-        P("data",),  # page_indices
-        P("data",),  # cu_q_lens
-        P("data",),  # distribution
+        P("data", ),  # page_indices
+        P("data", ),  # cu_q_lens
+        P("data", ),  # distribution
     )
     out_specs = (qkv_spec, kv_cache_spec)
 
@@ -99,7 +99,8 @@ def attention(
             md.query_start_loc,
             md.request_distribution,
         )
-    print("updated kv cache sum", jax.numpy.sum(kv_cache, dtype=jax.numpy.float32))
+    print("updated kv cache sum",
+          jax.numpy.sum(kv_cache, dtype=jax.numpy.float32))
 
     # breakpoint() # BP2
     return kv_cache, output

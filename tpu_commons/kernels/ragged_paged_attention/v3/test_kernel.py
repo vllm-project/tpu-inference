@@ -1,10 +1,9 @@
-
-from tpu_commons.kernels.ragged_paged_attention.v3.kernel import (
-    ragged_paged_attention, ref_ragged_paged_attention)
-import jax 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tpu_commons.kernels.ragged_paged_attention.v3.kernel import (
+    ragged_paged_attention, ref_ragged_paged_attention)
 
 kv_dtype = jnp.bfloat16
 q_dtype = jnp.bfloat16
@@ -13,24 +12,26 @@ page_size = 64
 max_num_batched_tokens = 32
 num_q_heads = 32
 num_kv_heads = 8
-num_kv_pages_per_block = 8 
+num_kv_pages_per_block = 8
 num_queries_per_block = 64
-vmem_limit_bytes=100 * 1024 * 1024
+vmem_limit_bytes = 100 * 1024 * 1024
+
 
 def gen_random(shape, dtype):
     x = jax.numpy.arange(np.prod(shape), dtype=dtype).reshape(shape) / 1000.0
     return x.astype(dtype)
 
+
 q = gen_random((max_num_batched_tokens, num_q_heads, head_dim), q_dtype)
 k = gen_random((max_num_batched_tokens, num_kv_heads, head_dim), kv_dtype)
 v = gen_random((max_num_batched_tokens, num_kv_heads, head_dim), kv_dtype)
 
-page_indices = jnp.zeros((512,), dtype=jnp.int32)
+page_indices = jnp.zeros((512, ), dtype=jnp.int32)
 page_indices = page_indices.at[0].set(1)
-cu_q_lens = jnp.ones((33,), dtype=jnp.int32)
+cu_q_lens = jnp.ones((33, ), dtype=jnp.int32)
 cu_q_lens = cu_q_lens.at[0].set(0)
 cu_q_lens = cu_q_lens.at[1].set(6)
-kv_lens = jnp.zeros((32,), dtype=jnp.int32)
+kv_lens = jnp.zeros((32, ), dtype=jnp.int32)
 kv_lens = kv_lens.at[0].set(6)
 distribution = jnp.array([0, 0, 1], dtype=jnp.int32)
 kv_cache = jnp.zeros((16, 64, 8, 2, 128), dtype=kv_dtype)
@@ -64,9 +65,9 @@ kwargs = {
 }
 
 expected, expected_kv_cache = ref_ragged_paged_attention(
-            *args,
-            **kwargs,
-        )
+    *args,
+    **kwargs,
+)
 
 print("expected", expected.ravel()[:10])
 print("expected_kv_cache", jnp.sum(expected_kv_cache))
@@ -79,11 +80,9 @@ output, updated_kv_cache = ragged_paged_attention(
     vmem_limit_bytes=vmem_limit_bytes,
 )
 
-output = output[: cu_q_lens[distribution[-1]]]
+output = output[:cu_q_lens[distribution[-1]]]
 print("output", output.ravel()[:10])
-print("updated_kv_cache",jnp.sum(updated_kv_cache))
-
-
+print("updated_kv_cache", jnp.sum(updated_kv_cache))
 
 ############# INPUT #################
 
@@ -137,7 +136,7 @@ print("updated_kv_cache",jnp.sum(updated_kv_cache))
 
 ############### OUTPUT #################
 
-# G3 
+# G3
 # output [0 0.000999451 0.0019989 0.00300598 0.0039978 0.00500488 0.00601196
 #  0.00698853 0.00799561 0.00897217]
 # updated_kv_cache 37632

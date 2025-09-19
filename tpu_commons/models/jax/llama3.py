@@ -202,7 +202,7 @@ class LlamaDecoderLayer(nnx.Module):
         attention_metadata: AttentionMetadata,
     ) -> Tuple[jax.Array, jax.Array]:
         hidden_states = self.input_layernorm(x)
-        
+
         kv_cache, attn_output = self.self_attn(
             kv_cache,
             hidden_states,
