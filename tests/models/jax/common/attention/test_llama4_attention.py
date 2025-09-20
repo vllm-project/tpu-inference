@@ -27,7 +27,7 @@ class Llama4AttentionTest(unittest.TestCase):
     """Unit test suite for Llama4-specific attention components."""
 
     def setUp(self):
-        devices = jax.devices()
+        devices = jax.devices()[:1]
         sharding_strategy = {"tensor_parallelism": len(devices)}
         self.mesh = build_mesh(devices, sharding_strategy)
 
@@ -88,6 +88,7 @@ class Llama4AttentionTest(unittest.TestCase):
                 rope_theta=10000.0,
                 rope_scaling={},
                 dtype=jnp.bfloat16,
+                kv_cache_dtype="auto",
                 use_qk_norm=False,
                 temperature_tuning=True,
                 temperature_tuning_scale=2.0,

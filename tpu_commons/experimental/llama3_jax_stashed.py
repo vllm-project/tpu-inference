@@ -69,6 +69,7 @@ class LlamaForCausalLM(nnx.Module):
                                  vd_sharding=("model", None))
 
         self.layers = []
+        kv_cache_dtype = self.vllm_config.cache_config.cache_dtype
         for _ in range(num_layers):
             self.layers.append(
                 TransformerBlock(
@@ -98,8 +99,7 @@ class LlamaForCausalLM(nnx.Module):
                         rngs=self.rng,
                         dtype=dtype,
                         # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
-                        kv_cache_dtype=self.vllm_config.cache_config.
-                        cache_dtype,
+                        kv_cache_dtype=kv_cache_dtype,
                         mesh=self.mesh,
                         random_init=force_random_weights,
                         dnh_sharding=(None, "model", None),
