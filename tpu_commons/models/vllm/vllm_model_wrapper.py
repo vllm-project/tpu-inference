@@ -14,7 +14,7 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import TORCH_DTYPE_TO_JAX
-from vllm.config import LoRAConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
@@ -25,8 +25,7 @@ from vllm.sequence import IntermediateTensors
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.vllm.quantization import get_tpu_quantization_config
-from tpu_commons.models.vllm.sharding import (
-    LORA_MODULE_TYPE_TO_WRAPPING_FUNC, get_fqn, shard_model_to_tpu)
+from tpu_commons.models.vllm.sharding import shard_model_to_tpu
 from tpu_commons.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 from tpu_commons.runner.lora_utils import replace_lora_metadata
@@ -106,77 +105,52 @@ class VllmModelWrapper:
             logger.info(
                 "Initializing vLLM model with random weights, weight loading skipped."
             )
-        # The DummyModelLoader in vLLM calls torch._sync for torch_xla path when it detects the tpu platform, but we don't need it and it causes crash without proper setup.
+        # The DummyModelLoader in vLLM calls torch._sync for torch_xla path when
+        # it detects the tpu platform, but we don't need it and it causes crash
+        # without proper setup.
         load_context = patch(
             "torch._sync",
             return_value=None) if use_random_weights else nullcontext()
 
-        # Load the vLLM model and wrap it into a new model whose forward function can calculate the hidden_state and logits.
+        # Load the vLLM model and wrap it into a new model whose forward
+        # function can calculate the hidden_state and logits.
         with load_context:
             # vllm_get_model will move the model weight to TPU.
             vllm_model = vllm_get_model(vllm_config=vllm_config_for_load)
         lora_manager = None
         if vllm_config_for_load.lora_config is not None:
-            # replace the layer with LoRA layers.
+            # Replace layers in the model with LoRA layers.
             with torchax.default_env():
-                # the device in load_lora_model is used to set the device used in punica wrapper.
+                # Argument "device" in load_lora_model is used to set the device
+                # used in punica wrapper.
                 lora_manager, vllm_model = load_lora_model(
                     vllm_model, vllm_config_for_load, device="jax")
-                self._register_lora_weights_as_param(
-                    vllm_model, vllm_config_for_load.lora_config)
             replace_set_lora(vllm_model)
 
+        static_forward_context = vllm_config_for_load.compilation_config.static_forward_context
+        self.vllm_config.compilation_config.static_forward_context = static_forward_context
+
         self.model = _VllmRunner(vllm_model)
-
-        # jax.config.update("jax_explain_cache_misses", True)
-        self.vllm_config.compilation_config.static_forward_context = vllm_config_for_load.compilation_config.static_forward_context
-
-        params_and_buffers = shard_model_to_tpu(self.model, self.mesh,
-                                                self.vllm_config)
+        params_and_buffers = shard_model_to_tpu(self.model, self.mesh)
 
         # Returning to the jax land, so we need to wrap it into a JaxValue.
         return jax_view(params_and_buffers), lora_manager
-
-    def _register_lora_weights_as_param(self, model: torch.nn.Module,
-                                        lora_config: LoRAConfig) -> None:
-
-        def _process_module(module, name=None, parent=None):
-            if get_fqn(module) in LORA_MODULE_TYPE_TO_WRAPPING_FUNC:
-                assert parent is not None and name is not None, (
-                    "Top Level module is not expected to be LoRA wrapper")
-                module.lora_a_stacked = torch.nn.ParameterList([
-                    torch.nn.Parameter(module.lora_a_stacked[i])
-                    for i in range(module.n_slices)
-                ])
-                module.lora_b_stacked = torch.nn.ParameterList([
-                    torch.nn.Parameter(module.lora_b_stacked[i])
-                    for i in range(module.n_slices)
-                ])
-                if lora_config.bias_enabled:
-                    module.lora_bias_stacked = torch.nn.ParameterList([
-                        torch.nn.Parameter(module.lora_bias_stacked[i])
-                        for i in range(module.n_slices)
-                    ])
-
-            for child_name, child_module in list(module.named_children()):
-                _process_module(child_module, child_name, module)
-
-        _process_module(model)
 
     def jit_step_func(self):
 
         @functools.partial(
             jax.jit,
-            donate_argnums=(1, ),  # donate kv_cache
+            donate_argnames=("kv_caches", ),
             compiler_options={
                 "xla_tpu_all_gather_collective_matmul_mode":
                 "post_spmd_conservative",
                 "xla_tpu_reduce_scatter_collective_matmul_mode":
                 "post_spmd_conservative"
             },
-            static_argnames=('layer_name_to_kvcache_index', ))
+            static_argnames=("layer_name_to_kvcache_index", ),
+        )
         def step_fun(
-            params_and_buffers,  # this has been wrapped into a torchax TorchValue
+            params_and_buffers,  # This has been wrapped into torchax TorchValue
             kv_caches: List[jax.Array],
             input_ids: jax.Array,
             attn_metadata: AttentionMetadata,
@@ -272,7 +246,8 @@ def load_lora_model(model: torch.nn.Module, vllm_config: VllmConfig,
     return lora_manager, lora_manager.create_lora_manager(model)
 
 
-# The reason why replace the method is that the set_lora and reset_lora need to run under torchax env.
+# The reason why replace the method is that the set_lora and reset_lora need to
+# run under torchax env.
 def replace_set_lora(model):
 
     def _tpu_set_lora(
