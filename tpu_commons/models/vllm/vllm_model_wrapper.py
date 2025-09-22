@@ -182,7 +182,7 @@ class VllmModelWrapper:
             attn_metadata: AttentionMetadata,
             input_embeds: jax.Array,
             layer_name_to_kvcache_index: Sequence[Tuple[str, int]],
-            lora_metadata=None,
+            lora_metadata,
             *args,
         ) -> Tuple[List[jax.Array], jax.Array]:
             layer_name_to_kvcache_index = dict(layer_name_to_kvcache_index)
@@ -230,7 +230,7 @@ class VllmModelWrapper:
         def compute_logits_func(
             params_and_buffers: Any,
             hidden_states: jax.Array,
-            lora_metadata=None,
+            lora_metadata,
         ) -> jax.Array:
             lora_metadata = torch_view(lora_metadata)
             with torchax.default_env(), set_vllm_model_wrapper_context(
