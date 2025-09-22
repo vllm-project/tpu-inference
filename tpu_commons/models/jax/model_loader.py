@@ -225,7 +225,7 @@ def get_flax_model(
     )
     def run_compute_logits(graphdef, state, *args):
         model = nnx.merge(graphdef, state)
-        hidden_state, _ = args
+        hidden_state, *_ = args
         return model.compute_logits(hidden_state)
 
     # Multi-modal support only
