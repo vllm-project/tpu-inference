@@ -71,8 +71,7 @@ class _VllmRunner(torch.nn.Module):
         return hidden_state
 
     def compute_logits(self, hidden_state: torch.Tensor) -> torch.Tensor:
-        return self.vllm_model.compute_logits(hidden_state,
-                                              sampling_metadata=None)
+        return self.vllm_model.compute_logits(hidden_state)
 
 
 class VllmModelWrapper:
