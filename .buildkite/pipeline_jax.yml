@@ -27,8 +27,7 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - echo "Only Test, Not need run"
-      #  - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
+       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
 
    - label: "E2E MLPerf tests for JAX new models"
      key: test_2
@@ -38,8 +37,7 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - echo "Only Test, Not need run"
-      #  - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
+       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
 
    - label: "E2E MLPerf tests for JAX + vLLM models"
      key: test_3
@@ -49,8 +47,7 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - echo "Only Test, Not need run"
-      #  - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
+       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
 
    - label: "E2E MLperf tests for Llama4 models"
      key: test_4
@@ -61,8 +58,7 @@ steps:
      agents:
        queue: tpu_v6e_8_queue
      commands:
-       - echo "Only Test, Not need run"
-      #  - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
+       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
 
 
    - label: "E2E multi modality test"
@@ -82,10 +78,9 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - echo "Only Test, Not need run"
-      #  - |
-      #    .buildkite/scripts/run_in_docker.sh \
-      #      bash -c 'python3 -m pytest -s -v -x /workspace/tpu_commons/tests/e2e/test_speculative_decoding.py'
+       - |
+         .buildkite/scripts/run_in_docker.sh \
+           bash -c 'python3 -m pytest -s -v -x /workspace/tpu_commons/tests/e2e/test_speculative_decoding.py'
 
    - label: "JAX unit tests"
      key: test_7
@@ -93,15 +88,14 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - echo "Only Test, Not need run"
-      #  - |
-      #    .buildkite/scripts/run_in_docker.sh \
-      #      python3 -m pytest -s -v -x /workspace/tpu_commons/tests/ \
-      #      --ignore=/workspace/tpu_commons/tests/kernels \
-      #      --ignore=/workspace/tpu_commons/tests/lora \
-      #      --ignore=/workspace/tpu_commons/tests/e2e \
-      #      --ignore=/workspace/tpu_commons/tpu_commons/mock \
-      #      --cov-config=/workspace/tpu_commons/.coveragerc --cov tpu_commons --cov-report term-missing --cov-fail-under=69
+       - |
+         .buildkite/scripts/run_in_docker.sh \
+           python3 -m pytest -s -v -x /workspace/tpu_commons/tests/ \
+           --ignore=/workspace/tpu_commons/tests/kernels \
+           --ignore=/workspace/tpu_commons/tests/lora \
+           --ignore=/workspace/tpu_commons/tests/e2e \
+           --ignore=/workspace/tpu_commons/tpu_commons/mock \
+           --cov-config=/workspace/tpu_commons/.coveragerc --cov tpu_commons --cov-report term-missing --cov-fail-under=69
 
    - label: "JAX unit tests - kernels"
      key: test_8
@@ -109,13 +103,12 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - echo "Only Test, Not need run"
-      #  - |
-      #    .buildkite/scripts/run_in_docker.sh \
-      #      python3 -m pytest -s -v -x /workspace/tpu_commons/tests/kernels \
-      #      --ignore=/workspace/tpu_commons/tests/kernels/ragged_paged_attention_kernel_v2_test.py \
-      #      --ignore=/workspace/tpu_commons/tests/kernels/ragged_kv_cache_update_v2_test.py \
-      #      --ignore=/workspace/tpu_commons/tests/kernels/collectives
+       - |
+         .buildkite/scripts/run_in_docker.sh \
+           python3 -m pytest -s -v -x /workspace/tpu_commons/tests/kernels \
+           --ignore=/workspace/tpu_commons/tests/kernels/ragged_paged_attention_kernel_v2_test.py \
+           --ignore=/workspace/tpu_commons/tests/kernels/ragged_kv_cache_update_v2_test.py \
+           --ignore=/workspace/tpu_commons/tests/kernels/collectives
 
    - label: "JAX unit tests - collective kernels"
      key: test_9
@@ -123,10 +116,9 @@ steps:
      agents:
        queue: tpu_v6e_8_queue
      commands:
-       - echo "Only Test, Not need run"
-      #  - |
-      #    .buildkite/scripts/run_in_docker.sh \
-      #      python3 -m pytest -s -v -x /workspace/tpu_commons/tests/kernels/collectives
+       - |
+         .buildkite/scripts/run_in_docker.sh \
+           python3 -m pytest -s -v -x /workspace/tpu_commons/tests/kernels/collectives
 
    - label: "lora tests for JAX + vLLM models"
      key: test_10
@@ -134,10 +126,9 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - echo "Only Test, Not need run"
-      #  - |
-      #    .buildkite/scripts/run_in_docker.sh \
-      #      bash -c 'SKIP_JAX_PRECOMPILE=1 MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_commons/tests/lora/test_lora.py'
+       - |
+         .buildkite/scripts/run_in_docker.sh \
+           bash -c 'SKIP_JAX_PRECOMPILE=1 MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_commons/tests/lora/test_lora.py'
 
 
   # -----------------------------------------------------------------
