@@ -196,7 +196,7 @@ class VllmModelWrapper:
                 # We need to wrap args from jax land into TorchValue with
                 # torch_view in order to call the Torch function.
                 original_lora_metadata = replace_lora_metadata(
-                    self.model, lora_metadata)
+                    self.model, lora_metadata, self.vllm_config.lora_config)
                 hidden_states = torch.func.functional_call(
                     self.model,
                     torch_view(params_and_buffers),
@@ -208,7 +208,8 @@ class VllmModelWrapper:
                     },
                     tie_weights=False,
                 )
-                replace_lora_metadata(self.model, original_lora_metadata)
+                replace_lora_metadata(self.model, original_lora_metadata,
+                                      self.vllm_config.lora_config)
                 vllm_model_wrapper_context = get_vllm_model_wrapper_context()
                 new_kv_caches = vllm_model_wrapper_context.kv_caches
             # Wrap the hidden_states from torch land into a JaxValue for the jax
@@ -235,7 +236,7 @@ class VllmModelWrapper:
             with torchax.default_env(), set_vllm_model_wrapper_context(
                     kv_caches=None, mesh=self.mesh):
                 original_lora_metadata = replace_lora_metadata(
-                    self.model, lora_metadata)
+                    self.model, lora_metadata, self.vllm_config.lora_config)
                 logits = torch.func.functional_call(
                     self.model,
                     torch_view(params_and_buffers),
@@ -244,7 +245,8 @@ class VllmModelWrapper:
                     },
                     tie_weights=False,
                 )
-                replace_lora_metadata(self.model, original_lora_metadata)
+                replace_lora_metadata(self.model, original_lora_metadata,
+                                      self.vllm_config.lora_config)
             return jax_view(logits)
 
         return compute_logits_func

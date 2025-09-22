@@ -78,8 +78,10 @@ class LoraUtils:
         return jax_view(params_and_buffers)
 
     def extract_lora_metadata(self):
-        metadata = {}
+        if self.runner.lora_config is None:
+            return None
 
+        metadata = {}
         punica_wrapper = None
         for m_name, m in self.runner.model.model.named_modules():
             module_qualname = get_fqn(m)
@@ -100,9 +102,11 @@ class LoraUtils:
         return jax_view(metadata)
 
 
-def replace_lora_metadata(model, metadata: dict) -> dict:
-    original_metadata = {}
+def replace_lora_metadata(model, metadata: dict, lora_config) -> dict:
+    if lora_config is None:
+        return {}
 
+    original_metadata = {}
     punica_wrapper = None
     for _, m in model.named_modules():
         module_qualname = get_fqn(m)
