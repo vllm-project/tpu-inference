@@ -3404,19 +3404,18 @@ def get_tuned_block_sizes(
     if tpu_version == 4:
         # TPUv4 has much smaller VMEM size so we pick fixed block sizes.
         bkv_p, bq = (512 // page_size, 32)
-    if tpu_version == 7:
+    elif tpu_version == 7:
         bkv_p, bq = (4096 // page_size, 32)
-    else:
-        if device in TUNED_BLOCK_SIZES:
-            tb = TUNED_BLOCK_SIZES[device]
-            if page_size in tb:
-                tb = tb[page_size]
-                if dtypes in tb:
-                    tb = tb[dtypes]
-                    if head_dims in tb:
-                        tb = tb[head_dims]
-                        if max_model_len in tb:
-                            bkv_p, bq = tb[max_model_len]
+    if device in TUNED_BLOCK_SIZES:
+        tb = TUNED_BLOCK_SIZES[device]
+        if page_size in tb:
+            tb = tb[page_size]
+            if dtypes in tb:
+                tb = tb[dtypes]
+                if head_dims in tb:
+                    tb = tb[head_dims]
+                    if max_model_len in tb:
+                        bkv_p, bq = tb[max_model_len]
 
     return (min(pages_per_seq, bkv_p), min(max_num_tokens, bq))
 
