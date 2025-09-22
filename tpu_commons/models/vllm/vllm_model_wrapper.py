@@ -14,7 +14,7 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import TORCH_DTYPE_TO_JAX
-from vllm.config import LoRAConfig, ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config import LoRAConfig, VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
@@ -72,8 +72,7 @@ class _VllmRunner(torch.nn.Module):
         return hidden_state
 
     def compute_logits(self, hidden_state: torch.Tensor) -> torch.Tensor:
-        return self.vllm_model.compute_logits(hidden_state,
-                                              sampling_metadata=None)
+        return self.vllm_model.compute_logits(hidden_state)
 
 
 class VllmModelWrapper:
@@ -122,11 +121,7 @@ class VllmModelWrapper:
             with torchax.default_env():
                 # the device in load_lora_model is used to set the device used in punica wrapper.
                 lora_manager, vllm_model = load_lora_model(
-                    vllm_model,
-                    vllm_config_for_load.model_config,
-                    vllm_config_for_load.scheduler_config,
-                    vllm_config_for_load.lora_config,
-                    device="jax")
+                    vllm_model, vllm_config_for_load, device="jax")
                 self._register_lora_weights_as_param(
                     vllm_model, vllm_config_for_load.lora_config)
             replace_set_lora(vllm_model)
@@ -255,8 +250,7 @@ class VllmModelWrapper:
         return compute_logits_func
 
 
-def load_lora_model(model: torch.nn.Module, model_config: ModelConfig,
-                    scheduler_config: SchedulerConfig, lora_config: LoRAConfig,
+def load_lora_model(model: torch.nn.Module, vllm_config: VllmConfig,
                     device: str) -> torch.nn.Module:
     if not supports_lora(model):
         raise ValueError(
@@ -266,19 +260,12 @@ def load_lora_model(model: torch.nn.Module, model_config: ModelConfig,
         logger.warning("Regarding multimodal models, vLLM currently "
                        "only supports adding LoRA to language model.")
 
-    # Use get_text_config() in case of multimodal models
-    text_config = model_config.hf_config.get_text_config()
-
     # Add LoRA Manager to the Model Runner
     lora_manager = LRUCacheWorkerLoRAManager(
-        scheduler_config.max_num_seqs,
-        scheduler_config.max_num_batched_tokens,
-        model_config.get_vocab_size(),
-        lora_config,
+        vllm_config,
         device,
         model.embedding_modules,
         model.embedding_padding_modules,
-        max_position_embeddings=text_config.max_position_embeddings,
     )
     return lora_manager, lora_manager.create_lora_manager(model)
 
