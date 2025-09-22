@@ -56,7 +56,7 @@ buildkite-agent artifact download image_tag.txt .
 export IMAGE_TAG=$(cat image_tag.txt)
 
 if [ -z "$IMAGE_TAG" ]; then
-    echo "Error：Can't get Image Tag"
+    echo "Error: Can't get Image Tag"
     exit 1
 fi
 
