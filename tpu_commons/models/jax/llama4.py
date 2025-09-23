@@ -463,51 +463,47 @@ class Llama4WeightLoader:
 
         with jax.default_device(jax.devices("cpu")[0]):
             for loaded_name, loaded_weight in self.names_and_weights_generator:
-                current_weight = loaded_weight
-                # breakpoint()
+                is_moe_layer = False
                 layer_num_match = re.search(r"layers\.(\d+)", loaded_name)
-                # Check if it's a layer-specific weight before proceeding
                 if layer_num_match:
                     layer_num = int(layer_num_match.group(1))
                     if layer_num >= num_model_layers:
+                        # logger.warning(
+                        #     f"Skipping weight for layer {layer_num} as the model only has {num_model_layers} layers."
+                        # )
                         continue
-
-                    # This part now correctly uses layer_num
-                    if not loaded_name.endswith(".bias"):
+                    if interleave_moe_layer_step > 0:
                         is_moe_layer = (layer_num + 1) % interleave_moe_layer_step == 0
-                    
-                        # Case 1: (q, k, v, o)
-                        if "self_attn" in loaded_name:
-                            current_weight = reshape_params(loaded_name, current_weight, self._weight_shape_map)
-                            current_weight = transpose_params(loaded_name, current_weight, self._transpose_map)
-                       
-                        # Case 2: MoE or DFF
-                        elif "feed_forward.experts.down_proj" in loaded_name or "feed_forward.experts.gate_up_proj" in loaded_name:
-                            current_weight = jnp.transpose(current_weight, (2, 0, 1))
-                        elif "router" in loaded_name:
-                            current_weight = jnp.transpose(current_weight, (1, 0))
 
-                        elif "feed_forward.down_proj" in loaded_name or "feed_forward.up_proj" in loaded_name or "feed_forward.gate_proj" in loaded_name:
-                            current_weight = jnp.transpose(current_weight, (1, 0))
-                
-                        # Case 3: LM Head
-                        elif "lm_head.weight" in loaded_name:
-                            current_weight = jnp.transpose(current_weight, (1, 0))
-                        
-                        # Case 4: Embedder
-                        elif "embed_tokens.weight" in loaded_name:
-                            # No transposition needed based on your original code
-                            pass
-
-                        # Case 5: Layer Norm
-                        elif "norm.weight" in loaded_name or "layernorm.weight" in loaded_name:
-                            pass
+                if "gate_up_proj" in loaded_name:
+                    self._map_llama4_gate_up_proj(model_for_loading,
+                                                  model_params, loaded_name,
+                                                  loaded_weight)
+                    continue
 
                 mapped_name = self.map_loaded_to_standardized_name(loaded_name)
                 model_weight = get_param(model_params, mapped_name)
 
-                # AFTER transformation, log the shapes again
-                logger.info(f"Transformed: {loaded_name}, Mapped Name: {mapped_name}, Final Shape: {current_weight.shape}, Expected Shape: {model_weight.value.shape}")
+                current_weight = loaded_weight
+
+                # --- Conditional Transformation Logic ---
+                # This is the key change. We check the key and layer type before transforming.
+                if not loaded_name.endswith(".bias"):
+                    if is_moe_layer and "experts." in loaded_name:
+                        # These are MoE expert weights. Their loaded shape already matches the model's needs.
+                        # No reshaping or transposing is needed for MoE's experts' weights.
+                        pass
+                    elif "q_proj" in loaded_name or "k_proj" in loaded_name or "v_proj" in loaded_name or "o_proj" in loaded_name or "router" in loaded_name:
+                        # These are attention weights. They need reshaping and transposing.
+                        current_weight = reshape_params(loaded_name, current_weight, self._weight_shape_map)
+                        current_weight = transpose_params(loaded_name, current_weight, self._transpose_map)
+                    elif not is_moe_layer and any(s in loaded_name for s in ["down_proj", "up_proj", "gate_proj"]) or "lm_head" in loaded_name:
+                        # These are dense layer weights. They need a standard transpose.
+                        current_weight = transpose_params(loaded_name, current_weight, self._transpose_map)
+                        # current_weight = jnp.transpose(current_weight, (1, 0))
+                    # For `shared_expert` weights, a different approach might be needed depending on the exact shape.
+                    elif "shared_expert" in loaded_name:
+                        current_weight = transpose_params(loaded_name, current_weight, self._transpose_map)
 
                 if model_weight.value.shape != current_weight.shape:
                     raise ValueError(
