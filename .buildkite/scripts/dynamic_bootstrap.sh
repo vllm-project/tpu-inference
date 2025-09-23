@@ -106,24 +106,24 @@ model_list_string=$(printf "%s\n" "${model_names[@]}")
 
 if [[ -n "$tpu_model_list_str" ]]; then
   echo "--- Uploading tpu_model_list_str to Meta-data:${MODEL_LIST_KEY}"
-  # echo "${tpu_model_list_str}" | buildkite-agent meta-data set "${MODEL_LIST_KEY}"
-  # echo "Testing: $(buildkite-agent meta-data get "MODEL_LIST_KEY")"
+  echo "${tpu_model_list_str}" | buildkite-agent meta-data set "${MODEL_LIST_KEY}"
+  echo "Testing: $(buildkite-agent meta-data get "MODEL_LIST_KEY")"
 else
   echo "--- No Model Names found to upload."
 fi
 
 if [[ -n "$vllm_model_list_str" ]]; then
   echo "--- Uploading vllm_model_list_str to Meta-data:${INFORMATIONAL_MODEL_LIST_KEY}"
-  # echo "${vllm_model_list_str}" | buildkite-agent meta-data set "${INFORMATIONAL_MODEL_LIST_KEY}"
-  # echo "Testing: $(buildkite-agent meta-data get "${INFORMATIONAL_MODEL_LIST_KEY}")"
+  echo "${vllm_model_list_str}" | buildkite-agent meta-data set "${INFORMATIONAL_MODEL_LIST_KEY}"
+  echo "Testing: $(buildkite-agent meta-data get "${INFORMATIONAL_MODEL_LIST_KEY}")"
 else
   echo "--- No Model Names found to upload."
 fi
 POPURLAR_MODEL_LIST_KEY
 if [[ -n "$popular_model_list_str" ]]; then
   echo "--- Uploading popular_model_list_str to Meta-data:${POPURLAR_MODEL_LIST_KEY}"
-  # echo "${popular_model_list_str}" | buildkite-agent meta-data set "${POPURLAR_MODEL_LIST_KEY}"
-  # echo "Testing: $(buildkite-agent meta-data get "${POPURLAR_MODEL_LIST_KEY}")"
+  echo "${popular_model_list_str}" | buildkite-agent meta-data set "${POPURLAR_MODEL_LIST_KEY}"
+  echo "Testing: $(buildkite-agent meta-data get "${POPURLAR_MODEL_LIST_KEY}")"
 else
   echo "--- No Model Names found to upload."
 fi
@@ -136,10 +136,10 @@ if [[ -n "$pipeline_steps" ]]; then
   final_pipeline_yaml="steps:"$'\n'
   final_pipeline_yaml+=$(printf "%s\n" "${pipeline_steps[@]}")
   echo "Upload YML: ${final_pipeline_yaml}"
-  # echo -e "${final_pipeline_yaml}" | buildkite-agent pipeline upload
+  echo -e "${final_pipeline_yaml}" | buildkite-agent pipeline upload
 else
   echo "--- No .yml files found, no new Pipeline Steps to upload."
-  # buildkite-agent step update --state "passed"
+  buildkite-agent step update --state "passed"
 fi
 
 echo "--- Buildkite Special Bootstrap Finished ---"
