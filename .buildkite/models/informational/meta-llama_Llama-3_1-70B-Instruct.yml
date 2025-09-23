@@ -17,7 +17,7 @@ steps:
         .buildkite/scripts/check_results.sh \
           "Unit tests for meta-llama/Llama-3.1-70B-Instruct" ut_meta-llama_Llama-3_1-70B-Instruct
     plugins:
-      - hooks#v1:
+      - git@github.com:buildkite-plugins/hooks-buildkite-plugin.git#v1::
           post-command: |
             echo "--- Post-command hook triggered ---"
             echo "Test exited with status: $BUILDKITE_COMMAND_EXIT_STATUS"
