@@ -11,6 +11,7 @@ import jaxtyping
 import numpy as np
 import torch
 import vllm.envs as envs
+import vllm.v1.core.sched as vLLMScheduler
 from flax import nnx
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.ops.mappings import j2t_dtype
@@ -32,6 +33,7 @@ from vllm.v1.worker.kv_connector_model_runner_mixin import \
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from tpu_commons import utils as common_utils
+from tpu_commons.core.sched.dp_scheduler import DPScheduler
 from tpu_commons.layers.common.attention_metadata import AttentionMetadata
 from tpu_commons.layers.jax.sample.rejection_sampler import RejectionSampler
 from tpu_commons.layers.jax.sample.sampling import (compute_logprobs,
@@ -56,6 +58,8 @@ from tpu_commons.runner.structured_decoding_manager import \
     StructuredDecodingManager
 from tpu_commons.spec_decode.jax.eagle3 import Eagle3Proposer
 from tpu_commons.utils import device_array, make_optimized_mesh
+
+vLLMScheduler.Scheduler = DPScheduler
 
 logger = init_logger(__name__)
 
@@ -142,7 +146,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         self.data_parallel_sharding = NamedSharding(self.mesh,
                                                     PartitionSpec("data"))
-        self.scheduler_dp_cache = {}
 
     def _init_random(self):
         if self.model_config.seed is None:
@@ -466,14 +469,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         discard_sampled_tokens_req_indices = []
         for i, req_id in zip(range(num_reqs), self.input_batch.req_ids):
             assert req_id is not None
-            print("req_id", req_id)
             req_state = self.requests[req_id]
             seq_len = (req_state.num_computed_tokens +
                        scheduler_output.num_scheduled_tokens[req_id])
             if seq_len >= req_state.num_tokens:
                 request_seq_lens.append((i, req_state, seq_len))
             else:
-                print("Partial request, rewind the sampled token. why here?")
                 # Ignore the sampled token from the partial request.
                 # Rewind the generator state as if the token was not sampled.
                 generator = self.input_batch.generators.get(i)
@@ -510,9 +511,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         for i in discard_sampled_tokens_req_indices:
             valid_sampled_token_ids[i].clear()
         # Append sampled tokens
-        breakpoint()
         for req_idx, req_state, _ in request_seq_lens:
-
             sampled_ids = valid_sampled_token_ids[req_idx]
             if not sampled_ids:
                 continue
@@ -577,12 +576,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         print(f"dp_size: {dp_size}")
         self.input_batch.req_dp_ranks = []
         for i, id in enumerate(self.input_batch.req_ids):
-            # if id in self.scheduler_dp_cache:
-            #     self.input_batch.req_dp_ranks.append(self.scheduler_dp_cache[id])
-            # else:
-            #     self.input_batch.req_dp_ranks.append(i % dp_size)
-            #     self.scheduler_dp_cache[id] = i % dp_size
-            dp_rank = scheduler_output.preferred_device[id]
+            dp_rank = scheduler_output.assigned_dp_rank[id]
             self.input_batch.req_dp_ranks.append(dp_rank)
         print("self.input_batch.req_dp_ranks", self.input_batch.req_dp_ranks)
         # Sort requests into DP ranks
@@ -809,8 +803,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
-            # logits_indices = self.query_start_loc_cpu[1:padded_num_reqs +
-            #   1] - 1
             logits_indices = np.concatenate(_logits_indices, axis=0)
             spec_decode_metadata = None
         else:
@@ -844,7 +836,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
              self.mesh, (input_ids, positions, block_tables, query_start_loc,
                          seq_lens, logits_indices, request_distribution),
              sharding=self.data_parallel_sharding)
-        
+
         # print()
         # print("DP input_ids ", input_ids.shape, input_ids.sharding)
         # print("DP positions", positions.shape, positions.sharding)
