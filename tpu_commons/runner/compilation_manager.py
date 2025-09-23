@@ -55,7 +55,14 @@ class CompilationManager:
                          **kwargs) -> None:
         logger.info(f"Precompile {name} --> {kwargs}")
         start = time.perf_counter()
-        result = fn(*args)
+        num_tokens = kwargs.get('num_tokens', None)
+        if num_tokens is not None:
+            with self.runner.maybe_select_dummy_loras(
+                    self.runner.lora_config,
+                    np.array([num_tokens], dtype=np.int32)):
+                result = fn(*args)
+        else:
+            result = fn(*args)
         if result is not None:
             if isinstance(result, tuple):
                 for r in result:
@@ -74,15 +81,16 @@ class CompilationManager:
             logger.info("[TEMP] skip precompiling for multi-modal models")
             return
 
-        self._precompile_backbone()
-        self._precompile_select_from_array()
-        self._precompile_compute_logits()
-        self._precompile_disagg_utils()
-        self._precompile_sampling()
-        self._precompile_gather_logprobs()
-        self._precompile_structured_decoding()
-        if self.runner.speculative_config:
-            self._precompile_rejection_sampler()
+        with self.runner.maybe_setup_dummy_loras(self.runner.lora_config):
+            self._precompile_backbone()
+            self._precompile_select_from_array()
+            self._precompile_compute_logits()
+            self._precompile_disagg_utils()
+            self._precompile_sampling()
+            self._precompile_gather_logprobs()
+            self._precompile_structured_decoding()
+            if self.runner.speculative_config:
+                self._precompile_rejection_sampler()
 
     def _precompile_backbone(self) -> None:
         for num_tokens in self.runner.num_tokens_paddings:
