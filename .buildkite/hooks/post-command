@@ -1,0 +1,13 @@
+#!/bin/bash
+set -euo pipefail
+
+echo "--- Post-command hook triggered ---"
+echo "Test exited with status: $BUILDKITE_COMMAND_EXIT_STATUS"
+
+if [ "$BUILDKITE_COMMAND_EXIT_STATUS" -eq 0 ]; then
+  echo "The step passed. Uploading result..."
+  buildkite-agent meta-data set "meta-llama/Llama-3.1-8B-Instruct:UnitTest" "passed"
+else
+  echo "The step failed. Uploading result..."
+  buildkite-agent meta-data set "meta-llama/Llama-3.1-8B-Instruct:UnitTest" "failed"
+fi

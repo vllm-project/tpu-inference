@@ -17,17 +17,7 @@ steps:
         .buildkite/scripts/check_results.sh \
           "Unit tests for meta-llama/Llama-3.1-8B-Instruct" ut_meta-llama_Llama-3_1-8B-Instruct
     plugins:
-      - buildkite-plugins/hooks-plugin#v1.1.0:
-          post-command: |
-            echo "--- Post-command hook triggered ---"
-            echo "Test exited with status: $BUILDKITE_COMMAND_EXIT_STATUS"
-            if [ "$BUILDKITE_COMMAND_EXIT_STATUS" -eq 0 ]; then
-              echo "The step passed. Uploading result..."
-              buildkite-agent meta-data set "meta-llama/Llama-3.1-8B-Instruct:UnitTest" "passed"
-            else
-              echo "The step failed. Uploading result..."
-              buildkite-agent meta-data set "meta-llama/Llama-3.1-8B-Instruct:UnitTest" "failed"
-            fi
+      - ".buildkite": ~
 
   - label: "Integration tests for meta-llama/Llama-3.1-8B-Instruct"
     key: "it_meta-llama_Llama-3_1-8B-Instruct"
