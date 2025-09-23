@@ -109,7 +109,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
         if self.kv_cache_quantized_dtype:
             key, value = utils.quantize_kv(key, value,
                                            self.kv_cache_quantized_dtype,
-                                           layer._k_scale, layer._v_scale)
+                                           layer._k_scale_float,
+                                           layer._v_scale_float)
             # TODO(kyuyeunk): Enable w8a8 when VREG spill issue is resolved.
             # q_scale = layer._q_scale_float
             k_scale = layer._k_scale_float

@@ -22,8 +22,12 @@ init_fn = nnx.initializers.uniform()
 class Eagle3LlamaDecoderLayer(LlamaDecoderLayer):
 
     def __init__(self, config: LlamaConfig, dtype: jnp.dtype, rng: nnx.Rngs,
-                 mesh: Mesh):
-        super().__init__(config, dtype=dtype, rng=rng, mesh=mesh)
+                 mesh: Mesh, kv_cache_dtype: str):
+        super().__init__(config,
+                         dtype=dtype,
+                         rng=rng,
+                         mesh=mesh,
+                         kv_cache_dtype=kv_cache_dtype)
         self.config = config
         # Override qkv
         hidden_size = 2 * self.self_attn.hidden_size
@@ -134,7 +138,8 @@ class Eagle3LlamaModel(nnx.Module):
                 dtype=dtype,
                 rng=rng,
                 mesh=mesh,
-            )
+                # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
+                kv_cache_dtype=vllm_config.cache_config.cache_dtype)
         ]
 
         if hasattr(hf_config, "target_hidden_size"):
