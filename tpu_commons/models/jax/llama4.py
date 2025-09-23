@@ -40,13 +40,7 @@ class Llama4ForCausalLM(nnx.Module):
 
         self.vllm_config = vllm_config
         model_config = vllm_config.model_config
-
-        # Check if the Hugging Face config has a 'text_config' attribute.
-        # Llama-4-Scout-17B-16E-Instruct and Llama-4-Maverick-17B-128E-Instruct has 'text_config' attribute in config.json
-        if hasattr(model_config.hf_config, "text_config"):
-            text_config = model_config.hf_config.text_config
-        else:
-            text_config = model_config.hf_config
+        text_config = model_config.hf_config.text_config
 
         self.rng = nnx.Rngs(rng)
         self.mesh = mesh
@@ -61,62 +55,44 @@ class Llama4ForCausalLM(nnx.Module):
         # TODO(fhzhang): remove these once we confirm that the values we get from config are good.
         # self.hidden_size: int = 5120
         # vocab_size = 202048
-        vocab_size = model_config.get_vocab_size()
+        self.vocab_size = model_config.get_vocab_size()
         self.hidden_size = model_config.get_hidden_size()
 
         dtype: jnp.dtype = jnp.bfloat16
 
-        # num_layers: int = 48
-        # self.interleave_moe_layer_step = 1  # All layers are MoE for Scout
-        # intermediate_size_moe: int = 8192
-        # num_local_experts: int = 128
-        # hidden_act: str = "silu"
-        # self.no_rope_layer_interval = 4
+        # self.num_layers: int = getattr(text_config, "num_hidden_layers", 48)
 
-        # num_shared_experts = 1
-        # rms_norm_eps = 1e-5
-        # self.num_attention_heads = 40
-        # self.num_key_value_heads = 8
-        # self.head_dim = 128
-
-        # intermediate_size = 16384
-
-        # Dynamically retrieve model parameters from the Hugging Face configuration.
-        # This approach replaces hard-coded values with flexible ones
-        # num_layers: int = getattr(text_config, "num_hidden_layers", 48)
-
+        # ====================== DEBUG ============================
         # Get the total number of layers from the config
         total_num_layers: int = getattr(text_config, "num_hidden_layers", 48)
         # Use the new parameter to limit the number of layers
         num_layers_to_run = 1
-        num_layers: int = min(total_num_layers, num_layers_to_run)
+        self.num_layers: int = min(total_num_layers, num_layers_to_run)
+        # ====================== DEBUG ============================
 
-        intermediate_size_moe: int = getattr(text_config, "intermediate_size", 8192)
+        self.intermediate_size_moe: int = getattr(text_config, "intermediate_size", 8192)
+        self.intermediate_size_mlp = getattr(text_config, "intermediate_size_mlp", 16384)
 
         # num_local_experts uses 128 experts specifically for Llama-4-Maverick-17B-128E-Instruct.
         # while Llama-4-Scout-17B-16E-Instruct uses 16 experts.
-        num_local_experts: int = getattr(text_config, "num_local_experts", 128)
-        hidden_act: str = getattr(text_config, "hidden_act", "silu")
+        self.num_local_experts: int = getattr(text_config, "num_local_experts", 16)
+        self.hidden_act: str = getattr(text_config, "hidden_act", "silu")
 
         # Note: The original config files show "no_rope_layers", not "no_rope_layers_interval"
-        self.no_rope_layer_interval = getattr(text_config, "no_rope_layers", []) 
+        self.no_rope_layer_interval = getattr(text_config, "no_rope_layers", [])
 
         # interleave_moe_layer_step has a layer step of 2 to interleave MoE and dense layers for Llama-4-Maverick-17B-128E-Instruct.
         # The default value is set to 1 for compatibility with Llama-4-Scout.
         self.interleave_moe_layer_step = getattr(text_config, "interleave_moe_layer_step", 1)
 
-        # Specifically for Llama-4-Maverick-17B-128E-Instruct, which uses 16384 as the intermediate size for its MLP layers.
-        # But in Llama-4-Scout-17B-16E-Instruct config file, it has the same value.
-        self.intermediate_size_mlp = getattr(text_config, "intermediate_size_mlp", 16384)
-
         self.num_attention_heads = getattr(text_config, "num_attention_heads", 40)
         self.num_key_value_heads = getattr(text_config, "num_key_value_heads", 8)
         self.head_dim = getattr(text_config, "head_dim", 128)
 
-        num_shared_experts = 1
-        rms_norm_eps = getattr(text_config, "rms_norm_eps", 1e-5)
+        self.num_shared_experts = getattr(text_config, "num_experts_per_tok", 1)
+        self.rms_norm_eps = getattr(text_config, "rms_norm_eps", 1e-5)
 
-        self.embedder = Embedder(vocab_size=vocab_size,
+        self.embedder = Embedder(vocab_size=self.vocab_size,
                                  hidden_size=self.hidden_size,
                                  dtype=dtype,
                                  vd_sharding=(('data', 'expert', 'model'),
@@ -126,7 +102,7 @@ class Llama4ForCausalLM(nnx.Module):
 
         self.layers = []
 
-        for i in range(num_layers):
+        for i in range(self.num_layers):
             # For Llama4-Scout, all layers are MoE layers.
             # This can be adjusted for other variants.
             is_moe_layer = (i + 1) % \
@@ -136,7 +112,7 @@ class Llama4ForCausalLM(nnx.Module):
 
             router = Router(dtype=dtype,
                             hidden_size=self.hidden_size,
-                            num_experts=num_local_experts,
+                            num_experts=self.num_local_experts,
                             num_experts_per_tok=1,
                             router_act="sigmoid",
                             rngs=self.rng,
@@ -145,11 +121,11 @@ class Llama4ForCausalLM(nnx.Module):
                             random_init=force_random_weights)
 
             custom_module = MoE(dtype=dtype,
-                                num_local_experts=num_local_experts,
+                                num_local_experts=self.num_local_experts,
                                 apply_expert_weight_before_computation=True,
                                 hidden_size=self.hidden_size,
-                                intermediate_size_moe=intermediate_size_moe,
-                                hidden_act=hidden_act,
+                                intermediate_size_moe=self.intermediate_size_moe,
+                                hidden_act=self.hidden_act,
                                 router=router,
                                 rngs=self.rng,
                                 activation_ffw_td=('data', None),
@@ -159,9 +135,8 @@ class Llama4ForCausalLM(nnx.Module):
                                 random_init=force_random_weights
                                 ) if is_moe_layer else DenseFFW(
                                     dtype=dtype,
-                                    hidden_act=hidden_act,
+                                    hidden_act=self.hidden_act,
                                     hidden_size=self.hidden_size,
-                                    # intermediate_size=intermediate_size,
                                     intermediate_size=self.intermediate_size_mlp, # Use the intermediate size for the MLP
                                     random_init=force_random_weights,
                                     rngs=self.rng,
@@ -206,20 +181,20 @@ class Llama4ForCausalLM(nnx.Module):
             )
 
             shared_experts = DenseFFW(dtype=dtype,
-                                      hidden_act=hidden_act,
+                                      hidden_act=self.hidden_act,
                                       hidden_size=self.hidden_size,
-                                      intermediate_size=num_shared_experts *
-                                      intermediate_size_moe,
+                                      intermediate_size=self.num_shared_experts *
+                                      self.intermediate_size_moe,
                                       rngs=self.rng,
                                       random_init=force_random_weights,
                                       df_sharding=(None, 'model'),
                                       fd_sharding=('model', None),
-                                      activation_ffw_td=('data', None))
+                                      activation_ffw_td=('data', None)) if is_moe_layer else None
 
             pre_attention_norm = RMSNorm(
                 dims=self.hidden_size,
                 random_init=force_random_weights,
-                epsilon=rms_norm_eps,
+                epsilon=self.rms_norm_eps,
                 rngs=self.rng,
                 with_scale=True,
                 dtype=dtype,
@@ -227,7 +202,7 @@ class Llama4ForCausalLM(nnx.Module):
 
             pre_mlp_norm = RMSNorm(
                 dims=self.hidden_size,
-                epsilon=rms_norm_eps,
+                epsilon=self.rms_norm_eps,
                 rngs=self.rng,
                 with_scale=True,
                 dtype=dtype,
@@ -245,14 +220,14 @@ class Llama4ForCausalLM(nnx.Module):
 
         self.final_norm = RMSNorm(
             dims=self.hidden_size,
-            epsilon=rms_norm_eps,
+            epsilon=self.rms_norm_eps,
             rngs=self.rng,
             with_scale=True,
             dtype=dtype,
             random_init=force_random_weights,
         )
 
-        self.lm_head = LMhead(vocab_size=vocab_size,
+        self.lm_head = LMhead(vocab_size=self.vocab_size,
                               hidden_size=self.hidden_size,
                               dtype=dtype,
                               rngs=self.rng,
@@ -336,20 +311,21 @@ class Llama4WeightLoader:
             download_dir=vllm_config.load_config.download_dir)
         self.is_verbose = getattr(vllm_config.additional_config, "is_verbose",
                                   False)
+        
+        self.interleave_moe_layer_step = getattr(vllm_config.model_config.hf_config.text_config, "interleave_moe_layer_step", 1)
+        self.expert_prefix = "shared_expert." if self.interleave_moe_layer_step == 1 else ""
         self._transpose_map = {
             "q_proj": (2, 0, 1),
             "k_proj": (2, 0, 1),
             "v_proj": (2, 0, 1),
             "router": (1, 0),
-            "down_proj": (1, 0), # This is for DenseFFW layers, add a transposition step specifically for the down_proj weight
-            "gate_proj": (1, 0), # Add this entry for DenseFFW gate
-            "up_proj": (1, 0),   # Add this entry for DenseFFW up
-            "shared_expert.down_proj": (1, 0),
-            "shared_expert.gate_proj": (1, 0),
-            "shared_expert.up_proj": (1, 0),
+            f"{self.expert_prefix}down_proj": (1, 0),
+            f"{self.expert_prefix}gate_proj": (1, 0),
+            f"{self.expert_prefix}up_proj": (1, 0),
             "o_proj": (1, 2, 0),
             "lm_head": (1, 0),
         }
+
         self._weight_shape_map = {
             "q_proj": (attn_heads, attn_head_dim, hidden_size),
             "k_proj": (num_key_value_heads, attn_head_dim, hidden_size),
@@ -390,11 +366,11 @@ class Llama4WeightLoader:
             "layers.*.shared_experts.kernel_gating_DF",
             "language_model.model.layers.*.feed_forward.shared_expert.up_proj.weight":
             "layers.*.shared_experts.kernel_up_proj_DF",
-            "language_model.model.layers.*.feed_forward.down_proj.weight": # Add for Llama-4-Maverick-17B-128E-Instruct
+            "language_model.model.layers.*.feed_forward.down_proj.weight":
             "layers.*.custom_module.kernel_down_proj_FD",
-            "language_model.model.layers.*.feed_forward.up_proj.weight": # Add for Llama-4-Maverick-17B-128E-Instruct
+            "language_model.model.layers.*.feed_forward.up_proj.weight":
             "layers.*.custom_module.kernel_up_proj_DF",
-            "language_model.model.layers.*.feed_forward.gate_proj.weight": # Add for Llama-4-Maverick-17B-128E-Instruct
+            "language_model.model.layers.*.feed_forward.gate_proj.weight":
             "layers.*.custom_module.kernel_gating_DF",
         }
 
@@ -433,11 +409,11 @@ class Llama4WeightLoader:
             mapped_name = re.sub(r"layers\.\*", f"layers.{layer_num}",
                                  mapped_name)
             mapped_model_weight = get_param(model_params, mapped_name)
-            # if not loaded_name.endswith(".bias"):
-            #     loaded_weight = reshape_params(loaded_name, loaded_weight,
-            #                                    self._weight_shape_map)
-            #     loaded_weight = transpose_params(loaded_name, loaded_weight,
-            #                                      self._transpose_map)
+            if not loaded_name.endswith(".bias"):
+                loaded_weight = reshape_params(loaded_name, loaded_weight,
+                                               self._weight_shape_map)
+                loaded_weight = transpose_params(loaded_name, loaded_weight,
+                                                 self._transpose_map)
             if mapped_model_weight.value.shape != loaded_weight.shape:
                 raise ValueError(
                     f"Loaded shape for {split_loaded_name}: {loaded_weight.shape} "
@@ -454,16 +430,14 @@ class Llama4WeightLoader:
 
     def load_weights(self, model_for_loading: nnx.Module):
         model_params = nnx.state(model_for_loading)
-        # breakpoint()
+
+        # ====================== DEBUG ============================
         num_model_layers = len(model_for_loading.layers)
-        interleave_moe_layer_step = getattr(
-            model_for_loading.vllm_config.model_config.hf_config.text_config, 
-            "interleave_moe_layer_step", 1
-        )
+        # ====================== DEBUG ============================
 
         with jax.default_device(jax.devices("cpu")[0]):
             for loaded_name, loaded_weight in self.names_and_weights_generator:
-                is_moe_layer = False
+                # ====================== DEBUG ============================
                 layer_num_match = re.search(r"layers\.(\d+)", loaded_name)
                 if layer_num_match:
                     layer_num = int(layer_num_match.group(1))
@@ -472,49 +446,34 @@ class Llama4WeightLoader:
                         #     f"Skipping weight for layer {layer_num} as the model only has {num_model_layers} layers."
                         # )
                         continue
-                    if interleave_moe_layer_step > 0:
-                        is_moe_layer = (layer_num + 1) % interleave_moe_layer_step == 0
+                # ====================== DEBUG ============================
 
                 if "gate_up_proj" in loaded_name:
                     self._map_llama4_gate_up_proj(model_for_loading,
                                                   model_params, loaded_name,
                                                   loaded_weight)
                     continue
-
                 mapped_name = self.map_loaded_to_standardized_name(loaded_name)
                 model_weight = get_param(model_params, mapped_name)
 
-                current_weight = loaded_weight
-
-                # --- Conditional Transformation Logic ---
-                # This is the key change. We check the key and layer type before transforming.
                 if not loaded_name.endswith(".bias"):
-                    if is_moe_layer and "experts." in loaded_name:
-                        # These are MoE expert weights. Their loaded shape already matches the model's needs.
-                        # No reshaping or transposing is needed for MoE's experts' weights.
-                        pass
-                    elif "q_proj" in loaded_name or "k_proj" in loaded_name or "v_proj" in loaded_name or "o_proj" in loaded_name or "router" in loaded_name:
-                        # These are attention weights. They need reshaping and transposing.
-                        current_weight = reshape_params(loaded_name, current_weight, self._weight_shape_map)
-                        current_weight = transpose_params(loaded_name, current_weight, self._transpose_map)
-                    elif not is_moe_layer and any(s in loaded_name for s in ["down_proj", "up_proj", "gate_proj"]) or "lm_head" in loaded_name:
-                        # These are dense layer weights. They need a standard transpose.
-                        current_weight = transpose_params(loaded_name, current_weight, self._transpose_map)
-                        # current_weight = jnp.transpose(current_weight, (1, 0))
-                    # For `shared_expert` weights, a different approach might be needed depending on the exact shape.
-                    elif "shared_expert" in loaded_name:
-                        current_weight = transpose_params(loaded_name, current_weight, self._transpose_map)
-
-                if model_weight.value.shape != current_weight.shape:
+                    loaded_weight = reshape_params(loaded_name, loaded_weight,
+                                                   self._weight_shape_map)
+                    loaded_weight = transpose_params(loaded_name,
+                                                     loaded_weight,
+                                                     self._transpose_map)
+                if model_weight.value.shape != loaded_weight.shape:
                     raise ValueError(
                         f"Loaded shape for {loaded_name}: {loaded_weight.shape} "
                         f"does not match model shape for {mapped_name}: {model_weight.value.shape}!"
                     )
-
-                model_weight.value = shard_put(current_weight, model_weight.sharding, mesh=model_for_loading.mesh)
-
+                logger.debug(
+                    f"Transformed parameter {loaded_name} to {mapped_name}: {loaded_weight.shape} --> {model_weight.value.shape}"
+                )
+                model_weight.value = shard_put(loaded_weight,
+                                               model_weight.sharding,
+                                               mesh=model_for_loading.mesh)
                 if self.is_verbose:
                     print_param_info(model_weight, loaded_name)
 
         nnx.update(model_for_loading, model_params)
-        # breakpoint()
