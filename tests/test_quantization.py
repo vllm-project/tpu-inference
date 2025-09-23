@@ -152,7 +152,7 @@ class TestQwixQuantizeNnxModel(unittest.TestCase):
                 kv_cache_block_size=self.kv_cache_block_size,
                 kv_cache_num_kv_heads=self.kv_cache_num_kv_heads,
                 kv_cache_head_size=self.kv_cache_head_size,
-            )
+                kv_cache_dtype="auto")
 
         self.assertIs(returned_model, quantized_model_mock)
         mock_quantize_model.assert_called_once()

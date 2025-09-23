@@ -50,6 +50,10 @@ class MockVllmConfig:
             }
         }
 
+        # NOTE (jacobplatin): we could add a quantized KV cache test, but
+        # we'll skip it for now.
+        self.cache_config = MagicMock(cache_dtype="auto")
+
 
 @pytest.fixture(scope="module")
 def mesh():

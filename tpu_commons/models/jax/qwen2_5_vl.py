@@ -291,6 +291,7 @@ class Qwen2_5_VisionAttention(nnx.Module):
             segment_ids = generate_window_segment_ids(cu_window_seqlens,
                                                       T_attn, padded_T)
 
+        # TODO (jacobplatin): add support for quantized KV cache?
         output = self.flash_attention(q, k, v, segment_ids)
 
         # Unpad the output
