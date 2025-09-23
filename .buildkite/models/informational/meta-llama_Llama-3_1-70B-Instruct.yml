@@ -10,13 +10,24 @@ steps:
   - label: "Notifications: Unit tests for meta-llama/Llama-3.1-70B-Instruct"
     key: "notifications_ut_meta-llama_Llama-3_1-70B-Instruct"
     depends_on: "ut_meta-llama_Llama-3_1-70B-Instruct"
-    soft_fail: true
     agents:
       queue: tpu_v6e_8_queue
     commands:
       - |
         .buildkite/scripts/check_results.sh \
           "Unit tests for meta-llama/Llama-3.1-70B-Instruct" ut_meta-llama_Llama-3_1-70B-Instruct
+    plugins:
+      - hooks#v1:
+          post-command: |
+            echo "--- Post-command hook triggered ---"
+            echo "Test exited with status: $BUILDKITE_COMMAND_EXIT_STATUS"
+            if [ "$BUILDKITE_COMMAND_EXIT_STATUS" -eq 0 ]; then
+              echo "The step passed. Uploading result..."
+              buildkite-agent meta-data set "meta-llama/Llama-3.1-70B-Instruct:UnitTest" "passed"
+            else
+              echo "The step failed. Uploading result..."
+              buildkite-agent meta-data set "meta-llama/Llama-3.1-70B-Instruct:UnitTest" "failed"
+            fi
 
   - label: "Integration tests for meta-llama/Llama-3.1-70B-Instruct"
     key: "it_meta-llama_Llama-3_1-70B-Instruct"
@@ -28,13 +39,24 @@ steps:
   - label: "Notifications: Integration tests for meta-llama/Llama-3.1-70B-Instruct"
     key: "notifications_it_meta-llama_Llama-3_1-70B-Instruct"
     depends_on: "it_meta-llama_Llama-3_1-70B-Instruct"
-    soft_fail: true
     agents:
       queue: tpu_v6e_8_queue
     commands:
       - |
         .buildkite/scripts/check_results.sh \
           "Integration tests for meta-llama/Llama-3.1-70B-Instruct" it_meta-llama_Llama-3_1-70B-Instruct
+    plugins:
+      - hooks#v1:
+          post-command: |
+            echo "--- Post-command hook triggered ---"
+            echo "Test exited with status: $BUILDKITE_COMMAND_EXIT_STATUS"
+            if [ "$BUILDKITE_COMMAND_EXIT_STATUS" -eq 0 ]; then
+              echo "The step passed. Uploading result..."
+              buildkite-agent meta-data set "meta-llama/Llama-3.1-70B-Instruct:IntTest" "passed"
+            else
+              echo "The step failed. Uploading result..."
+              buildkite-agent meta-data set "meta-llama/Llama-3.1-70B-Instruct:IntTest" "failed"
+            fi
 
   - label: "Performance benchmarks for meta-llama/Llama-3.1-70B-Instruct"
     key: "pb_meta-llama_Llama-3_1-70B-Instruct"
@@ -45,13 +67,24 @@ steps:
   - label: "Notifications: Performance benchmarks for meta-llama/Llama-3.1-70B-Instruct"
     key: "notifications_pb_meta-llama_Llama-3_1-70B-Instruct"
     depends_on: "pb_meta-llama_Llama-3_1-70B-Instruct"
-    soft_fail: true
     agents:
       queue: tpu_v6e_8_queue
     commands:
       - |
         .buildkite/scripts/check_results.sh \
           "Performance benchmarks for meta-llama/Llama-3.1-70B-Instruct" pb_meta-llama_Llama-3_1-70B-Instruct
+    plugins:
+      - hooks#v1:
+          post-command: |
+            echo "--- Post-command hook triggered ---"
+            echo "Test exited with status: $BUILDKITE_COMMAND_EXIT_STATUS"
+            if [ "$BUILDKITE_COMMAND_EXIT_STATUS" -eq 0 ]; then
+              echo "The step passed. Uploading result..."
+              buildkite-agent meta-data set "meta-llama/Llama-3.1-70B-Instruct:Benchmark" "passed"
+            else
+              echo "The step failed. Uploading result..."
+              buildkite-agent meta-data set "meta-llama/Llama-3.1-70B-Instruct:Benchmark" "failed"
+            fi
 
   - label: "Stress tests for meta-llama/Llama-3.1-70B-Instruct"
     key: "st_meta-llama_Llama-3_1-70B-Instruct"
@@ -68,3 +101,15 @@ steps:
       - |
         .buildkite/scripts/check_results.sh \
           "Stress tests for meta-llama/Llama-3.1-70B-Instruct" st_meta-llama_Llama-3_1-70B-Instruct
+    plugins:
+      - hooks#v1:
+          post-command: |
+            echo "--- Post-command hook triggered ---"
+            echo "Test exited with status: $BUILDKITE_COMMAND_EXIT_STATUS"
+            if [ "$BUILDKITE_COMMAND_EXIT_STATUS" -eq 0 ]; then
+              echo "The step passed. Uploading result..."
+              buildkite-agent meta-data set "meta-llama/Llama-3.1-70B-Instruct:StressTest" "passed"
+            else
+              echo "The step failed. Uploading result..."
+              buildkite-agent meta-data set "meta-llama/Llama-3.1-70B-Instruct:StressTest" "failed"
+            fi

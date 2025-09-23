@@ -10,13 +10,24 @@ steps:
   - label: "Notifications: Unit tests for {FEATURE_NAME}"
     key: "notifications_ut_{SAFE_FEATURE_NAME}"
     depends_on: "ut_{SAFE_FEATURE_NAME}"
-    soft_fail: true
     agents:
       queue: {QUEUE}
     commands:
       - |
         .buildkite/scripts/check_results.sh \
           "Unit tests for {FEATURE_NAME}" ut_{SAFE_FEATURE_NAME}
+    plugins:
+      - hooks#v1:
+          post-command: |
+            echo "--- Post-command hook triggered ---"
+            echo "Test exited with status: $BUILDKITE_COMMAND_EXIT_STATUS"
+            if [ "$BUILDKITE_COMMAND_EXIT_STATUS" -eq 0 ]; then
+              echo "The step passed. Uploading result..."
+              buildkite-agent meta-data set "{FEATURE_NAME}:UnitTest" "passed"
+            else
+              echo "The step failed. Uploading result..."
+              buildkite-agent meta-data set "{FEATURE_NAME}:UnitTest" "failed"
+            fi
 
   - label: "Integration tests for {FEATURE_NAME}"
     key: "it_{SAFE_FEATURE_NAME}"
@@ -28,13 +39,24 @@ steps:
   - label: "Notifications: Integration tests for {FEATURE_NAME}"
     key: "notifications_it_{SAFE_FEATURE_NAME}"
     depends_on: "it_{SAFE_FEATURE_NAME}"
-    soft_fail: true
     agents:
       queue: {QUEUE}
     commands:
       - |
         .buildkite/scripts/check_results.sh \
           "Integration tests for {FEATURE_NAME}" it_{SAFE_FEATURE_NAME}
+    plugins:
+      - hooks#v1:
+          post-command: |
+            echo "--- Post-command hook triggered ---"
+            echo "Test exited with status: $BUILDKITE_COMMAND_EXIT_STATUS"
+            if [ "$BUILDKITE_COMMAND_EXIT_STATUS" -eq 0 ]; then
+              echo "The step passed. Uploading result..."
+              buildkite-agent meta-data set "{FEATURE_NAME}:IntTest" "passed"
+            else
+              echo "The step failed. Uploading result..."
+              buildkite-agent meta-data set "{FEATURE_NAME}:IntTest" "failed"
+            fi
 
   - label: "Performance benchmarks for {FEATURE_NAME}"
     key: "pb_{SAFE_FEATURE_NAME}"
@@ -45,13 +67,24 @@ steps:
   - label: "Notifications: Performance benchmarks for {FEATURE_NAME}"
     key: "notifications_pb_{SAFE_FEATURE_NAME}"
     depends_on: "pb_{SAFE_FEATURE_NAME}"
-    soft_fail: true
     agents:
       queue: {QUEUE}
     commands:
       - |
         .buildkite/scripts/check_results.sh \
           "Performance benchmarks for {FEATURE_NAME}" pb_{SAFE_FEATURE_NAME}
+    plugins:
+      - hooks#v1:
+          post-command: |
+            echo "--- Post-command hook triggered ---"
+            echo "Test exited with status: $BUILDKITE_COMMAND_EXIT_STATUS"
+            if [ "$BUILDKITE_COMMAND_EXIT_STATUS" -eq 0 ]; then
+              echo "The step passed. Uploading result..."
+              buildkite-agent meta-data set "{FEATURE_NAME}:Benchmark" "passed"
+            else
+              echo "The step failed. Uploading result..."
+              buildkite-agent meta-data set "{FEATURE_NAME}:Benchmark" "failed"
+            fi
 
   - label: "Stress tests for {FEATURE_NAME}"
     key: "st_{SAFE_FEATURE_NAME}"
@@ -68,3 +101,15 @@ steps:
       - |
         .buildkite/scripts/check_results.sh \
           "Stress tests for {FEATURE_NAME}" st_{SAFE_FEATURE_NAME}
+    plugins:
+      - hooks#v1:
+          post-command: |
+            echo "--- Post-command hook triggered ---"
+            echo "Test exited with status: $BUILDKITE_COMMAND_EXIT_STATUS"
+            if [ "$BUILDKITE_COMMAND_EXIT_STATUS" -eq 0 ]; then
+              echo "The step passed. Uploading result..."
+              buildkite-agent meta-data set "{FEATURE_NAME}:StressTest" "passed"
+            else
+              echo "The step failed. Uploading result..."
+              buildkite-agent meta-data set "{FEATURE_NAME}:StressTest" "failed"
+            fi

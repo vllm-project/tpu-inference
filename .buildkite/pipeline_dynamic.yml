@@ -1,0 +1,17 @@
+steps:
+  # -----------------------------------------------------------------
+  # TEST STEPS - Calling wrapper
+  # -----------------------------------------------------------------"
+   - label: "Upload Dynamic Pipeline Test"
+     agents:
+       queue: tpu_v6e_queue
+     commands:
+       - .buildkite/scripts/dynamic_upload.sh
+
+   - wait: ~
+
+   - label: "Generate support matrices"
+     agents:
+       queue: tpu_v6e_queue
+     commands:
+       - echo "Generate support matrices..."
