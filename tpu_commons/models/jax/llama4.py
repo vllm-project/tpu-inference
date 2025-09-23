@@ -461,49 +461,45 @@ class Llama4WeightLoader:
 
         with jax.default_device(jax.devices("cpu")[0]):
             for loaded_name, loaded_weight in self.names_and_weights_generator:
+                current_weight = loaded_weight
                 # breakpoint()
                 layer_num_match = re.search(r"layers\.(\d+)", loaded_name)
+                # Check if it's a layer-specific weight before proceeding
                 if layer_num_match:
                     layer_num = int(layer_num_match.group(1))
                     if layer_num >= num_model_layers:
-                        # logger.warning(
-                        #     f"Skipping weight for layer {layer_num} as the model only has {num_model_layers} layers."
-                        # )
                         continue
 
-                # This is the original logic you had. Let's add more logging here.
-                current_weight = loaded_weight
-                
-                # BEFORE any transformation, log the raw data
-                logger.info(f"Loaded: {loaded_name}, Raw Shape: {loaded_weight.shape}")
-
-                if not loaded_name.endswith(".bias"):
-                    is_moe_layer = (layer_num + 1) % interleave_moe_layer_step == 0
-                
-                    # Case 1: (q, k, v, o)
-                    if "self_attn" in loaded_name:
-                        current_weight = reshape_params(loaded_name, current_weight, self._weight_shape_map)
-                        current_weight = transpose_params(loaded_name, current_weight, self._transpose_map)
-                   
-                    # Case 2: MoE or DFF
-                    elif "feed_forward.experts.down_proj" in loaded_name or "feed_forward.experts.gate_up_proj" in loaded_name:
-                        # if is_moe_layer:
-                            # if "experts.down_proj" in loaded_name or "experts.gate_up_proj" in loaded_name:
-                        current_weight = jnp.transpose(current_weight, (2, 0, 1))
-                    elif "router" in loaded_name:
-                        current_weight = jnp.transpose(current_weight, (1, 0))
-
-                    elif "feed_forward.down_proj" in loaded_name or "feed_forward.up_proj" in loaded_name or "feed_forward.gate_proj" in loaded_name:
-                        # if any(s in loaded_name for s in ["down_proj", "up_proj", "gate_proj"]):
-                        current_weight = jnp.transpose(current_weight, (1, 0))
+                    # This part now correctly uses layer_num
+                    if not loaded_name.endswith(".bias"):
+                        is_moe_layer = (layer_num + 1) % interleave_moe_layer_step == 0
                     
-                    # Case 3: LM Head
-                    elif "lm_head.weight" in loaded_name:
-                        current_weight = jnp.transpose(current_weight, (1, 0))
+                        # Case 1: (q, k, v, o)
+                        if "self_attn" in loaded_name:
+                            current_weight = reshape_params(loaded_name, current_weight, self._weight_shape_map)
+                            current_weight = transpose_params(loaded_name, current_weight, self._transpose_map)
+                       
+                        # Case 2: MoE or DFF
+                        elif "feed_forward.experts.down_proj" in loaded_name or "feed_forward.experts.gate_up_proj" in loaded_name:
+                            current_weight = jnp.transpose(current_weight, (2, 0, 1))
+                        elif "router" in loaded_name:
+                            current_weight = jnp.transpose(current_weight, (1, 0))
 
-                    # Case 4: Layer Norm
-                    elif "norm.weight" in loaded_name or "layernorm.weight" in loaded_name:
-                        pass
+                        elif "feed_forward.down_proj" in loaded_name or "feed_forward.up_proj" in loaded_name or "feed_forward.gate_proj" in loaded_name:
+                            current_weight = jnp.transpose(current_weight, (1, 0))
+                
+                        # Case 3: LM Head
+                        elif "lm_head.weight" in loaded_name:
+                            current_weight = jnp.transpose(current_weight, (1, 0))
+                        
+                        # Case 4: Embedder
+                        elif "embed_tokens.weight" in loaded_name:
+                            # No transposition needed based on your original code
+                            pass
+
+                        # Case 5: Layer Norm
+                        elif "norm.weight" in loaded_name or "layernorm.weight" in loaded_name:
+                            pass
 
                 mapped_name = self.map_loaded_to_standardized_name(loaded_name)
                 model_weight = get_param(model_params, mapped_name)
