@@ -50,8 +50,7 @@ class Llama4ForCausalLM(nnx.Module):
 
         self.rng = nnx.Rngs(rng)
         self.mesh = mesh
-        self.is_verbose = getattr(self.vllm_config.additional_config,
-                                  "is_verbose", False)
+        self.is_verbose = False
 
         # Currently the runner will always set a mesh, so the custom default sharding (when
         #  no sharding is set in vllm config) doesn't take effect.
@@ -88,7 +87,7 @@ class Llama4ForCausalLM(nnx.Module):
         # Get the total number of layers from the config
         total_num_layers: int = getattr(text_config, "num_hidden_layers", 48)
         # Use the new parameter to limit the number of layers
-        num_layers_to_run = 8
+        num_layers_to_run = 1
         num_layers: int = min(total_num_layers, num_layers_to_run)
 
         intermediate_size_moe: int = getattr(text_config, "intermediate_size", 8192)
@@ -214,7 +213,7 @@ class Llama4ForCausalLM(nnx.Module):
                                       random_init=force_random_weights,
                                       df_sharding=(None, 'model'),
                                       fd_sharding=('model', None),
-                                      activation_ffw_td=('data', None))
+                                      activation_ffw_td=('data', None)) if is_moe_layer else None
 
             pre_attention_norm = RMSNorm(
                 dims=self.hidden_size,
@@ -336,9 +335,9 @@ class Llama4WeightLoader:
             "down_proj": (1, 0), # This is for DenseFFW layers, add a transposition step specifically for the down_proj weight
             "gate_proj": (1, 0), # Add this entry for DenseFFW gate
             "up_proj": (1, 0),   # Add this entry for DenseFFW up
-            "shared_expert.down_proj": (1, 0),
-            "shared_expert.gate_proj": (1, 0),
-            "shared_expert.up_proj": (1, 0),
+            # "feed_forward.shared_expert.down_proj": (1, 0),
+            # "feed_forward.shared_expert.gate_proj": (1, 0),
+            # "feed_forward.shared_expert.up_proj": (1, 0),
             "o_proj": (1, 2, 0),
             "lm_head": (1, 0),
         }
@@ -425,11 +424,11 @@ class Llama4WeightLoader:
             mapped_name = re.sub(r"layers\.\*", f"layers.{layer_num}",
                                  mapped_name)
             mapped_model_weight = get_param(model_params, mapped_name)
-            # if not loaded_name.endswith(".bias"):
-            #     loaded_weight = reshape_params(loaded_name, loaded_weight,
-            #                                    self._weight_shape_map)
-            #     loaded_weight = transpose_params(loaded_name, loaded_weight,
-            #                                      self._transpose_map)
+            if not loaded_name.endswith(".bias"):
+                loaded_weight = reshape_params(loaded_name, loaded_weight,
+                                               self._weight_shape_map)
+                loaded_weight = transpose_params(loaded_name, loaded_weight,
+                                                 self._transpose_map)
             if mapped_model_weight.value.shape != loaded_weight.shape:
                 raise ValueError(
                     f"Loaded shape for {split_loaded_name}: {loaded_weight.shape} "
@@ -447,24 +446,20 @@ class Llama4WeightLoader:
     def load_weights(self, model_for_loading: nnx.Module):
         model_params = nnx.state(model_for_loading)
 
-        breakpoint()
+        # breakpoint()
 
         # inpsect model_params
         # inspect loaded_name and self.names_and_weights_generator
 
         all_relevant_keys = set(self._transpose_map.keys()).union(self._weight_shape_map.keys())
-
         num_model_layers = len(model_for_loading.layers)
 
         # Get the interleave step from the model config to decide if a layer is MoE
-        interleave_moe_layer_step = getattr(
-            model_for_loading.vllm_config.model_config.hf_config.text_config, 
-            "interleave_moe_layer_step", 1
-        )
+        interleave_moe_layer_step = model_for_loading.interleave_moe_layer_step
 
         with jax.default_device(jax.devices("cpu")[0]):
             for loaded_name, loaded_weight in self.names_and_weights_generator:
-                is_moe_layer = False
+                
                 layer_num_match = re.search(r"layers\.(\d+)", loaded_name)
                 if layer_num_match:
                     layer_num = int(layer_num_match.group(1))
@@ -473,77 +468,37 @@ class Llama4WeightLoader:
                             f"Skipping weight for layer {layer_num} as the model only has {num_model_layers} layers."
                         )
                         continue
-                    if interleave_moe_layer_step > 0:
-                        is_moe_layer = (layer_num + 1) % interleave_moe_layer_step == 0
-
+                # breakpoint()
+                # is_moe_layer = (layer_num + 1) % interleave_moe_layer_step == 0
+                
                 if "gate_up_proj" in loaded_name:
                     self._map_llama4_gate_up_proj(model_for_loading,
                                                   model_params, loaded_name,
                                                   loaded_weight)
                     continue
-
                 mapped_name = self.map_loaded_to_standardized_name(loaded_name)
                 model_weight = get_param(model_params, mapped_name)
-                breakpoint()
-
-                current_weight = loaded_weight
-                matched_key = None
-                for key in all_relevant_keys:
-                    if loaded_name.endswith(key) or loaded_name.endswith(key + ".weight"):
-                        matched_key = key
-                        break
-
-                # # --- Conditional Transformation Logic ---
-                # # This is the key change. We check the key and layer type before transforming.
-                # if not loaded_name.endswith(".bias"):
-                #     if is_moe_layer and "experts." in loaded_name:
-                #         # These are MoE expert weights. Their loaded shape already matches the model's needs.
-                #         # No reshaping or transposing is needed for MoE's experts' weights.
-                #         pass
-                #     elif "q_proj" in loaded_name or "k_proj" in loaded_name or "v_proj" in loaded_name or "o_proj" in loaded_name or "router" in loaded_name:
-                #         # These are attention weights. They need reshaping and transposing.
-                #         current_weight = reshape_params(loaded_name, current_weight, self._weight_shape_map)
-                #         current_weight = transpose_params(loaded_name, current_weight, self._transpose_map)
-                #     elif not is_moe_layer and any(s in loaded_name for s in ["down_proj", "up_proj", "gate_proj"]) or "lm_head" in loaded_name:
-                #         # These are dense layer weights. They need a standard transpose.
-                #         current_weight = transpose_params(loaded_name, current_weight, self._transpose_map)
-                #         current_weight = jnp.transpose(current_weight, (1, 0))
-                #     # For `shared_expert` weights, a different approach might be needed depending on the exact shape.
-                #     elif "shared_expert" in loaded_name:
-                #         current_weight = jnp.transpose(current_weight, (1, 0))
 
                 if not loaded_name.endswith(".bias"):
-                    if is_moe_layer and "experts." in loaded_name:
-                        # MoE expert weights. No transpose is typically needed as their shape is already correct.
-                        # This check is crucial to prevent applying 2D transpose rules to 3D tensors.
-                        pass
-                    elif "shared_expert" in loaded_name:
-                        # Shared experts are 2D dense layers, which need a transpose.
-                        current_weight = jnp.transpose(current_weight, (1, 0))
-                    elif matched_key in self._weight_shape_map:
-                        # This block handles attention weights (q_proj, k_proj, v_proj, o_proj)
-                        # as well as the MoE router.
-                        current_weight = reshape_params(matched_key, current_weight, self._weight_shape_map)
-                        current_weight = transpose_params(matched_key, current_weight, self._transpose_map)
-                    elif matched_key in self._transpose_map:
-                        # This block handles all other 2D weights (e.g., dense layer down_proj/up_proj/gate_proj, lm_head).
-                        current_weight = transpose_params(matched_key, current_weight, self._transpose_map)
-
-                # Validate the final shape.
-                if model_weight.value.shape != current_weight.shape:
+                    loaded_weight = reshape_params(loaded_name, loaded_weight,
+                                                   self._weight_shape_map)
+                    loaded_weight = transpose_params(loaded_name,
+                                                     loaded_weight,
+                                                     self._transpose_map)
+                if model_weight.value.shape != loaded_weight.shape:
                     raise ValueError(
                         f"Loaded shape for {loaded_name}: {loaded_weight.shape} "
                         f"does not match model shape for {mapped_name}: {model_weight.value.shape}!"
                     )
-
-                # Load the transformed weight.
-                model_weight.value = shard_put(current_weight,
-                                            model_weight.sharding,
-                                            mesh=model_for_loading.mesh)
-                
+                logger.debug(
+                    f"Transformed parameter {loaded_name} to {mapped_name}: {loaded_weight.shape} --> {model_weight.value.shape}"
+                )
+                model_weight.value = shard_put(loaded_weight,
+                                               model_weight.sharding,
+                                               mesh=model_for_loading.mesh)
                 if self.is_verbose:
                     print_param_info(model_weight, loaded_name)
 
         nnx.update(model_for_loading, model_params)
-        breakpoint()
+        # breakpoint()
         # inpsect model_params
