@@ -40,17 +40,12 @@ class Llama4ForCausalLM(nnx.Module):
 
         self.vllm_config = vllm_config
         model_config = vllm_config.model_config
-
-        # Check if the Hugging Face config has a 'text_config' attribute.
-        # Llama-4-Scout-17B-16E-Instruct and Llama-4-Maverick-17B-128E-Instruct has 'text_config' attribute in config.json
-        if hasattr(model_config.hf_config, "text_config"):
-            text_config = model_config.hf_config.text_config
-        else:
-            text_config = model_config.hf_config
+        text_config = model_config.hf_config.text_config
 
         self.rng = nnx.Rngs(rng)
         self.mesh = mesh
-        self.is_verbose = False
+        self.is_verbose = getattr(self.vllm_config.additional_config,
+                                  "is_verbose", False)
 
         # Currently the runner will always set a mesh, so the custom default sharding (when
         #  no sharding is set in vllm config) doesn't take effect.
@@ -65,24 +60,6 @@ class Llama4ForCausalLM(nnx.Module):
 
         dtype: jnp.dtype = jnp.bfloat16
 
-        # num_layers: int = 48
-        # self.interleave_moe_layer_step = 1  # All layers are MoE for Scout
-        # intermediate_size_moe: int = 8192
-        # num_local_experts: int = 128
-        # hidden_act: str = "silu"
-        # self.no_rope_layer_interval = 4
-
-        # num_shared_experts = 1
-        # rms_norm_eps = 1e-5
-        # self.num_attention_heads = 40
-        # self.num_key_value_heads = 8
-        # self.head_dim = 128
-
-        # intermediate_size = 16384
-
-        # Dynamically retrieve model parameters from the Hugging Face configuration.
-        # This approach replaces hard-coded values with flexible ones
-        # num_layers: int = getattr(text_config, "num_hidden_layers", 48)
 
         # Get the total number of layers from the config
         total_num_layers: int = getattr(text_config, "num_hidden_layers", 48)
@@ -91,6 +68,7 @@ class Llama4ForCausalLM(nnx.Module):
         num_layers: int = min(total_num_layers, num_layers_to_run)
 
         intermediate_size_moe: int = getattr(text_config, "intermediate_size", 8192)
+        self.intermediate_size_mlp = getattr(text_config, "intermediate_size_mlp", 16384)
 
         # num_local_experts uses 128 experts specifically for Llama-4-Maverick-17B-128E-Instruct.
         # while Llama-4-Scout-17B-16E-Instruct uses 16 experts.
@@ -103,10 +81,6 @@ class Llama4ForCausalLM(nnx.Module):
         # interleave_moe_layer_step has a layer step of 2 to interleave MoE and dense layers for Llama-4-Maverick-17B-128E-Instruct.
         # The default value is set to 1 for compatibility with Llama-4-Scout.
         self.interleave_moe_layer_step = getattr(text_config, "interleave_moe_layer_step", 1)
-
-        # Specifically for Llama-4-Maverick-17B-128E-Instruct, which uses 16384 as the intermediate size for its MLP layers.
-        # But in Llama-4-Scout-17B-16E-Instruct config file, it has the same value.
-        self.intermediate_size_mlp = getattr(text_config, "intermediate_size_mlp", 16384)
 
         self.num_attention_heads = getattr(text_config, "num_attention_heads", 40)
         self.num_key_value_heads = getattr(text_config, "num_key_value_heads", 8)
@@ -130,7 +104,6 @@ class Llama4ForCausalLM(nnx.Module):
             # This can be adjusted for other variants.
             is_moe_layer = (i + 1) % \
                             self.interleave_moe_layer_step == 0
-            # use_attention_rope = (i + 1) % self.no_rope_layer_interval != 0
             use_attention_rope = (i + 1) not in self.no_rope_layer_interval # Llama-4-Scout config: It has "no_rope_layers": []
 
             router = Router(dtype=dtype,
@@ -160,7 +133,6 @@ class Llama4ForCausalLM(nnx.Module):
                                     dtype=dtype,
                                     hidden_act=hidden_act,
                                     hidden_size=self.hidden_size,
-                                    # intermediate_size=intermediate_size,
                                     intermediate_size=self.intermediate_size_mlp, # Use the intermediate size for the MLP
                                     random_init=force_random_weights,
                                     rngs=self.rng,
@@ -332,12 +304,9 @@ class Llama4WeightLoader:
             "k_proj": (2, 0, 1),
             "v_proj": (2, 0, 1),
             "router": (1, 0),
-            "down_proj": (1, 0), # This is for DenseFFW layers, add a transposition step specifically for the down_proj weight
-            "gate_proj": (1, 0), # Add this entry for DenseFFW gate
-            "up_proj": (1, 0),   # Add this entry for DenseFFW up
-            # "feed_forward.shared_expert.down_proj": (1, 0),
-            # "feed_forward.shared_expert.gate_proj": (1, 0),
-            # "feed_forward.shared_expert.up_proj": (1, 0),
+            "down_proj": (1, 0),
+            "gate_proj": (1, 0),
+            "up_proj": (1, 0),
             "o_proj": (1, 2, 0),
             "lm_head": (1, 0),
         }
@@ -381,11 +350,11 @@ class Llama4WeightLoader:
             "layers.*.shared_experts.kernel_gating_DF",
             "language_model.model.layers.*.feed_forward.shared_expert.up_proj.weight":
             "layers.*.shared_experts.kernel_up_proj_DF",
-            "language_model.model.layers.*.feed_forward.down_proj.weight": # Add for Llama-4-Maverick-17B-128E-Instruct
+            "language_model.model.layers.*.feed_forward.down_proj.weight": 
             "layers.*.custom_module.kernel_down_proj_FD",
-            "language_model.model.layers.*.feed_forward.up_proj.weight": # Add for Llama-4-Maverick-17B-128E-Instruct
+            "language_model.model.layers.*.feed_forward.up_proj.weight":
             "layers.*.custom_module.kernel_up_proj_DF",
-            "language_model.model.layers.*.feed_forward.gate_proj.weight": # Add for Llama-4-Maverick-17B-128E-Instruct
+            "language_model.model.layers.*.feed_forward.gate_proj.weight":
             "layers.*.custom_module.kernel_gating_DF",
         }
 
@@ -446,16 +415,7 @@ class Llama4WeightLoader:
     def load_weights(self, model_for_loading: nnx.Module):
         model_params = nnx.state(model_for_loading)
 
-        # breakpoint()
-
-        # inpsect model_params
-        # inspect loaded_name and self.names_and_weights_generator
-
-        all_relevant_keys = set(self._transpose_map.keys()).union(self._weight_shape_map.keys())
         num_model_layers = len(model_for_loading.layers)
-
-        # Get the interleave step from the model config to decide if a layer is MoE
-        interleave_moe_layer_step = model_for_loading.interleave_moe_layer_step
 
         with jax.default_device(jax.devices("cpu")[0]):
             for loaded_name, loaded_weight in self.names_and_weights_generator:
@@ -468,8 +428,6 @@ class Llama4WeightLoader:
                             f"Skipping weight for layer {layer_num} as the model only has {num_model_layers} layers."
                         )
                         continue
-                # breakpoint()
-                # is_moe_layer = (layer_num + 1) % interleave_moe_layer_step == 0
                 
                 if "gate_up_proj" in loaded_name:
                     self._map_llama4_gate_up_proj(model_for_loading,
@@ -500,5 +458,3 @@ class Llama4WeightLoader:
                     print_param_info(model_weight, loaded_name)
 
         nnx.update(model_for_loading, model_params)
-        # breakpoint()
-        # inpsect model_params

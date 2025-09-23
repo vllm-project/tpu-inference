@@ -131,9 +131,6 @@ def model_weights_single_file_generator(
                 if layer_num_match:
                     layer_num = int(layer_num_match.group(1))
                     if layer_num >= 2:
-                        # logger.warning(
-                        #     f"Skipping weight for layer {layer_num} as the model only has {1} layers."
-                        # )
                         continue
                 if filter_regex is not None and not re.match(
                         filter_regex, name):
