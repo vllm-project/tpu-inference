@@ -9,6 +9,8 @@ from tpu_commons.logger import init_logger
 
 logger = init_logger(__name__)
 
+DEFAULT_KV_CACHE_DTYPE = jnp.bfloat16
+
 
 def get_kv_cache_shape_with_mesh(mesh: Mesh, total_num_pages: int,
                                  page_size: int, actual_num_kv_heads: int,
@@ -32,7 +34,7 @@ def create_kv_caches(
     head_size: int,
     mesh: Mesh,
     layer_names: List[str],
-    cache_dtype: jnp.dtype = jnp.bfloat16,
+    cache_dtype: jnp.dtype = DEFAULT_KV_CACHE_DTYPE,
 ) -> List[jax.Array]:
     """
     Creates the KV caches, a list of arrays, each array is for one attention layer.

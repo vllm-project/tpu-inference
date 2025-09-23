@@ -25,7 +25,7 @@ class MockSpeculativeConfig:
 
 class MockVllmConfig:
 
-    def __init__(self, model: str, draft_model: str):
+    def __init__(self, model: str, draft_model: str, kv_cache_dtype):
         self.model_config = ModelConfig(model)
         self.model_config.dtype = jnp.bfloat16
         self.load_config = MagicMock()
@@ -37,12 +37,14 @@ class MockVllmConfig:
             max_model_len=2048,
             skip_tokenizer_init=True,
             trust_remote_code=True)
+        self.cache_config = MagicMock(cache_dtype=kv_cache_dtype)
 
 
 @pytest.fixture
 def mock_vllm_config() -> MockVllmConfig:
     return MockVllmConfig(model="meta-llama/Meta-Llama-3-8B-Instruct",
-                          draft_model="yuhuili/EAGLE3-LLaMA3.1-Instruct-8B")
+                          draft_model="yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
+                          kv_cache_dtype="auto")
 
 
 @pytest.fixture(scope="module")
@@ -96,7 +98,12 @@ class TestEagleLlama3ForCausalLM:
         dtype = jnp.bfloat16
         rngs = nnx.Rngs(rng)
 
-        layer = Eagle3LlamaDecoderLayer(hf_config, dtype, rngs, mesh)
+        layer = Eagle3LlamaDecoderLayer(
+            hf_config,
+            dtype,
+            rngs,
+            mesh,
+            kv_cache_dtype=mock_vllm_config.cache_config.cache_dtype)
 
         # Check if projection layers are overridden with correct input size
         original_hidden_size = hf_config.hidden_size
@@ -110,6 +117,12 @@ class TestEagleLlama3ForCausalLM:
             0] == expected_input_size
         assert isinstance(layer.hidden_norm, nnx.RMSNorm)
 
+    @pytest.mark.parametrize("mock_vllm_config", [
+        MockVllmConfig("meta-llama/Meta-Llama-3-8B-Instruct",
+                       "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B", "auto"),
+        MockVllmConfig("meta-llama/Meta-Llama-3-8B-Instruct",
+                       "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B", "fp8"),
+    ])
     def test_forward_pass(self, mock_vllm_config: MockVllmConfig, rng: PRNGKey,
                           mesh: Mesh, mock_model_inputs):
         """Tests the forward pass of the EagleLlama3ForCausalLM model."""
@@ -126,7 +139,9 @@ class TestEagleLlama3ForCausalLM:
             head_size=hf_config.hidden_size // hf_config.num_attention_heads,
             mesh=mesh,
             layer_names=["layer"] * hf_config.num_hidden_layers,
-        )
+            cache_dtype=jnp.float8_e4m3fn
+            if mock_vllm_config.cache_config.cache_dtype == "fp8" else
+            jnp.bfloat16)
 
         _, output_hidden_states, aux_hidden_states = model(
             kv_caches, input_ids, hidden_states, attention_metadata)

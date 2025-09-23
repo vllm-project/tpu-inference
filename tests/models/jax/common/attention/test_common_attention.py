@@ -6,6 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 from flax import nnx
 from jax.sharding import Mesh
+from parameterized import parameterized
 
 from tpu_commons.models.jax.attention import get_kv_cache_shape
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
@@ -20,39 +21,39 @@ class TestAttention(unittest.TestCase):
     def setUp(self):
         """Sets up the testing environment before each test."""
         self.mesh = Mesh(
-            np.array(jax.devices()).reshape(1, -1),
+            np.array(jax.devices()[:1]).reshape(1, -1),
             axis_names=(
                 "expert",
                 "model",
             ),
         )
 
-    def test_attention_forward_pass(self):
+    @parameterized.expand([["auto"], ["fp8"]])
+    def test_attention_forward_pass(self, kv_cache_str):
         """Tests the forward pass of the Attention module in prefill mode."""
         hidden_size = 1024
         num_attention_heads = 8
         head_dim = hidden_size // num_attention_heads
 
         with jax.set_mesh(self.mesh):
-            attention = Attention(
-                hidden_size=hidden_size,
-                num_attention_heads=num_attention_heads,
-                num_key_value_heads=num_attention_heads,
-                head_dim=head_dim,
-                rope_theta=10000.0,
-                rope_scaling={},
-                dtype=jnp.bfloat16,
-                mesh=self.mesh,
-                random_init=True,
-                rngs=nnx.Rngs(42),
-            )
+            attention = Attention(hidden_size=hidden_size,
+                                  num_attention_heads=num_attention_heads,
+                                  num_key_value_heads=num_attention_heads,
+                                  head_dim=head_dim,
+                                  rope_theta=10000.0,
+                                  rope_scaling={},
+                                  dtype=jnp.bfloat16,
+                                  mesh=self.mesh,
+                                  random_init=True,
+                                  rngs=nnx.Rngs(42),
+                                  kv_cache_dtype=kv_cache_str)
 
             seq_len = 64
             x = jnp.ones((seq_len, hidden_size), dtype=jnp.bfloat16)
 
             block_size = 16
             num_blocks = 8
-            kv_dtype = jnp.bfloat16
+            kv_dtype = jnp.float8_e4m3fn if kv_cache_str == "fp8" else jnp.bfloat16
             cache_shape = get_kv_cache_shape(num_blocks, block_size,
                                              num_attention_heads, head_dim,
                                              kv_dtype)

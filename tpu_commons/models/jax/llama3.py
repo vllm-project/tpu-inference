@@ -64,7 +64,7 @@ class LlamaMLP(nnx.Module):
 class LlamaAttention(nnx.Module):
 
     def __init__(self, config: LlamaConfig, dtype: jnp.dtype, rng: nnx.Rngs,
-                 mesh: Mesh):
+                 mesh: Mesh, kv_cache_dtype: str):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
@@ -112,6 +112,14 @@ class LlamaAttention(nnx.Module):
             rngs=rng,
         )
 
+        self._q_scale = 1.0
+        self._k_scale = 1.0
+        self._v_scale = 1.0
+        self.kv_cache_quantized_dtype = None
+        if kv_cache_dtype != "auto":
+            self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
+                kv_cache_dtype)
+
     def __call__(
         self,
         kv_cache: Optional[jax.Array],
@@ -130,6 +138,14 @@ class LlamaAttention(nnx.Module):
         # v: (T, K, H)
         v = self.v_proj(x)
         # o: (T, N, H)
+        q_scale = k_scale = v_scale = None
+        if self.kv_cache_quantized_dtype:
+            # TODO(kyuyeunk/jacobplatin): Enable w8a8 when VREG spill issue is resolved.
+            # q_scale = self._q_scale
+            k_scale = self._k_scale
+            v_scale = self._v_scale
+            k, v = utils.quantize_kv(k, v, self.kv_cache_quantized_dtype,
+                                     k_scale, v_scale)
         new_kv_cache, outputs = attention(
             kv_cache,
             q,
@@ -138,6 +154,9 @@ class LlamaAttention(nnx.Module):
             attention_metadata,
             self.mesh,
             self.head_dim_original,
+            q_scale=q_scale,
+            k_scale=k_scale,
+            v_scale=v_scale,
         )
         # (T, D)
         o = self.o_proj(outputs)
@@ -147,7 +166,7 @@ class LlamaAttention(nnx.Module):
 class LlamaDecoderLayer(nnx.Module):
 
     def __init__(self, config: LlamaConfig, dtype: jnp.dtype, rng: nnx.Rngs,
-                 mesh: Mesh):
+                 mesh: Mesh, kv_cache_dtype: str):
         rms_norm_eps = config.rms_norm_eps
         hidden_size = config.hidden_size
 
@@ -161,7 +180,8 @@ class LlamaDecoderLayer(nnx.Module):
         self.self_attn = LlamaAttention(config=config,
                                         dtype=dtype,
                                         rng=rng,
-                                        mesh=mesh)
+                                        mesh=mesh,
+                                        kv_cache_dtype=kv_cache_dtype)
         self.post_attention_layernorm = nnx.RMSNorm(
             hidden_size,
             epsilon=rms_norm_eps,
@@ -220,7 +240,9 @@ class LlamaModel(nnx.Module):
                 dtype=dtype,
                 rng=rng,
                 mesh=mesh,
-            ) for _ in range(hf_config.num_hidden_layers)
+                # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
+                kv_cache_dtype=vllm_config.cache_config.cache_dtype)
+            for _ in range(hf_config.num_hidden_layers)
         ]
         self.norm = nnx.RMSNorm(
             hidden_size,
