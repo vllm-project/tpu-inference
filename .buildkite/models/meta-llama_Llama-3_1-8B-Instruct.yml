@@ -35,18 +35,6 @@ steps:
       - |
         .buildkite/scripts/check_results.sh \
           "Integration tests for meta-llama/Llama-3.1-8B-Instruct" it_meta-llama_Llama-3_1-8B-Instruct
-    plugins:
-      - hooks#v1:
-          post-command: |
-            echo "--- Post-command hook triggered ---"
-            echo "Test exited with status: $BUILDKITE_COMMAND_EXIT_STATUS"
-            if [ "$BUILDKITE_COMMAND_EXIT_STATUS" -eq 0 ]; then
-              echo "The step passed. Uploading result..."
-              buildkite-agent meta-data set "meta-llama/Llama-3.1-8B-Instruct:IntTest" "passed"
-            else
-              echo "The step failed. Uploading result..."
-              buildkite-agent meta-data set "meta-llama/Llama-3.1-8B-Instruct:IntTest" "failed"
-            fi
 
   - label: "Performance benchmarks for meta-llama/Llama-3.1-8B-Instruct"
     key: "pb_meta-llama_Llama-3_1-8B-Instruct"
@@ -63,18 +51,6 @@ steps:
       - |
         .buildkite/scripts/check_results.sh \
           "Performance benchmarks for meta-llama/Llama-3.1-8B-Instruct" pb_meta-llama_Llama-3_1-8B-Instruct
-    plugins:
-      - hooks#v1:
-          post-command: |
-            echo "--- Post-command hook triggered ---"
-            echo "Test exited with status: $BUILDKITE_COMMAND_EXIT_STATUS"
-            if [ "$BUILDKITE_COMMAND_EXIT_STATUS" -eq 0 ]; then
-              echo "The step passed. Uploading result..."
-              buildkite-agent meta-data set "meta-llama/Llama-3.1-8B-Instruct:Benchmark" "passed"
-            else
-              echo "The step failed. Uploading result..."
-              buildkite-agent meta-data set "meta-llama/Llama-3.1-8B-Instruct:Benchmark" "failed"
-            fi
 
   - label: "Stress tests for meta-llama/Llama-3.1-8B-Instruct"
     key: "st_meta-llama_Llama-3_1-8B-Instruct"
@@ -91,15 +67,3 @@ steps:
       - |
         .buildkite/scripts/check_results.sh \
           "Stress tests for meta-llama/Llama-3.1-8B-Instruct" st_meta-llama_Llama-3_1-8B-Instruct
-    plugins:
-      - hooks#v1:
-          post-command: |
-            echo "--- Post-command hook triggered ---"
-            echo "Test exited with status: $BUILDKITE_COMMAND_EXIT_STATUS"
-            if [ "$BUILDKITE_COMMAND_EXIT_STATUS" -eq 0 ]; then
-              echo "The step passed. Uploading result..."
-              buildkite-agent meta-data set "meta-llama/Llama-3.1-8B-Instruct:StressTest" "passed"
-            else
-              echo "The step failed. Uploading result..."
-              buildkite-agent meta-data set "meta-llama/Llama-3.1-8B-Instruct:StressTest" "failed"
-            fi
