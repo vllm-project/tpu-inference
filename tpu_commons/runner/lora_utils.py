@@ -71,7 +71,7 @@ class LoraUtils:
 
 
 def replace_lora_metadata(model, metadata: dict, lora_config) -> dict:
-    if lora_config is None:
+    if lora_config is None or not metadata:
         return {}
 
     original_metadata = {}
