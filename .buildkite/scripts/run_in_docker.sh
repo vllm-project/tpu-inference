@@ -32,18 +32,6 @@ if [ -z "${MODEL_IMPL_TYPE:-}" ]; then
   MODEL_IMPL_TYPE=flax_nnx
 fi
 
-# Try to cache HF models
-persist_cache_dir="/mnt/disks/persist/models"
-home_cache_dir="$HOME/models"
-
-if ( mkdir -p "$persist_cache_dir" ); then
-  LOCAL_HF_HOME="$persist_cache_dir"
-elif ( mkdir -p "$home_cache_dir" ); then
-  LOCAL_HF_HOME="$home_cache_dir"
-else
-  echo "Error: Failed to create either $persist_cache_dir or $home_cache_dir"
-  exit 1
-fi
 DOCKER_HF_HOME="/tmp/hf_home"
 
 # (TODO): Consider creating a remote registry to cache and share between agents.
@@ -83,7 +71,6 @@ exec docker run \
   --net host \
   --shm-size=16G \
   --rm \
-  -v "$LOCAL_HF_HOME":"$DOCKER_HF_HOME" \
   -e HF_HOME="$DOCKER_HF_HOME" \
   -e MODEL_IMPL_TYPE="$MODEL_IMPL_TYPE" \
   -e HF_TOKEN="$HF_TOKEN" \
