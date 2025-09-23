@@ -113,8 +113,6 @@ steps:
        - test_6
        - test_7
        - test_8
-       - integration_test_llama_3_1_8B_tpu
-       - integration_test_llama_3_1_70B_tpu
      agents:
        queue: tpu_v6e_queue
      commands:

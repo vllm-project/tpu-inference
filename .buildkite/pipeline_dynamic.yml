@@ -6,7 +6,7 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - .buildkite/scripts/dynamic_upload.sh
+       - .buildkite/scripts/dynamic_bootstrap.sh
 
    - wait: ~
 
