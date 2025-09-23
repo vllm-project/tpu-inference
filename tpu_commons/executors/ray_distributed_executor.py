@@ -28,7 +28,7 @@ from collections import defaultdict
 
 import msgspec
 from vllm.executor.msgspec_utils import encode_hook
-from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.v1.outputs import SamplerOutput
 
 from tpu_commons.distributed.utils import set_node_kv_ip_port
 
