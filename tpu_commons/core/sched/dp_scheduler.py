@@ -13,15 +13,18 @@ from vllm.v1.core.sched.request_queue import (SchedulingPolicy,
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreEventType
 from vllm.v1.request import Request, RequestStatus
+from vllm.v1.metrics.stats import PrefixCacheStats
+from vllm.v1.metrics.stats import SchedulerStats
+from vllm.v1.spec_decode.metrics import SpecDecodingStats
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorStats)
 
 logger = init_logger(__name__)
 
 
 @dataclass
 class DPSchedulerOutput(SchedulerOutput):
-    # req_id -> preferred_device
-    # Preferred device for each request.
-    assigned_dp_rank: dict[str, int]
+    assigned_dp_rank: dict[str, int] = None
 
 
 @dataclass
@@ -55,12 +58,12 @@ class DPScheduler(Scheduler):
         TODO(wenxindong): consider more advanced load balancing strategies.
         """
         req_id = request.request_id
-        if req_id in self.request_to_dp_rank:
-            return self.request_to_dp_rank[req_id]
+        if req_id in self.assigned_dp_rank:
+            return self.assigned_dp_rank[req_id]
 
-        self.request_to_dp_rank[req_id] = next(self.round_robin_counter)
+        self.assigned_dp_rank[req_id] = next(self.round_robin_counter)
 
-        return self.request_to_dp_rank[req_id]
+        return self.assigned_dp_rank[req_id]
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -81,7 +84,6 @@ class DPScheduler(Scheduler):
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
-        preferred_device: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
@@ -141,7 +143,7 @@ class DPScheduler(Scheduler):
                 continue
 
             while True:
-                req_dp_rank = self.request_to_dp_rank[request.request_id]
+                req_dp_rank = self.assigned_dp_rank[request.request_id]
 
                 new_blocks = self.kv_cache_manager[req_dp_rank].allocate_slots(
                     request,
@@ -281,12 +283,12 @@ class DPScheduler(Scheduler):
                         _new_computed_blocks, _num_new_local_computed_tokens = (
                             self.kv_cache_manager[rank].get_computed_blocks(
                                 request))
-                        if (len(new_computed_blocks.blocks[0])
+                        if (len(_new_computed_blocks.blocks[0])
                                 > max_num_local_computed_tokens):
-                            if len(new_computed_blocks.blocks[0]) > 0:
+                            if len(_new_computed_blocks.blocks[0]) > 0:
                                 dp_rank = rank
                             max_num_local_computed_tokens = len(
-                                new_computed_blocks.blocks[0])
+                                _new_computed_blocks.blocks[0])
                             new_computed_blocks = _new_computed_blocks
                             num_new_local_computed_tokens = (
                                 _num_new_local_computed_tokens)
@@ -392,7 +394,6 @@ class DPScheduler(Scheduler):
                     new_computed_blocks,
                     num_lookahead_tokens=effective_lookahead_tokens,
                     delay_cache_blocks=load_kv_async,
-                    preferred_device=dp_rank,
                     num_encoder_tokens=num_encoder_tokens,
                 )
 
@@ -497,11 +498,11 @@ class DPScheduler(Scheduler):
         structured_output_request_ids, grammar_bitmask = self.get_grammar_bitmask(
             scheduled_requests, scheduled_spec_decode_tokens)
         assigned_dp_rank = {
-            req.request_id: preferred_device[req.request_id]
+            req.request_id: self.assigned_dp_rank[req.request_id]
             for req in scheduled_requests
         }
 
-        scheduler_output = SchedulerOutput(
+        scheduler_output = DPSchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
             num_scheduled_tokens=num_scheduled_tokens,
@@ -579,3 +580,43 @@ class DPScheduler(Scheduler):
         # NOTE: We shouldn't do self.finished_req_ids.clear() here because
         # it will also affect the scheduler output.
         self.finished_req_ids = set()
+    
+    def _free_blocks(self, request: Request):
+        assert request.is_finished()
+        req_dp_rank = self.assigned_dp_rank.get(request.request_id)
+        self.kv_cache_manager[req_dp_rank].free(request)
+        del self.requests[request.request_id]
+
+    def reset_prefix_cache(self) -> bool:
+        for kv_cache_mgr in self.kv_cache_manager:
+            if not kv_cache_mgr.reset_prefix_cache():
+                return False
+        return True
+    
+    def make_stats(
+        self,
+        spec_decoding_stats: Optional[SpecDecodingStats] = None,
+        kv_connector_stats: Optional[KVConnectorStats] = None,
+    ) -> Optional[SchedulerStats]:
+        if not self.log_stats:
+            return None
+        combined_prefix_cache_stats = PrefixCacheStats()
+        for kv_cache_mgr in self.kv_cache_manager:
+            prefix_cache_stats = kv_cache_mgr.make_prefix_cache_stats()
+            assert prefix_cache_stats is not None
+            combined_prefix_cache_stats.reset = prefix_cache_stats.reset
+            combined_prefix_cache_stats.requests += (
+                prefix_cache_stats.requests)
+            combined_prefix_cache_stats.queries += prefix_cache_stats.queries
+            combined_prefix_cache_stats.hits += (
+                prefix_cache_stats.hits)
+            
+        return SchedulerStats(num_running_reqs=len(self.running),
+                            num_waiting_reqs=len(self.waiting),
+                            kv_cache_usage=kv_cache_mgr.usage,
+                            prefix_cache_stats=combined_prefix_cache_stats,
+                            spec_decoding_stats=spec_decoding_stats,
+                            num_corrupted_reqs=sum(req.is_output_corrupted
+                                                    for req in self.running),
+                            kv_connector_stats=kv_connector_stats.data
+                            if kv_connector_stats else None)

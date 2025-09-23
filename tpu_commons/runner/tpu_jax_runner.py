@@ -11,7 +11,7 @@ import jaxtyping
 import numpy as np
 import torch
 import vllm.envs as envs
-import vllm.v1.core.sched as vLLMScheduler
+import vllm.v1.core.sched.scheduler as vLLMScheduler
 from flax import nnx
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.ops.mappings import j2t_dtype
@@ -61,6 +61,7 @@ from tpu_commons.runner.structured_decoding_manager import \
 from tpu_commons.spec_decode.jax.eagle3 import Eagle3Proposer
 from tpu_commons.utils import device_array, make_optimized_mesh
 
+# Monkey patching vLLM scheduler
 vLLMScheduler.Scheduler = DPScheduler
 
 logger = init_logger(__name__)
