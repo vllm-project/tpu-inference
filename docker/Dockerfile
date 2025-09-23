@@ -34,5 +34,6 @@ COPY requirements_benchmarking.txt .
 RUN pip install -r requirements_benchmarking.txt
 COPY . .
 RUN pip install -e .
+RUN bash scripts/patch_core.sh
 
 CMD ["/bin/bash"]
