@@ -55,14 +55,7 @@ class CompilationManager:
                          **kwargs) -> None:
         logger.info(f"Precompile {name} --> {kwargs}")
         start = time.perf_counter()
-        num_tokens = kwargs.get('num_tokens', None)
-        if num_tokens is not None:
-            with self.runner.maybe_select_dummy_loras(
-                    self.runner.lora_config,
-                    np.array([num_tokens], dtype=np.int32)):
-                result = fn(*args)
-        else:
-            result = fn(*args)
+        result = fn(*args)
         if result is not None:
             if isinstance(result, tuple):
                 for r in result:
@@ -138,19 +131,22 @@ class CompilationManager:
                 self.runner.kv_caches = kv_caches
                 return hidden_states
 
-            lora_metadata = None
-            self._run_compilation(
-                "backbone",
-                model_fn_wrapper,
-                self.runner.state,
-                self.runner.kv_caches,
-                input_ids,
-                attention_metadata,
-                inputs_embeds,
-                tuple(self.runner.layer_name_to_kvcache_index.items()),
-                lora_metadata,
-                num_tokens=num_tokens,
-            )
+            with self.runner.maybe_select_dummy_loras(
+                    self.runner.lora_config,
+                    np.array([num_tokens], dtype=np.int32)):
+                lora_metadata = self.runner.lora_utils.extract_lora_metadata()
+                self._run_compilation(
+                    "backbone",
+                    model_fn_wrapper,
+                    self.runner.state,
+                    self.runner.kv_caches,
+                    input_ids,
+                    attention_metadata,
+                    inputs_embeds,
+                    tuple(self.runner.layer_name_to_kvcache_index.items()),
+                    lora_metadata,
+                    num_tokens=num_tokens,
+                )
 
     def _precompile_select_from_array_helper(
         self,

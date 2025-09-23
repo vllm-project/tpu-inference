@@ -88,6 +88,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         vllm_config: VllmConfig,
         devices: List[Any],
     ):
+        self.num_executes = 0
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         # TODO(jevinjiang): override block size based on RPA v3.
@@ -402,6 +403,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                      tuple(self.layer_name_to_kvcache_index.items()),
                      lora_metadata,
                  )
+                self.num_executes += 1
+                print(f'xw32 finished a self.model_fn {self.num_executes=}.')
 
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)
