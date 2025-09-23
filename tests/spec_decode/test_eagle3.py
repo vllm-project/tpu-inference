@@ -175,7 +175,7 @@ def test_propose(method, num_speculative_tokens):
 
         return kv_caches, new_hidden_states, None
 
-    def mock_compute_logits_fn(state, hidden_states):
+    def mock_compute_logits_fn(state, hidden_states, lora_metadata):
         # Create deterministic logits from hidden_states.
         token_ids = hidden_states[:, 0].astype(jnp.int32)
         return jax.nn.one_hot(token_ids, vocab_size)

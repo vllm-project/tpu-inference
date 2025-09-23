@@ -205,7 +205,9 @@ class Eagle3Proposer:
             attn_metadata,
         )
         sample_hidden_states = hidden_states[last_token_indices]
-        logits = self.compute_logits_fn(self.state, sample_hidden_states)
+        lora_metadata = None
+        logits = self.compute_logits_fn(self.state, sample_hidden_states,
+                                        lora_metadata)
 
         draft_token_ids = jnp.argmax(logits, axis=-1)
 
@@ -262,7 +264,8 @@ class Eagle3Proposer:
                 attn_metadata,
             )
             hidden_states = new_hidden_states
-            logits = self.compute_logits_fn(self.state, hidden_states)
+            logits = self.compute_logits_fn(self.state, hidden_states,
+                                            lora_metadata)
             draft_token_ids = jnp.argmax(logits, axis=-1)
             draft_token_ids_list.append(draft_token_ids)
 

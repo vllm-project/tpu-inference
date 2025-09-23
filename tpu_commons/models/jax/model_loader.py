@@ -225,7 +225,8 @@ def get_flax_model(
     )
     def run_compute_logits(graphdef, state, *args):
         model = nnx.merge(graphdef, state)
-        return model.compute_logits(*args)
+        hidden_state, *_ = args
+        return model.compute_logits(hidden_state)
 
     # Multi-modal support only
     # This function calculates the image token's embeddings by VIT

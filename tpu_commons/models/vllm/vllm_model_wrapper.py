@@ -14,7 +14,7 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import TORCH_DTYPE_TO_JAX
-from vllm.config import LoRAConfig, ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config import LoRAConfig, VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
@@ -29,6 +29,7 @@ from tpu_commons.models.vllm.sharding import (
     LORA_MODULE_TYPE_TO_WRAPPING_FUNC, get_fqn, shard_model_to_tpu)
 from tpu_commons.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
+from tpu_commons.runner.lora_utils import replace_lora_metadata
 
 logger = init_logger(__name__)
 
@@ -120,9 +121,7 @@ class VllmModelWrapper:
             with torchax.default_env():
                 # the device in load_lora_model is used to set the device used in punica wrapper.
                 lora_manager, vllm_model = load_lora_model(
-                    vllm_model,
-                    vllm_config_for_load,
-                    device="jax")
+                    vllm_model, vllm_config_for_load, device="jax")
                 self._register_lora_weights_as_param(
                     vllm_model, vllm_config_for_load.lora_config)
             replace_set_lora(vllm_model)
@@ -183,9 +182,11 @@ class VllmModelWrapper:
             attn_metadata: AttentionMetadata,
             input_embeds: jax.Array,
             layer_name_to_kvcache_index: Sequence[Tuple[str, int]],
+            lora_metadata,
             *args,
         ) -> Tuple[List[jax.Array], jax.Array]:
             layer_name_to_kvcache_index = dict(layer_name_to_kvcache_index)
+            lora_metadata = torch_view(lora_metadata)
             with torchax.default_env(), set_vllm_model_wrapper_context(
                     kv_caches=kv_caches,
                     mesh=self.mesh,
@@ -194,6 +195,8 @@ class VllmModelWrapper:
                                    vllm_config=self.vllm_config):
                 # We need to wrap args from jax land into TorchValue with
                 # torch_view in order to call the Torch function.
+                original_lora_metadata = replace_lora_metadata(
+                    self.model, lora_metadata, self.vllm_config.lora_config)
                 hidden_states = torch.func.functional_call(
                     self.model,
                     torch_view(params_and_buffers),
@@ -205,6 +208,8 @@ class VllmModelWrapper:
                     },
                     tie_weights=False,
                 )
+                replace_lora_metadata(self.model, original_lora_metadata,
+                                      self.vllm_config.lora_config)
                 vllm_model_wrapper_context = get_vllm_model_wrapper_context()
                 new_kv_caches = vllm_model_wrapper_context.kv_caches
             # Wrap the hidden_states from torch land into a JaxValue for the jax
@@ -225,9 +230,13 @@ class VllmModelWrapper:
         def compute_logits_func(
             params_and_buffers: Any,
             hidden_states: jax.Array,
+            lora_metadata,
         ) -> jax.Array:
+            lora_metadata = torch_view(lora_metadata)
             with torchax.default_env(), set_vllm_model_wrapper_context(
                     kv_caches=None, mesh=self.mesh):
+                original_lora_metadata = replace_lora_metadata(
+                    self.model, lora_metadata, self.vllm_config.lora_config)
                 logits = torch.func.functional_call(
                     self.model,
                     torch_view(params_and_buffers),
@@ -236,6 +245,8 @@ class VllmModelWrapper:
                     },
                     tie_weights=False,
                 )
+                replace_lora_metadata(self.model, original_lora_metadata,
+                                      self.vllm_config.lora_config)
             return jax_view(logits)
 
         return compute_logits_func
