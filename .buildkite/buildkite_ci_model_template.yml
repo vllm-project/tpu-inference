@@ -17,7 +17,7 @@ steps:
         .buildkite/scripts/check_results.sh \
           "Unit tests for {MODEL_NAME}" ut_{SAFE_MODEL_NAME}
     plugins:
-      - hooks#v1:
+      - git@github.com:buildkite-plugins/hooks-buildkite-plugin.git#v1::
           post-command: |
             echo "--- Post-command hook triggered ---"
             echo "Test exited with status: $BUILDKITE_COMMAND_EXIT_STATUS"

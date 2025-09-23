@@ -119,7 +119,7 @@ if [[ -n "$vllm_model_list_str" ]]; then
 else
   echo "--- No Model Names found to upload."
 fi
-POPURLAR_MODEL_LIST_KEY
+
 if [[ -n "$popular_model_list_str" ]]; then
   echo "--- Uploading popular_model_list_str to Meta-data:${POPURLAR_MODEL_LIST_KEY}"
   echo "${popular_model_list_str}" | buildkite-agent meta-data set "${POPURLAR_MODEL_LIST_KEY}"
