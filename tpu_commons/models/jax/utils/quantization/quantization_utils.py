@@ -9,7 +9,9 @@ import jax.numpy as jnp
 import qwix
 import yaml
 from flax import nnx
-from jax.sharding import Mesh
+from flax.typing import PRNGKey
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -17,7 +19,8 @@ if TYPE_CHECKING:
 from tpu_commons import utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.runner.kv_cache import create_kv_caches
+from tpu_commons.runner.kv_cache import (DEFAULT_KV_CACHE_DTYPE,
+                                         create_kv_caches)
 from tpu_commons.utils import device_array
 
 logger = init_logger(__name__)
@@ -27,6 +30,26 @@ DEFAULT_NUM_BLOCKS_FOR_JIT_KV_CACHE = 2000
 DEFAULT_NUM_TOKENS_FOR_MODEL_INPUTS = 512
 DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS = 256
 DEFAULT_MAX_NUM_BLOCKS_PER_REQ = 16
+
+DEFAULT_DEEPSEEK_FP8_CONFIG = {
+    "qwix": {
+        "use_abstract_model":
+        True,
+        "scale_dtype":
+        "bfloat16",
+        "rules": [
+            {
+                "module_path": ".*.custom_module.router.*",
+                "weight_qtype": None,
+            },
+            {
+                "module_path": ".*",
+                "weight_qtype": "float8_e4m3fn",
+                "act_qtype": "float8_e4m3fn",
+            },
+        ],
+    }
+}
 
 
 def parse_qwix_config_to_rules(
@@ -51,7 +74,8 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
                             rng: jax.Array, mesh: Mesh, num_hidden_layers: int,
                             kv_cache_block_size: int,
                             kv_cache_num_kv_heads: int,
-                            kv_cache_head_size: int) -> nnx.Module:
+                            kv_cache_head_size: int,
+                            kv_cache_dtype: str) -> nnx.Module:
     """
     Quantizes a Flax NNX model using Qwix.
 
@@ -77,9 +101,7 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
         kv_cache_page_size: the page size of the kv cache
         kv_cache_num_kv_heads: the number of kv heads
         head_size: the head size of the kv cache
-        rules_file_path: the path to the YAML file containing the quantization rules.
-            See the README for more information on how to create/use this file.
-            (optional)
+        kv_cache_dtype: the dtype of the kv cache
 
     Returns:
         model: the quantized model
@@ -89,6 +111,14 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
     logger.info(f"Memory usage before applying quantization of params: "
                 f"hbm={utils.hbm_usage_gb(jax.local_devices())}Gb")
 
+    # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
+    kv_cache_jnp_dtype = utils.get_jax_dtype_from_str_dtype(kv_cache_dtype)
+
+    # Handle the case where kv_cache_dtype is "auto"
+    if kv_cache_jnp_dtype is None:
+        assert kv_cache_dtype == "auto", "kv_cache_dtype must be 'auto' if kv_cache_jnp_dtype is None"
+        kv_cache_jnp_dtype = DEFAULT_KV_CACHE_DTYPE
+
     kv_caches = create_kv_caches(
         num_blocks=DEFAULT_NUM_BLOCKS_FOR_JIT_KV_CACHE,
         block_size=kv_cache_block_size,
@@ -96,7 +126,7 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
         head_size=kv_cache_head_size,
         mesh=mesh,
         layer_names=[f"layer.{i}" for i in range(num_hidden_layers)],
-    )
+        cache_dtype=kv_cache_jnp_dtype)
 
     # NOTE: the inputs don't need to match the actual ones, as long as the consumed weights are the same
     input_ids = jax.random.randint(rng,
@@ -219,9 +249,6 @@ def apply_qwix_quantization(
     qwix_config = None
     if quantization_config := vllm_config.additional_config.get(
             "quantization"):
-        if isinstance(quantization_config, str):
-            quantization_config = quantization_config_file_path_to_dict(
-                quantization_config)
         qwix_config = quantization_config.get("qwix").get("rules")
     if not qwix_config:
         return model_or_model_fn
@@ -241,6 +268,8 @@ def apply_qwix_quantization(
     head_size = model_config.get_head_size()
     head_size = utils.get_padded_head_dim(head_size)
 
+    kv_cache_dtype = vllm_config.cache_config.cache_dtype
+
     if not apply_to_abstract_model:
         assert isinstance(model_or_model_fn, nnx.Module)
         qwix_quantize_nnx_model_with_config = functools.partial(
@@ -256,6 +285,7 @@ def apply_qwix_quantization(
                 "kv_cache_block_size",
                 "kv_cache_num_kv_heads",
                 "kv_cache_head_size",
+                "kv_cache_dtype",
             ))(model=model_or_model_fn,
                rng=rng,
                mesh=mesh,
@@ -263,7 +293,8 @@ def apply_qwix_quantization(
                num_hidden_layers,
                kv_cache_block_size=block_size,
                kv_cache_num_kv_heads=num_kv_heads,
-               kv_cache_head_size=head_size)
+               kv_cache_head_size=head_size,
+               kv_cache_dtype=kv_cache_dtype)
 
         return model_or_model_fn
 
@@ -274,7 +305,8 @@ def apply_qwix_quantization(
         num_hidden_layers=vllm_config.model_config.hf_config.num_hidden_layers,
         kv_cache_block_size=block_size,
         kv_cache_num_kv_heads=num_kv_heads,
-        kv_cache_head_size=head_size)
+        kv_cache_head_size=head_size,
+        kv_cache_dtype=kv_cache_dtype)
 
     def create_and_quantize_model_factory() -> Callable:
         """
@@ -299,10 +331,179 @@ def apply_qwix_on_abstract_model(vllm_config: "VllmConfig") -> bool:
     Returns:
         whether to apply Qwix quantization on the abstract model
     """
-    quantization_config = None
-    if quantization_config := vllm_config.additional_config.get(
-            "quantization", {}):
-        if isinstance(quantization_config, str):
-            quantization_config = quantization_config_file_path_to_dict(
-                quantization_config)
+    quantization_config = vllm_config.additional_config.get("quantization", {})
     return quantization_config.get("qwix", {}).get("use_abstract_model", False)
+
+
+def get_default_qwix_quantization_config(
+        model_type: str, quant_method: str,
+        skip_quantization: bool) -> dict | None:
+    """
+    Some models are pre-quantized and in those cases, we want to return a default set of
+    Qwix quantization rules (instead of forcing the user to pass in a quantization config each time).
+
+    Note that if a user passes in a quantization config (via `additional_config`), then
+    we'll use that instead of this function.
+
+    Args:
+        model_type: the name of the model
+        quant_method: the quantization method
+        skip_quantization: whether to skip quantization.  In this case, we'll return None
+
+    Returns:
+        a dictionary containing the default Qwix quantization rules
+    """
+    if skip_quantization:
+        return None
+    # TODO (jacobplatin): remove this so that we can support various quantization types
+    if model_type == "deepseek_v3" and quant_method == "fp8":
+        return DEFAULT_DEEPSEEK_FP8_CONFIG
+
+
+def update_vllm_config_for_qwix_quantization(vllm_config: "VllmConfig"):
+    """
+    Updates the vLLM config to unpack the Qwix quantization config if it exists.
+    By default, we'll check if the checkpoint is quantized and update the
+    Qwix quantization config to use the default quantization config if it exists,
+    but we'll override this if the user passes in a quantization config via `additional_config`.
+    """
+    # Automatically detect whether checkpoint is quantized and update the
+    # Qwix quantization config accordingly
+    # NOTE: if a Qwix config is provided (via the`additional_config`), we'll
+    # use that instead
+    model_type = vllm_config.model_config.hf_config.model_type.lower(
+    ) if hasattr(vllm_config.model_config.hf_config, "model_type") else None
+    quant_method = vllm_config.model_config.hf_config.quantization_config[
+        "quant_method"] if hasattr(vllm_config.model_config.hf_config,
+                                   "quantization_config") else None
+    default_quantization_config = get_default_qwix_quantization_config(
+        model_type, quant_method,
+        vllm_config.additional_config.get("skip_quantization", False))
+
+    maybe_existing_quantization_config = vllm_config.additional_config.get(
+        "quantization")
+    if maybe_existing_quantization_config:
+        logger.warning("Overwriting default Qwix quantization config with "
+                       "user provided quantization config.")
+    elif default_quantization_config is not None:
+        vllm_config.additional_config[
+            "quantization"] = default_quantization_config
+
+    # Validate additional config
+    if additional_config := vllm_config.additional_config:
+        # Try loading/parsing the quantization config so that we can fail fast
+        if quantization_config := additional_config.get("quantization"):
+            try:
+                # NOTE: Qwix quantization supports two paths:
+                #  1. quantization config file (which we need to parse to a dictionary)
+                #  2. quantization config JSON
+                if isinstance(quantization_config, str):
+                    quantization_config = quantization_config_file_path_to_dict(
+                        quantization_config)
+                    # NOTE: unpack the quantization config now so we don't need to keep doing this every time
+                    vllm_config.additional_config[
+                        "quantization"] = quantization_config
+                parse_qwix_config_to_rules(
+                    quantization_config["qwix"]["rules"])
+            except Exception as e:
+                raise ValueError(
+                    f"Invalid quantization config; please see README for details on quantization config: {e}"
+                )
+
+
+def get_random_sharded_array(key: PRNGKey, mesh: Mesh, param: nnx.Param,
+                             param_shape: tuple, dtype: jnp.dtype,
+                             param_name: str) -> jax.Array:
+    """
+    Returns a random sharded array for the given parameter for the given shape.
+
+    Args:
+        key: The random key.
+        mesh: The mesh to use for sharding.
+        param: The parameter.
+        param_shape: The shape of the parameter.
+        dtype: The dtype of the parameter.
+        param_name: The name of the parameter.
+
+    Returns:
+        A random sharded array for the given parameter for the given shape.
+    """
+    is_int = jnp.issubdtype(dtype, jnp.integer)
+    if is_int:
+        # These need to be JAX arrays or else you'll run into an overflow error
+        minval = jnp.array(jnp.iinfo(dtype).min, dtype=dtype)
+        maxval = jnp.array(jnp.iinfo(dtype).max, dtype=dtype)
+        weight = jax.random.randint(key, param_shape, minval, maxval, dtype)
+    else:
+        weight = jax.random.normal(key, param_shape, dtype)
+
+    def get_slice(index):
+        return weight[index]
+
+    try:
+        sharded_array = jax.make_array_from_callback(
+            param_shape, NamedSharding(mesh, P(*param.sharding)), get_slice)
+    except (ValueError, TypeError):
+        logger.warning(
+            f"Could not create sharded scale for {param_name} with shape {param_shape} and sharding {param.sharding}, skipping sharding..."
+        )
+        sharded_array = jax.make_array_from_callback(param_shape,
+                                                     NamedSharding(mesh, P()),
+                                                     get_slice)
+
+    return sharded_array
+
+
+def load_random_weights_into_qwix_abstract_model(rng: PRNGKey,
+                                                 model: nnx.Module, mesh: Mesh,
+                                                 quantization_config: dict):
+    """
+    Loads random weights for an abstract, Qwix-quantized model.
+
+    Args:
+        rng: The random key.
+        state: The state of the model.
+        mesh: The mesh.
+        model: The model.
+        quantization_config: The quantization config for the model.
+    """
+    logger.info("Initializing Qwix-quantized model with random weights...")
+    # TODO (jacobplatin): clean up this logic
+    scale_dtype = model.weight_loader.scale_dtype
+    scale_shape_map = model.weight_loader.scale_shap_map_for_random_weight_loading if hasattr(
+        model.weight_loader,
+        'scale_shap_map_for_random_weight_loading') else {}
+    quantization_block_sizes = quantization_config["weight_block_size"]
+    assert len(
+        quantization_block_sizes
+    ) == 2, f"Expected only 2 quantization block sizes but got {quantization_block_sizes}"
+    quantization_block_size_n, _ = quantization_block_sizes[
+        0], quantization_block_sizes[1]
+
+    # Iterate through all variables and initialize them
+    prev_param_shape = None
+    for path, param in nnx.iter_graph(model):
+        if not isinstance(param, nnx.Variable):
+            continue
+        if path[0] == 'rng' and path[-1] == "key":
+            param.value = rng
+            continue
+        is_qwix_scale = (path[-1] == 'scale' and path[-2] == "array")
+        param_dtype = scale_dtype if is_qwix_scale else param.value.dtype
+        param_shape = param.value.shape
+        # TODO (jacobplatin): clean this up
+        if is_qwix_scale:
+            param_shape = scale_shape_map.get(
+                path[3],
+                tuple(dim // quantization_block_size_n
+                      for dim in prev_param_shape))
+        param.value = get_random_sharded_array(
+            rng, mesh, param, param_shape, param_dtype,
+            ".".join([str(x) for x in path]))
+        prev_param_shape = param_shape
+
+    # Handles the DeepSeek case, where this needs to be called to make the cache weights
+    # concrete
+    if hasattr(model, 'initialize_cache'):
+        model.initialize_cache()
+    logger.info("Done initializing Qwix-quantized model with random weights")

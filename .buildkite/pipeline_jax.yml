@@ -98,10 +98,21 @@ steps:
          .buildkite/scripts/run_in_docker.sh \
            python3 -m pytest -s -v -x /workspace/tpu_commons/tests/kernels \
            --ignore=/workspace/tpu_commons/tests/kernels/ragged_paged_attention_kernel_v2_test.py \
-           --ignore=/workspace/tpu_commons/tests/kernels/ragged_kv_cache_update_v2_test.py
+           --ignore=/workspace/tpu_commons/tests/kernels/ragged_kv_cache_update_v2_test.py \
+           --ignore=/workspace/tpu_commons/tests/kernels/collectives
+
+   - label: "JAX unit tests - collective kernels"
+     key: test_9
+     soft_fail: true
+     agents:
+       queue: tpu_v6e_8_queue
+     commands:
+       - |
+         .buildkite/scripts/run_in_docker.sh \
+           python3 -m pytest -s -v -x /workspace/tpu_commons/tests/kernels/collectives
 
    - label: "lora tests for JAX + vLLM models"
-     key: test_9
+     key: test_10
      soft_fail: true
      agents:
        queue: tpu_v6e_queue

@@ -60,7 +60,6 @@ def test_single_lora():
     assert int(answer) == 2
 
 
-@pytest.mark.skip("Not supported yet.")
 def test_lora_hotswapping():
     """
     This test ensures we can run multiple LoRA adapters on the TPU backend, even
@@ -92,7 +91,6 @@ def test_lora_hotswapping():
         assert int(answer) == i + 1, f"Expected {i + 1}, got {answer}"
 
 
-@pytest.mark.skip("Not supported yet.")
 def test_multi_lora():
     """
     This test ensures we can run multiple LoRA adapters on the TPU backend, when

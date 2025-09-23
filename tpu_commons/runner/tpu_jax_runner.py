@@ -54,7 +54,7 @@ from tpu_commons.runner.speculative_decoding_manager import \
     SpeculativeDecodingManager
 from tpu_commons.runner.structured_decoding_manager import \
     StructuredDecodingManager
-from tpu_commons.spec_decode.jax.eagle3 import EagleProposer
+from tpu_commons.spec_decode.jax.eagle3 import Eagle3Proposer
 from tpu_commons.utils import device_array, make_optimized_mesh
 
 logger = init_logger(__name__)
@@ -109,8 +109,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self._init_mesh()
         self._init_phased_profiling()
         self._init_mm()
-        self._init_speculative_decoding()
         self._init_inputs()
+        self._init_speculative_decoding()
 
         # Delegate functions to specific manager classes.
         self.compilation_manager = CompilationManager(self)
@@ -192,7 +192,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             if self.speculative_config.method == "ngram":
                 self.drafter = NgramProposer(self.vllm_config)
             elif self.speculative_config.method == "eagle3":
-                self.drafter = EagleProposer(self.vllm_config, self)
+                self.drafter = Eagle3Proposer(self.vllm_config, self)
             else:
                 raise NotImplementedError(
                     "Unsupported speculative decoding method: "
@@ -291,7 +291,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                             dtype=np.int64)
 
     def load_model(self):
-        self.model_fn, self.compute_logits_fn, self.get_multimodal_embeddings_fn, self.get_input_embeddings_fn, self.state, self.lora_manager, self.model = get_model(
+        self.model_fn, self.compute_logits_fn, self.combine_hidden_states_fn, self.get_multimodal_embeddings_fn, self.get_input_embeddings_fn, self.state, self.lora_manager, self.model = get_model(
             self.vllm_config,
             self.rng_key,
             self.mesh,
@@ -299,7 +299,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         if self.drafter is not None:
             logger.info("Loading drafter model...")
-            self.drafter.load_model()
+            self.drafter.load_model(self.state)
 
         self.rng_params_for_sampling = nnx.Rngs(
             jax.random.key(self.model_config.seed)).params()
@@ -317,6 +317,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         return self.kv_cache_manager.get_kv_cache_spec()
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+        self.kv_cache_config = kv_cache_config
         self.kv_caches = []
         self.kv_cache_manager.initialize_kv_cache(kv_cache_config)
         if has_kv_transfer_group():
@@ -378,6 +379,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.is_multimodal_model or self.lora_config is not None:
             self.maybe_forbid_compile = nullcontext()
 
+        lora_metadata = self.lora_utils.extract_lora_metadata()
         # TODO: make _get_input_ids_embeds within this context
         # NOTE: right now, mm model will use embeddings as the input,
         # but text-only model will use input_ids
@@ -398,11 +400,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                      attn_metadata,
                      inputs_embeds,
                      tuple(self.layer_name_to_kvcache_index.items()),
+                     lora_metadata,
                  )
 
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)
-            logits = self.compute_logits_fn(self.state, hidden_states)
+            logits = self.compute_logits_fn(
+                self.state,
+                hidden_states,
+                lora_metadata,
+            )
             if scheduler_output.grammar_bitmask is not None:
                 (
                     require_struct_decoding, grammar_bitmask_padded, arange
@@ -522,7 +529,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         if self.speculative_config:
             self.speculative_decoding_manager.propose_draft_token_ids(
-                valid_sampled_token_ids)
+                valid_sampled_token_ids,
+                aux_hidden_states,
+                attn_metadata,
+                spec_decode_metadata,
+                scheduler_output,
+                input_ids,
+            )
 
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,
@@ -563,6 +576,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         num_scheduled_tokens_per_req = np.array(num_scheduled_tokens_per_req,
                                                 dtype=np.int32)
         assert max_num_scheduled_tokens_all_reqs > 0
+        padded_num_reqs = runner_utils.get_padded_num_reqs_with_upper_limit(
+            num_reqs, self.max_num_reqs)
 
         # Get request indices.
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
@@ -635,11 +650,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         block_tables = self.block_table_cpu[:self.max_num_reqs]
         block_tables[:num_reqs, :self.max_num_blocks_per_req] = (
             self.input_batch.block_table[0].get_cpu_tensor()[:num_reqs])
+
+        # TODO(pooyam): Some paddings are up to `num_reqs_paddings` (spec decoding, select hidden states, etc) and some other are to `max_num_reqs` (block table, seq_lens). We should stick to one of them maybe?
         query_start_loc = self.query_start_loc_cpu[:self.max_num_reqs + 1]
         seq_lens = self.seq_lens_cpu[:self.max_num_reqs]
         request_distribution = np.array(self.input_batch.request_distribution)
-        padded_num_reqs = runner_utils.get_padded_num_reqs_with_upper_limit(
-            num_reqs, self.max_num_reqs)
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
@@ -667,6 +682,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # Convert block_tables to 1D on cpu.
         block_tables = block_tables.reshape(-1)
 
+        query_start_loc_cpu = query_start_loc
+        seq_lens_cpu = seq_lens
         (input_ids, positions, block_tables, query_start_loc, seq_lens,
          logits_indices, request_distribution) = device_array(
              self.mesh, (input_ids, positions, block_tables, query_start_loc,
@@ -677,15 +694,20 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 num_scheduled_tokens_per_req, total_num_scheduled_tokens,
                 padded_total_num_scheduled_tokens)
 
+        attention_metadata = AttentionMetadata(
+            input_positions=positions,
+            block_tables=block_tables,
+            seq_lens=seq_lens,
+            query_start_loc=query_start_loc,
+            request_distribution=request_distribution)
+
+        # This is for making these cpu buffers hidden during tracing
+        attention_metadata.query_start_loc_cpu = query_start_loc_cpu
+        attention_metadata.seq_lens_cpu = seq_lens_cpu
+
         return (
             input_ids,
-            AttentionMetadata(
-                input_positions=positions,
-                block_tables=block_tables,
-                seq_lens=seq_lens,
-                query_start_loc=query_start_loc,
-                request_distribution=request_distribution,
-            ),
+            attention_metadata,
             sampling_metadata,
             logits_indices,
             spec_decode_metadata,

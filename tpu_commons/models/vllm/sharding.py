@@ -102,71 +102,26 @@ def shard_model_to_tpu(model: torch.nn.Module, mesh: Mesh,
         shard_parallel_layers_to_tpu(model, mesh, vllm_config)
 
         # For other weight tensors, repliate them on all the TPU chips.
-        params, buffers, variables = extract_all_buffers(model)
+        params, buffers = extract_all_params_buffers(model)
 
         fmt_size = functools.partial(humanize.naturalsize, binary=True)
-        for qual_name, x in {**params, **buffers, **variables}.items():
+        for qual_name, x in {**params, **buffers}.items():
             if _is_unmoved_tensor(x):
                 tensor_size = fmt_size(x.nbytes)
                 logger.debug(
                     f"{qual_name=} is not sharded, {tensor_size=}, {x.shape=}, {x.dtype=}"
                 )
 
-        params, buffers, variables = pytree.tree_map_only(
-            _is_unmoved_tensor, _move_to_tpu_replicated,
-            (params, buffers, variables))
-        set_all_buffers(model, {}, {}, variables)
+        params, buffers = pytree.tree_map_only(_is_unmoved_tensor,
+                                               _move_to_tpu_replicated,
+                                               (params, buffers))
         params_and_buffers = {**params, **buffers}
 
         return params_and_buffers
 
 
-def extract_all_buffers(m: torch.nn.Module):
-    params = {}
-    buffers = {}
-    variables = {}
-
-    def extract_one(module, prefix):
-        for k in dir(module):
-            v = getattr(module, k, None)
-            if v is None:
-                continue
-
-            qual_name = prefix + k
-            if isinstance(v, torch.nn.Parameter) and k in module._parameters:
-                params[qual_name] = v
-            elif isinstance(v, torch.nn.ParameterList):
-                for i, param in enumerate(v):
-                    params[qual_name + f'.{i}'] = param
-            elif k in module._buffers:
-                buffers[qual_name] = v
-            elif isinstance(v, torch.Tensor):
-                variables[qual_name] = v
-
-        for name, child in module.named_children():
-            extract_one(child, prefix + name + '.')
-
-    extract_one(m, '')
-    return params, buffers, variables
-
-
-def set_all_buffers(m, params, buffers, variables):
-
-    def set_one(module, prefix):
-        for k in dir(module):
-            qual_name = prefix + k
-            if (potential_v := buffers.get(qual_name)) is not None or (
-                    potential_v := variables.get(qual_name)) is not None:
-                if getattr(module, k, None) is None:
-                    setattr(module, k, potential_v)
-            elif (potential_v := params.get(qual_name)) is not None:
-                # print(k, potential_v)
-                # setattr(module, k, torch.nn.Parameter(potential_v))
-                module.register_parameter(k, potential_v)
-        for name, child in module.named_children():
-            set_one(child, prefix + name + '.')
-
-    set_one(m, '')
+def extract_all_params_buffers(m: torch.nn.Module):
+    return dict(m.named_parameters()), dict(m.named_buffers())
 
 
 def shard_and_move_tensor_to_tpu(tensor, mesh):
@@ -182,9 +137,10 @@ def shard_and_move_tensor_to_tpu(tensor, mesh):
 
 
 def shard_and_move_lora_to_tpu(layer: torch.nn.Module, mesh: Mesh):
-    sharded_lora_a_tpu = []
-    sharded_lora_b_tpu = []
-    sharded_lora_bias_tpu = []
+    # Note, lora_a_stacked[i] has shape [max_loras, 1, num_out_features, num_in_features]
+    sharded_lora_a_tpu = torch.nn.ParameterList()
+    sharded_lora_b_tpu = torch.nn.ParameterList()
+    sharded_lora_bias_tpu = torch.nn.ParameterList()
 
     for i in range(layer.n_slices):
         sharded_lora_a_tpu.append(
@@ -195,10 +151,10 @@ def shard_and_move_lora_to_tpu(layer: torch.nn.Module, mesh: Mesh):
             sharded_lora_bias_tpu.append(
                 shard_and_move_tensor_to_tpu(layer.lora_bias_stacked[i], mesh))
 
-    layer.lora_a_stacked = tuple(sharded_lora_a_tpu)
-    layer.lora_b_stacked = tuple(sharded_lora_b_tpu)
+    layer.lora_a_stacked = sharded_lora_a_tpu
+    layer.lora_b_stacked = sharded_lora_b_tpu
     if layer.lora_bias_stacked is not None:
-        layer.lora_bias_stacked = tuple(sharded_lora_bias_tpu)
+        layer.lora_bias_stacked = sharded_lora_bias_tpu
 
 
 def partition_column_parallel_linear_lora(layer: torch.nn.Module,

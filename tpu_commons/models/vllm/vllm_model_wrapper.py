@@ -14,7 +14,7 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import TORCH_DTYPE_TO_JAX
-from vllm.config import LoRAConfig, ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config import LoRAConfig, VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
@@ -25,9 +25,11 @@ from vllm.sequence import IntermediateTensors
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.vllm.quantization import get_tpu_quantization_config
-from tpu_commons.models.vllm.sharding import shard_model_to_tpu
+from tpu_commons.models.vllm.sharding import (
+    LORA_MODULE_TYPE_TO_WRAPPING_FUNC, get_fqn, shard_model_to_tpu)
 from tpu_commons.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
+from tpu_commons.runner.lora_utils import replace_lora_metadata
 
 logger = init_logger(__name__)
 
@@ -70,8 +72,7 @@ class _VllmRunner(torch.nn.Module):
         return hidden_state
 
     def compute_logits(self, hidden_state: torch.Tensor) -> torch.Tensor:
-        return self.vllm_model.compute_logits(hidden_state,
-                                              sampling_metadata=None)
+        return self.vllm_model.compute_logits(hidden_state)
 
 
 class VllmModelWrapper:
@@ -120,11 +121,9 @@ class VllmModelWrapper:
             with torchax.default_env():
                 # the device in load_lora_model is used to set the device used in punica wrapper.
                 lora_manager, vllm_model = load_lora_model(
-                    vllm_model,
-                    vllm_config_for_load.model_config,
-                    vllm_config_for_load.scheduler_config,
-                    vllm_config_for_load.lora_config,
-                    device="jax")
+                    vllm_model, vllm_config_for_load, device="jax")
+                self._register_lora_weights_as_param(
+                    vllm_model, vllm_config_for_load.lora_config)
             replace_set_lora(vllm_model)
 
         self.model = _VllmRunner(vllm_model)
@@ -137,6 +136,32 @@ class VllmModelWrapper:
 
         # Returning to the jax land, so we need to wrap it into a JaxValue.
         return jax_view(params_and_buffers), lora_manager
+
+    def _register_lora_weights_as_param(self, model: torch.nn.Module,
+                                        lora_config: LoRAConfig) -> None:
+
+        def _process_module(module, name=None, parent=None):
+            if get_fqn(module) in LORA_MODULE_TYPE_TO_WRAPPING_FUNC:
+                assert parent is not None and name is not None, (
+                    "Top Level module is not expected to be LoRA wrapper")
+                module.lora_a_stacked = torch.nn.ParameterList([
+                    torch.nn.Parameter(module.lora_a_stacked[i])
+                    for i in range(module.n_slices)
+                ])
+                module.lora_b_stacked = torch.nn.ParameterList([
+                    torch.nn.Parameter(module.lora_b_stacked[i])
+                    for i in range(module.n_slices)
+                ])
+                if lora_config.bias_enabled:
+                    module.lora_bias_stacked = torch.nn.ParameterList([
+                        torch.nn.Parameter(module.lora_bias_stacked[i])
+                        for i in range(module.n_slices)
+                    ])
+
+            for child_name, child_module in list(module.named_children()):
+                _process_module(child_module, child_name, module)
+
+        _process_module(model)
 
     def jit_step_func(self):
 
@@ -157,9 +182,11 @@ class VllmModelWrapper:
             attn_metadata: AttentionMetadata,
             input_embeds: jax.Array,
             layer_name_to_kvcache_index: Sequence[Tuple[str, int]],
+            lora_metadata,
             *args,
         ) -> Tuple[List[jax.Array], jax.Array]:
             layer_name_to_kvcache_index = dict(layer_name_to_kvcache_index)
+            lora_metadata = torch_view(lora_metadata)
             with torchax.default_env(), set_vllm_model_wrapper_context(
                     kv_caches=kv_caches,
                     mesh=self.mesh,
@@ -168,6 +195,8 @@ class VllmModelWrapper:
                                    vllm_config=self.vllm_config):
                 # We need to wrap args from jax land into TorchValue with
                 # torch_view in order to call the Torch function.
+                original_lora_metadata = replace_lora_metadata(
+                    self.model, lora_metadata, self.vllm_config.lora_config)
                 hidden_states = torch.func.functional_call(
                     self.model,
                     torch_view(params_and_buffers),
@@ -178,8 +207,9 @@ class VllmModelWrapper:
                         "inputs_embeds": None,
                     },
                     tie_weights=False,
-                    strict=True,
                 )
+                replace_lora_metadata(self.model, original_lora_metadata,
+                                      self.vllm_config.lora_config)
                 vllm_model_wrapper_context = get_vllm_model_wrapper_context()
                 new_kv_caches = vllm_model_wrapper_context.kv_caches
             # Wrap the hidden_states from torch land into a JaxValue for the jax
@@ -200,9 +230,13 @@ class VllmModelWrapper:
         def compute_logits_func(
             params_and_buffers: Any,
             hidden_states: jax.Array,
+            lora_metadata,
         ) -> jax.Array:
+            lora_metadata = torch_view(lora_metadata)
             with torchax.default_env(), set_vllm_model_wrapper_context(
                     kv_caches=None, mesh=self.mesh):
+                original_lora_metadata = replace_lora_metadata(
+                    self.model, lora_metadata, self.vllm_config.lora_config)
                 logits = torch.func.functional_call(
                     self.model,
                     torch_view(params_and_buffers),
@@ -210,15 +244,15 @@ class VllmModelWrapper:
                         "hidden_state": torch_view(hidden_states),
                     },
                     tie_weights=False,
-                    strict=True,
                 )
+                replace_lora_metadata(self.model, original_lora_metadata,
+                                      self.vllm_config.lora_config)
             return jax_view(logits)
 
         return compute_logits_func
 
 
-def load_lora_model(model: torch.nn.Module, model_config: ModelConfig,
-                    scheduler_config: SchedulerConfig, lora_config: LoRAConfig,
+def load_lora_model(model: torch.nn.Module, vllm_config: VllmConfig,
                     device: str) -> torch.nn.Module:
     if not supports_lora(model):
         raise ValueError(
@@ -228,19 +262,12 @@ def load_lora_model(model: torch.nn.Module, model_config: ModelConfig,
         logger.warning("Regarding multimodal models, vLLM currently "
                        "only supports adding LoRA to language model.")
 
-    # Use get_text_config() in case of multimodal models
-    text_config = model_config.hf_config.get_text_config()
-
     # Add LoRA Manager to the Model Runner
     lora_manager = LRUCacheWorkerLoRAManager(
-        scheduler_config.max_num_seqs,
-        scheduler_config.max_num_batched_tokens,
-        model_config.get_vocab_size(),
-        lora_config,
+        vllm_config,
         device,
         model.embedding_modules,
         model.embedding_padding_modules,
-        max_position_embeddings=text_config.max_position_embeddings,
     )
     return lora_manager, lora_manager.create_lora_manager(model)
 

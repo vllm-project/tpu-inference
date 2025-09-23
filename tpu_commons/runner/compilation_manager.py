@@ -8,6 +8,7 @@ import numpy as np
 import vllm.envs as envs
 from jax.sharding import NamedSharding, PartitionSpec
 
+from tpu_commons.core.disagg_utils import is_disagg_enabled
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.layers.sample.sampling import sample
@@ -121,13 +122,15 @@ class CompilationManager:
                 attention_metadata,
                 inputs_embeds,
                 layer_name_to_kvcache_index,
+                lora_metadata,
             ):
                 kv_caches, hidden_states, aux_hidden_states = self.runner.model_fn(
                     state, kv_caches, input_ids, attention_metadata,
-                    inputs_embeds, layer_name_to_kvcache_index)
+                    inputs_embeds, layer_name_to_kvcache_index, lora_metadata)
                 self.runner.kv_caches = kv_caches
                 return hidden_states
 
+            lora_metadata = None
             self._run_compilation(
                 "backbone",
                 model_fn_wrapper,
@@ -137,6 +140,7 @@ class CompilationManager:
                 attention_metadata,
                 inputs_embeds,
                 tuple(self.runner.layer_name_to_kvcache_index.items()),
+                lora_metadata,
                 num_tokens=num_tokens,
             )
 
@@ -234,11 +238,13 @@ class CompilationManager:
         for num_reqs in leading_shape:
             hidden_states = self._create_dummy_tensor((num_reqs, hsize),
                                                       jnp.bfloat16)
+            lora_metadata = None
             self._run_compilation(
                 "compute_logits",
                 self.runner.compute_logits_fn,
                 self.runner.state,
                 hidden_states,
+                lora_metadata,
                 num_reqs=num_reqs,
             )
 
@@ -281,6 +287,8 @@ class CompilationManager:
                 )
 
     def _precompile_disagg_utils(self) -> None:
+        if not is_disagg_enabled():
+            return
         logger.info(
             "Compiling disaggregated util with different input shapes.")
         block_size = self.runner.block_size

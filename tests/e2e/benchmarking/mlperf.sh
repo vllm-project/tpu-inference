@@ -125,9 +125,11 @@ echo "Using the dataset at $dataset_path"
 
 cd "$root_dir"/vllm || exit
 echo "Current working directory: $(pwd)"
+echo "Using vLLM hash: $(git rev-parse HEAD)"
 
 # Overwrite a few of the vLLM benchmarking scripts with the TPU Commons ones
 cp -r "$root_dir"/tpu_commons/scripts/vllm/benchmarking/*.py "$root_dir"/vllm/benchmarks/
+echo "Using TPU Commons hash: $(git -C "$root_dir"/tpu_commons rev-parse HEAD)"
 
 cleanUp() {
     echo "Stopping the vLLM server and cleaning up log files..."
