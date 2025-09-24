@@ -138,29 +138,31 @@ class CompilationManager:
                     self.runner.lora_config,
                     np.array([num_tokens], dtype=np.int32)):
                 lora_metadata = self.runner.lora_utils.extract_lora_metadata()
-                print('xw32 state sharding:')
-                jax.tree_util.tree_map(
-                    lambda leaf: print(f"  - Leaf sharding: {leaf.sharding}"),
-                    self.runner.state)
-                print('xw32 kv_caches sharding:')
-                jax.tree_util.tree_map(
-                    lambda leaf: print(f"  - Leaf sharding: {leaf.sharding}"),
-                    self.runner.kv_caches)
-                print('xw32 input_ids sharding:')
-                jax.tree_util.tree_map(
-                    lambda leaf: print(f"  - Leaf sharding: {leaf.sharding}"),
-                    input_ids)
-                print('xw32 attention_metadata sharding:')
-                jax.tree_util.tree_map(
-                    lambda leaf: print(f"  - Leaf sharding: {leaf.sharding}"),
-                    attention_metadata)
-                # print('xw32 layer_name_to_kvcache_index sharding:')
-                # jax.tree_util.tree_map(lambda leaf: print(f"  - Leaf sharding: {leaf.sharding}"), tuple(self.runner.layer_name_to_kvcache_index.items()))
-                print('xw32 lora_metadata sharding:')
-                jax.tree_util.tree_map(
-                    lambda leaf: print(f"  - Leaf sharding: {leaf.sharding}")
-                    if isinstance(leaf, jax.Array) else print(
-                        "sharding not available."), lora_metadata)
+
+                # print('xw32 state sharding:')
+                # jax.tree_util.tree_map(
+                #     lambda leaf: print(f"  - Leaf sharding: {leaf.sharding}"),
+                #     self.runner.state)
+                # print('xw32 kv_caches sharding:')
+                # jax.tree_util.tree_map(
+                #     lambda leaf: print(f"  - Leaf sharding: {leaf.sharding}"),
+                #     self.runner.kv_caches)
+                # print('xw32 input_ids sharding:')
+                # jax.tree_util.tree_map(
+                #     lambda leaf: print(f"  - Leaf sharding: {leaf.sharding}"),
+                #     input_ids)
+                # print('xw32 attention_metadata sharding:')
+                # jax.tree_util.tree_map(
+                #     lambda leaf: print(f"  - Leaf sharding: {leaf.sharding}"),
+                #     attention_metadata)
+                # # print('xw32 layer_name_to_kvcache_index sharding:')
+                # # jax.tree_util.tree_map(lambda leaf: print(f"  - Leaf sharding: {leaf.sharding}"), tuple(self.runner.layer_name_to_kvcache_index.items()))  # no need to print layer_name_to_kvcache_index because the values are integers.
+                # print('xw32 lora_metadata sharding:')
+                # jax.tree_util.tree_map(
+                #     lambda leaf: print(f"  - Leaf sharding: {leaf.sharding}")
+                #     if isinstance(leaf, jax.Array) else print(
+                #         "sharding not available."), lora_metadata)
+
                 self._run_compilation(
                     "backbone",
                     model_fn_wrapper,
@@ -268,15 +270,18 @@ class CompilationManager:
         for num_reqs in leading_shape:
             hidden_states = self._create_dummy_tensor((num_reqs, hsize),
                                                       jnp.bfloat16)
-            lora_metadata = None
-            self._run_compilation(
-                "compute_logits",
-                self.runner.compute_logits_fn,
-                self.runner.state,
-                hidden_states,
-                lora_metadata,
-                num_reqs=num_reqs,
-            )
+            with self.runner.maybe_select_dummy_loras(
+                    self.runner.lora_config,
+                    np.array([num_reqs], dtype=np.int32)):
+                lora_metadata = self.runner.lora_utils.extract_lora_metadata()
+                self._run_compilation(
+                    "compute_logits",
+                    self.runner.compute_logits_fn,
+                    self.runner.state,
+                    hidden_states,
+                    lora_metadata,
+                    num_reqs=num_reqs,
+                )
 
     def _precompile_sampling(self) -> None:
         logger.info("Compiling sampling with different input shapes.")

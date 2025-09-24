@@ -394,29 +394,31 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     scheduler_output) as kv_connector_output:
                 # NOTE(Wenlong): It takes both `input_ids` and `inputs_embeds`,
                 # but one of them would be `None`
-                print('xw32 state sharding:')
-                jax.tree_util.tree_map(
-                    lambda leaf: print(f"  - Leaf sharding: {leaf.sharding}"),
-                    self.state)
-                print('xw32 kv_caches sharding:')
-                jax.tree_util.tree_map(
-                    lambda leaf: print(f"  - Leaf sharding: {leaf.sharding}"),
-                    self.kv_caches)
-                print('xw32 input_ids sharding:')
-                jax.tree_util.tree_map(
-                    lambda leaf: print(f"  - Leaf sharding: {leaf.sharding}"),
-                    input_ids)
-                print('xw32 attention_metadata sharding:')
-                jax.tree_util.tree_map(
-                    lambda leaf: print(f"  - Leaf sharding: {leaf.sharding}"),
-                    attn_metadata)
-                # print('xw32 layer_name_to_kvcache_index sharding:')
-                # jax.tree_util.tree_map(lambda leaf: print(f"  - Leaf sharding: {leaf.sharding}"), tuple(self.runner.layer_name_to_kvcache_index.items()))
-                print('xw32 lora_metadata sharding:')
-                jax.tree_util.tree_map(
-                    lambda leaf: print(f"  - Leaf sharding: {leaf.sharding}")
-                    if isinstance(leaf, jax.Array) else print(
-                        "sharding not available."), lora_metadata)
+
+                # print('xw32 state sharding:')
+                # jax.tree_util.tree_map(
+                #     lambda leaf: print(f"  - Leaf sharding: {leaf.sharding}"),
+                #     self.state)
+                # print('xw32 kv_caches sharding:')
+                # jax.tree_util.tree_map(
+                #     lambda leaf: print(f"  - Leaf sharding: {leaf.sharding}"),
+                #     self.kv_caches)
+                # print('xw32 input_ids sharding:')
+                # jax.tree_util.tree_map(
+                #     lambda leaf: print(f"  - Leaf sharding: {leaf.sharding}"),
+                #     input_ids)
+                # print('xw32 attention_metadata sharding:')
+                # jax.tree_util.tree_map(
+                #     lambda leaf: print(f"  - Leaf sharding: {leaf.sharding}"),
+                #     attn_metadata)
+                # # print('xw32 layer_name_to_kvcache_index sharding:')
+                # # jax.tree_util.tree_map(lambda leaf: print(f"  - Leaf sharding: {leaf.sharding}"), tuple(self.runner.layer_name_to_kvcache_index.items()))  # no need to print layer_name_to_kvcache_index because the values are integers.
+                # print('xw32 lora_metadata sharding:')
+                # jax.tree_util.tree_map(
+                #     lambda leaf: print(f"  - Leaf sharding: {leaf.sharding}")
+                #     if isinstance(leaf, jax.Array) else print(
+                #         "sharding not available."), lora_metadata)
+
                 (self.kv_caches, hidden_states,
                  aux_hidden_states) = self.model_fn(
                      self.state,
