@@ -6,12 +6,54 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - .buildkite/scripts/dynamic_bootstrap.sh
+       - bash .buildkite/scripts/dynamic_bootstrap.sh
 
    - wait: ~
 
-   - label: "Generate support matrices"
+   - label: "Export support matrix report"
+     key: export_support_matrix
      agents:
        queue: tpu_v6e_queue
      commands:
        - echo "Generate support matrices..."
+       - bash .buildkite/scripts/export_support_matrix.sh
+
+   # Handle PR builds: print model matrices and feature matrices
+   - label: "Handle Report"
+     if: build.pull_request.id != null
+     depends_on: export_support_matrix
+     agents:
+       queue: tpu_v6e_queue
+     command: |
+       buildkite-agent artifact download "model_support_matrix.csv" .
+       buildkite-agent artifact download "feature_support_matrix.csv" .
+       echo "--- Model Support Matrix ---"
+       cat model_support_matrix.csv
+       echo "--- Feature Support Matrix ---"
+       cat feature_support_matrix.csv
+
+  #  # Release Tag build: commit CSVs
+  #  - label: "Commit CSVs on Release Tag"
+  #    if: build.tag =~ /^v\.?[0-9]+(\.[0-9]+)*$/
+  #    depends_on: "set-results"
+  #    command: |
+  #      echo "=== Release Tag build ==="
+  #      echo "BUILDKITE_TAG=$BUILDKITE_TAG"
+
+  #      # Checkout main branch and sync code
+  #      git fetch origin main
+  #      git checkout main
+  #      git reset --hard origin/main
+
+  #      # Create target folder tpu_dev/result
+  #      mkdir -p result
+
+  #      # Download all CSV artifacts
+  #      buildkite-agent artifact download "model_support_matrix.csv" .
+  #      buildkite-agent artifact download "feature_support_matrix.csv" .
+
+  #      # Stage and commit changes (skip CI to avoid infinite loop)
+  #      git add *.csv
+  #      git commit -m "[skip ci] Update CSVs for $BUILDKITE_TAG" || echo "No changes to commit"
+
+  #      git push origin main

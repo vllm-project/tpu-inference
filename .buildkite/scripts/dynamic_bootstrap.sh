@@ -109,7 +109,7 @@ if [[ -n "$tpu_model_list_str" ]]; then
   echo "${tpu_model_list_str}" | buildkite-agent meta-data set "${MODEL_LIST_KEY}"
   echo "Testing: $(buildkite-agent meta-data get "MODEL_LIST_KEY")"
 else
-  echo "--- No Model Names found to upload."
+  echo "--- No tpu-support Models found to upload."
 fi
 
 if [[ -n "$vllm_model_list_str" ]]; then
@@ -117,7 +117,7 @@ if [[ -n "$vllm_model_list_str" ]]; then
   echo "${vllm_model_list_str}" | buildkite-agent meta-data set "${INFORMATIONAL_MODEL_LIST_KEY}"
   echo "Testing: $(buildkite-agent meta-data get "${INFORMATIONAL_MODEL_LIST_KEY}")"
 else
-  echo "--- No Model Names found to upload."
+  echo "--- No vllm-native Models found to upload."
 fi
 
 if [[ -n "$popular_model_list_str" ]]; then
@@ -125,7 +125,7 @@ if [[ -n "$popular_model_list_str" ]]; then
   echo "${popular_model_list_str}" | buildkite-agent meta-data set "${POPURLAR_MODEL_LIST_KEY}"
   echo "Testing: $(buildkite-agent meta-data get "${POPURLAR_MODEL_LIST_KEY}")"
 else
-  echo "--- No Model Names found to upload."
+  echo "--- No popular Models found to upload."
 fi
 
 
