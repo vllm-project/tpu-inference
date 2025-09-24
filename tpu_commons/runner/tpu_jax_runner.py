@@ -104,6 +104,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.dtype = self.model_config.dtype
         self.maybe_forbid_compile = runner_utils.ForbidCompile(
         ) if envs.VLLM_XLA_CHECK_RECOMPILATION else nullcontext()
+        print(f"{envs.VLLM_XLA_CHECK_RECOMPILATION=}")
 
         self._init_random()
         self._init_mesh()
