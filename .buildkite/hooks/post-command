@@ -5,9 +5,9 @@ echo "--- Post-command hook triggered ---"
 echo "Test exited with status: $BUILDKITE_COMMAND_EXIT_STATUS"
 
 if [ "$BUILDKITE_COMMAND_EXIT_STATUS" -eq 0 ]; then
-  echo "The step passed. Uploading result..."
-  buildkite-agent meta-data set "meta-llama/Llama-3.1-8B-Instruct:UnitTest" "passed"
+  echo "The step passed. Uploading $EXECUTE_MODEL:$EXECUTE_STAGE result..."
+  buildkite-agent meta-data set "$EXECUTE_MODEL:$EXECUTE_STAGE" "passed"
 else
-  echo "The step failed. Uploading result..."
-  buildkite-agent meta-data set "meta-llama/Llama-3.1-8B-Instruct:UnitTest" "failed"
+  echo "The step failed. Uploading $EXECUTE_MODEL:$EXECUTE_STAGE result..."
+  buildkite-agent meta-data set "$EXECUTE_MODEL:$EXECUTE_STAGE" "failed"
 fi
