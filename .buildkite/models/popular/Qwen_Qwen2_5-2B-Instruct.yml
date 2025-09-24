@@ -17,7 +17,7 @@ steps:
       EXECUTE_STAGE: "UnitTest"
     commands:
       - |
-        .buildkite/scripts/check_results.sh \
+        bash .buildkite/scripts/check_results.sh \
           "Unit tests for Qwen/Qwen2.5-2B-Instruct" ut_Qwen_Qwen2_5-2B-Instruct
 
   - label: "Integration tests for Qwen/Qwen2.5-2B-Instruct"
@@ -37,7 +37,7 @@ steps:
       EXECUTE_STAGE: "IntTest"
     commands:
       - |
-        .buildkite/scripts/check_results.sh \
+        bash .buildkite/scripts/check_results.sh \
           "Integration tests for Qwen/Qwen2.5-2B-Instruct" it_Qwen_Qwen2_5-2B-Instruct
 
   - label: "Performance benchmarks for Qwen/Qwen2.5-2B-Instruct"
@@ -56,7 +56,7 @@ steps:
       EXECUTE_STAGE: "Benchmark"
     commands:
       - |
-        .buildkite/scripts/check_results.sh \
+        bash .buildkite/scripts/check_results.sh \
           "Performance benchmarks for Qwen/Qwen2.5-2B-Instruct" pb_Qwen_Qwen2_5-2B-Instruct
 
   - label: "Stress tests for Qwen/Qwen2.5-2B-Instruct"
@@ -75,5 +75,5 @@ steps:
       EXECUTE_STAGE: "StressTest"
     commands:
       - |
-        .buildkite/scripts/check_results.sh \
+        bash .buildkite/scripts/check_results.sh \
           "Stress tests for Qwen/Qwen2.5-2B-Instruct" st_Qwen_Qwen2_5-2B-Instruct

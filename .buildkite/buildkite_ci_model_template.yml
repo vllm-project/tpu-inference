@@ -17,7 +17,7 @@ steps:
       EXECUTE_STAGE: "UnitTest"
     commands:
       - |
-        .buildkite/scripts/check_results.sh \
+        bash .buildkite/scripts/check_results.sh \
           "Unit tests for {MODEL_NAME}" ut_{SAFE_MODEL_NAME}
 
   - label: "Integration tests for {MODEL_NAME}"
@@ -37,7 +37,7 @@ steps:
       EXECUTE_STAGE: "IntTest"
     commands:
       - |
-        .buildkite/scripts/check_results.sh \
+        bash .buildkite/scripts/check_results.sh \
           "Integration tests for {MODEL_NAME}" it_{SAFE_MODEL_NAME}
 
   - label: "Performance benchmarks for {MODEL_NAME}"
@@ -56,7 +56,7 @@ steps:
       EXECUTE_STAGE: "Benchmark"
     commands:
       - |
-        .buildkite/scripts/check_results.sh \
+        bash .buildkite/scripts/check_results.sh \
           "Performance benchmarks for {MODEL_NAME}" pb_{SAFE_MODEL_NAME}
 
   - label: "Stress tests for {MODEL_NAME}"
@@ -75,5 +75,5 @@ steps:
       EXECUTE_STAGE: "StressTest"
     commands:
       - |
-        .buildkite/scripts/check_results.sh \
+        bash .buildkite/scripts/check_results.sh \
           "Stress tests for {MODEL_NAME}" st_{SAFE_MODEL_NAME}

@@ -17,7 +17,7 @@ steps:
       EXECUTE_STAGE: "UnitTest"
     commands:
       - |
-        .buildkite/scripts/check_results.sh \
+        bash .buildkite/scripts/check_results.sh \
           "Unit tests for meta-llama/Llama-3.1-70B-Instruct" ut_meta-llama_Llama-3_1-70B-Instruct
 
   - label: "Integration tests for meta-llama/Llama-3.1-70B-Instruct"
@@ -37,7 +37,7 @@ steps:
       EXECUTE_STAGE: "IntTest"
     commands:
       - |
-        .buildkite/scripts/check_results.sh \
+        bash .buildkite/scripts/check_results.sh \
           "Integration tests for meta-llama/Llama-3.1-70B-Instruct" it_meta-llama_Llama-3_1-70B-Instruct
 
   - label: "Performance benchmarks for meta-llama/Llama-3.1-70B-Instruct"
@@ -56,7 +56,7 @@ steps:
       EXECUTE_STAGE: "Benchmark"
     commands:
       - |
-        .buildkite/scripts/check_results.sh \
+        bash .buildkite/scripts/check_results.sh \
           "Performance benchmarks for meta-llama/Llama-3.1-70B-Instruct" pb_meta-llama_Llama-3_1-70B-Instruct
 
   - label: "Stress tests for meta-llama/Llama-3.1-70B-Instruct"
@@ -75,5 +75,5 @@ steps:
       EXECUTE_STAGE: "StressTest"
     commands:
       - |
-        .buildkite/scripts/check_results.sh \
+        bash .buildkite/scripts/check_results.sh \
           "Stress tests for meta-llama/Llama-3.1-70B-Instruct" st_meta-llama_Llama-3_1-70B-Instruct

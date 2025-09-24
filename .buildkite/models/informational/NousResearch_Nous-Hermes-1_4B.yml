@@ -17,7 +17,7 @@ steps:
       EXECUTE_STAGE: "UnitTest"
     commands:
       - |
-        .buildkite/scripts/check_results.sh \
+        bash .buildkite/scripts/check_results.sh \
           "Unit tests for NousResearch/Nous-Hermes-1.4B" ut_NousResearch_Nous-Hermes-1_4B
 
   - label: "Integration tests for NousResearch/Nous-Hermes-1.4B"
@@ -37,7 +37,7 @@ steps:
       EXECUTE_STAGE: "IntTest"
     commands:
       - |
-        .buildkite/scripts/check_results.sh \
+        bash .buildkite/scripts/check_results.sh \
           "Integration tests for NousResearch/Nous-Hermes-1.4B" it_NousResearch_Nous-Hermes-1_4B
 
   - label: "Performance benchmarks for NousResearch/Nous-Hermes-1.4B"
@@ -56,7 +56,7 @@ steps:
       EXECUTE_STAGE: "Benchmark"
     commands:
       - |
-        .buildkite/scripts/check_results.sh \
+        bash .buildkite/scripts/check_results.sh \
           "Performance benchmarks for NousResearch/Nous-Hermes-1.4B" pb_NousResearch_Nous-Hermes-1_4B
 
   - label: "Stress tests for NousResearch/Nous-Hermes-1.4B"
@@ -75,5 +75,5 @@ steps:
       EXECUTE_STAGE: "StressTest"
     commands:
       - |
-        .buildkite/scripts/check_results.sh \
+        bash .buildkite/scripts/check_results.sh \
           "Stress tests for NousResearch/Nous-Hermes-1.4B" st_NousResearch_Nous-Hermes-1_4B
