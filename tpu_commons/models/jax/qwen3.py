@@ -111,7 +111,7 @@ class Qwen3Attention(nnx.Module):
         q = apply_rope(q, md.input_positions, self.head_dim_original,
                        self.rope_theta, self.rope_scaling)
 
-        # k: (T,self.data_parallel_sharding K, H)
+        # k: (T, K, H)
         k = self.k_proj(x)
         k = self.k_norm(k)
         k = apply_rope(k, md.input_positions, self.head_dim_original,
