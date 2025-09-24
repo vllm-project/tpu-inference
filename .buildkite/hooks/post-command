@@ -3,9 +3,9 @@ set -euo pipefail
 
 echo "--- Post-command hook triggered ---"
 
-if [ -n "$EXECUTE_MODEL" ] && \
-   [ -n "$EXECUTE_STAGE" ] && \
-   [[ "$BUILDKITE_STEP_KEY" == "notifications_"* ]]; then
+if [ -n "${EXECUTE_MODEL:-}" ] && \
+   [ -n "${EXECUTE_STAGE:-}" ] && \
+   [[ "${BUILDKITE_STEP_KEY:-}" == "notifications_"* ]]; then
 
     echo "Test exited with status: $BUILDKITE_COMMAND_EXIT_STATUS"
 
