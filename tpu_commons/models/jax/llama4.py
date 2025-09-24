@@ -66,7 +66,7 @@ class Llama4ForCausalLM(nnx.Module):
         # Get the total number of layers from the config
         total_num_layers: int = getattr(text_config, "num_hidden_layers", 48)
         # Use the new parameter to limit the number of layers
-        num_layers_to_run = 1
+        num_layers_to_run = 2
         self.num_layers: int = min(total_num_layers, num_layers_to_run)
         # ====================== DEBUG ============================
 
@@ -313,7 +313,8 @@ class Llama4WeightLoader:
                                   False)
         
         self.interleave_moe_layer_step = getattr(vllm_config.model_config.hf_config.text_config, "interleave_moe_layer_step", 1)
-        self.expert_prefix = "shared_expert." if self.interleave_moe_layer_step == 1 else ""
+        self.expert_prefix = "shared_expert."
+        # self.expert_prefix = "shared_expert." if self.interleave_moe_layer_step == 1 else ""
         self._transpose_map = {
             "q_proj": (2, 0, 1),
             "k_proj": (2, 0, 1),
@@ -322,6 +323,9 @@ class Llama4WeightLoader:
             f"{self.expert_prefix}down_proj": (1, 0),
             f"{self.expert_prefix}gate_proj": (1, 0),
             f"{self.expert_prefix}up_proj": (1, 0),
+            "feed_forward.down_proj": (1, 0),
+            "feed_forward.gate_proj": (1, 0),
+            "feed_forward.up_proj": (1, 0),
             "o_proj": (1, 2, 0),
             "lm_head": (1, 0),
         }
@@ -409,11 +413,11 @@ class Llama4WeightLoader:
             mapped_name = re.sub(r"layers\.\*", f"layers.{layer_num}",
                                  mapped_name)
             mapped_model_weight = get_param(model_params, mapped_name)
-            if not loaded_name.endswith(".bias"):
-                loaded_weight = reshape_params(loaded_name, loaded_weight,
-                                               self._weight_shape_map)
-                loaded_weight = transpose_params(loaded_name, loaded_weight,
-                                                 self._transpose_map)
+            # if not loaded_name.endswith(".bias"):
+            #     loaded_weight = reshape_params(loaded_name, loaded_weight,
+            #                                    self._weight_shape_map)
+            #     loaded_weight = transpose_params(loaded_name, loaded_weight,
+            #                                      self._transpose_map)
             if mapped_model_weight.value.shape != loaded_weight.shape:
                 raise ValueError(
                     f"Loaded shape for {split_loaded_name}: {loaded_weight.shape} "
@@ -437,6 +441,7 @@ class Llama4WeightLoader:
 
         with jax.default_device(jax.devices("cpu")[0]):
             for loaded_name, loaded_weight in self.names_and_weights_generator:
+                is_moe_layer = False
                 # ====================== DEBUG ============================
                 layer_num_match = re.search(r"layers\.(\d+)", loaded_name)
                 if layer_num_match:
@@ -447,6 +452,9 @@ class Llama4WeightLoader:
                         # )
                         continue
                 # ====================== DEBUG ============================
+                    is_moe_layer = (layer_num + 1) % \
+                            self.interleave_moe_layer_step == 0
+                    self.expert_prefix = "shared_expert." if is_moe_layer else ""
 
                 if "gate_up_proj" in loaded_name:
                     self._map_llama4_gate_up_proj(model_for_loading,
