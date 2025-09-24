@@ -143,14 +143,37 @@ class TPUWorker(AbstractTpuWorker):
                     f"rank={self.rank} | "
                     f"node_id={get_node_id()} | "
                     f"is_driver_worker={self.is_driver_worker} | "
-                    f"hbm={utils.hbm_usage_gb(self.devices)}Gb")
+                    f"hbm={utils.hbm_usage_gb(self.devices)}GiB")
 
     def determine_available_memory(self) -> int:
+        gpu_memory_utilization = self.cache_config.gpu_memory_utilization
         hbm_usage = utils.hbm_usage_bytes(self.devices)
-        hbm_free = [limit - used for used, limit in hbm_usage]
-        total_hbm_free = sum(hbm_free)
-        taxed_hbm = total_hbm_free * self.cache_config.gpu_memory_utilization
-        return taxed_hbm
+        total_hbm_limit = total_hbm_used = 0
+        for used, limit in hbm_usage:
+            total_hbm_used += used
+            total_hbm_limit += limit
+
+        total_hbm_limit_cap = total_hbm_limit * gpu_memory_utilization
+        total_hbm_avail = int(total_hbm_limit_cap - total_hbm_used)
+
+        total_hbm_limit_gb = round(total_hbm_limit / utils.GBYTES, 2)
+        total_hbm_limit_cap_gb = round(total_hbm_limit_cap / utils.GBYTES, 2)
+        total_hbm_used_gb = round(total_hbm_used / utils.GBYTES, 2)
+        total_hbm_avail_gb = round(total_hbm_avail / utils.GBYTES, 2)
+
+        logger.info(f"Memory statistics | "
+                    f"{total_hbm_limit_gb=}GiB | "
+                    f"{total_hbm_limit_cap_gb=}GiB | "
+                    f"{total_hbm_used_gb=}GiB | "
+                    f"{total_hbm_avail_gb=}GiB")
+
+        if total_hbm_avail <= 0:
+            raise ValueError(f"{total_hbm_used_gb=}GiB exceeds "
+                             f"{total_hbm_limit_gb=}GiB by "
+                             f"{-total_hbm_avail_gb}GiB. Please consider "
+                             f"increasing --gpu-memory-utilization from "
+                             f"{gpu_memory_utilization} to a larger value.")
+        return total_hbm_avail
 
     def execute_model(
         self,
