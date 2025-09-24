@@ -1,0 +1,79 @@
+# NousResearch/Nous-Hermes-1.4B
+agents:
+  queue: tpu_v6e_queue
+steps:
+  - label: "Unit tests for NousResearch/Nous-Hermes-1.4B"
+    key: "ut_NousResearch_Nous-Hermes-1_4B"
+    commands:
+      # - replace_with_test_commands  # TODO: Replaced to actual test commands
+      - echo "[DEBUG], unit testing for NousResearch/Nous-Hermes-1.4B"  # TODO: Replace to actual test commands
+  - label: "Notifications: Unit tests for NousResearch/Nous-Hermes-1.4B"
+    key: "notifications_ut_NousResearch_Nous-Hermes-1_4B"
+    depends_on: "ut_NousResearch_Nous-Hermes-1_4B"
+    agents:
+      queue: tpu_v6e_queue
+    env:
+      EXECUTE_ENTITY: "NousResearch/Nous-Hermes-1.4B"
+      EXECUTE_STAGE: "UnitTest"
+    commands:
+      - |
+        .buildkite/scripts/check_results.sh \
+          "Unit tests for NousResearch/Nous-Hermes-1.4B" ut_NousResearch_Nous-Hermes-1_4B
+
+  - label: "Integration tests for NousResearch/Nous-Hermes-1.4B"
+    key: "it_NousResearch_Nous-Hermes-1_4B"
+    depends_on: "notifications_ut_NousResearch_Nous-Hermes-1_4B"
+    commands:
+      # TODO: expected_accuracy need parameterized
+      # - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/test_accuracy.sh -t 1 -m "NousResearch/Nous-Hermes-1.4B"
+      - echo "[DEBUG], integration testing for NousResearch/Nous-Hermes-1.4B"  # TODO: Replace to actual test commands
+  - label: "Notifications: Integration tests for NousResearch/Nous-Hermes-1.4B"
+    key: "notifications_it_NousResearch_Nous-Hermes-1_4B"
+    depends_on: "it_NousResearch_Nous-Hermes-1_4B"
+    agents:
+      queue: tpu_v6e_queue
+    env:
+      EXECUTE_ENTITY: "NousResearch/Nous-Hermes-1.4B"
+      EXECUTE_STAGE: "IntTest"
+    commands:
+      - |
+        .buildkite/scripts/check_results.sh \
+          "Integration tests for NousResearch/Nous-Hermes-1.4B" it_NousResearch_Nous-Hermes-1_4B
+
+  - label: "Performance benchmarks for NousResearch/Nous-Hermes-1.4B"
+    key: "pb_NousResearch_Nous-Hermes-1_4B"
+    depends_on: "notifications_it_NousResearch_Nous-Hermes-1_4B"
+    commands:
+      # - replace_with_test_command  # TODO
+      - echo "[DEBUG], performance benchmarking for NousResearch/Nous-Hermes-1.4B"  # TODO: Replace to actual test commands
+  - label: "Notifications: Performance benchmarks for NousResearch/Nous-Hermes-1.4B"
+    key: "notifications_pb_NousResearch_Nous-Hermes-1_4B"
+    depends_on: "pb_NousResearch_Nous-Hermes-1_4B"
+    agents:
+      queue: tpu_v6e_queue
+    env:
+      EXECUTE_ENTITY: "NousResearch/Nous-Hermes-1.4B"
+      EXECUTE_STAGE: "Benchmark"
+    commands:
+      - |
+        .buildkite/scripts/check_results.sh \
+          "Performance benchmarks for NousResearch/Nous-Hermes-1.4B" pb_NousResearch_Nous-Hermes-1_4B
+
+  - label: "Stress tests for NousResearch/Nous-Hermes-1.4B"
+    key: "st_NousResearch_Nous-Hermes-1_4B"
+    depends_on: "notifications_pb_NousResearch_Nous-Hermes-1_4B"
+    commands:
+      # - our_stress_tests_script NousResearch/Nous-Hermes-1.4B expected_throughput # TODO: expected_throughput need parameterized
+      - echo "[DEBUG], stress testing for NousResearch/Nous-Hermes-1.4B"  # TODO: Replace to actual test commands
+  - label: "Notifications: Stress tests for NousResearch/Nous-Hermes-1.4B"
+    key: "notifications_st_NousResearch_Nous-Hermes-1_4B"
+    depends_on: "st_NousResearch_Nous-Hermes-1_4B"
+    agents:
+      queue: tpu_v6e_queue
+    env:
+      EXECUTE_ENTITY: "NousResearch/Nous-Hermes-1.4B"
+      EXECUTE_STAGE: "StressTest"
+    commands:
+      - |
+        .buildkite/scripts/check_results.sh \
+          "Stress tests for NousResearch/Nous-Hermes-1.4B" st_NousResearch_Nous-Hermes-1_4B

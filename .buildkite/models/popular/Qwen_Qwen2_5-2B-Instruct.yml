@@ -1,0 +1,79 @@
+# Qwen/Qwen2.5-2B-Instruct
+agents:
+  queue: tpu_v6e_queue
+steps:
+  - label: "Unit tests for Qwen/Qwen2.5-2B-Instruct"
+    key: "ut_Qwen_Qwen2_5-2B-Instruct"
+    commands:
+      # - replace_with_test_commands  # TODO: Replaced to actual test commands
+      - echo "[DEBUG], unit testing for Qwen/Qwen2.5-2B-Instruct"  # TODO: Replace to actual test commands
+  - label: "Notifications: Unit tests for Qwen/Qwen2.5-2B-Instruct"
+    key: "notifications_ut_Qwen_Qwen2_5-2B-Instruct"
+    depends_on: "ut_Qwen_Qwen2_5-2B-Instruct"
+    agents:
+      queue: tpu_v6e_queue
+    env:
+      EXECUTE_ENTITY: "Qwen/Qwen2.5-2B-Instruct"
+      EXECUTE_STAGE: "UnitTest"
+    commands:
+      - |
+        .buildkite/scripts/check_results.sh \
+          "Unit tests for Qwen/Qwen2.5-2B-Instruct" ut_Qwen_Qwen2_5-2B-Instruct
+
+  - label: "Integration tests for Qwen/Qwen2.5-2B-Instruct"
+    key: "it_Qwen_Qwen2_5-2B-Instruct"
+    depends_on: "notifications_ut_Qwen_Qwen2_5-2B-Instruct"
+    commands:
+      # TODO: expected_accuracy need parameterized
+      # - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/test_accuracy.sh -t 1 -m "Qwen/Qwen2.5-2B-Instruct"
+      - echo "[DEBUG], integration testing for Qwen/Qwen2.5-2B-Instruct"  # TODO: Replace to actual test commands
+  - label: "Notifications: Integration tests for Qwen/Qwen2.5-2B-Instruct"
+    key: "notifications_it_Qwen_Qwen2_5-2B-Instruct"
+    depends_on: "it_Qwen_Qwen2_5-2B-Instruct"
+    agents:
+      queue: tpu_v6e_queue
+    env:
+      EXECUTE_ENTITY: "Qwen/Qwen2.5-2B-Instruct"
+      EXECUTE_STAGE: "IntTest"
+    commands:
+      - |
+        .buildkite/scripts/check_results.sh \
+          "Integration tests for Qwen/Qwen2.5-2B-Instruct" it_Qwen_Qwen2_5-2B-Instruct
+
+  - label: "Performance benchmarks for Qwen/Qwen2.5-2B-Instruct"
+    key: "pb_Qwen_Qwen2_5-2B-Instruct"
+    depends_on: "notifications_it_Qwen_Qwen2_5-2B-Instruct"
+    commands:
+      # - replace_with_test_command  # TODO
+      - echo "[DEBUG], performance benchmarking for Qwen/Qwen2.5-2B-Instruct"  # TODO: Replace to actual test commands
+  - label: "Notifications: Performance benchmarks for Qwen/Qwen2.5-2B-Instruct"
+    key: "notifications_pb_Qwen_Qwen2_5-2B-Instruct"
+    depends_on: "pb_Qwen_Qwen2_5-2B-Instruct"
+    agents:
+      queue: tpu_v6e_queue
+    env:
+      EXECUTE_ENTITY: "Qwen/Qwen2.5-2B-Instruct"
+      EXECUTE_STAGE: "Benchmark"
+    commands:
+      - |
+        .buildkite/scripts/check_results.sh \
+          "Performance benchmarks for Qwen/Qwen2.5-2B-Instruct" pb_Qwen_Qwen2_5-2B-Instruct
+
+  - label: "Stress tests for Qwen/Qwen2.5-2B-Instruct"
+    key: "st_Qwen_Qwen2_5-2B-Instruct"
+    depends_on: "notifications_pb_Qwen_Qwen2_5-2B-Instruct"
+    commands:
+      # - our_stress_tests_script Qwen/Qwen2.5-2B-Instruct expected_throughput # TODO: expected_throughput need parameterized
+      - echo "[DEBUG], stress testing for Qwen/Qwen2.5-2B-Instruct"  # TODO: Replace to actual test commands
+  - label: "Notifications: Stress tests for Qwen/Qwen2.5-2B-Instruct"
+    key: "notifications_st_Qwen_Qwen2_5-2B-Instruct"
+    depends_on: "st_Qwen_Qwen2_5-2B-Instruct"
+    agents:
+      queue: tpu_v6e_queue
+    env:
+      EXECUTE_ENTITY: "Qwen/Qwen2.5-2B-Instruct"
+      EXECUTE_STAGE: "StressTest"
+    commands:
+      - |
+        .buildkite/scripts/check_results.sh \
+          "Stress tests for Qwen/Qwen2.5-2B-Instruct" st_Qwen_Qwen2_5-2B-Instruct
