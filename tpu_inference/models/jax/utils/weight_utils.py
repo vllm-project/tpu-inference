@@ -12,6 +12,7 @@ from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
+import torch
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
@@ -112,6 +113,16 @@ def get_model_weights_files(
 
     weights_files.sort()
     return weights_files
+
+
+def _convert_torch_type_to_jax_type(torch_dtype: torch.dtype):
+    dtype_map = {
+        torch.float8_e4m3fn: jnp.float8_e4m3fn,
+        torch.float8_e5m2: jnp.float8_e5m2,
+        torch.bfloat16: jnp.bfloat16,
+        torch.float32: jnp.float32
+    }
+    return dtype_map.get(torch_dtype)
 
 
 def model_weights_single_file_generator(
@@ -277,7 +288,12 @@ def _load_hf_weights_on_thread(vllm_config,
         shardings = params
 
     for hf_key, hf_weight in model_weights_single_file_generator(
-            weights_file, framework="flax", filter_regex=filter_regex):
+            weights_file, framework="pt", filter_regex=filter_regex):
+
+        # As the jax numpy does not suport some dtypes such as float8, we read weight files as torch tensor first, and then convert it to jax.
+        target_jax_dtype = _convert_torch_type_to_jax_type(hf_weight.dtype)
+        hf_weight = hf_weight.to(
+            torch.float32).numpy().astype(target_jax_dtype)
 
         # Check if the key should retain its original dtype
         keep_original_dtype = False
