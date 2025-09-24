@@ -1,19 +1,17 @@
-tpu-info
+tpu-info==0.4.0  # pinning to 0.4.0 as newer version leads to segmentation fault on TPU https://github.com/vllm-project/vllm/pull/23135
 yapf==0.43.0
 pytest
 pytest-mock
 absl-py
 numpy
 google-cloud-storage
---pre
---index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
---find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html
-jax==0.7.1.dev20250813
-jaxlib==0.7.1.dev20250813
-libtpu==0.0.21.dev20250813+nightly
+jax==0.7.2
+jaxlib==0.7.2
+libtpu==0.0.23
 jaxtyping
 flax==0.11.1
 torchax==0.0.7
-qwix @ git+https://github.com/google/qwix@main
+qwix==0.1.0
+torchvision==0.23.0
 pathwaysutils
 parameterized
