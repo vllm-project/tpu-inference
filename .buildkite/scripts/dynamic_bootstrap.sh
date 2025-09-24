@@ -4,7 +4,7 @@ echo "--- Starting Special Buildkite Bootstrap ---"
 
 # for loop features and models upload to buildkite
 BUILDKITE_DIR=".buildkite"
-TARGET_FOLDERS="models features models/informational"
+TARGET_FOLDERS="models models/informational models/popular features"
 
 MODEL_LIST_KEY="tpu-model-list"
 INFORMATIONAL_MODEL_LIST_KEY="vllm-model-list"
