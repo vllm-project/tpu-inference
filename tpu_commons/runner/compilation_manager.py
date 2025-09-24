@@ -76,6 +76,7 @@ class CompilationManager:
 
         with self.runner.maybe_setup_dummy_loras(self.runner.lora_config):
             self._precompile_backbone()
+            # TODO(xw32): uncomment below before merging.
             self._precompile_select_from_array()
             self._precompile_compute_logits()
             self._precompile_disagg_utils()
@@ -86,7 +87,9 @@ class CompilationManager:
                 self._precompile_rejection_sampler()
 
     def _precompile_backbone(self) -> None:
-        for num_tokens in self.runner.num_tokens_paddings:
+        # TODO(xw32): change back to
+        # for num_tokens in self.runner.num_tokens_paddings:
+        for num_tokens in self.runner.num_tokens_paddings[:1]:
             input_ids = self._create_dummy_tensor((num_tokens, ), jnp.int32)
             positions = self._create_dummy_tensor((num_tokens, ), jnp.int32)
 
@@ -135,6 +138,29 @@ class CompilationManager:
                     self.runner.lora_config,
                     np.array([num_tokens], dtype=np.int32)):
                 lora_metadata = self.runner.lora_utils.extract_lora_metadata()
+                print('xw32 state sharding:')
+                jax.tree_util.tree_map(
+                    lambda leaf: print(f"  - Leaf sharding: {leaf.sharding}"),
+                    self.runner.state)
+                print('xw32 kv_caches sharding:')
+                jax.tree_util.tree_map(
+                    lambda leaf: print(f"  - Leaf sharding: {leaf.sharding}"),
+                    self.runner.kv_caches)
+                print('xw32 input_ids sharding:')
+                jax.tree_util.tree_map(
+                    lambda leaf: print(f"  - Leaf sharding: {leaf.sharding}"),
+                    input_ids)
+                print('xw32 attention_metadata sharding:')
+                jax.tree_util.tree_map(
+                    lambda leaf: print(f"  - Leaf sharding: {leaf.sharding}"),
+                    attention_metadata)
+                # print('xw32 layer_name_to_kvcache_index sharding:')
+                # jax.tree_util.tree_map(lambda leaf: print(f"  - Leaf sharding: {leaf.sharding}"), tuple(self.runner.layer_name_to_kvcache_index.items()))
+                print('xw32 lora_metadata sharding:')
+                jax.tree_util.tree_map(
+                    lambda leaf: print(f"  - Leaf sharding: {leaf.sharding}")
+                    if isinstance(leaf, jax.Array) else print(
+                        "sharding not available."), lora_metadata)
                 self._run_compilation(
                     "backbone",
                     model_fn_wrapper,
