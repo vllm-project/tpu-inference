@@ -156,7 +156,6 @@ class ForbidCompile:
             # Get cache statistics before the call
             info_before = original_cached_func.cache_info()
             misses_before = info_before.misses
-            print(f'xw32 {info_before=}, {original_cached_func=}')
 
             # Execute the original cached function
             result = original_cached_func(*args, **kwargs)
@@ -164,7 +163,6 @@ class ForbidCompile:
             # Get cache statistics after the call
             info_after = original_cached_func.cache_info()
             misses_after = info_after.misses
-            print(f'xw32 {info_after=}, {original_cached_func=}')
 
             # Check if a cache miss occurred
             if misses_after > misses_before:
