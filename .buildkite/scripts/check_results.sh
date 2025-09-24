@@ -21,7 +21,28 @@ for KEY in "$@"; do
     fi
 done
 
-if [ "${ANY_FAILED}" = "true" ] ; then
+# Check Test Result and upload to buildkite meta-data
+if [ -n "${EXECUTE_ENTITY:-}" ] && \
+   [ -n "${EXECUTE_STAGE:-}" ] && \
+   [[ "${BUILDKITE_STEP_KEY:-}" == "notifications_"* ]]; then
+
+    # If all conditions are true, execute the logic here.
+    echo "EXECUTE_ENTITY: $EXECUTE_ENTITY"
+    echo "EXECUTE_STAGE: $EXECUTE_STAGE"
+    echo "BUILDKITE_STEP_KEY: $BUILDKITE_STEP_KEY"
+
+    echo "Test exited with status: $BUILDKITE_COMMAND_EXIT_STATUS"
+    
+    if [ "${ANY_FAILED}" = "true" ]; then
+      echo "The step failed. Uploading $EXECUTE_ENTITY:$EXECUTE_STAGE result..."
+      buildkite-agent meta-data set "$EXECUTE_ENTITY:$EXECUTE_STAGE" "failed"
+    else
+      echo "The step passed. Uploading $EXECUTE_ENTITY:$EXECUTE_STAGE result..."
+      buildkite-agent meta-data set "$EXECUTE_ENTITY:$EXECUTE_STAGE" "passed"
+    fi
+fi
+
+if [ "${ANY_FAILED}" = "true" ]; then
     cat <<- YAML | buildkite-agent pipeline upload
     steps:
     - label: "${FAILURE_LABEL}"
