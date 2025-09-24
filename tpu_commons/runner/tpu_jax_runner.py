@@ -375,10 +375,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         input_ids, inputs_embeds = self._get_input_ids_embeds(
             input_ids, mm_embeds)
 
-        # TODO: Disable this for now
-        if self.is_multimodal_model:
-            self.maybe_forbid_compile = nullcontext()
-
         lora_metadata = self.lora_utils.extract_lora_metadata()
         # TODO: make _get_input_ids_embeds within this context
         # NOTE: right now, mm model will use embeddings as the input,
