@@ -30,10 +30,10 @@ class DisaggExecutor(Executor):
 
         start = sum(sizes[0:idx])
         end = start + sizes[idx]
-
+        logger.warning(f"All devices: {jax.devices()}, start: {start}, end:{end}")
         devices = jax.devices()[start:end]
         setattr(self.vllm_config.device_config, "slice", (idx + 1, sizes))
-        logger.info(
+        logger.warning(
             f"Creating DisaggExecutor with {devices}, index: {start} -> {end}")
 
         distributed_init_method = get_distributed_init_method(

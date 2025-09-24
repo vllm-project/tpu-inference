@@ -139,6 +139,7 @@ class TPUWorker(AbstractTpuWorker):
             )
         ensure_kv_transfer_initialized(self.vllm_config)
         self.model_runner = TPUModelRunner(self.vllm_config, self.devices)
+        logger.info(f"Initializing runner with self.devices: {self.devices}")
         logger.info(f"Init worker | "
                     f"rank={self.rank} | "
                     f"node_id={get_node_id()} | "
