@@ -13,11 +13,7 @@ tpu_model_list=$(buildkite-agent meta-data get "${MODEL_LIST_KEY}" --default "")
 vllm_model_list=$(buildkite-agent meta-data get "${INFORMATIONAL_MODEL_LIST_KEY}" --default "")
 popular_model_list=$(buildkite-agent meta-data get "${POPURLAR_MODEL_LIST_KEY}" --default "")
 
-echo "tl: $tpu_model_list"
-echo "vl: $vllm_model_list"
-echo "pl: $popular_model_list"
-
-feature_list="f1 f2"
+feature_list=$(buildkite-agent meta-data get "${FEATURE_LIST_METADATA_KEY}" --default "")
 STAGES="UnitTest IntTest Benchmark StressTest"
 
 # Output CSV files
