@@ -32,10 +32,13 @@ class DPScheduler(Scheduler):
 
     def __init__(self, *args, **kwargs):
         super(DPScheduler, self).__init__(*args, **kwargs)
-        print("HERE WENXIN!!")
 
         self.assigned_dp_rank: dict[str, int] = {}
-        self.dp_size = int(os.getenv("DATA_PARALLEL_SIZE", 1))
+        try:
+            self.dp_size = self.vllm_config.additional_config["sharding"]["sharding_strategy"]["data_parallelism"]
+        except KeyError:
+            self.dp_size = 1
+        assert self.dp_size >= 2, "Data parallel size must be at least 2." # Debugging purpose
         self.dp_kv_cache_config = self.kv_cache_config
         self.dp_kv_cache_config.num_blocks = (
             self.kv_cache_config.num_blocks // self.dp_size)
@@ -60,9 +63,7 @@ class DPScheduler(Scheduler):
         req_id = request.request_id
         if req_id in self.assigned_dp_rank:
             return self.assigned_dp_rank[req_id]
-
         self.assigned_dp_rank[req_id] = next(self.round_robin_counter)
-
         return self.assigned_dp_rank[req_id]
 
     def schedule(self) -> SchedulerOutput:
@@ -96,10 +97,8 @@ class DPScheduler(Scheduler):
 
         # First, schedule the RUNNING requests.
         req_index = 0
-        breakpoint()
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
-            print("processing running req", request.request_id)
             num_new_tokens = (request.num_tokens_with_spec +
                               request.num_output_placeholders -
                               request.num_computed_tokens)
@@ -234,7 +233,6 @@ class DPScheduler(Scheduler):
                     break
 
                 request = self.waiting.peek_request()
-                print("processing waiting req", request.request_id)
 
                 # KVTransfer: skip request if still waiting for remote kvs.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
