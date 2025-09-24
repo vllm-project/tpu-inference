@@ -6,6 +6,7 @@ import jax
 import torch
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from torchax.ops.mappings import j2t_dtype
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 from vllm.utils import supports_kw
@@ -298,8 +299,29 @@ def get_model(
 ) -> Any:
     impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
     logger.info(f"Loading model with MODEL_IMPL_TYPE={impl}")
+
     if impl == "flax_nnx":
-        return get_flax_model(vllm_config, rng, mesh, is_draft_model)
+        try:
+            # Try to load the flax model first
+            return get_flax_model(vllm_config, rng, mesh, is_draft_model)
+        except ValueError as e:
+            # Convert the error message to a string to check its contents
+            error_msg = str(e)
+
+            # Check if this is the specific "unsupported architecture" error.
+            # We check if it starts with the expected phrase and contains the key error message.
+            if error_msg.startswith("Model architectures ") and " are not supported for now" in error_msg:
+                logger.warning(
+                        f"Flax model failed with: '{error_msg}'. "
+                        "Falling back to vLLM implementation."
+                        )
+                # If it matches, fall back to the vLLM model. Change the dtype accordingly.
+                vllm_config.model_config.dtype = j2t_dtype(vllm_config.model_config.dtype.dtype)
+                return get_vllm_model(vllm_config, rng, mesh)
+            else:
+                # It was a different ValueError. So re-raise it.
+                logger.error(f"Failed to load flax model with an unexpected ValueError: {e}")
+                raise e  # Re-raise the original, unexpected error
     elif impl == "vllm":
         return get_vllm_model(vllm_config, rng, mesh)
     else:
