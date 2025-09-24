@@ -110,8 +110,10 @@ if __name__ == "__main__":
     args: dict = vars(parser.parse_args())
 
     if not disagg_utils.is_disagg_enabled():
+        print("Disagg not enabled!!!!!")
         main(args)
     else:
+        print("Disagg enabled!!!")
         from unittest.mock import patch
 
         from tpu_commons.core.core_tpu import DisaggEngineCoreProc
