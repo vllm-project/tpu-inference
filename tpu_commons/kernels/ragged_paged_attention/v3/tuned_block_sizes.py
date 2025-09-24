@@ -5,6 +5,9 @@ import jax.numpy as jnp
 from tpu_commons.kernels.ragged_paged_attention.v3.util import (
     align_to, get_device_name, get_dtype_packing, get_tpu_version,
     next_power_of_2)
+from tpu_commons.logger import init_logger
+
+logger = init_logger(__name__)
 
 # key
 #   - device_name
@@ -3728,10 +3731,21 @@ def get_tuned_block_sizes(
     max_num_tokens,
     pages_per_seq,
 ) -> tuple[int, int]:
-    """Look up for the best (num_kv_pages_per_blk, num_queries_per_blk) from auto-tuned table."""
+    """Search tuned values for (num_kv_pages_per_blk, num_queries_per_blk)."""
+
+    # Set default block sizes for each tpu_version.
     tpu_version = get_tpu_version()
     if tpu_version < 4:
         raise NotImplementedError('TPU version must be 4 or higher.')
+    match tpu_version:
+        case 4:
+            # TPUv4 has much smaller VMEM size so we pick fixed block sizes.
+            bkv_p, bq = (512 // page_size, 32)
+        case 7:
+            bkv_p, bq = (4096 // page_size, 32)
+        case _:
+            bkv_p, bq = (2048 // page_size, 32)
+
     keys = get_lookup_keys(
         page_size,
         q_dtype,
@@ -3743,23 +3757,12 @@ def get_tuned_block_sizes(
     )
     device, page_size, dtypes, head_dims, max_model_len = keys
 
-    # Default block sizes.
-    bkv_p, bq = (2048 // page_size, 32)
-    if tpu_version == 4:
-        # TPUv4 has much smaller VMEM size so we pick fixed block sizes.
-        bkv_p, bq = (512 // page_size, 32)
-    elif tpu_version == 7:
-        bkv_p, bq = (4096 // page_size, 32)
-    if device in TUNED_BLOCK_SIZES:
-        tb = TUNED_BLOCK_SIZES[device]
-        if page_size in tb:
-            tb = tb[page_size]
-            if dtypes in tb:
-                tb = tb[dtypes]
-                if head_dims in tb:
-                    tb = tb[head_dims]
-                    if max_model_len in tb:
-                        bkv_p, bq = tb[max_model_len]
+    try:
+        bkv_p, bq = TUNED_BLOCK_SIZES[device][page_size][dtypes][head_dims][
+            max_model_len]
+    except KeyError:
+        logger.warning_once(
+            'Couldn`t find tuned sizes for the RPA v3 kernel with %s', keys)
 
     return (min(pages_per_seq, bkv_p), min(max_num_tokens, bq))
 
