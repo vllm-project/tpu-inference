@@ -107,7 +107,7 @@ model_list_string=$(printf "%s\n" "${model_names[@]}")
 if [[ -n "$tpu_model_list_str" ]]; then
   echo "--- Uploading tpu_model_list_str to Meta-data:${MODEL_LIST_KEY}"
   echo "${tpu_model_list_str}" | buildkite-agent meta-data set "${MODEL_LIST_KEY}"
-  echo "Testing: $(buildkite-agent meta-data get "MODEL_LIST_KEY")"
+  echo "Testing: $(buildkite-agent meta-data get "${MODEL_LIST_KEY}")"
 else
   echo "--- No tpu-support Models found to upload."
 fi

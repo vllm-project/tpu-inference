@@ -12,9 +12,9 @@ FEATURE_LIST_METADATA_KEY="feature-list"
 # tpu_model_list="Qwen/Qwen2.5-0.5B-Instruct Qwen/Qwen2.5-2B-Instruct"
 # vllm_model_list="NousResearch/Nous-Hermes-1.4B NousResearch/Nous-Hermes-2.5B"
 # popular_model_list="meta-llama/Llama-3.1-8B-Instruct meta-llama/Llama-3.2-8B-Instruct"
-tpu_model_list=$(buildkite-agent meta-data get "${MODEL_LIST_KEY}")
-vllm_model_list=$(buildkite-agent meta-data get "${INFORMATIONAL_MODEL_LIST_KEY}")
-popular_model_list=$(buildkite-agent meta-data get "${POPURLAR_MODEL_LIST_KEY}")
+tpu_model_list=$(buildkite-agent meta-data get "${MODEL_LIST_KEY}" --default "")
+vllm_model_list=$(buildkite-agent meta-data get "${INFORMATIONAL_MODEL_LIST_KEY}" --default "")
+popular_model_list=$(buildkite-agent meta-data get "${POPURLAR_MODEL_LIST_KEY}" --default "")
 
 feature_list="f1 f2"
 STAGES="UnitTest IntTest Benchmark StressTest"
@@ -30,7 +30,7 @@ echo "Feature,UnitTest,IntTest,Benchmark,StressTest" > "$output_feature_support_
 check_tpu_model() {
     local model="$1"
     for stage in $STAGES; do
-        result=$(buildkite-agent meta-data get "${model}:${stage}" || echo "not_run")
+        result=$(buildkite-agent meta-data get "${model}:${stage}" --default "not_run")
         if [[ "$result" != "passed" ]]; then
             echo "TPU model $model failed at $stage ($result)"
             ANY_FAILED=true
@@ -43,7 +43,7 @@ check_vllm_model() {
     local model="$1"
     local required="UnitTest IntTest"
     for stage in $required; do
-        result=$(buildkite-agent meta-data get "${model}:${stage}" || echo "not_run")
+        result=$(buildkite-agent meta-data get "${model}:${stage}" --default "not_run")
         if [[ "$result" != "passed" ]]; then
             echo "VLLM model $model failed at $stage ($result)"
             ANY_FAILED=true
@@ -57,7 +57,7 @@ process_models() {
     for model in $model_list; do
         row="$model"
         for stage in $STAGES; do
-            result=$(buildkite-agent meta-data get "${model}:${stage}" || echo "${model}:${stage} not_run")
+            result=$(buildkite-agent meta-data get "${model}:${stage}" --default "${model}:${stage} not_run")
             row="$row,$result"
         done
         echo "$row" >> "$output_model_support_matrix_file"
@@ -76,7 +76,7 @@ process_features() {
     for feature in $feature_list; do
         row="$feature"
         for stage in $STAGES; do
-            result=$(buildkite-agent meta-data get "${feature}:${stage}" || echo "${feature}:${stage} not_run")
+            result=$(buildkite-agent meta-data get "${feature}:${stage}" --default "${feature}:${stage} not_run")
             row="$row,$result"
         done
         echo "$row" >> "$output_feature_support_matrix_file"
@@ -96,8 +96,8 @@ echo "--- Checking features Outcomes and Generating Reports ---"
 process_features "$feature_list"
 
 # Get commit hashes
-VLLM_COMMIT_HASH=$(buildkite-agent meta-data get 'VLLM_COMMIT_HASH' || echo "not_set")
-TPU_COMMONS_COMMIT_HASH=$(buildkite-agent meta-data get 'TPU_COMMONS_COMMIT_HASH' || echo "not_set")
+VLLM_COMMIT_HASH=$(buildkite-agent meta-data get 'VLLM_COMMIT_HASH' --default "not_set")
+TPU_COMMONS_COMMIT_HASH=$(buildkite-agent meta-data get 'TPU_COMMONS_COMMIT_HASH' --default "not_set")
 
 if [ "$ANY_FAILED" = true ]; then
     echo "Some checks failed!"
