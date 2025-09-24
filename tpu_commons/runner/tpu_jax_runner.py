@@ -11,7 +11,6 @@ import jaxtyping
 import numpy as np
 import torch
 import vllm.envs as envs
-import vllm.v1.core.sched.scheduler as vLLMScheduler
 from flax import nnx
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.ops.mappings import j2t_dtype
@@ -60,6 +59,9 @@ from tpu_commons.spec_decode.jax.eagle3 import Eagle3Proposer
 from tpu_commons.utils import device_array, make_optimized_mesh
 
 # Monkey patching vLLM scheduler
+import vllm.v1.core.sched.scheduler as vLLMScheduler
+from tpu_commons.core.sched.dp_scheduler import DPScheduler
+
 vLLMScheduler.Scheduler = DPScheduler
 
 logger = init_logger(__name__)
@@ -365,7 +367,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             return DUMMY_METADATA, EMPTY_MODEL_RUNNER_OUTPUT,
 
         (input_ids, attn_metadata, sampling_metadata, logits_indices,
-         spec_decode_metadata) = self._prepare_inputs(scheduler_output)
+         spec_decode_metadata, original_positions) = self._prepare_inputs(scheduler_output)
 
         # multi-modal support
         if self.is_multimodal_model:
@@ -416,6 +418,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 hidden_states,
                 lora_metadata,
             )
+            
             if scheduler_output.grammar_bitmask is not None:
                 (
                     require_struct_decoding, grammar_bitmask_padded, arange
@@ -500,6 +503,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             next_tokens = np.asarray(jax.device_get(next_tokens))
             # mask out tokens where logit_indices = 0
             next_tokens = next_tokens[logits_indices != -1]
+            
+            # Here need to map token positions back to the original request order
+            next_tokens = next_tokens[original_positions]
             selected_token_ids = np.expand_dims(next_tokens[:num_reqs], 1)
             valid_sampled_token_ids = selected_token_ids.tolist()
         else:
@@ -572,20 +578,22 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
 
+        breakpoint()
         # Fake DP scheduler output
         dp_size = self.mesh.shape["data"]
-        print(f"dp_size: {dp_size}")
         self.input_batch.req_dp_ranks = []
         for i, id in enumerate(self.input_batch.req_ids):
             dp_rank = scheduler_output.assigned_dp_rank[id]
             self.input_batch.req_dp_ranks.append(dp_rank)
         print("self.input_batch.req_dp_ranks", self.input_batch.req_dp_ranks)
         # Sort requests into DP ranks
-        req_ids_dp = defaultdict(list)
-        req_indices_dp = defaultdict(list)
-        num_scheduled_tokens_per_dp_rank = defaultdict(int)
-        scheduled_tokens_per_dp_rank = defaultdict(list)
-        num_req_per_dp_rank = defaultdict(int)
+        req_ids_dp = {dp_rank: [] for dp_rank in range(dp_size)}
+        req_indices_dp = {dp_rank: [] for dp_rank in range(dp_size)}
+        num_scheduled_tokens_per_dp_rank = {dp_rank: 0 for dp_rank in range(dp_size)}
+        scheduled_tokens_per_dp_rank = {dp_rank: [] for dp_rank in range(dp_size)}
+        num_req_per_dp_rank = {dp_rank: 0 for dp_rank in range(dp_size)}
+
+        
 
         for req_id, dp_rank in zip(self.input_batch.req_ids[:num_reqs],
                                    self.input_batch.req_dp_ranks[:num_reqs]):
@@ -597,6 +605,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             scheduled_tokens_per_dp_rank[dp_rank].append(
                 scheduler_output.num_scheduled_tokens[req_id])
             num_req_per_dp_rank[dp_rank] += 1
+
+        original_positions = sum(req_indices_dp.values(), [])
+        original_positions = np.argsort(np.array(original_positions))
 
         num_req_each_dp_rank_list = [
             num_req_per_dp_rank[dp_rank] for dp_rank in range(dp_size)
@@ -639,7 +650,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         ############# get self.input_ids_cpu #############
         # populate self.input_ids_cpu and self.positions_cpu
         for dp_rank in range(dp_size):
-
+            if num_req_per_dp_rank[dp_rank] == 0:
+                continue
             token_offset = padded_num_scheduled_tokens_per_dp_rank * dp_rank
             req_indices = np.repeat(req_indices_dp[dp_rank],
                                     scheduled_tokens_per_dp_rank[dp_rank])
@@ -704,7 +716,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # print("token_indices", token_indices)
 
         ##########################
-        # populate self.query_start_loc_cpu and self.seq_lens_cpu
+        # populate self.query_start_loc_cpu  
 
         for dp_rank in range(dp_size):
             req_offset = dp_rank * (self.max_num_reqs_per_dp + 1)
@@ -734,7 +746,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             _logits_indices_rank[:_num_reqs] += token_offset
             _logits_indices.append(_logits_indices_rank)
 
+        # populate seq_lens
         for dp_rank in range(dp_size):
+            _num_reqs = num_req_per_dp_rank[dp_rank]
             req_offset = dp_rank * (self.max_num_reqs_per_dp)
             _num_reqs_so_far = cum_num_req_each_dp_rank_list[dp_rank]
             self.seq_lens_cpu[req_offset:req_offset + _num_reqs] = (
@@ -839,6 +853,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
              sharding=self.data_parallel_sharding)
 
         # print()
+        breakpoint()
         # print("DP input_ids ", input_ids.shape, input_ids.sharding)
         # print("DP positions", positions.shape, positions.sharding)
         # print("DP block_tables", block_tables.shape, block_tables.sharding)
@@ -870,6 +885,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             sampling_metadata,
             logits_indices,
             spec_decode_metadata,
+            original_positions
         )
 
     def _get_input_ids_embeds(self, input_ids: jax.Array,
