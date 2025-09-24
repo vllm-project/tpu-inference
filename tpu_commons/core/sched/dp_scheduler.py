@@ -535,7 +535,9 @@ class DPScheduler(Scheduler):
             scheduler_output.kv_connector_metadata = meta
 
         # collect KV cache events from KV cache manager
-        events = self.kv_cache_manager[req_dp_rank].take_events()
+        events = []
+        for dp_rank in range(self.dp_size):
+            events.extend(self.kv_cache_manager[dp_rank].take_events())
 
         # collect KV cache events from connector
         if self.connector is not None:
