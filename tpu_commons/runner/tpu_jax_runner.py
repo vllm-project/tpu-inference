@@ -376,7 +376,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             input_ids, mm_embeds)
 
         # TODO: Disable this for now
-        if self.is_multimodal_model or self.lora_config is not None:
+        if self.lora_config is not None:
             self.maybe_forbid_compile = nullcontext()
 
         lora_metadata = self.lora_utils.extract_lora_metadata()

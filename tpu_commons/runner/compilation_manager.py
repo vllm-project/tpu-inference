@@ -70,11 +70,9 @@ class CompilationManager:
             return
         logger.info("Precompile all the subgraphs with possible input shapes.")
 
+        self._precompile_backbone_text_only()
         if self.runner.is_multimodal_model:
-            logger.info("[TEMP] skip precompiling for multi-modal models")
-            return
-
-        self._precompile_backbone()
+            self._precompile_backbone_with_inputs_embeds()
         self._precompile_select_from_array()
         self._precompile_compute_logits()
         self._precompile_disagg_utils()
@@ -84,65 +82,92 @@ class CompilationManager:
         if self.runner.speculative_config:
             self._precompile_rejection_sampler()
 
-    def _precompile_backbone(self) -> None:
+    def _precompile_backbone_helper(self, name, *, input_ids, positions,
+                                    inputs_embeds) -> None:
+        num_tokens = None
+        if input_ids is not None:
+            num_tokens = input_ids.shape[0]
+        elif inputs_embeds is not None:
+            num_tokens = inputs_embeds.shape[0]
+        assert num_tokens is not None
+
+        # Keep existing pattern for complex array operations
+        block_tables = self.runner.block_table_cpu[:self.runner.max_num_reqs]
+        block_tables = block_tables.reshape(-1)
+        block_tables = device_array(self.runner.mesh, block_tables)
+
+        seq_lens = self._create_dummy_tensor((self.runner.max_num_reqs, ),
+                                             jnp.int32)
+        query_start_loc = self._create_dummy_tensor(
+            (self.runner.max_num_reqs + 1, ), jnp.int32)
+
+        # Keep existing pattern for specific value arrays
+        request_distribution = np.array([0, 0, 0], dtype=np.int32)
+        request_distribution = device_array(self.runner.mesh,
+                                            request_distribution)
+
+        attention_metadata = AttentionMetadata(
+            input_positions=positions,
+            block_tables=block_tables,
+            seq_lens=seq_lens,
+            query_start_loc=query_start_loc,
+            request_distribution=request_distribution,
+        )
+
+        def model_fn_wrapper(
+            state,
+            kv_caches,
+            input_ids,
+            attention_metadata,
+            inputs_embeds,
+            layer_name_to_kvcache_index,
+            lora_metadata,
+        ):
+            kv_caches, hidden_states, aux_hidden_states = self.runner.model_fn(
+                state, kv_caches, input_ids, attention_metadata, inputs_embeds,
+                layer_name_to_kvcache_index, lora_metadata)
+            self.runner.kv_caches = kv_caches
+            return hidden_states
+
+        lora_metadata = None
+        self._run_compilation(
+            name,
+            model_fn_wrapper,
+            self.runner.state,
+            self.runner.kv_caches,
+            input_ids,
+            attention_metadata,
+            inputs_embeds,
+            tuple(self.runner.layer_name_to_kvcache_index.items()),
+            lora_metadata,
+            num_tokens=num_tokens,
+        )
+
+    def _precompile_backbone_text_only(self) -> None:
         for num_tokens in self.runner.num_tokens_paddings:
             input_ids = self._create_dummy_tensor((num_tokens, ), jnp.int32)
             positions = self._create_dummy_tensor((num_tokens, ), jnp.int32)
+            self._precompile_backbone_helper("backbone",
+                                             input_ids=input_ids,
+                                             positions=positions,
+                                             inputs_embeds=None)
 
-            # Keep existing pattern for complex array operations
-            block_tables = self.runner.block_table_cpu[:self.runner.
-                                                       max_num_reqs]
-            block_tables = block_tables.reshape(-1)
-            block_tables = device_array(self.runner.mesh, block_tables)
-
-            seq_lens = self._create_dummy_tensor((self.runner.max_num_reqs, ),
-                                                 jnp.int32)
-            query_start_loc = self._create_dummy_tensor(
-                (self.runner.max_num_reqs + 1, ), jnp.int32)
-
-            # Keep existing pattern for specific value arrays
-            request_distribution = np.array([0, 0, 0], dtype=np.int32)
-            request_distribution = device_array(self.runner.mesh,
-                                                request_distribution)
-
-            attention_metadata = AttentionMetadata(
-                input_positions=positions,
-                block_tables=block_tables,
-                seq_lens=seq_lens,
-                query_start_loc=query_start_loc,
-                request_distribution=request_distribution,
-            )
-
-            inputs_embeds = None
-
-            def model_fn_wrapper(
-                state,
-                kv_caches,
-                input_ids,
-                attention_metadata,
-                inputs_embeds,
-                layer_name_to_kvcache_index,
-                lora_metadata,
-            ):
-                kv_caches, hidden_states, aux_hidden_states = self.runner.model_fn(
-                    state, kv_caches, input_ids, attention_metadata,
-                    inputs_embeds, layer_name_to_kvcache_index, lora_metadata)
-                self.runner.kv_caches = kv_caches
-                return hidden_states
-
-            lora_metadata = None
-            self._run_compilation(
-                "backbone",
-                model_fn_wrapper,
-                self.runner.state,
-                self.runner.kv_caches,
-                input_ids,
-                attention_metadata,
-                inputs_embeds,
-                tuple(self.runner.layer_name_to_kvcache_index.items()),
-                lora_metadata,
-                num_tokens=num_tokens,
-            )
+    def _precompile_backbone_with_inputs_embeds(self) -> None:
+        hidden_size = self.runner.model_config.get_hidden_size()
+        dtype = self.runner.model_config.dtype
+        for num_tokens in self.runner.num_tokens_paddings:
+            inputs_embeds = self._create_dummy_tensor(
+                (num_tokens, hidden_size), dtype)
+            if self.runner.uses_mrope:
+                positions = self._create_dummy_tensor((3, num_tokens),
+                                                      jnp.int32)
+            else:
+                positions = self._create_dummy_tensor((num_tokens, ),
+                                                      jnp.int32)
+            self._precompile_backbone_helper("backbone with embeds",
+                                             input_ids=None,
+                                             positions=positions,
+                                             inputs_embeds=inputs_embeds)
 
     def _precompile_select_from_array_helper(
         self,
