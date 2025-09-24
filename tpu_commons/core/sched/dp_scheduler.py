@@ -96,8 +96,10 @@ class DPScheduler(Scheduler):
 
         # First, schedule the RUNNING requests.
         req_index = 0
+        breakpoint()
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
+            print("processing running req", request.request_id)
             num_new_tokens = (request.num_tokens_with_spec +
                               request.num_output_placeholders -
                               request.num_computed_tokens)
@@ -224,7 +226,7 @@ class DPScheduler(Scheduler):
         # Use a temporary RequestQueue to collect requests that need to be
         # skipped and put back at the head of the waiting queue later
         skipped_waiting_requests = create_request_queue(self.policy)
-
+        breakpoint()
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
             while self.waiting and token_budget > 0:
@@ -232,6 +234,7 @@ class DPScheduler(Scheduler):
                     break
 
                 request = self.waiting.peek_request()
+                print("processing waiting req", request.request_id)
 
                 # KVTransfer: skip request if still waiting for remote kvs.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
@@ -294,6 +297,9 @@ class DPScheduler(Scheduler):
                                 _num_new_local_computed_tokens)
                     if dp_rank is None:
                         dp_rank = self.assign_dp_rank(request)
+                    else:
+                        self.assigned_dp_rank[request.request_id] = dp_rank
+                        print(f"{request.request_id}. prefix cache hit: {dp_rank}")
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -385,7 +391,7 @@ class DPScheduler(Scheduler):
                         self.scheduler_config.max_num_encoder_input_tokens)
                 else:
                     num_encoder_tokens = 0
-                # here
+                
                 req_dp_rank = self.assigned_dp_rank[request.request_id]
                 new_blocks = self.kv_cache_manager[req_dp_rank].allocate_slots(
                     request,

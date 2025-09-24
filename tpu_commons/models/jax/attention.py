@@ -98,5 +98,6 @@ def attention(
             md.query_start_loc,
             md.request_distribution,
         )
+    # print("updated kv cache sum", jax.numpy.sum(kv_cache, dtype=jax.numpy.float32))
 
     return kv_cache, output

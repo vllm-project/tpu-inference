@@ -186,6 +186,7 @@ class KVCacheManager:
         for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
             assert kv_cache_tensor.size % page_size_bytes == 0
             num_blocks = kv_cache_tensor.size // page_size_bytes
+            num_blocks = (num_blocks//4)*4
             # NOTE: we'll multiply the num_kv_heads by 2 in the function
             kv_cache = create_kv_caches(
                 num_blocks=num_blocks,
