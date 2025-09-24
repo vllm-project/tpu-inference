@@ -28,7 +28,6 @@ def use_v1_only(monkeypatch: pytest.MonkeyPatch):
 def setup_vllm(num_loras: int) -> vllm.LLM:
     return vllm.LLM(model="Qwen/Qwen2.5-3B-Instruct",
                     max_model_len=256,
-                    max_seq_len_to_capture=256,
                     max_num_seqs=8,
                     enable_lora=True,
                     max_loras=num_loras,
