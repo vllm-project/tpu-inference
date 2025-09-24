@@ -20,6 +20,9 @@ logger = init_logger(__name__)
 
 _MODEL_REGISTRY = {}
 
+class UnsupportedArchitectureError(ValueError):
+    """Raised when a model architecture is not supported in the registry."""
+    pass
 
 def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     # NOTE: Use inline imports here, otherwise the normal imports
@@ -54,7 +57,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     for arch in architectures:
         if arch in _MODEL_REGISTRY:
             return _MODEL_REGISTRY[arch]
-    raise ValueError(
+    raise UnsupportedArchitectureError(
         f"Model architectures {architectures} are not supported for now. "
         f"Supported architectures: {list(_MODEL_REGISTRY.keys())}")
 
@@ -304,24 +307,17 @@ def get_model(
         try:
             # Try to load the flax model first
             return get_flax_model(vllm_config, rng, mesh, is_draft_model)
-        except ValueError as e:
+        except UnsupportedArchitectureError as e:
             # Convert the error message to a string to check its contents
             error_msg = str(e)
 
-            # Check if this is the specific "unsupported architecture" error.
-            # We check if it starts with the expected phrase and contains the key error message.
-            if error_msg.startswith("Model architectures ") and " are not supported for now" in error_msg:
-                logger.warning(
-                        f"Flax model failed with: '{error_msg}'. "
-                        "Falling back to vLLM implementation."
-                        )
-                # If it matches, fall back to the vLLM model. Change the dtype accordingly.
-                vllm_config.model_config.dtype = j2t_dtype(vllm_config.model_config.dtype.dtype)
-                return get_vllm_model(vllm_config, rng, mesh)
-            else:
-                # It was a different ValueError. So re-raise it.
-                logger.error(f"Failed to load flax model with an unexpected ValueError: {e}")
-                raise e  # Re-raise the original, unexpected error
+            logger.warning(
+                    f"Flax model failed with: '{error_msg}'. "
+                    "Falling back to vLLM implementation."
+                    )
+            # Fall back to the vLLM model and updating the dtype accordingly
+            vllm_config.model_config.dtype = j2t_dtype(vllm_config.model_config.dtype.dtype)
+            return get_vllm_model(vllm_config, rng, mesh)
     elif impl == "vllm":
         return get_vllm_model(vllm_config, rng, mesh)
     else:
