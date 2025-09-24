@@ -37,6 +37,9 @@ steps:
     depends_on: "it_meta-llama_Llama-3_1-8B-Instruct"
     agents:
       queue: tpu_v6e_queue
+    env:
+      EXECUTE_MODEL: "meta-llama/Llama-3.1-8B-Instruct"
+      EXECUTE_STAGE: "IntTest"
     commands:
       - |
         .buildkite/scripts/check_results.sh \
@@ -53,6 +56,9 @@ steps:
     depends_on: "pb_meta-llama_Llama-3_1-8B-Instruct"
     agents:
       queue: tpu_v6e_queue
+    env:
+      EXECUTE_MODEL: "meta-llama/Llama-3.1-8B-Instruct"
+      EXECUTE_STAGE: "Benchmark"
     commands:
       - |
         .buildkite/scripts/check_results.sh \
@@ -69,6 +75,9 @@ steps:
     depends_on: "st_meta-llama_Llama-3_1-8B-Instruct"
     agents:
       queue: tpu_v6e_queue
+    env:
+      EXECUTE_MODEL: "meta-llama/Llama-3.1-8B-Instruct"
+      EXECUTE_STAGE: "StressTest"
     commands:
       - |
         .buildkite/scripts/check_results.sh \
