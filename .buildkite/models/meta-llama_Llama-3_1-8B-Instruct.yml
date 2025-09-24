@@ -19,8 +19,10 @@ steps:
       - |
         .buildkite/scripts/check_results.sh \
           "Unit tests for meta-llama/Llama-3.1-8B-Instruct" ut_meta-llama_Llama-3_1-8B-Instruct
-    plugins:
-      - ".buildkite": ~
+    post-command: |
+      echo "Test post-command?"
+    # plugins:
+    #   - ".buildkite": ~
 
   - label: "Integration tests for meta-llama/Llama-3.1-8B-Instruct"
     key: "it_meta-llama_Llama-3_1-8B-Instruct"
