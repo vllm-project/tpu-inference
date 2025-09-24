@@ -9,12 +9,13 @@ POPURLAR_MODEL_LIST_KEY="popular-model-list"
 
 FEATURE_LIST_METADATA_KEY="feature-list"
 
-# tpu_model_list="Qwen/Qwen2.5-0.5B-Instruct Qwen/Qwen2.5-2B-Instruct"
-# vllm_model_list="NousResearch/Nous-Hermes-1.4B NousResearch/Nous-Hermes-2.5B"
-# popular_model_list="meta-llama/Llama-3.1-8B-Instruct meta-llama/Llama-3.2-8B-Instruct"
 tpu_model_list=$(buildkite-agent meta-data get "${MODEL_LIST_KEY}" --default "")
 vllm_model_list=$(buildkite-agent meta-data get "${INFORMATIONAL_MODEL_LIST_KEY}" --default "")
 popular_model_list=$(buildkite-agent meta-data get "${POPURLAR_MODEL_LIST_KEY}" --default "")
+
+echo "tl: $tpu_model_list"
+echo "vl: $vllm_model_list"
+echo "pl: $popular_model_list"
 
 feature_list="f1 f2"
 STAGES="UnitTest IntTest Benchmark StressTest"
@@ -106,11 +107,14 @@ if [ "$ANY_FAILED" = true ]; then
     exit 1
 else
     echo "--- Uploading Commit Hash to Repo ---"
-    echo "Will commit to tpu_commons main"
+    # TODO: Will commit hash value to tpu_commons main
 fi
 
 echo "--- Print Model Report Content ---"
 cat "$output_model_support_matrix_file"
+
+echo "--- Print Feature Report Content ---"
+cat "$output_feature_support_matrix_file"
 
 echo "--- Uploading CSV Reports as Buildkite Artifacts ---"
 buildkite-agent artifact upload "$output_model_support_matrix_file"
