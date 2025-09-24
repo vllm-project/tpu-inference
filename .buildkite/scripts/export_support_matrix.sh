@@ -109,6 +109,9 @@ else
     echo "Will commit to tpu_commons main"
 fi
 
+echo "--- Print Model Report Content ---"
+cat "$output_model_support_matrix_file"
+
 echo "--- Uploading CSV Reports as Buildkite Artifacts ---"
 buildkite-agent artifact upload "$output_model_support_matrix_file"
 buildkite-agent artifact upload "$output_feature_support_matrix_file"
