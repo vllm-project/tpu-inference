@@ -402,6 +402,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                      tuple(self.layer_name_to_kvcache_index.items()),
                      lora_metadata,
                  )
+                
+                # ====================== DEBUG ============================
+                self._hidden_states_for_debug = aux_hidden_states
+                # ====================== DEBUG ============================
 
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)
@@ -546,7 +550,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             pooler_output=[],
             kv_connector_output=kv_connector_output,
         )
-        return attn_metadata, model_runner_output
+
+        # return attn_metadata, model_runner_output
+        # ====================== DEBUG ============================
+        return attn_metadata, model_runner_output, aux_hidden_states
+        # ====================== DEBUG ============================
 
     @functools.partial(jax.jit, static_argnums=(0, ))
     def _select_from_array_fn(self, array, indices_to_select):

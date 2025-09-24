@@ -127,6 +127,16 @@ def model_weights_single_file_generator(
     with jax.default_device(jax.devices("cpu")[0]):
         with safe_open(weights_file, framework=framework) as f:
             for name in f.keys():
+                # ====================== DEBUG ============================
+                layer_num_match = re.search(r"layers\.(\d+)", name)
+                if layer_num_match:
+                    layer_num = int(layer_num_match.group(1))
+                    if layer_num >= 2:
+                        # logger.warning(
+                        #     f"Skipping weight for layer {layer_num} as the model only has {num_model_layers} layers."
+                        # )
+                        continue
+                # ====================== DEBUG ============================
                 if filter_regex is not None and not re.match(
                         filter_regex, name):
                     continue
