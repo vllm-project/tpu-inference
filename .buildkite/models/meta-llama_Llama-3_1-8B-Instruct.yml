@@ -13,17 +13,12 @@ steps:
     agents:
       queue: tpu_v6e_queue
     env:
-      EXECUTE_MODEL: "meta-llama/Llama-3.1-8B-Instruct"
+      EXECUTE_ENTITY: "meta-llama/Llama-3.1-8B-Instruct"
       EXECUTE_STAGE: "UnitTest"
     commands:
       - |
         .buildkite/scripts/check_results.sh \
           "Unit tests for meta-llama/Llama-3.1-8B-Instruct" ut_meta-llama_Llama-3_1-8B-Instruct
-    # plugins:
-    #   - buildkite-plugins/hooks-plugin#v1.1.0:
-    #     directory: ".buildkite"
-    # plugins:
-    #   - ".buildkite": ~
 
   - label: "Integration tests for meta-llama/Llama-3.1-8B-Instruct"
     key: "it_meta-llama_Llama-3_1-8B-Instruct"
@@ -38,7 +33,7 @@ steps:
     agents:
       queue: tpu_v6e_queue
     env:
-      EXECUTE_MODEL: "meta-llama/Llama-3.1-8B-Instruct"
+      EXECUTE_ENTITY: "meta-llama/Llama-3.1-8B-Instruct"
       EXECUTE_STAGE: "IntTest"
     commands:
       - |
@@ -57,7 +52,7 @@ steps:
     agents:
       queue: tpu_v6e_queue
     env:
-      EXECUTE_MODEL: "meta-llama/Llama-3.1-8B-Instruct"
+      EXECUTE_ENTITY: "meta-llama/Llama-3.1-8B-Instruct"
       EXECUTE_STAGE: "Benchmark"
     commands:
       - |
@@ -76,7 +71,7 @@ steps:
     agents:
       queue: tpu_v6e_queue
     env:
-      EXECUTE_MODEL: "meta-llama/Llama-3.1-8B-Instruct"
+      EXECUTE_ENTITY: "meta-llama/Llama-3.1-8B-Instruct"
       EXECUTE_STAGE: "StressTest"
     commands:
       - |
