@@ -29,6 +29,7 @@ logger = init_logger(__name__)
 init_fn = nnx.initializers.uniform()
 
 DEFAULT_BLOCK_K_MAJOR = 128
+TPU_NUM_LANES = 128
 
 
 class SegmentIds(NamedTuple):
@@ -276,7 +277,10 @@ class Qwen2_5_VisionAttention(nnx.Module):
         T_attn = q.shape[2]
         padded_T = (T_attn + block_k_major -
                     1) // block_k_major * block_k_major
-        pad_width = ((0, 0), (0, 0), (0, padded_T - T_attn), (0, 0))
+
+        # Pad the head dim for better MXU utilization.
+        head_padding = TPU_NUM_LANES - self.head_dim
+        pad_width = ((0, 0), (0, 0), (0, padded_T - T_attn), (0, head_padding))
 
         q = jnp.pad(q, pad_width, 'constant')
         k = jnp.pad(k, pad_width, 'constant')
@@ -295,7 +299,7 @@ class Qwen2_5_VisionAttention(nnx.Module):
         output = self.flash_attention(q, k, v, segment_ids)
 
         # Unpad the output
-        output = output[:, :, :T_attn, :]
+        output = output[:, :, :T_attn, :self.head_dim]
 
         # [B, N, T, H] -> [T, B, N, H]
         output = jnp.transpose(output, (2, 0, 1, 3))
