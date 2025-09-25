@@ -44,6 +44,7 @@ def sample(
     next_tokens = jax.random.categorical(rng, logits)
     # Note: avoid using the sample result when temperature < _SAMPLING_EPS
     # If temperature < 0, logits /= temperatures will flip the result, causing error.
+
     return jnp.where(tpu_sampling_metadata.temperature < _SAMPLING_EPS,
                      greedy_sampled, next_tokens)
 

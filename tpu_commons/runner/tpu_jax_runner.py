@@ -389,6 +389,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             attn_metadata,
             sampling_metadata,
             logits_indices,
+            logits_indices_cpu,
             spec_decode_metadata,
             original_positions,
         ) = self._prepare_inputs(scheduler_output)
@@ -434,14 +435,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                      tuple(self.layer_name_to_kvcache_index.items()),
                      lora_metadata,
                  )
-            print("hidden states sharding", hidden_states.sharding)
-            print("hidden states shape", hidden_states.shape)
-            print("logits_indices sharding", logits_indices.sharding)
-            print("logits_indices shape", logits_indices.shape)
+            # print("hidden states sharding", hidden_states.sharding)
+            # print("hidden states shape", hidden_states.shape)
+            # print("logits_indices sharding", logits_indices.sharding)
+            # print("logits_indices shape", logits_indices.shape)
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)
-            print("after select hidden states sharding",
-                  hidden_states.sharding)
+            # print("after select hidden states sharding",
+            #       hidden_states.sharding)
 
             logits = self.compute_logits_fn(
                 self.state,
@@ -531,7 +532,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if spec_decode_metadata is None:
             next_tokens = np.asarray(jax.device_get(next_tokens))
             # mask out tokens where logit_indices = 0
-            next_tokens = next_tokens[logits_indices != -1]
+            next_tokens = next_tokens[logits_indices_cpu != -1]
             # Here need to map token positions back to the original request order
             next_tokens = next_tokens[original_positions]
             selected_token_ids = np.expand_dims(next_tokens[:num_reqs], 1)
@@ -632,7 +633,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         req_dp_ranks = []
         for req_id in self.input_batch.req_ids[:num_reqs]:
             req_dp_ranks.append(scheduler_output.assigned_dp_rank[req_id])
-        print("req_dp_ranks", req_dp_ranks)
 
         req_ids_dp = {dp_rank: [] for dp_rank in range(dp_size)}
         req_indices_dp = {dp_rank: [] for dp_rank in range(dp_size)}
@@ -684,7 +684,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         padded_num_reqs_per_dp_rank = runner_utils.get_padded_num_reqs_with_upper_limit(
             max_num_reqs_across_dp, self.max_num_reqs_per_dp)
         padded_num_reqs = padded_num_reqs_per_dp_rank * dp_size
-
         # populate self.input_ids_cpu and self.positions_cpu
         for dp_rank in range(dp_size):
             if num_req_per_dp_rank[dp_rank] == 0:
@@ -737,22 +736,23 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 out=query_start_loc_cpu[1:_num_reqs + 1],
             )
             query_start_loc_cpu[_num_reqs + 1:] = 1
-
         # populate logits_indices
         _logits_indices = []
         for dp_rank in range(dp_size):
-            req_offset = dp_rank * self.max_num_reqs_per_dp
+            req_offset = dp_rank * padded_num_reqs_per_dp_rank
+            query_loc_req_offset = dp_rank * self.max_num_reqs_per_dp
             token_offset = padded_num_scheduled_tokens_per_dp_rank * dp_rank
             _num_reqs = num_req_per_dp_rank[dp_rank]
 
             _logits_indices_rank = (
-                np.ones(self.max_num_reqs_per_dp, dtype=np.int32) * -1)
+                np.ones(padded_num_reqs_per_dp_rank, dtype=np.int32) * -1)
             _logits_indices_rank[:_num_reqs] = (
-                self.query_start_loc_cpu[req_offset + dp_rank + 1:req_offset +
-                                         dp_rank + _num_reqs + 1] - 1)
+                self.query_start_loc_cpu[query_loc_req_offset + dp_rank +
+                                         1:query_loc_req_offset + dp_rank +
+                                         _num_reqs + 1] - 1)
             # _logits_indices_rank[:_num_reqs] += token_offset
             _logits_indices.append(_logits_indices_rank)
-        print("_logits_indices", _logits_indices)
+
         # populate seq_lens
         for dp_rank in range(dp_size):
             _num_reqs = num_req_per_dp_rank[dp_rank]
@@ -800,7 +800,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         ############# request_distribution logic ends #############
 
-        padded_num_reqs = self.max_num_reqs
+        # padded_num_reqs = self.max_num_reqs
 
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
@@ -838,6 +838,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         block_tables = block_tables.reshape(-1)
 
         query_start_loc_cpu = query_start_loc
+        logits_indices_cpu = logits_indices
         seq_lens_cpu = seq_lens
         (
             input_ids,
@@ -895,6 +896,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             attention_metadata,
             sampling_metadata,
             logits_indices,
+            logits_indices_cpu,
             spec_decode_metadata,
             original_positions,
         )
