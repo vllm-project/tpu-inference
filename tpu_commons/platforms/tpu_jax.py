@@ -57,7 +57,7 @@ class TpuPlatform(Platform):
                              block_size: int, use_v1: bool, use_mla: bool,
                              has_sink: bool) -> str:
         if (selected_backend != _Backend.PALLAS
-                and selected_backend != _Backend.PALLAS_VLLM_V1):
+                and selected_backend != _Backend.PALLAS):
             logger.info("Cannot use %s backend on TPU.", selected_backend)
 
         if use_v1:
