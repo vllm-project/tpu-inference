@@ -265,7 +265,8 @@ def _load_hf_weights_on_thread(vllm_config,
                                weights_file: str,
                                filter_regex: str | None = None,
                                keep_original_dtype_keys_regex: list[str]
-                               | None = None):
+                               | None = None,
+                               quant_scales: dict[str, any] | None = None):
     name_map = metadata_map.name_map
     reshape_keys = metadata_map.reshape_map
     bias_reshape_keys = metadata_map.bias_reshape_map
@@ -310,6 +311,14 @@ def _load_hf_weights_on_thread(vllm_config,
             )
             hf_weight = hf_weight.astype(model_config.dtype)
 
+        if hf_key.endswith(".weight_scale"):
+            if quant_scales is not None:
+                quant_scales[hf_key] = hf_weight
+                continue
+            else:
+                raise ValueError(
+                    "This model seems quantized, you need to add `quant_scales` to attribute to your model instance to load scale values from weight files."
+                )
         if hf_key.endswith(".weight"):
             hf_key = hf_key.removesuffix(".weight")
 
@@ -414,6 +423,8 @@ def load_hf_weights(vllm_config,
     weights_files = get_model_weights_files(
         model_path, vllm_config.load_config.download_dir)
     params = nnx.state(model)
+    quant_scales = model.quant_scales if hasattr(model,
+                                                 "quant_scales") else None
     max_workers = min(64, len(weights_files))
     # NOTE(xiang): Disable multi-threading mode if running on multi-host.
     # Because multi-threading would cause different JAX processes to load
@@ -430,8 +441,8 @@ def load_hf_weights(vllm_config,
                 mesh,
                 weights_file,
                 filter_regex=filter_regex,
-                keep_original_dtype_keys_regex=keep_original_dtype_keys_regex)
-            for weights_file in weights_files
+                keep_original_dtype_keys_regex=keep_original_dtype_keys_regex,
+                quant_scales=quant_scales) for weights_file in weights_files
         ]
         for future in futures:
             future.result()
