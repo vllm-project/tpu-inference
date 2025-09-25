@@ -5,8 +5,8 @@ steps:
   - label: "Unit tests for {MODEL_NAME}"
     key: "ut_{SAFE_MODEL_NAME}"
     commands:
-      # - replace_with_test_commands  # TODO: Replaced to actual test commands
-      - echo "[DEBUG], unit testing for {MODEL_NAME}"  # TODO: Replace to actual test commands
+      # Replace to actual test commands
+      - echo "[DEBUG], unit testing for {MODEL_NAME}"
   - label: "Notifications: Unit tests for {MODEL_NAME}"
     key: "notifications_ut_{SAFE_MODEL_NAME}"
     depends_on: "ut_{SAFE_MODEL_NAME}"
@@ -24,9 +24,8 @@ steps:
     key: "it_{SAFE_MODEL_NAME}"
     depends_on: "notifications_ut_{SAFE_MODEL_NAME}"
     commands:
-      # TODO: expected_accuracy need parameterized
-      # - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/test_accuracy.sh -t 1 -m "{MODEL_NAME}"
-      - echo "[DEBUG], integration testing for {MODEL_NAME}"  # TODO: Replace to actual test commands
+      # Replace to actual test commands
+      - echo "[DEBUG], integration testing for {MODEL_NAME}"
   - label: "Notifications: Integration tests for {MODEL_NAME}"
     key: "notifications_it_{SAFE_MODEL_NAME}"
     depends_on: "it_{SAFE_MODEL_NAME}"
@@ -44,8 +43,8 @@ steps:
     key: "pb_{SAFE_MODEL_NAME}"
     depends_on: "notifications_it_{SAFE_MODEL_NAME}"
     commands:
-      # - replace_with_test_command  # TODO
-      - echo "[DEBUG], performance benchmarking for {MODEL_NAME}"  # TODO: Replace to actual test commands
+      # Replace to actual test commands
+      - echo "[DEBUG], performance benchmarking for {MODEL_NAME}"
   - label: "Notifications: Performance benchmarks for {MODEL_NAME}"
     key: "notifications_pb_{SAFE_MODEL_NAME}"
     depends_on: "pb_{SAFE_MODEL_NAME}"
@@ -63,8 +62,8 @@ steps:
     key: "st_{SAFE_MODEL_NAME}"
     depends_on: "notifications_pb_{SAFE_MODEL_NAME}"
     commands:
-      # - our_stress_tests_script {MODEL_NAME} expected_throughput # TODO: expected_throughput need parameterized
-      - echo "[DEBUG], stress testing for {MODEL_NAME}"  # TODO: Replace to actual test commands
+      # Replace to actual test commands
+      - echo "[DEBUG], stress testing for {MODEL_NAME}"
   - label: "Notifications: Stress tests for {MODEL_NAME}"
     key: "notifications_st_{SAFE_MODEL_NAME}"
     depends_on: "st_{SAFE_MODEL_NAME}"

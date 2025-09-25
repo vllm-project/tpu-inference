@@ -15,10 +15,10 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - echo "Generate support matrices..."
+       - echo "Generate support matrices report..."
        - bash .buildkite/scripts/export_support_matrix.sh
 
-   # Handle PR builds: print model matrices and feature matrices
+   # Print model matrices and feature matrices
    - label: "Handle Report"
      if: build.pull_request.id != null
      depends_on: export_support_matrix
