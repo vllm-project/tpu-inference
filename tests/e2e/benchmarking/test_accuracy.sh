@@ -2,7 +2,7 @@
 
 model_list="meta-llama/Llama-3.1-8B-Instruct meta-llama/Llama-3.1-70B-Instruct"
 tensor_parallel_size=1
-gpu_enabled=false
+expected_value=0
 
 extra_serve_args=()
 echo extra_serve_args: "${extra_serve_args[@]}"
@@ -17,6 +17,7 @@ helpFunction()
    echo -e "\t-r The path your root directory containing both 'vllm' and 'tpu_commons' (default: /workspace/, which is used in the Dockerfile)"
    echo -e "\t-m A space-separated list of HuggingFace model ids to use (default: meta-llama/Llama-3.1-8B-Instruct and meta-llama/Llama-3.1-70B-Instruct)"
    echo -e "\t-t Tensor parallel size (default: 1)"
+   echo -e "\t-e Excepted value"
    exit 1
 }
 
@@ -37,8 +38,9 @@ while [[ "$#" -gt 0 ]]; do
             shift
             shift
             ;;
-        -g|--gpu)
-            gpu_enabled=true
+        -e|--excepted-value)
+            expected_value="$2"
+            shift
             shift
             ;;
         -h|--help)
@@ -66,10 +68,6 @@ echo "Running integration for models: $comma_model_list"
 echo "--------------------------------------------------"
 
 # Default action
-if $gpu_enabled; then
-    python3 -m pytest -rP test_accuracy.py::test_lm_eval_accuracy_v1_engine --tensor-parallel-size="$tensor_parallel_size" --model-names="$comma_model_list"
-else
-    python -m pytest -rP test_accuracy.py::test_lm_eval_accuracy_v1_engine --tensor-parallel-size="$tensor_parallel_size" --model-names="$comma_model_list"
-fi
+python -m pytest -rP test_accuracy.py::test_lm_eval_accuracy_v1_engine --tensor-parallel-size="$tensor_parallel_size" --model-names="$comma_model_list" --expected_value="$expected_value"
 
 exit $exit_code

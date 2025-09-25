@@ -150,8 +150,13 @@ def test_lm_eval_accuracy_v1_engine(model, monkeypatch: pytest.MonkeyPatch, requ
 
     tp_size = request.config.getoption("--tensor-parallel-size")
     expected_json_filepath = request.config.getoption("--expected-values-file")
-            
+    expected_value = request.config.getoption("--expected-value")
+
     expected_values_data = read_expected_value(expected_json_filepath)
+
+    # Add expected-value to expected_values_data with model name
+    if expected-value is not None:
+        expected_values_data[model] = float(expected_value)
 
     if tp_size is None:
         tp_size = 1
@@ -181,8 +186,13 @@ def test_lm_eval_accuracy_v1_engine_fp8_kv_cache(
 
     tp_size = request.config.getoption("--tensor-parallel-size")
     expected_json_filepath = request.config.getoption("--expected-values-file")
+    expected_value = request.config.getoption("--expected-value")
 
     expected_values_data = read_expected_value(expected_json_filepath)
+
+    # Add expected-value to expected_values_data with model name
+    if expected-value is not None:
+        expected_values_data[model] = float(expected_value)
 
     if tp_size is None:
         tp_size = 1
