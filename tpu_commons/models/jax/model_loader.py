@@ -6,6 +6,7 @@ import jax
 import torch
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from torchax.ops.mappings import j2t_dtype
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 from vllm.utils import supports_kw
@@ -19,6 +20,9 @@ logger = init_logger(__name__)
 
 _MODEL_REGISTRY = {}
 
+class UnsupportedArchitectureError(ValueError):
+    """Raised when a model architecture is not supported in the registry."""
+    pass
 
 def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     # NOTE: Use inline imports here, otherwise the normal imports
@@ -53,7 +57,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     for arch in architectures:
         if arch in _MODEL_REGISTRY:
             return _MODEL_REGISTRY[arch]
-    raise ValueError(
+    raise UnsupportedArchitectureError(
         f"Model architectures {architectures} are not supported for now. "
         f"Supported architectures: {list(_MODEL_REGISTRY.keys())}")
 
@@ -298,8 +302,22 @@ def get_model(
 ) -> Any:
     impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
     logger.info(f"Loading model with MODEL_IMPL_TYPE={impl}")
+
     if impl == "flax_nnx":
-        return get_flax_model(vllm_config, rng, mesh, is_draft_model)
+        try:
+            # Try to load the flax model first
+            return get_flax_model(vllm_config, rng, mesh, is_draft_model)
+        except UnsupportedArchitectureError as e:
+            # Convert the error message to a string to check its contents
+            error_msg = str(e)
+
+            logger.warning(
+                    f"Flax model failed with: '{error_msg}'. "
+                    "Falling back to vLLM implementation."
+                    )
+            # Fall back to the vLLM model and updating the dtype accordingly
+            vllm_config.model_config.dtype = j2t_dtype(vllm_config.model_config.dtype.dtype)
+            return get_vllm_model(vllm_config, rng, mesh)
     elif impl == "vllm":
         return get_vllm_model(vllm_config, rng, mesh)
     else:
