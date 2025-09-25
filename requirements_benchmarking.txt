@@ -5,3 +5,4 @@ evaluate
 datasets
 rouge-score
 scikit-learn
+tblib==3.1.0
