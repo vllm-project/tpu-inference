@@ -234,6 +234,7 @@ class Qwen3ForCausalLM(nnx.Module):
             rng=self.rng,
             mesh=mesh,
         )
+        self.quant_scales = {}
 
     def __call__(
         self,
