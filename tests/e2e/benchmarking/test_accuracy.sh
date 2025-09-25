@@ -68,6 +68,6 @@ echo "Running integration for models: $comma_model_list"
 echo "--------------------------------------------------"
 
 # Default action
-python -m pytest -rP test_accuracy.py::test_lm_eval_accuracy_v1_engine --tensor-parallel-size="$tensor_parallel_size" --model-names="$comma_model_list" --expected_value="$expected_value"
+python -m pytest -rP test_accuracy.py::test_lm_eval_accuracy_v1_engine --tensor-parallel-size="$tensor_parallel_size" --model-names="$comma_model_list" --expected-value="$expected_value"
 
 exit $exit_code
