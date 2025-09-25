@@ -74,6 +74,9 @@ else
     echo "No vllm-tpu images found to clean up."
 fi
 
+echo "Pruning old Docker build cache..."
+docker builder prune -f
+
 echo "Cleanup complete."
 
 docker build --no-cache -f docker/Dockerfile -t "vllm-tpu:${BUILDKITE_COMMIT}" .

@@ -4,6 +4,7 @@
 # This script is a self-contained test that runs a single prompt and
 # compares the output to a known-good output.
 
+import os
 from dataclasses import asdict
 
 from vllm import LLM, EngineArgs, SamplingParams
@@ -27,6 +28,9 @@ def test_multi_modal_inference(monkeypatch):
     """
     Runs multi-modal inference and verifies the output.
     """
+    os.environ['SKIP_JAX_PRECOMPILE'] = '1'  # Skip warmup to save time.
+    os.environ[
+        'VLLM_XLA_CHECK_RECOMPILATION'] = '0'  # Allow compilation during execution.
 
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
