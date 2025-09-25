@@ -40,8 +40,7 @@ class TpuPlatform(Platform):
                              block_size: int, use_v1: bool,
                              use_mla: bool) -> str:
         assert use_v1, "only v1 is supported"
-        if (selected_backend != _Backend.PALLAS
-                and selected_backend != _Backend.PALLAS_VLLM_V1):
+        if selected_backend != _Backend.PALLA:
             logger.info("Cannot use %s backend on TPU.", selected_backend)
 
         return "tpu_commons.attention.backends.pallas_torchax.PallasAttentionBackend"
