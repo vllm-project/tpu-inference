@@ -23,6 +23,6 @@ echo "--- Starting Buildkite Bootstrap ---"
 #   # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
 # fi
 
-buildkite-agent pipeline upload .buildkite/pipeline_dynamic.yml
+buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
 
 echo "--- Buildkite Bootstrap Finished ---"
