@@ -56,7 +56,7 @@ class TpuPlatform(Platform):
                              dtype: jnp.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool, use_mla: bool,
                              has_sink: bool) -> str:
-        if selected_backend != _Backend.PALLA:
+        if selected_backend != _Backend.PALLAS:
             logger.info("Cannot use %s backend on TPU.", selected_backend)
 
         if use_v1:
