@@ -183,9 +183,11 @@ class TestTPUWorker:
         available_mem = worker.determine_available_memory()
 
         mock_utils.hbm_usage_bytes.assert_called_once_with(mock_devices)
-        # Total free: (1000-100) + (1000-200) = 900 + 800 = 1700 GiB
-        # Taxed: 1700 * 0.9 = 1530 GiB
-        expected_mem = 1530 * 1024**3
+        # Total limit: 1000 + 1000 = 2000 GiB
+        # Total cap: 2000 * 0.9 = 1800 GiB
+        # Total used: 100 + 200 = 300 GiB
+        # Total free = 1800 - 300 = 1500 GiB
+        expected_mem = 1500 * 1024**3
         assert available_mem == expected_mem
 
     #
