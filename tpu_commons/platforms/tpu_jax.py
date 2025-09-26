@@ -63,7 +63,7 @@ class TpuPlatform(Platform):
 
         if use_v1:
             logger.info("Using Pallas V1 backend.")
-            return "tpu_commons.attention.backends.pallas_torchax.PallasAttentionBackend"
+            return "tpu_commons.models.vllm.pallas_torchax.PallasAttentionBackend"
         else:
             logger.info("Using Pallas backend.")
             return "vllm.attention.backends.pallas.PallasAttentionBackend"
