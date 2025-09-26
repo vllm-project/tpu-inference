@@ -70,17 +70,18 @@ class CompilationManager:
             return
         logger.info("Precompile all the subgraphs with possible input shapes.")
 
-        self._precompile_backbone_text_only()
-        if self.runner.is_multimodal_model:
-            self._precompile_backbone_with_inputs_embeds()
-        self._precompile_select_from_array()
-        self._precompile_compute_logits()
-        self._precompile_disagg_utils()
-        self._precompile_sampling()
-        self._precompile_gather_logprobs()
-        self._precompile_structured_decoding()
-        if self.runner.speculative_config:
-            self._precompile_rejection_sampler()
+        with self.runner.maybe_setup_dummy_loras(self.runner.lora_config):
+            self._precompile_backbone_text_only()
+            if self.runner.is_multimodal_model:
+                self._precompile_backbone_with_inputs_embeds()
+            self._precompile_select_from_array()
+            self._precompile_compute_logits()
+            self._precompile_disagg_utils()
+            self._precompile_sampling()
+            self._precompile_gather_logprobs()
+            self._precompile_structured_decoding()
+            if self.runner.speculative_config:
+                self._precompile_rejection_sampler()
 
     def _precompile_backbone_helper(self, name, *, input_ids, positions,
                                     inputs_embeds) -> None:
@@ -129,19 +130,22 @@ class CompilationManager:
             self.runner.kv_caches = kv_caches
             return hidden_states
 
-        lora_metadata = None
-        self._run_compilation(
-            name,
-            model_fn_wrapper,
-            self.runner.state,
-            self.runner.kv_caches,
-            input_ids,
-            attention_metadata,
-            inputs_embeds,
-            tuple(self.runner.layer_name_to_kvcache_index.items()),
-            lora_metadata,
-            num_tokens=num_tokens,
-        )
+        with self.runner.maybe_select_dummy_loras(
+                self.runner.lora_config, np.array([num_tokens],
+                                                  dtype=np.int32)):
+            lora_metadata = self.runner.lora_utils.extract_lora_metadata()
+            self._run_compilation(
+                name,
+                model_fn_wrapper,
+                self.runner.state,
+                self.runner.kv_caches,
+                input_ids,
+                attention_metadata,
+                inputs_embeds,
+                tuple(self.runner.layer_name_to_kvcache_index.items()),
+                lora_metadata,
+                num_tokens=num_tokens,
+            )
 
     def _precompile_backbone_text_only(self) -> None:
         for num_tokens in self.runner.num_tokens_paddings:
@@ -263,15 +267,18 @@ class CompilationManager:
         for num_reqs in leading_shape:
             hidden_states = self._create_dummy_tensor((num_reqs, hsize),
                                                       jnp.bfloat16)
-            lora_metadata = None
-            self._run_compilation(
-                "compute_logits",
-                self.runner.compute_logits_fn,
-                self.runner.state,
-                hidden_states,
-                lora_metadata,
-                num_reqs=num_reqs,
-            )
+            with self.runner.maybe_select_dummy_loras(
+                    self.runner.lora_config,
+                    np.array([num_reqs], dtype=np.int32)):
+                lora_metadata = self.runner.lora_utils.extract_lora_metadata()
+                self._run_compilation(
+                    "compute_logits",
+                    self.runner.compute_logits_fn,
+                    self.runner.state,
+                    hidden_states,
+                    lora_metadata,
+                    num_reqs=num_reqs,
+                )
 
     def _precompile_sampling(self) -> None:
         logger.info("Compiling sampling with different input shapes.")
