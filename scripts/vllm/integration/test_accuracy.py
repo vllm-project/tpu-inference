@@ -31,7 +31,6 @@ _JSON_WRITE_LOCK = threading.Lock()
 
 def run_test(model_name,
              expected_value,
-             expected_json_filepath,
              more_args=None):
     """Run the end to end accuracy test."""
     print(f"Running test for model: {model_name}")
@@ -81,8 +80,7 @@ def test_lm_eval_accuracy_v1_engine(monkeypatch: pytest.MonkeyPatch,
         
         print(f"common args: {more_args}")
 
-        run_test(model, expected_value, expected_json_filepath,
-                 more_args)
+        run_test(model, expected_value, more_args)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda()
@@ -116,4 +114,4 @@ def test_lm_eval_accuracy_v1_engine_fp8_kv_cache(
             
         print(f"common args: {more_args}")
 
-        run_test(fp8_kv_model, expected_values_data, expected_json_filepath, more_args)
+        run_test(fp8_kv_model, expected_values_data, more_args)
