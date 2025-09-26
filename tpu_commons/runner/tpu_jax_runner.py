@@ -308,7 +308,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                     is not None)
 
         logger.info(f"Init model | "
-                    f"hbm={common_utils.hbm_usage_gb(self.devices)}Gb")
+                    f"hbm={common_utils.hbm_usage_gb(self.devices)}GiB")
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return ("generate", )
