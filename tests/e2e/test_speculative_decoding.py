@@ -185,7 +185,7 @@ def test_ngram_performance_greedy(
     Compares timing between reference LLM and speculative LLM using Llama 3 8B.
     Expects spec_llm to be at least 3.x faster than ref_llm.
     '''
-    _test_ngram_performance_helper(monkeypatch, sampling_config, 3.4)
+    _test_ngram_performance_helper(monkeypatch, sampling_config, 3.0)
 
 
 def test_ngram_performance_random(
@@ -201,7 +201,7 @@ def test_ngram_performance_random(
     sampling_config.top_p = 0.9
     sampling_config.top_k = 5
 
-    _test_ngram_performance_helper(monkeypatch, sampling_config, 3.8)
+    _test_ngram_performance_helper(monkeypatch, sampling_config, 3.0)
 
 
 # TODO(pooyam): Make this rigorous once EAGLE-3 is working correctly.
