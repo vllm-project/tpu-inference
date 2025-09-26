@@ -135,7 +135,7 @@ class CompilationManager:
                                                   dtype=np.int32)):
             lora_metadata = self.runner.lora_utils.extract_lora_metadata()
             self._run_compilation(
-                "backbone",
+                name,
                 model_fn_wrapper,
                 self.runner.state,
                 self.runner.kv_caches,
