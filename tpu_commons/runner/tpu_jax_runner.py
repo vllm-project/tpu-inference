@@ -255,6 +255,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.query_start_loc_cpu = np.zeros(self.max_num_tokens + 1,
                                             dtype=np.int32)
         self.seq_lens_cpu = np.zeros(self.max_num_tokens, dtype=np.int32)
+        self.logits_indices_cpu = np.zeros(self.max_num_reqs, dtype=np.int32)
         # Range tensor with values [0 .. self.max_num_tokens - 1].
         # Used to initialize positions / context_lens / seq_lens
         # Keep in int64 to avoid overflow with long context
@@ -657,8 +658,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 scheduler_output.num_scheduled_tokens[req_id])
             num_req_per_dp_rank[dp_rank] += 1
 
+        # start_time = time.time()*1000
         original_positions = sum(req_indices_dp.values(), [])
         original_positions = np.argsort(np.array(original_positions))
+        # logger.debug(f"original_positions time: {time.time()*1000 - start_time:.3f}s")
 
         num_req_per_dp_rank_list = [
             num_req_per_dp_rank[dp_rank] for dp_rank in range(dp_size)
@@ -684,6 +687,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         padded_num_reqs_per_dp_rank = runner_utils.get_padded_num_reqs_with_upper_limit(
             max_num_reqs_across_dp, self.max_num_reqs_per_dp)
         padded_num_reqs = padded_num_reqs_per_dp_rank * dp_size
+
         # populate self.input_ids_cpu and self.positions_cpu
         for dp_rank in range(dp_size):
             if num_req_per_dp_rank[dp_rank] == 0:
@@ -707,6 +711,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             token_indices = (
                 positions_np +
                 req_indices * self.input_batch.token_ids_cpu.shape[1])
+
             np.take(
                 self.input_batch.token_ids_cpu.flatten(),
                 token_indices,
@@ -721,7 +726,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                dp_rank] = 0
 
         # populate self.query_start_loc_cpu
-
         for dp_rank in range(dp_size):
             req_offset = dp_rank * (self.max_num_reqs_per_dp + 1)
             # Prepare the attention metadata.
@@ -736,22 +740,23 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 out=query_start_loc_cpu[1:_num_reqs + 1],
             )
             query_start_loc_cpu[_num_reqs + 1:] = 1
+
         # populate logits_indices
-        _logits_indices = []
         for dp_rank in range(dp_size):
             req_offset = dp_rank * padded_num_reqs_per_dp_rank
             query_loc_req_offset = dp_rank * self.max_num_reqs_per_dp
             token_offset = padded_num_scheduled_tokens_per_dp_rank * dp_rank
             _num_reqs = num_req_per_dp_rank[dp_rank]
 
-            _logits_indices_rank = (
-                np.ones(padded_num_reqs_per_dp_rank, dtype=np.int32) * -1)
+            _logits_indices_rank = self.logits_indices_cpu[
+                req_offset:req_offset + padded_num_reqs_per_dp_rank]
+            # _logits_indices_rank.fill(-1)
             _logits_indices_rank[:_num_reqs] = (
                 self.query_start_loc_cpu[query_loc_req_offset + dp_rank +
                                          1:query_loc_req_offset + dp_rank +
                                          _num_reqs + 1] - 1)
-            # _logits_indices_rank[:_num_reqs] += token_offset
-            _logits_indices.append(_logits_indices_rank)
+            _logits_indices_rank[_num_reqs:] = -1
+        logits_indices = self.logits_indices_cpu[:padded_num_reqs]
 
         # populate seq_lens
         for dp_rank in range(dp_size):
@@ -805,7 +810,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
-            logits_indices = np.concatenate(_logits_indices, axis=0)
             spec_decode_metadata = None
         else:
             num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
