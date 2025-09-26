@@ -5,13 +5,13 @@ from typing import TYPE_CHECKING, Optional
 
 import jax.numpy as jnp
 import numpy as np
-from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
-from vllm.v1.outputs import DraftTokenIds
-from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
 from tpu_commons.runner import utils as runner_utils
 from tpu_commons.spec_decode.jax.eagle3 import Eagle3Proposer
 from tpu_commons.utils import device_array
+from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
+from vllm.v1.outputs import DraftTokenIds
+from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
 if TYPE_CHECKING:
     from tpu_commons.models.jax.attention_metadata import AttentionMetadata
@@ -54,8 +54,13 @@ class SpeculativeDecodingManager:
         input_ids: Optional[jnp.ndarray] = None,
     ) -> None:
         if self.runner.speculative_config.method == "ngram":
-            self._draft_token_ids = self.propose_ngram_draft_token_ids(
-                sampled_token_ids)
+            assert isinstance(self.runner.drafter, NgramProposer)
+            self._draft_token_ids = self.runner.drafter.propose(
+                sampled_token_ids[:self.runner.input_batch.num_reqs],
+                self.runner.input_batch.req_ids,
+                self.runner.input_batch.num_tokens_no_spec,
+                self.runner.input_batch.token_ids_cpu,
+                self.runner.input_batch.spec_decode_unsupported_reqs)
         elif self.runner.speculative_config.method == "eagle3":
             self._draft_token_ids = self.propose_eagle3_draft_token_ids(
                 sampled_token_ids,
@@ -138,42 +143,6 @@ class SpeculativeDecodingManager:
         )
         result = draft_token_ids.tolist()
         return result
-
-    def propose_ngram_draft_token_ids(
-        self,
-        sampled_token_ids: list[list[int]],
-    ) -> list[list[int]]:
-        assert isinstance(self.runner.drafter, NgramProposer)
-        draft_token_ids: list[list[int]] = []
-        num_reqs = self.runner.input_batch.num_reqs
-        for i, sampled_ids in enumerate(sampled_token_ids[:num_reqs]):
-            num_sampled_ids = len(sampled_ids)
-            if not num_sampled_ids:
-                # Skip speculative decoding.
-                draft_token_ids.append([])
-                continue
-
-            # Skip requests that require sampling parameters that are not
-            # supported with speculative decoding.
-            req_id = self.runner.input_batch.req_ids[i]
-            if req_id in self.runner.input_batch.spec_decode_unsupported_reqs:
-                draft_token_ids.append([])
-                continue
-
-            num_tokens = self.runner.input_batch.num_tokens_no_spec[i]
-            if num_tokens >= self.runner.max_model_len:
-                # Skip requests that have already reached the max model length.
-                draft_token_ids.append([])
-                continue
-
-            drafter_output = self.runner.drafter.propose(
-                self.runner.input_batch.token_ids_cpu[i, :num_tokens])
-            if drafter_output is None or len(drafter_output) == 0:
-                draft_token_ids.append([])
-            else:
-                draft_token_ids.append(drafter_output.tolist())
-
-        return draft_token_ids
 
     def get_spec_decode_metadata(
         self,
