@@ -10,27 +10,20 @@ def pytest_addoption(parser):
         help="The tensor parallel size to use for the test."
     )
     parser.addoption(
-        "--expected-values-file",
-        type=str,
-        default=None,
-        help="This is used to specify the JSON file that stores the expected values. " +
-            "The results from running test_accuracy on a GPU will be saved to this file, " +
-            "and when running on a TPU, the results will be read from this file for comparison.")
-    parser.addoption(
         "--expected-value",
         type=float,
         default=None,
         help="This value will be used to compare the measure value and determine if the test passes or fails.")
     parser.addoption(
-        "--model-names",
-        action="store",
-        # default="meta-llama/Llama-3.1-8B-Instruct",
+        "--model-name",
+        type=str,
         default=None,
-        help="Comma-separated list of model names to test (e.g., 'model1,model2')"
-    )
+        help=
+        "Model name to test (e.g., 'model1')")
     parser.addoption(
-        "--fp8-kv-model-names",
-        action="store",
+        "--fp8-kv-model-name",
+        type=str,
         default=None,
-        help="Comma-separated list of model names to test fp8-kv (e.g., 'model1,model2')"
+        help=
+        "Model name to test fp8-kv (e.g., 'model1')"
     )
