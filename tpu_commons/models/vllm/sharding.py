@@ -69,7 +69,10 @@ def _convert_to_torchax_and_shard(tensor: torch.Tensor,
         tensor = jax_view(tensor)
     else:
         tensor = t2j(tensor)
+    # tensor.sharding=SingleDeviceSharding(device=CpuDevice(id=0), memory_kind=device)
     return torch_view(jax.device_put(tensor, sharding))
+    # after jax.device_put(tensor, sharding), jax.device_put(tensor, sharding).sharding=NamedSharding(mesh=Mesh('data': 1, 'model': 1, axis_types=(Auto, Auto)), spec=PartitionSpec('model', None), memory_kind=device)
+    # jax.device_put(tensor, sharding).sharding.mesh.devices=array([[TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0)]], dtype=object)
 
 
 def _shard_tensor_to_tpu_replicated(tensor: torch.Tensor,

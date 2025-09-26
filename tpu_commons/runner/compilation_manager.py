@@ -54,6 +54,8 @@ class CompilationManager:
     def _run_compilation(self, name: str, fn: Callable, *args,
                          **kwargs) -> None:
         logger.info(f"Precompile {name} --> {kwargs}")
+        # log_dir = "/mnt/disks/persist/myprofiles"
+        # jax.profiler.start_trace(log_dir)
         start = time.perf_counter()
         result = fn(*args)
         if result is not None:
@@ -64,6 +66,7 @@ class CompilationManager:
                 result.block_until_ready()
         end = time.perf_counter()
         logger.info("Compilation finished in %.2f [secs].", end - start)
+        # jax.profiler.stop_trace()
 
     def capture_model(self) -> None:
         if os.getenv("SKIP_JAX_PRECOMPILE", False):
@@ -134,6 +137,7 @@ class CompilationManager:
         with self.runner.maybe_select_dummy_loras(
                 self.runner.lora_config, np.array([num_tokens],
                                                   dtype=np.int32)):
+            # lora_metadata = None
             lora_metadata = self.runner.lora_utils.extract_lora_metadata()
             self._run_compilation(
                 name,

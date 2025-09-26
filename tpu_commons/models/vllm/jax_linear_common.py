@@ -123,13 +123,21 @@ def torch_to_jax_param(
         output_sizes = [tensor.shape[0]]
 
     tensor = t2j(tensor, use_dlpack=False)
+    # xw32: tensor now has type <class 'jaxlib._jax.ArrayImpl'>.
+    # tensor.sharding=SingleDeviceSharding(device=TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0), memory_kind=device)
     if jax_dtype:
         tensor = tensor.astype(jax_dtype)
 
-    if fused:
+    if fused:  # xw32: True by default.
         tensor = reorder_concatenated_tensor_for_sharding(
             tensor, output_sizes, n_shards, dim)
+        # print(f'xw32 torch_to_jax_param line134 {tensor.sharding=}')
+        # prints `xw32 torch_to_jax_param line134 tensor.sharding=SingleDeviceSharding(device=TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0), memory_kind=device)`
+        # tensor.sharding.mesh.devices would fails with `'jaxlib._jax.SingleDeviceSharding' object has no attribute 'mesh'`
         tensor = jax.device_put(tensor, sharding)
+        # print(f'xw32 torch_to_jax_param line136 {tensor.sharding=}')
+        # prints `xw32 torch_to_jax_param line136 tensor.sharding=NamedSharding(mesh=Mesh('data': 1, 'model': 1, axis_types=(Auto, Auto)), spec=PartitionSpec('model', None), memory_kind=device)`
+        # tensor.sharding.mesh.devices outputs array([[TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0)]], dtype=object)
         param = torch.nn.Parameter(torch_view(tensor), requires_grad=False)
     else:
         tensors = []
