@@ -2,6 +2,7 @@ import torchax
 from jax.sharding import Mesh, PartitionSpec
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.layer import FusedMoE, FusedMoEConfig
 # yapf: disable
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase,
@@ -95,3 +96,10 @@ class JaxCommonConfig:
     def get_linear_config(self, layer: LinearBase) -> JaxCommonLinearConfig:
         assert isinstance(layer, LinearBase)
         return JaxCommonLinearConfig(self.vllm_config, self.mesh, layer)
+
+    def get_moe_config(self, layer: FusedMoE) -> FusedMoEConfig:
+        assert isinstance(layer, FusedMoE)
+        moe_config = layer.moe_config
+        use_ep = self.vllm_config.parallel_config.enable_expert_parallel
+        moe_config.moe_parallel_config.use_ep = use_ep
+        return moe_config
