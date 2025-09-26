@@ -67,21 +67,22 @@ class CompilationManager:
 
     def capture_model(self) -> None:
         if os.getenv("SKIP_JAX_PRECOMPILE", False):
+            logger.info(f"Skipping jax precompile, {os.getenv("SKIP_JAX_PRECOMPILE", False)=}")
             return
         logger.info("Precompile all the subgraphs with possible input shapes.")
 
         with self.runner.maybe_setup_dummy_loras(self.runner.lora_config):
             self._precompile_backbone_text_only()
-            if self.runner.is_multimodal_model:
-                self._precompile_backbone_with_inputs_embeds()
-            self._precompile_select_from_array()
-            self._precompile_compute_logits()
-            self._precompile_disagg_utils()
-            self._precompile_sampling()
-            self._precompile_gather_logprobs()
-            self._precompile_structured_decoding()
-            if self.runner.speculative_config:
-                self._precompile_rejection_sampler()
+            # if self.runner.is_multimodal_model:
+            #     self._precompile_backbone_with_inputs_embeds()
+            # self._precompile_select_from_array()
+            # self._precompile_compute_logits()
+            # self._precompile_disagg_utils()
+            # self._precompile_sampling()
+            # self._precompile_gather_logprobs()
+            # self._precompile_structured_decoding()
+            # if self.runner.speculative_config:
+            #     self._precompile_rejection_sampler()
 
     def _precompile_backbone_helper(self, name, *, input_ids, positions,
                                     inputs_embeds) -> None:
@@ -148,7 +149,7 @@ class CompilationManager:
             )
 
     def _precompile_backbone_text_only(self) -> None:
-        for num_tokens in self.runner.num_tokens_paddings:
+        for num_tokens in self.runner.num_tokens_paddings[:1]:
             input_ids = self._create_dummy_tensor((num_tokens, ), jnp.int32)
             positions = self._create_dummy_tensor((num_tokens, ), jnp.int32)
             self._precompile_backbone_helper("backbone",

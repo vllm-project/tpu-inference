@@ -1,4 +1,5 @@
 import functools
+import time
 import os
 import random
 from contextlib import nullcontext
@@ -375,6 +376,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         input_ids, inputs_embeds = self._get_input_ids_embeds(
             input_ids, mm_embeds)
 
+        print(f'xw32 start to run fwd, {input_ids.shape=}')
+        start = time.perf_counter()
         lora_metadata = self.lora_utils.extract_lora_metadata()
         # TODO: make _get_input_ids_embeds within this context
         # NOTE: right now, mm model will use embeddings as the input,
@@ -399,6 +402,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                      tuple(self.layer_name_to_kvcache_index.items()),
                      lora_metadata,
                  )
+                hidden_states.block_until_ready()
+                end = time.perf_counter()
+                print(f'xw32 finished running fwd. Time {end-start}')
 
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)
