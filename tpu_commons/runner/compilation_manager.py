@@ -92,6 +92,8 @@ class CompilationManager:
             num_tokens = inputs_embeds.shape[0]
         assert num_tokens is not None
 
+        dp_size = self.runner.mesh.shape["data"]
+
         # Keep existing pattern for complex array operations
         block_tables = self.runner.block_table_cpu[:self.runner.max_num_reqs]
         block_tables = block_tables.reshape(-1)
@@ -100,10 +102,10 @@ class CompilationManager:
         seq_lens = self._create_dummy_tensor((self.runner.max_num_reqs, ),
                                              jnp.int32)
         query_start_loc = self._create_dummy_tensor(
-            (self.runner.max_num_reqs + 1, ), jnp.int32)
+            (self.runner.max_num_reqs + dp_size, ), jnp.int32)
 
         # Keep existing pattern for specific value arrays
-        request_distribution = np.array([0, 0, 0], dtype=np.int32)
+        request_distribution = np.array([0, 0, 0] * dp_size, dtype=np.int32)
         request_distribution = device_array(self.runner.mesh,
                                             request_distribution)
 
