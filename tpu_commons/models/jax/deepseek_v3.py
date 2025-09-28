@@ -537,7 +537,17 @@ class DeepSeekV3WeightLoader:
 
         # Convert weights from torch into numpy
         cast_type = model_weight.value.dtype
-        weight_np = weight.to(torch.float32).numpy().astype(cast_type)
+
+        if cast_type == jnp.float8_e4m3fn:
+            # Avoid unnecessary upcasting and mem copy.
+            weight_np = jnp.array(weight.view(
+                torch.uint8).numpy()).view(cast_type)
+        elif cast_type == jnp.bfloat16:
+            # Avoid unnecessary upcasting and mem copy.
+            weight_np = jnp.array(weight.view(torch.uint16).numpy()).view(
+                jnp.bfloat16)
+        else:
+            weight_np = weight.to(torch.float32).numpy().astype(cast_type)
 
         if scale is not None:
             scale = scale.to(torch.float32).numpy().astype(self.scale_dtype)
