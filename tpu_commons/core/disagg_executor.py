@@ -26,6 +26,7 @@ class DisaggExecutor(Executor):
         slice_config = getattr(self.vllm_config.device_config, "slice")
         idx = slice_config[0]
         jax_devices = slice_config[-1]
+        devices = []
         if isinstance(idx, int):
             sizes = slice_config[1]
             start = sum(sizes[0:idx])
@@ -37,7 +38,7 @@ class DisaggExecutor(Executor):
             logger.debug(
                 f"Creating DisaggExecutor with {devices}, index: {start} -> {end}"
             )
-        else:
+        elif isinstance(idx, tuple):
             slice_idx = slice_config[1]
             sizes = slice_config[2][slice_idx]
             start_row, start_col = idx

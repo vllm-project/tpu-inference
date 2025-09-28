@@ -8,7 +8,6 @@ import signal
 import threading
 import time
 import traceback
-from collections import deque
 from typing import Any, Callable, Optional, Tuple, TypeVar, Union
 
 import jax
@@ -480,13 +479,7 @@ class DisaggEngineCore(vLLMEngineCore):
             f"{len(self._decode_engines)} Disaggregated decode engines created."
         )
 
-        self.batch_queue_size = self._prefill_engines[
-            0].model_executor.max_concurrent_batches
         self.batch_queue = None
-        if self.batch_queue_size > 1:
-            logger.info("Batch queue is enabled with size %d",
-                        self.batch_queue_size)
-            self.batch_queue = deque(maxlen=self.batch_queue_size)
 
         self.request_block_hasher = None
         if (self.vllm_config.cache_config.enable_prefix_caching
