@@ -3,9 +3,9 @@
 import jax.numpy as jnp
 
 from tpu_commons.kernels.ragged_paged_attention.v3.util import (
-    align_to, get_device_name, get_dtype_packing, get_tpu_version,
-    next_power_of_2)
+    align_to, get_dtype_packing, get_tpu_version, next_power_of_2)
 from tpu_commons.logger import init_logger
+from tpu_commons.utils import get_device_name
 
 logger = init_logger(__name__)
 
