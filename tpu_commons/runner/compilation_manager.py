@@ -126,19 +126,18 @@ class CompilationManager:
             attention_metadata,
             inputs_embeds,
             layer_name_to_kvcache_index,
-            lora_metadata,
         ):
             kv_caches, hidden_states, aux_hidden_states = self.runner.model_fn(
                 state, kv_caches, input_ids, attention_metadata, inputs_embeds,
-                layer_name_to_kvcache_index, lora_metadata)
+                layer_name_to_kvcache_index)
             self.runner.kv_caches = kv_caches
             return hidden_states
 
         with self.runner.maybe_select_dummy_loras(
                 self.runner.lora_config, np.array([num_tokens],
                                                   dtype=np.int32)):
-            # lora_metadata = None
-            lora_metadata = self.runner.lora_utils.extract_lora_metadata()
+            lora_metadata = None
+            # lora_metadata = self.runner.lora_utils.extract_lora_metadata()
             self._run_compilation(
                 name,
                 model_fn_wrapper,
@@ -148,7 +147,6 @@ class CompilationManager:
                 attention_metadata,
                 inputs_embeds,
                 tuple(self.runner.layer_name_to_kvcache_index.items()),
-                lora_metadata,
                 num_tokens=num_tokens,
             )
 

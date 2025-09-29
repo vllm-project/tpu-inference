@@ -156,11 +156,9 @@ class VllmModelWrapper:
             attn_metadata: AttentionMetadata,
             input_embeds: jax.Array,
             layer_name_to_kvcache_index: Sequence[Tuple[str, int]],
-            lora_metadata,
             *args,
         ) -> Tuple[List[jax.Array], jax.Array]:
             layer_name_to_kvcache_index = dict(layer_name_to_kvcache_index)
-            lora_metadata = torch_view(lora_metadata)
             with torchax.default_env(), set_vllm_model_wrapper_context(
                     kv_caches=kv_caches,
                     mesh=self.mesh,
@@ -169,8 +167,6 @@ class VllmModelWrapper:
                                    vllm_config=self.vllm_config):
                 # We need to wrap args from jax land into TorchValue with
                 # torch_view in order to call the Torch function.
-                original_lora_metadata = replace_lora_metadata(
-                    self.model, lora_metadata, self.vllm_config.lora_config)
                 hidden_states = torch.func.functional_call(
                     self.model,
                     torch_view(params_and_buffers),
@@ -182,8 +178,6 @@ class VllmModelWrapper:
                     },
                     tie_weights=False,
                 )
-                replace_lora_metadata(self.model, original_lora_metadata,
-                                      self.vllm_config.lora_config)
                 vllm_model_wrapper_context = get_vllm_model_wrapper_context()
                 new_kv_caches = vllm_model_wrapper_context.kv_caches
             # Wrap the hidden_states from torch land into a JaxValue for the jax

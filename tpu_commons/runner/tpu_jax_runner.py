@@ -400,7 +400,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                      attn_metadata,
                      inputs_embeds,
                      tuple(self.layer_name_to_kvcache_index.items()),
-                     lora_metadata,
                  )
                 hidden_states.block_until_ready()
                 end = time.perf_counter()
