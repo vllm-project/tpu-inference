@@ -30,6 +30,13 @@ from tpu_commons.models.jax.utils.weight_utils import (get_param,
 
 logger = init_logger(__name__)
 
+# A map from JAX dtype to the corresponding PyTorch integer dtype for raw memory viewing.
+DTYPE_VIEW_MAP = {
+    jnp.dtype(jnp.float8_e4m3fn): torch.uint8,
+    jnp.dtype(jnp.bfloat16): torch.uint16,
+    jnp.dtype(jnp.float32): torch.uint32,
+}
+
 
 @dataclass
 class DeepSeekV3(nnx.Module):
@@ -538,16 +545,15 @@ class DeepSeekV3WeightLoader:
         # Convert weights from torch into numpy
         cast_type = model_weight.value.dtype
 
-        if cast_type == jnp.float8_e4m3fn:
-            # Avoid unnecessary upcasting and mem copy.
-            weight_np = jnp.array(weight.view(
-                torch.uint8).numpy()).view(cast_type)
-        elif cast_type == jnp.bfloat16:
-            # Avoid unnecessary upcasting and mem copy.
-            weight_np = jnp.array(weight.view(torch.uint16).numpy()).view(
-                jnp.bfloat16)
+
+        torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
+
+        if torch_view_type:
+            # Avoid unnecessary upcasting and mem copy by viewing the tensor's
+            # raw data as integers before converting to a JAX array.
+            weight_np = jnp.array(weight.view(torch_view_type).numpy()).view(cast_type)
         else:
-            weight_np = weight.to(torch.float32).numpy().astype(cast_type)
+            raise ValueError(f"Unsupported dtype for tensor conversion: {cast_type}")
 
         if scale is not None:
             scale = scale.to(torch.float32).numpy().astype(self.scale_dtype)
