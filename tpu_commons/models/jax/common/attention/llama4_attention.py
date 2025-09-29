@@ -38,6 +38,7 @@ class Llama4Attention(Attention):
     temperature_tuning_scale: float
     activation_attention_td: Sharding
     activation_attention_out_td: Sharding
+    is_causal: bool = True
 
     def __call__(self,
                  x,
