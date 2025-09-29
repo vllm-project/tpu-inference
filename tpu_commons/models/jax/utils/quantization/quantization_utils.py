@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Callable, List
 import jax
 import jax.numpy as jnp
 import qwix
+import qwix.pallas as qpl
 import yaml
 from flax import nnx
 from flax.typing import PRNGKey
@@ -549,7 +550,7 @@ def manually_quantize_qwix_activation(inputs: jax.Array, rule_name: str,
     Returns:
         The quantized activation tensor.
     """
-    rule = qwix.pallas.get_current_rule(rule_name)
+    rule = qpl.get_current_rule(rule_name)
     lhs_how = ptq.qarray.HowToQuantize(qtype=qtype,
                                        channelwise_axes=channelwise_axes,
                                        tiled_axes=tiled_axes,
