@@ -62,8 +62,14 @@ def test_hbm_usage_bytes_pathways_disabled():
 
 @patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", True)
 @patch("jax.live_arrays")
-def test_hbm_usage_bytes_pathways_enabled(mock_live_arrays):
+@patch("jax.devices")
+def test_hbm_usage_bytes_pathways_enabled(mock_devices, mock_live_arrays):
     """Tests hbm_usage_bytes when VLLM_TPU_USING_PATHWAYS is True."""
+    # Mock TPU v5p devices
+    mock_jax_device = MagicMock()
+    mock_jax_device.device_kind = "TPU v5p"
+    mock_devices.return_value = [mock_jax_device]
+    
     # Create mock devices
     mock_device1 = MagicMock()
     mock_device2 = MagicMock()
@@ -91,7 +97,7 @@ def test_hbm_usage_bytes_pathways_enabled(mock_live_arrays):
     # Device1: 2000 + 1000 = 3000 bytes
     # Device2: 2000 + 0 = 2000 bytes
     # hbm_limit = 33550237184 (hardcoded in the function)
-    expected_usage = [(3000, 33550237184), (2000, 33550237184)]
+    expected_usage = [(3000, 95 * GBYTES), (2000, 95 * GBYTES)]
     assert usage == expected_usage
 
 
@@ -118,8 +124,14 @@ def test_hbm_usage_gb_pathways_disabled():
 
 @patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", True)
 @patch("jax.live_arrays")
-def test_hbm_usage_bytes_pathways_no_arrays(mock_live_arrays):
+@patch("jax.devices")
+def test_hbm_usage_bytes_pathways_no_arrays(mock_devices, mock_live_arrays):
     """Tests hbm_usage_bytes when VLLM_TPU_USING_PATHWAYS is True but no live arrays."""
+    # Mock TPU v5e devices
+    mock_jax_device = MagicMock()
+    mock_jax_device.device_kind = "TPU v6e"
+    mock_devices.return_value = [mock_jax_device]
+    
     mock_device1 = MagicMock()
     mock_device2 = MagicMock()
     devices = [mock_device1, mock_device2]
@@ -130,7 +142,7 @@ def test_hbm_usage_bytes_pathways_no_arrays(mock_live_arrays):
     usage = hbm_usage_bytes(devices)
 
     # No arrays means no memory usage
-    expected_usage = [(0, 33550237184), (0, 33550237184)]
+    expected_usage = [(0, 32 * GBYTES), (0, 32 * GBYTES)]
     assert usage == expected_usage
 
 
