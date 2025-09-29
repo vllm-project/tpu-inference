@@ -9,41 +9,46 @@ from jax._src import dtypes
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-from tpu_commons.kernels.quantized_matmul.tuned_block_sizes import \
-    get_tuned_block_sizes
+from tpu_commons.kernels.quantized_matmul.tuned_block_sizes import (
+    TunedValue, get_device_vmem_limit, get_tuned_block_sizes)
 from tpu_commons.kernels.quantized_matmul.util import (get_kernel_name,
                                                        next_multiple,
                                                        unfold_args)
 
 
 def quantize_array(
-        x: jax.Array,  # [bs_block_size, in_block_size]
-        x_abs_max: jax.Array,  # [1, bs_block_size]
+    x: jax.Array,  # [bs_block_size, in_block_size]
+    x_abs_max: jax.Array,  # [1, bs_block_size]
+    quant_dtype: jnp.dtype,
 ):
-    n_bits = 8
-    int_max = 2**(n_bits - 1) - 1
+    is_float = jnp.issubdtype(quant_dtype, jnp.floating)
+    dtype_info = jnp.finfo(quant_dtype) if is_float else jnp.iinfo(quant_dtype)
+    dtype_max = float(dtype_info.max)
+
     # TODO(kyuyeunk): Investigate performance gain from non xlu transpose.
-    scale = jnp.transpose(x_abs_max / int_max)  # [bs_block_size, 1]
-    x_int = jnp.round(x / scale).astype(jnp.int8)
-    return x_int, scale.astype(jnp.float32)
+    scale = jnp.transpose(x_abs_max / dtype_max)
+    return (x / scale).astype(quant_dtype), scale.astype(jnp.float32)
 
 
 def get_vmem_limit(
-    n_bs: int,
+    n_batch: int,
     n_out: int,
     n_in: int,
     batch_block_size: int,
     out_block_size: int,
     in_block_size: int,
     x_dtype: jnp.dtype,
+    x_q_dtype: jnp.dtype,
     w_q_dtype: jnp.dtype,
     scale_dtype: jnp.dtype,
     out_dtype: jnp.dtype,
     acc_dtype: jnp.dtype,
     save_acc: bool,
     save_x_q: bool,
-    upper_limit_bytes: int = 96 * 1024 * 1024,
+    upper_limit_bytes: int,
 ):
+    """Calculate VMEM limit for the kernel."""
+
     # Calculate in/out VMEM size.
     x_size = batch_block_size * in_block_size * dtypes.bit_width(x_dtype)
     x_abs_max_size = batch_block_size * dtypes.bit_width(scale_dtype)
@@ -56,15 +61,15 @@ def get_vmem_limit(
 
     # Account for double buffering.
     # Double buffering is used only if there are multiple blocks per in/out.
-    vmem_in_out += x_size if (n_bs > 1 or n_in > 1) else 0
-    vmem_in_out += x_abs_max_size if (n_bs > 1) else 0
+    vmem_in_out += x_size if (n_batch > 1 or n_in > 1) else 0
+    vmem_in_out += x_abs_max_size if (n_batch > 1) else 0
     vmem_in_out += w_q_size if (n_out > 1 or n_in > 1) else 0
     vmem_in_out += w_scale_size if (n_out > 1) else 0
-    vmem_in_out += out_size if (n_bs > 1 or n_out > 1) else 0
+    vmem_in_out += out_size if (n_batch > 1 or n_out > 1) else 0
 
     # Calculate scratch VMEM size.
     acc_size = batch_block_size * out_block_size * dtypes.bit_width(acc_dtype)
-    x_q_size = batch_block_size * in_block_size * dtypes.bit_width(w_q_dtype)
+    x_q_size = batch_block_size * in_block_size * dtypes.bit_width(x_q_dtype)
     x_scale_size = batch_block_size * dtypes.bit_width(scale_dtype)
 
     vmem_scratch = acc_size if save_acc else 0
@@ -85,11 +90,22 @@ def validate_inputs(
     w_q: jax.Array,
     w_scale: jax.Array,
     x_abs_max: jax.Array,
+    x_q_dtype: jnp.dtype,
     batch_block_size: int,
     out_block_size: int,
     in_block_size: int,
 ):
-    """Verify input shapes before invoking the kernel."""
+    """Verify inputs invoking the kernel."""
+
+    if x.dtype != x_q_dtype:
+        # If the input is quantized, then it should be the same subdtype as w_q
+        if jnp.issubdtype(x_q_dtype, jnp.integer) != jnp.issubdtype(
+                w_q.dtype, jnp.integer):
+            raise ValueError(
+                f'{x_q_dtype=} and {w_q.dtype=} must be the same int or float type.'
+            )
+
+    # Verify input shapes.
     if x.shape[1] != w_q.shape[1]:
         raise ValueError(f'{x.shape[1]=} must be equal to {w_q.shape[1]=}')
     if w_q.shape[0] != w_scale.shape[1]:
@@ -100,15 +116,13 @@ def validate_inputs(
             f'{x_abs_max.shape=} must be equal to (1, {x.shape[0]=})')
     if x.shape[0] % batch_block_size != 0:
         raise ValueError(
-            f'{x.shape[0]=} must be a multiple of block size {batch_block_size=}'
-        )
+            f'{x.shape[0]=} must be a multiple of {batch_block_size=}')
     if w_q.shape[0] % out_block_size != 0:
         raise ValueError(
-            f'{w_q.shape[0]=} must be a multiple of block size {out_block_size=}'
-        )
+            f'{w_q.shape[0]=} must be a multiple of {out_block_size=}')
     if x.shape[1] % in_block_size != 0:
         raise ValueError(
-            f'{x.shape[1]=} must be a multiple of block size {in_block_size=}')
+            f'{x.shape[1]=} must be a multiple of {in_block_size=}')
 
 
 def matmul_kernel(
@@ -121,7 +135,7 @@ def matmul_kernel(
     x_q_scratch: jax.Array,  # (batch_block_size, in_block_size)
     x_scale_scratch: jax.Array,  # (batch_block_size, 1)
     *,
-    quantize_activation: bool,
+    x_q_dtype: jnp.dtype,
     save_acc: bool,
     save_x_q: bool,
 ):
@@ -129,12 +143,14 @@ def matmul_kernel(
     n_in = pl.num_programs(2)
     x_ref_dtype = x_ref.dtype
 
+    quantize_activation = x_q_dtype != x_ref_dtype
+
     # Initialize conditional logic.
     if save_x_q:
         assert quantize_activation
         assert x_q_scratch is not None
         assert x_scale_scratch is not None
-        quant = (out_idx == 0)
+        quant = out_idx == 0
     else:
         assert x_q_scratch is None
         assert x_scale_scratch is None
@@ -142,22 +158,31 @@ def matmul_kernel(
 
     if save_acc:
         assert acc_scratch is not None
-        is_first_step = (in_idx == 0)
-        is_last_step = (in_idx == (n_in - 1))
+        is_first_step = in_idx == 0
+        is_last_step = in_idx == (n_in - 1)
     else:
         assert acc_scratch is None
         is_first_step = True
         is_last_step = True
 
+    acc_dtype = jnp.float32
+    if quantize_activation and jnp.issubdtype(w_q_ref.dtype, jnp.integer):
+        acc_dtype = jnp.int32
+
     # Start of actual computation logic.
     def matmul_body(quant: bool, is_first_step: bool, is_last_step: bool):
         if quantize_activation:
             if quant:
-                x_q_tmp, x_scale_tmp = quantize_array(x_ref[...],
-                                                      x_abs_max_ref[...])
+                x_q_tmp, x_scale_tmp = quantize_array(
+                    x_ref[...],
+                    x_abs_max_ref[...],
+                    x_q_dtype,
+                )
+
                 if save_x_q:
                     x_q_scratch[...] = x_q_tmp
                     x_scale_scratch[...] = x_scale_tmp
+
             else:
                 assert save_x_q
                 x_q_tmp = x_q_scratch[...]
@@ -168,14 +193,14 @@ def matmul_kernel(
                 x_q_tmp,
                 w_q_ref[...],
                 (((1, ), (1, )), ((), ())),
-                preferred_element_type=jnp.int32,
+                preferred_element_type=acc_dtype,
             )
         else:
             acc = jax.lax.dot_general(
                 x_ref[...],
                 w_q_ref[...],
                 (((1, ), (1, )), ((), ())),
-                preferred_element_type=jnp.float32,
+                preferred_element_type=acc_dtype,
             )
 
         if not is_first_step:
@@ -197,27 +222,44 @@ def matmul_kernel(
 @functools.partial(
     jax.jit,
     static_argnames=[
-        'quantize_activation',
-        'batch_block_size',
-        'out_block_size',
-        'in_block_size',
+        'x_q_dtype',
+        'tuned_value',
     ],
 )
 def quantized_matmul_kernel(
-    x: jax.Array,  # [bs, n_input_features]
-    w_q: jax.Array,  # [n_output_features, n_input_features]
-    w_scale: jax.Array,  # [n_output_features]
-    zero_point: jax.Array | None = None,  # [n_output_features]
-    quant_block_size: int | None = None,
-    quantize_activation: bool = False,
+    x: jax.Array,  # [bs, n_in]
+    w_q: jax.Array,  # [n_out, n_in]
+    w_scale: jax.Array,  # [n_out]
+    w_zp: jax.Array | None = None,  # [n_out]
+    block_size: int | None = None,
+    x_q_dtype: jnp.dtype | None = None,
     *,
-    batch_block_size: int | None = None,
-    out_block_size: int | None = None,
-    in_block_size: int | None = None,
-):
-    assert zero_point is None, 'Not implemented: zero_point is not supported.'
-    assert (quant_block_size
-            is None), 'Not implemented: quant_block_size is not supported.'
+    tuned_value: TunedValue | None = None,
+) -> jax.Array:
+    """Quantized matmul kernel.
+
+  Args:
+    x: Input unquantized array.
+    w_q: Weight quantized array. [n_output_features, n_input_features]
+    w_scale: Weight quantization scale. [n_output_features]
+    w_zp: Weight zero point for asymmetric quantization.
+    block_size: Block size for subchannel quantization.
+    x_q_dtype: Quantization type of the input. If None or if the value is the
+      same as x.dtype, then no quantization is applied.
+    tuned_value: Kernel tuned values for optimal performance.
+
+  Returns:
+    Quantized matmul result.
+  """
+
+    if w_zp is not None:
+        raise NotImplementedError('zero_point is not supported.')
+    if block_size is not None:
+        raise NotImplementedError('block_size is not supported.')
+
+    if x_q_dtype is None:
+        x_q_dtype = x.dtype
+    quantize_activation = x_q_dtype != x.dtype
 
     # Pallas kernel only has access to a single block of the input. Therefere,
     # for per-token quantization, abs max has to be computed outside of the
@@ -228,43 +270,43 @@ def quantized_matmul_kernel(
     x_abs_max = jnp.expand_dims(x_abs_max, axis=0)  # [1, bs]
     assert x_abs_max.shape == (1, x.shape[0])
 
-    orig_bs, orig_in_features = x.shape
-    orig_out_features, _ = w_q.shape
+    orig_n_batch, orig_n_in = x.shape
+    orig_n_out, _ = w_q.shape
 
-    if (batch_block_size is None or out_block_size is None
-            or in_block_size is None):
-        batch_block_size, out_block_size, in_block_size = get_tuned_block_sizes(
-            orig_bs,
-            orig_out_features,
-            orig_in_features,
-            jnp.dtype(x.dtype).name,
-            quantize_activation,
+    if tuned_value is None:
+        tuned_value = get_tuned_block_sizes(
+            n_batch=orig_n_batch,
+            n_out=orig_n_out,
+            n_in=orig_n_in,
+            x_q_dtype=jnp.dtype(x_q_dtype).name,
+            w_q_dtype=jnp.dtype(w_q.dtype).name,
         )
+    batch_block_size = tuned_value.batch_block_size
+    out_block_size = tuned_value.out_block_size
+    in_block_size = tuned_value.in_block_size
 
     # Pad the inputs to be multiple of block size.
-    padded_bs = next_multiple(orig_bs, batch_block_size)
-    if orig_bs < padded_bs:
-        x = jnp.pad(x, ((0, padded_bs - orig_bs), (0, 0)))
-        x_abs_max = jnp.pad(x_abs_max, ((0, 0), (0, padded_bs - orig_bs)))
-    padded_out_features = next_multiple(orig_out_features, out_block_size)
-    if orig_out_features < padded_out_features:
-        w_q = jnp.pad(w_q,
-                      ((0, padded_out_features - orig_out_features), (0, 0)))
-        w_scale = jnp.pad(w_scale,
-                          (0, padded_out_features - orig_out_features))
-    padded_in_features = next_multiple(orig_in_features, in_block_size)
-    if orig_in_features < padded_in_features:
-        x = jnp.pad(x, ((0, 0), (0, padded_in_features - orig_in_features)))
-        w_q = jnp.pad(w_q,
-                      ((0, 0), (0, padded_in_features - orig_in_features)))
+    padded_n_batch = next_multiple(orig_n_batch, batch_block_size)
+    if orig_n_batch < padded_n_batch:
+        x = jnp.pad(x, ((0, padded_n_batch - orig_n_batch), (0, 0)))
+        x_abs_max = jnp.pad(x_abs_max,
+                            ((0, 0), (0, padded_n_batch - orig_n_batch)))
+    padded_n_out = next_multiple(orig_n_out, out_block_size)
+    if orig_n_out < padded_n_out:
+        w_q = jnp.pad(w_q, ((0, padded_n_out - orig_n_out), (0, 0)))
+        w_scale = jnp.pad(w_scale, (0, padded_n_out - orig_n_out))
+    padded_n_in = next_multiple(orig_n_in, in_block_size)
+    if orig_n_in < padded_n_in:
+        x = jnp.pad(x, ((0, 0), (0, padded_n_in - orig_n_in)))
+        w_q = jnp.pad(w_q, ((0, 0), (0, padded_n_in - orig_n_in)))
 
     if w_scale.dtype != jnp.float32:
         w_scale = w_scale.astype(jnp.float32)
     w_scale = jnp.expand_dims(w_scale, axis=0)  # [1, n_output_features]
 
-    n_bs = padded_bs // batch_block_size
-    n_out = padded_out_features // out_block_size
-    n_in = padded_in_features // in_block_size
+    n_batch = padded_n_batch // batch_block_size
+    n_out = padded_n_out // out_block_size
+    n_in = padded_n_in // in_block_size
 
     save_acc = n_in > 1
     # Remove redundant input quantization logic by caching quantized input. For
@@ -272,28 +314,32 @@ def quantized_matmul_kernel(
     # used per batch.
     save_x_q = quantize_activation and n_in == 1 and n_out > 1
 
-    acc_dtype = jnp.int32 if quantize_activation else jnp.float32
+    acc_dtype = jnp.float32
+    if quantize_activation and jnp.issubdtype(w_q.dtype, jnp.integer):
+        acc_dtype = jnp.int32
 
     vmem_limit_bytes = get_vmem_limit(
-        n_bs=n_bs,
+        n_batch=n_batch,
         n_out=n_out,
         n_in=n_in,
         batch_block_size=batch_block_size,
         out_block_size=out_block_size,
         in_block_size=in_block_size,
         x_dtype=x.dtype,
+        x_q_dtype=x_q_dtype,
         w_q_dtype=w_q.dtype,
         scale_dtype=jnp.float32,
         out_dtype=x.dtype,
         acc_dtype=acc_dtype,
         save_acc=save_acc,
         save_x_q=save_x_q,
+        upper_limit_bytes=get_device_vmem_limit(),
     )
 
     kernel = pl.pallas_call(
         functools.partial(
             matmul_kernel,
-            quantize_activation=quantize_activation,
+            x_q_dtype=x_q_dtype,
             save_acc=save_acc,
             save_x_q=save_x_q,
         ),
@@ -314,15 +360,15 @@ def quantized_matmul_kernel(
             scratch_shapes=[
                 pltpu.VMEM((batch_block_size, out_block_size), acc_dtype)
                 if save_acc else None,  # acc_scratch
-                pltpu.VMEM((batch_block_size, in_block_size), w_q.dtype)
+                pltpu.VMEM((batch_block_size, in_block_size), x_q_dtype)
                 if save_x_q else None,  # x_q_scratch
                 pltpu.VMEM(
                     (batch_block_size,
                      1), jnp.float32) if save_x_q else None,  # x_scale_scratch
             ],
-            grid=(n_bs, n_out, n_in),
+            grid=(n_batch, n_out, n_in),
         ),
-        out_shape=jax.ShapeDtypeStruct((padded_bs, padded_out_features),
+        out_shape=jax.ShapeDtypeStruct((padded_n_batch, padded_n_out),
                                        x.dtype),
         compiler_params=pltpu.CompilerParams(
             dimension_semantics=('parallel', 'arbitrary', 'arbitrary'),
@@ -331,19 +377,19 @@ def quantized_matmul_kernel(
     )
 
     validate_inputs(
-        x,
-        w_q,
-        w_scale,
-        x_abs_max,
-        batch_block_size,
-        out_block_size,
-        in_block_size,
+        x=x,
+        w_q=w_q,
+        w_scale=w_scale,
+        x_abs_max=x_abs_max,
+        x_q_dtype=x_q_dtype,
+        batch_block_size=batch_block_size,
+        out_block_size=out_block_size,
+        in_block_size=in_block_size,
     )
 
     # The named_scope is used for autotune.
-    kernel_name = get_kernel_name(batch_block_size, out_block_size,
-                                  in_block_size)
+    kernel_name = get_kernel_name(tuned_value)
     with jax.named_scope(kernel_name):
         out = kernel(x, w_q, w_scale, x_abs_max)
 
-    return out[:orig_bs, :orig_out_features]
+    return out[:orig_n_batch, :orig_n_out]

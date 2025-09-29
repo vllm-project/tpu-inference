@@ -64,7 +64,7 @@ class LlamaMLP(nnx.Module):
 class LlamaAttention(nnx.Module):
 
     def __init__(self, config: LlamaConfig, dtype: jnp.dtype, rng: nnx.Rngs,
-                 mesh: Mesh):
+                 mesh: Mesh, kv_cache_dtype: str):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
@@ -112,6 +112,14 @@ class LlamaAttention(nnx.Module):
             rngs=rng,
         )
 
+        self._q_scale = 1.0
+        self._k_scale = 1.0
+        self._v_scale = 1.0
+        self.kv_cache_quantized_dtype = None
+        if kv_cache_dtype != "auto":
+            self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
+                kv_cache_dtype)
+
     def __call__(
         self,
         kv_cache: Optional[jax.Array],
@@ -130,6 +138,14 @@ class LlamaAttention(nnx.Module):
         # v: (T, K, H)
         v = self.v_proj(x)
         # o: (T, N, H)
+        q_scale = k_scale = v_scale = None
+        if self.kv_cache_quantized_dtype:
+            # TODO(kyuyeunk/jacobplatin): Enable w8a8 when VREG spill issue is resolved.
+            # q_scale = self._q_scale
+            k_scale = self._k_scale
+            v_scale = self._v_scale
+            k, v = utils.quantize_kv(k, v, self.kv_cache_quantized_dtype,
+                                     k_scale, v_scale)
         new_kv_cache, outputs = attention(
             kv_cache,
             q,
@@ -138,6 +154,9 @@ class LlamaAttention(nnx.Module):
             attention_metadata,
             self.mesh,
             self.head_dim_original,
+            q_scale=q_scale,
+            k_scale=k_scale,
+            v_scale=v_scale,
         )
         # (T, D)
         o = self.o_proj(outputs)
@@ -147,7 +166,7 @@ class LlamaAttention(nnx.Module):
 class LlamaDecoderLayer(nnx.Module):
 
     def __init__(self, config: LlamaConfig, dtype: jnp.dtype, rng: nnx.Rngs,
-                 mesh: Mesh):
+                 mesh: Mesh, kv_cache_dtype: str):
         rms_norm_eps = config.rms_norm_eps
         hidden_size = config.hidden_size
 
@@ -161,7 +180,8 @@ class LlamaDecoderLayer(nnx.Module):
         self.self_attn = LlamaAttention(config=config,
                                         dtype=dtype,
                                         rng=rng,
-                                        mesh=mesh)
+                                        mesh=mesh,
+                                        kv_cache_dtype=kv_cache_dtype)
         self.post_attention_layernorm = nnx.RMSNorm(
             hidden_size,
             epsilon=rms_norm_eps,
@@ -220,7 +240,9 @@ class LlamaModel(nnx.Module):
                 dtype=dtype,
                 rng=rng,
                 mesh=mesh,
-            ) for _ in range(hf_config.num_hidden_layers)
+                # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
+                kv_cache_dtype=vllm_config.cache_config.cache_dtype)
+            for _ in range(hf_config.num_hidden_layers)
         ]
         self.norm = nnx.RMSNorm(
             hidden_size,
@@ -237,14 +259,26 @@ class LlamaModel(nnx.Module):
                 sharding=(None, "model"),
             )
 
+        self.aux_hidden_state_layers = []
+        if vllm_config.speculative_config and vllm_config.speculative_config.method == "eagle3":
+            self.aux_hidden_state_layers = self.get_eagle3_aux_hidden_state_layers(
+            )
+
+    def get_eagle3_aux_hidden_state_layers(self):
+        num_layers = len(self.layers)
+        return (2, num_layers // 2, num_layers - 3)
+
     def __call__(
         self,
         kv_caches: List[jax.Array],
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
-    ) -> Tuple[List[jax.Array], jax.Array]:
+    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
         x = self.embed(input_ids)
+        aux_hidden_states = []
         for i, layer in enumerate(self.layers):
+            if i in self.aux_hidden_state_layers:
+                aux_hidden_states.append(x)
             kv_cache = kv_caches[i]
             kv_cache, x = layer(
                 kv_cache,
@@ -253,7 +287,7 @@ class LlamaModel(nnx.Module):
             )
             kv_caches[i] = kv_cache
         x = self.norm(x)
-        return kv_caches, x
+        return kv_caches, x, aux_hidden_states
 
 
 class LlamaForCausalLM(nnx.Module):
@@ -276,13 +310,13 @@ class LlamaForCausalLM(nnx.Module):
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
         *args,
-    ) -> Tuple[List[jax.Array], jax.Array]:
-        kv_caches, x = self.model(
+    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
+        kv_caches, x, aux_hidden_states = self.model(
             kv_caches,
             input_ids,
             attention_metadata,
         )
-        return kv_caches, x
+        return kv_caches, x, aux_hidden_states
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         if self.vllm_config.model_config.hf_config.tie_word_embeddings:

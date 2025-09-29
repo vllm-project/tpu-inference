@@ -13,8 +13,8 @@ from vllm.platforms.interface import Platform, PlatformEnum, _Backend
 from vllm.sampling_params import SamplingParams, SamplingType
 
 from tpu_commons.logger import init_logger
-from tpu_commons.models.jax.utils.quantization.quantization_utils import (
-    parse_qwix_config_to_rules, quantization_config_file_path_to_dict)
+from tpu_commons.models.jax.utils.quantization.quantization_utils import \
+    update_vllm_config_for_qwix_quantization
 
 if TYPE_CHECKING:
     from vllm.config import BlockSize, ModelConfig, VllmConfig
@@ -44,7 +44,7 @@ class TpuPlatform(Platform):
     simple_compile_backend: str = "openxla"
 
     supported_quantization: list[str] = [
-        "tpu_int8", "compressed-tensors", "awq"
+        "tpu_int8", "compressed-tensors", "awq", "fp8"
     ]
 
     additional_env_vars: list[str] = [
@@ -56,8 +56,7 @@ class TpuPlatform(Platform):
                              dtype: jnp.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool, use_mla: bool,
                              has_sink: bool) -> str:
-        if (selected_backend != _Backend.PALLAS
-                and selected_backend != _Backend.PALLAS_VLLM_V1):
+        if selected_backend != _Backend.PALLAS:
             logger.info("Cannot use %s backend on TPU.", selected_backend)
 
         if use_v1:
@@ -203,22 +202,7 @@ class TpuPlatform(Platform):
         if kv_transfer_config is not None:
             assert kv_transfer_config.kv_connector == "TPUConnector"
 
-        # Validate additional config
-        if additional_config := vllm_config.additional_config:
-            # Try loading/parsing the quantization config so that we can fail fast
-            if quantization_config := additional_config.get("quantization"):
-                try:
-                    # NOTE: Qwix quantization supports two paths: 1. quantization config file (which we need to parse)
-                    #  2. quantization config JSON
-                    if isinstance(quantization_config, str):
-                        quantization_config = quantization_config_file_path_to_dict(
-                            quantization_config)
-                    parse_qwix_config_to_rules(
-                        quantization_config["qwix"]["rules"])
-                except Exception as e:
-                    raise ValueError(
-                        f"Invalid quantization config; please see README for details on quantization config: {e}"
-                    )
+        update_vllm_config_for_qwix_quantization(vllm_config)
 
     @classmethod
     def is_pin_memory_available(cls):
@@ -246,8 +230,9 @@ class TpuPlatform(Platform):
         processed_inputs: ProcessorInputs,
     ) -> None:
         """Raises if this request is unsupported on this platform"""
+
         if isinstance(params, SamplingParams):
-            if params.guided_decoding is not None and not envs.VLLM_USE_V1:
+            if params.structured_outputs is not None and not envs.VLLM_USE_V1:
                 raise ValueError("Structured output is not supported on "
                                  f"{cls.device_name} V0.")
             if params.sampling_type == SamplingType.RANDOM_SEED:
@@ -256,4 +241,11 @@ class TpuPlatform(Platform):
     @classmethod
     def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
                                     model_config: ModelConfig) -> bool:
+        return True
+
+    @classmethod
+    def use_sync_weight_loader(cls) -> bool:
+        """
+        Returns if the current platform needs to sync weight loader.
+        """
         return True

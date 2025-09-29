@@ -12,10 +12,10 @@ from vllm.attention.backends.abstract import AttentionType
 
 from tpu_commons.attention.backends.pallas_torchax import (
     PallasAttentionBackend, PallasAttentionBackendImpl)
-from tpu_commons.models.jax.attention import get_kv_cache_shape_with_mesh
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.vllm.vllm_model_wrapper_context import \
     set_vllm_model_wrapper_context
+from tpu_commons.runner.kv_cache import get_kv_cache_shape_with_mesh
 
 # ---- Test Configuration & Constants ----
 
@@ -93,7 +93,7 @@ def mesh():
 class TestPallasAttentionBackend:
 
     def test_get_name(self):
-        assert PallasAttentionBackend.get_name() == "PALLAS_VLLM_V1"
+        assert PallasAttentionBackend.get_name() == "PALLAS"
 
     def test_get_impl_cls(self):
         assert PallasAttentionBackend.get_impl_cls(
@@ -186,6 +186,34 @@ class TestPallasAttentionBackendImpl:
 
         layer = MagicMock()
         layer.layer_name = "0"
+        layer._q_scale_float = None
+        layer._k_scale_float = 1
+        layer._v_scale_float = 1
+
+        query, key, value, kv_cache, metadata = create_inputs(
+            mesh, kv_dtype=jnp.float8_e4m3fn)
+
+        with torchax.default_env(), set_vllm_model_wrapper_context(
+                kv_caches=[kv_cache],
+                mesh=mesh,
+                layer_name_to_kvcache_index={'0': 0}):
+            impl.forward(layer, query, key, value, torch.tensor([]), metadata)
+
+    def test_forward_with_w8a8(self, mesh):
+        impl = PallasAttentionBackendImpl(
+            num_heads=NUM_HEADS,
+            head_size=HEAD_DIM,
+            scale=0.088,
+            num_kv_heads=NUM_KV_HEADS,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="fp8",
+            attn_type=AttentionType.DECODER,
+        )
+
+        layer = MagicMock()
+        layer.layer_name = "0"
+        layer._q_scale_float = 1
         layer._k_scale_float = 1
         layer._v_scale_float = 1
 

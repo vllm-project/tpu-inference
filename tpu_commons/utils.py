@@ -2,22 +2,34 @@
 import os
 from collections import defaultdict
 from collections.abc import Sequence
-from typing import Any, List, Tuple
+from typing import Any, Callable, List, Tuple
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 from jax._src import dtypes
 from jax._src import mesh as mesh_lib
 from jax._src import xla_bridge as xb
 from jax._src.lib import xla_client as xc
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from vllm import envs
+from vllm import envs, utils
 
 from tpu_commons.logger import init_logger
 
 GBYTES = 1024 * 1024 * 1024
 TPU_HEAD_SIZE_ALIGNMENT = 128
 TPU_SECOND_LAST_MINOR = 8
+
+# This is used to translate from a string name for a dtype
+# to formal jax.numpy DType.  One use case for this is
+# converting the `--kv_cache_dtype` flag to a dtype.
+TPU_STR_DTYPE_TO_JAX_DTYPE = {
+    "bfloat16": jnp.bfloat16,
+    "fp8": jnp.float8_e4m3fn,
+    "fp8_e4m3": jnp.float8_e4m3,
+    "fp8_e5m2": jnp.float8_e5m2,
+    "int8": jnp.int8,
+}
 
 _megacore = False
 logger = init_logger(__name__)
@@ -120,6 +132,8 @@ def make_optimized_mesh(axis_shapes: Sequence[int],
                         devices: Sequence[xc.Device] | None = None):
     if devices is None:
         devices = xb.devices()
+    # Sort the devices in case it's passed in an arbitary order
+    devices = sorted(devices, key=lambda x: x.coords)
 
     def _is_1D(axis_shapes):
         return sum(x > 1 for x in axis_shapes) == 1
@@ -142,13 +156,13 @@ def make_optimized_mesh(axis_shapes: Sequence[int],
             if device_num == 8:
                 ordered_devices = np.array([
                     devices[0],
-                    devices[2],
-                    devices[4],
-                    devices[6],
-                    devices[7],
-                    devices[5],
-                    devices[3],
                     devices[1],
+                    devices[2],
+                    devices[3],
+                    devices[7],
+                    devices[6],
+                    devices[5],
+                    devices[4],
                 ])
             # NOTE(chengjiyao):
             # The coords of v6e-4 are
@@ -159,9 +173,9 @@ def make_optimized_mesh(axis_shapes: Sequence[int],
             elif device_num == 4:
                 ordered_devices = np.array([
                     devices[0],
-                    devices[2],
-                    devices[3],
                     devices[1],
+                    devices[3],
+                    devices[2],
                 ])
             if ordered_devices is not None:
                 ordered_devices = np.array(ordered_devices)
@@ -189,3 +203,55 @@ def device_array(mesh: Mesh, *args, sharding=None, **kwargs) -> jax.Array:
     if sharding is None:
         sharding = NamedSharding(mesh, PartitionSpec(None))
     return jax.device_put(*args, device=sharding, **kwargs)
+
+
+def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], bytes]:
+    """
+    A wrapper function of vllm.utils.get_hash_fn_by_name to support builtin
+    """
+    if hash_fn_name == "builtin":
+        return hash
+    return utils.get_hash_fn_by_name(hash_fn_name)
+
+
+def quantize_kv(key: jax.Array, value: jax.Array,
+                kv_cache_quantized_dtype: jnp.dtype, k_scale: float,
+                v_scale: float) -> Tuple[jax.Array, jax.Array]:
+    """
+        Quantize the key and value tensors.
+
+        Args:
+            key: The key tensor to quantize.
+            value: The value tensor to quantize.
+            kv_cache_quantized_dtype: The dtype to quantize the key and value tensors to.
+            q_scale: The scale to quantize the key and value tensors by.
+            k_scale: The scale to quantize the key tensor by.
+            v_scale: The scale to quantize the value tensor by.
+
+        Returns:
+            Tuple[jax.Array, jax.Array]: The quantized key and value tensors.
+        """
+    dtype_info = jnp.finfo(kv_cache_quantized_dtype)
+    minval, maxval = float(dtype_info.min), float(dtype_info.max)
+    key = key.astype(jnp.float32) / k_scale
+    key = jnp.clip(key, minval, maxval)
+    key = key.astype(kv_cache_quantized_dtype)
+    value = value.astype(jnp.float32) / v_scale
+    value = jnp.clip(value, minval, maxval)
+    value = value.astype(kv_cache_quantized_dtype)
+
+    return key, value
+
+
+def get_jax_dtype_from_str_dtype(str_dtype: str) -> jnp.dtype:
+    """
+    Get the JAX dtype from a string dtype.
+
+    Args:
+        str_dtype: The string dtype to get the JAX dtype from.
+
+    Returns:
+        jnp.dtype: The JAX dtype.
+    """
+    str_dtype = str_dtype.lower().strip()
+    return TPU_STR_DTYPE_TO_JAX_DTYPE.get(str_dtype)

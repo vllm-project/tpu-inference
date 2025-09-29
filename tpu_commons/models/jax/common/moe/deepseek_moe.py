@@ -35,6 +35,8 @@ class DeepSeekV3Router(nnx.Module):
 
     random_init: bool = False
 
+    router_bias_dtype: jnp.dtype = jnp.float32
+
     def get_topk_indices(self, scores_TE: Float) -> Float:
         """Get the topk indices of the scores.
 
@@ -106,6 +108,6 @@ class DeepSeekV3Router(nnx.Module):
                                       random_init=self.random_init)
         self.bias_E = create_param(rngs,
                                    shape=(E, ),
-                                   dtype=self.dtype,
+                                   dtype=self.router_bias_dtype,
                                    sharding=self.e_sharding,
                                    random_init=self.random_init)

@@ -5,6 +5,7 @@ import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Sharding
 
+from tpu_commons import utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.common.attention.attention import (Attention,
@@ -108,6 +109,16 @@ class Llama4Attention(Attention):
                                self.kernel_v_proj_DKH.value)
             v_SKH = nnx.with_sharding_constraint(v_SKH, self.keyvalue_skh)
 
+        q_scale = k_scale = v_scale = None
+        if self.kv_cache_quantized_dtype:
+            # TODO(kyuyeunk/jacobplatin): Enable w8a8 when VREG spill issue is resolved.
+            # q_scale = self._q_scale
+            k_scale = self._k_scale
+            v_scale = self._v_scale
+            k_SKH, v_SKH = utils.quantize_kv(k_SKH, v_SKH,
+                                             self.kv_cache_quantized_dtype,
+                                             k_scale, v_scale)
+
         with jax.named_scope("attn_op"):
             new_kv_cache, outputs_TNH = self.attention(
                 is_prefill,
@@ -117,6 +128,9 @@ class Llama4Attention(Attention):
                 v_SKH,
                 attention_metadata,
                 self.mesh,
+                q_scale=q_scale,
+                k_scale=k_scale,
+                v_scale=v_scale,
             )
 
         with jax.named_scope("o_proj"):

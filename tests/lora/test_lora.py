@@ -28,7 +28,6 @@ def use_v1_only(monkeypatch: pytest.MonkeyPatch):
 def setup_vllm(num_loras: int) -> vllm.LLM:
     return vllm.LLM(model="Qwen/Qwen2.5-3B-Instruct",
                     max_model_len=256,
-                    max_seq_len_to_capture=256,
                     max_num_seqs=8,
                     enable_lora=True,
                     max_loras=num_loras,
@@ -60,7 +59,6 @@ def test_single_lora():
     assert int(answer) == 2
 
 
-@pytest.mark.skip("Not supported yet.")
 def test_lora_hotswapping():
     """
     This test ensures we can run multiple LoRA adapters on the TPU backend, even
@@ -92,7 +90,6 @@ def test_lora_hotswapping():
         assert int(answer) == i + 1, f"Expected {i + 1}, got {answer}"
 
 
-@pytest.mark.skip("Not supported yet.")
 def test_multi_lora():
     """
     This test ensures we can run multiple LoRA adapters on the TPU backend, when

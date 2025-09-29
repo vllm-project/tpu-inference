@@ -6,8 +6,8 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import (MultiModalBatchedField,
-                                    MultiModalFieldElem, MultiModalKwargsItem,
-                                    PlaceholderRange)
+                                    MultiModalFeatureSpec, MultiModalFieldElem,
+                                    MultiModalKwargsItem, PlaceholderRange)
 from vllm.sampling_params import SamplingType
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
@@ -19,7 +19,7 @@ class TestMultiModalManager:
 
     def setup_method(self):
         # Mock JAX dependencies
-        self.mock_devices = [MagicMock()] * 4
+        self.mock_devices = [MagicMock(coords=i) for i in range(4)]
         self.mock_mesh = MagicMock()
         self.mock_rng_key = MagicMock()
 
@@ -92,10 +92,14 @@ class TestMultiModalManager:
             sampling_params=MagicMock(),
             block_ids=(),
             num_computed_tokens=0,
-            mm_kwargs=[mm_item],
-            mm_positions=[PlaceholderRange(offset=0, length=1)],
+            mm_features=[
+                MultiModalFeatureSpec(data=mm_item,
+                                      identifier="req-1",
+                                      modality="image",
+                                      mm_position=PlaceholderRange(offset=0,
+                                                                   length=1))
+            ],
             lora_request=None,
-            mm_hashes=["req-1"],
             pooling_params=None,
             generator=None,
         )
@@ -173,10 +177,14 @@ class TestMultiModalManager:
             sampling_params=MagicMock(),
             block_ids=(),
             num_computed_tokens=0,
-            mm_kwargs=[mm_item_1],
-            mm_positions=[PlaceholderRange(offset=0, length=1)],
+            mm_features=[
+                MultiModalFeatureSpec(data=mm_item_1,
+                                      identifier="req-1",
+                                      modality="image",
+                                      mm_position=PlaceholderRange(offset=0,
+                                                                   length=1))
+            ],
             lora_request=None,
-            mm_hashes=["req-1"],
             pooling_params=None,
             generator=None)
 
@@ -196,10 +204,14 @@ class TestMultiModalManager:
             sampling_params=MagicMock(),
             block_ids=(),
             num_computed_tokens=0,
-            mm_kwargs=[mm_item_2],
-            mm_positions=[PlaceholderRange(offset=0, length=1)],
+            mm_features=[
+                MultiModalFeatureSpec(data=mm_item_2,
+                                      identifier="req-2",
+                                      modality="image",
+                                      mm_position=PlaceholderRange(offset=0,
+                                                                   length=1))
+            ],
             lora_request=None,
-            mm_hashes=["req-2"],
             pooling_params=None,
             generator=None)
 
@@ -270,10 +282,14 @@ class TestMultiModalManager:
             sampling_params=mock_sampling_params,
             block_ids=([], ),
             num_computed_tokens=0,  # This will be updated per step
-            mm_kwargs=[],
-            mm_positions=[PlaceholderRange(offset=10, length=56)],
+            mm_features=[
+                MultiModalFeatureSpec(data=None,
+                                      identifier=req_id,
+                                      modality="image",
+                                      mm_position=PlaceholderRange(offset=10,
+                                                                   length=56))
+            ],
             lora_request=None,
-            mm_hashes=[req_id],
             pooling_params=None,
             generator=None,
         )
@@ -354,10 +370,8 @@ class TestMultiModalManager:
             sampling_params=mock_sampling_params,
             block_ids=([], ),
             num_computed_tokens=num_computed,
-            mm_kwargs=[],
-            mm_positions=[],
+            mm_features=[],
             lora_request=None,
-            mm_hashes=[],
             pooling_params=None,
             generator=None,
             mrope_positions=mock_mrope_positions,

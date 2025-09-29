@@ -17,16 +17,12 @@ from tpu_commons.runner.kv_cache import create_kv_caches
 class MockVllmConfig:
     """A mock VllmConfig sufficient for testing the Qwen2 model."""
 
-    def __init__(self, model: str):
+    def __init__(self, model: str, kv_cache_dtype: str):
         self.model_config = ModelConfig(model)
         self.model_config.dtype = jnp.bfloat16
         self.load_config = MagicMock()
         self.load_config.download_dir = None
-
-
-@pytest.fixture
-def mock_vllm_config() -> MockVllmConfig:
-    return MockVllmConfig(model="Qwen/Qwen2.5-1.5B")
+        self.cache_config = MagicMock(cache_dtype=kv_cache_dtype)
 
 
 @pytest.fixture(scope="module")
@@ -80,6 +76,10 @@ def rng() -> PRNGKey:
 class TestQwen2ForCausalLM:
     """Tests for the main Qwen2ForCausalLM model class."""
 
+    @pytest.mark.parametrize("mock_vllm_config", [
+        MockVllmConfig("Qwen/Qwen2.5-1.5B", "auto"),
+        MockVllmConfig("Qwen/Qwen2.5-1.5B", "fp8")
+    ])
     def test_qwen25_1_5b(self, mock_vllm_config, rng, mesh, mock_model_inputs):
         """Tests model init and model forward for the 8B model variant."""
 
@@ -135,12 +135,15 @@ class TestQwen2ForCausalLM:
             head_size=head_dim,
             mesh=mesh,
             layer_names=["layer"] * hf_config.num_hidden_layers,
-        )
+            cache_dtype=jnp.float8_e4m3fn
+            if mock_vllm_config.cache_config.cache_dtype == "fp8" else
+            jnp.bfloat16)
         # 1 seq with 16 tokens
         input_ids, attention_metadata, indices_do_sample = mock_model_inputs
-        kv_caches, hidden_states = model(kv_caches, input_ids,
-                                         attention_metadata)
+        kv_caches, hidden_states, aux_hidden_states = model(
+            kv_caches, input_ids, attention_metadata)
         assert hidden_states.shape == (8, hidden_size)
+        assert len(aux_hidden_states) == 0
 
         hidden_states = hidden_states[indices_do_sample]
         assert hidden_states.shape == (1, hidden_size)

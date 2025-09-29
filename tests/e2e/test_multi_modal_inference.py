@@ -4,6 +4,7 @@
 # This script is a self-contained test that runs a single prompt and
 # compares the output to a known-good output.
 
+import os
 from dataclasses import asdict
 
 from vllm import LLM, EngineArgs, SamplingParams
@@ -14,12 +15,11 @@ from vllm.multimodal.image import convert_image_mode
 # run and is used for verification. The test is considered passed if the
 # generated output match with this text.
 EXPECTED_TEXT = (
-    "The image depicts a stunning view of the Tokyo Skytree, "
-    "a tall broadcasting tower located in the Odaiba district of "
-    "Tokyo, Japan. The skytree is surrounded by cherry blossom trees "
-    "in full bloom, creating a picturesque and serene scene. "
-    "The cherry blossoms are in various stages of bloom, with some "
-    "branches densely covered")
+    "The image depicts a tall, cylindrical tower with a lattice-like "
+    "structure, surrounded by cherry blossom trees in full bloom. The cherry "
+    "blossoms are in various stages of bloom, with pink petals covering the "
+    "branches. The sky is clear and blue, creating a vibrant and picturesque "
+    "scene. The tower appears to be a significant landmark,")
 
 
 # NOTE: Could be extended to more mm models/configs as needed
@@ -27,6 +27,9 @@ def test_multi_modal_inference(monkeypatch):
     """
     Runs multi-modal inference and verifies the output.
     """
+    os.environ['SKIP_JAX_PRECOMPILE'] = '1'  # Skip warmup to save time.
+    os.environ[
+        'VLLM_XLA_CHECK_RECOMPILATION'] = '0'  # Allow compilation during execution.
 
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 

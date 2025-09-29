@@ -4,9 +4,11 @@ import unittest
 from unittest.mock import MagicMock, mock_open, patch
 
 import jax
+import jax.numpy as jnp
 import qwix
 from flax import nnx
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
 
 import tpu_commons.models.jax.utils.quantization.quantization_utils as quantize_qwix  # noqa: E402
 from tpu_commons.models.jax.model_loader import apply_qwix_quantization
@@ -150,7 +152,7 @@ class TestQwixQuantizeNnxModel(unittest.TestCase):
                 kv_cache_block_size=self.kv_cache_block_size,
                 kv_cache_num_kv_heads=self.kv_cache_num_kv_heads,
                 kv_cache_head_size=self.kv_cache_head_size,
-            )
+                kv_cache_dtype="auto")
 
         self.assertIs(returned_model, quantized_model_mock)
         mock_quantize_model.assert_called_once()
@@ -234,22 +236,6 @@ class TestApplyQwixQuantization(unittest.TestCase):
                                     self.mock_rng,
                                     self.mock_mesh,
                                     apply_to_abstract_model=False)
-        mock_jit.assert_called_once()
-
-    @patch('tpu_commons.models.jax.model_loader.jax.jit')
-    def test_quantization_applied_from_string_path(self, mock_jit):
-        """
-        Test that quantization is applied when the config is a string (file path).
-        """
-        config_path = "int8_default.yaml"
-        self.mock_vllm_config.additional_config = {"quantization": config_path}
-        with patch('tpu_commons.utils.get_padded_num_heads', return_value=128):
-            apply_qwix_quantization(self.mock_vllm_config,
-                                    self.mock_model,
-                                    self.mock_rng,
-                                    self.mock_mesh,
-                                    apply_to_abstract_model=False)
-
         mock_jit.assert_called_once()
 
 
@@ -410,48 +396,239 @@ class TestDetermineWhetherToApplyQwixOnAbstractModel(unittest.TestCase):
     def setUp(self):
         self.mock_vllm_config = MagicMock()
         self.mock_vllm_config.additional_config = {
-            "quantization": "some_config.yaml"
+            "quantization": {
+                "qwix": {
+                    "use_abstract_model": True,
+                    "rules": [{
+                        "module_path": ".*",
+                        "weight_qtype": "int8"
+                    }]
+                }
+            }
+        }
+
+        self.mock_vllm_config_no_abstract_model = MagicMock()
+        self.mock_vllm_config_no_abstract_model.additional_config = {
+            "quantization": {
+                "qwix": {
+                    "rules": [{
+                        "module_path": ".*",
+                        "weight_qtype": "int8"
+                    }]
+                }
+            }
         }
 
         self.mock_vllm_config_no_additional_config = MagicMock()
         self.mock_vllm_config_no_additional_config.additional_config = {}
-
-    @patch(
-        "tpu_commons.models.jax.utils.quantization.quantization_utils.quantization_config_file_path_to_dict"
-    )
-    def test_returns_true_when_config_is_true(self, mock_load_dict):
-        """Test it returns True when use_abstract_model is True in config."""
-        mock_load_dict.return_value = {"qwix": {"use_abstract_model": True}}
-        result = quantize_qwix.apply_qwix_on_abstract_model(
-            self.mock_vllm_config)
-        self.assertTrue(result)
-        mock_load_dict.assert_called_once_with("some_config.yaml")
-
-    @patch(
-        "tpu_commons.models.jax.utils.quantization.quantization_utils.quantization_config_file_path_to_dict"
-    )
-    def test_returns_false_when_config_is_false(self, mock_load_dict):
-        """Test it returns False when use_abstract_model is False in config."""
-        mock_load_dict.return_value = {"qwix": {"use_abstract_model": False}}
-        result = quantize_qwix.apply_qwix_on_abstract_model(
-            self.mock_vllm_config)
-        self.assertFalse(result)
-
-    @patch(
-        "tpu_commons.models.jax.utils.quantization.quantization_utils.quantization_config_file_path_to_dict"
-    )
-    def test_returns_false_when_key_is_missing(self, mock_load_dict):
-        """Test it defaults to False when use_abstract_model key is missing."""
-        mock_load_dict.return_value = {"qwix": {"rules": []}}
-        result = quantize_qwix.apply_qwix_on_abstract_model(
-            self.mock_vllm_config)
-        self.assertFalse(result)
 
     def test_returns_false_when_additional_config_is_missing(self):
         """Test it returns False when additional_config is missing."""
         result = quantize_qwix.apply_qwix_on_abstract_model(
             self.mock_vllm_config_no_additional_config)
         self.assertFalse(result)
+
+    def test_returns_true_when_additional_config_is_present(self):
+        """Test it returns False when additional_config is missing."""
+        result = quantize_qwix.apply_qwix_on_abstract_model(
+            self.mock_vllm_config)
+        self.assertTrue(result)
+
+    def test_returns_false_when_use_abstract_model_is_false(self):
+        """Test it returns False when use_abstract_model is False."""
+        result = quantize_qwix.apply_qwix_on_abstract_model(
+            self.mock_vllm_config_no_abstract_model)
+        self.assertFalse(result)
+
+
+class TestLoadRandomWeightsIntoQwixAbstractModel(unittest.TestCase):
+    """Tests for the load_random_weights_into_qwix_abstract_model function."""
+
+    def setUp(self):
+        """Set up a mock environment for testing."""
+        if not jax.devices():
+            self.skipTest(
+                "JAX device not found, skipping JAX-dependent tests.")
+
+        self.rng = jax.random.PRNGKey(0)
+        self.mesh = Mesh(jax.devices(), ('data', ))
+        self.quantization_config = {
+            "weight_block_size": [64, 1],
+        }
+
+        # Mock model structure
+        self.model = MagicMock(spec=['weight_loader', 'initialize_cache'])
+        self.model.weight_loader = MagicMock(
+            spec=['scale_dtype', 'scale_shap_map_for_random_weight_loading'])
+        self.model.weight_loader.scale_dtype = jnp.float16
+        self.model.weight_loader.scale_shap_map_for_random_weight_loading = {}
+
+    @patch(
+        'tpu_commons.models.jax.utils.quantization.quantization_utils.nnx.iter_graph'
+    )
+    @patch(
+        'tpu_commons.models.jax.utils.quantization.quantization_utils.get_random_sharded_array'
+    )
+    def test_successful_initialization(self, mock_get_random_array,
+                                       mock_iter_graph):
+        """Test that variables are correctly initialized."""
+        # Setup mock graph elements
+        mock_weight_param = nnx.Param(jnp.empty((128, 64), dtype=jnp.int8),
+                                      sharding=P('data', None))
+        mock_scale_var = nnx.Variable(jnp.empty((1, 1), dtype=jnp.float16))
+        mock_rng_var = nnx.Variable(jax.random.PRNGKey(0))
+        mock_random_array = jax.numpy.ones(1)
+        mock_get_random_array.return_value = mock_random_array
+
+        mock_iter_graph.return_value = [
+            (('layers', '0', 'attention', 'wq', 'kernel'), mock_weight_param),
+            (('layers', '0', 'attention', 'wq', 'array', 'scale'),
+             mock_scale_var),
+            (('rng', 'params', 'key'), mock_rng_var),
+        ]
+
+        quantize_qwix.load_random_weights_into_qwix_abstract_model(
+            self.rng, self.model, self.mesh, self.quantization_config)
+
+        # Assert weight is updated
+        self.assertIs(mock_weight_param.value, mock_random_array)
+        # Assert scale is updated
+        self.assertIs(mock_scale_var.value, mock_random_array)
+        # Assert RNG key is updated with the passed-in RNG
+        self.assertIs(mock_rng_var.value, self.rng)
+        # Assert initialize_cache is called
+        self.model.initialize_cache.assert_called_once()
+
+    def test_invalid_config_raises_assertion_error(self):
+        """Test that an invalid quantization_block_sizes config raises an error."""
+        invalid_config = {"weight_block_size": [64]}  # Length is 1, not 2
+        with self.assertRaisesRegex(AssertionError,
+                                    "Expected only 2 quantization block"):
+            quantize_qwix.load_random_weights_into_qwix_abstract_model(
+                self.rng, self.model, self.mesh, invalid_config)
+
+    @patch(
+        'tpu_commons.models.jax.utils.quantization.quantization_utils.nnx.iter_graph'
+    )
+    def test_param_shape_setting_no_scale_map(self, mock_iter_graph):
+        """Test correct scale shape calculation when not in the map."""
+        old_weight_param_val = jnp.empty((128, 64))
+        mock_weight_param = nnx.Param(old_weight_param_val, dtype=jnp.int8)
+        old_scale_var_val = jnp.empty((0, 0))
+        mock_scale_var = nnx.Variable(old_scale_var_val)
+
+        mock_iter_graph.return_value = [
+            (('layers', '0', 'attention', 'wq', 'kernel'), mock_weight_param),
+            (('layers', '0', 'attention', 'wq', 'array', 'scale'),
+             mock_scale_var),
+        ]
+
+        quantize_qwix.load_random_weights_into_qwix_abstract_model(
+            self.rng, self.model, self.mesh, self.quantization_config)
+
+        new_weight_param_val = mock_weight_param.value
+        new_scale_var_val = mock_scale_var.value
+
+        expected_scale_shape = (128 // 64, 64 // 64)
+        actual_scale_shape = new_scale_var_val.shape
+
+        expected_weight_shape = (128, 64)
+        actual_weight_shape = new_weight_param_val.shape
+
+        self.assertEqual(expected_scale_shape, actual_scale_shape)
+        self.assertEqual(expected_weight_shape, actual_weight_shape)
+        self.assertNotEqual(old_scale_var_val.shape, new_scale_var_val.shape)
+        assert jnp.not_equal(old_weight_param_val, new_weight_param_val).all()
+
+    @patch(
+        'tpu_commons.models.jax.utils.quantization.quantization_utils.nnx.iter_graph'
+    )
+    def test_param_shape_setting_with_scale_map(self, mock_iter_graph):
+        """Test correct scale shape calculation when in the map."""
+        old_weight_param_val = jnp.empty((128, 64))
+        mock_weight_param = nnx.Param(old_weight_param_val, dtype=jnp.int8)
+        old_scale_var_val = jnp.empty((0, 0))
+        mock_scale_var = nnx.Variable(old_scale_var_val)
+
+        expected_scale_shape = (55, 34)
+
+        self.model.weight_loader.scale_shap_map_for_random_weight_loading = {
+            'wq': expected_scale_shape
+        }
+
+        mock_iter_graph.return_value = [
+            (('layers', '0', 'attention', 'wq', 'kernel'), mock_weight_param),
+            (('layers', '0', 'attention', 'wq', 'array', 'scale'),
+             mock_scale_var),
+        ]
+
+        quantize_qwix.load_random_weights_into_qwix_abstract_model(
+            self.rng, self.model, self.mesh, self.quantization_config)
+
+        new_weight_param_val = mock_weight_param.value
+        new_scale_var_val = mock_scale_var.value
+
+        actual_scale_shape = new_scale_var_val.shape
+
+        expected_weight_shape = (128, 64)
+        actual_weight_shape = new_weight_param_val.shape
+
+        self.assertEqual(expected_scale_shape, actual_scale_shape)
+        self.assertEqual(expected_weight_shape, actual_weight_shape)
+        self.assertNotEqual(old_scale_var_val.shape, new_scale_var_val.shape)
+        assert jnp.not_equal(old_weight_param_val, new_weight_param_val).all()
+
+    @patch('jax.random.randint')
+    @patch('jax.random.normal')
+    @patch('jax.make_array_from_callback')
+    def test_get_random_sharded_array_dtype_dispatch(self, mock_make_array,
+                                                     mock_normal,
+                                                     mock_randint):
+        """Test that integer dtypes call randint and floats call normal."""
+        # Test integer
+        quantize_qwix.get_random_sharded_array(
+            self.rng, self.mesh, nnx.Param(jnp.empty((2, 2)), sharding=P()),
+            (2, 2), jnp.int8, "int_param")
+        mock_randint.assert_called_once()
+        mock_normal.assert_not_called()
+
+        mock_randint.reset_mock()
+        mock_normal.reset_mock()
+
+        # Test float
+        quantize_qwix.get_random_sharded_array(
+            self.rng, self.mesh, nnx.Param(jnp.empty((2, 2)), sharding=P()),
+            (2, 2), jnp.float32, "float_param")
+        mock_randint.assert_not_called()
+        mock_normal.assert_called_once()
+
+    @patch(
+        "tpu_commons.models.jax.utils.quantization.quantization_utils.logger.warning"
+    )
+    @patch("jax.make_array_from_callback")
+    def test_get_random_sharded_array_sharding_fallback(
+            self, mock_make_array, mock_logger_warning):
+        """Test that sharding failure logs a warning and uses a fallback."""
+        # First call raises an error, second call (fallback) succeeds
+        mock_make_array.side_effect = [
+            ValueError("Sharding failed"),
+            MagicMock()
+        ]
+
+        param = nnx.Param(jnp.empty((2, 2)), sharding=P('data', None))
+        quantize_qwix.get_random_sharded_array(self.rng, self.mesh, param,
+                                               (2, 2), jnp.float32,
+                                               "test_param")
+
+        # Check that a warning was logged
+        mock_logger_warning.assert_called_once()
+        self.assertIn("Could not create sharded scale for test_param",
+                      mock_logger_warning.call_args[0][0])
+
+        # Check that the fallback was attempted with an empty PartitionSpec
+        fallback_call_args = mock_make_array.call_args_list[1]
+        fallback_sharding = fallback_call_args.args[1]
+        self.assertEqual(fallback_sharding, NamedSharding(self.mesh, P()))
 
 
 if __name__ == '__main__':

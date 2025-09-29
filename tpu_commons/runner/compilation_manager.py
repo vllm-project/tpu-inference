@@ -8,6 +8,7 @@ import numpy as np
 import vllm.envs as envs
 from jax.sharding import NamedSharding, PartitionSpec
 
+from tpu_commons.core.disagg_utils import is_disagg_enabled
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.layers.sample.sampling import sample
@@ -69,67 +70,72 @@ class CompilationManager:
             return
         logger.info("Precompile all the subgraphs with possible input shapes.")
 
-        if self.runner.is_multimodal_model:
-            logger.info("[TEMP] skip precompiling for multi-modal models")
-            return
+        with self.runner.maybe_setup_dummy_loras(self.runner.lora_config):
+            self._precompile_backbone_text_only()
+            if self.runner.is_multimodal_model:
+                self._precompile_backbone_with_inputs_embeds()
+            self._precompile_select_from_array()
+            self._precompile_compute_logits()
+            self._precompile_disagg_utils()
+            self._precompile_sampling()
+            self._precompile_gather_logprobs()
+            self._precompile_structured_decoding()
+            if self.runner.speculative_config:
+                self._precompile_rejection_sampler()
 
-        self._precompile_backbone()
-        self._precompile_select_from_array()
-        self._precompile_compute_logits()
-        self._precompile_disagg_utils()
-        self._precompile_sampling()
-        self._precompile_gather_logprobs()
-        self._precompile_structured_decoding()
-        if self.runner.speculative_config:
-            self._precompile_rejection_sampler()
+    def _precompile_backbone_helper(self, name, *, input_ids, positions,
+                                    inputs_embeds) -> None:
+        num_tokens = None
+        if input_ids is not None:
+            num_tokens = input_ids.shape[0]
+        elif inputs_embeds is not None:
+            num_tokens = inputs_embeds.shape[0]
+        assert num_tokens is not None
 
-    def _precompile_backbone(self) -> None:
-        for num_tokens in self.runner.num_tokens_paddings:
-            input_ids = self._create_dummy_tensor((num_tokens, ), jnp.int32)
-            positions = self._create_dummy_tensor((num_tokens, ), jnp.int32)
+        # Keep existing pattern for complex array operations
+        block_tables = self.runner.block_table_cpu[:self.runner.max_num_reqs]
+        block_tables = block_tables.reshape(-1)
+        block_tables = device_array(self.runner.mesh, block_tables)
 
-            # Keep existing pattern for complex array operations
-            block_tables = self.runner.block_table_cpu[:self.runner.
-                                                       max_num_reqs]
-            block_tables = block_tables.reshape(-1)
-            block_tables = device_array(self.runner.mesh, block_tables)
+        seq_lens = self._create_dummy_tensor((self.runner.max_num_reqs, ),
+                                             jnp.int32)
+        query_start_loc = self._create_dummy_tensor(
+            (self.runner.max_num_reqs + 1, ), jnp.int32)
 
-            seq_lens = self._create_dummy_tensor((self.runner.max_num_reqs, ),
-                                                 jnp.int32)
-            query_start_loc = self._create_dummy_tensor(
-                (self.runner.max_num_reqs + 1, ), jnp.int32)
+        # Keep existing pattern for specific value arrays
+        request_distribution = np.array([0, 0, 0], dtype=np.int32)
+        request_distribution = device_array(self.runner.mesh,
+                                            request_distribution)
 
-            # Keep existing pattern for specific value arrays
-            request_distribution = np.array([0, 0, 0], dtype=np.int32)
-            request_distribution = device_array(self.runner.mesh,
-                                                request_distribution)
+        attention_metadata = AttentionMetadata(
+            input_positions=positions,
+            block_tables=block_tables,
+            seq_lens=seq_lens,
+            query_start_loc=query_start_loc,
+            request_distribution=request_distribution,
+        )
 
-            attention_metadata = AttentionMetadata(
-                input_positions=positions,
-                block_tables=block_tables,
-                seq_lens=seq_lens,
-                query_start_loc=query_start_loc,
-                request_distribution=request_distribution,
-            )
+        def model_fn_wrapper(
+            state,
+            kv_caches,
+            input_ids,
+            attention_metadata,
+            inputs_embeds,
+            layer_name_to_kvcache_index,
+            lora_metadata,
+        ):
+            kv_caches, hidden_states, aux_hidden_states = self.runner.model_fn(
+                state, kv_caches, input_ids, attention_metadata, inputs_embeds,
+                layer_name_to_kvcache_index, lora_metadata)
+            self.runner.kv_caches = kv_caches
+            return hidden_states
 
-            inputs_embeds = None
-
-            def model_fn_wrapper(
-                state,
-                kv_caches,
-                input_ids,
-                attention_metadata,
-                inputs_embeds,
-                layer_name_to_kvcache_index,
-            ):
-                kv_caches, hidden_states = self.runner.model_fn(
-                    state, kv_caches, input_ids, attention_metadata,
-                    inputs_embeds, layer_name_to_kvcache_index)
-                self.runner.kv_caches = kv_caches
-                return hidden_states
-
+        with self.runner.maybe_select_dummy_loras(
+                self.runner.lora_config, np.array([num_tokens],
+                                                  dtype=np.int32)):
+            lora_metadata = self.runner.lora_utils.extract_lora_metadata()
             self._run_compilation(
-                "backbone",
+                name,
                 model_fn_wrapper,
                 self.runner.state,
                 self.runner.kv_caches,
@@ -137,8 +143,35 @@ class CompilationManager:
                 attention_metadata,
                 inputs_embeds,
                 tuple(self.runner.layer_name_to_kvcache_index.items()),
+                lora_metadata,
                 num_tokens=num_tokens,
             )
+
+    def _precompile_backbone_text_only(self) -> None:
+        for num_tokens in self.runner.num_tokens_paddings:
+            input_ids = self._create_dummy_tensor((num_tokens, ), jnp.int32)
+            positions = self._create_dummy_tensor((num_tokens, ), jnp.int32)
+            self._precompile_backbone_helper("backbone",
+                                             input_ids=input_ids,
+                                             positions=positions,
+                                             inputs_embeds=None)
+
+    def _precompile_backbone_with_inputs_embeds(self) -> None:
+        hidden_size = self.runner.model_config.get_hidden_size()
+        dtype = self.runner.model_config.dtype
+        for num_tokens in self.runner.num_tokens_paddings:
+            inputs_embeds = self._create_dummy_tensor(
+                (num_tokens, hidden_size), dtype)
+            if self.runner.uses_mrope:
+                positions = self._create_dummy_tensor((3, num_tokens),
+                                                      jnp.int32)
+            else:
+                positions = self._create_dummy_tensor((num_tokens, ),
+                                                      jnp.int32)
+            self._precompile_backbone_helper("backbone with embeds",
+                                             input_ids=None,
+                                             positions=positions,
+                                             inputs_embeds=inputs_embeds)
 
     def _precompile_select_from_array_helper(
         self,
@@ -234,13 +267,18 @@ class CompilationManager:
         for num_reqs in leading_shape:
             hidden_states = self._create_dummy_tensor((num_reqs, hsize),
                                                       jnp.bfloat16)
-            self._run_compilation(
-                "compute_logits",
-                self.runner.compute_logits_fn,
-                self.runner.state,
-                hidden_states,
-                num_reqs=num_reqs,
-            )
+            with self.runner.maybe_select_dummy_loras(
+                    self.runner.lora_config,
+                    np.array([num_reqs], dtype=np.int32)):
+                lora_metadata = self.runner.lora_utils.extract_lora_metadata()
+                self._run_compilation(
+                    "compute_logits",
+                    self.runner.compute_logits_fn,
+                    self.runner.state,
+                    hidden_states,
+                    lora_metadata,
+                    num_reqs=num_reqs,
+                )
 
     def _precompile_sampling(self) -> None:
         logger.info("Compiling sampling with different input shapes.")
@@ -281,6 +319,8 @@ class CompilationManager:
                 )
 
     def _precompile_disagg_utils(self) -> None:
+        if not is_disagg_enabled():
+            return
         logger.info(
             "Compiling disaggregated util with different input shapes.")
         block_size = self.runner.block_size
@@ -290,12 +330,17 @@ class CompilationManager:
             block_numbers = list(range(1, num_blocks + 1))
             kv_cache_slices = self.runner.kv_cache_manager.get_kv_cache_for_block_ids(
                 block_numbers)
+            # Prevent the slices from getting freed by insert before finishing this operation
+            for layer_cache in kv_cache_slices:
+                layer_cache.block_until_ready()
             self.runner.kv_caches = self.runner.kv_cache_manager._jitted_insert_continuous_kv_cache(
                 block_size,
                 self.runner.kv_caches,
                 kv_cache_slices,
                 block_numbers[0],
             )
+            for layer_cache in self.runner.kv_caches:
+                layer_cache.block_until_ready()
 
     def _precompile_gather_logprobs(self) -> None:
         logger.info("Compiling gather_logprobs with different input shapes.")

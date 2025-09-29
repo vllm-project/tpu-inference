@@ -90,7 +90,7 @@ checkThroughputAndRouge() {
 }
 
 echo "Spinning up the vLLM server..."
-(vllm serve "$model_name" --max-model-len "$max_model_len" --disable-log-requests --max-num-batched-tokens "$max_batched_tokens" 2>&1 | tee -a "$LOG_FILE") &
+(SKIP_JAX_PRECOMPILE=1 VLLM_XLA_CHECK_RECOMPILATION=0 vllm serve "$model_name" --max-model-len "$max_model_len" --disable-log-requests --max-num-batched-tokens "$max_batched_tokens" 2>&1 | tee -a "$LOG_FILE") &
 
 
 # Run a busy loop to block until the server is ready to receive requests
@@ -119,7 +119,8 @@ if $did_find_ready_message; then
     echo "Starting the benchmark for $model_name..."
     echo "Current working directory: $(pwd)"
     vllm bench serve \
-    --backend openai-chat \
+    --backend "openai-chat" \
+    --endpoint-type "openai-chat" \
     --model "$model_name" \
     --dataset-name "$dataset_name" \
     --dataset-path "$dataset_path" \

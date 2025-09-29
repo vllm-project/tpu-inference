@@ -14,10 +14,7 @@ class TestSharding(unittest.TestCase):
     def setUp(self):
         """Sets up the testing environment before each test."""
 
-        class MockDevice:
-            pass
-
-        self.mock_devices = [MockDevice() for _ in range(8)]
+        self.mock_devices = [MagicMock(coords=i) for i in range(8)]
         self.original_jax_devices = jax.devices
         jax.devices = lambda: self.mock_devices
 

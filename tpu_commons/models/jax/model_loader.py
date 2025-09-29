@@ -6,17 +6,24 @@ import jax
 import torch
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from torchax.ops.mappings import j2t_dtype
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 from vllm.utils import supports_kw
 
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.utils.quantization.quantization_utils import (
-    apply_qwix_on_abstract_model, apply_qwix_quantization)
+    apply_qwix_on_abstract_model, apply_qwix_quantization,
+    load_random_weights_into_qwix_abstract_model)
 
 logger = init_logger(__name__)
 
 _MODEL_REGISTRY = {}
+
+
+class UnsupportedArchitectureError(ValueError):
+    """Raised when a model architecture is not supported in the registry."""
+    pass
 
 
 def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
@@ -25,6 +32,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
 
     from tpu_commons.models.jax.deepseek_v3 import DeepSeekV3
     from tpu_commons.models.jax.llama4 import Llama4ForCausalLM
+    from tpu_commons.models.jax.llama_eagle3 import EagleLlama3ForCausalLM
     from tpu_commons.models.jax.phi3 import Phi3ForCausalLM
     from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
     from tpu_commons.models.jax.qwen2_5_vl import \
@@ -45,12 +53,13 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     _MODEL_REGISTRY[
         "Qwen2_5_VLForConditionalGeneration"] = Qwen2_5_VLForConditionalGeneration
     _MODEL_REGISTRY["Phi3ForCausalLM"] = Phi3ForCausalLM
+    _MODEL_REGISTRY["Eagle3LlamaForCausalLM"] = EagleLlama3ForCausalLM
 
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
         if arch in _MODEL_REGISTRY:
             return _MODEL_REGISTRY[arch]
-    raise ValueError(
+    raise UnsupportedArchitectureError(
         f"Model architectures {architectures} are not supported for now. "
         f"Supported architectures: {list(_MODEL_REGISTRY.keys())}")
 
@@ -61,10 +70,69 @@ def _get_nnx_model(
     rng: jax.Array,
     mesh: Mesh,
 ) -> nnx.Module:
+
+    def create_abstract_model() -> nnx.Module:
+        """
+        Helper class to create an abstract model for `nnx.eval_shape`.
+
+        Returns:
+            An abstract model function.
+        """
+        return model_class(vllm_config, rng, mesh)
+
+    @functools.partial(jax.jit,
+                       donate_argnums=(0, ),
+                       static_argnames=('use_qwix_on_abstract_model', ))
+    def create_jit_model(
+            model: nnx.Module,
+            use_qwix_on_abstract_model: bool = False) -> nnx.Module:
+        """
+        Create a jit model.
+
+        Args:
+            model: The model to jit.
+            use_qwix_on_abstract_model: Whether to apply Qwix on the abstract model.
+
+        Returns:
+            The jitted model.
+        """
+        state = nnx.state(model)
+        nnx.update(model, state)
+        if not use_qwix_on_abstract_model:
+            # NOTE: if Qwix is not configured, this will be a no-op
+            model = apply_qwix_quantization(vllm_config,
+                                            model,
+                                            rng,
+                                            mesh,
+                                            apply_to_abstract_model=False)
+        return model
+
     if os.getenv("JAX_RANDOM_WEIGHTS", False):
         # Create a sharded model with random inited weights.
         # TODO: currently Qwen2ForCausalLM is using legacy model implementation
         # will merge the random init logic when all model are migrated to new model implementation
+
+        # Handle the case where we want to load in random weights to a Qwix-quantized model.  Here, we
+        # need to run an abstract pass for Qwix first and then load in the random weights.
+        if apply_qwix_on_abstract_model(vllm_config):
+            abstract_model_fn = apply_qwix_quantization(
+                vllm_config,
+                create_abstract_model,
+                rng,
+                mesh,
+                apply_to_abstract_model=True)
+
+            model = nnx.eval_shape(abstract_model_fn)
+            quantization_config = vllm_config.model_config.hf_config.quantization_config if hasattr(
+                vllm_config.model_config.hf_config,
+                "quantization_config") else {}
+            load_random_weights_into_qwix_abstract_model(
+                rng, model, mesh, quantization_config)
+            with mesh:
+                jit_model = create_jit_model(model,
+                                             use_qwix_on_abstract_model=True)
+            return jit_model
+
         @jax.jit
         def create_sharded_model():
             model = model_class(vllm_config, rng, mesh)
@@ -95,25 +163,16 @@ def _get_nnx_model(
         # 2. The model loading won't be OOM. Otherwise the normal way will hold
         #    a full model weights after random-init, then duplicate a layer during
         #    the load_weights. This would be easy to OOM if the layer is super large.
-        def _create_abstract_model() -> nnx.Module:
-            """
-            Helper class to create an abstract model for `nnx.eval_shape`.
-
-            Returns:
-                An abstract model function.
-            """
-            return model_class(vllm_config, rng, mesh)
-
-        abstract_model_fn = _create_abstract_model
+        abstract_model_fn = create_abstract_model
         # NOTE: only one of the abstract (this) or or concrete Qwix quantization paths should
         # be taken
         if should_apply_qwix_on_abstract_model := apply_qwix_on_abstract_model(
                 vllm_config):
-            # NOTE: if Qwix is not configured, this will return `_create_abstract_model` and
+            # NOTE: if Qwix is not configured, this will return `create_abstract_model` and
             # thus be a no-op
             abstract_model_fn = apply_qwix_quantization(
                 vllm_config,
-                _create_abstract_model,
+                create_abstract_model,
                 rng,
                 mesh,
                 apply_to_abstract_model=True)
@@ -121,33 +180,27 @@ def _get_nnx_model(
         # Although the created model can already work, we still need to jit
         # the model creation again, otherwise the model forward will have
         # non-trivial overhead in PjitFunction.
-        @functools.partial(jax.jit, donate_argnums=(0, ))
-        def create_jit_model(model):
-            state = nnx.state(model)
-            nnx.update(model, state)
-            # NOTE: only one of the abstract (this) or or concrete Qwix quantization paths should
-            # be taken
-            if not should_apply_qwix_on_abstract_model:
-                # NOTE: if Qwix is not configured, this will be a no-op
-                model = apply_qwix_quantization(vllm_config,
-                                                model,
-                                                rng,
-                                                mesh,
-                                                apply_to_abstract_model=False)
-            return model
-
         with mesh:
             model.load_weights(rng)
-            jit_model = create_jit_model(model)
+            jit_model = create_jit_model(
+                model,
+                use_qwix_on_abstract_model=should_apply_qwix_on_abstract_model)
     return jit_model
 
 
+# TODO(pooyam): We need to refactor this. This is returning a bunch of functions that do not work with all models and this is not very easy to see from the code.
 def get_flax_model(
     vllm_config: VllmConfig,
     rng: jax.Array,
     mesh: Mesh,
+    is_draft_model: bool = False,
 ) -> nnx.Module:
-    model_class = _get_model_architecture(vllm_config.model_config.hf_config)
+    if is_draft_model:
+        model_class = _get_model_architecture(
+            vllm_config.speculative_config.draft_model_config.hf_config)
+    else:
+        model_class = _get_model_architecture(
+            vllm_config.model_config.hf_config)
     jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh)
     kv_cache_sharding = NamedSharding(mesh, PartitionSpec(None, None, "model"))
     hidden_states_sharding = NamedSharding(mesh, PartitionSpec(None,
@@ -162,6 +215,7 @@ def get_flax_model(
         out_shardings=(
             kv_cache_sharding,
             hidden_states_sharding,
+            hidden_states_sharding,  # aux hidden states
         ),
         donate_argnums=2,  # 0 is graphdef, 1 is state, 2 is kv_cache
         static_argnums=6,  #6 is layer_name_to_kvcache_index
@@ -178,7 +232,8 @@ def get_flax_model(
     )
     def run_compute_logits(graphdef, state, *args):
         model = nnx.merge(graphdef, state)
-        return model.compute_logits(*args)
+        hidden_state, *_ = args
+        return model.compute_logits(hidden_state)
 
     # Multi-modal support only
     # This function calculates the image token's embeddings by VIT
@@ -199,6 +254,15 @@ def get_flax_model(
         model = nnx.merge(graphdef, state)
         return model.get_input_embeddings(*args, **kwargs)
 
+    # For models that want to work with EAGLE-3 speculative decoding
+    @functools.partial(
+        jax.jit,
+        out_shardings=(logits_sharding),
+    )
+    def combine_hidden_states(graphdef, state, hidden_states):
+        model = nnx.merge(graphdef, state)
+        return model.combine_hidden_states(hidden_states)
+
     model_fn = functools.partial(run_model, graphdef)
     compute_logits_fn = functools.partial(run_compute_logits, graphdef)
     get_multimodal_embeddings_fn = functools.partial(
@@ -206,7 +270,10 @@ def get_flax_model(
     get_input_embeddings_fn = functools.partial(run_get_input_embeddings,
                                                 graphdef)
     lora_manager, model = None, None
-    return model_fn, compute_logits_fn, get_multimodal_embeddings_fn, get_input_embeddings_fn, state, lora_manager, model
+    combine_hidden_states_fn = functools.partial(combine_hidden_states,
+                                                 graphdef)
+
+    return model_fn, compute_logits_fn, combine_hidden_states_fn, get_multimodal_embeddings_fn, get_input_embeddings_fn, state, lora_manager, model
 
 
 def get_vllm_model(
@@ -226,18 +293,33 @@ def get_vllm_model(
     jit_model = model.jit_step_func()
     compute_logits_fn = model.jit_compute_logits_func()
     # the model needs to be returned because lora weights are neither torch.nn.parameter nor torch.nn.buffer. After we load the lora weights and set it to the torch.nn.Module, we can shard it and move it to TPU.
-    return jit_model, compute_logits_fn, None, None, params, lora_manager, model
+    combine_hidden_states_fn = None
+    return jit_model, compute_logits_fn, combine_hidden_states_fn, None, None, params, lora_manager, model
 
 
 def get_model(
     vllm_config: VllmConfig,
     rng: jax.Array,
     mesh: Mesh,
+    is_draft_model: bool = False,
 ) -> Any:
     impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
     logger.info(f"Loading model with MODEL_IMPL_TYPE={impl}")
+
     if impl == "flax_nnx":
-        return get_flax_model(vllm_config, rng, mesh)
+        try:
+            # Try to load the flax model first
+            return get_flax_model(vllm_config, rng, mesh, is_draft_model)
+        except UnsupportedArchitectureError as e:
+            # Convert the error message to a string to check its contents
+            error_msg = str(e)
+
+            logger.warning(f"Flax model failed with: '{error_msg}'. "
+                           "Falling back to vLLM implementation.")
+            # Fall back to the vLLM model and updating the dtype accordingly
+            vllm_config.model_config.dtype = j2t_dtype(
+                vllm_config.model_config.dtype.dtype)
+            return get_vllm_model(vllm_config, rng, mesh)
     elif impl == "vllm":
         return get_vllm_model(vllm_config, rng, mesh)
     else:
