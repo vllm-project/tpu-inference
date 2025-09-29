@@ -3,7 +3,6 @@
 import os
 from typing import TYPE_CHECKING, Optional, Tuple, Union, cast
 
-import jax
 import jax.numpy as jnp
 import vllm.envs as envs
 from torchax.ops.mappings import j2t_dtype
@@ -70,7 +69,8 @@ class TpuPlatform(Platform):
     def get_device_name(cls, device_id: int = 0) -> str:
         try:
             if envs.VLLM_TPU_USING_PATHWAYS:
-                return jax.local_devices()[0].device_kind
+                # Causes mutliprocess accessing IFRT when calling jax.devices()
+                return "TPU v6 lite"
             else:
                 chip_type, _ = device.get_local_chips()
                 return f"TPU {chip_type.name}"
