@@ -111,7 +111,6 @@ def get_model_weights_files(
         )
 
     weights_files.sort()
-    weights_files = weights_files[:4] + [weights_files[-4]]
     return weights_files
 
 

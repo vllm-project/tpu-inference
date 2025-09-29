@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Callable, List
 import jax
 import jax.numpy as jnp
 import qwix
-import qwix.pallas
 import yaml
 from flax import nnx
 from flax.typing import PRNGKey
@@ -517,6 +516,8 @@ def manually_quantize_qwix_weight(weight: jax.Array, qtype: jnp.dtype,
                                   tiled_axes: dict,
                                   calibration_method: str) -> QArray:
     """
+    Manually quantizes a weight tensor using Qwix.  Only needed for the SparseMatmul DeepSeek case right now, since
+    otherwise, Qwix will handle this automatically (through our application of `qwix.quantize_model`).
     """
     # TODO (jacobplatin): clean this up; this is needed because of issues with Qwix quantizing the `shard_map` in SpraseMatmul
     how_to_quantize = ptq.qarray.HowToQuantize(
@@ -553,6 +554,7 @@ def manually_quantize_qwix_activation(inputs: jax.Array, rule_name: str,
                                        channelwise_axes=channelwise_axes,
                                        tiled_axes=tiled_axes,
                                        calibration_method=calibration_method)
+    # This is needed because we aren't passing `act_name` right now
     assert not rule.act_static_scale, "Static scale not supported right now"
 
     # channelwise_axes should be set to (a subset of) non-contraction axes. e.g.

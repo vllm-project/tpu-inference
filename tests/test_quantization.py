@@ -9,6 +9,7 @@ import qwix
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
+from qwix._src.providers import ptq
 
 import tpu_commons.models.jax.utils.quantization.quantization_utils as quantize_qwix  # noqa: E402
 from tpu_commons.models.jax.model_loader import apply_qwix_quantization
@@ -629,6 +630,205 @@ class TestLoadRandomWeightsIntoQwixAbstractModel(unittest.TestCase):
         fallback_call_args = mock_make_array.call_args_list[1]
         fallback_sharding = fallback_call_args.args[1]
         self.assertEqual(fallback_sharding, NamedSharding(self.mesh, P()))
+
+
+class TestManualQwixQuantization(unittest.TestCase):
+    """Tests for manual Qwix quantization functions."""
+
+    def setUp(self):
+        if not jax.devices():
+            self.skipTest(
+                "JAX device not found, skipping JAX-dependent tests.")
+        self.weight = jnp.ones((4, 4))
+        self.inputs = jnp.ones((8, 4))
+        self.qtype = jnp.int8
+        self.channelwise_axes = [0]
+        self.tiled_axes = {}
+        self.calibration_method = 'max'
+
+    @patch(
+        'tpu_commons.models.jax.utils.quantization.quantization_utils.ptq._create_quantized_param'
+    )
+    def test_manually_quantize_qwix_weight(self, mock_create_param):
+        """Test that manually_quantize_qwix_weight calls ptq._create_quantized_param correctly."""
+        quantize_qwix.manually_quantize_qwix_weight(
+            weight=self.weight,
+            qtype=self.qtype,
+            channelwise_axes=self.channelwise_axes,
+            tiled_axes=self.tiled_axes,
+            calibration_method=self.calibration_method)
+
+        mock_create_param.assert_called_once()
+        args, _ = mock_create_param.call_args
+        passed_weight, passed_how_to_quantize = args
+
+        self.assertTrue(jnp.array_equal(passed_weight, self.weight))
+        self.assertIsInstance(passed_how_to_quantize, ptq.qarray.HowToQuantize)
+        self.assertEqual(passed_how_to_quantize.qtype, self.qtype)
+        self.assertEqual(passed_how_to_quantize.channelwise_axes,
+                         self.channelwise_axes)
+        self.assertEqual(passed_how_to_quantize.tiled_axes, self.tiled_axes)
+        self.assertEqual(passed_how_to_quantize.calibration_method,
+                         self.calibration_method)
+
+    @patch(
+        'tpu_commons.models.jax.utils.quantization.quantization_utils.ptq._quantize_act'
+    )
+    @patch('qwix.pallas.get_current_rule')
+    def test_manually_quantize_qwix_activation(self, mock_get_rule,
+                                               mock_quantize_act):
+        """Test that manually_quantize_qwix_activation calls ptq._quantize_act correctly."""
+        mock_rule = MagicMock()
+        mock_rule.act_static_scale = False
+        mock_get_rule.return_value = mock_rule
+        rule_name = "test_rule"
+
+        quantize_qwix.manually_quantize_qwix_activation(
+            inputs=self.inputs,
+            rule_name=rule_name,
+            qtype=self.qtype,
+            channelwise_axes=self.channelwise_axes,
+            tiled_axes=self.tiled_axes,
+            calibration_method=self.calibration_method)
+
+        mock_get_rule.assert_called_once_with(rule_name)
+        mock_quantize_act.assert_called_once()
+
+        args, _ = mock_quantize_act.call_args
+        passed_inputs, passed_how, passed_rule, passed_act_name = args
+
+        self.assertTrue(jnp.array_equal(passed_inputs, self.inputs))
+        self.assertIsInstance(passed_how, ptq.qarray.HowToQuantize)
+        self.assertEqual(passed_how.qtype, self.qtype)
+        self.assertEqual(passed_how.channelwise_axes, self.channelwise_axes)
+        self.assertEqual(passed_how.tiled_axes, self.tiled_axes)
+        self.assertEqual(passed_how.calibration_method,
+                         self.calibration_method)
+        self.assertIs(passed_rule, mock_rule)
+        self.assertEqual(passed_act_name, "")  # act_name is hardcoded to ""
+
+    @patch('qwix.pallas.get_current_rule')
+    def test_manually_quantize_qwix_activation_static_scale_raises_error(
+            self, mock_get_rule):
+        """Test that an assertion is raised if the rule has static scale."""
+        mock_rule = MagicMock()
+        mock_rule.act_static_scale = True
+        mock_get_rule.return_value = mock_rule
+
+        with self.assertRaisesRegex(AssertionError,
+                                    "Static scale not supported right now"):
+            quantize_qwix.manually_quantize_qwix_activation(
+                inputs=self.inputs,
+                rule_name="any_rule",
+                qtype=self.qtype,
+                channelwise_axes=self.channelwise_axes,
+                tiled_axes=self.tiled_axes,
+                calibration_method=self.calibration_method)
+
+
+class TestGetQuantDtypeFromQwixConfig(unittest.TestCase):
+    """Tests for the get_quant_dtype_from_qwix_config function."""
+
+    def setUp(self):
+        self.mock_vllm_config = MagicMock()
+        self.mock_vllm_config.additional_config = {}
+
+    def test_get_quant_dtype_success(self):
+        """Test successful extraction of dtypes from a valid config."""
+        self.mock_vllm_config.additional_config = {
+            "quantization": {
+                "qwix": {
+                    "scale_dtype":
+                    "float16",
+                    "rules": [
+                        {
+                            "module_path": ".*mlp.*",
+                            "weight_qtype": "int4"
+                        },
+                        {
+                            "module_path": ".*",
+                            "weight_qtype": "int8"
+                        },
+                    ],
+                }
+            }
+        }
+        scale_dtype, quant_dtype = quantize_qwix.get_quant_dtype_from_qwix_config(
+            self.mock_vllm_config)
+        self.assertEqual(scale_dtype, jnp.float16)
+        self.assertEqual(quant_dtype, jnp.int8)
+
+    def test_get_quant_dtype_default_scale(self):
+        """Test that scale_dtype defaults to bfloat16 when not specified."""
+        self.mock_vllm_config.additional_config = {
+            "quantization": {
+                "qwix": {
+                    "rules": [{
+                        "module_path": ".*",
+                        "weight_qtype": "int8"
+                    }]
+                }
+            }
+        }
+        scale_dtype, quant_dtype = quantize_qwix.get_quant_dtype_from_qwix_config(
+            self.mock_vllm_config)
+        self.assertEqual(scale_dtype, jnp.bfloat16)
+        self.assertEqual(quant_dtype, jnp.int8)
+
+    def test_no_quantization_config_returns_defaults(self):
+        """Test that default dtypes are returned when config is missing."""
+        self.mock_vllm_config.additional_config = {}
+        scale_dtype, quant_dtype = quantize_qwix.get_quant_dtype_from_qwix_config(
+            self.mock_vllm_config)
+        self.assertEqual(scale_dtype, jnp.bfloat16)
+        self.assertIsNone(quant_dtype)
+
+    def test_get_quant_dtype_no_wildcard_rule_returns_none(self):
+        """Test that quant_dtype is None if no wildcard rule is found."""
+        self.mock_vllm_config.additional_config = {
+            "quantization": {
+                "qwix": {
+                    "rules": [{
+                        "module_path": ".*mlp.*",
+                        "weight_qtype": "int4"
+                    }]
+                }
+            }
+        }
+        scale_dtype, quant_dtype = quantize_qwix.get_quant_dtype_from_qwix_config(
+            self.mock_vllm_config)
+        self.assertEqual(scale_dtype, jnp.bfloat16)
+        self.assertIsNone(quant_dtype)
+
+    def test_get_quant_dtype_wildcard_rule_missing_qtype_raises_error(self):
+        """Test that an assertion is raised if the wildcard rule is missing weight_qtype."""
+        self.mock_vllm_config.additional_config = {
+            "quantization": {
+                "qwix": {
+                    "rules": [{
+                        "module_path": ".*"
+                    }]
+                }
+            }
+        }
+        with self.assertRaisesRegex(AssertionError,
+                                    "Quantization dtype not found"):
+            quantize_qwix.get_quant_dtype_from_qwix_config(
+                self.mock_vllm_config)
+
+    def test_get_quant_dtype_no_rules_key_returns_none(self):
+        """Test that quant_dtype is None if 'rules' key is missing."""
+        self.mock_vllm_config.additional_config = {
+            "quantization": {
+                "qwix": {
+                    "scale_dtype": "float16",
+                }
+            }
+        }
+        scale_dtype, quant_dtype = quantize_qwix.get_quant_dtype_from_qwix_config(
+            self.mock_vllm_config)
+        self.assertEqual(scale_dtype, jnp.float16)
+        self.assertIsNone(quant_dtype)
 
 
 if __name__ == '__main__':
