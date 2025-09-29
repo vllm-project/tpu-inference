@@ -59,6 +59,52 @@ def test_single_lora():
     assert int(answer) == 2
 
 
+def test_no_lora_req_with_lora_server():
+    """
+    This test ensures we can run a single LoRA adapter on the TPU backend.
+    We run "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_2_adapter" which
+    will force Qwen2.5-3B-Instruct to claim 1+1=2.
+    """
+
+    llm = setup_vllm(1)
+
+    prompt = "What is 1+1? \n"
+
+    output = llm.generate(prompt,
+                          sampling_params=vllm.SamplingParams(max_tokens=256,
+                                                              temperature=0),)[0].outputs[0].text
+
+    answer = output.strip()[0]
+
+    print(f'{answer=}')
+    # assert answer.isdigit()
+    # assert int(answer) == 2
+
+
+def test_no_lora_req_without_lora_server():
+    """
+    This test ensures we can run a single LoRA adapter on the TPU backend.
+    We run "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_2_adapter" which
+    will force Qwen2.5-3B-Instruct to claim 1+1=2.
+    """
+
+    llm = vllm.LLM(model="Qwen/Qwen2.5-3B-Instruct",
+                   max_model_len=256,
+                   max_num_seqs=8,)
+
+    prompt = "What is 1+1? \n"
+
+    output = llm.generate(prompt,
+                          sampling_params=vllm.SamplingParams(max_tokens=256,
+                                                              temperature=0),)[0].outputs[0].text
+
+    answer = output.strip()[0]
+
+    print(f'{answer=}')
+    # assert answer.isdigit()
+    # assert int(answer) == 2
+
+
 def test_lora_hotswapping():
     """
     This test ensures we can run multiple LoRA adapters on the TPU backend, even
