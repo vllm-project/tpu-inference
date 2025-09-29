@@ -93,10 +93,13 @@ def get_device_name(num_devices: int | None = None):
     if kind.endswith(' lite'):
         kind = kind[:-len(' lite')]
         suffix = 'e'
-    if kind.endswith('p'):
+    elif kind.endswith('e'):
+        kind = kind[:-1]
+        suffix = 'e'
+    elif kind.endswith('p'):
         kind = kind[:-1]
         suffix = 'p'
-    if kind == 'TPU7x':
+    elif kind == 'TPU7x':
         kind = 'TPU v7'
     assert kind[:-1] == 'TPU v', kind
     kind += suffix
