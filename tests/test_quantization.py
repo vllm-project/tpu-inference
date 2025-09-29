@@ -647,10 +647,10 @@ class TestManualQwixQuantization(unittest.TestCase):
         self.calibration_method = 'max'
 
     @patch(
-        'tpu_commons.models.jax.utils.quantization.quantization_utils.ptq._create_quantized_param'
+        'tpu_commons.models.jax.utils.quantization.quantization_utils.ptq.create_quantized_param'
     )
     def test_manually_quantize_qwix_weight(self, mock_create_param):
-        """Test that manually_quantize_qwix_weight calls ptq._create_quantized_param correctly."""
+        """Test that manually_quantize_qwix_weight calls ptq.create_quantized_param correctly."""
         quantize_qwix.manually_quantize_qwix_weight(
             weight=self.weight,
             qtype=self.qtype,
@@ -672,12 +672,12 @@ class TestManualQwixQuantization(unittest.TestCase):
                          self.calibration_method)
 
     @patch(
-        'tpu_commons.models.jax.utils.quantization.quantization_utils.ptq._quantize_act'
+        'tpu_commons.models.jax.utils.quantization.quantization_utils.ptq.quantize_act'
     )
     @patch('qwix.pallas.get_current_rule')
     def test_manually_quantize_qwix_activation(self, mock_get_rule,
                                                mock_quantize_act):
-        """Test that manually_quantize_qwix_activation calls ptq._quantize_act correctly."""
+        """Test that manually_quantize_qwix_activation calls ptq.quantize_act correctly."""
         mock_rule = MagicMock()
         mock_rule.act_static_scale = False
         mock_get_rule.return_value = mock_rule

@@ -527,7 +527,7 @@ def manually_quantize_qwix_weight(weight: jax.Array, qtype: jnp.dtype,
         tiled_axes=tiled_axes,
         calibration_method=calibration_method)
 
-    return ptq._create_quantized_param(weight, how_to_quantize)
+    return ptq.create_quantized_param(weight, how_to_quantize)
 
 
 def manually_quantize_qwix_activation(inputs: jax.Array, rule_name: str,
@@ -561,7 +561,7 @@ def manually_quantize_qwix_activation(inputs: jax.Array, rule_name: str,
     # channelwise_axes should be set to (a subset of) non-contraction axes. e.g.
     # for ragged_dot [m, k] x [g, k, n], they are [0] and [0, 2]
     # TODO (jacobplatin): add support for `act_name`
-    return ptq._quantize_act(inputs, lhs_how, rule, "")
+    return ptq.quantize_act(inputs, lhs_how, rule, "")
 
 
 def get_quant_dtype_from_qwix_config(
