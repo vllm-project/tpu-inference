@@ -356,7 +356,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             return DUMMY_METADATA, EMPTY_MODEL_RUNNER_OUTPUT,
 
         (input_ids, attn_metadata, sampling_metadata, logits_indices,
-         spec_decode_metadata) = self._prepare_inputs(scheduler_output)
+         spec_decode_metadata,
+         batch_comp) = self._prepare_inputs(scheduler_output)
 
         # multi-modal support
         if self.is_multimodal_model:
@@ -389,16 +390,45 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 # NOTE(Wenlong): It takes both `input_ids` and `inputs_embeds`,
                 # but one of them would be `None`
 
+                # Define the dynamic arguments for this execution step
+                dynamic_args = (
+                    self.state,
+                    self.kv_caches,
+                    input_ids,
+                    attn_metadata,
+                    inputs_embeds,
+                    tuple(self.layer_name_to_kvcache_index.items()),
+                    lora_metadata,
+                )
+
+                # --- Step 1 (Optional): Lower the function to get HLO for debugging ---
+                # Access the original JIT'd function via .func
+                # Access the pre-filled 'graphdef' argument via .args
+                original_jit_fn = self.model_fn.func
+                all_args_for_lowering = self.model_fn.args + dynamic_args
+
+                # The .lower() call returns a "Lowered" object, not the model output
+                lowered_computation = original_jit_fn.lower(
+                    *all_args_for_lowering)
+
+                compilation_args = {'xla_dump_hlo_as_proto': True, 'xla_dump_to': "hlo_dump_all_256_decode"}
+
+                # You can now get the HLO text from the lowered object
+                if batch_comp["num_decode_tokens"] == 256:
+                    print(
+                        f"Dumping HLO for batch with composition: {batch_comp}"
+                    )
+                    lowered_computation.compile(compilation_args)
+                    raise ValueError("Finished compiling model for 256 tokens")
+
+                # You would typically log this or save it to a file, not assign it to output variables.
+                # For example: logger.debug(hlo_text)
+
+                # --- Step 2: Execute the model to get the actual outputs ---
+                # Call the partial `self.model_fn` directly with only the dynamic arguments.
+                # This correctly executes the pre-compiled function.
                 (self.kv_caches, hidden_states,
-                 aux_hidden_states) = self.model_fn(
-                     self.state,
-                     self.kv_caches,
-                     input_ids,
-                     attn_metadata,
-                     inputs_embeds,
-                     tuple(self.layer_name_to_kvcache_index.items()),
-                     lora_metadata,
-                 )
+                 aux_hidden_states) = self.model_fn(*dynamic_args)
 
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)
@@ -632,12 +662,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             total_num_scheduled_tokens:padded_total_num_scheduled_tokens] = 0
 
         # Please see runner_utils.PhasedBasedProfiler for details
-        if self.phase_based_profiler:
-            batch_composition_stats = runner_utils.get_batch_composition_stats(
-                self.input_batch, total_num_scheduled_tokens, num_reqs,
-                padded_total_num_scheduled_tokens, scheduler_output)
-
-            self.phase_based_profiler.step(batch_composition_stats)
+        batch_composition_stats = runner_utils.get_batch_composition_stats(
+            self.input_batch, total_num_scheduled_tokens, num_reqs,
+            padded_total_num_scheduled_tokens, scheduler_output)
 
         # Inputs
         input_ids = self.input_ids_cpu[:padded_total_num_scheduled_tokens]
@@ -702,13 +729,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         attention_metadata.query_start_loc_cpu = query_start_loc_cpu
         attention_metadata.seq_lens_cpu = seq_lens_cpu
 
-        return (
-            input_ids,
-            attention_metadata,
-            sampling_metadata,
-            logits_indices,
-            spec_decode_metadata,
-        )
+        return (input_ids, attention_metadata, sampling_metadata,
+                logits_indices, spec_decode_metadata, batch_composition_stats)
 
     def _get_input_ids_embeds(self, input_ids: jax.Array,
                               mm_embeds: list[jax.Array]):
