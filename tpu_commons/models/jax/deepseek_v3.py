@@ -24,6 +24,8 @@ from tpu_commons.models.jax.common.moe.deepseek_moe import (DeepSeekV3Router,
 from tpu_commons.models.jax.common.moe.moe import MoE
 from tpu_commons.models.jax.common.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
+from tpu_commons.models.jax.utils.quantization.quantization_utils import \
+    get_quant_dtype_from_qwix_config
 from tpu_commons.models.jax.utils.weight_utils import (get_param,
                                                        model_weights_generator,
                                                        print_param_info,
@@ -219,6 +221,8 @@ class DeepSeekV3(nnx.Module):
                     activation_ffw_ted=('data', None, None),
                     edf_sharding=('model', None, None),
                     efd_sharding=('model', None, None),
+                    quantized_dtype=self.weight_loader.quant_dtype
+                    if self.weight_loader.is_model_quantized else None,
                     router=router) if is_moe_layer else DenseFFW(
                         dtype=dtype,
                         hidden_act=hidden_act,
@@ -460,20 +464,12 @@ class DeepSeekV3WeightLoader:
             quantization_type = vllm_config.model_config.hf_config.quantization_config[
                 "quant_method"]
             assert quantization_type == "fp8", "DeepSeek only supports the fp8 quantization method for now"
-            # NOTE: this will only be used for loading in quantized weights (via Qwix)
-            qwix_config = vllm_config.additional_config.get(
-                "quantization", {}).get("qwix", {})
-            self.scale_dtype = getattr(
-                jnp, qwix_config.get("scale_dtype", "bfloat16"))
-            # TODO (jacobplatin): move this out of DeepSeek class to a utility function
-            for rule in qwix_config.get("rules", []):
-                if rule.get("module_path") == ".*":
-                    quant_dtype_str = rule.get("weight_qtype", "")
-                    assert quant_dtype_str, "Quantization dtype not found in Qwix config! We currently expect your Qwix config to have a rule with module_path '.*' and a weight_qtype."
-                    self.quant_dtype = getattr(jnp, quant_dtype_str)
-                    logger.info(
-                        f"Quantizing DeepSeek with quantization dtype: {self.quant_dtype} and scale dtype: {self.scale_dtype}"
-                    )
+            self.scale_dtype, self.quant_dtype = get_quant_dtype_from_qwix_config(
+                vllm_config)
+
+            logger.info(
+                f"Quantizing DeepSeek with quantization dtype: {self.quant_dtype} and scale dtype: {self.scale_dtype}"
+            )
 
             quantization_block_sizes = vllm_config.model_config.hf_config.quantization_config[
                 "weight_block_size"]
@@ -586,15 +582,16 @@ class DeepSeekV3WeightLoader:
         # Convert weights from torch into numpy
         cast_type = model_weight.value.dtype
 
-
         torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
 
         if torch_view_type:
             # Avoid unnecessary upcasting and mem copy by viewing the tensor's
             # raw data as integers before converting to a JAX array.
-            weight_np = jnp.array(weight.view(torch_view_type).numpy()).view(cast_type)
+            weight_np = jnp.array(
+                weight.view(torch_view_type).numpy()).view(cast_type)
         else:
-            raise ValueError(f"Unsupported dtype for tensor conversion: {cast_type}")
+            raise ValueError(
+                f"Unsupported dtype for tensor conversion: {cast_type}")
 
         if scale is not None:
             scale = scale.to(torch.float32).numpy().astype(self.scale_dtype)
