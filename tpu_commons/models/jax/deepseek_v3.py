@@ -21,14 +21,7 @@ from tpu_commons.models.jax.common.layers import (DenseFFW, Embedder, LMhead,
                                                   RMSNorm)
 from tpu_commons.models.jax.common.moe.deepseek_moe import (DeepSeekV3Router,
                                                             SparseMoE)
-<<<<<<< HEAD
-<<<<<<< HEAD
 from tpu_commons.models.jax.common.moe.moe import MoE
-=======
->>>>>>> a1aaa359 (Implement the SparseMatmul for DeepSeek)
-=======
-from tpu_commons.models.jax.common.moe.moe import MoE
->>>>>>> 8cbe9352 (add unit test; add flag to support switching between dense/sparse matmul)
 from tpu_commons.models.jax.common.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
 from tpu_commons.models.jax.utils.quantization.quantization_utils import \
@@ -589,15 +582,16 @@ class DeepSeekV3WeightLoader:
         # Convert weights from torch into numpy
         cast_type = model_weight.value.dtype
 
-
         torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
 
         if torch_view_type:
             # Avoid unnecessary upcasting and mem copy by viewing the tensor's
             # raw data as integers before converting to a JAX array.
-            weight_np = jnp.array(weight.view(torch_view_type).numpy()).view(cast_type)
+            weight_np = jnp.array(
+                weight.view(torch_view_type).numpy()).view(cast_type)
         else:
-            raise ValueError(f"Unsupported dtype for tensor conversion: {cast_type}")
+            raise ValueError(
+                f"Unsupported dtype for tensor conversion: {cast_type}")
 
         if scale is not None:
             scale = scale.to(torch.float32).numpy().astype(self.scale_dtype)
