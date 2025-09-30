@@ -169,7 +169,7 @@ class TPUWorker(AbstractTpuWorker):
 
         if total_hbm_avail <= 0:
             raise ValueError(f"{total_hbm_used_gb=}GiB exceeds "
-                             f"{total_hbm_limit_gb=}GiB by "
+                             f"{total_hbm_limit_cap_gb=}GiB by "
                              f"{-total_hbm_avail_gb}GiB. Please consider "
                              f"increasing --gpu-memory-utilization from "
                              f"{gpu_memory_utilization} to a larger value.")
