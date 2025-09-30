@@ -173,9 +173,9 @@ def generate_window_segment_ids(cu_seqlens: jax.Array, seq_len: int,
     Returns:
         A SegmentIds object for flash_attention.
     """
-    indices = jnp.arange(seq_len)
+    indices = jnp.arange(seq_len, dtype=jnp.int32)
     segment_ids = jnp.searchsorted(cu_seqlens[1:], indices, side='right') + 1
-    padding_segment_ids = jnp.zeros(padded_seq_len - seq_len)
+    padding_segment_ids = jnp.zeros(padded_seq_len - seq_len, dtype=jnp.int32)
     segment_ids = jnp.concatenate([segment_ids, padding_segment_ids])
     segment_ids = segment_ids.reshape(1, -1)
 
@@ -432,7 +432,7 @@ class Qwen2_5_VisionRotaryEmbedding(nnx.Module):
             jnp.arange(0, self.dim, 2, dtype=jnp.float32) / self.dim))
         seq = jnp.arange(seqlen, dtype=jnp.float32)
         freqs = jnp.outer(seq, inv_freq)
-        return freqs
+        return freqs.astype(jnp.bfloat16)
 
 
 class Qwen2_5_VisionTransformer(nnx.Module):

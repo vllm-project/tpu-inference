@@ -61,7 +61,8 @@ class JaxUnquantizedConfig(QuantizationConfig, JaxCommonConfig):
             linear_config = self.get_linear_config(layer)
             return JaxUnquantizedLinearMethod(linear_config)
         if isinstance(layer, FusedMoE):
-            return JaxUnquantizedFusedMoEMethod(layer.moe_config, self.mesh)
+            moe_config = self.get_moe_config(layer)
+            return JaxUnquantizedFusedMoEMethod(moe_config, self.mesh)
         if isinstance(layer, Attention):
             return None
         return None

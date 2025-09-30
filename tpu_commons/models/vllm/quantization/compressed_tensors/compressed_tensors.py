@@ -83,7 +83,7 @@ class JaxCompressedTensorsConfig(CompressedTensorsConfig, JaxCommonConfig):
         if self._is_fp8_w8a8(weight_quant, input_quant):
             is_static_input_scheme = input_quant and not input_quant.dynamic
             return JaxCompressedTensorsW8A8Fp8(
-                strategy=weight_quant.strategy,
+                weight_quant=weight_quant,
                 is_static_input_scheme=is_static_input_scheme,
                 jax_config=linear_config,
             )

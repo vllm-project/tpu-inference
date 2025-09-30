@@ -94,31 +94,8 @@ class Qwen3Attention(nnx.Module):
         self._v_scale = 1.0
         self.kv_cache_quantized_dtype = None
         if kv_cache_dtype != "auto":
-            self.kv_cache_quantized_dtype = utils.TPU_STR_DTYPE_TO_JAX_DTYPE.get(
-                kv_cache_dtype.lower().strip())
-
-    def quantize_kv(self, key: jax.Array,
-                    value: jax.Array) -> Tuple[jax.Array, jax.Array]:
-        """
-        Quantize the key and value tensors.
-
-        Args:
-            key: The key tensor to quantize.
-            value: The value tensor to quantize.
-
-        Returns:
-            Tuple[jax.Array, jax.Array]: The quantized key and value tensors.
-        """
-        dtype_info = jnp.finfo(self.kv_cache_quantized_dtype)
-        minval, maxval = float(dtype_info.min), float(dtype_info.max)
-        key = key.astype(jnp.float32) / self._k_scale
-        key = jnp.clip(key, minval, maxval)
-        key = key.astype(self.kv_cache_quantized_dtype)
-        value = value.astype(jnp.float32) / self._v_scale
-        value = jnp.clip(value, minval, maxval)
-        value = value.astype(self.kv_cache_quantized_dtype)
-
-        return key, value
+            self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
+                kv_cache_dtype)
 
     def __call__(
         self,
@@ -144,7 +121,8 @@ class Qwen3Attention(nnx.Module):
         # o: (T, N, H)
         q_scale = k_scale = v_scale = None
         if self.kv_cache_quantized_dtype:
-            q_scale = self._q_scale
+            # TODO(kyuyeunk/jacobplatin): Enable w8a8 when VREG spill issue is resolved.
+            # q_scale = self._q_scale
             k_scale = self._k_scale
             v_scale = self._v_scale
             k, v = utils.quantize_kv(k, v, self.kv_cache_quantized_dtype,
@@ -223,6 +201,7 @@ class Qwen3Model(Qwen2Model):
                 dtype=dtype,
                 rng=rng,
                 mesh=mesh,
+                # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype)
             for _ in range(hf_config.num_hidden_layers)
         ]

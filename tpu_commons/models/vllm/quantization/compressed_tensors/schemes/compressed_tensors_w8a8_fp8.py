@@ -3,7 +3,8 @@ from typing import Optional
 import jax
 import jax.numpy as jnp
 import torch
-from compressed_tensors.quantization import QuantizationStrategy
+from compressed_tensors.quantization import (QuantizationArgs,
+                                             QuantizationStrategy)
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.interop import torch_view
 from torchax.ops.mappings import t2j
@@ -54,11 +55,11 @@ class JaxCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
 
     def __init__(
         self,
-        strategy: str,
+        weight_quant: QuantizationArgs,
         is_static_input_scheme: bool,
         jax_config: JaxCommonLinearConfig,
     ):
-        super().__init__(strategy, is_static_input_scheme)
+        super().__init__(weight_quant, is_static_input_scheme)
 
         self.jax_config = jax_config
 

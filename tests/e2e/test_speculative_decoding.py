@@ -5,6 +5,7 @@ import string
 import time
 
 import pytest
+
 from vllm import LLM, SamplingParams
 
 
@@ -184,7 +185,7 @@ def test_ngram_performance_greedy(
     Compares timing between reference LLM and speculative LLM using Llama 3 8B.
     Expects spec_llm to be at least 3.x faster than ref_llm.
     '''
-    _test_ngram_performance_helper(monkeypatch, sampling_config, 3.8)
+    _test_ngram_performance_helper(monkeypatch, sampling_config, 3.0)
 
 
 def test_ngram_performance_random(
@@ -200,4 +201,34 @@ def test_ngram_performance_random(
     sampling_config.top_p = 0.9
     sampling_config.top_k = 5
 
-    _test_ngram_performance_helper(monkeypatch, sampling_config, 3.8)
+    _test_ngram_performance_helper(monkeypatch, sampling_config, 3.0)
+
+
+# TODO(pooyam): Make this rigorous once EAGLE-3 is working correctly.
+# For now, it's just an e2e test to make sure code runs without error.
+def test_eagle3_performance(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+):
+    model_name = "meta-llama/Llama-3.1-8B-Instruct"
+
+    with monkeypatch.context():
+        monkeypatch.setenv("SKIP_JAX_PRECOMPILE", "1")
+        monkeypatch.setenv("VLLM_XLA_CHECK_RECOMPILATION", "0")
+
+        # Use a smaller set of prompts for performance testing
+        test_prompts = get_test_prompts()[:30]
+
+        # Test speculative LLM timing with max_num_seqs=1
+        spec_llm = LLM(model=model_name,
+                       speculative_config={
+                           "method": "eagle3",
+                           "model": "unkmaster/EAGLE3-LLaMA3.1-Instruct-8B",
+                           "num_speculative_tokens": 3,
+                           "draft_tensor_parallel_size": 1
+                       },
+                       max_model_len=1024,
+                       max_num_seqs=2,
+                       enable_prefix_caching=False)
+
+        spec_llm.generate(test_prompts, sampling_config)

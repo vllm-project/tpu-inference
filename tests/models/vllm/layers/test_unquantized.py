@@ -12,6 +12,7 @@ from vllm.config import ParallelConfig, set_current_vllm_config
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.engine.arg_utils import EngineArgs
+from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.moe_torch_iterative import \
     fused_moe as torch_moe
@@ -466,7 +467,7 @@ def test_jax_fused_moe(use_ep, mesh, num_tokens, intermediate_size,
     score = torch_view(t2j(score))
     score.apply_jax_(jax.device_put, NamedSharding(mesh, P(None, None)))
 
-    with torchax.default_env():
+    with torchax.default_env(), set_forward_context(None, vllm_config):
         assert isinstance(vllm_fused_moe.quant_method,
                           JaxUnquantizedFusedMoEMethod)
         vllm_fused_moe.quant_method.process_weights_after_loading(

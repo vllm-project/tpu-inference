@@ -117,8 +117,8 @@ class LlamaAttention(nnx.Module):
         self._v_scale = 1.0
         self.kv_cache_quantized_dtype = None
         if kv_cache_dtype != "auto":
-            self.kv_cache_quantized_dtype = utils.TPU_STR_DTYPE_TO_JAX_DTYPE.get(
-                kv_cache_dtype.lower().strip())
+            self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
+                kv_cache_dtype)
 
     def __call__(
         self,
@@ -140,7 +140,8 @@ class LlamaAttention(nnx.Module):
         # o: (T, N, H)
         q_scale = k_scale = v_scale = None
         if self.kv_cache_quantized_dtype:
-            q_scale = self._q_scale
+            # TODO(kyuyeunk/jacobplatin): Enable w8a8 when VREG spill issue is resolved.
+            # q_scale = self._q_scale
             k_scale = self._k_scale
             v_scale = self._v_scale
             k, v = utils.quantize_kv(k, v, self.kv_cache_quantized_dtype,
@@ -239,6 +240,7 @@ class LlamaModel(nnx.Module):
                 dtype=dtype,
                 rng=rng,
                 mesh=mesh,
+                # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype)
             for _ in range(hf_config.num_hidden_layers)
         ]

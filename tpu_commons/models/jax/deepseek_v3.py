@@ -4,14 +4,15 @@ from typing import List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
-import ml_dtypes
 import torch
 from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
+from torchax.ops.mappings import j2t_dtype
 from vllm.config import VllmConfig
 
+from tpu_commons import utils
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.common.attention.attention import AttentionMetadata
 from tpu_commons.models.jax.common.attention.deepseek_v3_attention import MLA
@@ -28,6 +29,13 @@ from tpu_commons.models.jax.utils.weight_utils import (get_param,
                                                        reshape_params)
 
 logger = init_logger(__name__)
+
+# A map from JAX dtype to the corresponding PyTorch integer dtype for raw memory viewing.
+DTYPE_VIEW_MAP = {
+    jnp.dtype(jnp.float8_e4m3fn): torch.uint8,
+    jnp.dtype(jnp.bfloat16): torch.uint16,
+    jnp.dtype(jnp.float32): torch.uint32,
+}
 
 
 @dataclass
@@ -48,6 +56,7 @@ class DeepSeekV3(nnx.Module):
 
         vocab_size: int = 129280
         hidden_size: int = 7168
+        # NOTE: this dtype may be implicitly overriden if using to Qwix to load in the quantized weights
         dtype: jnp.dtype = jnp.bfloat16
         num_attention_heads: int = 128
         num_key_value_heads: int = 128
@@ -120,6 +129,8 @@ class DeepSeekV3(nnx.Module):
                 num_key_value_heads=num_key_value_heads,
                 head_dim=v_head_dim,  # MLA uses v_head_dim as head_dim
                 dtype=dtype,
+                # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
+                kv_cache_dtype=vllm_config.cache_config.cache_dtype,
                 rngs=self.rng,
                 activation_attention_td=(None, 'model'),
                 activation_q_td=(None, 'model'),
@@ -306,8 +317,8 @@ class DeepSeekV3WeightLoader:
             model_name_or_path=vllm_config.model_config.model,
             framework="pt",
             download_dir=vllm_config.load_config.download_dir)
-        self.is_verbose = getattr(vllm_config.additional_config, "is_verbose",
-                                  False)
+        self.is_verbose = vllm_config.additional_config.get(
+            "is_verbose", None) is not None
         self.num_routed_experts = num_local_experts
 
         self._transpose_map = {
@@ -397,6 +408,64 @@ class DeepSeekV3WeightLoader:
             "layers.*.shared_experts.kernel_up_proj_DF",
         }
 
+        # TODO (jacobplatin): we shouldn't hard-code this, but the logic to obtain the true quantized dtype
+        # is non-trivial and the default checkpoints all use this dtype
+        self.quant_dtype = jnp.float8_e4m3fn
+
+        self.is_model_quantized = not vllm_config.additional_config.get(
+            "skip_quantization", False)
+        if self.is_model_quantized:
+            # TODO (jacobplatin): expand support eventually
+            quantization_type = vllm_config.model_config.hf_config.quantization_config[
+                "quant_method"]
+            assert quantization_type == "fp8", "DeepSeek only supports the fp8 quantization method for now"
+            # NOTE: this will only be used for loading in quantized weights (via Qwix)
+            qwix_config = vllm_config.additional_config.get(
+                "quantization", {}).get("qwix", {})
+            self.scale_dtype = getattr(
+                jnp, qwix_config.get("scale_dtype", "bfloat16"))
+            # TODO (jacobplatin): move this out of DeepSeek class to a utility function
+            for rule in qwix_config.get("rules", []):
+                if rule.get("module_path") == ".*":
+                    quant_dtype_str = rule.get("weight_qtype", "")
+                    assert quant_dtype_str, "Quantization dtype not found in Qwix config! We currently expect your Qwix config to have a rule with module_path '.*' and a weight_qtype."
+                    self.quant_dtype = getattr(jnp, quant_dtype_str)
+                    logger.info(
+                        f"Quantizing DeepSeek with quantization dtype: {self.quant_dtype} and scale dtype: {self.scale_dtype}"
+                    )
+
+            quantization_block_sizes = vllm_config.model_config.hf_config.quantization_config[
+                "weight_block_size"]
+            assert len(
+                quantization_block_sizes
+            ) == 2, f"Expected only 2 quantization block sizes but got {quantization_block_sizes}"
+            self.quantization_block_size_n = quantization_block_sizes[0]
+            self.quantization_block_size_k = quantization_block_sizes[1]
+            # TODO (jacobplatin): remove this check in the future
+            assert self.quantization_block_size_n == self.quantization_block_size_k, "Quantization block size n and k must be the same!"
+            # NOTE: this is only needed for pre-quantized models
+            self._scale_shape_map = {
+                "q_b_proj": (1, qk_nope_head_dim + qk_rope_head_dim,
+                             q_lora_rank // self.quantization_block_size_n),
+                "kv_b_proj": (attn_heads, (qk_nope_head_dim + v_head_dim) //
+                              self.quantization_block_size_n,
+                              kv_lora_rank // self.quantization_block_size_n),
+                "o_proj":
+                (hidden_size // self.quantization_block_size_n, attn_heads,
+                 v_head_dim // self.quantization_block_size_n),
+            }
+            # NOTE: this is only needed for pre-quantized models when doing random weight loading
+            # TODO (jacobplatin): remove or clean this up
+            self.scale_shap_map_for_random_weight_loading = {
+                "kernel_kv_down_proj_DA": (56, 576),
+                "kernel_kv_up_proj_ANH": (4, 128, 2),
+                "kernel_q_up_proj_ANH": (12, 1, 192),
+                "kernel_o_proj_NHD": (128, 1, 56),
+                "kernel_down_proj_EFD": (256, 16, 56),
+                "kernel_up_proj_EDF": (256, 56, 16),
+                "kernel_gating_EDF": (256, 56, 16),
+            }
+
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
         # Find the corresponding model key using the HF key
         if "layer" in loaded_key:
@@ -442,21 +511,76 @@ class DeepSeekV3WeightLoader:
             return stacked_weights
         return None
 
-    def _load_individual_weight(self, name, weight, model_params, model_mesh):
+    def _load_individual_weight(self,
+                                name,
+                                weight,
+                                model_params,
+                                model_mesh,
+                                scale=None) -> Tuple[int, int]:
+        """
+        Loads a single weight into the model.
+
+        NOTE: if using the base quantized model, it is assumed that the Qwix abstract
+        pass has been run and that the model weights are thus QArrays, which we
+        will then load the weights/scales into.
+
+        Args:
+            name: The name of the weight.
+            weight: The weight to load.
+            model_params: The model parameters.
+            model_mesh: The model mesh.
+            scale: The scale of the weight (if using the pre-quantized model).
+
+        Returns:
+            Tuple[int, int]: The size (in bytes) for the given layer overall and per shard.
+                NOTE: if using the pre-quantized model (with Qwix), we'll include the scale size as well.
+        """
         mapped_name = self.map_loaded_to_standardized_name(name)
-        model_weight = get_param(model_params, mapped_name)
-        logger.debug(
-            f"{name}: {weight.shape}  -->  {mapped_name}: {model_weight.value.shape}"
-        )
+        base_model_weight = get_param(model_params, mapped_name)
+        model_weight = base_model_weight.array.qvalue if hasattr(
+            base_model_weight, "array") else base_model_weight
+        sharding = base_model_weight.array.qvalue.sharding if hasattr(
+            base_model_weight, "array") else base_model_weight.sharding
 
         # Convert weights from torch into numpy
-        # TODO: set cast_type based on model weight's type.
-        cast_type = ml_dtypes.bfloat16
-        weight_np = weight.to(torch.float32).numpy().astype(cast_type)
+        cast_type = model_weight.value.dtype
+
+
+        torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
+
+        if torch_view_type:
+            # Avoid unnecessary upcasting and mem copy by viewing the tensor's
+            # raw data as integers before converting to a JAX array.
+            weight_np = jnp.array(weight.view(torch_view_type).numpy()).view(cast_type)
+        else:
+            raise ValueError(f"Unsupported dtype for tensor conversion: {cast_type}")
+
+        if scale is not None:
+            scale = scale.to(torch.float32).numpy().astype(self.scale_dtype)
 
         # Reshape and transpose weights if necessary.
         weight_np = reshape_params(name, weight_np, self._weight_shape_map)
+        if scale is not None:
+            scale = reshape_params(name, scale, self._scale_shape_map)
         weight_np = self._transpose_params(name, weight_np)
+        if scale is not None:
+            scale = self._transpose_params(name, scale)
+            weight_shape = weight_np.shape
+            scale_shape = scale.shape
+            assert len(weight_shape) == len(scale_shape)
+            for idx, (weight_dim,
+                      scale_dim) in enumerate(zip(weight_shape, scale_shape)):
+                if weight_dim // self.quantization_block_size_n != scale_dim and weight_dim // scale_dim != 1:
+                    old_scale_shape = scale.shape
+                    scale = scale.repeat(self.quantization_block_size_n,
+                                         axis=idx)[:, :weight_dim]
+                    logger.warning(
+                        f"Got a weight with shape {weight_shape} and scale with shape {old_scale_shape} "
+                        f"where the scale_dim {scale_dim} does not match the weight_dim {weight_dim} "
+                        f"multiplied by the quantization block size {self.quantization_block_size_n}. "
+                        f"Repeating the scale to new shape {scale.shape} along axis {idx} with repeat size {self.quantization_block_size_n}."
+                    )
+                    break
 
         if model_weight.value.shape != weight_np.shape:
             raise ValueError(
@@ -467,17 +591,58 @@ class DeepSeekV3WeightLoader:
         def get_slice(index):
             return weight_np[index]
 
+        def get_slice_scale(index):
+            # ruff: noqa: F821
+            return scale[index]
+
         sharded_array = jax.make_array_from_callback(
-            weight_np.shape,
-            NamedSharding(model_mesh, P(*model_weight.sharding)), get_slice)
+            weight_np.shape, NamedSharding(model_mesh, P(*sharding)),
+            get_slice)
 
-        model_weight.value = sharded_array
+        if scale is not None:
+            maybe_sharded_scale = scale
+            # Since, by default, we'll use the same sharding as the weights, we might
+            # encounter an error where the smaller/different sharding dim isn't divisible
+            # by the parallel size
+            # NOTE: Qwix expert dangyi@ mentioned that we don't need to worry about accuracy
+            # impacts when sharing scales
+            try:
+                maybe_sharded_scale = jax.make_array_from_callback(
+                    scale.shape, NamedSharding(model_mesh, P(*sharding)),
+                    get_slice_scale)
+            except ValueError:
+                logger.warning(
+                    f"Could not create sharded scale for {name} with shape {scale.shape} and sharding {sharding}, skipping sharding..."
+                )
+            # NOTE: Despite the fact that scale has the name `scale_inv` in it, we don't need to
+            # inverse it
+            assert base_model_weight.array.scale.value.dtype == maybe_sharded_scale.dtype, "Expected dtype for model weight scale with name {mapped_name} and dtype ({base_model_weight.array.scale.value.dtype}) to match that of the incoming weight scale ({maybe_sharded_scale.dtype})"
+            assert base_model_weight.array.qvalue.value.dtype == sharded_array.dtype, "Expected dtype for model weight with name {mapped_name} and dtype ({base_model_weight.array.qvalue.value.dtype}) to match that of the incoming weight ({sharded_array.dtype})"
+            base_model_weight.array.scale.value = maybe_sharded_scale
+            base_model_weight.array.qvalue.value = sharded_array
+        else:
+            assert model_weight.value.dtype == sharded_array.dtype, f"Expected dtype for model weight with name {mapped_name} and dtype ({model_weight.value.dtype}) to match that of the incoming weight ({sharded_array.dtype})"
+            model_weight.value = sharded_array
 
-        del weight
-        if self.is_verbose:
-            print_param_info(model_weight, name)
-        return model_weight.value.nbytes / 1e9, model_weight.value.addressable_shards[
+        model_weight_size_bytes = model_weight.nbytes / 1e9
+        model_weight_local_size_bytes = model_weight.addressable_shards[
             0].data.nbytes / 1e9
+
+        if scale is not None:
+            model_weight_size_bytes += base_model_weight.array.scale.nbytes / 1e9
+            model_weight_local_size_bytes += base_model_weight.array.scale.addressable_shards[
+                0].data.nbytes / 1e9
+
+        if self.is_verbose:
+            logger.info(f"Memory usage after loading in {name}: "
+                        f"hbm={utils.hbm_usage_gb(jax.local_devices())}Gb")
+            print_param_info(model_weight, name)
+            if scale is not None:
+                print_param_info(base_model_weight.array.scale,
+                                 "scale for " + name)
+
+        del weight, scale
+        return model_weight_size_bytes, model_weight_local_size_bytes
 
     def load_weights(self, model_for_loading: nnx.Module):
         model_params = nnx.state(model_for_loading)
@@ -487,9 +652,13 @@ class DeepSeekV3WeightLoader:
         cumulative_global_memory = 0
         cumulative_local_memory = 0
         mlp_experts_gate_proj_weights = {}
+        mlp_experts_gate_proj_scales = {}
         mlp_experts_up_proj_weights = {}
+        mlp_experts_up_proj_scales = {}
         mlp_experts_down_proj_weights = {}
-        fp8_weights = {}
+        mlp_experts_down_proj_scales = {}
+        quantized_weights = {}
+        quantized_scales = {}
         with jax.default_device(jax.devices("cpu")[0]):
             for loaded_name, loaded_weight in self.names_and_weights_generator:
                 # Skip if the model has fewer layers than original.
@@ -509,36 +678,81 @@ class DeepSeekV3WeightLoader:
                     if int(expert_num) >= self.num_routed_experts:
                         del loaded_weight
                         continue
-                if loaded_weight.dtype == torch.float8_e4m3fn:
-                    fp8_weights[loaded_name] = loaded_weight
-                    continue
-                if loaded_name.endswith(".weight_scale_inv"):
-                    # assuming weights are loaded before scales.
-                    weight_name = loaded_name.replace(".weight_scale_inv",
-                                                      ".weight")
+                # NOTE: loaded_weight will be a Torch tensor, so we need to convert it to the
+                # equivalent jnp dtype
+                # TODO (jacobplatin): refactor this so that we instead change / update `model_weights_generator`
+                # instead of checking "weight_scale_inv" and assuming quantization method is fp8
+                scale = None
+                if loaded_weight.dtype == j2t_dtype(self.quant_dtype.dtype):
+                    if self.is_model_quantized:
+                        scale_name = loaded_name.replace(
+                            ".weight", ".weight_scale_inv")
+                        if scale_name in quantized_scales:
+                            scale = quantized_scales[scale_name]
+                            del quantized_scales[scale_name]
+                        else:
+                            quantized_weights[loaded_name] = loaded_weight
+                            continue
+                    else:
+                        quantized_weights[loaded_name] = loaded_weight
+                        continue
 
-                    loaded_weight = weights_dequant_cpu(
-                        fp8_weights[weight_name], loaded_weight)
-                    loaded_name = weight_name
-                    del fp8_weights[weight_name]
+                if loaded_name.endswith(".weight_scale_inv"):
+                    if self.is_model_quantized:
+                        weight_name = loaded_name.replace(
+                            ".weight_scale_inv", ".weight")
+                        if weight_name in quantized_weights:
+                            scale = loaded_weight
+                            loaded_weight = quantized_weights[weight_name]
+                            loaded_name = weight_name
+                            del quantized_weights[weight_name]
+                        else:
+                            quantized_scales[loaded_name] = loaded_weight
+                            continue
+                    # In the case that we don't want to use the quantized weights,
+                    # we'll dequantize the weights using the loaded scale on-the-fly
+                    else:
+                        # assuming weights are loaded before scales.
+                        weight_name = loaded_name.replace(
+                            ".weight_scale_inv", ".weight")
+                        loaded_weight = weights_dequant_cpu(
+                            quantized_weights[weight_name], loaded_weight)
+                        loaded_name = weight_name
+                        del quantized_weights[weight_name]
                 # concat mlp.experts weights
+                stacked_scales = None
+                stacked_weights = None
                 if "mlp.experts" in loaded_name:
                     if "down_proj" in loaded_name:
                         stacked_weights = self._process_moe_weights(
                             loaded_name, loaded_weight,
                             mlp_experts_down_proj_weights)
+                        if scale is not None:
+                            stacked_scales = self._process_moe_weights(
+                                loaded_name, scale,
+                                mlp_experts_down_proj_scales)
                     if "gate_proj" in loaded_name:
                         stacked_weights = self._process_moe_weights(
                             loaded_name, loaded_weight,
                             mlp_experts_gate_proj_weights)
+                        if scale is not None:
+                            stacked_scales = self._process_moe_weights(
+                                loaded_name, scale,
+                                mlp_experts_gate_proj_scales)
                     if "up_proj" in loaded_name:
                         stacked_weights = self._process_moe_weights(
                             loaded_name, loaded_weight,
                             mlp_experts_up_proj_weights)
+                        if scale is not None:
+                            stacked_scales = self._process_moe_weights(
+                                loaded_name, scale, mlp_experts_up_proj_scales)
                     if stacked_weights is not None:
                         weight_bytes, weight_shards = self._load_individual_weight(
-                            loaded_name, stacked_weights, model_params,
-                            model_for_loading.mesh)
+                            loaded_name,
+                            stacked_weights,
+                            model_params,
+                            model_for_loading.mesh,
+                            scale=stacked_scales)
                         if self.is_verbose:
                             cumulative_global_memory += weight_bytes
                             cumulative_local_memory += weight_shards
@@ -550,8 +764,11 @@ class DeepSeekV3WeightLoader:
                             )
                 else:
                     weight_bytes, weight_shards = self._load_individual_weight(
-                        loaded_name, loaded_weight, model_params,
-                        model_for_loading.mesh)
+                        loaded_name,
+                        loaded_weight,
+                        model_params,
+                        model_for_loading.mesh,
+                        scale=scale)
                     if self.is_verbose:
                         cumulative_global_memory += weight_bytes
                         cumulative_local_memory += weight_shards
@@ -565,7 +782,8 @@ class DeepSeekV3WeightLoader:
         del mlp_experts_gate_proj_weights
         del mlp_experts_up_proj_weights
         del mlp_experts_down_proj_weights
-        del fp8_weights
+        del quantized_weights
+        del quantized_scales
         # TODO: validate that all of the model_params were accounted for as well.
         nnx.update(model_for_loading, model_params)
 

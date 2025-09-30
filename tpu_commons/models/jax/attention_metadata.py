@@ -1,5 +1,6 @@
 import functools
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 import jax
 
@@ -14,6 +15,7 @@ import jax
         "request_distribution",
     ],
     meta_fields=[],
+    drop_fields=["query_start_loc_cpu", "seq_lens_cpu"],
 )
 @dataclass
 class AttentionMetadata(object):
@@ -27,3 +29,6 @@ class AttentionMetadata(object):
     query_start_loc: jax.Array = None
     # (3,)
     request_distribution: jax.Array = None
+
+    query_start_loc_cpu: Any = field(init=False)
+    seq_lens_cpu: Any = field(init=False)

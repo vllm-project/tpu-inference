@@ -25,7 +25,7 @@ class PallasAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "PALLAS_VLLM_V1"
+        return "PALLAS"
 
     @staticmethod
     def get_impl_cls() -> type["PallasAttentionBackendImpl"]:
@@ -65,8 +65,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
             raise NotImplementedError("Alibi slopes is not supported.")
         self.kv_cache_quantized_dtype = None
         if kv_cache_dtype != "auto":
-            self.kv_cache_quantized_dtype = utils.TPU_STR_DTYPE_TO_JAX_DTYPE.get(
-                kv_cache_dtype.lower().strip())
+            self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
+                kv_cache_dtype)
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "
@@ -109,8 +109,10 @@ class PallasAttentionBackendImpl(AttentionImpl):
         if self.kv_cache_quantized_dtype:
             key, value = utils.quantize_kv(key, value,
                                            self.kv_cache_quantized_dtype,
-                                           layer._k_scale, layer._v_scale)
-            q_scale = layer._q_scale_float
+                                           layer._k_scale_float,
+                                           layer._v_scale_float)
+            # TODO(kyuyeunk): Enable w8a8 when VREG spill issue is resolved.
+            # q_scale = layer._q_scale_float
             k_scale = layer._k_scale_float
             v_scale = layer._v_scale_float
 

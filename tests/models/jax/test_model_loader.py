@@ -54,7 +54,15 @@ def vllm_config() -> MagicMock:
     mock_config.load_config = MagicMock()
     mock_config.load_config.download_dir = None
     mock_config.additional_config = {}
+    mock_config.cache_config = MagicMock(cache_dtype="auto")
     return mock_config
+
+
+# --- Added RNG Fixture ---
+@pytest.fixture
+def rng() -> jax.Array:
+    """Provides a JAX PRNGKey."""
+    return jax.random.PRNGKey(0)
 
 
 # ==============================================================================
@@ -279,3 +287,97 @@ def test_get_vllm_model_random_weights(mesh, set_in_config):
     assert callable(model_fn)
     assert callable(compute_logits_fn)
     mock_load.assert_called()
+
+# ==============================================================================
+# >> Test Suite for get_model Fallback Logic
+# ==============================================================================
+
+@pytest.mark.usefixtures("mesh") # This fixture is module-scoped, but fine
+class TestGetModel:
+    """Tests the main get_model() entrypoint and its fallback logic."""
+
+    @patch.dict(os.environ, {"MODEL_IMPL_TYPE": "flax_nnx"}, clear=True)
+    @patch("tpu_commons.models.jax.model_loader.get_vllm_model")
+    @patch("tpu_commons.models.jax.model_loader.get_flax_model")
+    def test_get_model_flax_happy_path(
+        self, mock_get_flax, mock_get_vllm, vllm_config, rng, mesh
+    ):
+        """Tests that 'flax_nnx' impl calls get_flax_model."""
+        mock_get_flax.return_value = "flax_model_sentinel"
+
+        result = model_loader.get_model(vllm_config, rng, mesh)
+
+        mock_get_flax.assert_called_once_with(vllm_config, rng, mesh, False)
+        mock_get_vllm.assert_not_called()
+        assert result == "flax_model_sentinel"
+
+    @patch.dict(os.environ, {"MODEL_IMPL_TYPE": "vllm"}, clear=True)
+    @patch("tpu_commons.models.jax.model_loader.get_vllm_model")
+    @patch("tpu_commons.models.jax.model_loader.get_flax_model")
+    def test_get_model_vllm_happy_path(
+        self, mock_get_flax, mock_get_vllm, vllm_config, rng, mesh
+    ):
+        """Tests that 'vllm' impl calls get_vllm_model."""
+        mock_get_vllm.return_value = "vllm_model_sentinel"
+
+        result = model_loader.get_model(vllm_config, rng, mesh)
+
+        mock_get_flax.assert_not_called()
+        mock_get_vllm.assert_called_once_with(vllm_config, rng, mesh)
+        assert result == "vllm_model_sentinel"
+
+    @patch.dict(os.environ, {"MODEL_IMPL_TYPE": "flax_nnx"}, clear=True)
+    @patch("tpu_commons.models.jax.model_loader.get_vllm_model")
+    @patch("tpu_commons.models.jax.model_loader.get_flax_model")
+    def test_get_model_flax_fallback_on_unsupported_arch(
+        self, mock_get_flax, mock_get_vllm, vllm_config, rng, mesh
+    ):
+        """
+        Tests that 'flax_nnx' falls back to get_vllm_model on
+        UnsupportedArchitectureError.
+        """
+        # Mock get_flax_model to raise the specific error
+        mock_get_flax.side_effect = model_loader.UnsupportedArchitectureError(
+            "Model not supported"
+        )
+        mock_get_vllm.return_value = "vllm_fallback_sentinel"
+
+        result = model_loader.get_model(vllm_config, rng, mesh)
+
+        # Check that both were called
+        mock_get_flax.assert_called_once_with(vllm_config, rng, mesh, False)
+        mock_get_vllm.assert_called_once_with(vllm_config, rng, mesh)
+        assert result == "vllm_fallback_sentinel"
+
+    @patch.dict(os.environ, {"MODEL_IMPL_TYPE": "flax_nnx"}, clear=True)
+    @patch("tpu_commons.models.jax.model_loader.get_vllm_model")
+    @patch("tpu_commons.models.jax.model_loader.get_flax_model")
+    def test_get_model_flax_reraises_other_errors(
+        self, mock_get_flax, mock_get_vllm, vllm_config, rng, mesh
+    ):
+        """
+        Tests that 'flax_nnx' re-raises other ValueErrors
+        and does not fall back.
+        """
+        # Mock get_flax_model to raise a *different* error
+        mock_get_flax.side_effect = ValueError("A different error")
+
+        with pytest.raises(ValueError, match="A different error"):
+            model_loader.get_model(vllm_config, rng, mesh)
+
+        # Check that flax was called but vllm was not
+        mock_get_flax.assert_called_once_with(vllm_config, rng, mesh, False)
+        mock_get_vllm.assert_not_called()
+
+    @patch.dict(os.environ, {"MODEL_IMPL_TYPE": "jetpack"}, clear=True)
+    @patch("tpu_commons.models.jax.model_loader.get_vllm_model")
+    @patch("tpu_commons.models.jax.model_loader.get_flax_model")
+    def test_get_model_not_implemented(
+        self, mock_get_flax, mock_get_vllm, vllm_config, rng, mesh
+    ):
+        """Tests that an unknown impl raises NotImplementedError."""
+        with pytest.raises(NotImplementedError):
+            model_loader.get_model(vllm_config, rng, mesh)
+
+        mock_get_flax.assert_not_called()
+        mock_get_vllm.assert_not_called()
