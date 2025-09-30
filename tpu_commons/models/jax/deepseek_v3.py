@@ -45,7 +45,7 @@ class DeepSeekV3(nnx.Module):
         self.vllm_config = vllm_config
         self.rng = nnx.Rngs(rng)
 
-        num_layers: int = 61
+        num_layers: int = 5
         num_local_experts: int = 256
 
         vocab_size: int = 129280
@@ -196,6 +196,7 @@ class DeepSeekV3(nnx.Module):
                 ed_sharding=('model', None),
                 e_sharding=('model', ))
             if self.sparse_matmul:
+                # TODO: orginize the SparseMoE and DenseMoE better given they share most interfaces
                 custom_module = SparseMoE(
                     dtype=dtype,
                     num_local_experts=num_local_experts,
