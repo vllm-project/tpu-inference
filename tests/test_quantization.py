@@ -216,7 +216,7 @@ class TestApplyQwixQuantization(unittest.TestCase):
                       "Model should be returned as-is.")
         mock_nnx.jit.assert_not_called()
 
-    @patch('tpu_commons.models.jax.model_loader.nnx.jit')
+    @patch('tpu_commons.models.jax.model_loader.jax.jit')
     def test_quantization_applied_from_dict(self, mock_jit):
         """
         Test that quantization is applied correctly when the config is a dictionary.

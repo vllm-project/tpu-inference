@@ -20,9 +20,11 @@ logger = init_logger(__name__)
 
 _MODEL_REGISTRY = {}
 
+
 class UnsupportedArchitectureError(ValueError):
     """Raised when a model architecture is not supported in the registry."""
     pass
+
 
 def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     # NOTE: Use inline imports here, otherwise the normal imports
@@ -78,8 +80,9 @@ def _get_nnx_model(
         """
         return model_class(vllm_config, rng, mesh)
 
-    @nnx.jit(donate_argnums=(0, ),
-             static_argnames=('use_qwix_on_abstract_model', ))
+    @functools.partial(jax.jit,
+                       donate_argnums=(0, ),
+                       static_argnames=('use_qwix_on_abstract_model', ))
     def create_jit_model(
             model: nnx.Module,
             use_qwix_on_abstract_model: bool = False) -> nnx.Module:
@@ -130,7 +133,7 @@ def _get_nnx_model(
                                              use_qwix_on_abstract_model=True)
             return jit_model
 
-        @nnx.jit
+        @jax.jit
         def create_sharded_model():
             model = model_class(vllm_config, rng, mesh)
             state = nnx.state(model)
@@ -311,12 +314,11 @@ def get_model(
             # Convert the error message to a string to check its contents
             error_msg = str(e)
 
-            logger.warning(
-                    f"Flax model failed with: '{error_msg}'. "
-                    "Falling back to vLLM implementation."
-                    )
+            logger.warning(f"Flax model failed with: '{error_msg}'. "
+                           "Falling back to vLLM implementation.")
             # Fall back to the vLLM model and updating the dtype accordingly
-            vllm_config.model_config.dtype = j2t_dtype(vllm_config.model_config.dtype.dtype)
+            vllm_config.model_config.dtype = j2t_dtype(
+                vllm_config.model_config.dtype.dtype)
             return get_vllm_model(vllm_config, rng, mesh)
     elif impl == "vllm":
         return get_vllm_model(vllm_config, rng, mesh)
