@@ -66,8 +66,8 @@ class CompilationManager:
         logger.info("Compilation finished in %.2f [secs].", end - start)
 
     def capture_model(self) -> None:
-        if os.getenv("SKIP_JAX_PRECOMPILE", False):
-            return
+        # if os.getenv("SKIP_JAX_PRECOMPILE", False):
+        #     return
         logger.info("Precompile all the subgraphs with possible input shapes.")
 
         with self.runner.maybe_setup_dummy_loras(self.runner.lora_config):
