@@ -11,7 +11,7 @@ from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.utils import get_and_update_mm_cache
 from vllm.v1.outputs import AsyncModelRunnerOutput
-from vllm.worker.worker_base import WorkerWrapperBase
+from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 
