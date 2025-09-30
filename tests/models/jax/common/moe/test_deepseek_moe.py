@@ -1,8 +1,6 @@
 import os
 import unittest
 
-os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=8'
-
 import jax
 import jax.numpy as jnp
 import numpy as np
