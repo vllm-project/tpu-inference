@@ -175,7 +175,18 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
                           query_start_loc=query_start_loc,
                           request_distribution=request_distribution),
     }
-    model = qwix.quantize_model(model, qwix.PtqProvider(qwix_rules),
+    rules = [
+        qwix.QuantizationRule(
+            module_path=".*",
+            weight_qtype="int8",
+            act_qtype="int8",
+            act_static_scale=True,
+        ),
+    ]
+
+    qat_model = qwix.quantize_model(model, qwix.QtProvider(rules),
+                                    **model_input)
+    model = qwix.quantize_model(qat_model, qwix.PtqProvider(qwix_rules),
                                 **model_input)
     return model
 
