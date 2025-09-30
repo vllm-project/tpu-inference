@@ -325,14 +325,6 @@ class SparseMoE(MoE):
                 processed_tokens, jnp.argsort(sort_indices))
             reshaped_tokens_TXD = unsorted_tokens_tD.reshape(
                 -1, self.num_experts_per_tok, self.hidden_size)
-        # jax.debug.print(
-        #     "✅ reshaped_tokens_TXD on device:  reshaped_tokens_TXD[5]={t}",
-        #     t=reshaped_tokens_TXD[5, 0,:5]
-        # )
-        # jax.debug.print(
-        #     "✅ router_weights_TX  on device:  router_weights_TX={t}",
-        #     t=router_weights_TX[5, :]
-        # )
         with jax.named_scope("combine_weights"):
             output_TD = jnp.einsum(
                 "TXD,TX -> TD",
@@ -483,9 +475,6 @@ class SparseMoE(MoE):
             compute_group_sizes = global_group_sizes
             compute_expert_ids = global_sorted_experts
             local_sorted_indices = jnp.arange(sorted_inputs.shape[0])
-
-        #debug_position_in_sorted = jnp.argsort(global_sort_indices)[40:48]
-        #debug_position_compute_inputs = jnp.argsort(local_sorted_indices)[debug_position_in_sorted]
 
         # 4. Compute: Apply experts using Grouped Matrix Multiply
         with jax.named_scope("gating"):
