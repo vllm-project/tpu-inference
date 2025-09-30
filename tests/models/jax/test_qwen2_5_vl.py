@@ -174,8 +174,12 @@ class TestQwen2_5_VisionAttention:
         attn_module.flash_attention = mock_attn_fn
         x = jax.random.normal(rng, (T, B, D))
         rotary_pos_emb = jax.random.normal(rng, (T, attn_module.head_dim // 2))
+        cu_seqlens = jnp.array([0, 5])
 
-        y_full = attn_module(x, rotary_pos_emb, use_fullattn=True)
+        y_full = attn_module(x,
+                             rotary_pos_emb,
+                             cu_window_seqlens=cu_seqlens,
+                             use_fullattn=True)
         assert y_full.shape == (T, B, D)
         mock_attn_fn.assert_called_once()
         assert mock_attn_fn.call_args[0][3].q.shape == (1, 128)
