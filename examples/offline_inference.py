@@ -9,7 +9,6 @@ from vllm.utils import FlexibleArgumentParser
 
 from tpu_commons.core import disagg_utils
 
-
 def create_parser():
     parser = FlexibleArgumentParser()
     # Add engine args
@@ -35,13 +34,6 @@ def main(args: dict):
 
     # Create an LLM
     llm = LLM(**args)
-
-    # ====================== DEBUG ============================
-    print(f"Type of model_executor: {type(llm.llm_engine.model_executor)}")
-    print("Attributes of model_executor:")
-    print(dir(llm.llm_engine.model_executor))
-    model_runner = llm.llm_engine.model_executor.driver_worker.model_runner
-    # ====================== DEBUG ============================
 
     # Create a sampling params object
     sampling_params = llm.get_default_sampling_params()
@@ -99,33 +91,6 @@ def main(args: dict):
     outputs = llm.generate(prompts, sampling_params)
     if envs.VLLM_TORCH_PROFILER_DIR is not None:
         llm.stop_profile()
-
-    # ====================== DEBUG ============================
-    if hasattr(model_runner, '_hidden_states_for_debug'):
-        all_hidden_states = model_runner._hidden_states_for_debug
-        print("\n" + "="*50)
-        print("DEBUG: Printing Hidden States")
-        print("="*50)
-        
-        for i, hidden_state in enumerate(all_hidden_states):
-            print(f"--- Layer {i} ---")
-            print(f"Shape: {hidden_state.shape}")
-
-            if hidden_state.ndim == 2:
-                # For 2D hidden states (like the embeddings)
-                print("Partial content (first 10 values of first token):")
-                print(hidden_state[0, :10])
-            elif hidden_state.ndim == 3:
-                # For 3D hidden states (like the transformer block outputs)
-                print("Partial content (first 10 values of first token of first sequence):")
-                print(hidden_state[0, 0, :10])
-        
-        print("\n")
-        
-        # print(f"Shape of the first hidden state: {all_hidden_states[0]}")
-        
-        print("="*50 + "\n")
-    # ====================== DEBUG ============================
 
     # Print the outputs.
     print("-" * 50)

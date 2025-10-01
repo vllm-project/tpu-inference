@@ -7,6 +7,7 @@ from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
+import jax.debug
 from vllm.config import VllmConfig
 
 from tpu_commons.logger import init_logger
@@ -60,15 +61,7 @@ class Llama4ForCausalLM(nnx.Module):
 
         dtype: jnp.dtype = jnp.bfloat16
 
-        # self.num_layers: int = getattr(text_config, "num_hidden_layers", 48)
-
-        # ====================== DEBUG ============================
-        # Get the total number of layers from the config
-        total_num_layers: int = getattr(text_config, "num_hidden_layers", 48)
-        # Use the new parameter to limit the number of layers
-        num_layers_to_run = 2
-        self.num_layers: int = min(total_num_layers, num_layers_to_run)
-        # ====================== DEBUG ============================
+        self.num_layers: int = getattr(text_config, "num_hidden_layers", 48)
 
         self.intermediate_size_moe: int = getattr(text_config, "intermediate_size", 8192)
         self.intermediate_size_mlp = getattr(text_config, "intermediate_size_mlp", 16384)
@@ -281,17 +274,8 @@ class Llama4ForCausalLM(nnx.Module):
         attention_metadata: AttentionMetadata,
         *args,
     ) -> Tuple[List[KVCacheType], jax.Array, List[jax.Array]]:
-
-        # ====================== DEBUG ============================
-        hidden_states = []
-        # ====================== DEBUG ============================
-
         is_prefill = False
         x_TD = self.embedder.encode(input_ids)
-
-        # ====================== DEBUG ============================
-        hidden_states.append(x_TD)
-        # ====================== DEBUG ============================
 
         for (i, block) in enumerate(self.layers):
             kv_cache = kv_caches[i]
@@ -300,16 +284,9 @@ class Llama4ForCausalLM(nnx.Module):
             jax.block_until_ready(x_TD)
             kv_caches[i] = new_kv_cache
 
-            # ====================== DEBUG ============================
-            hidden_states.append(x_TD)
-            # ====================== DEBUG ============================
-
         final_activation_TD = self.final_norm(x_TD)
 
-        # return kv_caches, final_activation_TD, []
-        # ====================== DEBUG ============================
-        return kv_caches, final_activation_TD, hidden_states
-        # ====================== DEBUG ============================
+        return kv_caches, final_activation_TD, []
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         logits_TV = jnp.dot(hidden_states,
@@ -331,7 +308,6 @@ class Llama4WeightLoader:
         
         self.interleave_moe_layer_step = getattr(vllm_config.model_config.hf_config.text_config, "interleave_moe_layer_step", 1)
         self.expert_prefix = "shared_expert."
-        # self.expert_prefix = "shared_expert." if self.interleave_moe_layer_step == 1 else ""
         self._transpose_map = {
             "q_proj": (2, 0, 1),
             "k_proj": (2, 0, 1),
@@ -430,11 +406,7 @@ class Llama4WeightLoader:
             mapped_name = re.sub(r"layers\.\*", f"layers.{layer_num}",
                                  mapped_name)
             mapped_model_weight = get_param(model_params, mapped_name)
-            # if not loaded_name.endswith(".bias"):
-            #     loaded_weight = reshape_params(loaded_name, loaded_weight,
-            #                                    self._weight_shape_map)
-            #     loaded_weight = transpose_params(loaded_name, loaded_weight,
-            #                                      self._transpose_map)
+
             if mapped_model_weight.value.shape != loaded_weight.shape:
                 raise ValueError(
                     f"Loaded shape for {split_loaded_name}: {loaded_weight.shape} "
@@ -452,23 +424,12 @@ class Llama4WeightLoader:
     def load_weights(self, model_for_loading: nnx.Module):
         model_params = nnx.state(model_for_loading)
 
-        # ====================== DEBUG ============================
-        num_model_layers = len(model_for_loading.layers)
-        # ====================== DEBUG ============================
-
         with jax.default_device(jax.devices("cpu")[0]):
             for loaded_name, loaded_weight in self.names_and_weights_generator:
                 is_moe_layer = False
-                # ====================== DEBUG ============================
                 layer_num_match = re.search(r"layers\.(\d+)", loaded_name)
                 if layer_num_match:
                     layer_num = int(layer_num_match.group(1))
-                    if layer_num >= num_model_layers:
-                        # logger.warning(
-                        #     f"Skipping weight for layer {layer_num} as the model only has {num_model_layers} layers."
-                        # )
-                        continue
-                # ====================== DEBUG ============================
                     is_moe_layer = (layer_num + 1) % \
                             self.interleave_moe_layer_step == 0
                     self.expert_prefix = "shared_expert." if is_moe_layer else ""
