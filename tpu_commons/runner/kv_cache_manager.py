@@ -189,6 +189,7 @@ class KVCacheManager:
             num_blocks = kv_cache_tensor.size // page_size_bytes
             dp = self.runner.mesh.shape["data"]
             num_blocks = math.ceil(num_blocks / dp) * dp
+            # num_blocks = 128
             # NOTE: we'll multiply the num_kv_heads by 2 in the function
             kv_cache = create_kv_caches(
                 num_blocks=num_blocks,

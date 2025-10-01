@@ -26,14 +26,13 @@ class JaxCommonLinearConfig:
 
     def __init__(self, vllm_config: VllmConfig, mesh: Mesh, layer: LinearBase):
         assert isinstance(layer, LinearBase)
-
         self.mesh = mesh
         self.output_sizes = [layer.output_size]
         self.weight_sharding = P(None, None)
         self.fuse_matmuls = True
         self.enable_sequence_parallelism = vllm_config.compilation_config.pass_config.enable_sequence_parallelism
-        self.input_sharding = None
-        self.output_sharding = None
+        self.input_sharding = P("data", None)
+        self.output_sharding = P("data", None)
 
         if isinstance(layer, RowParallelLinear):
             self.weight_sharding = P(None, 'model')

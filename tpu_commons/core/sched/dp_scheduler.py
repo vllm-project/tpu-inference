@@ -38,7 +38,7 @@ class DPScheduler(Scheduler):
             self.dp_size = self.vllm_config.additional_config["sharding"]["sharding_strategy"]["data_parallelism"]
         except KeyError:
             self.dp_size = 1
-        assert self.dp_size >= 2, "Data parallel size must be at least 2." # Debugging purpose
+        # assert self.dp_size >= 2, "Data parallel size must be at least 2." # Debugging purpose
         self.dp_kv_cache_config = self.kv_cache_config
         self.dp_kv_cache_config.num_blocks = (
             self.kv_cache_config.num_blocks // self.dp_size)

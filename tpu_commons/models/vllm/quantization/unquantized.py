@@ -171,15 +171,13 @@ class JaxUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         assert isinstance(layer, FusedMoE)
-
-        w2_weight = t2j(layer.w2_weight, use_dlpack=False)
-        w13_weight = t2j(layer.w13_weight, use_dlpack=False)
+        breakpoint()
+        w2_weight = t2j(layer.w2_weight, use_dlpack=False) #[128, 2048, 768]
+        w13_weight = t2j(layer.w13_weight, use_dlpack=False) #[128, 1536, 2048]
 
         if layer.use_ep:
-            w13_weight = jax.device_put(
-                w13_weight, NamedSharding(self.mesh, P('model', None, None)))
-            w2_weight = jax.device_put(
-                w2_weight, NamedSharding(self.mesh, P('model', None, None)))
+            w13_weight = jax.device_put(w13_weight, NamedSharding(self.mesh, P('model', None, None)))
+            w2_weight = jax.device_put(w2_weight, NamedSharding(self.mesh, P('model', None, None)))
         else:
             intermediate_size = w13_weight.shape[1] // 2
             assert intermediate_size == w2_weight.shape[-1]

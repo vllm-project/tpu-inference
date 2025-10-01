@@ -6,7 +6,7 @@ from vllm import LLM, EngineArgs
 from vllm.utils import FlexibleArgumentParser
 
 from tpu_commons.core import disagg_utils
-
+import os
 
 def create_parser():
     parser = FlexibleArgumentParser()
@@ -102,7 +102,7 @@ def main(args: dict):
 
 if __name__ == "__main__":
     # Skip long warmup for local simple test.
-    # os.environ['SKIP_JAX_PRECOMPILE'] = '1'
+    os.environ['SKIP_JAX_PRECOMPILE'] = '1'
 
     parser = create_parser()
     args: dict = vars(parser.parse_args())
