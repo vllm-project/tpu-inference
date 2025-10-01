@@ -251,7 +251,7 @@ for model_name in $model_list; do
         max_batched_tokens=1024
         if [ "$model_name" == "meta-llama/Llama-4-Scout-17B-16E-Instruct" ]; then
             current_serve_args+=(--hf-overrides '{"architectures": ["Llama4ForCausalLM"]}')
-        elif [ "$model_name" == "deepseek-ai/DeepSeek-V3" ]; then
+        elif [ "$model_name" == "deepseek-ai/DeepSeek-R1-0528" ]; then
             current_serve_args+=(--hf_overrides '{"num_hidden_layers": 12}')
         fi
     fi

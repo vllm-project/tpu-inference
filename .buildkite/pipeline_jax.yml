@@ -131,7 +131,7 @@ steps:
      commands:
        - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
 
-   - label: "E2E MLperf tests for DeepSeek-V3 (no accuracy, 12-decoder layers only)"
+   - label: "E2E MLperf tests for DeepSeek-R1 (no accuracy, 12-decoder layers only)"
      key: test_12
      soft_fail: true
      env:
@@ -143,7 +143,7 @@ steps:
      agents:
        queue: tpu_v6e_8_queue
      commands:
-       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh -m deepseek-ai/DeepSeek-V3
+       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh -m deepseek-ai/DeepSeek-R1-0528
 
 
   # -----------------------------------------------------------------
