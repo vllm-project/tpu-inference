@@ -54,7 +54,7 @@ class DeepSeekV3(nnx.Module):
         self.vllm_config = vllm_config
         self.rng = nnx.Rngs(rng)
 
-        num_layers: int = 61
+        num_layers: int = vllm_config.model_config.hf_config.num_hidden_layers
         num_local_experts: int = 256
 
         vocab_size: int = 129280
