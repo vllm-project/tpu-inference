@@ -69,8 +69,6 @@ class Llama4ForCausalLM(nnx.Module):
         # while Llama-4-Scout-17B-16E-Instruct uses 16 experts.
         self.num_local_experts: int = getattr(text_config, "num_local_experts", 16)
         self.hidden_act: str = getattr(text_config, "hidden_act", "silu")
-
-        # Note: The original config files show "no_rope_layers", not "no_rope_layers_interval"
         self.no_rope_layer_interval = getattr(text_config, "no_rope_layers", [])
 
         # interleave_moe_layer_step has a layer step of 2 to interleave MoE and dense layers for Llama-4-Maverick-17B-128E-Instruct.
