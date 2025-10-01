@@ -7,7 +7,6 @@ from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
-import jax.debug
 from vllm.config import VllmConfig
 
 from tpu_commons.logger import init_logger
