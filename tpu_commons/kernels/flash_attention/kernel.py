@@ -47,15 +47,6 @@ class BlockSizes:
     block_k: int
     block_b: int
 
-    block_q_major_dkv: int | None = None
-    block_k_major_dkv: int | None = None
-    block_k_dkv: int | None = None
-    block_q_dkv: int | None = None
-
-    block_k_major_dq: int | None = None
-    block_k_dq: int | None = None
-    block_q_dq: int | None = None
-
     def __post_init__(self):
 
         def verify_major_minor(prefix, suffix, major, minor):
@@ -68,28 +59,6 @@ class BlockSizes:
                                  f" {prefix}_major{suffix}={major}")
 
         verify_major_minor("block_k", "", self.block_k_major, self.block_k)
-        if self.block_q_major_dkv is not None and self.block_q_dkv is not None:
-            verify_major_minor("block_q", "_dkv", self.block_q_major_dkv,
-                               self.block_q_dkv)
-        if self.block_k_major_dkv is not None and self.block_k_dkv is not None:
-            verify_major_minor("block_k", "_dkv", self.block_k_major_dkv,
-                               self.block_k_dkv)
-        if self.block_k_major_dq is not None and self.block_k_dq is not None:
-            verify_major_minor("block_k", "_dq", self.block_k_major_dq,
-                               self.block_k_dq)
-
-    @property
-    def has_backward_blocks(self) -> bool:
-        backward_blocks = (
-            self.block_q_major_dkv,
-            self.block_k_major_dkv,
-            self.block_q_dkv,
-            self.block_k_dkv,
-            self.block_k_major_dq,
-            self.block_k_dq,
-            self.block_q_dq,
-        )
-        return all(b is not None for b in backward_blocks)
 
     @classmethod
     def get_default(cls, batch_size, num_heads, q_seq_len, kv_len, d_model):
@@ -100,13 +69,6 @@ class BlockSizes:
             block_k_major=128,
             block_k=128,
             block_b=1,
-            block_q_major_dkv=128,
-            block_k_major_dkv=128,
-            block_k_dkv=128,
-            block_q_dkv=128,
-            block_k_major_dq=128,
-            block_k_dq=128,
-            block_q_dq=128,
         )
 
 
