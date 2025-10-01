@@ -283,29 +283,17 @@ def apply_qwix_quantization(
 
     if not apply_to_abstract_model:
         assert isinstance(model_or_model_fn, nnx.Module)
-        qwix_quantize_nnx_model_with_config = functools.partial(
-            qwix_quantize_nnx_model, qwix_config=qwix_config)
-        # NOTE: it's REALLY important `qwix_quantize_nnx_model_with_config` is jitted
-        # or else you'll run into hanging
-        model_or_model_fn = nnx.jit(
-            qwix_quantize_nnx_model_with_config,
-            donate_argnums=(0, ),
-            static_argnames=(
-                "mesh",
-                "num_hidden_layers",
-                "kv_cache_block_size",
-                "kv_cache_num_kv_heads",
-                "kv_cache_head_size",
-                "kv_cache_dtype",
-            ))(model=model_or_model_fn,
-               rng=rng,
-               mesh=mesh,
-               num_hidden_layers=vllm_config.model_config.hf_config.
-               num_hidden_layers,
-               kv_cache_block_size=block_size,
-               kv_cache_num_kv_heads=num_kv_heads,
-               kv_cache_head_size=head_size,
-               kv_cache_dtype=kv_cache_dtype)
+        model_or_model_fn = qwix_quantize_nnx_model(
+            model=model_or_model_fn,
+            qwix_config=qwix_config,
+            rng=rng,
+            mesh=mesh,
+            num_hidden_layers=vllm_config.model_config.hf_config.
+            num_hidden_layers,
+            kv_cache_block_size=block_size,
+            kv_cache_num_kv_heads=num_kv_heads,
+            kv_cache_head_size=head_size,
+            kv_cache_dtype=kv_cache_dtype)
 
         return model_or_model_fn
 
