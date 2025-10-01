@@ -305,6 +305,7 @@ def _load_hf_weights_on_thread(vllm_config,
                     break
 
         # Converting to config's dtype
+        keep_original_dtype = "mlp" in hf_key
         if not keep_original_dtype and hf_weight.dtype != model_config.dtype:
             logger.warning(
                 f"Converting dtype for {hf_key} from {hf_weight.dtype} to {model_config.dtype}"
@@ -312,6 +313,9 @@ def _load_hf_weights_on_thread(vllm_config,
             hf_weight = hf_weight.astype(model_config.dtype)
 
         if hf_key.endswith(".weight_scale"):
+            # Make the weight scale shape as (x), because it comes as (x, 1).
+            if len(hf_weight.shape) == 2:
+                hf_weight = jnp.reshape(hf_weight, hf_weight.shape[0])
             if quant_scales is not None:
                 quant_scales[hf_key] = hf_weight
                 continue
@@ -405,6 +409,9 @@ def _load_hf_weights_on_thread(vllm_config,
         # Update the model weight
         spec = model_weight.sharding.spec if isinstance(
             model_weight.sharding, NamedSharding) else model_weight.sharding
+        # Transpose the MLP weight shape as the quantized matmul will take it as (n_output_feature, n_input_feature).
+        if "mlp" in hf_key:
+            hf_weight = jnp.transpose(hf_weight)
         model_weight.value = shard(hf_weight, spec)
 
 
