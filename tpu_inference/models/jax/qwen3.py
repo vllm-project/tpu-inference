@@ -4,7 +4,8 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh
-from transformers import Qwen3Config
+from jax.sharding import PartitionSpec as P
+from transformers import Qwen3Config, modeling_flax_utils
 from vllm.config import VllmConfig
 
 from tpu_inference import utils
@@ -17,10 +18,149 @@ from tpu_inference.models.jax.qwen2 import Qwen2MLP as Qwen3MLP
 from tpu_inference.models.jax.qwen2 import Qwen2Model
 from tpu_inference.models.jax.utils.weight_utils import (get_default_maps,
                                                          load_hf_weights)
+from tpu_inference.layers.vllm.linear_common import sharded_quantized_matmul
 
 logger = init_logger(__name__)
 
 init_fn = nnx.initializers.uniform()
+
+
+def get_param_path(target_param: nnx.Param,
+                   root_module: nnx.Module) -> Optional[str]:
+    """
+    Finds the key path of a specific nnx.Param instance within an nnx.Module.
+
+    Args:
+        target_param: The nnx.Param instance to search for.
+        root_module: The root nnx.Module to search within.
+
+    Returns:
+        The dotted key path string if the param is found, otherwise None.
+    """
+    # Get the State PyTree containing all nnx.Param objects in the module
+    params_state = nnx.state(root_module, nnx.Param)
+
+    # Flatten the state tree, getting paths to each leaf
+    flat_params_with_paths, _ = jax.tree_util.tree_flatten_with_path(
+        params_state)
+
+    # Iterate through all paths and param leaves
+    for path, leaf_param in flat_params_with_paths:
+        # Check for object identity using 'is'
+        if leaf_param is target_param:
+            return jax.tree_util.keystr(path, simple=True,
+                                        separator='.').removesuffix(".value")
+
+    # Parameter instance not found in the module's Param state
+    return "Not found"
+
+
+class QuantizedLinear(nnx.Linear):
+
+    def __init__(
+            self,
+            in_features: int,
+            out_features: int,
+            *,
+            rngs: nnx.Rngs,  # Required keyword argument for nnx.Linear
+            model: nnx.Module,
+            **kwargs  # To catch other optional arguments for nnx.Linear
+    ):
+        super().__init__(in_features=in_features,
+                         out_features=out_features,
+                         rngs=rngs,
+                         **kwargs)
+        self.model = model
+
+    # Overrided from nnx.linear.__call__, started by copy and paste.
+    def __call__(self, inputs: jax.Array) -> jax.Array:
+        """Applies a quantized matmul to the inputs along the last dimension.
+
+    Args:
+      inputs: The nd-array to be transformed.
+
+    Returns:
+      The transformed input.
+    """
+        kernel = self.kernel.value
+        path = get_param_path(kernel, self.model)
+        if path.endswith(".kernel"):
+            path = path.removesuffix(".kernel")
+        # Find the weight scale maching to the given kernel by path.
+        weight_scale = None
+        for scale_key, scale_value in self.model.quant_scales.items():
+            if path in scale_key:
+                weight_scale = scale_value
+                break
+        if weight_scale is None:
+            raise ValueError(f"weight scale was not set for {path}")
+
+        # Convert back to fp8 as it was casted up to fp32 from fp8 while loading weights.
+        kernel = kernel.astype(jnp.float8_e4m3fn)
+        # Trasponse the weight shape as the quantized matmul will take it as (n_output_feature, n_input_feature).
+        kernel = jnp.transpose(kernel)
+        # Make the weight scale shpae as (x), because it comes as (x, 1).
+        if len(weight_scale.shape) == 2:
+            weight_scale = jnp.reshape(weight_scale, weight_scale.shape[0])
+        weight_sharding = P(self.kernel.sharding[0], self.kernel.sharding[1])
+        bias = self.bias.value if self.bias is not None else None
+
+        y = sharded_quantized_matmul(
+            inputs,
+            kernel,
+            weight_scale,
+            self.model.mesh,
+            weight_sharding,
+        )
+        assert self.use_bias == (bias is not None)
+        if bias is not None:
+            y += jnp.reshape(bias, (1, ) * (y.ndim - 1) + (-1, ))
+        return y
+
+
+class Qwen3QuantizedMLP(nnx.Module):
+
+    def __init__(self, config: Qwen3Config, dtype: jnp.dtype, rng: nnx.Rngs,
+                 model: nnx.Module):
+        hidden_size = config.hidden_size
+        intermediate_size = config.intermediate_size
+        act = config.hidden_act
+
+        self.gate_proj = QuantizedLinear(
+            hidden_size,
+            intermediate_size,
+            use_bias=False,
+            param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
+            rngs=rng,
+            model=model,
+        )
+        self.up_proj = QuantizedLinear(
+            hidden_size,
+            intermediate_size,
+            use_bias=False,
+            param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
+            rngs=rng,
+            model=model,
+        )
+        self.down_proj = QuantizedLinear(
+            intermediate_size,
+            hidden_size,
+            use_bias=False,
+            param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
+            rngs=rng,
+            model=model,
+        )
+        self.act_fn = modeling_flax_utils.ACT2FN[act]
+
+    def __call__(self, x: jax.Array) -> jax.Array:
+        gate = self.act_fn(self.gate_proj(x))
+        up = self.up_proj(x)
+        fuse = gate * up
+        result = self.down_proj(fuse)
+        return result
 
 
 class Qwen3Attention(nnx.Module):
@@ -147,7 +287,7 @@ class Qwen3Attention(nnx.Module):
 class Qwen3DecoderLayer(Qwen2DecoderLayer):
 
     def __init__(self, config: Qwen3Config, dtype: jnp.dtype, rng: nnx.Rngs,
-                 mesh: Mesh, kv_cache_dtype: str):
+                 mesh: Mesh, kv_cache_dtype: str, model: nnx.Module) -> None:
         rms_norm_eps = config.rms_norm_eps
         hidden_size = config.hidden_size
 
@@ -170,17 +310,18 @@ class Qwen3DecoderLayer(Qwen2DecoderLayer):
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
         )
-        self.mlp = Qwen3MLP(
+        self.mlp = Qwen3QuantizedMLP(
             config=config,
             dtype=dtype,
             rng=rng,
+            model=model,
         )
 
 
 class Qwen3Model(Qwen2Model):
 
-    def __init__(self, vllm_config: VllmConfig, rng: nnx.Rngs,
-                 mesh: Mesh) -> None:
+    def __init__(self, vllm_config: VllmConfig, rng: nnx.Rngs, mesh: Mesh,
+                 model: nnx.Module) -> None:
         model_config = vllm_config.model_config
         hf_config = model_config.hf_config
         vocab_size = model_config.get_vocab_size()
@@ -202,7 +343,8 @@ class Qwen3Model(Qwen2Model):
                 rng=rng,
                 mesh=mesh,
                 # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
-                kv_cache_dtype=vllm_config.cache_config.cache_dtype)
+                kv_cache_dtype=vllm_config.cache_config.cache_dtype,
+                model=model)
             for _ in range(hf_config.num_hidden_layers)
         ]
         self.norm = nnx.RMSNorm(
@@ -229,12 +371,13 @@ class Qwen3ForCausalLM(nnx.Module):
         self.rng = nnx.Rngs(rng_key)
         self.mesh = mesh
 
+        self.quant_scales = {}
         self.model = Qwen3Model(
             vllm_config=vllm_config,
             rng=self.rng,
             mesh=mesh,
+            model=self,
         )
-        self.quant_scales = {}
 
     def __call__(
         self,
