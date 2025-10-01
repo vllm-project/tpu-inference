@@ -546,7 +546,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             pooler_output=[],
             kv_connector_output=kv_connector_output,
         )
-
         return attn_metadata, model_runner_output
 
     @functools.partial(jax.jit, static_argnums=(0, ))
