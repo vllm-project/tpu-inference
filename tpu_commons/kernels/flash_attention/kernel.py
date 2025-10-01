@@ -174,7 +174,6 @@ def flash_attention(
                             block_sizes, debug)
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=range(5, 10))
 def _flash_attention(
     q,
     k,
@@ -762,7 +761,6 @@ def mha_reference(
     )
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8))
 def _mha_reference(
     q,
     k,
