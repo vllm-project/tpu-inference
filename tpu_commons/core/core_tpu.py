@@ -8,7 +8,6 @@ import signal
 import threading
 import time
 import traceback
-from collections import deque
 from typing import Any, Callable, Optional, Tuple, TypeVar, Union
 
 import jax
@@ -404,6 +403,25 @@ def _create_engine_cores(
     return engine_cores
 
 
+def _get_slice_sizes(devices):
+    prefill_slice_sizes = disagg_utils.get_prefill_slices()
+    decode_slice_sizes = disagg_utils.get_decode_slices()
+    if isinstance(prefill_slice_sizes[0], int):
+        prefill_chip_cnt = sum(prefill_slice_sizes)
+    else:
+        prefill_chip_cnt = sum([math.prod(t) for t in prefill_slice_sizes])
+    if isinstance(decode_slice_sizes[0], int):
+        decode_chip_cnt = sum(decode_slice_sizes)
+    else:
+        decode_chip_cnt = sum([math.prod(t) for t in decode_slice_sizes])
+    assert decode_chip_cnt + prefill_chip_cnt <= len(devices)
+    assert prefill_chip_cnt > 0 and decode_chip_cnt > 0
+
+    slice_sizes = list(prefill_slice_sizes)
+    slice_sizes.extend(decode_slice_sizes)
+    return prefill_slice_sizes, decode_slice_sizes, slice_sizes
+
+
 class DisaggEngineCore(vLLMEngineCore):
     """The vLLM-facing adapter that handles process management and I/O. Modifes vLLMEngineCore and is only used in in-process EngineCore client."""
 
@@ -421,29 +439,25 @@ class DisaggEngineCore(vLLMEngineCore):
         log_stats: bool,
         executor_fail_callback: Optional[Callable] = None,
     ):
-        # We don't invoke super class's ctor as we are not really the
-        # engine core to be executed, instead we create other instance of
-        # engine cores and let them do the work.
         self.vllm_config = vllm_config
         self.vllm_config.cache_config.gpu_memory_utilization = (
             self.vllm_config.cache_config.gpu_memory_utilization - 0.1)
 
-        devices = jax.devices()
-        prefill_slice_sizes = disagg_utils.get_prefill_slices()
-        decode_slice_sizes = disagg_utils.get_decode_slices()
-        prefill_chip_cnt = sum(prefill_slice_sizes)
-        decode_chip_cnt = sum(decode_slice_sizes)
-        assert decode_chip_cnt + prefill_chip_cnt <= len(devices)
-        assert prefill_chip_cnt > 0 and decode_chip_cnt > 0
-
         self.output_queue = queue.Queue[Union[tuple[int, EngineCoreOutputs],
                                               bytes]]()
 
-        slice_sizes = list(prefill_slice_sizes)
-        slice_sizes.extend(decode_slice_sizes)
-        setattr(vllm_config.device_config, "slice", (0, slice_sizes))
-        logger.warning("Creating DisaggEngineCore ...")
-        logger.info(f"Adding slice config to device config: {slice_sizes}")
+        self.devices = jax.devices()
+        prefill_slice_sizes, decode_slice_sizes, slice_sizes = _get_slice_sizes(
+            self.devices)
+
+        if isinstance(slice_sizes[0], int):
+            setattr(vllm_config.device_config, "slice",
+                    (0, slice_sizes, self.devices))
+        else:
+            setattr(vllm_config.device_config, "slice",
+                    ((0, 0), 0, slice_sizes, self.devices))
+        logger.info(
+            f"Creating DisaggEngineCore with slice_sizes {slice_sizes}...")
 
         self._prefill_engines = _create_engine_cores(
             prefill_slice_sizes,
@@ -465,13 +479,7 @@ class DisaggEngineCore(vLLMEngineCore):
             f"{len(self._decode_engines)} Disaggregated decode engines created."
         )
 
-        self.batch_queue_size = self._prefill_engines[
-            0].model_executor.max_concurrent_batches
         self.batch_queue = None
-        if self.batch_queue_size > 1:
-            logger.info("Batch queue is enabled with size %d",
-                        self.batch_queue_size)
-            self.batch_queue = deque(maxlen=self.batch_queue_size)
 
         self.request_block_hasher = None
         if (self.vllm_config.cache_config.enable_prefix_caching
@@ -533,7 +541,7 @@ class DisaggEngineCore(vLLMEngineCore):
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
         client_idx, output = self.output_queue.get()
         # logger.warning(f"step output: {output}")
-        time.sleep(0.01)
+        time.sleep(0.03)
         return {client_idx: output}, True
 
     def shutdown(self):
@@ -598,18 +606,18 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
 
-        devices = jax.devices()
-        prefill_slice_sizes = disagg_utils.get_prefill_slices()
-        decode_slice_sizes = disagg_utils.get_decode_slices()
-        prefill_chip_cnt = sum(prefill_slice_sizes)
-        decode_chip_cnt = sum(decode_slice_sizes)
-        assert decode_chip_cnt + prefill_chip_cnt <= len(devices)
-        assert prefill_chip_cnt > 0 and decode_chip_cnt > 0
+        self.devices = jax.devices()
+        prefill_slice_sizes, decode_slice_sizes, slice_sizes = _get_slice_sizes(
+            self.devices)
 
-        slice_sizes = list(prefill_slice_sizes)
-        slice_sizes.extend(decode_slice_sizes)
-        setattr(vllm_config.device_config, "slice", (0, slice_sizes))
-        logger.info(f"Adding slice config to device config: {slice_sizes}")
+        if isinstance(slice_sizes[0], int):
+            setattr(vllm_config.device_config, "slice",
+                    (0, slice_sizes, self.devices))
+        else:
+            setattr(vllm_config.device_config, "slice",
+                    ((0, 0), 0, slice_sizes, self.devices))
+        logger.info(
+            f"Creating DisaggEngineCoreProc with slice_sizes {slice_sizes}...")
 
         def executor_fail_callback():
             self.input_queue.put_nowait(
