@@ -63,6 +63,6 @@ jobs:
           # Use the secret token you created for Test PyPI (see instructions)
           password: ${{ secrets.PYPI_API_TOKEN }}
           user: __token__
-          packages_dir: dist
+          packages_dir: dist/wheels-ubuntu-latest/
           # Publish to Test PyPI for safety during testing
           repository_url: https://test.pypi.org/legacy/
