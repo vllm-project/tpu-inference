@@ -4,6 +4,7 @@ from typing import Any, Callable, Optional, Union
 import jax
 import jax.numpy as jnp
 import torch
+from jax.experimental.layout import Format, Layout
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
@@ -177,9 +178,13 @@ class JaxUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         if layer.use_ep:
             w13_weight = jax.device_put(
-                w13_weight, NamedSharding(self.mesh, P('model', None, None)))
+                w13_weight,
+                Format(Layout((0, 1, 2)),
+                       NamedSharding(self.mesh, P('model', None, None))))
             w2_weight = jax.device_put(
-                w2_weight, NamedSharding(self.mesh, P('model', None, None)))
+                w2_weight,
+                Format(Layout((0, 1, 2)),
+                       NamedSharding(self.mesh, P('model', None, None))))
         else:
             intermediate_size = w13_weight.shape[1] // 2
             assert intermediate_size == w2_weight.shape[-1]
@@ -191,9 +196,13 @@ class JaxUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                                                                   n_shards,
                                                                   dim=1)
             w13_weight = jax.device_put(
-                w13_weight, NamedSharding(self.mesh, P(None, 'model', None)))
+                w13_weight,
+                Format(Layout((0, 1, 2)),
+                       NamedSharding(self.mesh, P(None, 'model', None))))
             w2_weight = jax.device_put(
-                w2_weight, NamedSharding(self.mesh, P(None, None, 'model')))
+                w2_weight,
+                Format(Layout((0, 1, 2)),
+                       NamedSharding(self.mesh, P(None, None, 'model'))))
         w13_weight = Parameter(torch_view(w13_weight), requires_grad=False)
         w2_weight = Parameter(torch_view(w2_weight), requires_grad=False)
 
