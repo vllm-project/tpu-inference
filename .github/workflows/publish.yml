@@ -14,6 +14,7 @@ jobs:
   build_wheels:
     name: Build wheels on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       matrix:
         # Define the operating systems for which to build wheels
@@ -28,6 +29,9 @@ jobs:
 
       # Build the wheels for all Python versions supported by the OS
       - name: Build wheels
+        env:
+          # This tells cibuildwheel to only build for CPython 3.12 ('cp312')
+          CIBW_BUILD: "cp312-*"
         # --output-dir specifies where cibuildwheel saves the wheels
         run: cibuildwheel --output-dir wheelhouse
 
