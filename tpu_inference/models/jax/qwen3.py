@@ -47,10 +47,10 @@ class Qwen3Attention(nnx.Module):
         self.mesh = mesh
 
         self.q_proj = nnx.Einsum(
-            "TD,DNH->TNH",
-            (self.hidden_size, self.num_heads, self.head_dim),
+            "TD,NDH->TNH",
+            (self.num_heads, self.hidden_size, self.head_dim),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
+            kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
             rngs=rng,
         )
         self.q_norm = nnx.RMSNorm(
