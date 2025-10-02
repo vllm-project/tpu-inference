@@ -492,7 +492,6 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                  force_random_weights: bool = False):
         assert mesh is not None
 
-
         self.supports_multimodal: bool = True
 
         self.vllm_config = vllm_config
@@ -744,14 +743,14 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         kv_caches: List[jax.Array],
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
-        pixel_values: Optional[jax.Array] = None,  
+        pixel_values: Optional[jax.Array] = None,
         inputs_embeds: Optional[jax.Array] = None,
         *args,
     ) -> Tuple[List[KVCacheType], jax.Array]:
         is_prefill = False
 
         is_prefill = False
-    
+
         # --- 1. DETERMINE INPUT TENSOR (FUSED/EMBEDDED) ---
         # NOTE: The runner passes either input_ids (text-only) OR inputs_embeds (fused MM embeds).
         if inputs_embeds is not None:
@@ -762,7 +761,9 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             x_TD = self.embedder.encode(input_ids)
         else:
             # Safety check (should not happen if the request is valid)
-            raise ValueError("Cannot run forward pass: Both input_ids and inputs_embeds are None.")
+            raise ValueError(
+                "Cannot run forward pass: Both input_ids and inputs_embeds are None."
+            )
 
         # # # Debug print the input_ids to ensure they're being passed correctly
         # # jax.debug.print("Input IDs: {}", input_ids)
@@ -901,7 +902,11 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         return projected_vision_features.reshape(batch_size * num_patches,
                                                  hidden_size)
 
-    def get_input_embeddings(self, input_ids: jax.Array, multimodal_embeddings: Optional[List[jax.Array]] = None) -> jax.Array:
+    def get_input_embeddings(
+            self,
+            input_ids: jax.Array,
+            multimodal_embeddings: Optional[List[jax.Array]] = None
+    ) -> jax.Array:
         """
         Computes the embeddings for text input (used for input to fusion).
         """
