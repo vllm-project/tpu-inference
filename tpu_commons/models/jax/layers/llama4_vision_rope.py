@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import jax
 import jax.numpy as jnp
@@ -21,7 +21,7 @@ class Llama4VisionRotaryEmbedding(nnx.Module):
     rngs: nnx.Rngs
 
     # Stored complex frequency tensor
-    freqs_ci: jnp.ndarray = nnx.field(init=False)
+    freqs_ci: jnp.ndarray = field(init=False, default=None)
 
     def __post_init__(self):
         # Calculate the size of the patch grid (e.g., 336 / 14 = 24)
@@ -32,7 +32,7 @@ class Llama4VisionRotaryEmbedding(nnx.Module):
         self.head_dim = self.hidden_size // self.num_attention_heads
 
         # Total number of tokens: Patches + 1 CLS token
-        total_tokens = num_patches + 1
+        # total_tokens = num_patches + 1
 
         # 1. Create 1D index including the CLS token
         # The CLS token is handled at index 0 in the PyTorch reference, but often at the end in JAX.

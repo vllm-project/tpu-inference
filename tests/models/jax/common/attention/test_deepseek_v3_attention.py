@@ -5,6 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 from flax import nnx
 from jax.sharding import Mesh
+from parameterized import parameterized
 
 from tpu_commons.models.jax.attention import get_kv_cache_shape
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
@@ -15,14 +16,15 @@ class TestMLA(unittest.TestCase):
 
     def setUp(self):
         self.mesh = Mesh(
-            np.array(jax.devices("tpu")).reshape(1, -1),
+            np.array(jax.devices("tpu")[:1]).reshape(1, -1),
             axis_names=(
                 "expert",
                 "model",
             ),
         )
 
-    def test_mla_forward_pass(self):
+    @parameterized.expand([["auto"], ["fp8"]])
+    def test_mla_forward_pass(self, kv_cache_str):
         hidden_size = 256
 
         num_key_value_heads = 32
@@ -57,6 +59,7 @@ class TestMLA(unittest.TestCase):
                 },
                 mesh=self.mesh,
                 random_init=True,
+                kv_cache_dtype=kv_cache_str,
                 # Provide all required sharding objects
             )
 
@@ -70,7 +73,7 @@ class TestMLA(unittest.TestCase):
             qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
             block_size = 16
             num_blocks = 8
-            kv_dtype = jnp.bfloat16
+            kv_dtype = jnp.float8_e4m3fn if kv_cache_str == "fp8" else jnp.bfloat16
             cache_shape = get_kv_cache_shape(num_blocks, block_size,
                                              num_key_value_heads, qk_head_dim,
                                              kv_dtype)

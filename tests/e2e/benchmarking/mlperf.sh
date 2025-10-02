@@ -125,9 +125,11 @@ echo "Using the dataset at $dataset_path"
 
 cd "$root_dir"/vllm || exit
 echo "Current working directory: $(pwd)"
+echo "Using vLLM hash: $(git rev-parse HEAD)"
 
 # Overwrite a few of the vLLM benchmarking scripts with the TPU Commons ones
 cp -r "$root_dir"/tpu_commons/scripts/vllm/benchmarking/*.py "$root_dir"/vllm/benchmarks/
+echo "Using TPU Commons hash: $(git -C "$root_dir"/tpu_commons rev-parse HEAD)"
 
 cleanUp() {
     echo "Stopping the vLLM server and cleaning up log files..."
@@ -168,7 +170,10 @@ checkThroughputAndRouge() {
     actual_throughput=$(awk '/Total Token throughput \(tok\/s\):/ {print $NF}' "$BENCHMARK_LOG_FILE")
 
     echo "--- Extracted Values ---"
-    if [ -z "$actual_rouge1" ]; then
+    if [ "$SKIP_ACCURACY_TESTS" = "True" ]; then
+        echo "skipping accuracy test"
+        rouge1_pass=1
+    elif [ -z "$actual_rouge1" ]; then
         echo "Rouge1 score: NOT FOUND"
         rouge1_pass=0
     else
@@ -246,6 +251,8 @@ for model_name in $model_list; do
         max_batched_tokens=1024
         if [ "$model_name" == "meta-llama/Llama-4-Scout-17B-16E-Instruct" ]; then
             current_serve_args+=(--hf-overrides '{"architectures": ["Llama4ForCausalLM"]}')
+        elif [ "$model_name" == "deepseek-ai/DeepSeek-R1-0528" ]; then
+            current_serve_args+=(--hf_overrides '{"num_hidden_layers": 12}')
         fi
     fi
 

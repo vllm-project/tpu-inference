@@ -1,21 +1,11 @@
-# Copyright 2025 The JAX Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
+# SPDX-License-Identifier: Apache-2.0
+"""Utility functions for quantized matmul kernel."""
 from typing import Any, Callable
 
 import jax
 import jax.numpy as jnp
+
+from tpu_commons.kernels.quantized_matmul.tuned_block_sizes import TunedValue
 
 
 def unfold_args(
@@ -23,10 +13,8 @@ def unfold_args(
     fn_conditions: tuple[bool, ...],
     fn: Callable[..., Any],
 ):
-    """Minimize run-time branching by converting jnp.bool to python bool."""
-    if len(conditions) == 0:
-        fn(*fn_conditions)
-    else:
+    """Minimize run-time branching of fn by converting jnp.bool to python bool."""
+    if conditions:
         arg = conditions[0]
         if isinstance(arg, bool):
             unfold_args(conditions[1:], fn_conditions + (arg, ), fn)
@@ -39,21 +27,32 @@ def unfold_args(
                 lambda: unfold_args(conditions[1:], fn_conditions +
                                     (False, ), fn),
             )
+    else:
+        fn(*fn_conditions)
 
 
-def quantize_tensor(x: jax.Array, n_bits: int = 8, dim: int = -1):
-    max_val = jnp.max(jnp.abs(x), axis=dim, keepdims=True)
-    int_min = -(2**(n_bits - 1))
-    int_max = 2**(n_bits - 1) - 1
-    scale = max_val / int_max
-    x_int = jnp.clip(jnp.rint(x / scale), int_min, int_max).astype(jnp.int8)
-    return x_int, scale.astype(jnp.float32)
+def quantize_tensor(x: jax.Array, dtype: jnp.dtype, dim: int = -1):
+    if jnp.issubdtype(dtype, jnp.integer):
+        dtype_info = jnp.iinfo(dtype)
+        max_val = int(dtype_info.max)
+        min_val = int(dtype_info.min)
+    else:
+        dtype_info = jnp.finfo(dtype)
+        max_val = float(dtype_info.max)
+        min_val = float(dtype_info.min)
+
+    x_abs_max = jnp.max(jnp.abs(x), axis=dim, keepdims=True)
+    scale = x_abs_max / max_val
+    x_q = jnp.clip(x / scale, min_val, max_val).astype(dtype)
+    return x_q, scale.astype(jnp.float32)
 
 
 def next_multiple(x, multiple):
     return ((x + multiple - 1) // multiple) * multiple
 
 
-def get_kernel_name(bs_block_size, out_block_size, in_block_size):
-    kernel_id = f'{bs_block_size}_{out_block_size}_{in_block_size}'
-    return f'quantized_matmul_kernel_{kernel_id}'
+def get_kernel_name(tuned_value: TunedValue):
+    batch_block_size = tuned_value.batch_block_size
+    out_block_size = tuned_value.out_block_size
+    in_block_size = tuned_value.in_block_size
+    return f'quantized_matmul_kernel_{batch_block_size}_{out_block_size}_{in_block_size}'

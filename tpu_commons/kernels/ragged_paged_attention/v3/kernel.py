@@ -113,6 +113,15 @@ def ref_ragged_paged_attention(
         k = jnp.repeat(k, actual_num_q_heads_per_kv_head, axis=1)
         v = jnp.repeat(v, actual_num_q_heads_per_kv_head, axis=1)
 
+        if q_scale is not None:
+            q = (q / q_scale)
+            if jnp.issubdtype(k.dtype, jnp.floating):
+                dtype_info = jnp.finfo(k.dtype)
+                minval = float(dtype_info.min)
+                maxval = float(dtype_info.max)
+                q = jnp.clip(q, min=minval, max=maxval)
+            q = q.astype(k.dtype)
+
         attn = jnp.einsum("qhd,khd->hqk",
                           q,
                           k,
@@ -332,6 +341,15 @@ def _ragged_paged_attention_kernel(
                              ref[...])
 
         # Follow FlashAttention-2 forward pass.
+        if q_scale is not None:
+            q = (q / q_scale)
+            if jnp.issubdtype(k.dtype, jnp.floating):
+                dtype_info = jnp.finfo(k.dtype)
+                minval = float(dtype_info.min)
+                maxval = float(dtype_info.max)
+                q = jnp.clip(q, min=minval, max=maxval)
+            q = q.astype(k.dtype)
+
         s = jnp.einsum("nd,md->nm", q, k, preferred_element_type=jnp.float32)
         s *= sm_scale
         if k_scale is not None:

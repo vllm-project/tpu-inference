@@ -5,7 +5,6 @@ from typing import Any, Callable, Optional
 import jax
 import jax.numpy as jnp
 from jax.experimental import shard_map
-from jax.experimental.pallas.ops.tpu.flash_attention import flash_attention
 from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention
 from jax.experimental.pallas.ops.tpu.splash_attention import \
     splash_attention_kernel as splash
@@ -14,6 +13,7 @@ from jax.experimental.pallas.ops.tpu.splash_attention import \
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
+from tpu_commons.kernels.flash_attention.kernel import flash_attention
 from tpu_commons.utils import get_megacore
 
 MAX_ALLOWED_PAGE_INDICES_N = (

@@ -1,6 +1,7 @@
 import math
 from functools import partial
-from typing import Callable, Literal, NamedTuple, Optional, TypedDict, Union
+from typing import (Callable, List, Literal, NamedTuple, Optional, TypedDict,
+                    Union)
 
 import jax
 import jax.numpy as jnp
@@ -172,9 +173,9 @@ def generate_window_segment_ids(cu_seqlens: jax.Array, seq_len: int,
     Returns:
         A SegmentIds object for flash_attention.
     """
-    indices = jnp.arange(seq_len)
+    indices = jnp.arange(seq_len, dtype=jnp.int32)
     segment_ids = jnp.searchsorted(cu_seqlens[1:], indices, side='right') + 1
-    padding_segment_ids = jnp.zeros(padded_seq_len - seq_len)
+    padding_segment_ids = jnp.zeros(padded_seq_len - seq_len, dtype=jnp.int32)
     segment_ids = jnp.concatenate([segment_ids, padding_segment_ids])
     segment_ids = segment_ids.reshape(1, -1)
 
@@ -281,15 +282,10 @@ class Qwen2_5_VisionAttention(nnx.Module):
         k = jnp.pad(k, pad_width, 'constant')
         v = jnp.pad(v, pad_width, 'constant')
 
-        segment_ids = None
-        if use_fullattn:
-            segment_ids_val = (jnp.arange(padded_T)
-                               >= T_attn).astype(jnp.int32).reshape(B, -1)
-            segment_ids = SegmentIds(q=segment_ids_val, kv=segment_ids_val)
-        else:
-            segment_ids = generate_window_segment_ids(cu_window_seqlens,
-                                                      T_attn, padded_T)
+        segment_ids = generate_window_segment_ids(cu_window_seqlens, T_attn,
+                                                  padded_T)
 
+        # TODO (jacobplatin): add support for quantized KV cache?
         output = self.flash_attention(q, k, v, segment_ids)
 
         # Unpad the output
@@ -430,7 +426,7 @@ class Qwen2_5_VisionRotaryEmbedding(nnx.Module):
             jnp.arange(0, self.dim, 2, dtype=jnp.float32) / self.dim))
         seq = jnp.arange(seqlen, dtype=jnp.float32)
         freqs = jnp.outer(seq, inv_freq)
-        return freqs
+        return freqs.astype(jnp.bfloat16)
 
 
 class Qwen2_5_VisionTransformer(nnx.Module):
@@ -602,6 +598,7 @@ class Qwen2_5_VisionTransformer(nnx.Module):
         rotary_pos_emb = []
         window_index: list = []
         cu_window_seqlens: list = [jnp.array([0], dtype=jnp.int32)]
+        cu_seqlens: list = []
 
         window_index_id = 0
         cu_window_seqlens_last = 0
@@ -628,9 +625,17 @@ class Qwen2_5_VisionTransformer(nnx.Module):
 
             rotary_pos_emb.append(rotary_pos_emb_thw)
 
+            cu_seqlens.append(cu_seqlens_thw)
+
         rotary_pos_emb = jnp.concatenate(rotary_pos_emb, axis=0)
         window_index = jnp.concatenate(window_index, axis=0)
         cu_window_seqlens = jnp.concatenate(cu_window_seqlens, axis=0)
+
+        cu_seqlens = jnp.concatenate(cu_seqlens, axis=0)
+        cu_seqlens = jnp.cumsum(cu_seqlens, axis=0, dtype=jnp.int32)
+        cu_seqlens = jnp.pad(cu_seqlens, ((1, 0), ),
+                             mode='constant',
+                             constant_values=0)
 
         hidden_states = hidden_states.reshape(
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
@@ -643,6 +648,7 @@ class Qwen2_5_VisionTransformer(nnx.Module):
             if layer_num in self.fullatt_block_indexes:
                 hidden_states = blk(hidden_states,
                                     rotary_pos_emb=rotary_pos_emb,
+                                    cu_window_seqlens=cu_seqlens,
                                     use_fullattn=True)
             else:
                 hidden_states = blk(hidden_states,
@@ -834,16 +840,16 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         attention_metadata: AttentionMetadata,
         inputs_embeds: Optional[jax.Array] = None,
         *args,
-    ) -> tuple[list[jax.Array], jax.Array]:
+    ) -> tuple[list[jax.Array], jax.Array, List[jax.Array]]:
         # The logic of choosing between input_ids and inputs_embeds is
         # handled inside self.language_model.__call__
-        kv_caches, x = self.language_model(
+        kv_caches, x, [] = self.language_model(
             kv_caches=kv_caches,
             input_ids=input_ids,
             attention_metadata=attention_metadata,
             inputs_embeds=inputs_embeds,
         )
-        return kv_caches, x
+        return kv_caches, x, []
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         return self.language_model.compute_logits(hidden_states)

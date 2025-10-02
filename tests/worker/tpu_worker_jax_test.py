@@ -37,6 +37,7 @@ def mock_vllm_config():
 
     mock_parallel_conf = MagicMock()
     mock_parallel_conf.tensor_parallel_size = 2
+    mock_parallel_conf.data_parallel_size = 1
 
     mock_additional_config = {}
 
@@ -182,9 +183,11 @@ class TestTPUWorker:
         available_mem = worker.determine_available_memory()
 
         mock_utils.hbm_usage_bytes.assert_called_once_with(mock_devices)
-        # Total free: (1000-100) + (1000-200) = 900 + 800 = 1700 GiB
-        # Taxed: 1700 * 0.9 = 1530 GiB
-        expected_mem = 1530 * 1024**3
+        # Total limit: 1000 + 1000 = 2000 GiB
+        # Total cap: 2000 * 0.9 = 1800 GiB
+        # Total used: 100 + 200 = 300 GiB
+        # Total free = 1800 - 300 = 1500 GiB
+        expected_mem = 1500 * 1024**3
         assert available_mem == expected_mem
 
     #
@@ -269,8 +272,7 @@ class TestTPUWorker:
         worker.model_runner.take_draft_token_ids.assert_called_once()
         assert result == mock_draft_tokens
 
-    @patch(
-        'tpu_commons.worker.tpu_worker_torchax.adapt_lora_request_if_needed')
+    @patch('tpu_commons.worker.tpu_worker_jax.adapt_lora_request_if_needed')
     def test_add_lora_not_implemented(self, mock_adapter_fn,
                                       mock_host_interface, mock_vllm_config):
         """Tests that add_lora raises NotImplementedError."""
@@ -291,8 +293,7 @@ class TestTPUWorker:
                 match="LoRA is not supported by the JAX worker yet."):
             worker.add_lora(mock_lora_request)
 
-    @patch(
-        'tpu_commons.worker.tpu_worker_torchax.adapt_lora_request_if_needed')
+    @patch('tpu_commons.worker.tpu_worker_jax.adapt_lora_request_if_needed')
     def test_add_lora_not_implemented_lora_request(self, mock_adapter_fn,
                                                    mock_host_interface,
                                                    mock_vllm_config):

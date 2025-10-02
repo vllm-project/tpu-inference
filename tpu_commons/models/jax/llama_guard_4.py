@@ -134,11 +134,14 @@ class JAXLlama4VisionEncoderLayer(nnx.Module):
         cfg = config
         self.hidden_size = cfg.hidden_size
 
+        #TODO: ENSURE THAT THE KV_CACHE IS NOT BEING USED.
         self.self_attn = Llama4Attention(  # Included is_causal flag with the approval of Jevin.
             hidden_size=cfg.hidden_size,
             dtype=dtype,
             num_attention_heads=cfg.num_attention_heads,
             num_key_value_heads=cfg.num_attention_heads,
+            # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
+            kv_cache_dtype="auto",
             head_dim=cfg.hidden_size // cfg.num_attention_heads,
             rope_theta=10000.0,  # From vision_config
             rope_scaling=None,
@@ -624,6 +627,8 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                 },
                 rngs=self.rng,  #nnx.Rngs(rng),
                 rope_input_ordering="interleaved",
+                # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
+                kv_cache_dtype=vllm_config.cache_config.cache_dtype,
                 temperature_tuning=True,
                 temperature_tuning_scale=0.1,
                 temperature_tuning_floor_scale=8192,
@@ -1088,7 +1093,7 @@ class LlamaGuard4WeightLoader:
         model_params = nnx.state(model_for_loading)
 
         # Determine if the model was initialized with vision components
-        is_multimodal_loaded = model_for_loading.vision_model is not None
+        # is_multimodal_loaded = model_for_loading.vision_model is not None
 
         with jax.default_device(jax.devices("cpu")[0]):
             for loaded_name, loaded_weight in self.names_and_weights_generator:

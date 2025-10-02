@@ -9,20 +9,15 @@ import json
 import os
 import time
 from enum import Enum
-from typing import Any, List, Optional
+from typing import Any
 
 import jax
-import jax.numpy as jnp
 from jax._src.interpreters import pxla
-from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
-import tpu_commons.kernels.ragged_paged_attention.v3.kernel as rpa
-from tpu_commons import utils
 from tpu_commons.logger import init_logger
-from tpu_commons.runner.jax.input_batch_jax import InputBatch
+from tpu_commons.runner.input_batch_jax import InputBatch
 
-DEFAULT_KV_CACHE_DTYPE = jnp.bfloat16
 MIN_NUM_SEQS = 8
 
 # These are used for determining the inference phase for a given batch in
@@ -46,33 +41,6 @@ class InferencePhase(Enum):
     DECODE_HEAVY = 1
     BALANCED = 2
     AMBIGUOUS = 3
-
-
-def determine_do_sampling(top_k: int, temperature: float) -> bool:
-    """
-  Determine whether sampling should be done for the next tokens in the model forward pass.
-
-  Args:
-    top_k: The top_k value (from SamplingParams).
-    temperature: The temperature value (from SamplingParams).
-
-  Returns:
-    True if sampling should be done, False otherwise.
-  """
-    return top_k != 1 and temperature != 0.0
-
-
-def pad_to_multiple(x: int,
-                    multiple: int = 8,
-                    max_limit: Optional[int] = None,
-                    keep_one: bool = False) -> int:
-    assert x > 0
-    if keep_one and x == 1:
-        return x
-    x = x + (-x % multiple)
-    if max_limit is not None:
-        x = min(x, max_limit)
-    return x
 
 
 def get_padded_num_reqs_with_upper_limit(x: int, upper_limit: int) -> int:
@@ -213,68 +181,6 @@ class ForbidCompile:
         return False
 
 
-def create_kv_caches(
-    num_blocks: int,
-    block_size: int,
-    num_kv_heads: int,
-    head_size: int,
-    mesh: Mesh,
-    layer_names: List[str],
-    devices: List[Any],
-) -> List[jax.Array]:
-    """
-    Creates the KV caches, one per each decoder layer in the model, where the shape of each cache is
-    (num_blocks, block_size, cdiv(num_kv_heads * 2, packing), packing, head_size).
-
-    Args:
-        num_blocks: The number of blocks in the KV cache.
-        block_size: The size of each block in the KV cache.
-        num_kv_heads: The number of KV heads in the KV cache.
-        head_size: The size of each head in the KV cache.
-        mesh: The mesh to shard the KV caches across.
-        layer_names: The names of the decoder layers in the model.
-        devices: The devices to shard the KV caches across.
-
-    Returns:
-        A list of KV caches, one per each decoder layer in the model.
-
-    """
-    # TODO (jacobplatin): update this for quantized KV cache
-    cache_dtype = DEFAULT_KV_CACHE_DTYPE
-    # TODO(xiang): fix this together with get_kv_cache_spec
-    # cache_dtype = kv_cache_spec.dtype
-
-    # NOTE(jevinjiang): Instead of sharding automatically, we manually calculate
-    # the kv cache for each shard because the padding logic for RPA's KV cache
-    # needs to know the exact head number on each shard. In other words, we can
-    # not determine the padding logics for kv cache globally.
-    shard_cnt = mesh.shape["model"]
-    assert num_kv_heads % shard_cnt == 0
-    cache_shape_per_shard = rpa.get_kv_cache_shape(num_blocks, block_size,
-                                                   num_kv_heads // shard_cnt,
-                                                   head_size, cache_dtype)
-    # Intended to be replicated.
-    sharding = NamedSharding(mesh, PartitionSpec())
-
-    def _allocate() -> jax.Array:
-        return jnp.empty(
-            shape=cache_shape_per_shard,
-            dtype=cache_dtype,
-        )
-
-    sharded_allocate = jax.jit(_allocate, out_shardings=sharding)
-    kv_caches = []
-    for _ in layer_names:
-        kv_caches.append(sharded_allocate())
-    logger.info(
-        f"Init kv-cache | "
-        f"shape={len(layer_names)} * {shard_cnt} * {cache_shape_per_shard} | "
-        f"sharding={sharding} | "
-        f"dtype={cache_dtype} | "
-        f"hbm={utils.hbm_usage_gb(devices)}Gb")
-    return kv_caches
-
-
 def get_batch_composition_stats(
         input_batch: InputBatch, total_num_scheduled_tokens: int,
         num_reqs: int, padded_total_num_scheduled_tokens: int,
@@ -389,7 +295,9 @@ class PhasedBasedProfiler:
     def __init__(self, profile_dir: str):
         self.profiling_n_steps_left: int = 0
         self.profile_dir_with_phase_suffix: str = None
-        self.num_steps_to_profile_for: int = PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR
+        self.num_steps_to_profile_for: int = int(
+            os.getenv("PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR",
+                      PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR))
         self.profile_dir: str = profile_dir
         # NOTE: we purposely don't have AMBIGUOUS here
         self.inference_phase_seen: dict = {
@@ -411,10 +319,10 @@ class PhasedBasedProfiler:
             self, batch_composition_stats: dict) -> None:
         """
         Writes the batch composition stats to a file at the given time,
-        e.g.: prefill_heavy/batch_composition_stats_2025_08_22_15_41_41.json
+        e.g.: prefill_heavy/batch_composition_stats_2025_08_22_15_41_41_505018.json
         """
         now = datetime.datetime.now()
-        date_string_in_profiler_format = now.strftime("%Y_%m_%d_%H_%M_%S")
+        date_string_in_profiler_format = now.strftime("%Y_%m_%d_%H_%M_%S_%f")
 
         with open(
                 os.path.join(
@@ -506,7 +414,7 @@ class PhasedBasedProfiler:
         have_seen_all_phases = all(self.inference_phase_seen.values())
         # We want to start profiling only after the first trial request
         is_past_initial_request = batch_composition_stats[
-            "num_reqs"] > 1 and batch_composition_stats[
+            "num_reqs"] >= 1 and batch_composition_stats[
                 "total_num_scheduled_tokens"] > 1
         if is_past_initial_request and (not have_seen_all_phases
                                         or self.current_phase != ""):

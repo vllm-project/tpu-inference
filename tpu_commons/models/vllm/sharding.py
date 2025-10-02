@@ -1,135 +1,27 @@
-import functools
-
-import humanize
 import jax
 import torch
 import torchax
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from torch.nn.parameter import Parameter
+from torch.nn import Parameter
 from torch.utils import _pytree as pytree
-from torchax.interop import extract_all_buffers, torch_view
+from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
-from vllm.attention import Attention as VllmAttention
-from vllm.config import VllmConfig
-from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.linear import \
-    UnquantizedLinearMethod  # yapf: disable
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               MergedColumnParallelLinear,
-                                               QKVParallelLinear,
-                                               RowParallelLinear)
+from vllm.lora.layers import (MergedColumnParallelLinearWithLoRA,
+                              MergedQKVParallelLinearWithLoRA,
+                              RowParallelLinearWithLoRA)
+from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead, VocabParallelEmbedding)
 
 from tpu_commons.logger import init_logger
-from tpu_commons.models.vllm.jax_attention import JaxAttention
-from tpu_commons.models.vllm.jax_fused_moe import JaxFusedMoE
-from tpu_commons.models.vllm.jax_merged_column_parallel_linear import \
-    JaxMergedColumnParallelLinear
-from tpu_commons.models.vllm.jax_merged_column_parallel_linear_fusion_assignments import \
-    get_model_matmul_fusion_assignment
-from tpu_commons.models.vllm.jax_qkv_parallel_linear import \
-    JaxQKVParallelLinear
-from tpu_commons.models.vllm.jax_row_parallel_linear import \
-    JaxRowParallelLinear
 
 P = PartitionSpec
 
 logger = init_logger(__name__)
 
 
-def shard_attention(layer: torch.nn.Module, mesh: Mesh,
-                    vllm_config: VllmConfig):
-    return JaxAttention(layer, mesh)
-
-
-def shard_qkv_parallel_linear(layer: torch.nn.Module, mesh: Mesh,
-                              vllm_config: VllmConfig):
-    assert isinstance(layer, QKVParallelLinear)
-    jax_layer = JaxQKVParallelLinear(
-        layer,
-        mesh,
-        shard_qkv_parallel_linear.fuse_matmuls,
-        enable_sequence_parallelism=vllm_config.compilation_config.pass_config.
-        enable_sequence_parallelism)
-    return jax_layer
-
-
-def shard_merged_column_parallel_linear(layer: torch.nn.Module, mesh: Mesh,
-                                        vllm_config: VllmConfig):
-    assert isinstance(layer, MergedColumnParallelLinear)
-    jax_layer = JaxMergedColumnParallelLinear(
-        layer,
-        mesh,
-        shard_merged_column_parallel_linear.fuse_matmuls,
-        enable_sequence_parallelism=vllm_config.compilation_config.pass_config.
-        enable_sequence_parallelism)
-    return jax_layer
-
-
-def shard_column_parallel_linear(layer: torch.nn.Module, mesh: Mesh,
-                                 vllm_config: VllmConfig):
-    assert isinstance(layer, ColumnParallelLinear)
-    if not isinstance(layer.quant_method, UnquantizedLinearMethod):
-        raise ValueError(
-            "tpu_commons torchax ColumnParallelLinear doesn't support quantization"
-        )
-    w = Parameter(torch_view(t2j(layer.weight)), requires_grad=False)
-    layer.weight = w.apply_jax_(jax.device_put,
-                                NamedSharding(mesh, P('model', None)))
-    return layer
-
-
-def shard_row_parallel_linear(layer: torch.nn.Module, mesh: Mesh,
-                              vllm_config: VllmConfig):
-    assert isinstance(layer, RowParallelLinear)
-    jax_layer = JaxRowParallelLinear(
-        layer,
-        mesh,
-        enable_sequence_parallelism=vllm_config.compilation_config.pass_config.
-        enable_sequence_parallelism)
-    return jax_layer
-
-
-def shard_fused_moe(layer: torch.nn.Module, mesh: Mesh,
-                    vllm_config: VllmConfig):
-    assert isinstance(layer, FusedMoE)
-    jax_layer = JaxFusedMoE(layer, mesh, vllm_config.parallel_config)
-    return jax_layer
-
-
-MODULE_TYPE_TO_WRAPPING_FUNC = {
-    VllmAttention: shard_attention,
-    QKVParallelLinear: shard_qkv_parallel_linear,
-    MergedColumnParallelLinear: shard_merged_column_parallel_linear,
-    ColumnParallelLinear: shard_column_parallel_linear,
-    RowParallelLinear: shard_row_parallel_linear,
-    FusedMoE: shard_fused_moe,
-}
-
-
-def shard_parallel_layers_to_tpu(model: torch.nn.Module, mesh: Mesh,
-                                 vllm_config: VllmConfig) -> None:
-
-    def _shard_layer(module, name=None, parent=None):
-        for module_type, wrapping_func in MODULE_TYPE_TO_WRAPPING_FUNC.items():
-            if isinstance(module, module_type):
-                wrapped_module = wrapping_func(module, mesh, vllm_config)
-
-                assert parent is not None and name is not None, (
-                    "Top Level module is not expected to be wrapped.")
-                logger.debug("replace %s with %s", module, wrapped_module)
-                setattr(parent, name, wrapped_module)
-
-                module = wrapped_module
-                break
-
-        for child_name, child_module in list(module.named_children()):
-            _shard_layer(child_module, child_name, module)
-
-    _shard_layer(model)
-
-
-def shard_model_to_tpu(model: torch.nn.Module, mesh: Mesh,
-                       vllm_config: VllmConfig):
+def shard_model_to_tpu(model: torch.nn.Module,
+                       mesh: Mesh) -> dict[str, torchax.torch.Tensor]:
     """
     Shard the model weights and move them to TPU.
 
@@ -140,47 +32,127 @@ def shard_model_to_tpu(model: torch.nn.Module, mesh: Mesh,
     Args:
         model: A PyTorch model whose weights are on CPU main memory.
         mesh: JAX mesh object for sharding.
+    Returns:
+        Dictionary of parameters and buffers that will be used as arguments of
+        torch.func.functional_call
     """
 
-    def _is_unmoved_tensor(x):
-        # tensors haven't been turned into torchax tensor are the ones not moved to TPU yet.
-        return isinstance(
-            x, torch.Tensor) and not isinstance(x, torchax.tensor.Tensor)
+    with jax.default_device(jax.devices("cpu")[0]):
+        _shard_module_to_tpu(model, mesh)
 
-    def _move_to_tpu_replicated(x):
-        # In certain cases, if t2j puts the tensor on CPU first and then device_put it to TPU, the tensor layout get messed up. To avoid that, we set jax default_device to TPU.
-        with jax.default_device(jax.devices("tpu")[0]):
-            x = t2j(x, use_dlpack=False)
-        return torch_view(x).apply_jax_(jax.device_put,
-                                        NamedSharding(mesh, P()))
-
-    tp_size = vllm_config.parallel_config.tensor_parallel_size
-    shard_qkv_parallel_linear.fuse_matmuls = get_model_matmul_fusion_assignment(
-        vllm_config.model_config.model,
-        vllm_config.scheduler_config.max_num_batched_tokens, tp_size,
-        "QKVParallelLinear")
-    shard_merged_column_parallel_linear.fuse_matmuls = get_model_matmul_fusion_assignment(
-        vllm_config.model_config.model,
-        vllm_config.scheduler_config.max_num_batched_tokens, tp_size,
-        "MergedColumnParallelLinear")
-
-    with jax.default_device(jax.devices("cpu")[0]), torchax.default_env():
-        shard_parallel_layers_to_tpu(model, mesh, vllm_config)
+        params, buffers = _extract_all_params_buffers(model)
 
         # For other weight tensors, repliate them on all the TPU chips.
-        params, buffers = extract_all_buffers(model)
+        params, buffers = pytree.tree_map_only(
+            _tensor_is_in_cpu,
+            lambda tensor: _shard_tensor_to_tpu_replicated(tensor, mesh),
+            (params, buffers))
 
-        fmt_size = functools.partial(humanize.naturalsize, binary=True)
-        for qual_name, x in {**params, **buffers}.items():
-            if _is_unmoved_tensor(x):
-                tensor_size = fmt_size(x.nbytes)
-                logger.debug(
-                    f"{qual_name=} is not sharded, {tensor_size=}, {x.shape=}, {x.dtype=}"
-                )
+        return {**params, **buffers}
 
-        params, buffers = pytree.tree_map_only(_is_unmoved_tensor,
-                                               _move_to_tpu_replicated,
-                                               (params, buffers))
-        params_and_buffers = {**params, **buffers}
 
-        return params_and_buffers
+def _extract_all_params_buffers(model: torch.nn.Module):
+    return dict(model.named_parameters()), dict(model.named_buffers())
+
+
+def _tensor_is_in_cpu(tensor: torch.tensor) -> bool:
+    # Check if a tensor haven't been converted to torchax tensor.
+    if not isinstance(tensor, torchax.tensor.Tensor):
+        return True
+    # Check if torchax tensor is still in CPU.
+    return tensor.jax_device == jax.devices('cpu')[0]
+
+
+def _convert_to_torchax_and_shard(tensor: torch.Tensor,
+                                  sharding: NamedSharding) -> torch.Tensor:
+    if isinstance(tensor, torchax.tensor.Tensor):
+        tensor = jax_view(tensor)
+    else:
+        tensor = t2j(tensor)
+    return torch_view(jax.device_put(tensor, sharding))
+
+
+def _shard_tensor_to_tpu_replicated(tensor: torch.Tensor,
+                                    mesh: Mesh) -> torchax.tensor.Tensor:
+    return _convert_to_torchax_and_shard(tensor, NamedSharding(mesh, P()))
+
+
+def _shard_vocab_parallel_embedding(layer: VocabParallelEmbedding,
+                                    mesh: Mesh) -> None:
+    weight = _convert_to_torchax_and_shard(
+        layer.weight, NamedSharding(mesh, P('model', None)))
+    layer.weight = Parameter(weight, requires_grad=False)
+
+
+def _shard_lm_head(layer: ParallelLMHead, mesh: Mesh):
+    # TODO(qihqi): currently this is not handling case of tie_word_weights=True.
+    # if that config is set, then we should not create new weights but reuse the
+    # weight from VocabParallelEmbedding
+    weight = _convert_to_torchax_and_shard(
+        layer.weight, NamedSharding(mesh, P('model', None)))
+    layer.weight = Parameter(weight, requires_grad=False)
+    if layer.bias is not None:
+        bias = _convert_to_torchax_and_shard(layer.bias,
+                                             NamedSharding(mesh, P('model')))
+        layer.bias = Parameter(bias, requires_grad=False)
+
+
+def _shard_base_linear_lora(layer: BaseLinearLayerWithLoRA,
+                            mesh: Mesh) -> None:
+    # NOTE: lora_a_stacked[i] has shape [max_loras, 1, num_out, num_in]
+    sharded_lora_a_tpu = torch.nn.ParameterList()
+    sharded_lora_b_tpu = torch.nn.ParameterList()
+    sharded_lora_bias_tpu = torch.nn.ParameterList()
+
+    for i in range(layer.n_slices):
+        sharded_lora_a_tpu.append(
+            _shard_tensor_to_tpu_replicated(layer.lora_a_stacked[i], mesh))
+        sharded_lora_b_tpu.append(
+            _shard_tensor_to_tpu_replicated(layer.lora_b_stacked[i], mesh))
+        if layer.lora_bias_stacked is not None:
+            sharded_lora_bias_tpu.append(
+                _shard_tensor_to_tpu_replicated(layer.lora_bias_stacked[i],
+                                                mesh))
+
+    layer.lora_a_stacked = sharded_lora_a_tpu
+    layer.lora_b_stacked = sharded_lora_b_tpu
+    if layer.lora_bias_stacked is not None:
+        layer.lora_bias_stacked = sharded_lora_bias_tpu
+
+
+# TODO: Add custom sharding logic for following lora layers
+def _shard_column_parallel_linear_lora(
+        layer: MergedColumnParallelLinearWithLoRA, mesh: Mesh) -> None:
+    _shard_base_linear_lora(layer, mesh)
+
+
+def _shard_qkv_parallel_linear_lora(layer: MergedQKVParallelLinearWithLoRA,
+                                    mesh: Mesh) -> None:
+    _shard_base_linear_lora(layer, mesh)
+
+
+def _shard_row_parallel_linear_lora(layer: RowParallelLinearWithLoRA,
+                                    mesh: Mesh) -> None:
+    _shard_base_linear_lora(layer, mesh)
+
+
+# NOTE: Ordering is important as it calls first matched type of a given module
+MODULE_TYPE_TO_SHARDING_FUNC = [
+    # Shard embedding layers
+    (ParallelLMHead, _shard_lm_head),
+    (VocabParallelEmbedding, _shard_vocab_parallel_embedding),
+    # Shard LoRA layers
+    (MergedColumnParallelLinearWithLoRA, _shard_column_parallel_linear_lora),
+    (MergedQKVParallelLinearWithLoRA, _shard_qkv_parallel_linear_lora),
+    (RowParallelLinearWithLoRA, _shard_row_parallel_linear_lora),
+    (BaseLinearLayerWithLoRA, _shard_base_linear_lora),
+]
+
+
+def _shard_module_to_tpu(model: torch.nn.Module, mesh: Mesh) -> None:
+    for path, module in model.named_modules():
+        for module_type, sharding_func in MODULE_TYPE_TO_SHARDING_FUNC:
+            if isinstance(module, module_type):
+                logger.debug("shard %s with %s", path, sharding_func)
+                sharding_func(module, mesh)
+                break

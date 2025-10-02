@@ -10,6 +10,7 @@ from jax.experimental import shard_map
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
+from tpu_commons import utils
 from tpu_commons.kernels.ragged_paged_attention.v3.kernel import \
     ragged_paged_attention
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
@@ -36,6 +37,7 @@ class MLA(nnx.Module):
     rope_theta: float
     rope_scaling: dict[str, Any]
     dtype: jnp.dtype
+    kv_cache_dtype: str
     mesh: Mesh
 
     q_lora_rank: int
@@ -67,6 +69,10 @@ class MLA(nnx.Module):
 
     rngs: InitVar[nnx.Rngs]
 
+    _q_scale: float = 1
+    _k_scale: float = 1
+    _v_scale: float = 1
+
     def __post_init__(self, rngs: nnx.Rngs):
         self.N = self.num_attention_heads
         self.K = self.num_key_value_heads
@@ -92,7 +98,7 @@ class MLA(nnx.Module):
             dtype=self.dtype,
             beta_fast=self.rope_scaling["beta_fast"],
             beta_slow=self.rope_scaling["beta_slow"],
-            mscale=self.rope_scaling["mscale"],
+            mscale_value=self.rope_scaling["mscale"],
             mscale_all_dim=self.rope_scaling["mscale_all_dim"],
         )
 
@@ -146,6 +152,11 @@ class MLA(nnx.Module):
             dtype=self.dtype,
             rngs=rngs,
         )
+
+        self.kv_cache_quantized_dtype = None
+        if self.kv_cache_dtype != "auto":
+            self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
+                self.kv_cache_dtype)
 
     def __call__(self,
                  x,
@@ -230,6 +241,15 @@ class MLA(nnx.Module):
                                     (0, multiple_of_128 - self.qk_head_dim)))
             v_SNH = jnp.pad(v_SNH, ((0, 0), (0, 0),
                                     (0, multiple_of_128 - self.v_head_dim)))
+            q_scale = k_scale = v_scale = None
+            if self.kv_cache_quantized_dtype:
+                # TODO(kyuyeunk/jacobplatin): Enable w8a8 when VREG spill issue is resolved.
+                # q_scale = self._q_scale
+                k_scale = self._k_scale
+                v_scale = self._v_scale
+                k_SNH, v_SNH = utils.quantize_kv(k_SNH, v_SNH,
+                                                 self.kv_cache_quantized_dtype,
+                                                 k_scale, v_scale)
             new_kv_cache, outputs_TNH = self.attention(
                 is_prefill,
                 kv_cache,
@@ -238,6 +258,9 @@ class MLA(nnx.Module):
                 v_SNH,
                 attention_metadata,
                 self.mesh,
+                q_scale,
+                k_scale,
+                v_scale,
             )
             # TODO(wenxindongwork): For now, unpad the outputs_TNH to match the v_head_dim.
             # We shall add the MLA kv cache implementation in the future.
@@ -259,6 +282,9 @@ class MLA(nnx.Module):
         v_SKH: jax.Array,
         attention_metadata: AttentionMetadata,
         mesh: Mesh,
+        q_scale: float | None = None,
+        k_scale: float | None = None,
+        v_scale: float | None = None,
     ) -> Tuple[KVCache, jax.Array]:
         """Performs scaled dot-product attention and updates the KV cache.
 
@@ -276,6 +302,9 @@ class MLA(nnx.Module):
             attention_metadata: Metadata containing sequence lengths.
             mesh: The JAX device mesh (unused in this specific function but
                 kept for potential future use or API consistency).
+            q_scale: Quantization scale for q.
+            k_scale: Quantization scale for k.
+            v_scale: Quantization scale for v.
 
         Returns:
             A tuple containing:
@@ -288,18 +317,21 @@ class MLA(nnx.Module):
             self.query_tnh,  # q
             self.keyvalue_skh,  # k
             self.keyvalue_skh,  # v
-            P(),  # kv_cache: Replicated
+            P(None, None, "model"),  # kv_cache
             P(),  # md.seq_lens: Replicated
             P(),  # page_indices_flat: Replicated
             P(),  # query_start_loc: Replicated
             P(),  # distribution: Replicated
         )
-        out_specs = (self.attn_o_tnh, P())
+        out_specs = (self.attn_o_tnh, P(None, None, "model"))
 
         def _ragged_paged_attention(*args):
             return ragged_paged_attention(
                 *args,
                 sm_scale=self.scale,
+                q_scale=q_scale,
+                k_scale=k_scale,
+                v_scale=v_scale,
             )
 
         output_TNH, kv_cache = jax.jit(

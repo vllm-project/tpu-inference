@@ -180,13 +180,16 @@ def get_param_and_sharding(params: nnx.State, shardings: Any,
     return plevel, slevel.value
 
 
-def shard_put(x: jax.Array, sharding_names: tuple[str, ...],
-              mesh: jax.sharding.Mesh) -> jax.Array:
+def shard_put(x: jax.Array, shardings, mesh: jax.sharding.Mesh) -> jax.Array:
     # Single device sharding requires this special handling
     # to avoid the recursive jit error.
     if math.prod(mesh.axis_sizes) == 1:
         return jax.device_put(x, mesh.devices.flatten()[0])
-    return jax.device_put(x, NamedSharding(mesh, P(*sharding_names)))
+
+    if isinstance(shardings, tuple):
+        return jax.device_put(x, NamedSharding(mesh, P(*shardings)))
+    else:
+        return jax.device_put(x, shardings)
 
 
 def get_default_maps(vllm_config, mesh: Mesh,
@@ -217,6 +220,7 @@ def get_default_maps(vllm_config, mesh: Mesh,
     }
     transpose_keys: dict[str, tuple[int, ...]] = {
         "lm_head": (1, 0),
+        "fc": (1, 0),
         "gate_proj": (1, 0),
         "up_proj": (1, 0),
         "down_proj": (1, 0),
@@ -262,7 +266,9 @@ def _load_hf_weights_on_thread(vllm_config,
                                metadata_map: MetadataMap,
                                mesh: Mesh,
                                weights_file: str,
-                               filter_regex: str | None = None):
+                               filter_regex: str | None = None,
+                               keep_original_dtype_keys_regex: list[str]
+                               | None = None):
     name_map = metadata_map.name_map
     reshape_keys = metadata_map.reshape_map
     bias_reshape_keys = metadata_map.bias_reshape_map
@@ -286,11 +292,27 @@ def _load_hf_weights_on_thread(vllm_config,
 
     for hf_key, hf_weight in model_weights_single_file_generator(
             weights_file, framework="flax", filter_regex=filter_regex):
+
+        # Check if the key should retain its original dtype
+        keep_original_dtype = False
+        if keep_original_dtype_keys_regex:
+            for pattern in keep_original_dtype_keys_regex:
+                if re.match(pattern, hf_key):
+                    keep_original_dtype = True
+                    break
+
+        # Converting to config's dtype
+        if not keep_original_dtype and hf_weight.dtype != model_config.dtype:
+            logger.warning(
+                f"Converting dtype for {hf_key} from {hf_weight.dtype} to {model_config.dtype}"
+            )
+            hf_weight = hf_weight.astype(model_config.dtype)
+
         if hf_key.endswith(".weight"):
             hf_key = hf_key.removesuffix(".weight")
 
         # Find the corresponding model key using the HF key
-        if "layer" in hf_key:
+        if "layers" in hf_key:
             layer_num = re.search(r"layers\.(\d+)", hf_key).group(1)
             layer_key = re.sub(r"layers\.\d+", "layers.*", hf_key)
             model_key = name_map[layer_key]
@@ -304,6 +326,11 @@ def _load_hf_weights_on_thread(vllm_config,
             if hf_key not in name_map and hf_key == "lm_head":
                 logger.warning(
                     f"Skip loading {hf_key} due to tie_word_embeddings")
+                continue
+            if hf_key not in name_map and "t2d" in hf_key:
+                logger.warning(
+                    f"Skip loading {hf_key} as it's not used in eagle-3 for now"
+                )
                 continue
             model_key = name_map.get(hf_key, hf_key)
         model_weight, model_sharding = get_param_and_sharding(
@@ -374,22 +401,34 @@ def load_hf_weights(vllm_config,
                     model: nnx.Module,
                     metadata_map: MetadataMap,
                     mesh: Mesh,
-                    filter_regex: str | None = None):
+                    filter_regex: str | None = None,
+                    is_draft_model: bool = False,
+                    keep_original_dtype_keys_regex: list[str] | None = None):
     """Load weights from all model weights files to the model, run in multi threads."""
-    model_path = vllm_config.model_config.model
+    if is_draft_model:
+        model_path = vllm_config.speculative_config.draft_model_config.model
+    else:
+        model_path = vllm_config.model_config.model
     weights_files = get_model_weights_files(
         model_path, vllm_config.load_config.download_dir)
     params = nnx.state(model)
     max_workers = min(64, len(weights_files))
+    # NOTE(xiang): Disable multi-threading mode if running on multi-host.
+    # Because multi-threading would cause different JAX processes to load
+    # different weights at the same time.
+    if os.environ.get("TPU_MULTIHOST_BACKEND", "").lower() == "ray":
+        max_workers = 1
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
-            executor.submit(_load_hf_weights_on_thread,
-                            vllm_config,
-                            params,
-                            metadata_map,
-                            mesh,
-                            weights_file,
-                            filter_regex=filter_regex)
+            executor.submit(
+                _load_hf_weights_on_thread,
+                vllm_config,
+                params,
+                metadata_map,
+                mesh,
+                weights_file,
+                filter_regex=filter_regex,
+                keep_original_dtype_keys_regex=keep_original_dtype_keys_regex)
             for weights_file in weights_files
         ]
         for future in futures:

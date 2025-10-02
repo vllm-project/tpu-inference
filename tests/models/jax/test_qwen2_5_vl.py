@@ -174,8 +174,12 @@ class TestQwen2_5_VisionAttention:
         attn_module.flash_attention = mock_attn_fn
         x = jax.random.normal(rng, (T, B, D))
         rotary_pos_emb = jax.random.normal(rng, (T, attn_module.head_dim // 2))
+        cu_seqlens = jnp.array([0, 5])
 
-        y_full = attn_module(x, rotary_pos_emb, use_fullattn=True)
+        y_full = attn_module(x,
+                             rotary_pos_emb,
+                             cu_window_seqlens=cu_seqlens,
+                             use_fullattn=True)
         assert y_full.shape == (T, B, D)
         mock_attn_fn.assert_called_once()
         assert mock_attn_fn.call_args[0][3].q.shape == (1, 128)
@@ -526,10 +530,10 @@ class TestQwen2_5_VLForConditionalGeneration:
                                        model.config.vocab_size)
         attn_meta = MagicMock(spec=AttentionMetadata)
         mock_lm_output = ([MagicMock()],
-                          jnp.ones((1, 10, model.config.hidden_size)))
+                          jnp.ones((1, 10, model.config.hidden_size)), [])
         model.language_model.return_value = mock_lm_output
 
-        new_kvs, x = model(kv_caches, input_ids, attn_meta)
+        new_kvs, x, aux_hidden_states = model(kv_caches, input_ids, attn_meta)
         model.language_model.assert_called_once_with(
             kv_caches=kv_caches,
             input_ids=input_ids,
@@ -537,6 +541,7 @@ class TestQwen2_5_VLForConditionalGeneration:
             inputs_embeds=None)
         assert len(new_kvs) == 1
         assert x.shape == (1, 10, model.config.hidden_size)
+        assert len(aux_hidden_states) == 0
 
     def test_compute_logits(self, model: Qwen2_5_VLForConditionalGeneration,
                             rng: PRNGKey):

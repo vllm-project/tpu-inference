@@ -37,11 +37,10 @@ class TpuPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
-                             block_size: int, use_v1: bool,
-                             use_mla: bool) -> str:
+                             block_size: int, use_v1: bool, use_mla: bool,
+                             has_sink: bool, use_sparse: bool) -> str:
         assert use_v1, "only v1 is supported"
-        if (selected_backend != _Backend.PALLAS
-                and selected_backend != _Backend.PALLAS_VLLM_V1):
+        if selected_backend != _Backend.PALLAS:
             logger.info("Cannot use %s backend on TPU.", selected_backend)
 
         return "tpu_commons.attention.backends.pallas_torchax.PallasAttentionBackend"
@@ -172,3 +171,10 @@ class TpuPlatform(Platform):
             if params.sampling_type == SamplingType.RANDOM_SEED:
                 raise ValueError(
                     "Torch XLA does not support per-request seed.")
+
+    @classmethod
+    def use_sync_weight_loader(cls) -> bool:
+        """
+        Returns if the current platform needs to sync weight loader.
+        """
+        return True

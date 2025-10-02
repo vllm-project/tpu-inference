@@ -31,7 +31,7 @@ def _parse_slices(slices_str: str) -> Tuple[int, ...]:
             if len(dims) == 1:
                 slice_sizes.append(int(dims[0]))
             elif len(dims) == 2:
-                slice_sizes.append(int(dims[0]) * int(dims[1]))
+                slice_sizes.append((int(dims[0]), int(dims[1])))
             else:
                 raise ValueError("Each slice must be in 'N' or 'NxM' format.")
         return tuple(slice_sizes)

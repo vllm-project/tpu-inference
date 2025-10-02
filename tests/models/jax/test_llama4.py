@@ -54,6 +54,8 @@ class MockVllmConfig:
             }
         }
 
+        self.cache_config = MagicMock(cache_dtype="auto")
+
 
 @pytest.fixture(scope="module")
 def mesh():

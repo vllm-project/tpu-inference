@@ -1,5 +1,4 @@
 """Utility functions for ragged paged attention."""
-
 import jax
 from jax._src import dtypes
 
@@ -40,12 +39,9 @@ def get_tpu_version() -> int:
         return -1
     if kind.endswith(' lite'):
         kind = kind[:-len(' lite')]
+    if kind.endswith('p'):
+        kind = kind[:-1]
+    if kind == 'TPU7x':
+        return 7
     assert kind[:-1] == 'TPU v', kind
     return int(kind[-1])
-
-
-def get_device_name(num_devices: int | None = None):
-    name = ' '.join(jax.devices()[0].device_kind.split()[:2])
-    if num_devices is not None:
-        name += f'-{num_devices}'
-    return name
