@@ -18,7 +18,7 @@ jobs:
     strategy:
       matrix:
         # Define the operating systems for which to build wheels
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest]
 
     steps:
       - uses: actions/checkout@v4
