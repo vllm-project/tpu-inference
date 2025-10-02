@@ -82,13 +82,13 @@ def apply_rope(
 
         out = jnp.concatenate([outputs_real, outputs_imag], axis=-1)
 
-    elif positions.ndim >= 2 and positions.shape[-1] == 2: #VISION RoPE
+    elif positions.ndim >= 2 and positions.shape[-1] == 2:  #VISION RoPE
         # positions = freqs_cis_stacked: (S, D_rot, 2)
-        
+
         # Unstack to get the complex rotation factors (cos + i*sin)
-        cos = positions[..., 0] # Real part
-        sin = positions[..., 1] # Imaginary part
-        
+        cos = positions[..., 0]  # Real part
+        sin = positions[..., 1]  # Imaginary part
+
         # Add num_heads dimension for broadcasting: (seq_len, 1, head_dim//2)
         cos = cos[:, jnp.newaxis, :]
         sin = sin[:, jnp.newaxis, :]
@@ -96,7 +96,7 @@ def apply_rope(
         # Apply rotation (Standard split logic)
         inputs_real = inputs[..., :head_dim // 2]
         inputs_imag = inputs[..., head_dim // 2:head_dim]
-        
+
         outputs_real = inputs_real * cos - inputs_imag * sin
         outputs_imag = inputs_real * sin + inputs_imag * cos
 

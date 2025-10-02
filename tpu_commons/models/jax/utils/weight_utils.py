@@ -50,21 +50,21 @@ def print_param_info(param: nnx.Param, name: str):
 
 def transpose_params(param_key: str, param_tensor: jax.Array, transpose_map):
     """
-    Applies transpose by matching the param_key against transpose_map keys 
+    Applies transpose by matching the param_key against transpose_map keys
     using regular expressions to handle layer wildcards (*).
     """
     for key, value in transpose_map.items():
         # 1. Escape regex special characters in the key (except for the '*')
         # and replace '*' with a wildcard match for numbers (\d+)
         regex_pattern = re.escape(key).replace(r'\*', r'\d+')
-        
-        # 2. To handle the trailing '.weight' or '.kernel' that is often on the param_key, 
+
+        # 2. To handle the trailing '.weight' or '.kernel' that is often on the param_key,
         # but not on the map key, ensure the pattern is anchored and allows a suffix.
         # This checks if the key matches the START of the param_key.
-        if re.search(regex_pattern, param_key): 
+        if re.search(regex_pattern, param_key):
             transposed_tensor = jnp.transpose(param_tensor, value)
             return transposed_tensor
-            
+
     return param_tensor
 
 

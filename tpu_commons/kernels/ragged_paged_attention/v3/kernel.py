@@ -244,7 +244,7 @@ def _ragged_paged_attention_kernel(
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
-    is_causal: bool = True, # For bi-directional self-attention
+    is_causal: bool = True,  # For bi-directional self-attention
     chunk_prefill_size: int | None = None,
     bkv_p,
     bq_sz,
@@ -338,19 +338,20 @@ def _ragged_paged_attention_kernel(
             s *= k_scale
         if q_scale is not None:
             s *= q_scale
-        
+
         if is_causal:
             q_span = (kv_len - q_len + bq_idx * bq_sz +
-                    lax.broadcasted_iota(jnp.int32, s.shape, 0) //
-                    num_q_heads_per_kv_head)
-            k_span = bkv_idx * bkv_sz + lax.broadcasted_iota(jnp.int32, s.shape, 1)
+                      lax.broadcasted_iota(jnp.int32, s.shape, 0) //
+                      num_q_heads_per_kv_head)
+            k_span = bkv_idx * bkv_sz + lax.broadcasted_iota(
+                jnp.int32, s.shape, 1)
             mask = q_span < k_span
             # TODO(jevinjiang, xiowei): reduce pages_per_seq based on sliding_window.
             if sliding_window is not None:
                 mask = jnp.logical_or(mask, q_span - sliding_window >= k_span)
-        else: 
+        else:
             # Full/Bidirectional Mask: Mask is always False (no masking)
-            mask = jnp.zeros_like(s, dtype=jnp.bool_) 
+            mask = jnp.zeros_like(s, dtype=jnp.bool_)
 
         if soft_cap is not None:
             s = soft_cap * jnp.tanh(s / soft_cap)
@@ -1217,7 +1218,7 @@ def ragged_paged_attention(
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
-    is_causal: bool = True, # For bi-directional self-attention
+    is_causal: bool = True,  # For bi-directional self-attention
     # Kernel optimization params.
     chunk_prefill_size: int | None = None,
     # Kernel tuning params.
