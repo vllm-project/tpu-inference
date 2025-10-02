@@ -7,11 +7,14 @@ from typing import TYPE_CHECKING, Callable, List
 import jax
 import jax.numpy as jnp
 import qwix
+import qwix.pallas as qpl
 import yaml
 from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
+from qwix._src.core.qarray import QArray
+from qwix._src.providers import ptq
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -507,3 +510,79 @@ def load_random_weights_into_qwix_abstract_model(rng: PRNGKey,
     if hasattr(model, 'initialize_cache'):
         model.initialize_cache()
     logger.info("Done initializing Qwix-quantized model with random weights")
+
+
+def manually_quantize_qwix_weight(weight: jax.Array, qtype: jnp.dtype,
+                                  channelwise_axes: List[int],
+                                  tiled_axes: dict,
+                                  calibration_method: str) -> QArray:
+    """
+    Manually quantizes a weight tensor using Qwix.  Only needed for the SparseMatmul DeepSeek case right now, since
+    otherwise, Qwix will handle this automatically (through our application of `qwix.quantize_model`).
+    """
+    # TODO (jacobplatin): clean this up; this is needed because of issues with Qwix quantizing the `shard_map` in SpraseMatmul
+    how_to_quantize = ptq.qarray.HowToQuantize(
+        qtype=qtype,
+        channelwise_axes=channelwise_axes,
+        tiled_axes=tiled_axes,
+        calibration_method=calibration_method)
+
+    return ptq.create_quantized_param(weight, how_to_quantize)
+
+
+def manually_quantize_qwix_activation(inputs: jax.Array, rule_name: str,
+                                      qtype: jnp.dtype,
+                                      channelwise_axes: List[int],
+                                      tiled_axes: dict,
+                                      calibration_method: str) -> QArray:
+    """
+    Manually quantizes an activation tensor using Qwix.  Needed for the SparseMatmul
+    DeepSeek MoE case currently.
+
+    Args:
+        inputs: The activation tensor to quantize.
+        rule_name: The name of the quantization rule to use.
+        qtype: The quantization type.
+        channelwise_axes: The channelwise axes to quantize.
+        tiled_axes: The tiled axes to quantize.
+        calibration_method: The calibration method to use.
+
+    Returns:
+        The quantized activation tensor.
+    """
+    rule = qpl.get_current_rule(rule_name)
+    lhs_how = ptq.qarray.HowToQuantize(qtype=qtype,
+                                       channelwise_axes=channelwise_axes,
+                                       tiled_axes=tiled_axes,
+                                       calibration_method=calibration_method)
+    # This is needed because we aren't passing `act_name` right now
+    assert not rule.act_static_scale, "Static scale not supported right now"
+
+    # channelwise_axes should be set to (a subset of) non-contraction axes. e.g.
+    # for ragged_dot [m, k] x [g, k, n], they are [0] and [0, 2]
+    # TODO (jacobplatin): add support for `act_name`
+    return ptq.quantize_act(inputs, lhs_how, rule, "")
+
+
+def get_quant_dtype_from_qwix_config(
+        vllm_config: "VllmConfig") -> tuple[jnp.dtype, jnp.dtype]:
+    """
+    Gets the quantization dtype from the Qwix config.
+
+    Args:
+        vllm_config: The VllmConfig object.
+
+    Returns:
+        A tuple of the scale dtype and quant dtype.
+    """
+    qwix_config = vllm_config.additional_config.get("quantization",
+                                                    {}).get("qwix", {})
+    scale_dtype = getattr(jnp, qwix_config.get("scale_dtype", "bfloat16"))
+    quant_dtype = None
+    # TODO (jacobplatin): this needs to be much more robust
+    for rule in qwix_config.get("rules", []):
+        if rule.get("module_path") == ".*":
+            quant_dtype_str = rule.get("weight_qtype", "")
+            assert quant_dtype_str, "Quantization dtype not found in Qwix config! We currently expect your Qwix config to have a rule with module_path '.*' and a weight_qtype."
+            quant_dtype = getattr(jnp, quant_dtype_str)
+    return scale_dtype, quant_dtype
