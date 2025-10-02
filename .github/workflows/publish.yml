@@ -61,7 +61,7 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           # Use the secret token you created for Test PyPI (see instructions)
-          password: ${{ secrets.PYPI_API_TOKEN }}
+          password: ${{ secrets.TEST_PYPI_API_TOKEN }}
           user: __token__
           packages_dir: dist/wheels-ubuntu-latest/
           # Publish to Test PyPI for safety during testing
