@@ -15,11 +15,8 @@ from vllm.multimodal.image import convert_image_mode
 # run and is used for verification. The test is considered passed if the
 # generated output match with this text.
 EXPECTED_TEXT = (
-    "The image depicts a tall, cylindrical tower with a lattice-like "
-    "structure, surrounded by cherry blossom trees in full bloom. The cherry "
-    "blossoms are in various stages of bloom, with pink petals covering the "
-    "branches. The sky is clear and blue, creating a vibrant and picturesque "
-    "scene. The tower appears to be a significant landmark,")
+    "The image depicts a tall, cylindrical tower with a lattice-like structure, surrounded by cherry blossom trees in full bloom. The cherry blossoms are in various stages of opening, with pink petals covering the branches. The sky is clear and blue, creating a vibrant and picturesque scene. The tower appears to be a significant landmark,"
+)
 
 
 # NOTE: Could be extended to more mm models/configs as needed
