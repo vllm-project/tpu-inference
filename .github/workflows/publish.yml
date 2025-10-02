@@ -30,6 +30,7 @@ jobs:
       # Build the wheels for all Python versions supported by the OS
       - name: Build wheels
         env:
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux2014
           # This tells cibuildwheel to only build for CPython 3.12 ('cp312')
           CIBW_BUILD: "cp312-*"
         # --output-dir specifies where cibuildwheel saves the wheels
