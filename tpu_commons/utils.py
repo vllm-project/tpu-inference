@@ -85,11 +85,48 @@ def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
     return usage
 
 
+def get_device_name(num_devices: int | None = None):
+    kind = jax.devices()[0].device_kind
+    if 'TPU' not in kind:
+        raise RuntimeError('Expected TPU devices')
+    suffix = ''
+    if kind.endswith(' lite'):
+        kind = kind[:-len(' lite')]
+        suffix = 'e'
+    elif kind.endswith('e'):
+        kind = kind[:-1]
+        suffix = 'e'
+    elif kind.endswith('p'):
+        kind = kind[:-1]
+        suffix = 'p'
+    elif kind == 'TPU7x':
+        kind = 'TPU v7'
+    assert kind[:-1] == 'TPU v', kind
+    kind += suffix
+    if num_devices is not None:
+        kind += f'-{num_devices}'
+    return kind
+
+
+def get_device_hbm_limit() -> int:
+
+    device_kind = get_device_name()
+    if device_kind == "TPU v5p" or device_kind == "TPU v5":
+        return 95 * GBYTES
+    elif device_kind == "TPU v5e":
+        return 16 * GBYTES
+    elif device_kind == "TPU v6e" or device_kind == "TPU v4":
+        return 32 * GBYTES
+    elif device_kind == "TPU v7":
+        return 192 * GBYTES
+    else:
+        raise ValueError(f"Unknown device kind: {device_kind}")
+
+
 def pathways_hbm_usage_gb(devices: Any) -> List[Tuple[float, float]]:
     live_arrays = jax.live_arrays()
     hbm_used = defaultdict(int)
-    # TODO(wenxindong): Find a way to get the accurate hbm limit on Pathways.
-    hbm_limit = 33550237184
+    hbm_limit = get_device_hbm_limit()
     for array in live_arrays:
         assert hasattr(array, 'sharding') and hasattr(
             array.sharding, 'device_set'

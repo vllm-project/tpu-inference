@@ -39,27 +39,9 @@ def get_tpu_version() -> int:
         return -1
     if kind.endswith(' lite'):
         kind = kind[:-len(' lite')]
+    if kind.endswith('p'):
+        kind = kind[:-1]
     if kind == 'TPU7x':
         return 7
     assert kind[:-1] == 'TPU v', kind
     return int(kind[-1])
-
-
-def get_device_name(num_devices: int | None = None):
-    kind = jax.devices()[0].device_kind
-    if 'TPU' not in kind:
-        raise RuntimeError('Expected TPU devices')
-    suffix = ''
-    if kind.endswith(' lite'):
-        kind = kind[:-len(' lite')]
-        suffix = 'e'
-    if kind.endswith('p'):
-        kind = kind[:-1]
-        suffix = 'p'
-    if kind == 'TPU7x':
-        kind = 'TPU v7'
-    assert kind[:-1] == 'TPU v', kind
-    kind += suffix
-    if num_devices is not None:
-        kind += f'-{num_devices}'
-    return kind

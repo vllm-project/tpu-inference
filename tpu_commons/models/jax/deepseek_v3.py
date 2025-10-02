@@ -19,16 +19,26 @@ from tpu_commons.models.jax.common.attention.deepseek_v3_attention import MLA
 from tpu_commons.models.jax.common.constants import KVCacheType
 from tpu_commons.models.jax.common.layers import (DenseFFW, Embedder, LMhead,
                                                   RMSNorm)
-from tpu_commons.models.jax.common.moe.deepseek_moe import DeepSeekV3Router
+from tpu_commons.models.jax.common.moe.deepseek_moe import (DeepSeekV3Router,
+                                                            SparseMoE)
 from tpu_commons.models.jax.common.moe.moe import MoE
 from tpu_commons.models.jax.common.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
+from tpu_commons.models.jax.utils.quantization.quantization_utils import \
+    get_quant_dtype_from_qwix_config
 from tpu_commons.models.jax.utils.weight_utils import (get_param,
                                                        model_weights_generator,
                                                        print_param_info,
                                                        reshape_params)
 
 logger = init_logger(__name__)
+
+# A map from JAX dtype to the corresponding PyTorch integer dtype for raw memory viewing.
+DTYPE_VIEW_MAP = {
+    jnp.dtype(jnp.float8_e4m3fn): torch.uint8,
+    jnp.dtype(jnp.bfloat16): torch.uint16,
+    jnp.dtype(jnp.float32): torch.uint32,
+}
 
 
 @dataclass
@@ -44,7 +54,8 @@ class DeepSeekV3(nnx.Module):
         self.vllm_config = vllm_config
         self.rng = nnx.Rngs(rng)
 
-        num_layers: int = 61
+        # NOTE: the default is 61
+        num_layers: int = vllm_config.model_config.hf_config.num_hidden_layers
         num_local_experts: int = 256
 
         vocab_size: int = 129280
@@ -81,6 +92,18 @@ class DeepSeekV3(nnx.Module):
 
         self.random_init = force_random_weights or self.vllm_config.additional_config.get(
             "random_weights", False)
+        self.sparse_matmul = self.vllm_config.additional_config.get(
+            "sparse_matmul", False)
+
+        if isinstance(self.sparse_matmul, str):
+            self.sparse_matmul = self.sparse_matmul.lower() == "true"
+        else:
+            self.sparse_matmul = bool(self.sparse_matmul)
+
+        if self.sparse_matmul:
+            logger.info("sparse matmul is enabled")
+        else:
+            logger.info("sparse matmul is disabled, using dense matmul")
         self.mesh = mesh
 
         self.weight_loader = DeepSeekV3WeightLoader(
@@ -125,11 +148,11 @@ class DeepSeekV3(nnx.Module):
                 # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype,
                 rngs=self.rng,
-                activation_attention_td=(None, 'model'),
-                activation_q_td=(None, 'model'),
+                activation_attention_td=(None, None),
+                activation_q_td=(None, None),
                 query_tnh=P(None, 'model', None),
                 keyvalue_skh=P(None, 'model', None),
-                activation_attention_out_td=(None, 'model'),
+                activation_attention_out_td=(None, None),
                 attn_o_tnh=P(None, 'model', None),
                 q_da_sharding=(None, 'model'),
                 anh_sharding=(None, 'model', None),
@@ -180,29 +203,59 @@ class DeepSeekV3(nnx.Module):
                 routed_scaling_factor=2.5,
                 dtype=dtype,
                 activation_ffw_td=('data', None),
-                ed_sharding=('expert', None),
-                e_sharding=('expert', ))
-            custom_module = MoE(dtype=dtype,
-                                num_local_experts=num_local_experts,
-                                apply_expert_weight_before_computation=False,
-                                hidden_size=hidden_size,
-                                intermediate_size_moe=moe_intermediate_size,
-                                hidden_act=hidden_act,
-                                rngs=self.rng,
-                                random_init=self.random_init,
-                                activation_ffw_td=('data', None),
-                                activation_ffw_ted=('data', 'expert', None),
-                                edf_sharding=('expert', None, 'model'),
-                                efd_sharding=('expert', 'model', None),
-                                router=router) if is_moe_layer else DenseFFW(
-                                    dtype=dtype,
-                                    hidden_act=hidden_act,
-                                    hidden_size=hidden_size,
-                                    intermediate_size=ffw_intermediate_size,
-                                    rngs=self.rng,
-                                    random_init=self.random_init,
-                                    df_sharding=(None, ('model', 'expert')),
-                                    fd_sharding=(('model', 'expert'), None))
+                ed_sharding=('model', None),
+                e_sharding=('model', ))
+            if self.sparse_matmul:
+                # TODO: orginize the SparseMoE and DenseMoE better given they share most interfaces
+                custom_module = SparseMoE(
+                    dtype=dtype,
+                    num_local_experts=num_local_experts,
+                    apply_expert_weight_before_computation=False,
+                    hidden_size=hidden_size,
+                    intermediate_size_moe=moe_intermediate_size,
+                    num_experts_per_tok=num_experts_per_token,
+                    mesh=self.mesh,
+                    hidden_act=hidden_act,
+                    rngs=self.rng,
+                    random_init=self.random_init,
+                    activation_ffw_td=('data', None),
+                    activation_ffw_ted=('data', None, None),
+                    edf_sharding=('model', None, None),
+                    efd_sharding=('model', None, None),
+                    quantized_dtype=self.weight_loader.quant_dtype
+                    if self.weight_loader.is_model_quantized else None,
+                    router=router) if is_moe_layer else DenseFFW(
+                        dtype=dtype,
+                        hidden_act=hidden_act,
+                        hidden_size=hidden_size,
+                        intermediate_size=ffw_intermediate_size,
+                        rngs=self.rng,
+                        random_init=self.random_init,
+                        df_sharding=(None, ('model', 'expert')),
+                        fd_sharding=(('model', 'expert'), None))
+            else:
+                custom_module = MoE(
+                    dtype=dtype,
+                    num_local_experts=num_local_experts,
+                    apply_expert_weight_before_computation=False,
+                    hidden_size=hidden_size,
+                    intermediate_size_moe=moe_intermediate_size,
+                    hidden_act=hidden_act,
+                    rngs=self.rng,
+                    random_init=self.random_init,
+                    activation_ffw_td=('data', None),
+                    activation_ffw_ted=('data', None, None),
+                    edf_sharding=('model', None, None),
+                    efd_sharding=('model', None, None),
+                    router=router) if is_moe_layer else DenseFFW(
+                        dtype=dtype,
+                        hidden_act=hidden_act,
+                        hidden_size=hidden_size,
+                        intermediate_size=ffw_intermediate_size,
+                        rngs=self.rng,
+                        random_init=self.random_init,
+                        df_sharding=(None, ('model', 'expert')),
+                        fd_sharding=(('model', 'expert'), None))
 
             shared_experts = DenseFFW(dtype=dtype,
                                       hidden_act=hidden_act,
@@ -412,20 +465,12 @@ class DeepSeekV3WeightLoader:
             quantization_type = vllm_config.model_config.hf_config.quantization_config[
                 "quant_method"]
             assert quantization_type == "fp8", "DeepSeek only supports the fp8 quantization method for now"
-            # NOTE: this will only be used for loading in quantized weights (via Qwix)
-            qwix_config = vllm_config.additional_config.get(
-                "quantization", {}).get("qwix", {})
-            self.scale_dtype = getattr(
-                jnp, qwix_config.get("scale_dtype", "bfloat16"))
-            # TODO (jacobplatin): move this out of DeepSeek class to a utility function
-            for rule in qwix_config.get("rules", []):
-                if rule.get("module_path") == ".*":
-                    quant_dtype_str = rule.get("weight_qtype", "")
-                    assert quant_dtype_str, "Quantization dtype not found in Qwix config! We currently expect your Qwix config to have a rule with module_path '.*' and a weight_qtype."
-                    self.quant_dtype = getattr(jnp, quant_dtype_str)
-                    logger.info(
-                        f"Quantizing DeepSeek with quantization dtype: {self.quant_dtype} and scale dtype: {self.scale_dtype}"
-                    )
+            self.scale_dtype, self.quant_dtype = get_quant_dtype_from_qwix_config(
+                vllm_config)
+
+            logger.info(
+                f"Quantizing DeepSeek with quantization dtype: {self.quant_dtype} and scale dtype: {self.scale_dtype}"
+            )
 
             quantization_block_sizes = vllm_config.model_config.hf_config.quantization_config[
                 "weight_block_size"]
@@ -537,7 +582,17 @@ class DeepSeekV3WeightLoader:
 
         # Convert weights from torch into numpy
         cast_type = model_weight.value.dtype
-        weight_np = weight.to(torch.float32).numpy().astype(cast_type)
+
+        torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
+
+        if torch_view_type:
+            # Avoid unnecessary upcasting and mem copy by viewing the tensor's
+            # raw data as integers before converting to a JAX array.
+            weight_np = jnp.array(
+                weight.view(torch_view_type).numpy()).view(cast_type)
+        else:
+            raise ValueError(
+                f"Unsupported dtype for tensor conversion: {cast_type}")
 
         if scale is not None:
             scale = scale.to(torch.float32).numpy().astype(self.scale_dtype)

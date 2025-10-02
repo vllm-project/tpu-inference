@@ -140,7 +140,7 @@ def _configure_vllm_root_logger() -> None:
         if formatter.get(
                 "class") == "tpu_commons.vllm_logging_utils.NewLineFormatter":
             formatter[
-                "class"] = "tpu_commons.vllm_logging_utils.NewLineFormatter"
+                "class"] = "tpu_commons.mock.vllm_logging_utils.NewLineFormatter"
 
     if logging_config:
         dictConfig(logging_config)

@@ -308,7 +308,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                     is not None)
 
         logger.info(f"Init model | "
-                    f"hbm={common_utils.hbm_usage_gb(self.devices)}Gb")
+                    f"hbm={common_utils.hbm_usage_gb(self.devices)}GiB")
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return ("generate", )
@@ -375,10 +375,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         input_ids, inputs_embeds = self._get_input_ids_embeds(
             input_ids, mm_embeds)
 
-        # TODO: Disable this for now
-        if self.is_multimodal_model or self.lora_config is not None:
-            self.maybe_forbid_compile = nullcontext()
-
         lora_metadata = self.lora_utils.extract_lora_metadata()
         # TODO: make _get_input_ids_embeds within this context
         # NOTE: right now, mm model will use embeddings as the input,
@@ -392,6 +388,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     scheduler_output) as kv_connector_output:
                 # NOTE(Wenlong): It takes both `input_ids` and `inputs_embeds`,
                 # but one of them would be `None`
+
                 (self.kv_caches, hidden_states,
                  aux_hidden_states) = self.model_fn(
                      self.state,

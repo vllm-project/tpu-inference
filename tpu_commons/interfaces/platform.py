@@ -23,7 +23,7 @@ class IPlatform(Protocol):
     def get_attn_backend_cls(self, selected_backend: Any, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool, use_mla: bool,
-                             has_sink: bool) -> str:
+                             has_sink: bool, use_spare: bool) -> str:
         ...
 
     def get_device_communicator_cls(self) -> str:

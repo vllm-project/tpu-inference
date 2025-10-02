@@ -34,14 +34,11 @@ fi
 
 # Try to cache HF models
 persist_cache_dir="/mnt/disks/persist/models"
-home_cache_dir="$HOME/models"
 
 if ( mkdir -p "$persist_cache_dir" ); then
   LOCAL_HF_HOME="$persist_cache_dir"
-elif ( mkdir -p "$home_cache_dir" ); then
-  LOCAL_HF_HOME="$home_cache_dir"
 else
-  echo "Error: Failed to create either $persist_cache_dir or $home_cache_dir"
+  echo "Error: Failed to create $persist_cache_dir"
   exit 1
 fi
 DOCKER_HF_HOME="/tmp/hf_home"
@@ -74,6 +71,9 @@ else
     echo "No vllm-tpu images found to clean up."
 fi
 
+echo "Pruning old Docker build cache..."
+docker builder prune -f
+
 echo "Cleanup complete."
 
 docker build --no-cache -f docker/Dockerfile -t "vllm-tpu:${BUILDKITE_COMMIT}" .
@@ -93,5 +93,8 @@ exec docker run \
   ${QUANTIZATION:+-e QUANTIZATION="$QUANTIZATION"} \
   ${NEW_MODEL_DESIGN:+-e NEW_MODEL_DESIGN="$NEW_MODEL_DESIGN"} \
   ${USE_V6E8_QUEUE:+-e USE_V6E8_QUEUE="$USE_V6E8_QUEUE"} \
+  ${JAX_RANDOM_WEIGHTS:+-e JAX_RANDOM_WEIGHTS="$JAX_RANDOM_WEIGHTS"} \
+  ${SKIP_ACCURACY_TESTS:+-e SKIP_ACCURACY_TESTS="$SKIP_ACCURACY_TESTS"} \
+  ${VLLM_MLA_DISABLE:+-e VLLM_MLA_DISABLE="$VLLM_MLA_DISABLE"} \
   "vllm-tpu:${BUILDKITE_COMMIT}" \
   "$@" # Pass all script arguments as the command to run in the container

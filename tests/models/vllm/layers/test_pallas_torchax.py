@@ -93,7 +93,7 @@ def mesh():
 class TestPallasAttentionBackend:
 
     def test_get_name(self):
-        assert PallasAttentionBackend.get_name() == "PALLAS_VLLM_V1"
+        assert PallasAttentionBackend.get_name() == "PALLAS"
 
     def test_get_impl_cls(self):
         assert PallasAttentionBackend.get_impl_cls(

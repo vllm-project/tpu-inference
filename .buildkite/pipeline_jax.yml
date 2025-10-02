@@ -30,7 +30,7 @@ steps:
      commands:
        - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
 
-   - label: "E2E MLPerf tests for JAX + vLLM models"
+   - label: "E2E MLPerf tests for JAX + vLLM models on single chip"
      key: test_3
      soft_fail: true
      env:
@@ -119,7 +119,31 @@ steps:
      commands:
        - |
          .buildkite/scripts/run_in_docker.sh \
-           bash -c 'SKIP_JAX_PRECOMPILE=1 MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_commons/tests/lora/test_lora.py'
+           bash -c 'MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_commons/tests/lora/test_lora.py'
+
+   - label: "E2E MLPerf tests for JAX + vLLM models on multiple chips"
+     key: test_11
+     soft_fail: true
+     env:
+       MODEL_IMPL_TYPE: "vllm"
+     agents:
+       queue: tpu_v6e_8_queue
+     commands:
+       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
+
+   - label: "E2E MLperf tests for DeepSeek-R1 (no accuracy, 12-decoder layers only)"
+     key: test_12
+     soft_fail: true
+     env:
+       NEW_MODEL_DESIGN: "True"
+       USE_V6E8_QUEUE: "True"
+       SKIP_ACCURACY_TESTS: "True"
+       VLLM_MLA_DISABLE: "1"
+       JAX_RANDOM_WEIGHTS: "True"
+     agents:
+       queue: tpu_v6e_8_queue
+     commands:
+       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh -m deepseek-ai/DeepSeek-R1-0528
 
 
   # -----------------------------------------------------------------
@@ -137,9 +161,12 @@ steps:
        - test_7
        - test_8
        - test_9
+       - test_10
+       - test_11
+       - test_12
      agents:
        queue: tpu_v6e_queue
      commands:
        - |
          .buildkite/scripts/check_results.sh \
-           "TPU JAX Tests Failed" test_0 test_1 test_2 test_3 test_4 test_5 test_6 test_7 test_8 test_9
+           "TPU JAX Tests Failed" test_0 test_1 test_2 test_3 test_4 test_5 test_6 test_7 test_8 test_9 test_10 test_11 test_12

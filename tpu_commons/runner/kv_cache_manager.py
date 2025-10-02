@@ -9,7 +9,8 @@ from vllm.attention import Attention
 from vllm.attention.backends.abstract import AttentionType
 from vllm.config import get_layers_from_vllm_config
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheSpec, SlidingWindowSpec)
+                                        KVCacheSpec, MLAAttentionSpec,
+                                        SlidingWindowSpec)
 
 from tpu_commons import utils
 from tpu_commons import utils as common_utils
@@ -57,13 +58,20 @@ class KVCacheManager:
             head_size = common_utils.get_padded_head_dim(
                 model_config.get_head_size())
             for i in range(model_config.get_num_layers(parallel_config)):
-                kv_cache_spec[f"layer.{i}"] = FullAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=num_kv_heads,
-                    head_size=head_size,
-                    dtype=self.runner.kv_cache_dtype,
-                    use_mla=use_mla,
-                )
+                if use_mla:
+                    kv_cache_spec[f"layer.{i}"] = MLAAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=num_kv_heads,
+                        head_size=head_size,
+                        dtype=self.runner.kv_cache_dtype,
+                        cache_dtype_str=self.runner.vllm_config.cache_config.
+                        cache_dtype)
+                else:
+                    kv_cache_spec[f"layer.{i}"] = FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=num_kv_heads,
+                        head_size=head_size,
+                        dtype=self.runner.kv_cache_dtype)
             if self.runner.speculative_config and self.runner.speculative_config.method == "eagle3":
                 draft_model_config = self.runner.speculative_config.draft_model_config
                 hf_config = draft_model_config.hf_config
@@ -75,13 +83,20 @@ class KVCacheManager:
 
                 # Eagle3 has only 1 layer
                 for i in range(1):
-                    kv_cache_spec[f"draft_layer.{i}"] = FullAttentionSpec(
-                        block_size=block_size,
-                        num_kv_heads=num_kv_heads,
-                        head_size=head_size,
-                        dtype=self.runner.kv_cache_dtype,
-                        use_mla=use_mla,
-                    )
+                    if use_mla:
+                        kv_cache_spec[f"layer.{i}"] = MLAAttentionSpec(
+                            block_size=block_size,
+                            num_kv_heads=num_kv_heads,
+                            head_size=head_size,
+                            dtype=self.runner.kv_cache_dtype,
+                            cache_dtype_str=self.runner.vllm_config.
+                            cache_config.cache_dtype)
+                    else:
+                        kv_cache_spec[f"draft_layer.{i}"] = FullAttentionSpec(
+                            block_size=block_size,
+                            num_kv_heads=num_kv_heads,
+                            head_size=head_size,
+                            dtype=self.runner.kv_cache_dtype)
         else:
             # Else propagate attention modules from compilation config.
             layers = get_layers_from_vllm_config(self.runner.vllm_config,
@@ -108,8 +123,15 @@ class KVCacheManager:
                             head_size=common_utils.get_padded_head_dim(
                                 attn_module.head_size),
                             dtype=self.runner.kv_cache_dtype,
-                            sliding_window=attn_module.sliding_window,
-                            use_mla=use_mla)
+                            sliding_window=attn_module.sliding_window)
+                    elif use_mla:
+                        kv_cache_spec[f"layer.{i}"] = MLAAttentionSpec(
+                            block_size=block_size,
+                            num_kv_heads=attn_module.num_kv_heads,
+                            head_size=attn_module.head_size,
+                            dtype=self.runner.kv_cache_dtype,
+                            cache_dtype_str=self.runner.vllm_config.
+                            cache_config.cache_dtype)
                     else:
                         kv_cache_spec[layer_name] = FullAttentionSpec(
                             block_size=block_size,
@@ -118,9 +140,7 @@ class KVCacheManager:
                                 self.runner.mesh.shape["model"]),
                             head_size=common_utils.get_padded_head_dim(
                                 attn_module.head_size),
-                            dtype=self.runner.kv_cache_dtype,
-                            use_mla=use_mla,
-                        )
+                            dtype=self.runner.kv_cache_dtype)
                 elif attn_module.attn_type in (AttentionType.ENCODER,
                                                AttentionType.ENCODER_ONLY):
                     # encoder-only attention does not need KV cache.
