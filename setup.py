@@ -3,7 +3,7 @@
 import os
 from typing import List
 
-from setuptools import find_packages, setup
+from setuptools import Extension, find_packages, setup
 
 ROOT_DIR = os.path.dirname(__file__)
 
@@ -46,6 +46,7 @@ setup(
     packages=find_packages(),
     python_requires=">=3.10",
     install_requires=get_requirements(),
+    ext_modules=[Extension("_dummy_tpu_ext", sources=[])],
     classifiers=[
         "Development Status :: 3 - Alpha",
         "Intended Audience :: Developers",
