@@ -26,7 +26,7 @@ from tpu_inference import envs, utils
 if TYPE_CHECKING:
     from vllm.v1.configs.vllm_config import VllmConfig
 
-MESH_AXIS_NAMES = ("data", "attn_dp", "expert", "model")
+MESH_AXIS_NAMES = ("data", "attn_dp", "expert", "model", "no_attn_dp")
 MESH_AXIS_NAMES_2D = ('data', 'model')
 
 
@@ -37,7 +37,7 @@ class ShardingAxisNameBase:
     MLP_DATA = 'data'
     ATTN_HEAD = 'model'
     ATTN_TENSOR = None
-    MLP_TENSOR = ('attn_dp', 'model', 'expert')
+    MLP_TENSOR = ('no_attn_dp', 'model', 'expert')
     MOE_TENSOR = ('attn_dp', 'model')
     EXPERT = ('attn_dp', 'expert', 'model')
     VOCAB = ('expert', 'attn_dp', 'model')
@@ -155,15 +155,24 @@ class ShardingConfigManager:
                 int(tensor_parallelism // num_kv_heads_per_device_in_kv_cache),
                 1)
             tensor_parallelism = tensor_parallelism // attn_dp
+            no_attn_dp  = attn_dp
+            if vllm_config.model_config.use_mla:
+                attn_dp *= expert_parallelism
+            sharding_strategy = ShardingStrategy(
+                        tensor_parallelism=tensor_parallelism,
+                        data_parallelism=data_parallelism,
+                        expert_parallelism=expert_parallelism,
+                        sequence_parallelism=sequence_parallelism,
+                        attention_data_parallelism=attn_dp,
+                        no_attention_data_parallelism=no_attn_dp)
         else:
             attn_dp = 1
-
-        sharding_strategy = ShardingStrategy(
-            tensor_parallelism=tensor_parallelism,
-            data_parallelism=data_parallelism,
-            expert_parallelism=expert_parallelism,
-            sequence_parallelism=sequence_parallelism,
-            attention_data_parallelism=attn_dp)
+            sharding_strategy = ShardingStrategy(
+                tensor_parallelism=tensor_parallelism,
+                data_parallelism=data_parallelism,
+                expert_parallelism=expert_parallelism,
+                sequence_parallelism=sequence_parallelism,
+                attention_data_parallelism=attn_dp)
 
         # Must override here to avoid vLLM spinning up multiple DP engines.
         if vllm_config.parallel_config.data_parallel_size > 1:
