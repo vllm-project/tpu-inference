@@ -1,7 +1,7 @@
 import enum
 from dataclasses import InitVar, dataclass
 from functools import partial
-from typing import Optional, Tuple
+from typing import Tuple
 
 import jax
 import jax.numpy as jnp
@@ -9,14 +9,10 @@ from flax import nnx
 from flax.typing import Sharding
 from jax.sharding import PartitionSpec
 from jaxtyping import Float
-from qwix._src.core.ragged_dot import ragged_dot as qwix_ragged_dot
-from qwix._src.providers import ptq
 
 from tpu_commons.models.jax.common.base import create_param
 from tpu_commons.models.jax.common.layers import FlaxUtils
 from tpu_commons.models.jax.common.moe.moe import MoE
-from tpu_commons.models.jax.utils.quantization.quantization_utils import (
-    manually_quantize_qwix_activation, manually_quantize_qwix_weight)
 
 modeling_flax_utils = FlaxUtils()
 
@@ -140,19 +136,43 @@ class SparseMoE(MoE):
         # TODO: determine if we get it from external or extrat it in MoE class
         is_batch_sharded_by_expert: True if batch is sharded over 'expert' dim.
     """
+    def_sharding: Sharding
+    fed_sharding: Sharding
     num_experts_per_tok: int
     #TODO: tile size is (tile_batch_seq, tile_activation_dim, tile_weight_dim,) from MaxText
     tile_size: tuple[int, int, int] = (128, 64, 128)
     use_megablox: bool = False
     mesh: jax.sharding.Mesh
-    # This should be set if and only if you have quantized your model (via Qwix)
-    quantized_dtype: Optional[jnp.dtype] = None
 
     def __post_init__(self, rngs: nnx.Rngs):
-        super().__post_init__(rngs)
+
+        D = self.hidden_size
+        F = self.intermediate_size_moe
+        # shape_gating = (D, self.num_local_experts, F)
+        # shape_up = (D, self.num_local_experts, F)
+        # shape_down = (F, self.num_local_experts,D)
+        shape_gating = (self.num_local_experts, D, F)
+        shape_up = (self.num_local_experts, D, F)
+        shape_down = (self.num_local_experts, F, D)
+
+        self.kernel_gating_DEF = create_param(rngs,
+                                              shape=shape_gating,
+                                              dtype=self.dtype,
+                                              sharding=self.def_sharding,
+                                              random_init=self.random_init)
+        self.kernel_up_proj_DEF = create_param(rngs,
+                                               shape=shape_up,
+                                               dtype=self.dtype,
+                                               sharding=self.def_sharding,
+                                               random_init=self.random_init)
+        self.kernel_down_proj_FED = create_param(rngs,
+                                                 shape=shape_down,
+                                                 dtype=self.dtype,
+                                                 sharding=self.fed_sharding,
+                                                 random_init=self.random_init)
 
         # Derive the expert sharding
-        self.expert_axis_name = self.edf_sharding[0]
+        self.expert_axis_name = self.def_sharding[0]
         if self.expert_axis_name is None:
             self.num_expert_parallelism = 1
         else:
@@ -329,20 +349,29 @@ class SparseMoE(MoE):
         with jax.named_scope("unpermute"):
             unsorted_tokens_tD = self._sort_activations(
                 processed_tokens, jnp.argsort(sort_indices))
+            D = unsorted_tokens_tD.shape[1]
             reshaped_tokens_TXD = unsorted_tokens_tD.reshape(
-                -1, self.num_experts_per_tok, self.hidden_size)
+                -1, self.num_experts_per_tok, D)
+        # jax.debug.print(
+        #     "✅ reshaped_tokens_TXD on device:  reshaped_tokens_TXD[5]={t}",
+        #     t=reshaped_tokens_TXD[5, 0,:5]
+        # )
+        # jax.debug.print(
+        #     "✅ router_weights_TX  on device:  router_weights_TX={t}",
+        #     t=router_weights_TX[5, :]
+        # )
         with jax.named_scope("combine_weights"):
             output_TD = jnp.einsum(
                 "TXD,TX -> TD",
-                reshaped_tokens_TXD.astype(jnp.float32),
-                router_weights_TX.astype(jnp.float32),
-                precision='float32',
+                reshaped_tokens_TXD.astype(self.dtype),
+                router_weights_TX.astype(self.dtype),
             )
 
         return output_TD.astype(self.dtype)
 
     def _gmm(self, inputs, kernel, group_sizes):
         """Performs Grouped Matrix Multiply."""
+        jax.config.update("jax_ragged_dot_use_ragged_dot_instruction", True)
         num_rows = inputs.shape[0]
         pad_amount = (self.tile_size[0] -
                       num_rows % self.tile_size[0]) % self.tile_size[0]
@@ -354,11 +383,8 @@ class SparseMoE(MoE):
             raise NotImplementedError(
                 "MegaBlox kernel call is not implemented.")
         else:
-            inputs = manually_quantize_qwix_activation(
-                inputs, "ragged_dot", jnp.float8_e4m3fn, [0], {},
-                "absmax") if self.quantized_dtype else inputs
-            ragged_dot_func = qwix_ragged_dot if self.quantized_dtype else jax.lax.ragged_dot
-            output = ragged_dot_func(
+
+            output = jax.lax.ragged_dot(
                 lhs=inputs,
                 rhs=kernel,
                 group_sizes=group_sizes,
@@ -394,10 +420,12 @@ class SparseMoE(MoE):
 
         # TODO: update to 'expert' after we enable expert parallelism, currently experts are sharded along model axis
         # or we sould derive it from the model init
-        expert_shard_id = jax.lax.axis_index(self.expert_axis_name)
+        
         local_expert_size = self.num_local_experts // self.num_expert_parallelism
 
-        if self.num_expert_parallelism > 1:
+        #if self.num_expert_parallelism > 1:
+        if self.expert_axis_name:
+            expert_shard_id = jax.lax.axis_index(self.expert_axis_name)
             if self.is_batch_sharded_by_expert:
                 # When token sharded in devices
                 # In this path, we assume the data(tokens) are fully sharded on expert, namely data_axis_name == expert_axis_name
@@ -508,8 +536,9 @@ class SparseMoE(MoE):
         # 5. Return Results (All-to-All)
         if self.num_expert_parallelism > 1:
             local_total_assignments = x_TD.shape[0] * self.num_experts_per_tok
+            D = x_TD.shape[1]
             output_shape = jnp.zeros(
-                (local_total_assignments, self.hidden_size),
+                (local_total_assignments, D),
                 dtype=intermediate_output.dtype)
 
             if self.is_batch_sharded_by_expert:
@@ -568,10 +597,10 @@ class SparseMoE(MoE):
             PartitionSpec(*self.activation_ffw_td),  # Sharded x_TD
             PartitionSpec(),  # Replicated router_weights_TX
             PartitionSpec(),  # Replicated selected_experts_TX
-            PartitionSpec(*self.edf_sharding),  # Sharded gating kernel
-            PartitionSpec(*self.edf_sharding),  # Sharded up-projection kernel
+            PartitionSpec(*self.def_sharding),  # Sharded gating kernel
+            PartitionSpec(*self.def_sharding),  # Sharded up-projection kernel
             PartitionSpec(
-                *self.efd_sharding),  # Sharded down-projection kernel
+                *self.fed_sharding),  # Sharded down-projection kernel
         )
         out_specs = PartitionSpec(*self.activation_ffw_td)
 
@@ -582,27 +611,12 @@ class SparseMoE(MoE):
                                  check_rep=False)(
                                      SparseMoE._distributed_sparse_moe_fwd)
 
-        kernel_gating_EDF = self.kernel_gating_EDF.value
-        kernel_up_proj_EDF = self.kernel_up_proj_EDF.value
-        kernel_down_proj_EFD = self.kernel_down_proj_EFD.value
-
-        if self.quantized_dtype:
-            if not isinstance(kernel_gating_EDF, ptq.WithAux):
-                kernel_gating_EDF = manually_quantize_qwix_weight(
-                    kernel_gating_EDF, self.quantized_dtype, [0, 2], {},
-                    "absmax")
-            if not isinstance(kernel_up_proj_EDF, ptq.WithAux):
-                kernel_up_proj_EDF = manually_quantize_qwix_weight(
-                    kernel_up_proj_EDF, self.quantized_dtype, [0, 2], {},
-                    "absmax")
-            if not isinstance(kernel_down_proj_EFD, ptq.WithAux):
-                kernel_down_proj_EFD = manually_quantize_qwix_weight(
-                    kernel_down_proj_EFD, self.quantized_dtype, [0, 1], {},
-                    "absmax")
-            kernel_gating_EDF = kernel_gating_EDF.array
-            kernel_up_proj_EDF = kernel_up_proj_EDF.array
-            kernel_down_proj_EFD = kernel_down_proj_EFD.array
-
-        return mapped_moe_fwd(self, x_TD, router_weights_TX,
-                              selected_experts_TX, kernel_gating_EDF,
-                              kernel_up_proj_EDF, kernel_down_proj_EFD)
+        return mapped_moe_fwd(
+            self,
+            x_TD,
+            router_weights_TX,
+            selected_experts_TX,
+            self.kernel_gating_DEF.value,
+            self.kernel_up_proj_DEF.value,
+            self.kernel_down_proj_FED.value,
+        )
