@@ -7,9 +7,10 @@ from jax.sharding import PartitionSpec as P
 
 import tpu_commons.kernels.ragged_paged_attention.v3.kernel as rpa
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-
+from tpu_commons.models.jax.common.sharding import ATTN_DATA_AXIS_NAME
 ragged_paged_attention = rpa.ragged_paged_attention
 get_kv_cache_shape = rpa.get_kv_cache_shape
+
 
 
 def sharded_ragged_paged_attention(
@@ -21,17 +22,17 @@ def sharded_ragged_paged_attention(
     v_scale: float | None = None,
 ):
     """Shards along KV heads."""
-    qkv_spec = P("data", "model", None)
-    kv_cache_spec = P("data", None, "model")
+    qkv_spec = P(ATTN_DATA_AXIS_NAME, "model", None)
+    kv_cache_spec = P(ATTN_DATA_AXIS_NAME, None, "model")
     in_specs = (
         qkv_spec,  # q
         qkv_spec,  # k
         qkv_spec,  # v
         kv_cache_spec,  # kv cache
-        P("data", ),  # kv_lens
-        P("data", ),  # page_indices
-        P("data", ),  # cu_q_lens
-        P("data", ),  # distribution
+        P(ATTN_DATA_AXIS_NAME, ),  # kv_lens
+        P(ATTN_DATA_AXIS_NAME, ),  # page_indices
+        P(ATTN_DATA_AXIS_NAME, ),  # cu_q_lens
+        P(ATTN_DATA_AXIS_NAME, ),  # distribution
     )
     out_specs = (qkv_spec, kv_cache_spec)
 

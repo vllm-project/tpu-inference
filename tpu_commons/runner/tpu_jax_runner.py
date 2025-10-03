@@ -59,6 +59,8 @@ from tpu_commons.runner.structured_decoding_manager import \
 from tpu_commons.spec_decode.jax.eagle3 import Eagle3Proposer
 from tpu_commons.utils import device_array, make_optimized_mesh
 
+from tpu_commons.models.jax.common.sharding import MLP_DATA_AXIS_NAME
+
 vLLMScheduler.Scheduler = DPScheduler
 
 logger = init_logger(__name__)
@@ -150,8 +152,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 cache_config.cache_dtype]
 
         self.data_parallel_sharding = NamedSharding(self.mesh,
-                                                    PartitionSpec("data"))
-        self.dp_size = self.mesh.shape["data"]
+                                                    PartitionSpec(MLP_DATA_AXIS_NAME))
+        self.dp_size = self.mesh.shape["data"] * self.mesh.shape["attn_dp"]
 
     def _init_random(self):
         if self.model_config.seed is None:
@@ -180,12 +182,20 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             except KeyError:
                 tp = len(self.devices)
 
-            axis_names = ("data", "model")
-            mesh_shape = (dp, tp)
+            # if TP < number of kv heads 
+            attn_dp = 1 
+            # breakpoint()
+            if self.model_config.hf_config.num_key_value_heads < tp:
+                attn_dp = tp // self.model_config.num_kv_heads
+
+            
+            axis_names = ("data", "attn_dp","expert", "model")
+            mesh_shape = (dp, attn_dp, 1, tp)
 
             self.mesh = make_optimized_mesh(mesh_shape,
                                             axis_names,
                                             devices=self.devices)
+            print("self.mesh", self.mesh)
         logger.info(f"Init mesh | mesh={self.mesh}")
 
     def _init_phased_profiling(self) -> None:

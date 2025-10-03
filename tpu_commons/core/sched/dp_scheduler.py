@@ -35,7 +35,14 @@ class DPScheduler(Scheduler):
 
         self.assigned_dp_rank: dict[str, int] = {}
         try:
-            self.dp_size = self.vllm_config.additional_config["sharding"]["sharding_strategy"]["data_parallelism"]
+            # breakpoint()
+            num_kv_heads = self.vllm_config.model_config.hf_config.num_key_value_heads
+            tp = self.vllm_config.parallel_config.tensor_parallel_size
+            attn_dp = tp // num_kv_heads
+            dp = self.vllm_config.additional_config["sharding"]["sharding_strategy"]["data_parallelism"]
+            
+            self.dp_size = dp * attn_dp
+            print("scheduler dp_size from config", self.dp_size)
         except KeyError:
             self.dp_size = 1
         # assert self.dp_size >= 2, "Data parallel size must be at least 2." # Debugging purpose

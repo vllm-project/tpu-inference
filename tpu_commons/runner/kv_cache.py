@@ -9,6 +9,7 @@ from torchax.ops.mappings import t2j_dtype
 
 import tpu_commons.kernels.ragged_paged_attention.v3.kernel as rpa
 from tpu_commons.logger import init_logger
+from tpu_commons.models.jax.common.sharding import ATTN_DATA_AXIS_NAME, ATTN_HEAD_AXIS_NAME
 
 logger = init_logger(__name__)
 
@@ -66,7 +67,7 @@ def create_kv_caches(
                                                num_kv_heads, head_size,
                                                cache_dtype)
 
-    sharding = NamedSharding(mesh, PartitionSpec("data", None, "model"))
+    sharding = NamedSharding(mesh, PartitionSpec(ATTN_DATA_AXIS_NAME, None, ATTN_HEAD_AXIS_NAME))
 
     def _allocate() -> jax.Array:
         return jnp.empty(

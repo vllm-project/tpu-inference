@@ -9,6 +9,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
+from tpu_commons.models.jax.common.sharding import EXPERT_AXIS_NAME, MLP_TENSOR_AXIS_NAME
 from vllm.attention.layer import Attention
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import (
@@ -177,24 +178,19 @@ class JaxUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         w13_weight = t2j(layer.w13_weight, use_dlpack=False) #[128, 1536, 2048]
 
         if layer.use_ep:
-<<<<<<< HEAD
             w13_weight = jax.device_put(
                 w13_weight,
                 Format(Layout((0, 1, 2)),
-                       NamedSharding(self.mesh, P('model', None, None))))
+                       NamedSharding(self.mesh, P(EXPERT_AXIS_NAME, None, None))))
             w2_weight = jax.device_put(
                 w2_weight,
                 Format(Layout((0, 1, 2)),
-                       NamedSharding(self.mesh, P('model', None, None))))
-=======
-            w13_weight = jax.device_put(w13_weight, NamedSharding(self.mesh, P('model', None, None)))
-            w2_weight = jax.device_put(w2_weight, NamedSharding(self.mesh, P('model', None, None)))
->>>>>>> a00da87d (wip)
+                       NamedSharding(self.mesh, P(EXPERT_AXIS_NAME, None, None))))
         else:
             intermediate_size = w13_weight.shape[1] // 2
             assert intermediate_size == w2_weight.shape[-1]
             output_sizes = [intermediate_size, intermediate_size]
-            n_shards = self.mesh.shape['model']
+            n_shards = self.mesh.shape['model'] * self.mesh.shape.get("attn_dp", 1)
             assert intermediate_size % n_shards == 0
             w13_weight = reorder_concatenated_tensor_for_sharding(w13_weight,
                                                                   output_sizes,
@@ -203,11 +199,11 @@ class JaxUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w13_weight = jax.device_put(
                 w13_weight,
                 Format(Layout((0, 1, 2)),
-                       NamedSharding(self.mesh, P(None, 'model', None))))
+                       NamedSharding(self.mesh, P(None, MLP_TENSOR_AXIS_NAME, None))))
             w2_weight = jax.device_put(
                 w2_weight,
                 Format(Layout((0, 1, 2)),
-                       NamedSharding(self.mesh, P(None, None, 'model'))))
+                       NamedSharding(self.mesh, P(None, None, MLP_TENSOR_AXIS_NAME))))
         w13_weight = Parameter(torch_view(w13_weight), requires_grad=False)
         w2_weight = Parameter(torch_view(w2_weight), requires_grad=False)
 
