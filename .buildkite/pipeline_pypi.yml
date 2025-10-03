@@ -1,0 +1,65 @@
+# .buildkite/pipeline.yml
+# This file defines the Buildkite pipeline to build and publish wheels.
+
+steps:
+  - label: ":linux: Build Wheels (Linux/cp312 - musllinux)"
+    key: build-wheels
+    # IMPORTANT: Update these tags to match the agent that has Docker installed.
+    agents:
+      queue: "default"
+      os: "linux"
+      docker: "true"
+
+    plugins:
+      # Use a plugin if you need a specific Docker/environment configuration
+      # Example: Use the standard Docker plugin if your agent doesn't manage Docker directly
+      # buildkite-plugins/docker-compose#v4.16.0:
+      #   run: your_service_name
+
+    commands:
+      # 1. Ensure CIBW is installed
+      - "pip install cibuildwheel twine"
+
+      # 2. Set the environment variable to target a clean musllinux wheel for CPython 3.12
+      # This is the critical fix for the 400 Bad Request error.
+      - "export CIBW_BUILD='cp312-musllinux_*'"
+
+      # 3. Build the wheels
+      - "cibuildwheel --output-dir wheelhouse"
+
+    # 4. Upload the resulting wheels as an artifact for the next step
+    artifact_paths:
+      - "wheelhouse/*.whl"
+
+  - label: ":pypi: Publish to Test PyPI"
+    key: publish
+    depends_on: "build-wheels" # Only run if the build was successful
+    agents:
+      queue: "default"
+      os: "linux"
+
+    commands:
+      # 1. Install Twine (already installed in the previous step, but safer to ensure here)
+      - "pip install twine"
+
+      # 2. Download the artifact(s) uploaded by the 'build-wheels' step
+      # Downloads all wheels into the current directory (which we'll use for twine)
+      - "buildkite-agent artifact download 'wheelhouse/*.whl' --build '${BUILDKITE_BUILD_ID}' --step 'build-wheels' ."
+
+      # 3. Move the wheels to a standard 'dist' folder for Twine
+      - "mkdir dist"
+      - "mv wheelhouse/*.whl dist/"
+
+      # 4. Upload using Twine
+      # Twine automatically detects TWINE_USERNAME and TWINE_PASSWORD
+      - "twine upload --repository-url https://test.pypi.org/legacy/ dist/*.whl"
+
+    # 5. Environment Variables for Authentication
+    env:
+      # Set the username to '__token__' for API token authentication
+      TWINE_USERNAME: "__token__"
+
+      # CRITICAL: This variable must be configured in Buildkite's Secret Management.
+      # The exact syntax depends on your Buildkite Secret setup (e.g., AWS Secrets Manager, Vault).
+      # This example uses a placeholder that needs to be replaced with your actual secret retrieval method.
+      TWINE_PASSWORD: "pypi-AgENdGVzdC5weXBpLm9yZwIkYjRhZDNhNmItZTQ2My00YzQ1LWFlNGMtNjhhNzI2MjZhNWU5AAIqWzMsImZmNmNiMzhjLTNhYWYtNDFhYi1hODg2LTBhNWRmNjA4NmJmZSJdAAAGILiOCaCl1wDdJyUc87PejD4aZTqoIw_mxbfyzNXpcbOB" # Replace with the actual secret retrieval method
