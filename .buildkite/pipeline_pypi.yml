@@ -16,6 +16,7 @@ steps:
       # - "export CIBW_BUILD='cp312-musllinux_*'"
 
       # 3. Build the wheels
+      - "export CIBW_ALLOW_PURE=true"
       - "python -m cibuildwheel --output-dir wheelhouse"
 
     # 4. Upload the resulting wheels as an artifact for the next step
@@ -27,7 +28,6 @@ steps:
     depends_on: "build-wheels" # Only run if the build was successful
     agents:
       queue: tpu_v6e_queue
-      os: "linux"
     commands:
       # 1. Install Twine (already installed in the previous step, but safer to ensure here)
       - "pip install twine"
