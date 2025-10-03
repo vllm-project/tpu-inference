@@ -9,18 +9,22 @@ steps:
     soft_fail: true
     commands:
       # 1. Ensure CIBW is installed
-      - "pip install cibuildwheel twine"
+      #- "pip install cibuildwheel twine"
 
       # 2. Set the environment variable to target a clean musllinux wheel for CPython 3.12
       # This is the critical fix for the 400 Bad Request error.
       # - "export CIBW_BUILD='cp312-musllinux_*'"
 
       # 3. Build the wheels
-      - "export CIBW_ENVIRONMENT='CIBW_ALLOW_PURE=\"true\"'"
-      - "python -m cibuildwheel --output-dir wheelhouse"
+      # - "export CIBW_ENVIRONMENT='CIBW_ALLOW_PURE=\"true\"'"
+      # - "python -m cibuildwheel --output-dir wheelhouse"
 
     # 4. Upload the resulting wheels as an artifact for the next step
     artifact_paths:
+      - "pip install build twine"
+
+  # 2. Build the pure-Python wheel and source distribution
+      - "python -m build --outdir wheelhouse"
       - "wheelhouse/*.whl"
 
   - label: ":pypi: Publish to Test PyPI"
