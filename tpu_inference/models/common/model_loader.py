@@ -218,9 +218,7 @@ def get_flax_model(
             vllm_config.model_config.hf_config)
     jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh)
     kv_cache_sharding = NamedSharding(
-        mesh,
-        PartitionSpec(ShardingAxisName.ATTN_DATA, None,
-                      ShardingAxisName.ATTN_HEAD))
+        mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None, (("no_attn_dp", "model"), "expert")))
     hidden_states_sharding = NamedSharding(mesh,
                                            PartitionSpec(
                                                ShardingAxisName.ATTN_DATA,
@@ -249,6 +247,7 @@ def get_flax_model(
     logits_sharding = NamedSharding(
         mesh,
         PartitionSpec(ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR))
+
 
     @functools.partial(
         jax.jit,
