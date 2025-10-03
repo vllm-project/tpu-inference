@@ -135,11 +135,17 @@ class DeepSeekV3(nnx.Module):
                 query_tnh_spec = P(ShardingAxisName.MLP_TENSOR, None, None)
                 keyvalue_skh_spec = P(ShardingAxisName.MLP_TENSOR, None)
                 attn_o_tnh_spec = P(ShardingAxisName.MLP_TENSOR, None, None)
+                q_da_sharding=(None, ShardingAxisName.ATTN_HEAD)
+                anh_sharding=(None, ShardingAxisName.ATTN_HEAD, None)
+                kv_da_sharding=(None, ShardingAxisName.ATTN_HEAD)
 
             else:
                 query_tnh_spec = P(None, ShardingAxisName.MLP_TENSOR, None)
                 keyvalue_skh_spec = P(None, ShardingAxisName.MLP_TENSOR, None)
                 attn_o_tnh_spec = P(None, ShardingAxisName.MLP_TENSOR, None)
+                q_da_sharding=(None, ('model', 'expert'))
+                anh_sharding=(None, ('model', 'expert'), None)
+                kv_da_sharding=(None, ('model', 'expert'))
 
             return MLA(
                 rope_theta=rope_theta,
@@ -168,9 +174,9 @@ class DeepSeekV3(nnx.Module):
                 keyvalue_skh=keyvalue_skh_spec,
                 activation_attention_out_td=(None, None),
                 attn_o_tnh=attn_o_tnh_spec,
-                q_da_sharding=(None, ShardingAxisName.VOCAB),
-                anh_sharding=(None, ShardingAxisName.MLP_TENSOR, None),
-                kv_da_sharding=(None, ShardingAxisName.VOCAB),
+                q_da_sharding=q_da_sharding,
+                anh_sharding=anh_sharding,
+                kv_da_sharding=kv_da_sharding,
                 nhd_sharding=(ShardingAxisName.MLP_TENSOR, None, None))
 
         for i in range(first_k_dense_replace):
@@ -217,9 +223,9 @@ class DeepSeekV3(nnx.Module):
                 rngs=self.rng,
                 routed_scaling_factor=2.5,
                 dtype=dtype,
-                activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
-                ed_sharding=(ShardingAxisName.MLP_TENSOR, None),
-                e_sharding=(ShardingAxisName.MLP_TENSOR, ))
+                activation_ffw_td=activation_ffw_td,
+                ed_sharding=ed_sharding,
+                e_sharding=e_sharding)
             if self.sparse_matmul:
                 # TODO: orginize the SparseMoE and DenseMoE better given they share most interfaces
                 custom_module = SparseMoE(
