@@ -41,7 +41,7 @@ steps:
       - "mv wheelhouse/*.whl dist/"
       # 4. Upload using Twine
       # Twine automatically detects TWINE_USERNAME and TWINE_PASSWORD
-      - "twine upload --repository-url https://test.pypi.org/legacy/ dist/*.whl"
+      - "python -m twine upload --repository-url https://test.pypi.org/legacy/ dist/*.whl"
     # 5. Environment Variables for Authentication
     env:
       # Set the username to '__token__' for API token authentication
