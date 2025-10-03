@@ -1,0 +1,8 @@
+steps:
+  - label: "verify buildkite settings"
+    agents:
+      queue: tpu_v6e_queue
+    secrets:
+      - GITHUB_PAT
+    commands:
+      - bash .buildkite/scripts/env_check.sh
