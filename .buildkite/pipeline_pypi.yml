@@ -16,7 +16,7 @@ steps:
       - "export CIBW_BUILD='cp312-musllinux_*'"
 
       # 3. Build the wheels
-      - "cibuildwheel --output-dir wheelhouse"
+      - "python -m cibuildwheel --output-dir wheelhouse"
 
     # 4. Upload the resulting wheels as an artifact for the next step
     artifact_paths:
