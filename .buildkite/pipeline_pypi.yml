@@ -13,7 +13,7 @@ steps:
 
       # 2. Set the environment variable to target a clean musllinux wheel for CPython 3.12
       # This is the critical fix for the 400 Bad Request error.
-      - "export CIBW_BUILD='cp312-musllinux_*'"
+      # - "export CIBW_BUILD='cp312-musllinux_*'"
 
       # 3. Build the wheels
       - "python -m cibuildwheel --output-dir wheelhouse"
