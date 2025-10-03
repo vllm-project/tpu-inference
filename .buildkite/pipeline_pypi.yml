@@ -8,6 +8,8 @@ steps:
       queue: tpu_v6e_queue
     soft_fail: true
     commands:
+      - "pip install build twine"
+      - "python -m build --outdir wheelhouse"
       # 1. Ensure CIBW is installed
       #- "pip install cibuildwheel twine"
 
@@ -21,10 +23,6 @@ steps:
 
     # 4. Upload the resulting wheels as an artifact for the next step
     artifact_paths:
-      - "pip install build twine"
-
-  # 2. Build the pure-Python wheel and source distribution
-      - "python -m build --outdir wheelhouse"
       - "wheelhouse/*.whl"
 
   - label: ":pypi: Publish to Test PyPI"
