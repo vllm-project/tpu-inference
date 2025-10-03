@@ -863,8 +863,4 @@ def weights_dequant_cpu(x: torch.Tensor,
             scale = s[M // block_size, j // block_size]
             y[M_main:M, j:j + block_size] = block * scale
 
-<<<<<<< HEAD:tpu_inference/models/jax/deepseek_v3.py
     return y.to(j2t_dtype(jnp.dtype(output_dtype)))
-=======
-    return y.to(torch.get_default_dtype())
->>>>>>> 307bbd62 (local change to support 2d TP for DeepSeek):tpu_commons/models/jax/deepseek_v3.py
