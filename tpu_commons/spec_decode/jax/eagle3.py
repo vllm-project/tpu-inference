@@ -5,11 +5,11 @@ from typing import Any, Optional
 import jax
 import jax.numpy as jnp
 import numpy as np
-from vllm.config import VllmConfig
 
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.model_loader import get_model
 from tpu_commons.utils import device_array
+from vllm.config import VllmConfig
 
 
 class Eagle3Proposer:
@@ -197,7 +197,7 @@ class Eagle3Proposer:
         block_tables = block_tables.reshape(-1)
         attn_metadata = replace(attn_metadata, block_tables=block_tables)
 
-        kv_caches, hidden_states, _ = self.model_fn(
+        kv_caches, hidden_states, residual = self.model_fn(
             self.state,
             kv_caches,
             input_ids,
@@ -218,7 +218,7 @@ class Eagle3Proposer:
 
         draft_token_ids_list = [draft_token_ids]
         positions = attn_metadata.input_positions[last_token_indices]
-        hidden_states = hidden_states[last_token_indices]
+        hidden_states = residual[0][last_token_indices]
 
         for _ in range(self.num_speculative_tokens - 1):
             input_ids_loop = draft_token_ids_list[-1]
@@ -255,16 +255,15 @@ class Eagle3Proposer:
                 query_start_loc=query_start_loc,
                 block_tables=new_block_tables,
             )
-
-            kv_caches, new_hidden_states, _ = self.model_fn(
+            kv_caches, new_hidden_states, residual = self.model_fn(
                 self.state,
                 kv_caches,
                 input_ids_loop,
                 hidden_states,  # This should be the hidden_states from previous step
                 attn_metadata,
             )
-            hidden_states = new_hidden_states
-            logits = self.compute_logits_fn(self.state, hidden_states,
+            hidden_states = residual[0]
+            logits = self.compute_logits_fn(self.state, new_hidden_states,
                                             lora_metadata)
             draft_token_ids = jnp.argmax(logits, axis=-1)
             draft_token_ids_list.append(draft_token_ids)
