@@ -33,6 +33,13 @@ from tpu_commons.models.jax.utils.weight_utils import (get_param,
 
 logger = init_logger(__name__)
 
+# A map from JAX dtype to the corresponding PyTorch integer dtype for raw memory viewing.
+DTYPE_VIEW_MAP = {
+    jnp.dtype(jnp.float8_e4m3fn): torch.uint8,
+    jnp.dtype(jnp.bfloat16): torch.uint16,
+    jnp.dtype(jnp.float32): torch.uint32,
+}
+
 
 @dataclass
 class DeepSeekV3(nnx.Module):
@@ -47,7 +54,7 @@ class DeepSeekV3(nnx.Module):
         self.vllm_config = vllm_config
         self.rng = nnx.Rngs(rng)
 
-        num_layers: int = 61
+        num_layers: int = 20
         num_local_experts: int = 256
 
         vocab_size: int = 129280
@@ -142,14 +149,14 @@ class DeepSeekV3(nnx.Module):
                 rngs=self.rng,
                 activation_attention_td=(None, None),
                 activation_q_td=(None, None),
-                query_tnh=P(None, 'model', None),
-                keyvalue_skh=P(None, 'model', None),
+                query_tnh=P(None, ('model', 'expert'), None),
+                keyvalue_skh=P(None, ('model', 'expert'), None),
                 activation_attention_out_td=(None, None),
-                attn_o_tnh=P(None, 'model', None),
-                q_da_sharding=(None, 'model'),
-                anh_sharding=(None, 'model', None),
-                kv_da_sharding=(None, 'model'),
-                nhd_sharding=('model', None, None))
+                attn_o_tnh=P(None, ('model', 'expert'), None),
+                q_da_sharding=(None, ('model', 'expert')),
+                anh_sharding=(None, ('model', 'expert'), None),
+                kv_da_sharding=(None, ('model', 'expert')),
+                nhd_sharding=(('model', 'expert'), None, None))
 
         for i in range(first_k_dense_replace):
             block = TransformerBlock(
@@ -195,8 +202,8 @@ class DeepSeekV3(nnx.Module):
                 routed_scaling_factor=2.5,
                 dtype=dtype,
                 activation_ffw_td=('data', None),
-                ed_sharding=('model', None),
-                e_sharding=('model', ))
+                ed_sharding=(None, None),
+                e_sharding=(None, ))
             if self.sparse_matmul:
                 # TODO: orginize the SparseMoE and DenseMoE better given they share most interfaces
                 custom_module = SparseMoE(
@@ -210,12 +217,10 @@ class DeepSeekV3(nnx.Module):
                     hidden_act=hidden_act,
                     rngs=self.rng,
                     random_init=self.random_init,
-                    activation_ffw_td=('data', None),
-                    activation_ffw_ted=('data', None, None),
-                    edf_sharding=('model', None, None),
-                    efd_sharding=('model', None, None),
-                    quantized_dtype=self.weight_loader.quant_dtype
-                    if self.weight_loader.is_model_quantized else None,
+                    activation_ffw_td=('data', 'model'),
+                    activation_ffw_ted=('data', None, 'model'),
+                    def_sharding=('expert', 'model', None),
+                    fed_sharding=('expert', None, 'model'),
                     router=router) if is_moe_layer else DenseFFW(
                         dtype=dtype,
                         hidden_act=hidden_act,
@@ -235,10 +240,10 @@ class DeepSeekV3(nnx.Module):
                     hidden_act=hidden_act,
                     rngs=self.rng,
                     random_init=self.random_init,
-                    activation_ffw_td=('data', None),
+                    activation_ffw_td=('data', 'model'),
                     activation_ffw_ted=('data', None, None),
-                    edf_sharding=('model', None, None),
-                    efd_sharding=('model', None, None),
+                    edf_sharding=('expert', 'model', None),
+                    efd_sharding=('expert', None, 'model'),
                     router=router) if is_moe_layer else DenseFFW(
                         dtype=dtype,
                         hidden_act=hidden_act,

@@ -84,8 +84,8 @@ class MoE(nnx.Module):
     router: nnx.Module
     activation_ffw_td: Sharding
     activation_ffw_ted: Sharding
-    edf_sharding: Sharding
-    efd_sharding: Sharding
+    edf_sharding: Sharding = ()
+    efd_sharding: Sharding = ()
     random_init: bool = False
 
     def __call__(self, x_TD: Float):
