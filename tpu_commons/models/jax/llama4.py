@@ -296,7 +296,7 @@ class Llama4WeightLoader:
             download_dir=vllm_config.load_config.download_dir)
         self.is_verbose = getattr(vllm_config.additional_config, "is_verbose", False)
         self.interleave_moe_layer_step = getattr(vllm_config.model_config.hf_config.text_config, "interleave_moe_layer_step", 1)
-        
+
         self.expert_prefix = "shared_expert."
         self._transpose_map = {
             "q_proj": (2, 0, 1),
@@ -410,6 +410,16 @@ class Llama4WeightLoader:
             )
             if self.is_verbose:
                 print_param_info(mapped_model_weight, mapped_name)
+    
+    def _get_layer_num(self, loaded_key: str) -> Optional[int]:
+        """
+        Extracts the layer number from a HuggingFace weight key string.
+        Returns the layer number (int) or None if no layer number is found.
+        """
+        match = re.search(r"layers\.(\d+)", loaded_key)
+        if match:
+            return int(match.group(1))
+        return None
 
     def load_weights(self, model_for_loading: nnx.Module):
         model_params = nnx.state(model_for_loading)
@@ -417,9 +427,9 @@ class Llama4WeightLoader:
         with jax.default_device(jax.devices("cpu")[0]):
             for loaded_name, loaded_weight in self.names_and_weights_generator:
                 is_moe_layer = False
-                layer_num_match = re.search(r"layers\.(\d+)", loaded_name)
-                if layer_num_match:
-                    layer_num = int(layer_num_match.group(1))
+                layer_num = self._get_layer_num(loaded_name)
+
+                if layer_num is not None:
                     is_moe_layer = (layer_num + 1) % \
                             self.interleave_moe_layer_step == 0
                     self.expert_prefix = "shared_expert." if is_moe_layer else ""
