@@ -220,7 +220,7 @@ def get_flax_model(
     kv_cache_sharding = NamedSharding(
         mesh,
         PartitionSpec(ShardingAxisName.ATTN_DATA, None,
-                      ShardingAxisName.ATTN_HEAD))
+                      ShardingAxisName.MLP_TENSOR))
     hidden_states_sharding = NamedSharding(mesh,
                                            PartitionSpec(
                                                ShardingAxisName.ATTN_DATA,

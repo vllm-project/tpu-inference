@@ -148,11 +148,17 @@ class DeepSeekV3(nnx.Module):
                 query_tnh_spec = P(ShardingAxisName.MLP_TENSOR, None, None)
                 keyvalue_skh_spec = P(ShardingAxisName.MLP_TENSOR, None)
                 attn_o_tnh_spec = P(ShardingAxisName.MLP_TENSOR, None, None)
+                q_da_sharding=(None, ShardingAxisName.ATTN_HEAD)
+                anh_sharding=(None, ShardingAxisName.ATTN_HEAD, None)
+                kv_da_sharding=(None, ShardingAxisName.ATTN_HEAD)
 
             else:
                 query_tnh_spec = P(None, ShardingAxisName.MLP_TENSOR, None)
                 keyvalue_skh_spec = P(None, ShardingAxisName.MLP_TENSOR, None)
                 attn_o_tnh_spec = P(None, ShardingAxisName.MLP_TENSOR, None)
+                q_da_sharding=(None, ('model', 'expert'))
+                anh_sharding=(None, ('model', 'expert'), None)
+                kv_da_sharding=(None, ('model', 'expert'))
 
             return MLA(
                 rope_theta=rope_theta,
@@ -184,7 +190,7 @@ class DeepSeekV3(nnx.Module):
                 # TODO: bz branch is: q_da_sharding=('model', None),
                 q_da_sharding=(None, ShardingAxisName.VOCAB),
                 anh_sharding=(None, ShardingAxisName.MLP_TENSOR, None),
-                # TIDIL bz branch is kv_da_sharding=('model', None),
+                # TODO bz branch is kv_da_sharding=('model', None),
                 kv_da_sharding=(None, ShardingAxisName.VOCAB),
                 nhd_sharding=(ShardingAxisName.MLP_TENSOR, None, None))
 
@@ -991,4 +997,4 @@ def weights_dequant_cpu(x: torch.Tensor,
             scale = s[M // block_size, j // block_size]
             y[M_main:M, j:j + block_size] = block * scale
 
-    return y.to(torch_output_type)
+    return y.to(j2t_dtype(jnp.dtype(output_dtype)))
