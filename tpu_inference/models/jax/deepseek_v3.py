@@ -148,14 +148,14 @@ class DeepSeekV3(nnx.Module):
                 rngs=self.rng,
                 activation_attention_td=(None, None),
                 activation_q_td=(None, None),
-                query_tnh=P(None, 'model', None),
-                keyvalue_skh=P(None, 'model', None),
+                query_tnh=P(None, ('model', 'expert'), None),
+                keyvalue_skh=P(None, ('model', 'expert'), None),
                 activation_attention_out_td=(None, None),
-                attn_o_tnh=P(None, 'model', None),
-                q_da_sharding=(None, 'model'),
-                anh_sharding=(None, 'model', None),
-                kv_da_sharding=(None, 'model'),
-                nhd_sharding=('model', None, None))
+                attn_o_tnh=P(None, ('model', 'expert'), None),
+                q_da_sharding=(None, ('model', 'expert')),
+                anh_sharding=(None, ('model', 'expert'), None),
+                kv_da_sharding=(None, ('model', 'expert')),
+                nhd_sharding=(('model', 'expert'), None, None))
 
         for i in range(first_k_dense_replace):
             block = TransformerBlock(
@@ -201,8 +201,8 @@ class DeepSeekV3(nnx.Module):
                 routed_scaling_factor=2.5,
                 dtype=dtype,
                 activation_ffw_td=('data', None),
-                ed_sharding=('model', None),
-                e_sharding=('model', ))
+                ed_sharding=(None, None),
+                e_sharding=(None, ))
             if self.sparse_matmul:
                 # TODO: orginize the SparseMoE and DenseMoE better given they share most interfaces
                 custom_module = SparseMoE(
@@ -216,12 +216,10 @@ class DeepSeekV3(nnx.Module):
                     hidden_act=hidden_act,
                     rngs=self.rng,
                     random_init=self.random_init,
-                    activation_ffw_td=('data', None),
-                    activation_ffw_ted=('data', None, None),
-                    edf_sharding=('model', None, None),
-                    efd_sharding=('model', None, None),
-                    quantized_dtype=self.weight_loader.quant_dtype
-                    if self.weight_loader.is_model_quantized else None,
+                    activation_ffw_td=('data', 'model'),
+                    activation_ffw_ted=('data', None, 'model'),
+                    def_sharding=('expert', 'model', None),
+                    fed_sharding=('expert', None, 'model'),
                     router=router) if is_moe_layer else DenseFFW(
                         dtype=dtype,
                         hidden_act=hidden_act,
@@ -241,10 +239,10 @@ class DeepSeekV3(nnx.Module):
                     hidden_act=hidden_act,
                     rngs=self.rng,
                     random_init=self.random_init,
-                    activation_ffw_td=('data', None),
+                    activation_ffw_td=('data', 'model'),
                     activation_ffw_ted=('data', None, None),
-                    edf_sharding=('model', None, None),
-                    efd_sharding=('model', None, None),
+                    edf_sharding=('expert', 'model', None),
+                    efd_sharding=('expert', None, 'model'),
                     router=router) if is_moe_layer else DenseFFW(
                         dtype=dtype,
                         hidden_act=hidden_act,
@@ -865,4 +863,8 @@ def weights_dequant_cpu(x: torch.Tensor,
             scale = s[M // block_size, j // block_size]
             y[M_main:M, j:j + block_size] = block * scale
 
+<<<<<<< HEAD:tpu_inference/models/jax/deepseek_v3.py
     return y.to(j2t_dtype(jnp.dtype(output_dtype)))
+=======
+    return y.to(torch.get_default_dtype())
+>>>>>>> 307bbd62 (local change to support 2d TP for DeepSeek):tpu_commons/models/jax/deepseek_v3.py
