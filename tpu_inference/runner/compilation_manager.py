@@ -369,7 +369,7 @@ class CompilationManager:
                 indices_paddings=self.runner.num_reqs_paddings,
                 hidden_dim=vocab_size,
                 input_sharding=NamedSharding(self.runner.mesh,
-                                             PartitionSpec(None, "model")),
+                                             PartitionSpec(None, ('model', 'expert')),
             )
             self._precompile_select_from_array_helper(
                 name="select target tokens for spec decoding",
@@ -377,7 +377,7 @@ class CompilationManager:
                 indices_paddings=self.runner.num_logits_paddings,
                 hidden_dim=vocab_size,
                 input_sharding=NamedSharding(self.runner.mesh,
-                                             PartitionSpec(None, "model")),
+                                             PartitionSpec(None, ('model', 'expert')),
                 only_equal_paddings=True,
             )
 
@@ -409,7 +409,7 @@ class CompilationManager:
         for num_reqs in self.runner.num_reqs_paddings:
             logits_sharding = NamedSharding(
                 self.runner.mesh,
-                PartitionSpec(ShardingAxisName.ATTN_DATA, "model"))
+                PartitionSpec(ShardingAxisName.ATTN_DATA, ('model', 'expert'))
             dp_size = self.runner.vllm_config.sharding_config.total_dp_size
             sampling_metadata_sharding = NamedSharding(
                 self.runner.mesh, PartitionSpec(
@@ -499,7 +499,7 @@ class CompilationManager:
         for num_logits in self.runner.num_logits_paddings:
             for num_reqs in self.runner.num_reqs_paddings:
                 sharding = NamedSharding(self.runner.mesh,
-                                         PartitionSpec(None, "model"))
+                                         PartitionSpec(None, ('model', 'expert')))
                 target_probs = self._create_dummy_tensor(
                     (num_logits, vocab_size), jnp.bfloat16, sharding)
                 draft_token_ids = self._create_dummy_tensor((num_logits, ),
