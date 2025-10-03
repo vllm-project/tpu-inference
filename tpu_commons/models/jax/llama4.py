@@ -62,40 +62,29 @@ class Llama4ForCausalLM(nnx.Module):
 
         self.num_layers: int = getattr(text_config, "num_hidden_layers", 48)
 
-        self.intermediate_size_moe: int = getattr(text_config,
-                                                  "intermediate_size", 8192)
-        self.intermediate_size_mlp = getattr(text_config,
-                                             "intermediate_size_mlp", 16384)
+        self.intermediate_size_moe: int = getattr(text_config, "intermediate_size", 8192)
+        self.intermediate_size_mlp = getattr(text_config, "intermediate_size_mlp", 16384)
 
-        # num_local_experts uses 128 experts specifically for Llama-4-Maverick-17B-128E-Instruct.
-        # while Llama-4-Scout-17B-16E-Instruct uses 16 experts.
-        self.num_local_experts: int = getattr(text_config, "num_local_experts",
-                                              16)
+        # num_local_experts: uses 16 experts for Llama-4-Scout-17B-16E-Instruct and uses 128 experts Llama-4-Maverick-17B-128E-Instruct.
+        self.num_local_experts: int = getattr(text_config, "num_local_experts", 16)
         self.hidden_act: str = getattr(text_config, "hidden_act", "silu")
-        self.no_rope_layer_interval = getattr(text_config, "no_rope_layers",
-                                              [])
+        self.no_rope_layer_interval = getattr(text_config, "no_rope_layers", [])
 
         # interleave_moe_layer_step has a layer step of 2 to interleave MoE and dense layers for Llama-4-Maverick-17B-128E-Instruct.
         # The default value is set to 1 for compatibility with Llama-4-Scout.
-        self.interleave_moe_layer_step = getattr(text_config,
-                                                 "interleave_moe_layer_step",
-                                                 1)
+        self.interleave_moe_layer_step = getattr(text_config, "interleave_moe_layer_step", 1)
 
-        self.num_attention_heads = getattr(text_config, "num_attention_heads",
-                                           40)
-        self.num_key_value_heads = getattr(text_config, "num_key_value_heads",
-                                           8)
+        self.num_attention_heads = getattr(text_config, "num_attention_heads", 40)
+        self.num_key_value_heads = getattr(text_config, "num_key_value_heads", 8)
         self.head_dim = getattr(text_config, "head_dim", 128)
 
-        self.num_shared_experts = getattr(text_config, "num_experts_per_tok",
-                                          1)
+        self.num_shared_experts = getattr(text_config, "num_experts_per_tok", 1)
         self.rms_norm_eps = getattr(text_config, "rms_norm_eps", 1e-5)
 
         self.embedder = Embedder(vocab_size=self.vocab_size,
                                  hidden_size=self.hidden_size,
                                  dtype=dtype,
-                                 vd_sharding=(('data', 'expert', 'model'),
-                                              None),
+                                 vd_sharding=(('data', 'expert', 'model'), None),
                                  rngs=self.rng,
                                  random_init=force_random_weights)
 
@@ -106,10 +95,9 @@ class Llama4ForCausalLM(nnx.Module):
             # This can be adjusted for other variants.
             is_moe_layer = (i + 1) % \
                             self.interleave_moe_layer_step == 0
-            # use_attention_rope = (i + 1) % self.no_rope_layer_interval != 0
-            use_attention_rope = (
-                i + 1
-            ) not in self.no_rope_layer_interval  # Llama-4-Scout config: It has "no_rope_layers": []
+
+            # Llama-4-Scout config: It has "no_rope_layers": []
+            use_attention_rope = (i + 1) not in self.no_rope_layer_interval
 
             router = Router(dtype=dtype,
                             hidden_size=self.hidden_size,
@@ -140,7 +128,7 @@ class Llama4ForCausalLM(nnx.Module):
                 hidden_act=self.hidden_act,
                 hidden_size=self.hidden_size,
                 intermediate_size=self.
-                intermediate_size_mlp,  # Use the intermediate size for the MLP
+                intermediate_size_mlp,
                 random_init=force_random_weights,
                 rngs=self.rng,
                 df_sharding=(None, 'model'),
@@ -270,16 +258,6 @@ class Llama4ForCausalLM(nnx.Module):
             attn_head_dim=self.head_dim)
         weight_loader.load_weights(self)
 
-        logger.info("Starting final verification of model parameters...")
-        state = nnx.state(self)
-
-        # Let's inspect the names of the parameters in state[0]
-        logger.info(
-            "Inspecting names and types of parameters in the first state container:"
-        )
-        for i, (name, param) in enumerate(state.items()):
-            logger.info(f"Param {i}: Name='{name}', Type={type(param)}")
-
     def __call__(
         self,
         kv_caches: List[jax.Array],
@@ -316,12 +294,9 @@ class Llama4WeightLoader:
             framework="flax",
             filter_regex="language_model",
             download_dir=vllm_config.load_config.download_dir)
-        self.is_verbose = getattr(vllm_config.additional_config, "is_verbose",
-                                  False)
-
-        self.interleave_moe_layer_step = getattr(
-            vllm_config.model_config.hf_config.text_config,
-            "interleave_moe_layer_step", 1)
+        self.is_verbose = getattr(vllm_config.additional_config, "is_verbose", False)
+        self.interleave_moe_layer_step = getattr(vllm_config.model_config.hf_config.text_config, "interleave_moe_layer_step", 1)
+        
         self.expert_prefix = "shared_expert."
         self._transpose_map = {
             "q_proj": (2, 0, 1),
