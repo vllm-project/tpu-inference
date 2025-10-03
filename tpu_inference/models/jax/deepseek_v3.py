@@ -223,9 +223,9 @@ class DeepSeekV3(nnx.Module):
                 rngs=self.rng,
                 routed_scaling_factor=2.5,
                 dtype=dtype,
-                activation_ffw_td=activation_ffw_td,
-                ed_sharding=ed_sharding,
-                e_sharding=e_sharding)
+                activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
+                ed_sharding=(ShardingAxisName.MLP_TENSOR, None),
+                e_sharding=(ShardingAxisName.MLP_TENSOR, ))
             if self.sparse_matmul:
                 # TODO: orginize the SparseMoE and DenseMoE better given they share most interfaces
                 custom_module = SparseMoE(
