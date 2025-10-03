@@ -6,7 +6,7 @@ steps:
     key: build-wheels
     # IMPORTANT: Update these tags to match the agent that has Docker installed.
     agents:
-      queue: "default"
+      queue: "tpu_v6e_queue"
       os: "linux"
       docker: "true"
 
@@ -35,7 +35,7 @@ steps:
     key: publish
     depends_on: "build-wheels" # Only run if the build was successful
     agents:
-      queue: "default"
+      queue: "tpu_v6e_queue"
       os: "linux"
 
     commands:
