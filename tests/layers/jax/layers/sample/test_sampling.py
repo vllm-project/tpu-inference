@@ -1,10 +1,10 @@
-# /home/pooyam/tpu_commons/tests/models/jax/layers/test_sampling.py
+# /home/pooyam/tpu_inference/tests/models/jax/layers/test_sampling.py
 import jax.numpy as jnp
 import numpy as np
 from vllm.v1.outputs import LogprobsTensors
 
-from tpu_commons.layers.jax.sample.sampling import (compute_logprobs,
-                                                    gather_logprobs)
+from tpu_inference.models.jax.layers.sample.sampling import (compute_logprobs,
+                                                           gather_logprobs)
 
 
 class TestSampling:

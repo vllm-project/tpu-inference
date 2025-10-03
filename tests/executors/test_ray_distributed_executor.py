@@ -29,23 +29,23 @@ class MockVllmConfig:
 @patch(
     "vllm.v1.executor.ray_distributed_executor.RayDistributedExecutor.__init__",
     lambda x, y: None)
-@patch("tpu_commons.executors.ray_distributed_executor.envs")
-@patch("tpu_commons.executors.ray_distributed_executor.ray")
-@patch("tpu_commons.executors.ray_distributed_executor.current_platform")
-@patch("tpu_commons.executors.ray_distributed_executor.get_ip",
+@patch("tpu_inference.executors.ray_distributed_executor.envs")
+@patch("tpu_inference.executors.ray_distributed_executor.ray")
+@patch("tpu_inference.executors.ray_distributed_executor.current_platform")
+@patch("tpu_inference.executors.ray_distributed_executor.get_ip",
        return_value="127.0.0.1")
-@patch("tpu_commons.executors.ray_distributed_executor.get_open_port",
+@patch("tpu_inference.executors.ray_distributed_executor.get_open_port",
        return_value=12345)
 @patch(
-    "tpu_commons.executors.ray_distributed_executor.available_resources_per_node"
+    "tpu_inference.executors.ray_distributed_executor.available_resources_per_node"
 )
-@patch("tpu_commons.executors.ray_distributed_executor._wait_until_pg_ready")
+@patch("tpu_inference.executors.ray_distributed_executor._wait_until_pg_ready")
 class TestTpuRayDistributedExecutor(unittest.TestCase):
 
     def setUp(self):
         # Import the class under test inside the test method to ensure
         # patches are applied.
-        from tpu_commons.executors.ray_distributed_executor import \
+        from tpu_inference.executors.ray_distributed_executor import \
             RayDistributedExecutor
         self.RayDistributedExecutor = RayDistributedExecutor
 

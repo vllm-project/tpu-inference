@@ -14,7 +14,7 @@ from jax._src import test_util as jtu
 from jax.sharding import Mesh
 from safetensors.numpy import save_file
 
-from tpu_commons.models.jax.utils.weight_utils import (
+from tpu_inference.models.jax.utils.weight_utils import (
     MetadataMap, load_hf_weights, transfer_state_with_mappings)
 
 # ----- nnx.Module Wrappers -----

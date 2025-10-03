@@ -1,12 +1,12 @@
 # Custom JAX Model Onboarding as a Plugin
 
-## TPU Commons Overview
+## TPU Inference Overview
 
 ### uLLM JAX Supported Features {#ullm-jax-supported-features}
 
 TODO: What features uLLM supports (for example standard attention blocks, KV cache management)
 
-TODO: If needed, talk briefly about the scheduler, interaction between vllm and tpu_commons codebases.
+TODO: If needed, talk briefly about the scheduler, interaction between vllm and tpu_inference codebases.
 
 ### uLLM JAX Limitations {#ullm-jax-limitations}
 
@@ -14,7 +14,7 @@ TODO: Limitations of uLLM (aka - what models aren’t a good fit yet)
 
 ## Custom Model Integration Guide {#custom-model-integration-guide}
 
-This guide walks you through the steps to implement a basic JAX model to TPU Commons.
+This guide walks you through the steps to implement a basic JAX model to TPU Inference.
 
 ### 1. Bring your model code
 
@@ -60,7 +60,7 @@ def __call__(
     …
 ```
 
-For reference, check out [our Llama implementation](https://github.com/vllm-project/tpu_commons/blob/aad6cc2a36a2cf0de681f76055ce632d5abeca5f/tpu_commons/models/jax/llama3.py).
+For reference, check out [our Llama implementation](https://github.com/vllm-project/tpu-inference/blob/aad6cc2a36a2cf0de681f76055ce632d5abeca5f/tpu_inference/models/jax/llama3.py).
 
 ### 3. Implement the weight loading logic
 
@@ -68,9 +68,9 @@ You now need to implement the `load_weights` method in your `*ForCausalLM` class
 
 ### 4. Register your model
 
-TPU Commons relies on a model registry to determine how to run each model. A list of pre-registered architectures can be found [here](https://github.com/vllm-project/tpu_commons/blob/aad6cc2a36a2cf0de681f76055ce632d5abeca5f/tpu_commons/models/jax/model_loader.py#L22).
+TPU Inference relies on a model registry to determine how to run each model. A list of pre-registered architectures can be found [here](https://github.com/vllm-project/tpu-inference/blob/aad6cc2a36a2cf0de681f76055ce632d5abeca5f/tpu_inference/models/jax/model_loader.py#L22).
 
-If your model is not on this list, you must register it to TPU Commons. You can load an external model using a plugin (similar to [vLLM’s plugins](https://docs.vllm.ai/en/latest/contributing/model/registration.html)) without modifying the TPU Commons codebase.
+If your model is not on this list, you must register it to TPU Inference. You can load an external model using a plugin (similar to [vLLM’s plugins](https://docs.vllm.ai/en/latest/contributing/model/registration.html)) without modifying the TPU Inference codebase.
 
 Structure your plugin as following:
 
@@ -86,8 +86,8 @@ The `setup.py` build script should follow the [same guidance as for vLLM plugins
 To register the model, use the following code in `your_code/__init__.py`:
 
 ```
-from tpu_commons.logger import init_logger
-from tpu_commons.models.common.model_loader import register_model
+from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.model_loader import register_model
 
 logger = init_logger(__name__)
 
@@ -98,7 +98,7 @@ def register():
 
 ### 5. Install and run your model
 
-Ensure that you `pip install .` your model from within the same Python environment as vllm/tpu commons. Then to run your model:
+Ensure that you `pip install .` your model from within the same Python environment as vllm/tpu inference. Then to run your model:
 
 ```
 HF_TOKEN=token TPU_BACKEND_TYPE=jax \

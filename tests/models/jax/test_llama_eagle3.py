@@ -9,10 +9,10 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh
 from vllm.config import ModelConfig
 
-from tpu_commons.layers.common.attention_metadata import AttentionMetadata
-from tpu_commons.models.jax.llama_eagle3 import (Eagle3LlamaDecoderLayer,
+from tpu_inference.models.jax.attention_metadata import AttentionMetadata
+from tpu_inference.models.jax.llama_eagle3 import (Eagle3LlamaDecoderLayer,
                                                  EagleLlama3ForCausalLM)
-from tpu_commons.runner.kv_cache import create_kv_caches
+from tpu_inference.runner.kv_cache import create_kv_caches
 
 
 class MockSpeculativeConfig:
@@ -157,7 +157,7 @@ class TestEagleLlama3ForCausalLM:
         assert len(aux_hidden_states) == 1
         assert aux_hidden_states[0].shape == output_hidden_states.shape
 
-    @patch("tpu_commons.models.jax.llama_eagle3.load_hf_weights")
+    @patch("tpu_inference.models.jax.llama_eagle3.load_hf_weights")
     def test_load_weights(self, mock_load_hf_weights: MagicMock,
                           mock_vllm_config: MockVllmConfig, rng: PRNGKey,
                           mesh: Mesh):

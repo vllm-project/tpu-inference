@@ -7,9 +7,9 @@ from flax import nnx
 from jax.sharding import Mesh
 from parameterized import parameterized
 
-from tpu_commons.layers.common.attention_metadata import AttentionMetadata
-from tpu_commons.layers.jax.attention.deepseek_v3_attention import MLA
-from tpu_commons.layers.jax.attention_interface import get_kv_cache_shape
+from tpu_inference.models.jax.attention import get_kv_cache_shape
+from tpu_inference.models.jax.attention_metadata import AttentionMetadata
+from tpu_inference.models.jax.common.attention.deepseek_v3_attention import MLA
 
 
 class TestMLA(unittest.TestCase):

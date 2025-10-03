@@ -10,9 +10,9 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tpu_commons.layers.jax.sample.rejection_sampler import (
+from tpu_inference.models.jax.layers.sample.rejection_sampler import (
     PLACEHOLDER_TOKEN_ID, RejectionSampler)
-from tpu_commons.layers.jax.sample.sampling_metadata import \
+from tpu_inference.models.jax.layers.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 
 # ======================== CONSTANTS ========================

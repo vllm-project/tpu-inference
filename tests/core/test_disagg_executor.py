@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from vllm.config import ModelConfig, VllmConfig
 
-from tpu_commons.core.disagg_executor import DisaggExecutor
+from tpu_inference.core.disagg_executor import DisaggExecutor
 
 
 class DisaggExecutorTest(unittest.TestCase):
@@ -30,7 +30,7 @@ class DisaggExecutorTest(unittest.TestCase):
 
         # Patch the collective_rpc method to avoid actual RPC calls
         self.patcher = patch(
-            "tpu_commons.core.disagg_executor.DisaggExecutor.collective_rpc")
+            "tpu_inference.core.disagg_executor.DisaggExecutor.collective_rpc")
         self.mock_collective_rpc = self.patcher.start()
         self.addCleanup(self.patcher.stop)
 

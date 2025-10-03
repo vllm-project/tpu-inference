@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
-from tpu_commons.layers.jax.sample.sampling_metadata import (
+from tpu_inference.models.jax.layers.sample.sampling_metadata import (
     DEFAULT_SAMPLING_PARAMS, TPUSupportedSamplingMetadata)
 
 ## Mocks and Fixtures

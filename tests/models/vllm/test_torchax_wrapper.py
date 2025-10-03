@@ -9,7 +9,7 @@ from torch.utils import _pytree as pytree
 from vllm.engine.arg_utils import EngineArgs
 from vllm.forward_context import get_forward_context
 
-from tpu_commons.models.torchax.torchax_wrapper import (
+from tpu_inference.models.torchax.torchax_wrapper import (
     get_cpu_tensor_from_torchax_tensor, with_torchax_global, wrap_model,
     wrap_model_func)
 

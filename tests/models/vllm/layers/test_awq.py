@@ -23,10 +23,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import \
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.scalar_type import scalar_types
 
-from tpu_commons.models.vllm.quantization import get_tpu_quantization_config
-from tpu_commons.models.vllm.quantization.awq import (JaxAWQConfig,
+from tpu_inference.models.vllm.quantization import get_tpu_quantization_config
+from tpu_inference.models.vllm.quantization.awq import (JaxAWQConfig,
                                                       JaxAWQLinearMethod)
-from tpu_commons.models.vllm.quantization.common import JaxCommonLinearConfig
+from tpu_inference.models.vllm.quantization.common import JaxCommonLinearConfig
 
 P = PartitionSpec
 MODELS = ["Qwen/Qwen2.5-1.5B-Instruct-AWQ"]
@@ -285,7 +285,7 @@ def test_jax_column_parallel_linear(model, bias, mesh, enable_sp):
     vllm_config = engine_args.create_engine_config()
     vllm_config.compilation_config.pass_config.enable_sequence_parallelism = enable_sp
 
-    # Call tpu_commons code
+    # Call tpu_inference code
     vllm_config.model_config.dtype = torch.bfloat16
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
     with set_current_vllm_config(vllm_config):
@@ -325,7 +325,7 @@ def test_jax_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
     vllm_config = engine_args.create_engine_config()
     vllm_config.compilation_config.pass_config.enable_sequence_parallelism = enable_sp
 
-    # Call tpu_commons code
+    # Call tpu_inference code
     vllm_config.model_config.dtype = torch.bfloat16
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
     with set_current_vllm_config(vllm_config):
@@ -369,7 +369,7 @@ def test_jax_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
     vllm_config = engine_args.create_engine_config()
     vllm_config.compilation_config.pass_config.enable_sequence_parallelism = enable_sp
 
-    # Call tpu_commons code
+    # Call tpu_inference code
     vllm_config.model_config.dtype = torch.bfloat16
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
     with set_current_vllm_config(vllm_config):
