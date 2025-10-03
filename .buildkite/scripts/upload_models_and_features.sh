@@ -81,5 +81,5 @@ if [[ "${#pipeline_steps[@]}" -gt 0 ]]; then
   echo -e "${final_pipeline_yaml}" | buildkite-agent pipeline upload
 else
   echo "--- No .yml files found, no new Pipeline Steps to upload."
-  buildkite-agent step update --state "passed"
+  exit 0
 fi
