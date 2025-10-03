@@ -264,6 +264,10 @@ class DeepSeekV3(nnx.Module):
                 edf_sharding=(None , ShardingAxisName.MOE_TENSOR, ShardingAxisName.ATTN_DATA_EXPERT),
                 # efd_sharding=(None , 'expert', 'model'),
                 efd_sharding=(None , ShardingAxisName.ATTN_DATA_EXPERT, ShardingAxisName.MOE_TENSOR),
+                # Previously had:
+                # activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
+                # ed_sharding=(ShardingAxisName.MLP_TENSOR, None),
+                # e_sharding=(ShardingAxisName.MLP_TENSOR, ))
                 use_sparse_moe=self.sparse_matmul,
                 quantized_dtype=self.weight_loader.quant_dtype
                 if self.weight_loader.is_model_quantized else None,
