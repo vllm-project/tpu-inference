@@ -9,11 +9,11 @@ import vllm.envs as envs
 from jax.sharding import NamedSharding, PartitionSpec
 
 from tpu_commons.core.disagg_utils import is_disagg_enabled
+from tpu_commons.layers.jax.sample.sampling import sample
+from tpu_commons.layers.jax.sample.sampling_metadata import \
+    TPUSupportedSamplingMetadata
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.models.jax.layers.sample.sampling import sample
-from tpu_commons.models.jax.layers.sample.sampling_metadata import \
-    TPUSupportedSamplingMetadata
 from tpu_commons.utils import device_array
 
 if TYPE_CHECKING:

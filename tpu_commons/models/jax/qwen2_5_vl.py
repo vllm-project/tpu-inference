@@ -14,9 +14,9 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
 from vllm.config import VllmConfig
 
 from tpu_commons import utils as utils
+from tpu_commons.layers.jax.attention import sharded_flash_attention
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.models.jax.layers.attention import sharded_flash_attention
 from tpu_commons.models.jax.qwen2 import Qwen2ForCausalLM
 # from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from tpu_commons.models.jax.utils.multi_modal_utils import (

@@ -6,8 +6,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tpu_commons.models.common.model_loader import get_model
 from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.models.jax.model_loader import get_model
 from tpu_commons.utils import device_array
 from vllm.config import VllmConfig
 
