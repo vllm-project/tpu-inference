@@ -5,17 +5,13 @@ from typing import TYPE_CHECKING, Optional
 
 import jax.numpy as jnp
 import numpy as np
-
-from tpu_inference.runner import utils as runner_utils
-from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
-from tpu_inference.utils import device_array
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.outputs import DraftTokenIds
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
-from tpu_commons.runner import utils as runner_utils
-from tpu_commons.spec_decode.jax.eagle3 import Eagle3Proposer
-from tpu_commons.utils import device_array
+from tpu_inference.runner import utils as runner_utils
+from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
+from tpu_inference.utils import device_array
 
 if TYPE_CHECKING:
     from tpu_inference.models.jax.attention_metadata import AttentionMetadata
