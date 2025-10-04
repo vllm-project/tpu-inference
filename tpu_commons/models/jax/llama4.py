@@ -66,6 +66,7 @@ class Llama4ForCausalLM(nnx.Module):
         self.intermediate_size_mlp = getattr(text_config, "intermediate_size_mlp", 16384)
 
         # num_local_experts: uses 16 experts for Llama-4-Scout-17B-16E-Instruct and uses 128 experts Llama-4-Maverick-17B-128E-Instruct.
+        # The default value is set to 16 for compatibility with Llama-4-Scout.
         self.num_local_experts: int = getattr(text_config, "num_local_experts", 16)
         self.hidden_act: str = getattr(text_config, "hidden_act", "silu")
         self.no_rope_layer_interval = getattr(text_config, "no_rope_layers", [])
