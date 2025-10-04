@@ -204,21 +204,23 @@ def expert_sharded_gmm(
     # We sum them up to get total rows in that shard, and that is the size for shard to send to its peers. This is also
     # the number of non-zero rows from the gmm results.
     # In the working example, send_sizes would be [3, 2, 5, 4]
-    send_sizes = jnp.array([
-        group_sizes[i * num_experts_per_shard:(i + 1) *
-                    num_experts_per_shard].sum() for i in range(ep_size)
-    ])
+    send_sizes = group_sizes.reshape(-1, num_experts_per_shard).sum(axis=1)
+
     # In the working example, input_offsets would be [0, 3, 5, 10]
-    input_offsets = jnp.concatenate((jnp.array([0]), send_sizes.cumsum()[:-1]))
+    input_offsets = send_sizes.cumsum() - send_sizes
     output_offsets = input_offsets
     recv_sizes = send_sizes
 
-    input_offsets = jax.lax.with_sharding_constraint(
-        input_offsets, NamedSharding(mesh, P(('kv', "model"))))
-    send_sizes = jax.lax.with_sharding_constraint(
-        send_sizes, NamedSharding(mesh, P(('kv', "model"))))
-    output_offsets = jax.lax.with_sharding_constraint(
-        output_offsets, NamedSharding(mesh, P(('kv', "model"))))
+    input_offsets = jnp.repeat(input_offsets, ep_size)
+    send_sizes = jnp.repeat(send_sizes, ep_size)
+    output_offsets = jnp.repeat(output_offsets, ep_size)
+
+    # input_offsets = jax.lax.with_sharding_constraint(
+    #     input_offsets, NamedSharding(mesh, P(('kv', "model"))))
+    # send_sizes = jax.lax.with_sharding_constraint(
+    #     send_sizes, NamedSharding(mesh, P(('kv', "model"))))
+    # output_offsets = jax.lax.with_sharding_constraint(
+    #     output_offsets, NamedSharding(mesh, P(('kv', "model"))))
 
     def _ragged_all_to_all(operand, input_offsets, send_sizes, output_offsets,
                            recv_sizes):
@@ -226,9 +228,9 @@ def expert_sharded_gmm(
 
         # input_offsets, send_sizes and output_offsets are sharded and there is only 1 elemnt in each shard, we
         # are taking the 0-th element from them just so that jnp.repeat generates the arrays with correct shape.
-        input_offsets_of_shard = jnp.repeat(input_offsets[0], ep_size)
-        send_sizes_of_shard = jnp.repeat(send_sizes[0], ep_size)
-        output_offsets_of_shard = jnp.repeat(output_offsets[0], ep_size)
+        input_offsets_of_shard = input_offsets
+        send_sizes_of_shard = send_sizes
+        output_offsets_of_shard = output_offsets
 
         # recv_sizes is replicated across shards, because all the shards receive the same data and write to the
         # output in the same way (same output_offsets and same recv_sizes) and thus generates replicated output.
