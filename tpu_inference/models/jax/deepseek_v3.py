@@ -120,7 +120,7 @@ class DeepSeekV3(nnx.Module):
                                  hidden_size=hidden_size,
                                  dtype=dtype,
                                  rngs=self.rng,
-                                 vd_sharding=(('data', 'expert', 'model'),
+                                 vd_sharding=(('data', 'model', 'expert'),
                                               None),
                                  random_init=self.random_init)
 
@@ -218,8 +218,8 @@ class DeepSeekV3(nnx.Module):
                     random_init=self.random_init,
                     activation_ffw_td=('data', 'model'),
                     activation_ffw_ted=('data', None, 'model'),
-                    def_sharding=('expert', 'model', None),
-                    fed_sharding=('expert', None, 'model'),
+                    def_sharding=(None , 'model', 'expert'),
+                    fed_sharding=(None , 'expert', 'model'),
                     router=router) if is_moe_layer else DenseFFW(
                         dtype=dtype,
                         hidden_act=hidden_act,
@@ -302,8 +302,8 @@ class DeepSeekV3(nnx.Module):
                               hidden_size=hidden_size,
                               dtype=dtype,
                               rngs=self.rng,
-                              vd_sharding=(('data', 'expert', 'model'), None),
-                              dv_sharding=(None, ('data', 'expert', 'model')),
+                              vd_sharding=(('data', 'model', 'expert'), None),
+                              dv_sharding=(None, ('data', 'model', 'expert')),
                               random_init=self.random_init)
 
     # For compatibility with flax.
