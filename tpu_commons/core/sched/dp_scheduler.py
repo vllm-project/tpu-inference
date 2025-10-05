@@ -36,16 +36,19 @@ class DPScheduler(Scheduler):
         self.assigned_dp_rank: dict[str, int] = {}
         try:
             # breakpoint()
-            num_kv_heads = self.vllm_config.model_config.hf_config.num_key_value_heads
-            tp = self.vllm_config.parallel_config.tensor_parallel_size
-            attn_dp = tp // num_kv_heads
-            dp = self.vllm_config.additional_config["sharding"]["sharding_strategy"]["data_parallelism"]
-            
-            self.dp_size = dp * attn_dp
+            self.dp_size = self.vllm_config.additional_config["sharding"]["sharding_strategy"]["data_parallelism"]   
             print("scheduler dp_size from config", self.dp_size)
         except KeyError:
             self.dp_size = 1
-        # assert self.dp_size >= 2, "Data parallel size must be at least 2." # Debugging purpose
+        
+        # DP attention.
+        num_kv_heads = self.vllm_config.model_config.hf_config.num_key_value_heads
+        tp = self.vllm_config.parallel_config.tensor_parallel_size
+        attn_dp = tp // num_kv_heads
+        self.dp_size = self.dp_size * attn_dp
+        print("wenxin: scheduler dp:_size", self.dp_size)
+        
+        assert self.dp_size >= 2, "Data parallel size must be at least 2." # Debugging purpose
         self.dp_kv_cache_config = self.kv_cache_config
         self.dp_kv_cache_config.num_blocks = (
             self.kv_cache_config.num_blocks // self.dp_size)
@@ -232,7 +235,6 @@ class DPScheduler(Scheduler):
         # Use a temporary RequestQueue to collect requests that need to be
         # skipped and put back at the head of the waiting queue later
         skipped_waiting_requests = create_request_queue(self.policy)
-        breakpoint()
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
             while self.waiting and token_budget > 0:

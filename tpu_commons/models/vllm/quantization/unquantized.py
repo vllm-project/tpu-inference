@@ -173,7 +173,7 @@ class JaxUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         assert isinstance(layer, FusedMoE)
-        breakpoint()
+        # breakpoint()
         w2_weight = t2j(layer.w2_weight, use_dlpack=False) #[128, 2048, 768]
         w13_weight = t2j(layer.w13_weight, use_dlpack=False) #[128, 1536, 2048]
 

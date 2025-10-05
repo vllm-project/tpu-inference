@@ -114,6 +114,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         self._init_random()
         self._init_mesh()
+        self.dp_size = self.mesh.shape["data"] * self.mesh.shape["attn_dp"]
         self._init_phased_profiling()
         self._init_mm()
         self._init_inputs()
@@ -153,7 +154,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         self.data_parallel_sharding = NamedSharding(self.mesh,
                                                     PartitionSpec(MLP_DATA_AXIS_NAME))
-        self.dp_size = self.mesh.shape["data"] * self.mesh.shape["attn_dp"]
 
     def _init_random(self):
         if self.model_config.seed is None:
@@ -186,8 +186,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             attn_dp = 1 
             # breakpoint()
             if self.model_config.hf_config.num_key_value_heads < tp:
-                attn_dp = tp // self.model_config.num_kv_heads
-
+                attn_dp = tp // self.model_config.hf_config.num_key_value_heads
+                tp = tp//attn_dp
             
             axis_names = ("data", "attn_dp","expert", "model")
             mesh_shape = (dp, attn_dp, 1, tp)
@@ -234,8 +234,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # InputBatch needs to work with sampling tensors greater than padding
         # to avoid dynamic shapes. Also, avoid suboptimal alignment.
         self.max_num_reqs = max(scheduler_config.max_num_seqs, MIN_NUM_SEQS)
-        self.max_num_reqs_per_dp_rank = self.max_num_reqs // self.mesh.shape[
-            "data"]
+        self.max_num_reqs_per_dp_rank = self.max_num_reqs //self.dp_size
         # [16, 32, 64, 128, 256, 512, 1024, 2048]
         self.num_tokens_paddings = runner_utils.get_token_paddings(
             min_token_size=16,
@@ -427,6 +426,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # TODO: make _get_input_ids_embeds within this context
         # NOTE: right now, mm model will use embeddings as the input,
         # but text-only model will use input_ids
+        
         with self.maybe_forbid_compile:
 
             with set_forward_context(
@@ -673,11 +673,22 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             max_num_reqs_across_dp, self.max_num_reqs_per_dp_rank)
         padded_num_reqs = padded_num_reqs_per_dp_rank * dp_size
 
+        all_req_indices = np.concatenate(
+            [req_indices_dp[dp_rank] for dp_rank in range(dp_size)])
+        all_positions = np.concatenate([
+            np.arange(len(req_indices_dp[dp_rank])) +
+            padded_num_reqs_per_dp_rank * dp_rank for dp_rank in range(dp_size)
+        ])
+
+        # Sort positions by request indices
+        sorted_indices = np.argsort(all_req_indices)
+        logits_indices_selector = all_positions[sorted_indices]
+
         return (req_ids_dp, req_indices_dp, num_scheduled_tokens_per_dp_rank,
                 scheduled_tokens_per_dp_rank, num_req_per_dp_rank,
                 padded_num_scheduled_tokens_per_dp_rank, padded_num_reqs,
                 padded_total_num_scheduled_tokens,
-                cum_num_req_per_dp_rank_list, padded_num_reqs_per_dp_rank)
+                cum_num_req_per_dp_rank_list, padded_num_reqs_per_dp_rank, logits_indices_selector)
 
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -691,7 +702,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
          scheduled_tokens_per_dp_rank, num_req_per_dp_rank,
          padded_num_scheduled_tokens_per_dp_rank, padded_num_reqs,
          padded_total_num_scheduled_tokens, cum_num_req_per_dp_rank_list,
-         padded_num_reqs_per_dp_rank
+         padded_num_reqs_per_dp_rank, logits_indices_selector
          ) = self._prepare_dp_input_metadata(scheduler_output)
 
         # Multi-modal support
@@ -699,17 +710,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
             self.mm_manager.calc_mrope_positions(scheduler_output)
-
-        all_req_indices = np.concatenate(
-            [req_indices_dp[dp_rank] for dp_rank in range(dp_size)])
-        all_positions = np.concatenate([
-            np.arange(len(req_indices_dp[dp_rank])) +
-            padded_num_reqs_per_dp_rank * dp_rank for dp_rank in range(dp_size)
-        ])
-
-        # Sort positions by request indices
-        sorted_indices = np.argsort(all_req_indices)
-        logits_indices_selector = all_positions[sorted_indices]
 
         # Populates input_ids and positions
         for dp_rank in range(dp_size):
@@ -821,7 +821,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         positions = self.positions_cpu[:padded_total_num_scheduled_tokens]
         mrope_positions = self.mrope_positions_cpu[:, :
                                                    padded_total_num_scheduled_tokens]
-
+        
         block_tables = self.block_table_cpu[:self.max_num_reqs]
         for dp_rank in range(dp_size):
             req_offset = dp_rank * self.max_num_reqs_per_dp_rank
@@ -901,7 +901,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             sharding=self.data_parallel_sharding,
         )
 
-        breakpoint()
+        # breakpoint()
         # print("DP input_ids ", input_ids.shape, input_ids.sharding)
         # print("DP positions", positions.shape, positions.sharding)
         # print("DP block_tables", block_tables.shape, block_tables.sharding)
