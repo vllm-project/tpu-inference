@@ -81,7 +81,7 @@ def _shard_tensor_to_tpu_replicated(tensor: torch.Tensor,
 def _shard_vocab_parallel_embedding(layer: VocabParallelEmbedding,
                                     mesh: Mesh) -> None:
     weight = _convert_to_torchax_and_shard(
-        layer.weight, NamedSharding(mesh, P('model', None)))
+        layer.weight, NamedSharding(mesh, P(MLP_TENSOR_AXIS_NAME, None)))
     layer.weight = Parameter(weight, requires_grad=False)
 
 
