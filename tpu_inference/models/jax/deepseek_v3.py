@@ -421,6 +421,8 @@ class DeepSeekV3WeightLoader:
         self.model_dtype = model_dtype
         self.use_mla_kernel = use_mla_kernel
 
+=======
+>>>>>>> 641cb6d4 (Fix dtype bug of weight_loading. It not only occurs for sparsematmul, but densematmul):tpu_commons/models/jax/deepseek_v3.py
         self._transpose_map = {
             # dense mlp
             r"mlp\.down_proj": (1, 0),
@@ -956,9 +958,10 @@ class DeepSeekV3WeightLoader:
 
 def weights_dequant_cpu(x: torch.Tensor,
                         s: torch.Tensor,
-                        output_dtype: jnp.dtype,
+                        output_dtype: torch.dtype,
                         block_size: int = 128) -> torch.Tensor:
     assert x.dim() == 2 and s.dim() == 2, "Both x and s must be 2D tensors"
+    torch_output_type = DTYPE_VIEW_MAP.get(jnp.dtype(output_dtype))
     M, N = x.shape
 
     x = x.to(torch.float32)
