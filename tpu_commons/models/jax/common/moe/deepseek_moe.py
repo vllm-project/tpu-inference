@@ -136,8 +136,8 @@ class SparseMoE(MoE):
         # TODO: determine if we get it from external or extrat it in MoE class
         is_batch_sharded_by_expert: True if batch is sharded over 'expert' dim.
     """
-    def_sharding: Sharding
-    fed_sharding: Sharding
+    edf_sharding: Sharding
+    efd_sharding: Sharding
     num_experts_per_tok: int
     #TODO: tile size is (tile_batch_seq, tile_activation_dim, tile_weight_dim,) from MaxText
     tile_size: tuple[int, int, int] = (128, 64, 128)
@@ -155,24 +155,24 @@ class SparseMoE(MoE):
         shape_up = (self.num_local_experts, D, F)
         shape_down = (self.num_local_experts, F, D)
 
-        self.kernel_gating_DEF = create_param(rngs,
+        self.kernel_gating_EDF = create_param(rngs,
                                               shape=shape_gating,
                                               dtype=self.dtype,
-                                              sharding=self.def_sharding,
+                                              sharding=self.edf_sharding,
                                               random_init=self.random_init)
-        self.kernel_up_proj_DEF = create_param(rngs,
+        self.kernel_up_proj_EDF = create_param(rngs,
                                                shape=shape_up,
                                                dtype=self.dtype,
-                                               sharding=self.def_sharding,
+                                               sharding=self.edf_sharding,
                                                random_init=self.random_init)
-        self.kernel_down_proj_FED = create_param(rngs,
+        self.kernel_down_proj_EFD = create_param(rngs,
                                                  shape=shape_down,
                                                  dtype=self.dtype,
-                                                 sharding=self.fed_sharding,
+                                                 sharding=self.efd_sharding,
                                                  random_init=self.random_init)
 
         # Derive the expert sharding
-        self.expert_axis_name = self.def_sharding[0]
+        self.expert_axis_name = self.edf_sharding[0]
         if self.expert_axis_name is None:
             self.num_expert_parallelism = 1
         else:
@@ -597,10 +597,10 @@ class SparseMoE(MoE):
             PartitionSpec(*self.activation_ffw_td),  # Sharded x_TD
             PartitionSpec(),  # Replicated router_weights_TX
             PartitionSpec(),  # Replicated selected_experts_TX
-            PartitionSpec(*self.def_sharding),  # Sharded gating kernel
-            PartitionSpec(*self.def_sharding),  # Sharded up-projection kernel
+            PartitionSpec(*self.edf_sharding),  # Sharded gating kernel
+            PartitionSpec(*self.edf_sharding),  # Sharded up-projection kernel
             PartitionSpec(
-                *self.fed_sharding),  # Sharded down-projection kernel
+                *self.efd_sharding),  # Sharded down-projection kernel
         )
         out_specs = PartitionSpec(*self.activation_ffw_td)
 
@@ -616,7 +616,7 @@ class SparseMoE(MoE):
             x_TD,
             router_weights_TX,
             selected_experts_TX,
-            self.kernel_gating_DEF.value,
-            self.kernel_up_proj_DEF.value,
-            self.kernel_down_proj_FED.value,
+            self.kernel_gating_EDF.value,
+            self.kernel_up_proj_EDF.value,
+            self.kernel_down_proj_EFD.value,
         )
