@@ -172,7 +172,7 @@ class SparseMoE(MoE):
                                                  random_init=self.random_init)
 
         # Derive the expert sharding
-        self.expert_axis_name = self.def_sharding[0]
+        self.expert_axis_name = self.edf_sharding[0]
         if self.expert_axis_name is None:
             self.num_expert_parallelism = 1
         else:
@@ -597,10 +597,10 @@ class SparseMoE(MoE):
             PartitionSpec(*self.activation_ffw_td),  # Sharded x_TD
             PartitionSpec(),  # Replicated router_weights_TX
             PartitionSpec(),  # Replicated selected_experts_TX
-            PartitionSpec(*self.def_sharding),  # Sharded gating kernel
-            PartitionSpec(*self.def_sharding),  # Sharded up-projection kernel
+            PartitionSpec(*self.edf_sharding),  # Sharded gating kernel
+            PartitionSpec(*self.edf_sharding),  # Sharded up-projection kernel
             PartitionSpec(
-                *self.fed_sharding),  # Sharded down-projection kernel
+                *self.efd_sharding),  # Sharded down-projection kernel
         )
         out_specs = PartitionSpec(*self.activation_ffw_td)
 

@@ -446,6 +446,8 @@ class DeepSeekV3WeightLoader:
         self.model_dtype = model_dtype
         self.use_mla_kernel = use_mla_kernel
 
+=======
+>>>>>>> 641cb6d4 (Fix dtype bug of weight_loading. It not only occurs for sparsematmul, but densematmul):tpu_commons/models/jax/deepseek_v3.py
         self._transpose_map = {
             # dense mlp
             r"mlp\.down_proj": (1, 0),
