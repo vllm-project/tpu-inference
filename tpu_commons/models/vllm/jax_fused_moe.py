@@ -190,6 +190,7 @@ def expert_sharded_gmm(
     #       0, 0, 0, 0     0, 0, 0, 0     0, 0, 0, 0     D, D, D, D
     #        shard-0        shard-1        shard-2        shard-3
     # The shard 0,1,2,3 each has 3 (A rows), 2 (B rows), 5 (C rows) and 4 (D rows).
+    print("getting into gmm")
     gmm_res = shard_map(
         _gmm,
         mesh=mesh,
@@ -197,6 +198,8 @@ def expert_sharded_gmm(
         out_specs=(P(EXPERT_AXIS_NAME, None)), 
         check_rep=False,
     )(lhs, rhs, group_sizes, group_offset)
+    print("gmm_res", gmm_res)
+    # (256, 2048), (128, 1536, 2048), (128,), (8, )
 
     # For i-th shard, it is responsible groups (AKA experts) from i*num_experts_per_shard to (i+1)*num_experts_per_shard
     # We sum them up to get total rows in that shard, and that is the size for shard to send to its peers. This is also

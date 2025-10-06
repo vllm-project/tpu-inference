@@ -43,7 +43,11 @@ class JaxCommonLinearConfig:
             if self.enable_sequence_parallelism:
                 self.output_sharding = P(MLP_TENSOR_AXIS_NAME, None)
         elif isinstance(layer, ColumnParallelLinear):
-            self.weight_sharding = P(MLP_TENSOR_AXIS_NAME, None)
+            if isinstance(
+                    layer, QKVParallelLinear):
+                self.weight_sharding = P(("model", "expert"), None)
+            else:
+                self.weight_sharding = P(MLP_TENSOR_AXIS_NAME, None)
             if self.enable_sequence_parallelism:
                 self.input_sharding = P(MLP_TENSOR_AXIS_NAME, None) # todo(wenxindongwork): verify this
 

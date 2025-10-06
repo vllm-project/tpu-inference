@@ -13,7 +13,7 @@ ATTN_HEAD_AXIS_NAME = 'model'
 ATTN_TENSOR_AXIS_NAME = None
 MLP_TENSOR_AXIS_NAME = ('model', 'expert', 'attn_dp')
 MOE_TENSOR_AXIS_NAME = ('model', 'attn_dp')
-EXPERT_AXIS_NAME = ('expert', 'attn_dp')
+EXPERT_AXIS_NAME = ('expert', 'model', 'attn_dp')
 VOCAB_AXIS_NAME = ('data', 'expert', 'attn_dp', 'model')
 
 

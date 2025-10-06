@@ -173,7 +173,6 @@ class JaxUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         assert isinstance(layer, FusedMoE)
-        # breakpoint()
         w2_weight = t2j(layer.w2_weight, use_dlpack=False) #[128, 2048, 768]
         w13_weight = t2j(layer.w13_weight, use_dlpack=False) #[128, 1536, 2048]
 
@@ -253,12 +252,12 @@ class JaxUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             reduce_results=layer.reduce_results,
             mesh=self.mesh,
             use_ep=layer.use_ep)
-
+        # breakpoint()
         output = _fused_moe_func(
-            jax_view(x),
-            jax_view(layer.w13_weight),
-            jax_view(layer.w2_weight),
-            jax_view(router_logits),
+            jax_view(x), # PartitionSpec() #(32, 2048)
+            jax_view(layer.w13_weight), # PartitionSpec(('expert', 'model', 'attn_dp'), None, None)
+            jax_view(layer.w2_weight), # PartitionSpec(('expert', 'model', 'attn_dp'), None, None)
+            jax_view(router_logits), #PartitionSpec()
         )
 
         return torch_view(output)
