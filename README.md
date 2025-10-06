@@ -1,299 +1,63 @@
-# 🔬 **IMPORTANT: EXPERIMENTAL AND NOT SUPPORTED** 🔬
+<h1 align="center"> vLLM TPU</h1>
 
-This is an exploratory repository provided for informational and learning purposes only.
-The code is **not feature-complete** and **may not be stable**.
+<h3 align="center">
+A high performance backend unifying PyTorch and JAX in vLLM on TPU
+</h3>
 
-> ⚠️ **DO NOT USE IN A PRODUCTION ENVIRONMENT.**
+<p align="center">
+| <a href="https://github.com/vllm-project/tpu-inference/tree/main/docs"><b>Documentation</b></a> | <a href="https://blog.vllm.ai/"><b>Blog</b></a> | <a href="https://discuss.vllm.ai/c/hardware-support/google-tpu-support/27"><b>User Forum</b></a> | <a href="https://slack.vllm.ai"><b>Developer Slack</b></a> (#sig-tpu) |
+</p>
 
-## Develop on a TPU VM
+---
 
-### Install `vLLM-TPU`:
+_Upcoming Events_ 🔥
 
-Follow this [guide](https://docs.vllm.ai/en/latest/getting_started/installation/google_tpu.html#set-up-using-python) to install vLLM from source.
+- Join us at the [PyTorch Conference, October 22-23](https://events.linuxfoundation.org/pytorch-conference/) in San Francisco!
+- Join us at [Ray Summit, November 3-5](https://www.anyscale.com/ray-summit/2025) in San Francisco!
+- Join us at [JAX DevDay on November 18th](https://rsvp.withgoogle.com/events/devlab-fall-2025) in Sunnyvale!
+- vLLM Social Hour sponsored by Google at PyTorch Conference (link to RSVP will be added closer to the event date)
+- Google is hosting the vLLM Meetup in Seoul, South Korea (link to RSVP will be added closer to the event date)
+- Google is hosting the vLLM Meetup in Singapore (link to RSVP will be added closer to the event date)
 
-### Install `tpu_inference`:
+_Latest News_ 🔥
 
-```
-cd ~
-git clone https://github.com/vllm-project/tpu-inference.git
-cd tpu_inference
-pip install -r requirements.txt
-pip install -e .
-```
+- [2025/10] vLLM TPU 2.0: A New Unified-Backend Supporting PyTorch and JAX on TPU
+<!--TODO: add link: Read Google Cloud's Blog Post about vLLM TPU 2.0!-->
 
-### Setup pre-commit hooks
+<details>
+<summary><i>Previous News</i> 🔥</summary>
 
-```
-pip install pre-commit
+- [2025/04] vLLM TPU 1.0 announced at Cloud Next 2025
+</details>
 
-# Linting, formatting and static type checking
-pre-commit install --hook-type pre-commit --hook-type commit-msg
+---
 
-# You can manually run pre-commit with
-pre-commit run --all-files
-```
+## About
 
-## Run examples
+vLLM TPU is now powered by `tpu-inference`, an expressive and powerful new hardware plugin unifying JAX and PyTorch under a single lowering path within the vLLM project. It's faster than vLLM TPU 1.0 and offers broader model coverage and feature support. vLLM TPU now provides a framework for developers to:
 
-### Run JAX models
+- Push the limits of TPU hardware **performance** in open source.
+- Provide more **flexibility** to JAX and PyTorch users by running PyTorch model definitions performantly on TPU without any additional code changes, while also extending native support to JAX.
+- Retain vLLM **standardization** by keeping the same user experience, telemetry, and interface.
 
-Run `Llama 3.1 8B` offline inference on 4 TPU chips:
+## Get started
 
-```
-HF_TOKEN=<huggingface_token> python tpu_inference/examples/offline_inference.py \
-    --model=meta-llama/Llama-3.1-8B \
-    --tensor_parallel_size=4 \
-    --max_model_len=1024
-```
+Get started with vLLM on TPUs by following the [quickstart guide](https://github.com/vllm-project/tpu-inference/tree/main/docs/getting_started/quickstart.md).
 
-### Run JAX models with local disaggregated serving
+Visit our [documentation](https://github.com/vllm-project/tpu-inference/tree/main/docs) to learn more:
 
-Run `Llama 3.1 8B Instruct` offline inference on 4 TPU chips in disaggregated mode:
+- [Quickstart](https://github.com/vllm-project/tpu-inference/tree/main/docs/getting_started/quickstart.md)
+<!--TODO: add link to list of supported models-->
 
-```
-PREFILL_SLICES=2 DECODE_SLICES=2 HF_TOKEN=<huggingface_token> \
-python tpu_inference/examples/offline_inference.py \
-    --model=meta-llama/Meta-Llama-3-8B-Instruct \
-    --max_model_len=1024 \
-    --max_num_seqs=8
-```
+## Contribute
 
-### Run JAX models with llm-d disaggregated serving
+We're always looking for ways to partner with the community to accelerate TPU development. If you're interested in contributing to this effort, here are some open feature requests we’d love your help on:
 
-We simulate the llm-d scenario using a single TPU VM.
+1. Pooling/Embedding models <!--TODO: add link to existing FR-->
 
-```
-bash examples/disagg/run_disagg_servers.sh
-```
+## Contact us
 
-Then follow the instructions output by the command to send requests.
-
-### Run JAX model with Ray-based multi-host serving
-
-Run `Llama 3.1 70B Instruct` offline inference on 4 hosts (v6e-16) in interleaved mode:
-
-1. Deploy Ray cluster and containers:
-
-```
-~/tpu_inference/scripts/multihost/deploy_cluster.sh \
-    -s ~/tpu_inference/scripts/multihost/run_cluster.sh \
-    -d "<your_docker_image>" \
-    -c "<path_on_remote_hosts_for_hf_cache>" \
-    -t "<your_hugging_face_token>" \
-    -H "<head_node_public_ip>" \
-    -i "<head_node_private_ip>" \
-    -W "<worker1_public_ip>,<worker2_public_ip>,<etc...>"
-```
-
-1. On the head node, use `sudo docker exec -it node /bin/bash` to enter the container. And then execute:
-
-```
-HF_TOKEN=<huggingface_token> python /workspace/tpu_inference/examples/offline_inference.py \
-    --model=meta-llama/Llama-3.1-70B  \
-    --tensor_parallel_size=16  \
-    --max_model_len=1024
-```
-
-### Run vLLM Pytorch models on the JAX path
-
-Run the vLLM's implementation of `Llama 3.1 8B`, which is in Pytorch. It is the same command as above with the extra env var `MODEL_IMPL_TYPE=vllm`:
-
-```
-export MODEL_IMPL_TYPE=vllm
-export HF_TOKEN=<huggingface_token>
-python tpu_inference/examples/offline_inference.py \
-    --model=meta-llama/Llama-3.1-8B \
-    --tensor_parallel_size=4 \
-    --max_model_len=1024
-```
-
-Run the vLLM Pytorch `Qwen3-30B-A3B` MoE model, use `--enable-expert-parallel` for expert parallelism, otherwise it defaults to tensor parallelism:
-
-```
-export MODEL_IMPL_TYPE=vllm
-export HF_TOKEN=<huggingface_token>
-python vllm/examples/offline_inference/basic/generate.py \
-    --model=Qwen/Qwen3-30B-A3B \
-    --tensor_parallel_size=4 \
-    --max_model_len=1024 \
-    --enable-expert-parallel
-```
-
-## Run docker containers
-
-### Build and push docker image
-
-This can be run on a CPU VM.
-
-```
-cd ~
-git clone https://github.com/vllm-project/tpu-inference.git
-cd tpu_inference
-
-DOCKER_URI=<Specify a GCR URI>
-# example:
-# DOCKER_URI=gcr.io/cloud-nas-260507/ullm:$USER-test
-
-docker build -f docker/Dockerfile -t $DOCKER_URI .
-docker push $DOCKER_URI
-```
-
-### Download docker image and run
-
-Pull the docker image and run it:
-
-```
-DOCKER_URI=<the same URI used in docker build>
-docker pull $DOCKER_URI
-docker run \
-  --rm \
-  $DOCKER_URI \
-  python /workspace/tpu_inference/examples/offline_inference.py \
-  --model=meta-llama/Llama-3.1-8B \
-  --tensor_parallel_size=4 \
-  --max_model_len=1024 \
-```
-
-### Relevant env
-
-To switch different model implementations (default is flax_nnx):
-
-```
-MODEL_IMPL_TYPE=flax_nnx
-MODEL_IMPL_TYPE=vllm
-```
-
-To run JAX models without precompiling:
-
-```
-SKIP_JAX_PRECOMPILE=1
-```
-
-To run JAX models with random initialized weights:
-
-```
-JAX_RANDOM_WEIGHTS=1
-```
-
-To run workloads on multi-host:
-
-```
-TPU_MULTIHOST_BACKEND=ray
-
-```
-
-## Profiling
-
-There are two ways to profile your workload:
-
-### Using `PHASED_PROFILING_DIR`
-If you set the following environment variable:
-
-```
-
-PHASED_PROFILING_DIR=<DESIRED PROFILING OUTPUT DIR>
-
-```
-
-we will automatically capture profiles during three phases of your workload (assuming they are encountered):
-1. Prefill-heavy (the quotient of prefill / total scheduled tokens for the given batch is => 0.9)
-2. Decode-heavy (the quotient of prefill / total scheduled tokens for the given batch is <= 0.2)
-3. Mixed (the quotient of prefill / total scheduled tokens for the given batch is between 0.4 and 0.6)
-
-To aid in your analysis, we will also log the batch composition for the profiled batches.
-
-#### Using `USE_JAX_PROFILER_SERVER`
-If you set the following environment variable:
-
-```
-
-USE_JAX_PROFILER_SERVER=True
-
-```
-
-you can instead manually decide when to capture a profile and for how long, which can helpful if your workload (e.g. E2E benchmarking) is
-large and taking a profile of the entire workload (i.e. using the above method) will generate a massive tracing file.
-
-You can additionally set the desired profiling port (default is `9999`):
-
-```
-
-JAX_PROFILER_SERVER_PORT=XXXX
-
-```
-
-In order to use this approach, you can do the following:
-
-1. Run your typical `vllm serve` or `offline_inference` command (making sure to set `USE_JAX_PROFILER_SERVER=True`)
-2. Run your benchmarking command (`python benchmark_serving.py...`)
-3. Once the warmup has completed and your benchmark is running, start a new tensorboard instance with your `logdir` set to the desired output location of your profiles (e.g. `tensorboard --logdir=profiles/llama3-mmlu/`)
-4. Open the tensorboard instance and navigate to the `profile` page (e.g. `http://localhost:6006/#profile`)
-5. Click `Capture Profile` and, in the `Profile Service URL(s) or TPU name` box, enter `localhost:XXXX` where `XXXX` is your `JAX_PROFILER_SERVER_PORT` (default is `9999`)
-
-6. Enter the desired amount of time (in ms) you'd like to capture the profile for and then click `Capture`.   If everything goes smoothly, you should see a success message, and your `logdir` should be populated.
-
-## How to run an End-To-End (E2E) benchmark?
-In order to run an [E2E benchmark test](https://github.com/vllm-project/tpu-inference/blob/main/scripts/vllm/benchmarking/README.md), which will spin up a vLLM server with Llama 3.1 8B and run a single request from the MLPerf dataset against it, you can run the
-following command locally:
-
-```
-
-BUILDKITE_COMMIT=0f199f1 .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
-
-```
-
-While this will run the code in a Docker image, you can also run the bare `tests/e2e/benchmarking/mlperf.sh` script itself,
-being sure to pass the proper args for your machine.
-
-You might need to run the benchmark client *twice* to make sure all compilations are cached server-side.
-
-## Quantization
-### Overview
-Currently, we support overall model weight/activation quantization through the [Qwix](https://github.com/google/qwix?tab=readme-ov-file#quantization-config) framework.
-
-To enable quantization, you can do one of the following:
-
-#### Using a quantization config YAML
-Simply pass the name of a quantization config found inside the quantization config directory (`tpu_inference/models/jax/utils/quantization/configs/`), for example:
-
-```
-
-... --additional_config='{"quantization": "int8_default.yaml"}'
-
-```
-
-#### Using a quantization config JSON
-Alternatively, you can pass the explicit quantization configuration as JSON string, where each entry in `rules` corresponds to a Qwix rule (see below):
-
-```
-
-{ "qwix": { "rules": [{ "module_path": ".*", "weight_qtype": "int8", "act_qtype": "int8" }]}}
-
-```
-
-### Creating your own quantization config YAML
-To create your own quantization config YAML file:
-
-1. Add a new file to the quantization config directory (`tpu_inference/models/jax/utils/quantization/configs/`)
-2. For Qwix quantization, add a new entry to the file as follows:
-
-```
-
-qwix:
-  rules:
-    # NOTE: each entry corresponds to a qwix.QuantizationRule
-    - module_path: '.*'
-      weight_qtype: 'int8'
-      act_qtype: 'int8'
-
-```
-
-where each entry under `rules` corresponds to a `qwix.QuantizationRule`.  To learn more about Qwix and defining Qwix rules, please see the relevant docs [here](https://github.com/google/qwix?tab=readme-ov-file#quantization-config).
-
-1. To use the config, simply pass the name of the file you created in the `--additional_config`, e.g.:
-
-```
-
-... --additional_config='{"quantization": "YOUR_FILE_NAME_HERE.yaml"}'
-
-```
+- For technical questions and feature requests, use GitHub [Issues](https://github.com/vllm-project/tpu-inference/issues)
+- For discussing with fellow users, use the [TPU support topic in the vLLM Forum](https://discuss.vllm.ai/c/hardware-support/google-tpu-support/27)
+- For coordinating contributions and development, use [Slack](https://slack.vllm.ai) (#sig-tpu)
+- For collaborations and partnerships, contact us at [vllm-tpu@google.com](mailto:vllm-tpu@google.com)
