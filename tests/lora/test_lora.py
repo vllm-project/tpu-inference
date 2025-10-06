@@ -49,7 +49,7 @@ def test_single_lora():
         "lora_adapter_2", 2,
         "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_2_adapter")
     output = llm.generate(prompt,
-                          sampling_params=vllm.SamplingParams(max_tokens=256,
+                          sampling_params=vllm.SamplingParams(max_tokens=16,
                                                               temperature=0),
                           lora_request=lora_request)[0].outputs[0].text
 
@@ -82,7 +82,7 @@ def test_lora_hotswapping():
     for i, req in enumerate(lora_requests):
         output = llm.generate(prompt,
                               sampling_params=vllm.SamplingParams(
-                                  max_tokens=256, temperature=0),
+                                  max_tokens=16, temperature=0),
                               lora_request=req)[0].outputs[0].text
         answer = output.strip()[0]
 
@@ -112,7 +112,7 @@ def test_multi_lora():
     for i, req in enumerate(lora_requests):
         output = llm.generate(prompt,
                               sampling_params=vllm.SamplingParams(
-                                  max_tokens=256, temperature=0),
+                                  max_tokens=16, temperature=0),
                               lora_request=req)[0].outputs[0].text
 
         answer = output.strip()[0]
