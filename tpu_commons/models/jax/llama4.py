@@ -139,11 +139,10 @@ class Llama4ForCausalLM(nnx.Module):
             attn = Llama4Attention(
                 hidden_size=self.hidden_size,
                 dtype=dtype,
-                # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype,
-                num_attention_heads=40,
-                num_key_value_heads=8,
-                head_dim=128,
+                num_attention_heads=self.num_attention_heads,
+                num_key_value_heads=self.num_key_value_heads,
+                head_dim=self.head_dim,
                 rope_theta=500000.0,
                 # https://huggingface.co/meta-llama/Llama-4-Scout-17B-16E-Instruct/blob/main/config.json
                 rope_scaling={
