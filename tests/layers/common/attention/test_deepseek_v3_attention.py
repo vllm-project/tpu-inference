@@ -8,8 +8,8 @@ from jax.sharding import Mesh
 from parameterized import parameterized
 
 from tpu_commons.layers.common.attention.deepseek_v3_attention import MLA
-from tpu_commons.models.jax.attention import get_kv_cache_shape
-from tpu_commons.models.jax.attention_metadata import AttentionMetadata
+from tpu_commons.layers.common.attention_metadata import AttentionMetadata
+from tpu_commons.layers.jax.attention import get_kv_cache_shape
 
 
 class TestMLA(unittest.TestCase):

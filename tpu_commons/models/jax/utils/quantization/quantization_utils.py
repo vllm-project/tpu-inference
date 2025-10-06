@@ -20,8 +20,8 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 from tpu_commons import utils
+from tpu_commons.layers.common.attention_metadata import AttentionMetadata
 from tpu_commons.logger import init_logger
-from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.runner.kv_cache import (DEFAULT_KV_CACHE_DTYPE,
                                          create_kv_caches)
 from tpu_commons.utils import device_array

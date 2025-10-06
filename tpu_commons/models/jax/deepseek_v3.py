@@ -18,8 +18,8 @@ from tpu_commons.layers.common.attention.deepseek_v3_attention import MLA
 from tpu_commons.layers.common.constants import KVCacheType
 from tpu_commons.layers.common.layers import (DenseFFW, Embedder, LMhead,
                                               RMSNorm)
-from tpu_commons.layers.common.moe.deepseek_moe import (DeepSeekV3Router,
-                                                        SparseMoE)
+from tpu_commons.layers.common.moe.deepseek_v3_moe import (DeepSeekV3Router,
+                                                           SparseMoE)
 from tpu_commons.layers.common.moe.moe import MoE
 from tpu_commons.layers.common.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)

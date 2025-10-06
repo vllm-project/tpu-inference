@@ -11,9 +11,9 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 
 from tpu_commons import utils
+from tpu_commons.layers.common.attention_metadata import AttentionMetadata
+from tpu_commons.layers.jax.attention import attention
 from tpu_commons.logger import init_logger
-from tpu_commons.models.jax.attention import attention
-from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 # Register custom op dispatcher.
 from tpu_commons.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context

@@ -12,9 +12,9 @@ from jax.sharding import PartitionSpec as P
 from tpu_commons import utils
 from tpu_commons.kernels.ragged_paged_attention.v3.kernel import \
     ragged_paged_attention
+from tpu_commons.layers.common.attention_metadata import AttentionMetadata
 from tpu_commons.layers.common.base import create_param
 from tpu_commons.layers.jax.rope import apply_rope
-from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 
 KVCache = Tuple[jax.Array, jax.Array]
 
