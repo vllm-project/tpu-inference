@@ -391,11 +391,12 @@ def _ragged_paged_attention_kernel(
         if debug_mode:
             # Skip DMA if debug mode is enabled.
             return
-        cp = pltpu.make_async_copy(src, dst, sem)
         if wait:
-            cp.wait()
+            # Wait on a dummy DMA on dst ref to save SREGs used for
+            # index/offset calculation.
+            pltpu.make_async_copy(dst, dst, sem).wait()
         else:
-            cp.start()
+            pltpu.make_async_copy(src, dst, sem).start()
 
     def _fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx, *, wait=False):
         sem = sems.at[0, bkv_sem_idx]
@@ -509,30 +510,39 @@ def _ragged_paged_attention_kernel(
         debug_print("[RPA debug] p_ignore={}", p_ignore)
         debug_print("[RPA debug] page_indices_offset={}", page_indices_offset)
 
-        def loop_body(i, states):
-            update_sz, ignore = states
-            sz = jnp.minimum(page_size - ignore, update_sz)
+        if wait:
+            dst = cache_hbm_ref.at[pl.ds(
+                0,
+                update_sz,
+            )]
+            pltpu.make_async_copy(dst, dst, sem).wait()
+        else:
 
-            _async_copy(
-                vmem_ref.at[pl.ds((p_ignore + i) * page_size + ignore, sz)],
-                cache_hbm_ref.at[pl.ds(
-                    page_indices_ref[page_indices_offset + i] * page_size +
-                    ignore,
-                    sz,
-                )],
-                sem,
-                wait,
+            def loop_body(i, states):
+                update_sz, ignore = states
+                sz = jnp.minimum(page_size - ignore, update_sz)
+
+                _async_copy(
+                    vmem_ref.at[pl.ds((p_ignore + i) * page_size + ignore,
+                                      sz)],
+                    cache_hbm_ref.at[pl.ds(
+                        page_indices_ref[page_indices_offset + i] * page_size +
+                        ignore,
+                        sz,
+                    )],
+                    sem,
+                    wait,
+                )
+                debug_print("[RPA debug] loop_body i={}, sz={}", i, sz)
+                return update_sz - sz, 0
+
+            lax.fori_loop(
+                0,
+                kv_p_end - kv_p_start,
+                loop_body,
+                (update_sz, ignore),  # total transfer size
+                unroll=False,
             )
-            debug_print("[RPA debug] loop_body i={}, sz={}", i, sz)
-            return update_sz - sz, 0
-
-        lax.fori_loop(
-            0,
-            kv_p_end - kv_p_start,
-            loop_body,
-            (update_sz, ignore),  # total transfer size
-            unroll=False,
-        )
 
     def _fetch_bq(seq_idx, bq_idx, bq_sem_idx, *, wait=False):
         sem = sems.at[1, bq_sem_idx]
