@@ -255,9 +255,6 @@ class TPUWorker(AbstractTpuWorker):
         # and the vLLM side should be updated to handle the translation.
         kv_cache_specs = self.model_runner.get_kv_cache_spec()
 
-        if len(kv_cache_specs) == 0:
-            return kv_cache_specs
-
         # TODO(kyuyeunk): Instead of checking page_size_bytes here, introduce
         # feature that allows overriding page_size_bytes of KVCacheSpec.
         vllm_page_size_bytes = get_uniform_page_size(kv_cache_specs)
