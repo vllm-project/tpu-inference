@@ -72,16 +72,16 @@ class CompilationManager:
 
         with self.runner.maybe_setup_dummy_loras(self.runner.lora_config):
             self._precompile_backbone_text_only()
-            if self.runner.is_multimodal_model:
-                self._precompile_backbone_with_inputs_embeds()
-            self._precompile_select_from_array()
-            self._precompile_compute_logits()
-            self._precompile_disagg_utils()
-            self._precompile_sampling()
-            self._precompile_gather_logprobs()
-            self._precompile_structured_decoding()
-            if self.runner.speculative_config:
-                self._precompile_rejection_sampler()
+            # if self.runner.is_multimodal_model:
+            #     self._precompile_backbone_with_inputs_embeds()
+            # self._precompile_select_from_array()
+            # self._precompile_compute_logits()
+            # self._precompile_disagg_utils()
+            # self._precompile_sampling()
+            # self._precompile_gather_logprobs()
+            # self._precompile_structured_decoding()
+            # if self.runner.speculative_config:
+            #     self._precompile_rejection_sampler()
 
     def _precompile_backbone_helper(self, name, *, input_ids, positions,
                                     inputs_embeds) -> None:
@@ -124,6 +124,27 @@ class CompilationManager:
             layer_name_to_kvcache_index,
             lora_metadata,
         ):
+            import pickle, pathlib
+            from jax.experimental import serialize_executable as se
+            
+            args=(state, kv_caches, input_ids, attention_metadata, inputs_embeds, layer_name_to_kvcache_index, lora_metadata)
+            compiled = self.runner.model_fn.lower(*args).compile()
+            # --- serialize ---
+            blob, in_tree, out_tree = se.serialize(compiled)
+            
+            pathlib.Path("exec.bin").write_bytes(blob)
+            pathlib.Path("exec.trees.pkl").write_bytes(pickle.dumps((in_tree, out_tree)))
+            # pickle doesn't capture sharding info. So make sure to run on one device (JAX_DEVICES=0)
+            with open("args.pkl", "wb") as f:
+                pickle.dump(args, f)
+                
+            # orbax doesn't work somehow.
+            # import orbax.checkpoint as ocp
+            # # checkpointer = ocp.Checkpointer(ocp.PyTreeCheckpointHandler())
+            # ckpt_dir = "/mnt/disks/persist/tpu_commons/ckpt_args"
+            # checkpointer = ocp.PyTreeCheckpointer()
+            # checkpointer.save(ckpt_dir, args)
+
             kv_caches, hidden_states, aux_hidden_states = self.runner.model_fn(
                 state, kv_caches, input_ids, attention_metadata, inputs_embeds,
                 layer_name_to_kvcache_index, lora_metadata)
@@ -148,7 +169,7 @@ class CompilationManager:
             )
 
     def _precompile_backbone_text_only(self) -> None:
-        for num_tokens in self.runner.num_tokens_paddings:
+        for num_tokens in self.runner.num_tokens_paddings[:1]:
             input_ids = self._create_dummy_tensor((num_tokens, ), jnp.int32)
             positions = self._create_dummy_tensor((num_tokens, ), jnp.int32)
             self._precompile_backbone_helper("backbone",
