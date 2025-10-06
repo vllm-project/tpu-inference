@@ -939,9 +939,10 @@ class DeepSeekV3WeightLoader:
 
 def weights_dequant_cpu(x: torch.Tensor,
                         s: torch.Tensor,
-                        output_dtype: jnp.dtype,
+                        output_dtype: torch.dtype,
                         block_size: int = 128) -> torch.Tensor:
     assert x.dim() == 2 and s.dim() == 2, "Both x and s must be 2D tensors"
+    torch_output_type = DTYPE_VIEW_MAP.get(jnp.dtype(output_dtype))
     M, N = x.shape
 
     x = x.to(torch.float32)
@@ -975,4 +976,4 @@ def weights_dequant_cpu(x: torch.Tensor,
             scale = s[M // block_size, j // block_size]
             y[M_main:M, j:j + block_size] = block * scale
 
-    return y.to(j2t_dtype(jnp.dtype(output_dtype)))
+    return y.to(torch_output_type)
