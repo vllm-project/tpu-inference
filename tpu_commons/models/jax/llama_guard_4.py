@@ -1,6 +1,6 @@
 import math
 import re
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -639,24 +639,23 @@ class LlamaGuard4ForCausalLM(nnx.Module):
 
                 # Added ".spec" to the ends of these TODO: removed this, maybe revert
                 activation_attention_td=NamedSharding(self.mesh,
-                                                      P('data',
-                                                        'model')),  #.spec,
+                                                      P('data', 'model')).spec,
                 activation_q_td=NamedSharding(self.mesh, P('data',
-                                                           'model')),  #.spec,
+                                                           'model')).spec,
                 query_tnh=NamedSharding(self.mesh, P('data', 'model',
-                                                     None)),  #.spec,
+                                                     None)).spec,
                 keyvalue_skh=NamedSharding(self.mesh, P('data', 'model',
-                                                        None)),  #.spec,
+                                                        None)).spec,
                 activation_attention_out_td=NamedSharding(
-                    self.mesh, P('data', 'model')),  #.spec,
+                    self.mesh, P('data', 'model')).spec,
                 attn_o_tnh=NamedSharding(self.mesh, P('data', 'model',
-                                                      None)),  #.spec,
+                                                      None)).spec,
                 dnh_sharding=NamedSharding(self.mesh, P(None, 'model',
-                                                        None)),  #.spec,
+                                                        None)).spec,
                 dkh_sharding=NamedSharding(self.mesh, P(None, 'model',
-                                                        None)),  #.spec,
+                                                        None)).spec,
                 nhd_sharding=NamedSharding(self.mesh, P('model', None,
-                                                        None)),  #.spec,
+                                                        None)).spec,
             )
 
             pre_attention_norm = RMSNorm(
@@ -744,17 +743,23 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         nnx.reseed(self, default=new_rng_key)
 
     def __call__(
-        self,
-        kv_caches: List[jax.Array],
-        input_ids: jax.Array,
-        attention_metadata: AttentionMetadata,
-        pixel_values: Optional[jax.Array] = None,
-        inputs_embeds: Optional[jax.Array] = None,
-        *args,
+            self,
+            kv_caches: List[jax.Array],
+            input_ids: jax.Array,
+            attention_metadata: AttentionMetadata,
+            inputs_embeds: Optional[jax.Array] = None,
+            layer_metadata_tuple: Optional[Tuple] = None,
+            lora_metadata: Optional[Any] = None,  # The 7th argument
+            *args,  # Catch any remaining args
     ) -> Tuple[List[KVCacheType], jax.Array]:
         is_prefill = False
 
-        is_prefill = False
+        print(
+            "this is the value of input_embeds when first passed into LlamaGuard4ForCausalLM.__call__: ",
+            inputs_embeds)
+        print(
+            "this is the value of input_ids when first passed into LlamaGuard4ForCausalLM.__call__: ",
+            input_ids)
 
         # --- 1. DETERMINE INPUT TENSOR (FUSED/EMBEDDED) ---
         # NOTE: The runner passes either input_ids (text-only) OR inputs_embeds (fused MM embeds).
@@ -769,6 +774,10 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             raise ValueError(
                 "Cannot run forward pass: Both input_ids and inputs_embeds are None."
             )
+
+        print(
+            "this is the value of x_TD after if-elif statement in LlamaGuard4ForCausalLM.__call__: ",
+            x_TD)
 
         # # # Debug print the input_ids to ensure they're being passed correctly
         # # jax.debug.print("Input IDs: {}", input_ids)
@@ -861,7 +870,9 @@ class LlamaGuard4ForCausalLM(nnx.Module):
 
         # jax.debug.print("\nJAX Final Hidden States:\n{}", final_activation_TD)
 
-        return kv_caches, final_activation_TD
+        aux_hidden_states = None
+
+        return kv_caches, final_activation_TD, aux_hidden_states
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         logits_TV = jnp.dot(hidden_states,

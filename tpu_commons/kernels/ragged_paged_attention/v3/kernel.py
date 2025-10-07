@@ -1200,20 +1200,10 @@ def static_validate_inputs(
 
 @functools.partial(
     jax.jit,
-    static_argnames=(
-        "sm_scale",
-        "sliding_window",
-        "soft_cap",
-        "mask_value",
-        "q_scale",
-        "k_scale",
-        "v_scale",
-        "chunk_prefill_size",
-        "num_kv_pages_per_block",
-        "num_queries_per_block",
-        "vmem_limit_bytes",
-        "debug_mode",
-    ),
+    static_argnames=("sm_scale", "sliding_window", "soft_cap", "mask_value",
+                     "q_scale", "k_scale", "v_scale", "chunk_prefill_size",
+                     "num_kv_pages_per_block", "num_queries_per_block",
+                     "vmem_limit_bytes", "debug_mode", "is_causal"),
     donate_argnames=("kv_cache", ),
 )
 def ragged_paged_attention(
