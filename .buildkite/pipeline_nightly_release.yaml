@@ -1,0 +1,25 @@
+steps:
+  # === Build Wheel and Source Distribution (sdist) ===
+  - label: ":python: Build Wheel and sdist"
+    key: build-package
+    if: build.env("NIGHTLY") == "1"
+    commands:
+      - "pip install -r requirements.txt"
+      - "pip install build"
+      - "rm -rf dist/"
+      - "python3 -m build"
+      - "buildkite-agent artifact upload 'dist/*.whl'"
+
+  # === Publish to PyPI (Using Twine) ===
+  - label: ":pypi: Publish to PyPI"
+    key: publish-pypi
+    if: build.env("NIGHTLY") == "1"
+    depends_on:
+      - build-package
+    commands:
+      - "pip install twine"
+      - "buildkite-agent artifact download 'dist/*.whl' --build $BUILDKITE_BUILD_ID --step 'build-package'"
+      - "twine upload dist/*.whl --verbose --repository-url https://test.pypi.org/legacy/"
+    env:
+      TWINE_USERNAME: "${PYPI_USERNAME}"  
+      TWINE_PASSWORD: "${PYPI_PASSWORD}"  
