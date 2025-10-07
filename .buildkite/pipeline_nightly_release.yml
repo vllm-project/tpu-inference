@@ -3,6 +3,8 @@ steps:
   - label: ":python: Build Wheel and sdist"
     key: build-package
     if: build.env("NIGHTLY") == "1"
+    agents:
+       queue: tpu_v6e_queue
     commands:
       - "pip install -r requirements.txt"
       - "pip install build"
@@ -14,6 +16,8 @@ steps:
   - label: ":pypi: Publish to PyPI"
     key: publish-pypi
     if: build.env("NIGHTLY") == "1"
+    agents:
+       queue: tpu_v6e_queue
     depends_on:
       - build-package
     commands:
