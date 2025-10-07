@@ -1,4 +1,6 @@
-<h1 align="center"> vLLM TPU</h1>
+<p align="center">
+  <img src="docs/assets/tpu2.0_banner.png" alt="vLLM TPU 2.0">
+</p>
 
 <h3 align="center">
 A high performance backend unifying PyTorch and JAX in vLLM on TPU
