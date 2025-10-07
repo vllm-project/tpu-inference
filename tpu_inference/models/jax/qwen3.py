@@ -96,7 +96,7 @@ class QuantizedLinear(nnx.Linear):
             raise ValueError(f"weight scale was not set for {path}")
 
         # Convert back to fp8 as it was casted up to fp32 from fp8 while loading weights.
-        kernel = kernel.astype(jnp.float8_e4m3fn)
+        # kernel = kernel.astype(jnp.float8_e4m3fn)
         # Trasponse the weight shape as the quantized matmul will take it as (n_output_feature, n_input_feature).
         kernel = jnp.transpose(kernel)
         # Make the weight scale shpae as (x), because it comes as (x, 1).
