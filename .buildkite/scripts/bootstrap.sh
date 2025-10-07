@@ -14,7 +14,7 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
   # If it's a PR, check for the specific label
   if [[ $PR_LABELS == *"ready"* ]]; then
     echo "Found 'ready' label on PR. Uploading main pipeline..."
-    upload_pipeline()
+    upload_pipeline
   else
     echo "No 'ready' label found on PR. Skipping main pipeline upload."
     exit 0 # Exit with 0 to indicate success (no error, just skipped)
@@ -22,7 +22,7 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
 else
   # If it's NOT a Pull Request (e.g., branch push, tag, manual build)
   echo "This is not a Pull Request build. Uploading main pipeline."
-  upload_pipeline()
+  upload_pipeline
 fi
 
 echo "--- Buildkite Bootstrap Finished ---"
