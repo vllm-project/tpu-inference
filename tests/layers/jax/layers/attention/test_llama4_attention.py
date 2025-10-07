@@ -12,10 +12,10 @@ from flax import nnx
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
 
-from tpu_commons.layers.common.attention.attention import AttentionMetadata
-from tpu_commons.layers.common.attention.llama4_attention import (
-    L2Norm, Llama4Attention)
-from tpu_commons.layers.common.sharding import build_mesh
+from tpu_commons.layers.common.attention_metadata import AttentionMetadata
+from tpu_commons.layers.jax.attention.llama4_attention import (L2Norm,
+                                                               Llama4Attention)
+from tpu_commons.layers.jax.sharding import build_mesh
 
 
 @dataclass

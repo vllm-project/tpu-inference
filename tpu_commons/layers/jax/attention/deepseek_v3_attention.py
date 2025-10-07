@@ -14,9 +14,9 @@ from tpu_commons import utils
 from tpu_commons.kernels.ragged_paged_attention.v3.kernel import \
     ragged_paged_attention
 from tpu_commons.layers.common.attention_metadata import AttentionMetadata
-from tpu_commons.layers.common.base import create_param
-from tpu_commons.layers.common.layers import RMSNorm
-from tpu_commons.layers.common.rope import DeepseekScalingRotaryEmbedding
+from tpu_commons.layers.jax.base import create_param
+from tpu_commons.layers.jax.layers import RMSNorm
+from tpu_commons.layers.jax.rope import DeepseekScalingRotaryEmbedding
 
 KVCache = Tuple[jax.Array, jax.Array]
 

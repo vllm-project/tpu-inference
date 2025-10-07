@@ -1,8 +1,8 @@
 from jax import numpy as jnp
 from jax._src import test_util as jtu
 
-from tpu_commons.layers.common.rope import (DeepseekScalingRotaryEmbedding,
-                                            RotaryEmbedding)
+from tpu_commons.layers.jax.rope import (DeepseekScalingRotaryEmbedding,
+                                         RotaryEmbedding)
 
 
 class RotaryEmbeddingTest(jtu.JaxTestCase):

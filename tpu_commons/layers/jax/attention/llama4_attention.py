@@ -6,9 +6,9 @@ from flax import nnx
 from jax.sharding import Sharding
 
 from tpu_commons import utils
-from tpu_commons.layers.common.attention.attention import Attention, KVCache
 from tpu_commons.layers.common.attention_metadata import AttentionMetadata
-from tpu_commons.layers.jax.rope import apply_rope
+from tpu_commons.layers.jax.attention.attention import Attention, KVCache
+from tpu_commons.layers.jax.rope_interface import apply_rope
 from tpu_commons.logger import init_logger
 
 logger = init_logger(__name__)

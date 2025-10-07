@@ -6,8 +6,8 @@ from flax import nnx
 from flax.typing import Sharding
 from jaxtyping import Float
 
-from tpu_commons.layers.common.base import create_param
-from tpu_commons.layers.common.layers import FlaxUtils
+from tpu_commons.layers.jax.base import create_param
+from tpu_commons.layers.jax.layers import FlaxUtils
 
 modeling_flax_utils = FlaxUtils()
 

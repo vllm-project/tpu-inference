@@ -5,10 +5,10 @@ from typing import Any, Tuple
 import jax
 from flax import nnx
 
-from tpu_commons.layers.common.attention.attention import (AttentionMetadata,
-                                                           KVCache)
-from tpu_commons.layers.common.layers import DenseFFW
-from tpu_commons.layers.common.moe.moe import MoE
+from tpu_commons.layers.jax.attention.attention import (AttentionMetadata,
+                                                        KVCache)
+from tpu_commons.layers.jax.layers import DenseFFW
+from tpu_commons.layers.jax.moe.moe import MoE
 
 
 @dataclass(kw_only=True)

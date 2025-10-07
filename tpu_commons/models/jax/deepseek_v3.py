@@ -13,15 +13,14 @@ from torchax.ops.mappings import j2t_dtype
 from vllm.config import VllmConfig
 
 from tpu_commons import utils
-from tpu_commons.layers.common.attention.attention import AttentionMetadata
-from tpu_commons.layers.common.attention.deepseek_v3_attention import MLA
-from tpu_commons.layers.common.constants import KVCacheType
-from tpu_commons.layers.common.layers import (DenseFFW, Embedder, LMhead,
-                                              RMSNorm)
-from tpu_commons.layers.common.moe.deepseek_v3_moe import (DeepSeekV3Router,
-                                                           SparseMoE)
-from tpu_commons.layers.common.moe.moe import MoE
-from tpu_commons.layers.common.transformer_block import (
+from tpu_commons.layers.jax.attention.attention import AttentionMetadata
+from tpu_commons.layers.jax.attention.deepseek_v3_attention import MLA
+from tpu_commons.layers.jax.constants import KVCacheType
+from tpu_commons.layers.jax.layers import DenseFFW, Embedder, LMhead, RMSNorm
+from tpu_commons.layers.jax.moe.deepseek_v3_moe import (DeepSeekV3Router,
+                                                        SparseMoE)
+from tpu_commons.layers.jax.moe.moe import MoE
+from tpu_commons.layers.jax.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.utils.quantization.quantization_utils import \

@@ -31,12 +31,12 @@ from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from tpu_commons import utils as common_utils
 from tpu_commons.layers.common.attention_metadata import AttentionMetadata
-from tpu_commons.layers.common.sharding import build_mesh
 from tpu_commons.layers.jax.sample.rejection_sampler import RejectionSampler
 from tpu_commons.layers.jax.sample.sampling import (compute_logprobs,
                                                     gather_logprobs, sample)
 from tpu_commons.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
+from tpu_commons.layers.jax.sharding import build_mesh
 from tpu_commons.logger import init_logger
 from tpu_commons.models.common.model_loader import get_model
 from tpu_commons.models.jax.utils.weight_utils import (

@@ -9,12 +9,11 @@ from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from vllm.config import VllmConfig
 
-from tpu_commons.layers.common.attention.attention import (Attention,
-                                                           AttentionMetadata)
-from tpu_commons.layers.common.constants import KVCacheType
-from tpu_commons.layers.common.layers import (DenseFFW, Embedder, LMhead,
-                                              RMSNorm)
-from tpu_commons.layers.common.transformer_block import TransformerBlock
+from tpu_commons.layers.jax.attention.attention import (Attention,
+                                                        AttentionMetadata)
+from tpu_commons.layers.jax.constants import KVCacheType
+from tpu_commons.layers.jax.layers import DenseFFW, Embedder, LMhead, RMSNorm
+from tpu_commons.layers.jax.transformer_block import TransformerBlock
 from tpu_commons.logger import init_logger
 from tpu_commons.models.jax.utils.weight_utils import (MetadataMap,
                                                        load_hf_weights)

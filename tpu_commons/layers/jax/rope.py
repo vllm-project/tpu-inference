@@ -1,214 +1,172 @@
 import math
-from typing import Any, Dict
+from dataclasses import dataclass, field
+from typing import Optional
 
 import jax
-import jax.numpy as jnp
+from flax import nnx
+from jax import numpy as jnp
 
 
-def apply_rope(
-    # (seq_len, num_heads, head_dim)
-    inputs: jax.Array,
-    # (3, seq_len) for M-RoPE, otherwise (seq_len,)
-    positions: jax.Array,
-    head_dim: int,
-    rope_theta: float = 10000,
-    rope_scaling: Dict[str, Any] = None,
-    rope_input_ordering: str = "split",
-) -> jax.Array:
+@dataclass(kw_only=True)
+class RotaryEmbedding(nnx.Module):
     """
-    Applies Rotary Positional Embedding using the sine and cosine strategy.
-
-    This implementation assumes the input tensor has a shape that might include
-    padding on the last dimension (head_dim).
-    RoPE is applied only to the first `head_dim` features, and the result is
-    padded back to the original dimension if necessary.
-    If rope_input_ordering is "split", then the input pairs for rotation are taken one from the
-    first and one from the second half of the head_dim. If it is "interleaved" then
-    adjacent values are used as inputs for rotation.
+    An implementation of the original rotary positional embedding.
     """
+    rotary_dim: int
+    rope_theta: float
+    original_max_position_embeddings: int
+    dtype: jnp.dtype
+    sin_cos_cache: Optional[jax.Array] = field(init=False, default=None)
 
-    # M-RoPE support for Qwen2.5-VL
-    if positions.ndim == 2 and positions.shape[0] == 3:
-        mrope_section = rope_scaling.get("mrope_section",
-                                         None) if rope_scaling else None
-        # NOTE: We assume mrope_section is always available
-        # as Qwen2.5-VL is the only model using mrope
-        assert mrope_section is not None
+    def initialize_cache(self):
+        """Computes and caches the sin/cos embeddings."""
+        if self.sin_cos_cache is None:
+            self.sin_cos_cache = self._compute_sin_cos()
 
-        split_indices = [mrope_section[0], mrope_section[0] + mrope_section[1]]
+    def _compute_inv_freq(self):
+        fractions_H = jnp.arange(0, self.rotary_dim, 2,
+                                 dtype=jnp.float32) / self.rotary_dim
+        inv_freq_H = 1.0 / (self.rope_theta**fractions_H)
+        return inv_freq_H
 
-        # Indices for the features to be rotated (first half of head_dim)
-        all_freq_indices = jnp.arange(head_dim // 2)
+    def _compute_sin_cos(self):
+        inv_freq_H = self._compute_inv_freq()
+        t = jnp.arange(self.original_max_position_embeddings,
+                       dtype=jnp.float32)
 
-        # Split the indices according to mrope_section. This is valid because split_indices are static.
-        freq_indices_split = jnp.split(all_freq_indices, split_indices)
-        # freq_indices_split is a list of 3 JAX arrays.
+        freqs = jnp.einsum("...T,k->...Tk",
+                           t,
+                           inv_freq_H,
+                           precision=jax.lax.Precision.HIGHEST)
+        sin, cos = jnp.sin(freqs), jnp.cos(freqs)
+        cache = jnp.concatenate((cos, sin), axis=-1)
+        return cache
 
-        cos_list = []
-        sin_list = []
-
-        for i in range(3):  # For each of the 3 position dimensions
-            current_indices = freq_indices_split[i]
-
-            if current_indices.size == 0:
-                # This section is empty, skip.
-                continue
-
-            # inv_freq shape: (mrope_section[i],)
-            inv_freq = 1.0 / (rope_theta**(current_indices * 2.0 / head_dim))
-
-            # positions[i]: (seq_len,)
-            # freqs shape: (seq_len, mrope_section[i])
-            freqs = jnp.outer(positions[i], inv_freq)
-
-            cos_list.append(jnp.cos(freqs))
-            sin_list.append(jnp.sin(freqs))
-
-        # Concatenate along the feature dimension
-        # cos, sin shape: (seq_len, head_dim//2)
-        cos = jnp.concatenate(cos_list, axis=1)
-        sin = jnp.concatenate(sin_list, axis=1)
-
-        # Add num_heads dimension for broadcasting
-        cos = cos[:, jnp.newaxis, :]  # Shape: (seq_len, 1, head_dim//2)
-        sin = sin[:, jnp.newaxis, :]  # Shape: (seq_len, 1, head_dim//2)
-
-        # Apply rotation
-        inputs_real = inputs[..., :head_dim // 2]
-        inputs_imag = inputs[..., head_dim // 2:head_dim]
-
-        outputs_real = inputs_real * cos - inputs_imag * sin
-        outputs_imag = inputs_real * sin + inputs_imag * cos
-
-        out = jnp.concatenate([outputs_real, outputs_imag], axis=-1)
-
-    # Standard RoPE
-    else:
-        # Calculate inverse frequencies (timescale)
-        fraction = 2 * jnp.arange(0, head_dim // 2) / head_dim
-        timescale = 1.0 / (rope_theta**fraction)
-
-        # Apply scaling if provided
-        if rope_scaling:
-            timescale = apply_rope_scaling(timescale, rope_scaling)
-
-        # Prepare for rotation by calculating sin and cos values
-        # `sinusoid_inp` gets shape (batch * seq_len, head_dim/2)
-        sinusoid_inp = positions[..., jnp.newaxis] * timescale[jnp.newaxis, :]
-
-        # Broadcast over the 'heads' dimension, assuming shape (batch*seq, heads, head_dim)
-        sinusoid_inp = sinusoid_inp[:, jnp.newaxis, ...]
-        sin = jnp.sin(sinusoid_inp)
-        cos = jnp.cos(sinusoid_inp)
-
-        if rope_input_ordering == "interleaved":
-            # Reshape to group adjacent features for rotation, matching new_apply_rope
-            rotary_inputs = inputs[
-                ..., :head_dim]  # Take just the non-padded amount.
-            reshaped_inputs = rotary_inputs.reshape(*rotary_inputs.shape[:-1],
-                                                    -1, 2)
-
-            # Apply the rotation
-            first_half = reshaped_inputs[..., 0]
-            second_half = reshaped_inputs[..., 1]
-        else:
-            first_half = inputs[..., :head_dim // 2]
-            second_half = inputs[..., head_dim // 2:head_dim]
-
-        first_part = first_half * cos - second_half * sin
-        second_part = second_half * cos + first_half * sin
-
-        # Combine the rotated parts and reshape back
-        if rope_input_ordering == "interleaved":
-            out_stacked = jnp.stack([first_part, second_part], axis=-1)
-            out = out_stacked.reshape(rotary_inputs.shape)
-        else:
-            out = jnp.concatenate([first_part, second_part], axis=-1)
-
-    # If the original input was padded, pad the output with zeros to match.
-    padded_head_dim = inputs.shape[-1]
-    if padded_head_dim > head_dim:
-        pad_width = padded_head_dim - head_dim
-        pad_config = [(0, 0)] * (out.ndim - 1) + [(0, pad_width)]
-        out = jnp.pad(out, pad_config)
-
-    return out.astype(inputs.dtype)
+    def apply_rope(self, positions: jax.Array, x_TNH: jax.Array):
+        assert x_TNH.ndim == 3
+        assert self.sin_cos_cache is not None, "RoPE cache not initialized."
+        cos_sin_TH = self.sin_cos_cache[positions]
+        # cos, sin: (T, H/2)
+        cos_TH, sin_TH = jnp.split(cos_sin_TH, 2, axis=-1)
+        assert sin_TH.ndim == 2 and cos_TH.ndim == 2
+        # cos, sin: (T, 1, H/2)
+        cos_T1H, sin_T1H = cos_TH[:, None, :], sin_TH[:, None, :]
+        # first_half, second_half: (T, N, H/2)
+        first_half_TNH, second_half_TNH = jnp.split(x_TNH, 2, axis=-1)
+        combined = jnp.concatenate([
+            first_half_TNH * cos_T1H - second_half_TNH * sin_T1H,
+            second_half_TNH * cos_T1H + first_half_TNH * sin_T1H
+        ],
+                                   axis=-1)
+        return combined.astype(self.dtype)
 
 
-def apply_longrope(
-    inputs: jax.Array,
-    positions: jax.Array,
-    head_dim: int,
-    rope_scaling: Dict[str, Any],
-    original_max_position_embeddings: int,
-    max_position_embeddings: int,
-    rope_theta: float = 10000,
-) -> jax.Array:
-    # LongRoPE implementation specific to Phi-3
-    # Implementation based on https://github.com/huggingface/transformers/blob/main/src/transformers/models/phi3/modeling_phi3.py#L197-L235
+@dataclass(kw_only=True)
+class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
+    """
+    Rotary Embedding for deepseek, with scaling and YaRN method.
+    """
+    scaling_factor: float
+    beta_fast: int = 32
+    beta_slow: int = 1
+    mscale_value: float = 1
+    mscale_all_dim: float = 0
 
-    scale = max_position_embeddings / original_max_position_embeddings
-    if scale <= 1.0:
-        mscale = 1.0
-    else:
-        mscale = jnp.sqrt(1 + (jnp.log(scale) /
-                               jnp.log(original_max_position_embeddings)))
+    def initialize_cache(self):
+        """Computes and caches the sin/cos embeddings."""
+        # The second condition is for the Qwix case, where we need to call `initialize_cache` on
+        # the abstract model.  Thus, when we go to call `initialize_cache` on the concrete model,
+        # this method will have been called already, but we need to recompute the cache so that
+        # it's concrete (otherwise, it'll still be a jax.ShapeDtypeStruct).
+        if self.sin_cos_cache is not None and not isinstance(
+                self.sin_cos_cache, jax.ShapeDtypeStruct):
+            return
+        self.mscale = _yarn_get_mscale(
+            self.scaling_factor, self.mscale_value) / _yarn_get_mscale(
+                self.scaling_factor, self.mscale_all_dim)
+        self.sin_cos_cache = self._compute_sin_cos()
 
-    seq_len = inputs.shape[0]
-    if seq_len > original_max_position_embeddings:
-        long_factor = jnp.array(rope_scaling.get("long_factor"))
-        timescale = 1.0 / (long_factor * (rope_theta**(
-            (2 * jnp.arange(0, head_dim // 2)) / head_dim)))
-    else:
-        short_factor = jnp.array(rope_scaling.get("short_factor"))
-        timescale = 1.0 / (short_factor * (rope_theta**(
-            (2 * jnp.arange(0, head_dim // 2)) / head_dim)))
+    def _compute_inv_freq(self):
+        fractions = jnp.arange(0, self.rotary_dim, 2,
+                               dtype=jnp.float32) / self.rotary_dim
+        inv_freq_extrapolation = 1.0 / (self.rope_theta**fractions)
+        inv_freq_interpolation = 1.0 / (self.scaling_factor *
+                                        self.rope_theta**fractions)
+        low, high = _yarn_find_correction_range(
+            self.beta_fast, self.beta_slow, self.rotary_dim, self.rope_theta,
+            self.original_max_position_embeddings)
 
-    # Calculate RoPE positions
-    sinusoid_inp = positions[..., jnp.newaxis] * timescale[jnp.newaxis, :]
-    sinusoid_inp = sinusoid_inp[:, jnp.newaxis, ...]
-    sin = jnp.sin(sinusoid_inp) * mscale
-    cos = jnp.cos(sinusoid_inp) * mscale
+        # Get n-d rotational scaling corrected for extrapolation
+        inv_freq_mask = 1 - _yarn_linear_ramp_mask(
+            low, high, self.rotary_dim // 2).astype(jnp.float32)
+        inv_freq = inv_freq_interpolation * (
+            1 - inv_freq_mask) + inv_freq_extrapolation * inv_freq_mask
+        return inv_freq
 
-    # Padding logic
-    padded_head_dim = inputs.shape[-1]
+    def _compute_sin_cos(self):
+        inv_freq_H = self._compute_inv_freq()
+        t = jnp.arange(self.original_max_position_embeddings *
+                       self.scaling_factor,
+                       dtype=jnp.float32)
+        freqs = jnp.einsum("...T,k->...Tk", t, inv_freq_H)
+        sin, cos = jnp.sin(freqs) * self.mscale, jnp.cos(freqs) * self.mscale
+        cache = jnp.concatenate((cos, sin), axis=-1)
+        return cache
 
-    # Apply RoPE mechanism
-    first_half = inputs[..., :head_dim // 2]
-    second_half = inputs[..., head_dim // 2:head_dim]
+    def apply_rope(self, positions: jax.Array, x_TNH: jax.Array):
+        assert x_TNH.ndim == 3
+        assert self.sin_cos_cache is not None, "RoPE cache not initialized."
+        cos_sin_TH = self.sin_cos_cache[positions]
+        # cos, sin: (T, H/2)
+        cos_TH, sin_TH = jnp.split(cos_sin_TH, 2, axis=-1)
+        assert sin_TH.ndim == 2 and cos_TH.ndim == 2
+        # cos, sin: (T, 1, H/2)
+        cos_T1H, sin_T1H = cos_TH[:, None, :], sin_TH[:, None, :]
+        # even, odd: (T, N, H/2)
+        even_TNH, odd_TNH = x_TNH[..., ::2], x_TNH[..., 1::2]
+        combined_TNH = jnp.stack([
+            even_TNH * cos_T1H - odd_TNH * sin_T1H,
+            odd_TNH * cos_T1H + even_TNH * sin_T1H
+        ],
+                                 axis=-1).reshape(x_TNH.shape)
+        return combined_TNH.astype(self.dtype)
 
-    first_part = first_half * cos - second_half * sin
-    second_part = second_half * cos + first_half * sin
-    out = jnp.concatenate([first_part, second_part], axis=-1)
 
-    if padded_head_dim > head_dim:
-        out = jnp.pad(out, ((0, 0), (0, 0), (0, padded_head_dim - head_dim)))
-
-    return out.astype(inputs.dtype)
+# Calculates the temperature scaling factor for YaRN to adjust
+# RoPE embedding magnitudes.
+def _yarn_get_mscale(scale, mscale):
+    return jnp.where(scale <= 1, 1.0, 0.1 * mscale * jnp.log(scale) + 1.0)
 
 
-def apply_rope_scaling(freqs: jax.Array, rope_scaling: Dict[str,
-                                                            Any]) -> jax.Array:
-    # Values obtained from grid search
-    scale_factor = rope_scaling.get("scale_factor", 8.0)
-    low_freq_factor = rope_scaling.get("low_freq_factor", 1.0)
-    high_freq_factor = rope_scaling.get("high_freq_factor", 4.0)
-    old_context_len = rope_scaling.get("original_max_position_embeddings",
-                                       8192)
+# Inverses dim formula to find dim based on number of rotations.
+def _yarn_find_correction_dim(num_rotations,
+                              dim,
+                              base=10000,
+                              max_position_embeddings=2048):
+    return (dim * math.log(max_position_embeddings /
+                           (num_rotations * 2 * math.pi))) / (2 *
+                                                              math.log(base))
 
-    low_freq_wavelen = old_context_len / low_freq_factor
-    high_freq_wavelen = old_context_len / high_freq_factor
 
-    wavelen = 2 * math.pi / freqs
-    smooth = (old_context_len / wavelen -
-              low_freq_factor) / (high_freq_factor - low_freq_factor)
+# Finds dim range bounds based on rotations.
+def _yarn_find_correction_range(low_rot,
+                                high_rot,
+                                dim,
+                                base=10000,
+                                max_position_embeddings=2048):
+    low = math.floor(
+        _yarn_find_correction_dim(low_rot, dim, base, max_position_embeddings))
+    high = math.ceil(
+        _yarn_find_correction_dim(high_rot, dim, base,
+                                  max_position_embeddings))
+    return max(low, 0), min(high, dim - 1)  # Clamp values just in case
 
-    high_freqs = jnp.where(wavelen < high_freq_wavelen, freqs, 0)
-    low_freqs = jnp.where(wavelen > low_freq_wavelen, freqs / scale_factor, 0)
-    mid_freqs = jnp.where(
-        (wavelen >= high_freq_wavelen) & (wavelen <= low_freq_wavelen),
-        (1 - smooth) * freqs / scale_factor + smooth * freqs,
-        0,
-    )
-    new_freqs = high_freqs + low_freqs + mid_freqs
-    return new_freqs
+
+# Creates a 1D mask that ramps linearly from 0 to 1 between min and max indices.
+def _yarn_linear_ramp_mask(min, max, dim):
+    if min == max:
+        max += 0.001  # Prevent singularity
+
+    linear_func = (jnp.arange(dim, dtype=jnp.float32) - min) / (max - min)
+    ramp_func = jnp.clip(linear_func, 0, 1)
+    return ramp_func

@@ -12,9 +12,9 @@ from jaxtyping import Float
 from qwix._src.core.ragged_dot import ragged_dot as qwix_ragged_dot
 from qwix._src.providers import ptq
 
-from tpu_commons.layers.common.base import create_param
-from tpu_commons.layers.common.layers import FlaxUtils
-from tpu_commons.layers.common.moe.moe import MoE
+from tpu_commons.layers.jax.base import create_param
+from tpu_commons.layers.jax.layers import FlaxUtils
+from tpu_commons.layers.jax.moe.moe import MoE
 from tpu_commons.models.jax.utils.quantization.quantization_utils import (
     manually_quantize_qwix_activation, manually_quantize_qwix_weight)
 

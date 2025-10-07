@@ -7,7 +7,7 @@ from flax import nnx
 from flax.typing import Sharding
 from jaxtyping import Float, Int
 
-from tpu_commons.layers.common.base import create_param
+from tpu_commons.layers.jax.base import create_param
 
 
 # A dummy for modeling_flax_utils which might contain activation functions
