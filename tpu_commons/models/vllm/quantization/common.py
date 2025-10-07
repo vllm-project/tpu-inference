@@ -60,6 +60,7 @@ class JaxCommonLinearConfig:
                 "Unsupported linear layer type of %s. Can potentially yield "
                 " bad performance.", type(layer))
 
+        # non-lora: for qkv_parallel_linear, weight_sharding is PartitionSpec('model', None)
         self.bias_sharding = P(self.weight_sharding[0])
         self.n_shards = self.mesh.shape.get(self.weight_sharding[0], 1)
 

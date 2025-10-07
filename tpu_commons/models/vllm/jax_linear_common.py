@@ -127,6 +127,8 @@ def torch_to_jax_param(
         tensor = tensor.astype(jax_dtype)
 
     if fused:
+        # In non-lora qkv layer, tensor.shape=[3072, 2048], output_sizes=[2048, 512, 512], n_shards=4, dim=0
+        # sharding=NamedSharding(mesh=Mesh('data': 1, 'model': 4, axis_types=(Auto, Auto)), spec=PartitionSpec('model', None), memory_kind=device)
         tensor = reorder_concatenated_tensor_for_sharding(
             tensor, output_sizes, n_shards, dim)
         tensor = jax.device_put(tensor, sharding)

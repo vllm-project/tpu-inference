@@ -14,7 +14,7 @@ def create_parser():
     parser = FlexibleArgumentParser()
     # Add engine args
     EngineArgs.add_cli_args(parser)
-    parser.set_defaults(model="meta-llama/Llama-3.2-1B-Instruct")
+    parser.set_defaults(model="Qwen/Qwen2.5-3B-Instruct")
     parser.set_defaults(max_model_len=1024)
 
     # Add sampling params

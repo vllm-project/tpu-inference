@@ -1,4 +1,5 @@
 # https://github.com/vllm-project/vllm/blob/ed10f3cea199a7a1f3532fbe367f5c5479a6cae9/tests/tpu/lora/test_lora.py
+
 import pytest
 import vllm
 from vllm.lora.request import LoRARequest
@@ -25,10 +26,11 @@ def use_v1_only(monkeypatch: pytest.MonkeyPatch):
         yield
 
 
-def setup_vllm(num_loras: int) -> vllm.LLM:
+def setup_vllm(num_loras: int, num_devices: int = 1) -> vllm.LLM:
     return vllm.LLM(model="Qwen/Qwen2.5-3B-Instruct",
                     max_model_len=256,
                     max_num_seqs=8,
+                    tensor_parallel_size=num_devices,
                     enable_lora=True,
                     max_loras=num_loras,
                     max_lora_rank=8)
@@ -42,6 +44,53 @@ def test_single_lora():
     """
 
     llm = setup_vllm(1)
+
+    prompt = "What is 1+1? \n"
+
+    lora_request = LoRARequest(
+        "lora_adapter_2", 2,
+        "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_2_adapter")
+    output = llm.generate(prompt,
+                          sampling_params=vllm.SamplingParams(max_tokens=16,
+                                                              temperature=0),
+                          lora_request=lora_request)[0].outputs[0].text
+
+    answer = output.strip()[0]
+
+    assert answer.isdigit()
+    assert int(answer) == 2
+
+
+def test_single_lora_spmd():
+    """
+    This test ensures we can run a single LoRA adapter on the TPU backend.
+    We run "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_2_adapter" which
+    will force Qwen2.5-3B-Instruct to claim 1+1=2.
+    """
+    # max_loras = 1
+    # engine_args = EngineArgs(
+    #     model="Qwen/Qwen2.5-3B-Instruct",
+    #     max_model_len=256,
+    #     max_num_seqs=8,
+    #     enable_lora=True,
+    #     max_loras=max_loras,
+    #     max_lora_rank=8,
+    # )
+    # vllm_config = engine_args.create_engine_config()
+    # with set_current_vllm_config(vllm_config):
+    #     temp_file = tempfile.mkstemp()[1]
+    #     init_distributed_environment(
+    #         1,
+    #         0,
+    #         local_rank=0,
+    #         distributed_init_method=f"file://{temp_file}",
+    #         backend="gloo")
+    #     ensure_model_parallel_initialized(1, 1)
+
+    # num_devices = jax.local_device_count()  # why does this line cause hanging.
+    num_devices = 4
+    print(f'xw32 using TP={num_devices}')
+    llm = setup_vllm(1, num_devices)
 
     prompt = "What is 1+1? \n"
 
