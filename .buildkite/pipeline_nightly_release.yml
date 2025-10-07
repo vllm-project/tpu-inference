@@ -22,7 +22,7 @@ steps:
     commands:
       - "pip install twine"
       - "buildkite-agent artifact download 'dist/*.whl' --build $BUILDKITE_BUILD_ID --step 'build-package' ."
-      - "twine upload dist/*.whl --verbose --repository-url https://test.pypi.org/legacy/"
+      - "python -m twine upload dist/*.whl --verbose --repository-url https://test.pypi.org/legacy/"
     env:
       TWINE_USERNAME: "${PYPI_USERNAME}"  
       TWINE_PASSWORD: "${PYPI_PASSWORD}"  
