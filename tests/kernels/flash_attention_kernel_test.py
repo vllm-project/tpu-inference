@@ -7,7 +7,7 @@ import torchax
 from absl.testing import absltest, parameterized
 from jax._src import test_util as jtu
 
-from tpu_commons.models.torchax.torchax_wrapper import flash_attention
+from tpu_inference.models.torchax.torchax_wrapper import flash_attention
 
 jax.config.parse_flags_with_absl()
 

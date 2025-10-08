@@ -1,12 +1,12 @@
 import unittest
 from unittest.mock import Mock, patch
 
-from tpu_commons.backend import TPUBackend
+from tpu_inference.backend import TPUBackend
 
 
 class TPUBackendTest(unittest.TestCase):
 
-    @patch('tpu_commons.backend.TPUWorker')
+    @patch('tpu_inference.backend.TPUWorker')
     def test_tpu_backend_initialization(self, mock_tpu_worker_class):
         """Test that TPUBackend initializes the worker correctly."""
         mock_host_interface = Mock()
@@ -22,8 +22,8 @@ class TPUBackendTest(unittest.TestCase):
         # Assert that the worker attribute is an instance of the mock class
         self.assertEqual(backend.worker, mock_tpu_worker_class.return_value)
 
-    @patch('tpu_commons.backend.VllmSchedulerOutputAdapter')
-    @patch('tpu_commons.backend.TPUWorker')
+    @patch('tpu_inference.backend.VllmSchedulerOutputAdapter')
+    @patch('tpu_inference.backend.TPUWorker')
     def test_launch_tpu_batch(self, mock_tpu_worker_class, mock_adapter_class):
         """Test that launch_tpu_batch delegates to the worker correctly."""
         mock_worker_instance = mock_tpu_worker_class.return_value
@@ -40,8 +40,8 @@ class TPUBackendTest(unittest.TestCase):
         mock_worker_instance.execute_model.assert_called_once_with(
             mock_adapter_class.return_value)
 
-    @patch('tpu_commons.backend.VllmLoRARequestAdapter')
-    @patch('tpu_commons.backend.TPUWorker')
+    @patch('tpu_inference.backend.VllmLoRARequestAdapter')
+    @patch('tpu_inference.backend.TPUWorker')
     def test_add_lora(self, mock_tpu_worker_class, mock_adapter_class):
         """Test that add_lora delegates to the worker correctly."""
         mock_worker_instance = mock_tpu_worker_class.return_value

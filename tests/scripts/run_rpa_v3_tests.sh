@@ -3,7 +3,7 @@
 # Install dependencies
 pip install -U --pre jax jaxlib libtpu requests -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
 
-TPU_COMMONS_DIR="/workspace/tpu_commons/"
+TPU_COMMONS_DIR="/workspace/tpu_inference/"
 
 # RPA v3 test files - add new tests here
 RPA_V3_TESTS=(

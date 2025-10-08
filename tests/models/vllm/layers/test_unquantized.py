@@ -23,8 +23,8 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 
-from tpu_commons.models.vllm.quantization import get_tpu_quantization_config
-from tpu_commons.models.vllm.quantization.unquantized import (
+from tpu_inference.models.vllm.quantization import get_tpu_quantization_config
+from tpu_inference.models.vllm.quantization.unquantized import (
     JaxUnquantizedConfig, JaxUnquantizedFusedMoEMethod,
     JaxUnquantizedLinearMethod)
 
@@ -371,7 +371,7 @@ def test_jax_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
         merged_column_linear)
     output = merged_column_linear(input_tensor).to(dtype)
 
-    # Call tpu_commons code
+    # Call tpu_inference code
     vllm_config.model_config.dtype = dtype
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
     with set_current_vllm_config(vllm_config):

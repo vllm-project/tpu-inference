@@ -6,7 +6,7 @@ import numpy as np
 from flax import nnx
 from jax.sharding import Mesh
 
-from tpu_commons.layers.jax.layers import DenseFFW, Embedder, RMSNorm
+from tpu_inference.layers.jax.layers import DenseFFW, Embedder, RMSNorm
 
 
 class TestLayers(unittest.TestCase):
