@@ -1,3 +1,4 @@
+import concurrent.futures
 import functools
 import os
 import random
@@ -33,7 +34,7 @@ from tpu_inference import utils as common_utils
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.sample.rejection_sampler import RejectionSampler
 from tpu_inference.layers.jax.sample.sampling import (compute_logprobs,
-                                                    gather_logprobs, sample)
+                                                      gather_logprobs, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.layers.jax.sharding import build_mesh
@@ -42,12 +43,15 @@ from tpu_inference.models.common.model_loader import get_model
 from tpu_inference.models.jax.utils.weight_utils import (
     shard_put, transfer_state_with_mappings)
 from tpu_inference.runner import utils as runner_utils
+from tpu_inference.runner.async_tpu_output import (AsyncTPUModelRunnerOutput,
+                                                   AsyncTPUSpecDecodeOutput)
 from tpu_inference.runner.compilation_manager import CompilationManager
 from tpu_inference.runner.input_batch_jax import CachedRequestState, InputBatch
 from tpu_inference.runner.kv_cache_manager import KVCacheManager
 from tpu_inference.runner.lora_utils import LoraUtils
 from tpu_inference.runner.multimodal_manager import MultiModalManager
-from tpu_inference.runner.persistent_batch_manager import PersistentBatchManager
+from tpu_inference.runner.persistent_batch_manager import \
+    PersistentBatchManager
 from tpu_inference.runner.speculative_decoding_manager import \
     SpeculativeDecodingManager
 from tpu_inference.runner.structured_decoding_manager import \
@@ -120,6 +124,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.requests, self.input_batch, self.encoder_cache,
             self.uses_mrope, self.model_config)
         self.lora_utils = LoraUtils(self)
+
+        # Async scheduling support
+        self.use_async_scheduling = self.scheduler_config.async_scheduling
+        print("self.use_async_scheduling", self.use_async_scheduling)
+        # For TPU, we use a thread pool executor instead of CUDA streams
+        # to handle async device-to-host transfers
+        self.async_executor = (concurrent.futures.ThreadPoolExecutor(
+            max_workers=2) if self.use_async_scheduling else None)
 
         cache_config = self.cache_config
         if cache_config.cache_dtype == "auto":
@@ -485,6 +497,55 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         for req_id in self.input_batch.req_ids[:num_reqs]:
             prompt_logprobs_dict[req_id] = None
 
+        # Return async output if async scheduling is enabled
+        # We defer only the jax.device_get() operation, but do all other processing synchronously
+        if self.use_async_scheduling:
+            # Process logprobs for async output
+            if logprobs is not None:
+                logprobs_lists = logprobs.tolists()
+            else:
+                logprobs_lists = None
+
+            # Create the base model runner output with state for async processing
+            model_runner_output = ModelRunnerOutput(
+                req_ids=req_ids,
+                req_id_to_index=self.input_batch.req_id_to_index,
+                sampled_token_ids=[],  # Will be filled in by async processing
+                logprobs=logprobs_lists,
+                prompt_logprobs_dict=prompt_logprobs_dict,
+                pooler_output=[],
+                kv_connector_output=kv_connector_output,
+            )
+
+            if spec_decode_metadata is None:
+                return attn_metadata, AsyncTPUModelRunnerOutput(
+                    model_runner_output=model_runner_output,
+                    next_tokens_device=next_tokens,
+                    invalid_req_indices=discard_sampled_tokens_req_indices,
+                    executor=self.async_executor,
+                    # Pass additional context needed for state updates
+                    request_seq_lens=request_seq_lens,
+                    input_batch=self.input_batch,
+                    max_model_len=self.max_model_len,
+                )
+            else:
+                return attn_metadata, AsyncTPUSpecDecodeOutput(
+                    model_runner_output=model_runner_output,
+                    next_tokens_device=next_tokens,
+                    rejection_sampler=self.rejection_sampler,
+                    vocab_size=self.input_batch.vocab_size,
+                    draft_lengths_cpu=spec_decode_metadata.draft_lengths_cpu,
+                    draft_token_ids_shape=spec_decode_metadata.draft_token_ids.
+                    shape,
+                    invalid_req_indices=discard_sampled_tokens_req_indices,
+                    executor=self.async_executor,
+                    # Pass additional context needed for state updates
+                    request_seq_lens=request_seq_lens,
+                    input_batch=self.input_batch,
+                    max_model_len=self.max_model_len,
+                )
+
+        # Synchronous processing (original behavior)
         if spec_decode_metadata is None:
             next_tokens = np.asarray(jax.device_get(next_tokens))
             selected_token_ids = np.expand_dims(next_tokens[:num_reqs], 1)

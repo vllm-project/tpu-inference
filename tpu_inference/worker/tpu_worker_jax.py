@@ -22,11 +22,11 @@ from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 
 from tpu_inference import utils
 from tpu_inference.di.abstracts import (AbstractKVCacheConfig,
-                                      AbstractLoRARequest,
-                                      AbstractSchedulerOutput)
+                                        AbstractLoRARequest,
+                                        AbstractSchedulerOutput)
 from tpu_inference.di.interfaces import HostInterface
 from tpu_inference.distributed.utils import (get_host_ip, get_kv_transfer_port,
-                                           get_node_id)
+                                             get_node_id)
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.kv_cache import get_rpa_page_size_bytes
 from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
@@ -194,11 +194,19 @@ class TPUWorker(AbstractTpuWorker):
         vllm_scheduler_output = adapted_scheduler_output.vllm_scheduler_output
         output = self.model_runner.execute_model(vllm_scheduler_output)
 
+        # Handle async output by extracting only the ModelRunnerOutput portion
+        # The attention metadata is not needed at the worker level
+        if isinstance(output, tuple) and len(output) == 2:
+            # The output is (attention_metadata, model_runner_output)
+            _, model_runner_output = output
+        else:
+            model_runner_output = output
+
         # With a connector, the scheduler expects output from all workers
         if has_kv_transfer_group():
-            return output
+            return model_runner_output
 
-        return output if self.is_driver_worker else None
+        return model_runner_output if self.is_driver_worker else None
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         return self.model_runner.take_draft_token_ids()

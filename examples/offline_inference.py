@@ -115,7 +115,7 @@ if __name__ == "__main__":
         from unittest.mock import patch
 
         from tpu_inference.core.core_tpu import (DisaggEngineCore,
-                                               DisaggEngineCoreProc)
+                                                 DisaggEngineCoreProc)
 
         with patch("vllm.v1.engine.core.EngineCore", DisaggEngineCore), patch(
                 "vllm.v1.engine.core.EngineCoreProc", DisaggEngineCoreProc):
