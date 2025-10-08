@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tpu_commons.models.jax.utils.multi_modal_utils import (
+from tpu_inference.models.jax.utils.multi_modal_utils import (
     MultiModalEmbeddings, NestedTensors, _flatten_embeddings,
     merge_multimodal_embeddings, sanity_check_mm_encoder_outputs)
 

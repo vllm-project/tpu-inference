@@ -132,7 +132,7 @@ print(cache)
 The trick is to have the function inside of `jax.jit` return updated
 KV cache, and we reassign the modification back.
 
-The code that uses the above technique is located at: `tpu_commons/models/torchax/torchax_wrapper.py#L55-L83` show below:
+The code that uses the above technique is located at: `tpu_inference/models/torchax/torchax_wrapper.py#L55-L83` show below:
 
 ![alt text](assets/wrap_model.png)
 

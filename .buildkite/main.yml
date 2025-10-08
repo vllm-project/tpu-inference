@@ -32,7 +32,7 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       # TODO : record verified vllm-tpu_commons commit hash pair if test successful (to be handled in separate PR)
+       # TODO : record verified vllm-tpu_inference commit hash pair if test successful (to be handled in separate PR)
        - echo "committing verified commit hashes"
 
    - label: "Commit support matrices if release tag specified"

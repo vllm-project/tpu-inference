@@ -3,7 +3,7 @@ from unittest.mock import MagicMock
 
 import jax
 
-from tpu_commons.layers.jax.sharding import (Sharding, ShardingConfig,
+from tpu_inference.layers.jax.sharding import (Sharding, ShardingConfig,
                                              ShardingRulesConfig,
                                              ShardingStrategy)
 

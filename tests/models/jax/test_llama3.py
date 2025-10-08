@@ -9,9 +9,9 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh
 from vllm.config import ModelConfig
 
-from tpu_commons.layers.common.attention_metadata import AttentionMetadata
-from tpu_commons.models.jax.llama3 import LlamaForCausalLM
-from tpu_commons.runner.kv_cache import create_kv_caches
+from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.models.jax.llama3 import LlamaForCausalLM
+from tpu_inference.runner.kv_cache import create_kv_caches
 
 
 class MockVllmConfig:

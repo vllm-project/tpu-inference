@@ -6,9 +6,9 @@ import numpy as np
 import pytest
 from jax.sharding import Mesh
 
-from tpu_commons.layers.common.attention_metadata import AttentionMetadata
-from tpu_commons.layers.jax.attention_interface import attention
-from tpu_commons.runner.kv_cache import get_kv_cache_shape_with_mesh
+from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.jax.attention_interface import attention
+from tpu_inference.runner.kv_cache import get_kv_cache_shape_with_mesh
 
 # ---- Test Configuration & Constants ----
 
@@ -76,7 +76,7 @@ def test_attention(monkeypatch, mesh):
         return_value=(jnp.ones((TOTAL_TOKENS, NUM_HEADS, PADDED_HEAD_DIM)),
                       kv_cache))
     monkeypatch.setattr(
-        "tpu_commons.layers.jax.attention_interface.ragged_paged_attention",
+        "tpu_inference.layers.jax.attention_interface.ragged_paged_attention",
         mock_paged_attn_kernel,
     )
 

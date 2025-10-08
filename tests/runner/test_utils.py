@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 from jax._src.interpreters import pxla
 
-from tpu_commons.runner.utils import (
+from tpu_inference.runner.utils import (
     PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR, ForbidCompile, InferencePhase,
     LatencyTracker, PhasedBasedProfiler,
     determine_phase_from_batch_composition_stats, get_batch_composition_stats,
@@ -76,7 +76,7 @@ def test_get_req_paddings():
 
 def test_latency_tracker(caplog):
     """Tests the LatencyTracker context manager."""
-    logger_name = "vllm.tpu_commons.runner.utils"
+    logger_name = "vllm.tpu_inference.runner.utils"
     logger = logging.getLogger(logger_name)
 
     original_level = logger.level
@@ -297,7 +297,7 @@ def test_determine_phase_from_batch_composition_stats(prefill_tokens,
 @pytest.fixture
 def profiler_fixture(tmp_path):
     """Fixture to set up a PhasedBasedProfiler with mocked dependencies."""
-    target_module = "tpu_commons.runner.utils"
+    target_module = "tpu_inference.runner.utils"
     with patch(f"{target_module}.jax.profiler.start_trace") as mock_start, \
          patch(f"{target_module}.jax.profiler.stop_trace") as mock_stop, \
          patch("builtins.open", mock_open()) as mock_file, \

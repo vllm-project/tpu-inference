@@ -13,8 +13,8 @@ from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          VllmConfig)
 from vllm.config.load import LoadConfig
 
-from tpu_commons.layers.common.attention_metadata import AttentionMetadata
-from tpu_commons.spec_decode.jax.eagle3 import Eagle3Proposer
+from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
 
 # Use a real model dir for config, but we will mock model loading/execution
 model_dir = "meta-llama/Llama-3.1-8B-Instruct"

@@ -11,7 +11,7 @@ echo "--- Starting Buildkite Bootstrap ---"
 # Check if the current build is a pull request
 if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
   echo "This is a Pull Request build."
-  PR_LABELS=$(curl -s "https://api.github.com/repos/vllm-project/tpu_commons/pulls/$BUILDKITE_PULL_REQUEST" | jq -r '.labels[].name')
+  PR_LABELS=$(curl -s "https://api.github.com/repos/vllm-project/tpu-inference/pulls/$BUILDKITE_PULL_REQUEST" | jq -r '.labels[].name')
 
   # If it's a PR, check for the specific label
   if [[ $PR_LABELS == *"ready"* ]]; then
