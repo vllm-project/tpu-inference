@@ -88,7 +88,9 @@ def test_single_lora_spmd():
     #     ensure_model_parallel_initialized(1, 1)
 
     # num_devices = jax.local_device_count()  # why does this line cause hanging.
-    num_devices = 4
+    # To test SPMD multi-chip case, only num_device=2 works for this model Qwen2.5-3B-Instruct.
+    # This is because this model has kv_head=2. https://github.com/vllm-project/tpu_commons/blob/a489e59c5b3a4d5c28e93775d5323970eecd66c9/tpu_commons/layers/jax/attention_interface.py#L275 here we shard the num_kv_heads. Only 2 can divide the num_kv_heads in this case.
+    num_devices = 2
     print(f'xw32 using TP={num_devices}')
     llm = setup_vllm(1, num_devices)
 
