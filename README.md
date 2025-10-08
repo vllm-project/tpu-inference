@@ -40,7 +40,7 @@ pre-commit run --all-files
 Run `Llama 3.1 8B` offline inference on 4 TPU chips:
 
 ```
-HF_TOKEN=<huggingface_token> python tpu_inference/examples/offline_inference.py \
+HF_TOKEN=<huggingface_token> python examples/offline_inference.py \
     --model=meta-llama/Llama-3.1-8B \
     --tensor_parallel_size=4 \
     --max_model_len=1024
@@ -52,7 +52,7 @@ Run `Llama 3.1 8B Instruct` offline inference on 4 TPU chips in disaggregated mo
 
 ```
 PREFILL_SLICES=2 DECODE_SLICES=2 HF_TOKEN=<huggingface_token> \
-python tpu_inference/examples/offline_inference.py \
+python examples/offline_inference.py \
     --model=meta-llama/Meta-Llama-3-8B-Instruct \
     --max_model_len=1024 \
     --max_num_seqs=8
@@ -88,7 +88,7 @@ Run `Llama 3.1 70B Instruct` offline inference on 4 hosts (v6e-16) in interleave
 1. On the head node, use `sudo docker exec -it node /bin/bash` to enter the container. And then execute:
 
 ```
-HF_TOKEN=<huggingface_token> python /workspace/tpu_inference/examples/offline_inference.py \
+HF_TOKEN=<huggingface_token> python /workspace/tpu-inference/examples/offline_inference.py \
     --model=meta-llama/Llama-3.1-70B  \
     --tensor_parallel_size=16  \
     --max_model_len=1024
@@ -101,7 +101,7 @@ Run the vLLM's implementation of `Llama 3.1 8B`, which is in Pytorch. It is the 
 ```
 export MODEL_IMPL_TYPE=vllm
 export HF_TOKEN=<huggingface_token>
-python tpu_inference/examples/offline_inference.py \
+python examples/offline_inference.py \
     --model=meta-llama/Llama-3.1-8B \
     --tensor_parallel_size=4 \
     --max_model_len=1024
@@ -148,7 +148,7 @@ docker pull $DOCKER_URI
 docker run \
   --rm \
   $DOCKER_URI \
-  python /workspace/tpu_inference/examples/offline_inference.py \
+  python /workspace/tpu-inference/examples/offline_inference.py \
   --model=meta-llama/Llama-3.1-8B \
   --tensor_parallel_size=4 \
   --max_model_len=1024 \
