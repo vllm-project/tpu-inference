@@ -18,6 +18,7 @@ _Upcoming Events_ 🔥
 - Join us at [Ray Summit, November 3-5](https://www.anyscale.com/ray-summit/2025) in San Francisco!
 - Join us at [JAX DevDay on November 18th](https://rsvp.withgoogle.com/events/devlab-fall-2025) in Sunnyvale!
 - vLLM Social Hour sponsored by Google at PyTorch Conference (link to RSVP will be added closer to the event date)
+  
 _Latest News_ 🔥
 
 - [2025/10] vLLM TPU 2.0: A New Unified-Backend Supporting PyTorch and JAX on TPU
