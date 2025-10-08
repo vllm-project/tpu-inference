@@ -8,7 +8,7 @@ TPU_COMMONS_DIR="/workspace/tpu_commons/"
 # RPA v3 test files - add new tests here
 RPA_V3_TESTS=(
     "tests/kernels/ragged_paged_attention_kernel_v3_test.py"
-    "tests/models/jax/common/attention/test_deepseek_v3_attention.py"
+    "tests/layers/attention/test_deepseek_v3_attention.py"
 )
 
 # Convert array to space-separated string for pytest

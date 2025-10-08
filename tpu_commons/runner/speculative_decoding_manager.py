@@ -5,16 +5,16 @@ from typing import TYPE_CHECKING, Optional
 
 import jax.numpy as jnp
 import numpy as np
-
-from tpu_commons.runner import utils as runner_utils
-from tpu_commons.spec_decode.jax.eagle3 import Eagle3Proposer
-from tpu_commons.utils import device_array
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.outputs import DraftTokenIds
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
+from tpu_commons.runner import utils as runner_utils
+from tpu_commons.spec_decode.jax.eagle3 import Eagle3Proposer
+from tpu_commons.utils import device_array
+
 if TYPE_CHECKING:
-    from tpu_commons.models.jax.attention_metadata import AttentionMetadata
+    from tpu_commons.layers.common.attention_metadata import AttentionMetadata
     from tpu_commons.runner.tpu_jax_runner import TPUModelRunner
 
 

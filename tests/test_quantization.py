@@ -12,7 +12,7 @@ from jax.sharding import PartitionSpec as P
 from qwix._src.providers import ptq
 
 import tpu_commons.models.jax.utils.quantization.quantization_utils as quantize_qwix  # noqa: E402
-from tpu_commons.models.jax.model_loader import apply_qwix_quantization
+from tpu_commons.models.common.model_loader import apply_qwix_quantization
 from tpu_commons.models.jax.utils.quantization.quantization_utils import (
     DEFAULT_MAX_NUM_BLOCKS_PER_REQ, DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS,
     DEFAULT_NUM_TOKENS_FOR_MODEL_INPUTS)
@@ -217,7 +217,7 @@ class TestApplyQwixQuantization(unittest.TestCase):
                       "Model should be returned as-is.")
         mock_nnx.jit.assert_not_called()
 
-    @patch('tpu_commons.models.jax.model_loader.nnx.jit')
+    @patch('tpu_commons.models.common.model_loader.nnx.jit')
     def test_quantization_applied_from_dict(self, mock_jit):
         """
         Test that quantization is applied correctly when the config is a dictionary.

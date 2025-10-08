@@ -12,7 +12,7 @@ from vllm.attention.backends.abstract import AttentionType
 
 from tpu_commons.attention.backends.pallas_torchax import (
     PallasAttentionBackend, PallasAttentionBackendImpl)
-from tpu_commons.models.jax.attention_metadata import AttentionMetadata
+from tpu_commons.layers.common.attention_metadata import AttentionMetadata
 from tpu_commons.models.vllm.vllm_model_wrapper_context import \
     set_vllm_model_wrapper_context
 from tpu_commons.runner.kv_cache import get_kv_cache_shape_with_mesh

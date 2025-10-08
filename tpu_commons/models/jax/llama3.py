@@ -8,10 +8,10 @@ from transformers import LlamaConfig, modeling_flax_utils
 from vllm.config import VllmConfig
 
 from tpu_commons import utils
+from tpu_commons.layers.common.attention_metadata import AttentionMetadata
+from tpu_commons.layers.jax.attention_interface import attention
+from tpu_commons.layers.jax.rope_interface import apply_rope
 from tpu_commons.logger import init_logger
-from tpu_commons.models.jax.attention import attention
-from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.models.jax.layers.rope import apply_rope
 from tpu_commons.models.jax.utils.weight_utils import (get_default_maps,
                                                        load_hf_weights)
 

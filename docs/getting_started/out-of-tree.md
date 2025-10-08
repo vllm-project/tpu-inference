@@ -87,7 +87,7 @@ To register the model, use the following code in `your_code/__init__.py`:
 
 ```
 from tpu_commons.logger import init_logger
-from tpu_commons.models.jax.model_loader import register_model
+from tpu_commons.models.common.model_loader import register_model
 
 logger = init_logger(__name__)
 

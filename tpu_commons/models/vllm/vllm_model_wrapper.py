@@ -22,8 +22,8 @@ from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm.sequence import IntermediateTensors
 
+from tpu_commons.layers.common.attention_metadata import AttentionMetadata
 from tpu_commons.logger import init_logger
-from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.vllm.quantization import get_tpu_quantization_config
 from tpu_commons.models.vllm.sharding import shard_model_to_tpu
 from tpu_commons.models.vllm.vllm_model_wrapper_context import (

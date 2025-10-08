@@ -7,8 +7,8 @@ from jax.sharding import Mesh
 from transformers import LlamaConfig
 from vllm.config import VllmConfig
 
+from tpu_commons.layers.common.attention_metadata import AttentionMetadata
 from tpu_commons.logger import init_logger
-from tpu_commons.models.jax.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.llama3 import LlamaDecoderLayer
 from tpu_commons.models.jax.utils.weight_utils import (MetadataMap,
                                                        get_default_maps,

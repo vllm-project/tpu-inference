@@ -9,7 +9,7 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh
 from vllm.config import ModelConfig
 
-from tpu_commons.models.jax.attention_metadata import AttentionMetadata
+from tpu_commons.layers.common.attention_metadata import AttentionMetadata
 from tpu_commons.models.jax.llama_eagle3 import (Eagle3LlamaDecoderLayer,
                                                  EagleLlama3ForCausalLM)
 from tpu_commons.runner.kv_cache import create_kv_caches
