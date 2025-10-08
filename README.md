@@ -18,9 +18,6 @@ _Upcoming Events_ 🔥
 - Join us at [Ray Summit, November 3-5](https://www.anyscale.com/ray-summit/2025) in San Francisco!
 - Join us at [JAX DevDay on November 18th](https://rsvp.withgoogle.com/events/devlab-fall-2025) in Sunnyvale!
 - vLLM Social Hour sponsored by Google at PyTorch Conference (link to RSVP will be added closer to the event date)
-- Google is hosting the vLLM Meetup in Seoul, South Korea (link to RSVP will be added closer to the event date)
-- Google is hosting the vLLM Meetup in Singapore (link to RSVP will be added closer to the event date)
-
 _Latest News_ 🔥
 
 - [2025/10] vLLM TPU 2.0: A New Unified-Backend Supporting PyTorch and JAX on TPU
@@ -47,9 +44,6 @@ vLLM TPU is now powered by `tpu-inference`, an expressive and powerful new hardw
 Get started with vLLM on TPUs by following the [quickstart guide](https://github.com/vllm-project/tpu-inference/tree/main/docs/getting_started/quickstart.md).
 
 Visit our [documentation](https://github.com/vllm-project/tpu-inference/tree/main/docs) to learn more:
-
-- [Quickstart](https://github.com/vllm-project/tpu-inference/tree/main/docs/getting_started/quickstart.md)
-<!--TODO: add link to list of supported models-->
 
 ## Contribute
 
