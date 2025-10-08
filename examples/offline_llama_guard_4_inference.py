@@ -5,11 +5,13 @@ import os
 
 import pandas as pd
 import vllm.envs as envs
+from datasets import concatenate_datasets, load_dataset
 from jinja2 import Environment, FileSystemLoader
 from vllm import LLM, EngineArgs
+from vllm.inputs import TokensPrompt
 from vllm.utils import FlexibleArgumentParser
 
-from tpu_commons.core import disagg_utils
+from tpu_inference.core import disagg_utils
 
 # Create a mapping from AILuminate's abbreviations to your model's expected S-codes.
 # This assumes the S-codes align with the a-i-r-r taxonomy.
@@ -65,9 +67,6 @@ def load_ailuminate_dataset(file_path):
         test_cases.append((conversation, expected_output))
 
     return test_cases
-
-
-from datasets import concatenate_datasets, load_dataset
 
 
 def load_toxic_chat_dataset(version_name="toxicchat0124"):
@@ -236,8 +235,6 @@ def main(args: dict):
     print(f"Token for 'safe': {tokenizer.encode('safe')}")
     print(f"Token for 'unsafe': {tokenizer.encode('unsafe')}")
 
-    from vllm.inputs import TokensPrompt
-
     prompts = []
     for conv in conversations:
 
@@ -345,7 +342,7 @@ if __name__ == "__main__":
     else:
         from unittest.mock import patch
 
-        from tpu_commons.core.core_tpu import DisaggEngineCoreProc
+        from tpu_inference.core.core_tpu import DisaggEngineCoreProc
 
         with patch("vllm.v1.engine.core.EngineCoreProc", DisaggEngineCoreProc):
             main(args)

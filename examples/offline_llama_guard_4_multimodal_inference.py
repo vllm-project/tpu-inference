@@ -11,7 +11,7 @@ from PIL import Image
 from vllm import LLM, EngineArgs
 from vllm.utils import FlexibleArgumentParser
 
-from tpu_commons.core import disagg_utils
+from tpu_inference.core import disagg_utils
 
 # --- HAZARD MAPPING (S-Codes for Expected Output) ---
 # This is a minimal subset for the sanity check tests
@@ -346,7 +346,7 @@ if __name__ == "__main__":
     else:
         from unittest.mock import patch
 
-        from tpu_commons.core.core_tpu import DisaggEngineCoreProc
+        from tpu_inference.core.core_tpu import DisaggEngineCoreProc
 
         with patch("vllm.v1.engine.core.EngineCoreProc", DisaggEngineCoreProc):
             main(args)
