@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple
 import jax
 import jax.numpy as jnp
 import numpy as np
-from tpu_commons.models.jax.common.sharding import MLP_TENSOR_AXIS_NAME
+from tpu_commons.layers.jax.sharding import MLP_TENSOR_AXIS_NAME
 import vllm.envs as envs
 from jax.sharding import NamedSharding, PartitionSpec
 

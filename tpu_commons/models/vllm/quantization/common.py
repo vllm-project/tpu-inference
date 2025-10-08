@@ -1,6 +1,6 @@
 import torchax
 from jax.sharding import Mesh, PartitionSpec
-from tpu_commons.models.jax.common.sharding import MLP_DATA_AXIS_NAME, MLP_TENSOR_AXIS_NAME
+from tpu_commons.layers.jax.sharding import MLP_DATA_AXIS_NAME, MLP_TENSOR_AXIS_NAME
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE, FusedMoEConfig

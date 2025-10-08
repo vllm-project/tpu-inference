@@ -15,6 +15,7 @@ from tpu_commons.kernels.ragged_paged_attention.v3.kernel import \
 from tpu_commons.layers.common.attention_metadata import AttentionMetadata
 from tpu_commons.layers.jax.base import create_param
 from tpu_commons.layers.jax.rope_interface import apply_rope
+from tpu_commons.layers.jax.sharding import ATTN_DATA_AXIS_NAME
 
 KVCache = Tuple[jax.Array, jax.Array]
 
@@ -42,15 +43,15 @@ class Attention(nnx.Module):
     mesh: Mesh
     kv_cache_dtype: str
 
-    dnh_sharding: Sharding = ()
-    dkh_sharding: Sharding = ()
-    nhd_sharding: Sharding = ()
+    dnh_sharding: Sharding = (ATTN_DATA_AXIS_NAME)
+    dkh_sharding: Sharding = (ATTN_DATA_AXIS_NAME)
+    nhd_sharding: Sharding = (ATTN_DATA_AXIS_NAME)
 
-    activation_q_td: Sharding = ()
-    query_tnh: P = P()
-    keyvalue_skh: P = P()
+    activation_q_td: Sharding = (ATTN_DATA_AXIS_NAME)
+    query_tnh: P = P(ATTN_DATA_AXIS_NAME)
+    keyvalue_skh: P = P(ATTN_DATA_AXIS_NAME)
 
-    attn_o_tnh: P = P()
+    attn_o_tnh: P = P(ATTN_DATA_AXIS_NAME)
     rngs: InitVar[nnx.Rngs]
 
     random_init: bool = False
@@ -211,16 +212,16 @@ class Attention(nnx.Module):
                   `(seq, num_q_heads, head_dim)`.
         """
         md = attention_metadata
-        kv_cache_spec = P(None, None, "model")
+        kv_cache_spec = P(ATTN_DATA_AXIS_NAME, None, "model")
         in_specs = (
             self.query_tnh,  # q
             self.keyvalue_skh,  # k
             self.keyvalue_skh,  # v
             kv_cache_spec,  # kv_cache
-            P(),  # md.seq_lens: Replicated
-            P(),  # page_indices_flat: Replicated
-            P(),  # query_start_loc: Replicated
-            P(),  # distribution: Replicated
+            P(ATTN_DATA_AXIS_NAME),  # md.seq_lens: Replicated
+            P(ATTN_DATA_AXIS_NAME),  # page_indices_flat: Replicated
+            P(ATTN_DATA_AXIS_NAME),  # query_start_loc: Replicated
+            P(ATTN_DATA_AXIS_NAME),  # distribution: Replicated
         )
 
         out_specs = (self.attn_o_tnh, kv_cache_spec)

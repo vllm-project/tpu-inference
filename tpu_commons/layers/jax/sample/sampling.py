@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from tpu_commons.models.jax.common.sharding import ATTN_DATA_AXIS_NAME, MLP_DATA_AXIS_NAME
+from tpu_commons.layers.jax.sharding import ATTN_DATA_AXIS_NAME, MLP_DATA_AXIS_NAME
 from vllm.v1.outputs import LogprobsTensors
 
 from tpu_commons.layers.jax.binary_search import topk_mask, topp_mask

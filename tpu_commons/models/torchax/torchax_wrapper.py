@@ -129,7 +129,7 @@ def _ragged_paged_attention(
     num_queries_per_block: int | None = None,
     vmem_limit_bytes: int | None = None,
 ) -> Array:
-    print("torchax _ragged_paged_attention", _ragged_paged_attention)
+
     assert use_kernel, "use_kernel must be True for torchax path."
 
     from tpu_commons.kernels.ragged_paged_attention.kernel import \

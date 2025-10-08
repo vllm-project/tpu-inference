@@ -7,7 +7,7 @@ import torch
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.ops.mappings import j2t_dtype
-from tpu_commons.models.jax.common.sharding import ATTN_DATA_AXIS_NAME, MLP_DATA_AXIS_NAME
+from tpu_commons.layers.jax.sharding import ATTN_DATA_AXIS_NAME, MLP_DATA_AXIS_NAME
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 from vllm.utils import supports_kw

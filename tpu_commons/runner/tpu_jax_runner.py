@@ -59,9 +59,9 @@ from tpu_commons.runner.structured_decoding_manager import \
 from tpu_commons.spec_decode.jax.eagle3 import Eagle3Proposer
 from tpu_commons.utils import device_array, make_optimized_mesh
 
-from tpu_commons.models.jax.common.sharding import MLP_DATA_AXIS_NAME
+from tpu_commons.layers.jax.sharding import MLP_DATA_AXIS_NAME
 
-# vLLMScheduler.Scheduler = DPScheduler
+vLLMScheduler.Scheduler = DPScheduler
 
 logger = init_logger(__name__)
 
@@ -369,8 +369,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         scheduler_output: "VllmSchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> ModelRunnerOutput:
-        with jax.disable_jit():
-            return self._execute_model(scheduler_output)[1]
+        # with jax.disable_jit():
+        return self._execute_model(scheduler_output)[1]
 
     def _execute_model(
         self,
@@ -692,7 +692,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 padded_total_num_scheduled_tokens,
                 cum_num_req_per_dp_rank_list, padded_num_reqs_per_dp_rank, logits_indices_selector)
 
-    def _prepare_inputs_dp(self, scheduler_output: "VllmSchedulerOutput"):
+    def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -941,7 +941,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             logits_indices_selector,
         )
 
-    def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
+    def _prepare_inputs_non_dp(self, scheduler_output: "VllmSchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs

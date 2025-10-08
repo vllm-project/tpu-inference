@@ -48,7 +48,6 @@ class PallasAttentionBackendImpl(AttentionImpl):
         kv_sharing_target_layer_name: Optional[int] = None,
         use_irope: bool = False,
     ) -> None:
-        breakpoint()
         if use_irope:
             logger.warning_once(
                 "Using irope in Pallas is not supported yet, it will fall back "
@@ -86,7 +85,6 @@ class PallasAttentionBackendImpl(AttentionImpl):
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        breakpoint()
         if output_scale is not None:
             raise NotImplementedError(
                 "fused output quantization is not yet supported for "

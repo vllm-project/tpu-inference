@@ -6,7 +6,7 @@ from torch.nn import Parameter
 from torch.utils import _pytree as pytree
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
-from tpu_commons.models.jax.common.sharding import MLP_TENSOR_AXIS_NAME
+from tpu_commons.layers.jax.sharding import MLP_TENSOR_AXIS_NAME
 from vllm.lora.layers import (MergedColumnParallelLinearWithLoRA,
                               MergedQKVParallelLinearWithLoRA,
                               RowParallelLinearWithLoRA)

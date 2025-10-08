@@ -9,7 +9,7 @@ from torchax.ops.mappings import t2j_dtype
 
 import tpu_commons.kernels.ragged_paged_attention.v3.kernel as rpa
 from tpu_commons.logger import init_logger
-from tpu_commons.models.jax.common.sharding import ATTN_DATA_AXIS_NAME, ATTN_HEAD_AXIS_NAME
+from tpu_commons.layers.jax.sharding import ATTN_DATA_AXIS_NAME, ATTN_HEAD_AXIS_NAME
 
 logger = init_logger(__name__)
 

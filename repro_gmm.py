@@ -3,7 +3,7 @@ from jax.experimental.shard_map import shard_map
 import jax 
 import jax.numpy as jnp
 import numpy as np
-from tpu_commons.models.jax.common.sharding import EXPERT_AXIS_NAME
+from tpu_commons.layers.jax.sharding import EXPERT_AXIS_NAME
 from tpu_commons.models.vllm.jax_fused_moe import _get_tiling_size_for_gmm_kernel
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
@@ -46,7 +46,7 @@ def _gmm(lhs, rhs, group_sizes, group_offset):
                 transpose_rhs=transpose_rhs,
                 group_offset=group_offset_of_shard)
 
-breakpoint()
+# breakpoint()
 gmm_res = shard_map(
     _gmm,
     mesh=mesh,
@@ -54,5 +54,5 @@ gmm_res = shard_map(
     out_specs=(P(EXPERT_AXIS_NAME, None)), 
     check_rep=False,
 )(lhs, rhs, group_sizes, group_offset)
-breakpoint()
-print("gmm_res", gmm_res)
+# breakpoint()
+# print("gmm_res", gmm_res)

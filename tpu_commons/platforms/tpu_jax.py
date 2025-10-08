@@ -1,15 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-import sys
-print(f"Importing {__name__}, sys.modules has vllm.config: {'vllm.config' in sys.modules}")
-
-if 'vllm.config' in sys.modules:
-    config_module = sys.modules['vllm.config']
-    print(f"vllm.config attributes: {dir(config_module)}")
-    print(f"Has vllmConfig: {hasattr(config_module, 'vllmConfig')}")
-    
-# Then try your import
-# from vllm.config import vllmConfig
-
 
 import os
 from typing import TYPE_CHECKING, Optional, Tuple, Union, cast
@@ -24,16 +13,13 @@ from vllm.sampling_params import SamplingParams, SamplingType
 
 
 from tpu_commons.logger import init_logger
-print("here1")
 
-from tpu_commons.models.jax.utils.quantization.quantization_utils import \
-    update_vllm_config_for_qwix_quantization
-print("here2")
+
 if TYPE_CHECKING:
     from vllm.attention.backends.registry import _Backend
     from vllm.config import BlockSize, ModelConfig, VllmConfig
     from vllm.pooling_params import PoolingParams
-else:
+else:   
     BlockSize = None
     ModelConfig = None
     VllmConfig = None
@@ -218,6 +204,8 @@ class TpuPlatform(Platform):
         kv_transfer_config = vllm_config.kv_transfer_config
         if kv_transfer_config is not None:
             assert kv_transfer_config.kv_connector == "TPUConnector"
+        from tpu_commons.models.jax.utils.quantization.quantization_utils import \
+        update_vllm_config_for_qwix_quantization
 
         update_vllm_config_for_qwix_quantization(vllm_config)
 

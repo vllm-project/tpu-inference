@@ -15,7 +15,7 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import TORCH_DTYPE_TO_JAX
-from tpu_commons.models.jax.common.sharding import MLP_TENSOR_AXIS_NAME
+from tpu_commons.layers.jax.sharding import MLP_TENSOR_AXIS_NAME
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.lora.layers import BaseLayerWithLoRA
@@ -180,7 +180,6 @@ class VllmModelWrapper:
                 # torch_view in order to call the Torch function.
                 original_lora_metadata = replace_lora_metadata(
                     self.model, lora_metadata, self.vllm_config.lora_config)
-                
                 hidden_states = torch.func.functional_call(
                     self.model,
                     torch_view(params_and_buffers),
@@ -192,7 +191,6 @@ class VllmModelWrapper:
                     },
                     tie_weights=False,
                 )
-                breakpoint()
                 replace_lora_metadata(self.model, original_lora_metadata,
                                       self.vllm_config.lora_config)
                 vllm_model_wrapper_context = get_vllm_model_wrapper_context()

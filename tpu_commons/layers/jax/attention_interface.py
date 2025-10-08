@@ -16,6 +16,7 @@ from jax.sharding import PartitionSpec as P
 import tpu_commons.kernels.ragged_paged_attention.v3.kernel as rpa
 from tpu_commons.kernels.flash_attention.kernel import flash_attention
 from tpu_commons.layers.common.attention_metadata import AttentionMetadata
+from tpu_commons.layers.jax.sharding import ATTN_DATA_AXIS_NAME
 from tpu_commons.utils import get_megacore
 
 MAX_ALLOWED_PAGE_INDICES_N = (
@@ -272,17 +273,17 @@ def sharded_ragged_paged_attention(
     v_scale: float | None = None,
 ):
     """Shards along KV heads."""
-    qkv_spec = P(None, "model", None)
-    kv_cache_spec = P(None, None, "model")
+    qkv_spec = P(ATTN_DATA_AXIS_NAME, "model", None)
+    kv_cache_spec = P(ATTN_DATA_AXIS_NAME, None, "model")
     in_specs = (
         qkv_spec,  # q
         qkv_spec,  # k
         qkv_spec,  # v
         kv_cache_spec,  # kv cache
-        P(),  # kv_lens
-        P(),  # page_indices
-        P(),  # cu_q_lens
-        P(),  # distribution
+        P(ATTN_DATA_AXIS_NAME),  # kv_lens
+        P(ATTN_DATA_AXIS_NAME),  # page_indices
+        P(ATTN_DATA_AXIS_NAME),  # cu_q_lens
+        P(ATTN_DATA_AXIS_NAME),  # distribution
     )
     out_specs = (qkv_spec, kv_cache_spec)
 

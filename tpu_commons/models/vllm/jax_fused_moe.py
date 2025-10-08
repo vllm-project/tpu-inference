@@ -5,7 +5,7 @@ from jax import numpy as jnp
 from jax.experimental.pallas.ops.tpu.megablox.gmm import gmm
 from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from tpu_commons.models.jax.common.sharding import EXPERT_AXIS_NAME, MLP_DATA_AXIS_NAME, MLP_TENSOR_AXIS_NAME
+from tpu_commons.layers.jax.sharding import EXPERT_AXIS_NAME, MLP_DATA_AXIS_NAME, MLP_TENSOR_AXIS_NAME
 from tpu_commons.models.vllm.jax_linear_common import \
     slice_sharded_tensor_for_concatenation
 

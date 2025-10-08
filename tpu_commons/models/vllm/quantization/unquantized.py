@@ -9,7 +9,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
-from tpu_commons.models.jax.common.sharding import EXPERT_AXIS_NAME, MLP_TENSOR_AXIS_NAME
+from tpu_commons.layers.jax.sharding import EXPERT_AXIS_NAME, MLP_TENSOR_AXIS_NAME
 from vllm.attention.layer import Attention
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import (
@@ -106,7 +106,6 @@ class JaxUnquantizedLinearMethod(UnquantizedLinearMethod):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-       
         with jax.named_scope(layer._get_name()):
             if in_sharding := self.jax_config.get_input_sharding(x):
                 x.shard_(NamedSharding(self.jax_config.mesh, in_sharding))
@@ -118,8 +117,7 @@ class JaxUnquantizedLinearMethod(UnquantizedLinearMethod):
 
             if out_sharding := self.jax_config.get_output_sharding(out):
                 out.shard_(NamedSharding(self.jax_config.mesh, out_sharding))
-            breakpoint()
-            print(layer._get_name(), "out", out)
+
         return out
 
     def _apply_fused(self,
@@ -254,7 +252,7 @@ class JaxUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             reduce_results=layer.reduce_results,
             mesh=self.mesh,
             use_ep=layer.use_ep)
-        # breakpoint()
+
         output = _fused_moe_func(
             jax_view(x), # PartitionSpec() #(32, 2048)
             jax_view(layer.w13_weight), # PartitionSpec(('expert', 'model', 'attn_dp'), None, None)
