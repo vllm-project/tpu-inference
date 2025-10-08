@@ -3,7 +3,7 @@
 </p>
 
 <h3 align="center">
-A high performance backend unifying PyTorch and JAX in vLLM on TPU
+A new, high performance TPU backend unifying PyTorch and JAX in vLLM
 </h3>
 
 <p align="center">
@@ -16,8 +16,7 @@ _Upcoming Events_ 🔥
 
 - Join us at the [PyTorch Conference, October 22-23](https://events.linuxfoundation.org/pytorch-conference/) in San Francisco!
 - Join us at [Ray Summit, November 3-5](https://www.anyscale.com/ray-summit/2025) in San Francisco!
-- Join us at [JAX DevDay on November 18th](https://rsvp.withgoogle.com/events/devlab-fall-2025) in Sunnyvale!
-- vLLM Social Hour sponsored by Google at PyTorch Conference (link to RSVP will be added closer to the event date)
+- Join us at [JAX DevLab on November 18th](https://rsvp.withgoogle.com/events/devlab-fall-2025) in Sunnyvale!
   
 _Latest News_ 🔥
 
@@ -26,19 +25,25 @@ _Latest News_ 🔥
 
 <details>
 <summary><i>Previous News</i> 🔥</summary>
-
-- [2025/04] vLLM TPU 1.0 announced at Cloud Next 2025
+  
 </details>
 
 ---
 
 ## About
 
-vLLM TPU is now powered by `tpu-inference`, an expressive and powerful new hardware plugin unifying JAX and PyTorch under a single lowering path within the vLLM project. It's faster than vLLM TPU 1.0 and offers broader model coverage and feature support. vLLM TPU now provides a framework for developers to:
+vLLM TPU is now powered by `tpu-inference`, an expressive and powerful new hardware plugin unifying JAX and PyTorch under a single lowering path within the vLLM project. The new backend now provides a framework for developers to:
 
 - Push the limits of TPU hardware **performance** in open source.
 - Provide more **flexibility** to JAX and PyTorch users by running PyTorch model definitions performantly on TPU without any additional code changes, while also extending native support to JAX.
 - Retain vLLM **standardization** by keeping the same user experience, telemetry, and interface.
+
+## Supported models and features
+
+See the following links for a list of stress-tested and validated models and features:
+
+- [Model support matrix](https://github.com/vllm-project/tpu-inference/blob/main/model_support_matrix.csv)
+- [Feature support matrix](https://github.com/vllm-project/tpu-inference/blob/main/feature_support_matrix.csv)
 
 ## Get started
 
@@ -48,13 +53,11 @@ Visit our [documentation](https://github.com/vllm-project/tpu-inference/tree/mai
 
 ## Contribute
 
-We're always looking for ways to partner with the community to accelerate TPU development. If you're interested in contributing to this effort, here are some open feature requests we’d love your help on:
-
-1. Pooling/Embedding models <!--TODO: add link to existing FR-->
+We're always looking for ways to partner with the community to accelerate vLLM TPU development. If you're interested in contributing to this effort, check the current [Issues](https://github.com/vllm-project/tpu-inference/issues) with the **First Timer** tag for recommend issues to get started with.
 
 ## Contact us
 
-- For technical questions and feature requests, use GitHub [Issues](https://github.com/vllm-project/tpu-inference/issues)
+- For technical questions and feature requests, open a GitHub [Issue](https://github.com/vllm-project/tpu-inference/issues)
 - For discussing with fellow users, use the [TPU support topic in the vLLM Forum](https://discuss.vllm.ai/c/hardware-support/google-tpu-support/27)
 - For coordinating contributions and development, use [Slack](https://slack.vllm.ai) (#sig-tpu)
 - For collaborations and partnerships, contact us at [vllm-tpu@google.com](mailto:vllm-tpu@google.com)
