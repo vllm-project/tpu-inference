@@ -14,8 +14,8 @@ from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.models.registry import ModelRegistry
 
-from tpu_commons.models.common import model_loader
-from tpu_commons.models.jax.qwen3 import Qwen3ForCausalLM
+from tpu_inference.models.common import model_loader
+from tpu_inference.models.jax.qwen3 import Qwen3ForCausalLM
 
 
 class MockModelA:
@@ -148,7 +148,7 @@ def test_register_model_new_arch():
     arch = "NewArch"
     model_loader.register_model(arch, MockModelA)
 
-    # Check tpu_commons registry
+    # Check tpu_inference registry
     config = PretrainedConfig(architectures=[arch])
     model_class = model_loader._get_model_architecture(config)
     assert model_class == MockModelA
@@ -299,8 +299,8 @@ class TestGetModel:
     """Tests the main get_model() entrypoint and its fallback logic."""
 
     @patch.dict(os.environ, {"MODEL_IMPL_TYPE": "flax_nnx"}, clear=True)
-    @patch("tpu_commons.models.common.model_loader.get_vllm_model")
-    @patch("tpu_commons.models.common.model_loader.get_flax_model")
+    @patch("tpu_inference.models.common.model_loader.get_vllm_model")
+    @patch("tpu_inference.models.common.model_loader.get_flax_model")
     def test_get_model_flax_happy_path(self, mock_get_flax, mock_get_vllm,
                                        vllm_config, rng, mesh):
         """Tests that 'flax_nnx' impl calls get_flax_model."""
@@ -313,8 +313,8 @@ class TestGetModel:
         assert result == "flax_model_sentinel"
 
     @patch.dict(os.environ, {"MODEL_IMPL_TYPE": "vllm"}, clear=True)
-    @patch("tpu_commons.models.common.model_loader.get_vllm_model")
-    @patch("tpu_commons.models.common.model_loader.get_flax_model")
+    @patch("tpu_inference.models.common.model_loader.get_vllm_model")
+    @patch("tpu_inference.models.common.model_loader.get_flax_model")
     def test_get_model_vllm_happy_path(self, mock_get_flax, mock_get_vllm,
                                        vllm_config, rng, mesh):
         """Tests that 'vllm' impl calls get_vllm_model."""
@@ -327,8 +327,8 @@ class TestGetModel:
         assert result == "vllm_model_sentinel"
 
     @patch.dict(os.environ, {"MODEL_IMPL_TYPE": "flax_nnx"}, clear=True)
-    @patch("tpu_commons.models.common.model_loader.get_vllm_model")
-    @patch("tpu_commons.models.common.model_loader.get_flax_model")
+    @patch("tpu_inference.models.common.model_loader.get_vllm_model")
+    @patch("tpu_inference.models.common.model_loader.get_flax_model")
     def test_get_model_flax_fallback_on_unsupported_arch(
             self, mock_get_flax, mock_get_vllm, vllm_config, rng, mesh):
         """
@@ -348,8 +348,8 @@ class TestGetModel:
         assert result == "vllm_fallback_sentinel"
 
     @patch.dict(os.environ, {"MODEL_IMPL_TYPE": "flax_nnx"}, clear=True)
-    @patch("tpu_commons.models.common.model_loader.get_vllm_model")
-    @patch("tpu_commons.models.common.model_loader.get_flax_model")
+    @patch("tpu_inference.models.common.model_loader.get_vllm_model")
+    @patch("tpu_inference.models.common.model_loader.get_flax_model")
     def test_get_model_flax_reraises_other_errors(self, mock_get_flax,
                                                   mock_get_vllm, vllm_config,
                                                   rng, mesh):
@@ -368,8 +368,8 @@ class TestGetModel:
         mock_get_vllm.assert_not_called()
 
     @patch.dict(os.environ, {"MODEL_IMPL_TYPE": "jetpack"}, clear=True)
-    @patch("tpu_commons.models.common.model_loader.get_vllm_model")
-    @patch("tpu_commons.models.common.model_loader.get_flax_model")
+    @patch("tpu_inference.models.common.model_loader.get_vllm_model")
+    @patch("tpu_inference.models.common.model_loader.get_flax_model")
     def test_get_model_not_implemented(self, mock_get_flax, mock_get_vllm,
                                        vllm_config, rng, mesh):
         """Tests that an unknown impl raises NotImplementedError."""

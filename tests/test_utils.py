@@ -6,7 +6,7 @@ import jax.numpy as jnp
 import pytest
 
 # Import the functions to be tested
-from tpu_commons.utils import (GBYTES, enable_megacore,
+from tpu_inference.utils import (GBYTES, enable_megacore,
                                get_jax_dtype_from_str_dtype, get_megacore,
                                get_padded_head_dim, hbm_usage_bytes,
                                hbm_usage_gb, quantize_kv)
@@ -69,7 +69,7 @@ def test_hbm_usage_bytes_pathways_enabled(mock_devices, mock_live_arrays):
     mock_jax_device = MagicMock()
     mock_jax_device.device_kind = "TPU v5p"
     mock_devices.return_value = [mock_jax_device]
-    
+
     # Create mock devices
     mock_device1 = MagicMock()
     mock_device2 = MagicMock()
@@ -131,7 +131,7 @@ def test_hbm_usage_bytes_pathways_no_arrays(mock_devices, mock_live_arrays):
     mock_jax_device = MagicMock()
     mock_jax_device.device_kind = "TPU v6e"
     mock_devices.return_value = [mock_jax_device]
-    
+
     mock_device1 = MagicMock()
     mock_device2 = MagicMock()
     devices = [mock_device1, mock_device2]

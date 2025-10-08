@@ -6,7 +6,7 @@ from jax._src import test_util as jtu
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
-from tpu_commons.kernels.ragged_paged_attention.v2.ragged_kv_cache_update import \
+from tpu_inference.kernels.ragged_paged_attention.v2.ragged_kv_cache_update import \
     kv_cache_update
 
 

@@ -83,7 +83,7 @@ docker exec node-0 /bin/bash -c \
     --port ${PREFILL_VLLM_PORT} \
     --gpu-memory-utilization 0.2 \
     --tensor-parallel-size 4 \
-    --kv-transfer-config '{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_commons.distributed.tpu_connector\",\"kv_role\":\"kv_producer\"}' \
+    --kv-transfer-config '{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_producer\"}' \
     > /root/logs/prefill.txt 2>&1 &"
 set +x
 

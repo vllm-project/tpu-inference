@@ -6,7 +6,7 @@ import numpy as np
 from flax import nnx
 from jax.sharding import Mesh, PartitionSpec
 
-from tpu_commons.layers.jax.moe.deepseek_v3_moe import (DeepSeekV3Router,
+from tpu_inference.layers.jax.moe.deepseek_v3_moe import (DeepSeekV3Router,
                                                         SparseMoE)
 
 

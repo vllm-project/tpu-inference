@@ -1,7 +1,7 @@
-# Benchmarking TPU Commons
+# Benchmarking TPU Inference
 
 ## Setup
-In order to begin benchmarking TPU Commons (via vLLM), you'll want to copy all of the scripts in this directory (also listed below for your convenience) to the [`benchmarks`](https://github.com/vllm-project/vllm/tree/main/benchmarks) directory in your local copy of vLLM:
+In order to begin benchmarking TPU Inference (via vLLM), you'll want to copy all of the scripts in this directory (also listed below for your convenience) to the [`benchmarks`](https://github.com/vllm-project/vllm/tree/main/benchmarks) directory in your local copy of vLLM:
 
 * `scripts/vllm/benchmarking/backend_request_func.py`
 * `scripts/vllm/benchmarking/benchmark_dataset.py`

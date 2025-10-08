@@ -9,7 +9,7 @@ from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
 
-from tpu_commons.experimental.llama3_jax_stashed import (Llama3WeightLoader,
+from tpu_inference.experimental.llama3_jax_stashed import (Llama3WeightLoader,
                                                          LlamaForCausalLM)
 
 
@@ -146,7 +146,7 @@ class TestLlamaForCausalLM:
 
             assert jnp.all(final_norm_scale == 1.0)
 
-    @patch("tpu_commons.experimental.llama3_jax_stashed.Llama3WeightLoader")
+    @patch("tpu_inference.experimental.llama3_jax_stashed.Llama3WeightLoader")
     def test_load_weights_called_correctly(self, mock_loader_cls, rng, mesh):
         """Tests that the weight loader is called correctly for checkpoint loading."""
         vllm_config = MockVllmConfig(model_name="llama3-8b",
@@ -185,7 +185,7 @@ class TestLlama3WeightLoader:
         model = LlamaForCausalLM(vllm_config, rng, mesh)
 
         with patch(
-                "tpu_commons.experimental.llama3_jax_stashed.load_hf_weights"
+                "tpu_inference.experimental.llama3_jax_stashed.load_hf_weights"
         ) as mock_load:
             # This will now pass after the code fix
             weight_loader.load_weights(model)

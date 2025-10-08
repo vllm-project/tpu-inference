@@ -4,9 +4,9 @@ from unittest.mock import MagicMock
 import jax.numpy as jnp
 from flax import nnx
 
-from tpu_commons.layers.jax.layers import DenseFFW
-from tpu_commons.layers.jax.moe.moe import MoE
-from tpu_commons.layers.jax.transformer_block import (
+from tpu_inference.layers.jax.layers import DenseFFW
+from tpu_inference.layers.jax.moe.moe import MoE
+from tpu_inference.layers.jax.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
 
 

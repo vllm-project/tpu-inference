@@ -28,8 +28,8 @@ RUN python3 -m pip install --no-cache-dir \
     tblib \
     numba
 
-# Install tpu_commons
-WORKDIR /workspace/tpu_commons
+# Install tpu_inference
+WORKDIR /workspace/tpu_inference
 # Install requirements first and cache so we don't need to re-install on code change.
 COPY requirements.txt .
 RUN pip install -r requirements.txt

@@ -14,7 +14,7 @@ helpFunction()
 {
    echo ""
    echo "Usage: $0 [-r full_path_to_root_dir -m model_id]"
-   echo -e "\t-r The path your root directory containing both 'vllm' and 'tpu_commons' (default: /workspace/, which is used in the Dockerfile)"
+   echo -e "\t-r The path your root directory containing both 'vllm' and 'tpu_inference' (default: /workspace/, which is used in the Dockerfile)"
    exit 1
 }
 
@@ -75,8 +75,8 @@ echo "Using the root directory at $root_dir"
 
 cd "$root_dir"/vllm/tests/entrypoints/llm || exit
 
-# Overwrite a few of the vLLM benchmarking scripts with the TPU Commons ones
-cp "$root_dir"/tpu_commons/scripts/vllm/integration/*.py "$root_dir"/vllm/tests/entrypoints/llm/
+# Overwrite a few of the vLLM benchmarking scripts with the TPU Inference ones
+cp "$root_dir"/tpu_inference/scripts/vllm/integration/*.py "$root_dir"/vllm/tests/entrypoints/llm/
 
 echo "--------------------------------------------------"
 echo "Running integration for model: $test_model"

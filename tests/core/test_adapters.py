@@ -2,7 +2,7 @@
 import unittest
 from unittest.mock import MagicMock, PropertyMock
 
-from tpu_commons.core import adapters
+from tpu_inference.core import adapters
 
 
 class TestVllmConfigAdapter(unittest.TestCase):
