@@ -23,11 +23,11 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsLinearMethod
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 
-from tpu_commons.models.vllm.quantization import get_tpu_quantization_config
-from tpu_commons.models.vllm.quantization.common import JaxCommonLinearConfig
-from tpu_commons.models.vllm.quantization.compressed_tensors.compressed_tensors import \
+from tpu_inference.models.vllm.quantization import get_tpu_quantization_config
+from tpu_inference.models.vllm.quantization.common import JaxCommonLinearConfig
+from tpu_inference.models.vllm.quantization.compressed_tensors.compressed_tensors import \
     JaxCompressedTensorsConfig
-from tpu_commons.models.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import (
+from tpu_inference.models.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import (
     JaxCompressedTensorsW8A8Fp8, requantize_with_max_scale)
 
 P = PartitionSpec
@@ -289,7 +289,7 @@ def test_jax_column_parallel_linear(model, bias, mesh, enable_sp):
     vllm_config = engine_args.create_engine_config()
     vllm_config.compilation_config.pass_config.enable_sequence_parallelism = enable_sp
 
-    # Call tpu_commons code
+    # Call tpu_inference code
     vllm_config.model_config.dtype = torch.bfloat16
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
     with set_current_vllm_config(vllm_config):
@@ -327,7 +327,7 @@ def test_jax_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
     vllm_config = engine_args.create_engine_config()
     vllm_config.compilation_config.pass_config.enable_sequence_parallelism = enable_sp
 
-    # Call tpu_commons code
+    # Call tpu_inference code
     vllm_config.model_config.dtype = torch.bfloat16
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
     with set_current_vllm_config(vllm_config):
@@ -369,7 +369,7 @@ def test_jax_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
     vllm_config = engine_args.create_engine_config()
     vllm_config.compilation_config.pass_config.enable_sequence_parallelism = enable_sp
 
-    # Call tpu_commons code
+    # Call tpu_inference code
     vllm_config.model_config.dtype = torch.bfloat16
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
     with set_current_vllm_config(vllm_config):

@@ -10,7 +10,7 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh
 from vllm.config import ModelConfig
 
-from tpu_commons.models.jax.llama4 import Llama4ForCausalLM, Llama4WeightLoader
+from tpu_inference.models.jax.llama4 import Llama4ForCausalLM, Llama4WeightLoader
 
 
 class MockParamLlama4:
@@ -126,7 +126,7 @@ class TestLlama4ForCausalLM:
 
             assert jnp.all(final_norm_scale == 1.0)
 
-    @patch("tpu_commons.models.jax.llama4.Llama4WeightLoader")
+    @patch("tpu_inference.models.jax.llama4.Llama4WeightLoader")
     def test_load_weights_called_correctly(self, mock_loader_cls, rng, mesh):
         """Tests that the weight loader is called correctly for checkpoint loading."""
         vllm_config = MockVllmConfig(model_name="llama4-scout",
@@ -202,8 +202,8 @@ class TestLlama4WeightLoader:
         # Mock get_param to return a mock param with the target shape (vocab_size, hidden_size)
         mock_param = MockParamLlama4(shape=(128, 32))
 
-        with patch("tpu_commons.models.jax.llama4.get_param", return_value=mock_param), \
-            patch("tpu_commons.models.jax.llama4.shard_put", return_value=jnp.ones(mock_param.value.shape)) as mock_shard_put:
+        with patch("tpu_inference.models.jax.llama4.get_param", return_value=mock_param), \
+            patch("tpu_inference.models.jax.llama4.shard_put", return_value=jnp.ones(mock_param.value.shape)) as mock_shard_put:
 
             # This will now pass after the code fix
             weight_loader.load_weights(model)
@@ -242,8 +242,8 @@ class TestLlama4WeightLoader:
              dummy_weight),
         ]
 
-        with patch("tpu_commons.models.jax.llama4.get_param", return_value=mock_param), \
-            patch("tpu_commons.models.jax.llama4.shard_put", return_value=jnp.ones(mock_param.value.shape)) as mock_shard_put:
+        with patch("tpu_inference.models.jax.llama4.get_param", return_value=mock_param), \
+            patch("tpu_inference.models.jax.llama4.shard_put", return_value=jnp.ones(mock_param.value.shape)) as mock_shard_put:
 
             # Call _map_llama4_gate_up_proj directly
             weight_loader._map_llama4_gate_up_proj(

@@ -11,12 +11,12 @@ The code is **not feature-complete** and **may not be stable**.
 
 Follow this [guide](https://docs.vllm.ai/en/latest/getting_started/installation/google_tpu.html#set-up-using-python) to install vLLM from source.
 
-### Install `tpu_commons`:
+### Install `tpu_inference`:
 
 ```
 cd ~
-git clone https://github.com/vllm-project/tpu_commons.git
-cd tpu_commons
+git clone https://github.com/vllm-project/tpu-inference.git
+cd tpu_inference
 pip install -r requirements.txt
 pip install -e .
 ```
@@ -40,7 +40,7 @@ pre-commit run --all-files
 Run `Llama 3.1 8B` offline inference on 4 TPU chips:
 
 ```
-HF_TOKEN=<huggingface_token> python tpu_commons/examples/offline_inference.py \
+HF_TOKEN=<huggingface_token> python tpu_inference/examples/offline_inference.py \
     --model=meta-llama/Llama-3.1-8B \
     --tensor_parallel_size=4 \
     --max_model_len=1024
@@ -52,7 +52,7 @@ Run `Llama 3.1 8B Instruct` offline inference on 4 TPU chips in disaggregated mo
 
 ```
 PREFILL_SLICES=2 DECODE_SLICES=2 HF_TOKEN=<huggingface_token> \
-python tpu_commons/examples/offline_inference.py \
+python tpu_inference/examples/offline_inference.py \
     --model=meta-llama/Meta-Llama-3-8B-Instruct \
     --max_model_len=1024 \
     --max_num_seqs=8
@@ -75,8 +75,8 @@ Run `Llama 3.1 70B Instruct` offline inference on 4 hosts (v6e-16) in interleave
 1. Deploy Ray cluster and containers:
 
 ```
-~/tpu_commons/scripts/multihost/deploy_cluster.sh \
-    -s ~/tpu_commons/scripts/multihost/run_cluster.sh \
+~/tpu_inference/scripts/multihost/deploy_cluster.sh \
+    -s ~/tpu_inference/scripts/multihost/run_cluster.sh \
     -d "<your_docker_image>" \
     -c "<path_on_remote_hosts_for_hf_cache>" \
     -t "<your_hugging_face_token>" \
@@ -88,7 +88,7 @@ Run `Llama 3.1 70B Instruct` offline inference on 4 hosts (v6e-16) in interleave
 1. On the head node, use `sudo docker exec -it node /bin/bash` to enter the container. And then execute:
 
 ```
-HF_TOKEN=<huggingface_token> python /workspace/tpu_commons/examples/offline_inference.py \
+HF_TOKEN=<huggingface_token> python /workspace/tpu_inference/examples/offline_inference.py \
     --model=meta-llama/Llama-3.1-70B  \
     --tensor_parallel_size=16  \
     --max_model_len=1024
@@ -101,7 +101,7 @@ Run the vLLM's implementation of `Llama 3.1 8B`, which is in Pytorch. It is the 
 ```
 export MODEL_IMPL_TYPE=vllm
 export HF_TOKEN=<huggingface_token>
-python tpu_commons/examples/offline_inference.py \
+python tpu_inference/examples/offline_inference.py \
     --model=meta-llama/Llama-3.1-8B \
     --tensor_parallel_size=4 \
     --max_model_len=1024
@@ -127,8 +127,8 @@ This can be run on a CPU VM.
 
 ```
 cd ~
-git clone https://github.com/vllm-project/tpu_commons.git
-cd tpu_commons
+git clone https://github.com/vllm-project/tpu-inference.git
+cd tpu_inference
 
 DOCKER_URI=<Specify a GCR URI>
 # example:
@@ -148,7 +148,7 @@ docker pull $DOCKER_URI
 docker run \
   --rm \
   $DOCKER_URI \
-  python /workspace/tpu_commons/examples/offline_inference.py \
+  python /workspace/tpu_inference/examples/offline_inference.py \
   --model=meta-llama/Llama-3.1-8B \
   --tensor_parallel_size=4 \
   --max_model_len=1024 \
@@ -233,12 +233,12 @@ In order to use this approach, you can do the following:
 6. Enter the desired amount of time (in ms) you'd like to capture the profile for and then click `Capture`.   If everything goes smoothly, you should see a success message, and your `logdir` should be populated.
 
 ## How to run an End-To-End (E2E) benchmark?
-In order to run an [E2E benchmark test](https://github.com/vllm-project/tpu_commons/blob/main/scripts/vllm/benchmarking/README.md), which will spin up a vLLM server with Llama 3.1 8B and run a single request from the MLPerf dataset against it, you can run the
+In order to run an [E2E benchmark test](https://github.com/vllm-project/tpu-inference/blob/main/scripts/vllm/benchmarking/README.md), which will spin up a vLLM server with Llama 3.1 8B and run a single request from the MLPerf dataset against it, you can run the
 following command locally:
 
 ```
 
-BUILDKITE_COMMIT=0f199f1 .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
+BUILDKITE_COMMIT=0f199f1 .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
 
 ```
 
@@ -254,7 +254,7 @@ Currently, we support overall model weight/activation quantization through the [
 To enable quantization, you can do one of the following:
 
 #### Using a quantization config YAML
-Simply pass the name of a quantization config found inside the quantization config directory (`tpu_commons/models/jax/utils/quantization/configs/`), for example:
+Simply pass the name of a quantization config found inside the quantization config directory (`tpu_inference/models/jax/utils/quantization/configs/`), for example:
 
 ```
 
@@ -274,7 +274,7 @@ Alternatively, you can pass the explicit quantization configuration as JSON stri
 ### Creating your own quantization config YAML
 To create your own quantization config YAML file:
 
-1. Add a new file to the quantization config directory (`tpu_commons/models/jax/utils/quantization/configs/`)
+1. Add a new file to the quantization config directory (`tpu_inference/models/jax/utils/quantization/configs/`)
 2. For Qwix quantization, add a new entry to the file as follows:
 
 ```

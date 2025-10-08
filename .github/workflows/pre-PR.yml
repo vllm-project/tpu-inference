@@ -35,7 +35,7 @@ jobs:
           CHANGED_FILES=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
 
           # --- Check for modeling files ---
-          if echo "$CHANGED_FILES" | grep -E -q '^tpu_commons/models/jax/(common|recipes)/'; then
+          if echo "$CHANGED_FILES" | grep -E -q '^tpu_inference/models/jax/(common|recipes)/'; then
             echo "modeling=true" >> "$GITHUB_OUTPUT"
           else
             echo "modeling=false" >> "$GITHUB_OUTPUT"

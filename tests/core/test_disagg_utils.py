@@ -1,6 +1,6 @@
 import unittest
 
-from tpu_commons.core.disagg_utils import _parse_slices
+from tpu_inference.core.disagg_utils import _parse_slices
 
 
 class DisaggUtilsTest(unittest.TestCase):

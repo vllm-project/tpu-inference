@@ -2,7 +2,7 @@
 
 from unittest.mock import Mock
 
-from tpu_commons.adapters.vllm_adapters import (VllmKVCacheConfigAdapter,
+from tpu_inference.adapters.vllm_adapters import (VllmKVCacheConfigAdapter,
                                                 VllmKVCacheSpecAdapter,
                                                 VllmLoRARequestAdapter,
                                                 VllmModelRunnerOutputAdapter,
