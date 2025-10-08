@@ -6,7 +6,7 @@ import jax
 from flax import nnx
 
 from tpu_inference.layers.jax.attention.attention import (AttentionMetadata,
-                                                        KVCache)
+                                                          KVCache)
 from tpu_inference.layers.jax.layers import DenseFFW
 from tpu_inference.layers.jax.moe.moe import MoE
 
@@ -29,19 +29,30 @@ class TransformerBlock(nnx.Module):
             self, x_TD: jax.Array, is_prefill: bool, kv_cache: KVCache,
             attention_metadata: AttentionMetadata
     ) -> Tuple[KVCache, jax.Array]:
-        # Attn Block
+        # # Attn Block
+        # jax.debug.print("Layer input hidden states slice:\n{}", x_TD)
+
         attn_residual_TD = x_TD
         x_TD = self.pre_attention_norm(x_TD)
+        # jax.debug.print("Pre-attention norm output slice:\n{}", x_TD)
         new_cache, attn_output_TD = self.attn(x_TD, is_prefill, kv_cache,
                                               attention_metadata,
                                               self.use_attention_rope)
+        # jax.debug.print("Attention output (before residual): {}",
+        #                 attn_output_TD)
         attn_output_TD += attn_residual_TD
+        # jax.debug.print("Attention output (after residual): {}",
+        #                 attn_output_TD)
 
         # FFW Block
         ffw_residual_TD = attn_output_TD
         normed_ffw_input_TD = self.pre_mlp_norm(attn_output_TD)
+        # jax.debug.print("FFW input (after pre_mlp_norm): {}",
+        #                 normed_ffw_input_TD)
         logits_TD = self.custom_module(normed_ffw_input_TD)
+        # jax.debug.print("FFW output (before residual): {}", logits_TD)
         logits_TD += ffw_residual_TD
+        # jax.debug.print("FFW output (after residual): {}", logits_TD)
         return new_cache, logits_TD
 
 
@@ -58,7 +69,6 @@ class SharedExpertsTransformerBlock(TransformerBlock):
                                               attention_metadata,
                                               self.use_attention_rope)
         attn_output_TD += attn_residual_TD
-
         # FFW Block
         ffw_residual_TD = attn_output_TD
         normed_ffw_input_TD = self.pre_mlp_norm(attn_output_TD)

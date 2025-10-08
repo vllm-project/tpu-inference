@@ -38,6 +38,7 @@ class Llama4Attention(Attention):
     temperature_tuning_scale: float
     activation_attention_td: Sharding
     activation_attention_out_td: Sharding
+    is_causal: bool = True
 
     def __call__(self,
                  x,
@@ -69,6 +70,11 @@ class Llama4Attention(Attention):
         """
         md = attention_metadata
         x = jnp.asarray(x, self.dtype)
+
+        # 1. Input to the attention block (same as layer input hidden states)
+        # jax.debug.print("JAX Attention input hidden states slice: {}",
+        #                 x[0, :5])
+
         x_SD = nnx.with_sharding_constraint(x, self.activation_attention_td)
         x_q_TD = nnx.with_sharding_constraint(x, self.activation_q_td)
         rope_scaling = self.rope_scaling
@@ -79,13 +85,24 @@ class Llama4Attention(Attention):
         with jax.named_scope("q_proj"):
             q_TNH = jnp.einsum('TD,DNH -> TNH', x_q_TD,
                                self.kernel_q_proj_DNH.value)
+
+            # # 2. Output of q_proj before RoPE
+            # jax.debug.print("JAX q_proj output slice before RoPE: {}",
+            #                 q_TNH[0, 0, :5])
+
             if use_attention_rope:
                 q_TNH = apply_rope(q_TNH, md.input_positions, H, rope_theta,
                                    rope_scaling, self.rope_input_ordering)
 
+                # # 3. Output of q_proj after RoPE
+                # jax.debug.print("JAX q_proj output after RoPE slice: {}",
+                #                 q_TNH[0, 0, :5])
+
                 # Apply normaliation after RoPE
                 if self.use_qk_norm:
                     q_TNH = l2_norm(q_TNH)
+                    # jax.debug.print("JAX q_proj output after L2Norm slice: {}",
+                    #                 q_TNH[0, 0, :5])
             else:
                 if self.temperature_tuning:
                     q_TNH = self.apply_temperature_tuning(md, q_TNH)
@@ -94,19 +111,32 @@ class Llama4Attention(Attention):
         with jax.named_scope("k_proj"):
             k_SKH = jnp.einsum('SD,DKH -> SKH', x_SD,
                                self.kernel_k_proj_DKH.value)
+            # # 4. Output of k_proj before RoPE
+            # jax.debug.print("JAX k_proj output slice before RoPE: {}",
+            #                 k_SKH[0, 0, :5])
             if use_attention_rope:
                 k_SKH = apply_rope(k_SKH, md.input_positions, H, rope_theta,
                                    rope_scaling, self.rope_input_ordering)
+                # # 5. Output of k_proj after RoPE
+                # jax.debug.print("JAX k_proj output after RoPE slice: {}",
+                #                 k_SKH[0, 0, :5])
 
                 # Apply normaliation after RoPE
                 if self.use_qk_norm:
                     k_SKH = l2_norm(k_SKH)
+                    # jax.debug.print("JAX k_proj output after L2Norm slice: {}",
+                    #                 k_SKH[0, 0, :5])
             k_SKH = nnx.with_sharding_constraint(k_SKH, self.keyvalue_skh)
 
         with jax.named_scope("v_proj"):
             v_SKH = jnp.einsum('SD,DKH -> SKH', x_SD,
                                self.kernel_v_proj_DKH.value)
+            # # 6. Output of v_proj
+            # jax.debug.print("JAX v_proj output slice: {}", v_SKH[0, 0, :5])
             v_SKH = nnx.with_sharding_constraint(v_SKH, self.keyvalue_skh)
+            # jax.debug.print(
+            #     "JAX v_proj output slice after sharding constraint: {}",
+            #     v_SKH[0, 0, :5])
 
         q_scale = k_scale = v_scale = None
         if self.kv_cache_quantized_dtype:
@@ -131,12 +161,21 @@ class Llama4Attention(Attention):
                 k_scale=k_scale,
                 v_scale=v_scale,
             )
+        # The outputs_TNH variable is the core attention output, but before the final projection.
+        # This is the "Attention Output (before projection)" from your last log.
+        # jax.debug.print("JAX Attention output (before projection): {}",
+        #                 outputs_TNH[0, -1, :5])
 
         with jax.named_scope("o_proj"):
             o_TD = jnp.einsum('TNH,NHD -> TD', outputs_TNH,
                               self.kernel_o_proj_NHD.value)
             o_TD = nnx.with_sharding_constraint(
                 o_TD, self.activation_attention_out_td)
+
+        # # This is the "Attention Output (after projection)" which is what we compared previously.
+        # jax.debug.print("JAX Attention output (after projection): {}",
+        #                 o_TD[0, :5])
+
         return new_kv_cache, o_TD
 
     def apply_temperature_tuning(self, md: AttentionMetadata,
