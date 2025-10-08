@@ -11,15 +11,15 @@ from vllm.inputs import ProcessorInputs, PromptType
 from vllm.platforms.interface import Platform, PlatformEnum
 from vllm.sampling_params import SamplingParams, SamplingType
 
+
 from tpu_inference.logger import init_logger
-from tpu_inference.models.jax.utils.quantization.quantization_utils import \
-    update_vllm_config_for_qwix_quantization
+
 
 if TYPE_CHECKING:
     from vllm.attention.backends.registry import _Backend
     from vllm.config import BlockSize, ModelConfig, VllmConfig
     from vllm.pooling_params import PoolingParams
-else:
+else:   
     BlockSize = None
     ModelConfig = None
     VllmConfig = None
@@ -207,6 +207,8 @@ class TpuPlatform(Platform):
         kv_transfer_config = vllm_config.kv_transfer_config
         if kv_transfer_config is not None:
             assert kv_transfer_config.kv_connector == "TPUConnector"
+        from tpu_inference.models.jax.utils.quantization.quantization_utils import \
+        update_vllm_config_for_qwix_quantization
 
         update_vllm_config_for_qwix_quantization(vllm_config)
 

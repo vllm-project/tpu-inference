@@ -40,6 +40,7 @@ class TPUSupportedSamplingMetadata:
         mesh: Mesh,
         input_batch: InputBatch,
         padded_num_reqs: int,
+        sharding: Optional[jax.sharding.Sharding] = None,
     ) -> "TPUSupportedSamplingMetadata":
         needs_logprobs = input_batch.max_num_logprobs > 0 if input_batch.max_num_logprobs else False
         if input_batch.all_greedy:
@@ -61,9 +62,9 @@ class TPUSupportedSamplingMetadata:
 
         # Slice persistent device tensors to a fixed pre-compiled padded shape.
         return cls(
-            temperature=device_array(mesh, temp_tensor[:padded_num_reqs]),
-            top_p=device_array(mesh, top_p_tensor[:padded_num_reqs]),
-            top_k=device_array(mesh, top_k_tensor[:padded_num_reqs]),
+            temperature=device_array(mesh, temp_tensor[:padded_num_reqs], sharding=sharding),
+            top_p=device_array(mesh, top_p_tensor[:padded_num_reqs], sharding=sharding),
+            top_k=device_array(mesh, top_k_tensor[:padded_num_reqs], sharding=sharding),
             do_sampling=not input_batch.all_greedy,
             logprobs=needs_logprobs,
         )

@@ -1,0 +1,52 @@
+_VllmRunner(
+  (vllm_model): Qwen3MoeForCausalLM(
+    (model): Qwen3MoeModel(
+      (embed_tokens): VocabParallelEmbedding(num_embeddings=151936, embedding_dim=2048, org_vocab_size=151936, num_embeddings_padded=151936, tp_size=1)
+      # ----> PartitionSpec(('model', 'expert', 'attn_dp'), None)      
+      
+      (layers): ModuleList(
+        (0-47): 48 x Qwen3MoeDecoderLayer(
+          (self_attn): Qwen3MoeAttention(
+            (qkv_proj): QKVParallelLinear(in_features=2048, output_features=5120, bias=False, tp_size=1, gather_output=False)
+            # ---->  (5120, 2048) spec=PartitionSpec('model', None)
+            
+            (o_proj): RowParallelLinear(in_features=4096, output_features=2048, bias=False, tp_size=1, reduce_results=True)
+            # ---->  (2048, 4096)  spec=PartitionSpec(None, ('model', 'expert', 'attn_dp')
+                                                
+            (rotary_emb): RotaryEmbedding(head_size=128, rotary_dim=128, max_position_embeddings=40960, base=1000000.0, is_neox_style=True)
+            (attn): Attention(head_size=128, num_heads=32, num_kv_heads=4, scale=0.08838834764831845, backend=PallasAttentionBackendImpl)
+            (q_norm): RMSNorm(hidden_size=128, eps=1e-06)
+            (k_norm): RMSNorm(hidden_size=128, eps=1e-06)
+          )
+          (mlp): Qwen3MoeSparseMoeBlock(
+            (experts): FusedMoE(
+              global_num_experts=128, local_num_experts=128, top_k=8, intermediate_size_per_partition=768, tp_size=1,
+              ep_size=1, reduce_results=True, renormalize=True, use_grouped_topk=False, scoring_func='softmax', activation='silu'
+              (quant_method): JaxUnquantizedFusedMoEMethod()
+            )
+            # ----> (Pdb) self.model.vllm_model.model.layers[0].mlp.experts.w13_weight.shape
+            # torch.Size([128, 1536, 2048])
+            # PartitionSpec(('expert', 'model', 'attn_dp'), None, None)
+            
+            # ----> (Pdb) self.model.vllm_model.model.layers[0].mlp.experts.w2_weight.shape
+            # torch.Size([128, 2048, 768])
+            # PartitionSpec(('expert', 'model', 'attn_dp'), None, None)
+            
+
+            (gate): ReplicatedLinear(in_features=2048, output_features=128, bias=False)
+            # ----> (128, 2048) PartitionSpec(None, None)
+          )
+          (input_layernorm): RMSNorm(hidden_size=2048, eps=1e-06)
+          # ---->  torch.Size([2048])
+          (post_attention_layernorm): RMSNorm(hidden_size=2048, eps=1e-06)
+          #---->  torch.Size([2048])
+          
+        )
+      )
+      (norm): RMSNorm(hidden_size=2048, eps=1e-06)
+    )
+    (lm_head): ParallelLMHead(num_embeddings=151936, embedding_dim=2048, org_vocab_size=151936, num_embeddings_padded=151936, tp_size=1)
+    # ----> (151936, 2048), spec=PartitionSpec(('model', 'expert', 'attn_dp'), None)
+    (logits_processor): LogitsProcessor(vocab_size=151936, org_vocab_size=151936, scale=1.0, logits_as_input=False)
+  )
+)

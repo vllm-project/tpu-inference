@@ -1,5 +1,6 @@
 import torchax
 from jax.sharding import Mesh, PartitionSpec
+from tpu_inference.layers.jax.sharding import MLP_DATA_AXIS_NAME, MLP_TENSOR_AXIS_NAME
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE, FusedMoEConfig
@@ -32,17 +33,22 @@ class JaxCommonLinearConfig:
         self.weight_sharding = P(None, None)
         self.fuse_matmuls = True
         self.enable_sequence_parallelism = vllm_config.compilation_config.pass_config.enable_sequence_parallelism
-        self.input_sharding = None
-        self.output_sharding = None
-
+        self.input_sharding = P(MLP_DATA_AXIS_NAME, None)
+        self.output_sharding = P(MLP_DATA_AXIS_NAME, None)
+        
+        self.tp_size = self.mesh.shape['model']*self.mesh.shape.get('attn_dp', 1)
         if isinstance(layer, RowParallelLinear):
-            self.weight_sharding = P(None, "model")
+            self.weight_sharding = P(None, MLP_TENSOR_AXIS_NAME)
             if self.enable_sequence_parallelism:
-                self.output_sharding = P("model", None)
+                self.output_sharding = P(MLP_TENSOR_AXIS_NAME, None)
         elif isinstance(layer, ColumnParallelLinear):
-            self.weight_sharding = P("model", None)
+            if isinstance(
+                    layer, QKVParallelLinear):
+                self.weight_sharding = P(("model", "expert"), None)
+            else:
+                self.weight_sharding = P(MLP_TENSOR_AXIS_NAME, None)
             if self.enable_sequence_parallelism:
-                self.input_sharding = P("model", None)
+                self.input_sharding = P(MLP_TENSOR_AXIS_NAME, None) # todo(wenxindongwork): verify this
 
             if isinstance(layer, MergedColumnParallelLinear) or isinstance(
                     layer, QKVParallelLinear):
@@ -64,10 +70,11 @@ class JaxCommonLinearConfig:
         self.n_shards = self.mesh.shape.get(self.weight_sharding[0], 1)
 
     def get_input_sharding(self, x: torchax.tensor.Tensor):
+        
         if self.enable_sequence_parallelism:
             token_num = x.shape[0]
             # NOTE(chengjiyao): make sure the sharded token_num is larger than TPU_SECOND_LAST_MINOR
-            if token_num // self.mesh.shape["model"] >= TPU_SECOND_LAST_MINOR:
+            if token_num // self.tp_size >= TPU_SECOND_LAST_MINOR:
                 return self.input_sharding
             else:
                 return None
@@ -77,7 +84,7 @@ class JaxCommonLinearConfig:
         if self.enable_sequence_parallelism:
             token_num = x.shape[0]
             # NOTE(chengjiyao): make sure the sharded token_num is larger than TPU_SECOND_LAST_MINOR
-            if token_num // self.mesh.shape["model"] >= TPU_SECOND_LAST_MINOR:
+            if token_num // self.tp_size >= TPU_SECOND_LAST_MINOR:
                 return self.output_sharding
             else:
                 return None

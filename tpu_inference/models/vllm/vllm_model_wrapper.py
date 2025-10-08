@@ -3,6 +3,7 @@ import functools
 import os
 from collections.abc import Sequence
 from contextlib import nullcontext
+import time
 from typing import Any, List, Optional, Tuple
 from unittest.mock import patch
 
@@ -14,6 +15,7 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import TORCH_DTYPE_TO_JAX
+from tpu_inference.layers.jax.sharding import MLP_TENSOR_AXIS_NAME
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.lora.layers import BaseLayerWithLoRA
@@ -114,8 +116,12 @@ class VllmModelWrapper:
 
         # Load the vLLM model and wrap it into a new model whose forward
         # function can calculate the hidden_state and logits.
+        start_time = time.time()
+         
         with load_context, jax.default_device(jax.devices('cpu')[0]):
             vllm_model = vllm_get_model(vllm_config=vllm_config_for_load)
+        end_time = time.time()
+        print("wenxin: loading model time: ", end_time - start_time)
         lora_manager = None
         if vllm_config_for_load.lora_config is not None:
             # Replace layers in the model with LoRA layers.
@@ -130,8 +136,11 @@ class VllmModelWrapper:
         self.vllm_config.compilation_config.static_forward_context = static_forward_context
 
         self.model = _VllmRunner(vllm_model)
+        start_time = time.time()
         params_and_buffers = shard_model_to_tpu(self.model, self.mesh)
-
+        end_time = time.time()
+        print("wenxin: shard model to tpu time: ", end_time - start_time)
+        
         # Returning to the jax land, so we need to wrap it into a JaxValue.
         return jax_view(params_and_buffers), lora_manager
 
@@ -198,7 +207,7 @@ class VllmModelWrapper:
         @functools.partial(
             jax.jit,
             out_shardings=(NamedSharding(self.mesh,
-                                         PartitionSpec(None, "model"))),
+                                         PartitionSpec(None, MLP_TENSOR_AXIS_NAME))),
         )
         def compute_logits_func(
             params_and_buffers: Any,
