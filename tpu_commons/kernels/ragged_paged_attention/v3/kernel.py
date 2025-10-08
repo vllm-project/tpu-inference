@@ -1272,6 +1272,7 @@ def ragged_paged_attention(
   Returns:
     The output of the attention.
   """
+    print("inside ragged_paged_attention")
     q, k, v = queries, keys, values
     static_validate_inputs(
         q,
@@ -1443,7 +1444,7 @@ def ragged_paged_attention(
             },
             name=scope_name,
         ))
-
+    breakpoint()
     output, updated_kv_cache = kernel(*scalar_prefetches, q, kv, kv_cache)
     return (
         prepare_outputs(output, actual_num_q_heads_per_kv_head,

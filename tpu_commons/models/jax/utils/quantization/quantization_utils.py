@@ -16,15 +16,19 @@ from jax.sharding import PartitionSpec as P
 from qwix._src.core.qarray import QArray
 from qwix._src.providers import ptq
 
-if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+# if TYPE_CHECKING:
+#     from vllm.config import VllmConfig
 
 from tpu_commons import utils
 from tpu_commons.layers.common.attention_metadata import AttentionMetadata
 from tpu_commons.logger import init_logger
 from tpu_commons.runner.kv_cache import (DEFAULT_KV_CACHE_DTYPE,
                                          create_kv_caches)
+print("29")
+
 from tpu_commons.utils import device_array
+print("35")
+
 
 logger = init_logger(__name__)
 

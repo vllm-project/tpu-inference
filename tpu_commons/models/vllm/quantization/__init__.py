@@ -15,6 +15,7 @@ from tpu_commons.models.vllm.quantization.unquantized import \
 
 def get_tpu_quantization_config(vllm_config: VllmConfig,
                                 mesh: Mesh) -> QuantizationConfig:
+    
     model_config = copy.deepcopy(vllm_config.model_config)
     # TODO(kyuyeunk): Add support for "tpu_int8".
     method_to_config: dict[str, str] = {
@@ -22,7 +23,6 @@ def get_tpu_quantization_config(vllm_config: VllmConfig,
         "compressed-tensors": JaxCompressedTensorsConfig,
         "awq": JaxAWQConfig,
     }
-
     if model_config.quantization not in method_to_config:
         raise NotImplementedError
     quant_config = method_to_config[model_config.quantization]

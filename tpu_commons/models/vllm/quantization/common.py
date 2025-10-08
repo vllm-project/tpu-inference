@@ -37,7 +37,6 @@ class JaxCommonLinearConfig:
         self.output_sharding = P(MLP_DATA_AXIS_NAME, None)
         
         self.tp_size = self.mesh.shape['model']*self.mesh.shape.get('attn_dp', 1)
-
         if isinstance(layer, RowParallelLinear):
             self.weight_sharding = P(None, MLP_TENSOR_AXIS_NAME)
             if self.enable_sequence_parallelism:

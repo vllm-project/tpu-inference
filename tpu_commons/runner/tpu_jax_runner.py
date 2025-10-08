@@ -61,7 +61,7 @@ from tpu_commons.utils import device_array, make_optimized_mesh
 
 from tpu_commons.models.jax.common.sharding import MLP_DATA_AXIS_NAME
 
-vLLMScheduler.Scheduler = DPScheduler
+# vLLMScheduler.Scheduler = DPScheduler
 
 logger = init_logger(__name__)
 
@@ -115,6 +115,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self._init_random()
         self._init_mesh()
         self.dp_size = self.mesh.shape["data"] * self.mesh.shape["attn_dp"]
+        print("self.dp_size", self.dp_size)
         self._init_phased_profiling()
         self._init_mm()
         self._init_inputs()
@@ -194,7 +195,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.mesh = make_optimized_mesh(mesh_shape,
                                             axis_names,
                                             devices=self.devices)
-            print("self.mesh", self.mesh)
+            print("_init_mesh self.mesh", self.mesh)
         logger.info(f"Init mesh | mesh={self.mesh}")
 
     def _init_phased_profiling(self) -> None:
@@ -540,7 +541,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # mask out tokens where logit_indices = 0
             # next_tokens = next_tokens[logits_indices_cpu != -1]
             # Here need to map token positions back to the original request order
-            next_tokens = next_tokens[logits_indices_selector]
+            if logits_indices_selector is not None:
+                next_tokens = next_tokens[logits_indices_selector]
             selected_token_ids = np.expand_dims(next_tokens[:num_reqs], 1)
             valid_sampled_token_ids = selected_token_ids.tolist()
         else:
@@ -690,7 +692,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 padded_total_num_scheduled_tokens,
                 cum_num_req_per_dp_rank_list, padded_num_reqs_per_dp_rank, logits_indices_selector)
 
-    def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
+    def _prepare_inputs_dp(self, scheduler_output: "VllmSchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -937,6 +939,162 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             logits_indices,
             spec_decode_metadata,
             logits_indices_selector,
+        )
+
+    def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
+        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        assert total_num_scheduled_tokens > 0
+        num_reqs = self.input_batch.num_reqs
+        assert num_reqs > 0
+
+        # Get the number of scheduled tokens for each request.
+        num_scheduled_tokens_per_req = []
+        max_num_scheduled_tokens_all_reqs = 0
+        for req_id in self.input_batch.req_ids[:num_reqs]:
+            assert req_id is not None
+            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            num_scheduled_tokens_per_req.append(num_tokens)
+            max_num_scheduled_tokens_all_reqs = max(
+                max_num_scheduled_tokens_all_reqs, num_tokens)
+        num_scheduled_tokens_per_req = np.array(num_scheduled_tokens_per_req,
+                                                dtype=np.int32)
+        assert max_num_scheduled_tokens_all_reqs > 0
+        padded_num_reqs = runner_utils.get_padded_num_reqs_with_upper_limit(
+            num_reqs, self.max_num_reqs)
+
+        # Get request indices.
+        # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
+        # For each scheduled token, what are the corresponding req index.
+        req_indices = np.repeat(self.arange_cpu[:num_reqs],
+                                num_scheduled_tokens_per_req)
+
+        # Get batched arange.
+        # E.g., [2, 5, 3] -> [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+        # For each scheduled token, what is its position in corresponding req.
+        arange = np.concatenate(
+            [self.arange_cpu[:n] for n in num_scheduled_tokens_per_req])
+
+        # Get positions.
+        positions_np = self.positions_cpu[:total_num_scheduled_tokens]
+        np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
+               arange,
+               out=positions_np)
+
+        # Multi-modal support
+        # Calculate M-RoPE positions.
+        # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
+        if self.uses_mrope:
+            self.mm_manager.calc_mrope_positions(scheduler_output)
+
+        # Get token indices.
+        # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+        # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
+        # where M is the max_model_len.
+        token_indices = (positions_np +
+                         req_indices * self.input_batch.token_ids_cpu.shape[1])
+
+        # NOTE(woosuk): We use torch.index_select instead of np.take here
+        # because torch.index_select is much faster than np.take for large
+        # tensors.
+        np.take(self.input_batch.token_ids_cpu.flatten(),
+                token_indices,
+                out=self.input_ids_cpu[:total_num_scheduled_tokens])
+
+        # Prepare the attention metadata.
+        self.query_start_loc_cpu[0] = 0
+        np.cumsum(num_scheduled_tokens_per_req,
+                  out=self.query_start_loc_cpu[1:num_reqs + 1])
+        self.query_start_loc_cpu[num_reqs + 1:] = 1
+
+        self.seq_lens_cpu[:num_reqs] = (
+            self.input_batch.num_computed_tokens_cpu[:num_reqs] +
+            num_scheduled_tokens_per_req)
+
+        # Do the padding and copy the tensors to the TPU.
+        padded_total_num_scheduled_tokens = runner_utils.get_padded_token_len(
+            self.num_tokens_paddings, total_num_scheduled_tokens)
+        # Zero out to avoid spurious values from prev iteration (last cp chunk)
+        self.input_ids_cpu[
+            total_num_scheduled_tokens:padded_total_num_scheduled_tokens] = 0
+
+        # Please see runner_utils.PhasedBasedProfiler for details
+        if self.phase_based_profiler:
+            batch_composition_stats = runner_utils.get_batch_composition_stats(
+                self.input_batch, total_num_scheduled_tokens, num_reqs,
+                padded_total_num_scheduled_tokens, scheduler_output)
+
+            self.phase_based_profiler.step(batch_composition_stats)
+
+        # Inputs
+        input_ids = self.input_ids_cpu[:padded_total_num_scheduled_tokens]
+        positions = self.positions_cpu[:padded_total_num_scheduled_tokens]
+        mrope_positions = self.mrope_positions_cpu[:, :
+                                                   padded_total_num_scheduled_tokens]
+        block_tables = self.block_table_cpu[:self.max_num_reqs]
+        block_tables[:num_reqs, :self.max_num_blocks_per_req] = (
+            self.input_batch.block_table[0].get_cpu_tensor()[:num_reqs])
+
+        # TODO(pooyam): Some paddings are up to `num_reqs_paddings` (spec decoding, select hidden states, etc) and some other are to `max_num_reqs` (block table, seq_lens). We should stick to one of them maybe?
+        query_start_loc = self.query_start_loc_cpu[:self.max_num_reqs + 1]
+        seq_lens = self.seq_lens_cpu[:self.max_num_reqs]
+        request_distribution = np.array(self.input_batch.request_distribution)
+        use_spec_decode = len(
+            scheduler_output.scheduled_spec_decode_tokens) > 0
+        if not use_spec_decode:
+            logits_indices = self.query_start_loc_cpu[1:padded_num_reqs +
+                                                      1] - 1
+            spec_decode_metadata = None
+        else:
+            num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
+            for req_id, draft_token_ids in (
+                    scheduler_output.scheduled_spec_decode_tokens.items()):
+                req_idx = self.input_batch.req_id_to_index[req_id]
+                num_draft_tokens[req_idx] = len(draft_token_ids)
+
+            spec_decode_metadata = self.speculative_decoding_manager.get_spec_decode_metadata(
+                num_draft_tokens, self.query_start_loc_cpu[1:num_reqs + 1],
+                padded_num_reqs)
+            logits_indices = spec_decode_metadata.final_logits_indices
+
+        # Put to device
+        sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
+            self.mesh, self.input_batch, padded_num_reqs)
+        if self.uses_mrope:
+            positions = mrope_positions
+
+        # Convert block_tables to 1D on cpu.
+        block_tables = block_tables.reshape(-1)
+
+        query_start_loc_cpu = query_start_loc
+        seq_lens_cpu = seq_lens
+        (input_ids, positions, block_tables, query_start_loc, seq_lens,
+         logits_indices, request_distribution) = device_array(
+             self.mesh, (input_ids, positions, block_tables, query_start_loc,
+                         seq_lens, logits_indices, request_distribution))
+
+        if self.lora_config is not None:
+            self.lora_utils.set_active_loras(
+                num_scheduled_tokens_per_req, total_num_scheduled_tokens,
+                padded_total_num_scheduled_tokens)
+
+        attention_metadata = AttentionMetadata(
+            input_positions=positions,
+            block_tables=block_tables,
+            seq_lens=seq_lens,
+            query_start_loc=query_start_loc,
+            request_distribution=request_distribution)
+
+        # This is for making these cpu buffers hidden during tracing
+        attention_metadata.query_start_loc_cpu = query_start_loc_cpu
+        attention_metadata.seq_lens_cpu = seq_lens_cpu
+
+        return (
+            input_ids,
+            attention_metadata,
+            sampling_metadata,
+            logits_indices,
+            spec_decode_metadata,
+            None
         )
 
     def _get_input_ids_embeds(self, input_ids: jax.Array,

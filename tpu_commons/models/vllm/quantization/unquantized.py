@@ -106,6 +106,7 @@ class JaxUnquantizedLinearMethod(UnquantizedLinearMethod):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+       
         with jax.named_scope(layer._get_name()):
             if in_sharding := self.jax_config.get_input_sharding(x):
                 x.shard_(NamedSharding(self.jax_config.mesh, in_sharding))
@@ -117,7 +118,8 @@ class JaxUnquantizedLinearMethod(UnquantizedLinearMethod):
 
             if out_sharding := self.jax_config.get_output_sharding(out):
                 out.shard_(NamedSharding(self.jax_config.mesh, out_sharding))
-
+            breakpoint()
+            print(layer._get_name(), "out", out)
         return out
 
     def _apply_fused(self,

@@ -4,6 +4,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
+from tpu_commons.models.jax.common.sharding import ATTN_DATA_AXIS_NAME, MLP_DATA_AXIS_NAME
 from vllm.v1.outputs import LogprobsTensors
 
 from tpu_commons.layers.jax.binary_search import topk_mask, topp_mask
@@ -27,7 +28,8 @@ def sample(
     if tpu_sampling_metadata.do_sampling:
         # Unshard the logits explicity to avoid latency increase.
         logits = jax.lax.with_sharding_constraint(
-            logits, NamedSharding(mesh, P("data", None)))
+            # todo(wenxindongwork): verify if ATTN_DATA_AXIS_NAME or MLP_DATA_AXIS_NAME should be used here
+            logits, NamedSharding(mesh, P(ATTN_DATA_AXIS_NAME, None)))
     greedy_sampled = jnp.argmax(logits, axis=-1)
     if not tpu_sampling_metadata.do_sampling:
         return greedy_sampled

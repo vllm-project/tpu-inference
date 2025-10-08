@@ -21,6 +21,7 @@ def sharded_ragged_paged_attention(
     k_scale: float | None = None,
     v_scale: float | None = None,
 ):
+    print("inside sharded_ragged_paged_attention")
     """Shards along KV heads."""
     qkv_spec = P(ATTN_DATA_AXIS_NAME, "model", None)
     kv_cache_spec = P(ATTN_DATA_AXIS_NAME, None, "model")
@@ -85,7 +86,7 @@ def attention(
         head_dim_original = q.shape[-1]
 
     md = attention_metadata
-
+    print("inside attention")
     # (T, N, H)
     output, kv_cache = sharded_ragged_paged_attention(
         head_dim_original**-0.5, mesh, attention_chunk_size, q_scale, k_scale,

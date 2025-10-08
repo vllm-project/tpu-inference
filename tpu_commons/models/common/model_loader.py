@@ -7,6 +7,7 @@ import torch
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.ops.mappings import j2t_dtype
+from tpu_commons.models.jax.common.sharding import ATTN_DATA_AXIS_NAME, MLP_DATA_AXIS_NAME
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 from vllm.utils import supports_kw
@@ -201,8 +202,8 @@ def get_flax_model(
         model_class = _get_model_architecture(
             vllm_config.model_config.hf_config)
     jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh)
-    kv_cache_sharding = NamedSharding(mesh, PartitionSpec("data", None, "model"))
-    hidden_states_sharding = NamedSharding(mesh, PartitionSpec("data",
+    kv_cache_sharding = NamedSharding(mesh, PartitionSpec(ATTN_DATA_AXIS_NAME, None, "model"))
+    hidden_states_sharding = NamedSharding(mesh, PartitionSpec(MLP_DATA_AXIS_NAME,
                                                                None))  # (T, D)
 
     # For performance consideration, refer to:

@@ -180,6 +180,7 @@ class VllmModelWrapper:
                 # torch_view in order to call the Torch function.
                 original_lora_metadata = replace_lora_metadata(
                     self.model, lora_metadata, self.vllm_config.lora_config)
+                
                 hidden_states = torch.func.functional_call(
                     self.model,
                     torch_view(params_and_buffers),
@@ -191,6 +192,7 @@ class VllmModelWrapper:
                     },
                     tie_weights=False,
                 )
+                breakpoint()
                 replace_lora_metadata(self.model, original_lora_metadata,
                                       self.vllm_config.lora_config)
                 vllm_model_wrapper_context = get_vllm_model_wrapper_context()
