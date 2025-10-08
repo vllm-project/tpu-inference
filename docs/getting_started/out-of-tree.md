@@ -1,26 +1,12 @@
 # Custom JAX Model Onboarding as a Plugin
 
-## TPU Inference Overview
-
-### uLLM JAX Supported Features {#ullm-jax-supported-features}
-
-TODO: What features uLLM supports (for example standard attention blocks, KV cache management)
-
-TODO: If needed, talk briefly about the scheduler, interaction between vllm and tpu_inference codebases.
-
-### uLLM JAX Limitations {#ullm-jax-limitations}
-
-TODO: Limitations of uLLM (aka - what models aren’t a good fit yet)
-
-## Custom Model Integration Guide {#custom-model-integration-guide}
-
 This guide walks you through the steps to implement a basic JAX model to TPU Inference.
 
-### 1. Bring your model code
+## 1. Bring your model code
 
 This guide assumes that your model is written for JAX.
 
-### 2. Make your code compatible with vLLM
+## 2. Make your code compatible with vLLM
 
 To ensure compatibility with vLLM, your model must meet the following requirements:
 
@@ -62,11 +48,11 @@ def __call__(
 
 For reference, check out [our Llama implementation](https://github.com/vllm-project/tpu-inference/blob/aad6cc2a36a2cf0de681f76055ce632d5abeca5f/tpu_inference/models/jax/llama3.py).
 
-### 3. Implement the weight loading logic
+## 3. Implement the weight loading logic
 
 You now need to implement the `load_weights` method in your `*ForCausalLM` class. This method should load the weights from the HuggingFace's checkpoint file (or a compatible local checkpoint) and assign them to the corresponding layers in your model.
 
-### 4. Register your model
+## 4. Register your model
 
 TPU Inference relies on a model registry to determine how to run each model. A list of pre-registered architectures can be found [here](https://github.com/vllm-project/tpu-inference/blob/aad6cc2a36a2cf0de681f76055ce632d5abeca5f/tpu_inference/models/jax/model_loader.py#L22).
 
@@ -96,7 +82,7 @@ def register():
     register_model("YourModelForCausalLM", YourModelForCausalLM)
 ```
 
-### 5. Install and run your model
+## 5. Install and run your model
 
 Ensure that you `pip install .` your model from within the same Python environment as vllm/tpu inference. Then to run your model:
 
