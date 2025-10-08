@@ -181,11 +181,15 @@ class JAXLlama4VisionEncoderLayer(nnx.Module):
         residual = hidden_state
         hidden_state = self.input_layernorm(hidden_state)
 
+        original_shape = hidden_state.shape
+
+        hidden_state_2D = hidden_state.reshape(-1, original_shape[-1])
+
         vision_metadata = AttentionMetadata(input_positions=freqs_ci_stacked, )
         #TODO: I don't believe I took care of the causal mask issue yet
         # there is a "mask_value" variable in ref_ragged_paged_attention
-        attention_output, new_kv_cache = self.self_attn(
-            x=hidden_state,
+        attention_output_2D, new_kv_cache = self.self_attn(
+            x=hidden_state_2D,
             is_prefill=
             True,  # Encoder layer is always a prefill/non-autoregressive run
             kv_cache=None,  # Vision Encoder does not use KV cache
@@ -193,6 +197,8 @@ class JAXLlama4VisionEncoderLayer(nnx.Module):
             vision_metadata,  # Pass the object containing the frequencies
             use_attention_rope=True  # Explicitly ensure RoPE is executed
         )
+        attention_output = attention_output_2D.reshape(original_shape)
+
         hidden_state = residual + attention_output
         residual = hidden_state
 
@@ -562,14 +568,6 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         )
 
         if is_multimodal:
-            # 1. Vision Encoder (Llama4VisionModel)
-            self.vision_model = JAXLlama4VisionModel(
-                self.vision_config,
-                rngs=self.rng,  #nnx.Rngs(rng),
-                mesh=self.mesh,
-                dtype=dtype,
-                random_init=force_random_weights,
-            )
 
             self.vision_rope = Llama4VisionRotaryEmbedding(
                 image_size=vision_config.image_size,
@@ -580,6 +578,15 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                 rngs=self.rng,  #nnx.Rngs(rng),
                 dtype=dtype,
             )
+
+            # 1. Vision Encoder (Llama4VisionModel)
+            self.vision_model = JAXLlama4VisionModel(
+                self.vision_config,
+                rngs=self.rng,  #nnx.Rngs(rng),
+                mesh=self.mesh,
+                dtype=dtype,
+                random_init=force_random_weights,
+                vision_rope=self.vision_rope)
 
             # 2. Multimodal Projector (Llama4MultiModalProjector)
             self.multi_modal_projector = JAXLlama4MultiModalProjector(
@@ -905,12 +912,23 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         return logits_TV
 
     #Not sure if I need these two functions
-    def get_multimodal_embeddings(self, pixel_values: jax.Array, *args,
-                                  **kwargs) -> jax.Array:
+    def get_multimodal_embeddings(
+            self,
+            # Positional argument (image_grid_thw) - Must be here to match the call
+            image_grid_thw: tuple,
+            *args,
+            **kwargs) -> jax.Array:
         """
         Computes the final projected embeddings for multimodal input.
         """
-        image_features = self.vision_model(pixel_values)
+        # Pixel values must be extracted from kwargs, not the first positional arg
+        pixel_values = kwargs.pop("pixel_values")
+
+        # NOTE: If aspect_ratios or patches_per_image are important,
+        # extract them from kwargs here too.
+
+        image_features = self.vision_model(
+            pixel_values)  # Use the correct image data
 
         projected_vision_features = self.multi_modal_projector(image_features)
 

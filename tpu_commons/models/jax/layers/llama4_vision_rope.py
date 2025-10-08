@@ -96,7 +96,9 @@ class Llama4VisionRotaryEmbedding(nnx.Module):
         # Store as parameter/attribute for checkpointing
         self.freqs_ci = freqs_cis_stacked.astype(self.dtype)
 
-    def __call__(self, x: jax.Array) -> jax.Array:
+    def __call__(
+            self
+    ) -> jax.Array:  #TODO: used to have "x: jax.Array" as an argument
         """Returns the pre-calculated complex rotation factors."""
         # The input x is needed only to get the batch dimensions if necessary, but here
         # we return the static frequencies calculated in __init__.

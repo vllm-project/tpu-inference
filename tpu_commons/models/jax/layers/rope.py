@@ -86,8 +86,10 @@ def apply_rope(
         # positions = freqs_cis_stacked: (S, D_rot, 2)
 
         # Unstack to get the complex rotation factors (cos + i*sin)
-        cos = positions[..., 0]  # Real part
-        sin = positions[..., 1]  # Imaginary part
+        split_positions = jnp.split(positions, 2, axis=-1)
+        cos = jnp.squeeze(split_positions[0], axis=-1)
+        sin = jnp.squeeze(split_positions[1], axis=-1)
+        # FIX END
 
         # Add num_heads dimension for broadcasting: (seq_len, 1, head_dim//2)
         cos = cos[:, jnp.newaxis, :]
