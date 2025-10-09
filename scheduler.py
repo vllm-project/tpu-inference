@@ -475,8 +475,9 @@ class Scheduler(SchedulerInterface):
             any_request = self.running[0]
             num_common_prefix_blocks = (
                 self.kv_cache_manager.get_num_common_prefix_blocks(
-                    any_request, len(self.running)))
-
+                    any_request.request_id
+                )
+            )
         # Construct the scheduler output.
         new_reqs_data = [
             NewRequestData.from_request(
@@ -571,7 +572,9 @@ class Scheduler(SchedulerInterface):
         req_ids: list[str] = []
         new_token_ids: list[list[int]] = []
         new_block_ids: list[Optional[tuple[list[int], ...]]] = []
+        resumed_req_token_ids: list[list[int] | None] = []
         num_computed_tokens: list[int] = []
+        num_output_tokens: list[int] = []
 
         use_connector = self.connector is not None
         for req in itertools.chain(running_reqs, resumed_reqs):
@@ -593,9 +596,12 @@ class Scheduler(SchedulerInterface):
                 # out of bounds errors. TODO: Remove this once the KVConnector
                 # is updated to handle token IDs properly.
                 new_token_ids.append([])
+            resumed_token_ids = None
+            resumed_req_token_ids.append(resumed_token_ids)
             new_block_ids.append(
                 req_to_new_blocks[req_id].get_block_ids(allow_none=True))
             num_computed_tokens.append(req.num_computed_tokens)
+            num_output_tokens.append(req.num_output_tokens)
         # Because resumed_reqs is usually empty, it is more efficient to do
         # in-place appending so that we don't need to allocate a new list.
         resumed_from_preemption = [False] * len(running_reqs)
@@ -607,6 +613,8 @@ class Scheduler(SchedulerInterface):
             new_token_ids=new_token_ids,
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
+            num_output_tokens=num_output_tokens,
+            resumed_req_token_ids=resumed_req_token_ids,
         )
 
     def _try_schedule_encoder_inputs(
