@@ -11,12 +11,12 @@ The code is **not feature-complete** and **may not be stable**.
 
 Follow this [guide](https://docs.vllm.ai/en/latest/getting_started/installation/google_tpu.html#set-up-using-python) to install vLLM from source.
 
-### Install `tpu_inference`:
+### Install `tpu-inference`:
 
 ```
 cd ~
 git clone https://github.com/vllm-project/tpu-inference.git
-cd tpu_inference
+cd tpu-inference
 pip install -r requirements.txt
 pip install -e .
 ```
@@ -40,7 +40,7 @@ pre-commit run --all-files
 Run `Llama 3.1 8B` offline inference on 4 TPU chips:
 
 ```
-HF_TOKEN=<huggingface_token> python tpu_inference/examples/offline_inference.py \
+HF_TOKEN=<huggingface_token> python tpu-inference/examples/offline_inference.py \
     --model=meta-llama/Llama-3.1-8B \
     --tensor_parallel_size=4 \
     --max_model_len=1024
@@ -52,7 +52,7 @@ Run `Llama 3.1 8B Instruct` offline inference on 4 TPU chips in disaggregated mo
 
 ```
 PREFILL_SLICES=2 DECODE_SLICES=2 HF_TOKEN=<huggingface_token> \
-python tpu_inference/examples/offline_inference.py \
+python tpu-inference/examples/offline_inference.py \
     --model=meta-llama/Meta-Llama-3-8B-Instruct \
     --max_model_len=1024 \
     --max_num_seqs=8
@@ -75,8 +75,8 @@ Run `Llama 3.1 70B Instruct` offline inference on 4 hosts (v6e-16) in interleave
 1. Deploy Ray cluster and containers:
 
 ```
-~/tpu_inference/scripts/multihost/deploy_cluster.sh \
-    -s ~/tpu_inference/scripts/multihost/run_cluster.sh \
+~/tpu-inference/scripts/multihost/deploy_cluster.sh \
+    -s ~/tpu-inference/scripts/multihost/run_cluster.sh \
     -d "<your_docker_image>" \
     -c "<path_on_remote_hosts_for_hf_cache>" \
     -t "<your_hugging_face_token>" \
@@ -101,7 +101,7 @@ Run the vLLM's implementation of `Llama 3.1 8B`, which is in Pytorch. It is the 
 ```
 export MODEL_IMPL_TYPE=vllm
 export HF_TOKEN=<huggingface_token>
-python tpu_inference/examples/offline_inference.py \
+python tpu-inference/examples/offline_inference.py \
     --model=meta-llama/Llama-3.1-8B \
     --tensor_parallel_size=4 \
     --max_model_len=1024
@@ -128,7 +128,7 @@ This can be run on a CPU VM.
 ```
 cd ~
 git clone https://github.com/vllm-project/tpu-inference.git
-cd tpu_inference
+cd tpu-inference
 
 DOCKER_URI=<Specify a GCR URI>
 # example:

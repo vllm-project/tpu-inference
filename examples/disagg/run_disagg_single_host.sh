@@ -98,7 +98,7 @@ done
 
 
 # Start proxy server
-python $HOME/tpu_inference/examples/disagg/toy_proxy_server.py \
+python $HOME/tpu-inference/examples/disagg/toy_proxy_server.py \
 --host localhost \
 --port 7080 \
 --prefiller-hosts ${PREFILL_HOSTS[@]} \
