@@ -83,7 +83,7 @@ def get_kv_spec(mesh: Mesh) -> list[int]:
     num_kv_heads = 8
     head_dim = 128
 
-    import tpu_commons.kernels.ragged_paged_attention.v3.kernel as rpa
+    import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
     shape = rpa.get_kv_cache_shape(num_blocks, block_size, num_kv_heads,
                                    head_dim, jnp.bfloat16)
     dtype = jnp.bfloat16

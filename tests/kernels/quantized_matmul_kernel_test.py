@@ -7,7 +7,7 @@ import jax.numpy as jnp
 from absl.testing import absltest, parameterized
 from jax._src import test_util as jtu
 
-from tpu_commons.kernels.quantized_matmul import (kernel, tuned_block_sizes,
+from tpu_inference.kernels.quantized_matmul import (kernel, tuned_block_sizes,
                                                   util)
 
 quantized_matmul_kernel = kernel.quantized_matmul_kernel

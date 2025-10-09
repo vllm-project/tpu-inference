@@ -7,13 +7,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, SpeculativeConfig,
                          VllmConfig)
 from vllm.config.load import LoadConfig
 
-from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.spec_decode.jax.eagle3 import Eagle3Proposer
+from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
 
 # Use a real model dir for config, but we will mock model loading/execution
 model_dir = "meta-llama/Llama-3.1-8B-Instruct"
@@ -173,7 +174,7 @@ def test_propose(method, num_speculative_tokens):
         else:  # Subsequent calls in the loop
             new_hidden_states = new_hidden_states.at[:, 0].set(input_ids + 1)
 
-        return kv_caches, new_hidden_states, None
+        return kv_caches, new_hidden_states, new_hidden_states
 
     def mock_compute_logits_fn(state, hidden_states, lora_metadata):
         # Create deterministic logits from hidden_states.
