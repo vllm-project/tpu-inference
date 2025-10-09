@@ -175,6 +175,8 @@ cython_debug/
 
 # Results
 *.csv
+!model_support_matrix.csv
+!feature_support_matrix.csv
 
 # Python pickle files
 *.pkl
