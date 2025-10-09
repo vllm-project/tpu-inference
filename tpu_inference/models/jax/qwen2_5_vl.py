@@ -15,14 +15,15 @@ from vllm.config import VllmConfig
 
 from tpu_inference import utils as utils
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.jax.attention_interface import sharded_flash_attention
+from tpu_inference.layers.jax.attention_interface import \
+    sharded_flash_attention
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.qwen2 import Qwen2ForCausalLM
 # from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from tpu_inference.models.jax.utils.multi_modal_utils import (
     MultiModalEmbeddings, merge_multimodal_embeddings)
 from tpu_inference.models.jax.utils.weight_utils import (get_default_maps,
-                                                       load_hf_weights)
+                                                         load_hf_weights)
 
 logger = init_logger(__name__)
 
@@ -229,6 +230,7 @@ class Qwen2_5_VisionAttention(nnx.Module):
             mesh=mesh,
             causal=False,
             sm_scale=1.0 / math.sqrt(self.head_dim),
+            vmem_limit_bytes=128 * 1024 * 1024,
         )
 
     def __call__(

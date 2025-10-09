@@ -27,9 +27,11 @@ get_kv_cache_shape = rpa.get_kv_cache_shape
 
 
 def sharded_flash_attention(
-        mesh: Mesh,
-        causal: bool = True,
-        sm_scale: Optional[float] = None) -> Callable[..., Any]:
+    mesh: Mesh,
+    causal: bool = True,
+    sm_scale: Optional[float] = None,
+    vmem_limit_bytes: int | None = None,
+) -> Callable[..., Any]:
     in_specs = (
         P("data", "model", None, None),  # q
         P("data", "model", None, None),  # k
@@ -44,7 +46,8 @@ def sharded_flash_attention(
                                v,
                                segment_ids=segment_ids,
                                sm_scale=sm_scale,
-                               causal=causal)
+                               causal=causal,
+                               vmem_limit_bytes=vmem_limit_bytes)
 
     return jax.jit(
         shard_map.shard_map(_flash_attention,
