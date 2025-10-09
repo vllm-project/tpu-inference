@@ -41,9 +41,10 @@ steps:
      depends_on: generate_support_matrices
      agents:
        queue: tpu_v6e_queue
+     secrets:
+      - GITHUB_PAT
      command:
-       # TODO : commit support matrices if release tag specified (to be handled in separate PR)
-       - echo "committing support matrices to repo"
+       - bash .buildkite/scripts/commit_support_matrices.sh
 
    - label: "Handle release if release tag specified"
      if: build.tag =~ /^v\.?[0-9]+(\.[0-9]+)*$/
