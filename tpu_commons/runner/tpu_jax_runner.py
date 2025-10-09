@@ -385,7 +385,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     None,
                     self.vllm_config,
             ), self.maybe_get_kv_connector_output(
-                    scheduler_output) as kv_connector_output:
+                    scheduler_output) as kv_connector_output, jax.set_mesh(
+                        self.mesh):
                 # NOTE(Wenlong): It takes both `input_ids` and `inputs_embeds`,
                 # but one of them would be `None`
 

@@ -42,7 +42,8 @@ class LoraUtils:
                                       lora_requests)
 
         params_and_buffers = shard_model_to_tpu(self.runner.model.model,
-                                                self.runner.mesh)
+                                                self.runner.mesh,
+                                                self.runner.vllm_config)
         self.runner.state = jax_view(params_and_buffers)
 
     def extract_lora_metadata(self):

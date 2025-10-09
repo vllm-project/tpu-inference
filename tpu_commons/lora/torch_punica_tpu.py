@@ -105,7 +105,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
 
         Args:
             y (torch.Tensor): Output tensor. (num_tokens, out_features)
-            x (Union[tuple[torch.Tensor, ...], torch.Tensor]): Input tensors. (n_slices, num_tokens, r)
+            x (Union[tuple[torch.Tensor, ...], torch.Tensor]): Input tensors. (n_slices, num_tokens, r), the output of x@lora_a_stacked
             lora_b_stacked (tuple[torch.Tensor, ...]): lora_b's weight
             lora_bias_stacked (Optional[tuple[torch.Tensor, ...]]):
                 bias's weight
@@ -192,10 +192,10 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                 (len(output_slices), num_tokens, max_lora_rank),
                 dtype=x.dtype,
                 device=x.device,
-            )
+            )  # TP=1, buffer:[3, 16, 8],x:[16,2048],lora_a_stacked[0]:[1,1,8,2048]
         buffer = self.add_shrink(
-            buffer, x, lora_a_stacked, scale,
-            **kwargs)  # (n_slices, num_tokens, max_lora_rank)
+            buffer, x, lora_a_stacked, scale, **kwargs
+        )  # (n_slices, num_tokens, max_lora_rank) # TP=1, buffer:[3, 16, 8]
         return self.add_expand(y,
                                buffer,
                                lora_b_stacked,

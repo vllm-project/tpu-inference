@@ -11,7 +11,7 @@ from jax._src import dtypes
 from jax._src import mesh as mesh_lib
 from jax._src import xla_bridge as xb
 from jax._src.lib import xla_client as xc
-from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec
 from vllm import envs, utils
 
 from tpu_commons.logger import init_logger
@@ -221,7 +221,10 @@ def make_optimized_mesh(axis_shapes: Sequence[int],
                 logger.info("Use customized mesh: %s", mesh)
                 return mesh
 
-    return jax.make_mesh(axis_shapes, axis_names, devices=devices)
+    return jax.make_mesh(axis_shapes,
+                         axis_names,
+                         devices=devices,
+                         axis_types=(AxisType.Explicit, AxisType.Explicit))
 
 
 def device_array(mesh: Mesh, *args, sharding=None, **kwargs) -> jax.Array:

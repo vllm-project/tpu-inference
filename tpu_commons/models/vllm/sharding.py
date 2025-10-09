@@ -1,27 +1,31 @@
 import jax
 import torch
 import torchax
-from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec
 from torch.nn import Parameter
 from torch.utils import _pytree as pytree
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
+from vllm.config import VllmConfig
 from vllm.lora.layers import (MergedColumnParallelLinearWithLoRA,
                               MergedQKVParallelLinearWithLoRA,
                               RowParallelLinearWithLoRA)
 from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
+from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 
 from tpu_commons.logger import init_logger
+from tpu_commons.models.vllm.quantization.common import (JaxCommonLinearConfig)
 
 P = PartitionSpec
 
 logger = init_logger(__name__)
 
 
-def shard_model_to_tpu(model: torch.nn.Module,
-                       mesh: Mesh) -> dict[str, torchax.torch.Tensor]:
+def shard_model_to_tpu(
+        model: torch.nn.Module, mesh: Mesh,
+        vllm_config: VllmConfig) -> dict[str, torchax.torch.Tensor]:
     """
     Shard the model weights and move them to TPU.
 
@@ -38,7 +42,7 @@ def shard_model_to_tpu(model: torch.nn.Module,
     """
 
     with jax.default_device(jax.devices("cpu")[0]):
-        _shard_module_to_tpu(model, mesh)
+        _shard_module_to_tpu(model, mesh, vllm_config)
 
         params, buffers = _extract_all_params_buffers(model)
 
@@ -77,14 +81,14 @@ def _shard_tensor_to_tpu_replicated(tensor: torch.Tensor,
     return _convert_to_torchax_and_shard(tensor, NamedSharding(mesh, P()))
 
 
-def _shard_vocab_parallel_embedding(layer: VocabParallelEmbedding,
-                                    mesh: Mesh) -> None:
+def _shard_vocab_parallel_embedding(layer: VocabParallelEmbedding, mesh: Mesh,
+                                    vllm_config: VllmConfig) -> None:
     weight = _convert_to_torchax_and_shard(
         layer.weight, NamedSharding(mesh, P('model', None)))
     layer.weight = Parameter(weight, requires_grad=False)
 
 
-def _shard_lm_head(layer: ParallelLMHead, mesh: Mesh):
+def _shard_lm_head(layer: ParallelLMHead, mesh: Mesh, vllm_config: VllmConfig):
     # TODO(qihqi): currently this is not handling case of tie_word_weights=True.
     # if that config is set, then we should not create new weights but reuse the
     # weight from VocabParallelEmbedding
@@ -97,8 +101,8 @@ def _shard_lm_head(layer: ParallelLMHead, mesh: Mesh):
         layer.bias = Parameter(bias, requires_grad=False)
 
 
-def _shard_base_linear_lora(layer: BaseLinearLayerWithLoRA,
-                            mesh: Mesh) -> None:
+def _shard_base_linear_lora(layer: BaseLinearLayerWithLoRA, mesh: Mesh,
+                            vllm_config: VllmConfig) -> None:
     # NOTE: lora_a_stacked[i] has shape [max_loras, 1, num_out, num_in]
     sharded_lora_a_tpu = torch.nn.ParameterList()
     sharded_lora_b_tpu = torch.nn.ParameterList()
@@ -122,12 +126,20 @@ def _shard_base_linear_lora(layer: BaseLinearLayerWithLoRA,
 
 # TODO: Add custom sharding logic for following lora layers
 def _shard_column_parallel_linear_lora(
-        layer: MergedColumnParallelLinearWithLoRA, mesh: Mesh) -> None:
-    _shard_base_linear_lora(layer, mesh)
+        layer: MergedColumnParallelLinearWithLoRA, mesh: Mesh,
+        vllm_config: VllmConfig) -> None:
+    _shard_base_linear_lora(layer, mesh, vllm_config)
 
 
 def _shard_qkv_parallel_linear_lora(layer: MergedQKVParallelLinearWithLoRA,
-                                    mesh: Mesh) -> None:
+                                    mesh: Mesh,
+                                    vllm_config: VllmConfig) -> None:
+    # _shard_base_linear_lora(layer, mesh, vllm_config)
+    # return
+
+    assert isinstance(layer.base_layer, LinearBase)
+    jax_config = JaxCommonLinearConfig(vllm_config, mesh, layer.base_layer)
+
     # mesh=Mesh(axis_sizes=(1, 2), axis_names=('data', 'model'), axis_types=(Auto, Auto))
     # NOTE: lora_a_stacked[i] has shape [max_loras, 1, num_out, num_in]
     sharded_lora_a_tpu = torch.nn.ParameterList()
@@ -135,26 +147,44 @@ def _shard_qkv_parallel_linear_lora(layer: MergedQKVParallelLinearWithLoRA,
     sharded_lora_bias_tpu = torch.nn.ParameterList()
 
     assert layer.n_slices > 0, "layer.n_slices should be greater than 0"
+
+    mesh_lora_a_shape = (1, 1, 1, 1)
+    mesh_lora_a_axis = ('replica_num_lora', 'replica', 'rank', 'in_features')
+    lora_a_mesh = jax.make_mesh(
+        mesh_lora_a_shape,
+        mesh_lora_a_axis,
+        devices=mesh.devices[0],
+        axis_types=(AxisType.Explicit, AxisType.Explicit, AxisType.Explicit,
+                    AxisType.Explicit))  # mesh.devices=[[device0, ..device_n]]
+    lora_a_partition_spec = P(None, None, None, None)
+    lora_a_sharding = NamedSharding(mesh, lora_a_partition_spec)
+
     mesh_lora_b_shape = (1, 1) + (mesh.shape['data'], mesh.shape['model'])
     mesh_lora_b_axis = ('replica_num_lora', 'replica', 'data', 'model')
     lora_b_mesh = jax.make_mesh(
-        mesh_lora_b_shape, mesh_lora_b_axis,
-        devices=mesh.devices[0])  # mesh.devices=[[device0, ..device_n]]
+        mesh_lora_b_shape,
+        mesh_lora_b_axis,
+        devices=mesh.devices[0],
+        axis_types=(AxisType.Explicit, AxisType.Explicit, AxisType.Explicit,
+                    AxisType.Explicit))  # mesh.devices=[[device0, ..device_n]]
     lora_b_partition_spec = P(None, None, 'model', None)
-    lora_b_sharding = NamedSharding(lora_b_mesh, lora_b_partition_spec)
+    lora_b_sharding = NamedSharding(mesh, lora_b_partition_spec)
 
     mesh_lora_bias_shape = (1, 1) + (mesh.shape['model'], )
     mesh_lora_bias_axis = ('replica_num_lora', 'replica', 'model')
     lora_bias_mesh = jax.make_mesh(
-        mesh_lora_bias_shape, mesh_lora_bias_axis,
-        devices=mesh.devices[0])  # mesh.devices=[[device0, ..device_n]]
+        mesh_lora_bias_shape,
+        mesh_lora_bias_axis,
+        devices=mesh.devices[0],
+        axis_types=(AxisType.Explicit, AxisType.Explicit,
+                    AxisType.Explicit))  # mesh.devices=[[device0, ..device_n]]
     lora_bias_partition_spec = P(None, None, 'model')
-    lora_bias_sharding = NamedSharding(lora_bias_mesh,
-                                       lora_bias_partition_spec)
+    lora_bias_sharding = NamedSharding(mesh, lora_bias_partition_spec)
 
     for i in range(layer.n_slices):
         sharded_lora_a_tpu.append(
-            _shard_tensor_to_tpu_replicated(layer.lora_a_stacked[i], mesh))
+            _convert_to_torchax_and_shard(layer.lora_a_stacked[i],
+                                          lora_a_sharding))
 
         sharded_lora_b_tpu.append(
             _convert_to_torchax_and_shard(layer.lora_b_stacked[i],
@@ -172,8 +202,9 @@ def _shard_qkv_parallel_linear_lora(layer: MergedQKVParallelLinearWithLoRA,
 
 
 def _shard_row_parallel_linear_lora(layer: RowParallelLinearWithLoRA,
-                                    mesh: Mesh) -> None:
-    _shard_base_linear_lora(layer, mesh)
+                                    mesh: Mesh,
+                                    vllm_config: VllmConfig) -> None:
+    _shard_base_linear_lora(layer, mesh, vllm_config)
 
 
 # NOTE: Ordering is important as it calls first matched type of a given module
@@ -189,10 +220,11 @@ MODULE_TYPE_TO_SHARDING_FUNC = [
 ]
 
 
-def _shard_module_to_tpu(model: torch.nn.Module, mesh: Mesh) -> None:
+def _shard_module_to_tpu(model: torch.nn.Module, mesh: Mesh,
+                         vllm_config: VllmConfig) -> None:
     for path, module in model.named_modules():
         for module_type, sharding_func in MODULE_TYPE_TO_SHARDING_FUNC:
             if type(module) is module_type:
                 logger.debug("shard %s with %s", path, sharding_func)
-                sharding_func(module, mesh)
+                sharding_func(module, mesh, vllm_config)
                 break

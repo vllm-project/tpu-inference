@@ -72,26 +72,28 @@ def bgmv_expand_slice(
 ):
     """
     Args:
-        inputs (torch.Tensor): Input tensor of shape [num_tokens, lora_rank].
+        inputs (torch.Tensor): Input tensor of shape [num_tokens, lora_rank], output of x@lora_a_stacked[i]
 
         lora_b_weights (torch.Tensor): LoRA weights of shape
             [num_loras, 1, out_features, lora_rank].
 
         output_tensor (torch.Tensor): output tensor of shape
-            [num_tokens, out_features * num_slices].
+            [num_tokens, out_features].
 
         lora_indices_tensor (torch.Tensor): Tensor of shape [num_tokens]
             indicating which LoRA matrix to use for each token.
         add_inputs (bool): Whether or not to add the input tensor to the output
             tensor.
     """
-    outputs = bgmv_torch(inputs, lora_b_weights, lora_indices_tensor)
+    outputs = bgmv_torch(inputs, lora_b_weights,
+                         lora_indices_tensor)  # [num_tokens, out_features]
 
     outputs = F.pad(
         outputs,
         (
-            slice_offset,
-            output_tensor.shape[1] - (slice_offset + slice_size),
+            slice_offset,  # left side of out_features dim
+            output_tensor.shape[1] -
+            (slice_offset + slice_size),  # right side of out_features dim
             0,
             0,
         ),

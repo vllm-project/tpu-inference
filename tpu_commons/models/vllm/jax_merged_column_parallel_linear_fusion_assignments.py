@@ -35,6 +35,8 @@ def get_model_matmul_fusion_assignment(model_name: str, batch_size: int,
     key = (model_name, batch_size, tp_size, layer_name)
     fuse_matmuls = MODEL_MATMUL_FUSION_TRUTH_TABLE.get(key, None)
     if fuse_matmuls is None:
+        logger.info(
+            f"Not found matmul fusion overwrite for {key=}, fuse_matmuls=True")
         return True
     else:
         logger.info(

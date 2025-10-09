@@ -130,8 +130,10 @@ class JaxUnquantizedLinearMethod(UnquantizedLinearMethod):
         if bias is not None and not layer.skip_bias_add:
             outs += bias.jax()
 
+        # if tp=2 and qkv_linear, outs.shape=[16, 2560@model]
         outs = slice_sharded_tensor_for_concatenation(
             outs, self.jax_config.output_sizes, self.jax_config.n_shards)
+        # if tp=2 and qkv_linear, len(outs)=3,outs[0]:[16, 2048@model], outs[1]:[16,256@model], outs[2]:[16,256@model]
         out = jnp.concatenate(outs, axis=-1)
         return torch_view(out)
 

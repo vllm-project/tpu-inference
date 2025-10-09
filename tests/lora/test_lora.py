@@ -36,7 +36,7 @@ def setup_vllm(num_loras: int, num_devices: int = 1) -> vllm.LLM:
                     max_lora_rank=8)
 
 
-def test_single_lora():
+def test_single_lora_nonspmd():
     """
     This test ensures we can run a single LoRA adapter on the TPU backend.
     We run "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_2_adapter" which
