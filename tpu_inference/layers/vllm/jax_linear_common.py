@@ -9,7 +9,8 @@ from jax.sharding import PartitionSpec as P
 from torchax.interop import torch_view
 from torchax.ops.mappings import t2j
 
-from tpu_inference.kernels.quantized_matmul.kernel import quantized_matmul_kernel
+from tpu_inference.kernels.quantized_matmul.kernel import \
+    quantized_matmul_kernel
 
 
 def sharded_quantized_matmul(x: jax.Array, w_q: jax.Array, w_s: jax.Array,

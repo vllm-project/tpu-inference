@@ -5,11 +5,11 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizationConfig
 
-from tpu_inference.models.vllm.quantization.awq import JaxAWQConfig
-from tpu_inference.models.vllm.quantization.common import JaxCommonConfig
-from tpu_inference.models.vllm.quantization.compressed_tensors.compressed_tensors import \
+from tpu_inference.layers.vllm.quantization.awq import JaxAWQConfig
+from tpu_inference.layers.vllm.quantization.common import JaxCommonConfig
+from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors import \
     JaxCompressedTensorsConfig  # noqa: E501
-from tpu_inference.models.vllm.quantization.unquantized import \
+from tpu_inference.layers.vllm.quantization.unquantized import \
     JaxUnquantizedConfig
 
 

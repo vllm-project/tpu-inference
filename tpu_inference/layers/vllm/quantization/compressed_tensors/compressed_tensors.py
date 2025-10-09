@@ -17,12 +17,12 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target, is_activation_quantization_format,
     should_ignore_layer)
 
-from tpu_inference.models.vllm.quantization.common import JaxCommonConfig
-from tpu_inference.models.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import \
+from tpu_inference.layers.vllm.quantization.common import JaxCommonConfig
+from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import \
     JaxCompressedTensorsW8A8Fp8
-from tpu_inference.models.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_int8 import \
+from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_int8 import \
     JaxCompressedTensorsW8A8Int8
-from tpu_inference.models.vllm.quantization.unquantized import \
+from tpu_inference.layers.vllm.quantization.unquantized import \
     JaxUnquantizedConfig
 
 P = PartitionSpec
