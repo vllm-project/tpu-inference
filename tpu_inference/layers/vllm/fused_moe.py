@@ -307,6 +307,12 @@ def jax_fused_moe_func(
         "The kernel requires num_tokens * topk to be a multiple of "
         f"16 but got {num_tokens}*{topk}={num_tokens*topk}")
 
+    hidden_states = jax.lax.with_sharding_constraint(
+            hidden_states, NamedSharding(mesh, P(None)))
+
+    gating_output = jax.lax.with_sharding_constraint(
+            gating_output, NamedSharding(mesh, P(None)))
+    
     hidden_states = hidden_states.reshape(num_tokens, hidden_size)
     gating_output = gating_output.reshape(num_tokens, global_num_experts)
 
@@ -317,15 +323,19 @@ def jax_fused_moe_func(
     topk_weights = topk_weights.astype(dtype)
 
     topk_indices_flat = topk_indices.flatten()
+
     topk_argsort_indices = jnp.argsort(topk_indices_flat)
     topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)
     token_indices = jnp.arange(num_tokens, dtype=jnp.int32).repeat(topk)
     token_indices_sorted = token_indices[topk_argsort_indices]
     group_sizes = jnp.bincount(topk_indices_flat, length=global_num_experts)
-
+    
+    
     x = hidden_states[token_indices_sorted]
 
     if use_ep:
+        x = jax.lax.with_sharding_constraint(
+            x, NamedSharding(mesh, P(None)))
         x = expert_sharded_gmm(x,
                                w1,
                                group_sizes,
@@ -346,6 +356,8 @@ def jax_fused_moe_func(
     x = jax.nn.silu(x1) * x2
 
     if use_ep:
+        x = jax.lax.with_sharding_constraint(
+            x, NamedSharding(mesh, P(None)))
         x = expert_sharded_gmm(x,
                                w2,
                                group_sizes,

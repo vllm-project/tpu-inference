@@ -44,7 +44,7 @@ class DPScheduler(Scheduler):
         # DP attention.
         num_kv_heads = self.vllm_config.model_config.hf_config.num_key_value_heads
         tp = self.vllm_config.parallel_config.tensor_parallel_size
-        attn_dp = tp // num_kv_heads
+        attn_dp = max(tp // num_kv_heads, 1)
         self.dp_size = self.dp_size * attn_dp
         print("wenxin: scheduler dp:_size", self.dp_size)
         

@@ -34,12 +34,16 @@ class JaxCommonLinearConfig:
         self.weight_sharding = P(None, None)
         self.fuse_matmuls = True
         self.enable_sequence_parallelism = vllm_config.compilation_config.pass_config.enable_sequence_parallelism
+        print("self.enable_sequence_parallelism", self.enable_sequence_parallelism)
         self.input_sharding = None
         self.output_sharding = None
         
         self.tp_size = self.mesh.shape['model']*self.mesh.shape.get('attn_dp', 1)
         if isinstance(layer, RowParallelLinear):
+            
             self.weight_sharding = P(None, MLP_TENSOR_AXIS_NAME)
+            if self.mesh.shape.get('attn_dp', 1) > 1:
+                self.weight_sharding = P(None)
             if self.enable_sequence_parallelism:
                 self.output_sharding = P(MLP_TENSOR_AXIS_NAME, None)
         elif isinstance(layer, ColumnParallelLinear):
