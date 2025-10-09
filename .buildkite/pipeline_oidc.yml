@@ -20,3 +20,4 @@ steps:
       - docker#v5.0.0:
           image: "python:${PYTHON_VERSION}-slim"
           propagate-environment: true
+          mount-buildkite-agent: true
