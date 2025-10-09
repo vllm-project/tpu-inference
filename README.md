@@ -16,7 +16,7 @@ Follow this [guide](https://docs.vllm.ai/en/latest/getting_started/installation/
 ```
 cd ~
 git clone https://github.com/vllm-project/tpu-inference.git
-cd tpu_inference
+cd tpu-inference
 pip install -r requirements.txt
 pip install -e .
 ```
