@@ -57,7 +57,10 @@ class MockVllmConfig:
         self.cache_config = MagicMock(cache_dtype="auto")
 
         text_config_mock = MagicMock()
-        text_config_mock.interleave_moe_layer_step = 1  
+        text_config_mock.interleave_moe_layer_step = 1
+        text_config_mock.num_attention_heads = 40
+        text_config_mock.num_key_value_heads = 8
+        text_config_mock.head_dim = 128
         
         hf_config_mock = MagicMock()
         hf_config_mock.text_config = text_config_mock
