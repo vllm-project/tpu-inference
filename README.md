@@ -3,7 +3,7 @@
 </p>
 
 <h3 align="center">
-A new, high performance TPU backend unifying PyTorch and JAX in vLLM
+A New High Performance TPU Backend Unifying PyTorch and JAX in vLLM
 </h3>
 
 <p align="center">
@@ -34,9 +34,9 @@ _Latest News_ 🔥
 
 vLLM TPU is now powered by `tpu-inference`, an expressive and powerful new hardware plugin unifying JAX and PyTorch under a single lowering path within the vLLM project. The new backend now provides a framework for developers to:
 
-- Push the limits of TPU hardware **performance** in open source.
-- Provide more **flexibility** to JAX and PyTorch users by running PyTorch model definitions performantly on TPU without any additional code changes, while also extending native support to JAX.
-- Retain vLLM **standardization** by keeping the same user experience, telemetry, and interface.
+- Push the limits of TPU hardware performance in open source.
+- Provide more flexibility to JAX and PyTorch users by running PyTorch model definitions performantly on TPU without any additional code changes, while also extending native support to JAX.
+- Retain vLLM standardization: keep the same user experience, telemetry, and interface.
 
 ## Supported models and features
 
