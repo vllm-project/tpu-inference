@@ -16,8 +16,8 @@ WORKDIR /workspace/vllm
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 RUN git clone $VLLM_REPO /workspace/vllm
 RUN pip install -r requirements/tpu.txt
-RUN git checkout v0.11.0
 RUN VLLM_TARGET_DEVICE="tpu" pip install -e .
+RUN git checkout v0.11.0
 
 # Install test dependencies
 RUN python3 -m pip install -e tests/vllm_test_utils
