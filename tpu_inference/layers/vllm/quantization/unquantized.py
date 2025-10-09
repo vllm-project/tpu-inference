@@ -108,6 +108,7 @@ class VllmUnquantizedLinearMethod(UnquantizedLinearMethod):
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         with jax.named_scope(layer._get_name()):
             if in_sharding := self.jax_config.get_input_sharding(x):
+                print("layer:", layer, "in_sharding:", in_sharding)
                 x.shard_(NamedSharding(self.jax_config.mesh, in_sharding))
 
             if self.jax_config.fuse_matmuls:
@@ -259,5 +260,5 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             jax_view(layer.w2_weight), # PartitionSpec(('expert', 'model', 'attn_dp'), None, None)
             jax_view(router_logits), #PartitionSpec()
         )
-
+        breakpoint()
         return torch_view(output)

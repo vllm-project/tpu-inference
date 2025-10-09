@@ -454,6 +454,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)
+            breakpoint()
             logits = self.compute_logits_fn(
                 self.state,
                 hidden_states,
@@ -874,7 +875,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.mesh,
             self.input_batch,
             padded_num_reqs,
-            sharding=self.data_parallel_sharding,
+            # wenxin: here we should also shard on attn_dp as well I think,
+            sharding=NamedSharding(self.mesh,PartitionSpec(('data', 'attn_dp'))),
         )
         if self.uses_mrope:
             positions = mrope_positions

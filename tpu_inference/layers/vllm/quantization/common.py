@@ -1,6 +1,6 @@
 import torchax
 from jax.sharding import Mesh, PartitionSpec
-from tpu_inference.layers.jax.sharding import MLP_DATA_AXIS_NAME, MLP_TENSOR_AXIS_NAME
+from tpu_inference.layers.jax.sharding import ATTN_DATA_AXIS_NAME, MLP_DATA_AXIS_NAME, MLP_TENSOR_AXIS_NAME
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE, FusedMoEConfig
@@ -27,14 +27,15 @@ class JaxCommonLinearConfig:
 
     def __init__(self, vllm_config: VllmConfig, mesh: Mesh, layer: LinearBase):
         assert isinstance(layer, LinearBase)
-
+        # breakpoint()
+        print("wenxin: layer type", type(layer))
         self.mesh = mesh
         self.output_sizes = [layer.output_size]
         self.weight_sharding = P(None, None)
         self.fuse_matmuls = True
         self.enable_sequence_parallelism = vllm_config.compilation_config.pass_config.enable_sequence_parallelism
-        self.input_sharding = P(MLP_DATA_AXIS_NAME, None)
-        self.output_sharding = P(MLP_DATA_AXIS_NAME, None)
+        self.input_sharding = None
+        self.output_sharding = None
         
         self.tp_size = self.mesh.shape['model']*self.mesh.shape.get('attn_dp', 1)
         if isinstance(layer, RowParallelLinear):
@@ -44,9 +45,12 @@ class JaxCommonLinearConfig:
         elif isinstance(layer, ColumnParallelLinear):
             if isinstance(
                     layer, QKVParallelLinear):
+                self.input_sharding = P(ATTN_DATA_AXIS_NAME, None)
                 self.weight_sharding = P(("model", "expert"), None)
+                self.output_sharding = P(ATTN_DATA_AXIS_NAME, "model")
             else:
                 self.weight_sharding = P(MLP_TENSOR_AXIS_NAME, None)
+            
             if self.enable_sequence_parallelism:
                 self.input_sharding = P(MLP_TENSOR_AXIS_NAME, None) # todo(wenxindongwork): verify this
 
