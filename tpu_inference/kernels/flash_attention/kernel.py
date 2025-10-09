@@ -78,6 +78,7 @@ class BlockSizes:
         "causal",
         "sm_scale",
         "block_sizes",
+        "vmem_limit_bytes",
         "debug",
     ],
 )
@@ -91,6 +92,7 @@ def flash_attention(
     causal: bool = False,
     sm_scale: float = 1.0,
     block_sizes: BlockSizes | None = None,
+    vmem_limit_bytes: int,
     debug: bool = False,
 ):
     batch_size, num_heads, q_seq_len, d_model = q.shape
@@ -133,14 +135,14 @@ def flash_attention(
         block_sizes = BlockSizes.get_default(batch_size, num_heads, q_seq_len,
                                              kv_seq_len, d_model)
         # TODO (KWang1998 & hfan): tune the block sizes properly.
-        if kv_seq_len <= 21760:
+        if kv_seq_len <= 92800:
             # Override block_k/block_k_major to use `_flash_attention_kernel_single_batch_single_step`.
             block_sizes = BlockSizes(block_q=block_sizes.block_q,
                                      block_b=block_sizes.block_b,
                                      block_k_major=kv_seq_len,
                                      block_k=kv_seq_len)
     return _flash_attention(q, k, v, ab, segment_ids, False, causal, sm_scale,
-                            block_sizes, debug)
+                            block_sizes, vmem_limit_bytes, debug)
 
 
 def _flash_attention(
@@ -153,6 +155,7 @@ def _flash_attention(
     causal,
     sm_scale,
     block_sizes,
+    vmem_limit_bytes,
     debug,
 ):
     return _flash_attention_impl(
@@ -168,6 +171,7 @@ def _flash_attention(
         block_sizes.block_q,
         block_sizes.block_k_major,
         block_sizes.block_k,
+        vmem_limit_bytes,
         debug,
     )
 
@@ -462,6 +466,7 @@ def _flash_attention_impl(
     block_q,
     block_k_major,
     block_k,
+    vmem_limit_bytes,
     debug,
 ):
     batch_size, num_heads, q_seq_len, head_dim = q.shape
@@ -632,12 +637,15 @@ def _flash_attention_impl(
         ),
         out_shape=out_shape,
         debug=debug,
-        compiler_params=pltpu.CompilerParams(dimension_semantics=(
-            "parallel",
-            "parallel",
-            "parallel",
-            "arbitrary",
-        )),
+        compiler_params=pltpu.CompilerParams(
+            dimension_semantics=(
+                "parallel",
+                "parallel",
+                "parallel",
+                "arbitrary",
+            ),
+            vmem_limit_bytes=vmem_limit_bytes,
+        ),
         cost_estimate=_fwd_cost_estimate(
             q,
             k,
