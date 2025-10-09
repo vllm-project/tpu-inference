@@ -7,7 +7,9 @@ steps:
   - label: ":python: Build & Publish to PyPI"
     key: publish
     branches: vllm/ernie_build_wheel
-
+    agents:
+      queue: tpu_v6e_queue
+    soft_fail: true
     commands:
       - pip install --upgrade pip
       - pip install build twine
