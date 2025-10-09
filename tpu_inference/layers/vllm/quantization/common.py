@@ -11,7 +11,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 
-from tpu_inference.models.vllm.jax_merged_column_parallel_linear_fusion_assignments import \
+from tpu_inference.layers.vllm.jax_merged_column_parallel_linear_fusion_assignments import \
     get_model_matmul_fusion_assignment
 from tpu_inference.utils import TPU_SECOND_LAST_MINOR
 

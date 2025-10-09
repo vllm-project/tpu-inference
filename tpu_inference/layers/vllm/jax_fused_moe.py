@@ -6,7 +6,7 @@ from jax.experimental.pallas.ops.tpu.megablox.gmm import gmm
 from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
-from tpu_inference.models.vllm.jax_linear_common import \
+from tpu_inference.layers.vllm.jax_linear_common import \
     slice_sharded_tensor_for_concatenation
 
 P = PartitionSpec

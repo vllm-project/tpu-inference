@@ -19,11 +19,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import \
     unpack_quantized_values_into_int32
 from vllm.scalar_type import scalar_types
 
-from tpu_inference.models.vllm.jax_linear_common import (
+from tpu_inference.layers.vllm.jax_linear_common import (
     slice_sharded_tensor_for_concatenation, torch_to_jax_param)
-from tpu_inference.models.vllm.quantization.common import (JaxCommonConfig,
-                                                         JaxCommonLinearConfig)
-from tpu_inference.models.vllm.quantization.unquantized import \
+from tpu_inference.layers.vllm.quantization.common import (
+    JaxCommonConfig, JaxCommonLinearConfig)
+from tpu_inference.layers.vllm.quantization.unquantized import \
     JaxUnquantizedLinearMethod
 
 P = PartitionSpec
