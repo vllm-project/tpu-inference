@@ -6,6 +6,7 @@ from typing import List
 from setuptools import find_packages, setup
 
 ROOT_DIR = os.path.dirname(__file__)
+VERSION = os.environ.get("TPU_COMMONS_VERSION", "0.1.0")
 
 
 def get_path(*filepath) -> str:
@@ -37,7 +38,7 @@ def get_requirements() -> List[str]:
 
 setup(
     name="tpu_commons",
-    version="0.2.0",
+    version=VERSION,
     description="",
     long_description=open("README.md").read() if hasattr(
         open("README.md"), "read") else "",

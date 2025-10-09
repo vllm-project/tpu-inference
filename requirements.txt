@@ -11,7 +11,7 @@ libtpu==0.0.23
 jaxtyping
 flax==0.11.1
 torchax==0.0.7
-qwix @ git+https://github.com/google/qwix@main
+qwix
 torchvision==0.23.0
 pathwaysutils
 parameterized
