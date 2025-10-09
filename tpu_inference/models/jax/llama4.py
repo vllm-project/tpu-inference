@@ -341,16 +341,19 @@ class Llama4WeightLoader:
             "layers.*.attn.kernel_o_proj_NHD",
             "language_model.model.layers.*.feed_forward.router.weight":
             "layers.*.custom_module.router.kernel_DE",
+            # experts
             "language_model.model.layers.*.feed_forward.experts.down_proj":
             "layers.*.custom_module.kernel_down_proj_EFD",
             "language_model.model.layers.*.feed_forward.experts.gate_up_proj":
             "layers.*.custom_module.kernel_up_proj_EDF",
+            # shared experts
             "language_model.model.layers.*.feed_forward.shared_expert.down_proj.weight":
             "layers.*.shared_experts.kernel_down_proj_FD",
             "language_model.model.layers.*.feed_forward.shared_expert.gate_proj.weight":
             "layers.*.shared_experts.kernel_gating_DF",
             "language_model.model.layers.*.feed_forward.shared_expert.up_proj.weight":
             "layers.*.shared_experts.kernel_up_proj_DF",
+            # dense layers
             "language_model.model.layers.*.feed_forward.down_proj.weight":
             "layers.*.custom_module.kernel_down_proj_FD",
             "language_model.model.layers.*.feed_forward.up_proj.weight":
@@ -400,9 +403,21 @@ class Llama4WeightLoader:
                     f"Loaded shape for {split_loaded_name}: {loaded_weight.shape} "
                     f"does not match model shape for {mapped_name}: {mapped_model_weight.value.shape}!"
                 )
-            mapped_model_weight.value = shard_put(loaded_weight,
-                                                  mapped_model_weight.sharding,
+            # ============================= ADD ================================
+            # update loading logic to handle qarray 
+            if loaded_weight.itemsize < 2: # check model weight elem nbits < 16
+                 #type check 
+                mapped_model_weight.array.qvalue.value = shard_put(loaded_weight,
+                                                  mapped_model_weight.array.qvalue.sharding,
                                                   mesh=model_for_loading.mesh)
+            else: 
+                mapped_model_weight.value = shard_put(loaded_weight,
+                                                    mapped_model_weight.sharding,
+                                                    mesh=model_for_loading.mesh)
+            # ============================= ADD ================================
+            # mapped_model_weight.value = shard_put(loaded_weight,
+            #                                       mapped_model_weight.sharding,
+            #                                       mesh=model_for_loading.mesh)
             logger.debug(
                 f"{split_loaded_name}: {loaded_weight.shape}  -->  {mapped_name}: {mapped_model_weight.value.shape}"
             )
@@ -454,9 +469,47 @@ class Llama4WeightLoader:
                 logger.debug(
                     f"Transformed parameter {loaded_name} to {mapped_name}: {loaded_weight.shape} --> {model_weight.value.shape}"
                 )
-                model_weight.value = shard_put(loaded_weight,
-                                               model_weight.sharding,
+
+                # ============================= ADD ================================
+                if loaded_name.endswith(".weight_scale"):
+                    # assert model_weight is a qarray 
+                    assert hasattr(model_weight, 'array'), \
+                        f"Expected model_weight for scale '{loaded_name}' to be a quantized array (qarray), but it lacks an 'array' attribute."
+                    expected_scale_dtype = model_weight.array.scale.value.dtype
+                    assert loaded_weight.dtype == expected_scale_dtype, \
+                        f"DType mismatch for scale '{loaded_name}'. Loaded dtype ({loaded_weight.dtype}) != Expected dtype ({expected_scale_dtype})."
+                    
+                    model_weight.array.scale.value = shard_put(loaded_weight,
+                                               model_weight.array.qvalue.sharding,
                                                mesh=model_for_loading.mesh)
+                
+                elif loaded_weight.itemsize < 2: # check model weight elem nbits < 16
+                    assert hasattr(model_weight, 'array'), \
+                        f"Expected model_weight for quantized weight '{loaded_name}' to be a quantized array (qarray), but it lacks an 'array' attribute."
+                    expected_qvalue_dtype = model_weight.array.qvalue.value.dtype
+                    assert loaded_weight.dtype == expected_qvalue_dtype, \
+                        f"DType mismatch for quantized weight '{loaded_name}'. Loaded dtype ({loaded_weight.dtype}) != Expected dtype ({expected_qvalue_dtype})."
+                    assert loaded_weight.shape == model_weight.array.qvalue.value.shape, \
+                        f"Shape mismatch for quantized weight '{loaded_name}'. Loaded shape ({loaded_weight.shape}) != Expected shape ({model_weight.array.qvalue.value.shape})."
+                    
+                    model_weight.array.qvalue.value = shard_put(loaded_weight,
+                                               model_weight.array.qvalue.sharding,
+                                               mesh=model_for_loading.mesh)
+                else: 
+                    expected_dtype = model_weight.value.dtype
+                    assert loaded_weight.dtype == expected_dtype, \
+                        f"DType mismatch for full-precision weight '{loaded_name}'. Loaded dtype ({loaded_weight.dtype}) != Expected dtype ({expected_dtype})."
+                    assert loaded_weight.shape == model_weight.value.shape, \
+                        f"Shape mismatch for full-precision weight '{loaded_name}'. Loaded shape ({loaded_weight.shape}) != Expected shape ({model_weight.value.shape})."
+                    
+                    model_weight.value = shard_put(loaded_weight,
+                                                model_weight.sharding,
+                                                mesh=model_for_loading.mesh)
+                # ============================= ADD ================================   
+
+                # model_weight.value = shard_put(loaded_weight,
+                #                                model_weight.sharding,
+                #                                mesh=model_for_loading.mesh)
                 if self.is_verbose:
                     print_param_info(model_weight, loaded_name)
 
