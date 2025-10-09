@@ -292,6 +292,15 @@ class CompilationManager:
                     lora_metadata,
                     num_reqs=num_reqs,
                 )
+            if self.runner.speculative_config and self.runner.speculative_config.method == "eagle3":
+                self._run_compilation(
+                    "drafter_compute_logits",
+                    self.runner.drafter.compute_logits_fn,
+                    self.runner.drafter.state,
+                    hidden_states,
+                    None,
+                    num_reqs=num_reqs,
+                )
 
     def _precompile_sampling(self) -> None:
         logger.info("Compiling sampling with different input shapes.")
