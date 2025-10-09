@@ -13,10 +13,10 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compress
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import \
     per_tensor_dequantize
 
-from tpu_inference.models.vllm.jax_linear_common import (
+from tpu_inference.layers.vllm.jax_linear_common import (
     sharded_quantized_matmul, slice_sharded_tensor_for_concatenation,
     torch_to_jax_param)
-from tpu_inference.models.vllm.quantization.common import JaxCommonLinearConfig
+from tpu_inference.layers.vllm.quantization.common import JaxCommonLinearConfig
 
 P = PartitionSpec
 
