@@ -20,6 +20,7 @@ from tpu_inference.kernels.ragged_paged_attention.v3.util import (
 
 DEFAULT_MASK_VALUE = -0.7 * float(jnp.finfo(jnp.dtype("float32")).max)
 
+DEFAULT_VMEM_LIMIT_BYTES = 100 * 1024 * 1024
 
 def ref_ragged_paged_attention(
     queries: jax.
@@ -1330,16 +1331,9 @@ def ragged_paged_attention(
         )
     bkv_sz = bkv_p * page_size
     if vmem_limit_bytes is None:
-        vmem_limit_bytes = int(
-            get_vmem_estimate_bytes(
-                actual_num_kv_heads,
-                actual_num_q_heads_per_kv_head,
-                head_dim,
-                bq_sz,
-                bkv_sz,
-                q.dtype,
-                kv_cache.dtype,
-            ) * 2.4)  # TODO(jevinjiang): figure out why it is so inaccurate?
+        # TODO (jevinjiang/jacobplatin): change this to use
+        # `get_vmem_estimate_bytes` when VREG spilling is fixed.
+        vmem_limit_bytes = DEFAULT_VMEM_LIMIT_BYTES
     grid = (distribution[2], )
 
     in_specs = [
