@@ -2,26 +2,28 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+import time
 
 import vllm.envs as envs
 from vllm import LLM, EngineArgs
+from vllm.lora.request import LoRARequest
 from vllm.utils import FlexibleArgumentParser
-
-from tpu_inference.core import disagg_utils
 
 
 def create_parser():
     parser = FlexibleArgumentParser()
     # Add engine args
     EngineArgs.add_cli_args(parser)
-    # TODO(xw32): change the model back to "meta-llama/Llama-3.2-1B-Instruct"
     parser.set_defaults(model="Qwen/Qwen2.5-3B-Instruct")
-    parser.set_defaults(max_model_len=1024)
+    parser.set_defaults(max_model_len=256)
+    parser.set_defaults(max_num_seqs=8)
+    parser.set_defaults(enable_lora=True)
+    parser.set_defaults(max_lora_rank=8)
 
     # Add sampling params
     sampling_group = parser.add_argument_group("Sampling parameters")
-    sampling_group.add_argument("--max-tokens", type=int)
-    sampling_group.add_argument("--temperature", type=float)
+    sampling_group.add_argument("--max-tokens", type=int, default=16)
+    sampling_group.add_argument("--temperature", type=float, default=0)
     sampling_group.add_argument("--top-p", type=float)
     sampling_group.add_argument("--top-k", type=int)
     return parser
@@ -48,15 +50,18 @@ def main(args: dict):
     if top_k is not None:
         sampling_params.top_k = top_k
 
-    # Generate texts from the prompts. The output is a list of RequestOutput
-    # objects that contain the prompt, generated text, and other information.
-    prompts = [
-        "Hello, my name is",
-    ]
+    prompt = "What is 1+1? \n"
+    lora_request = LoRARequest(
+        "lora_adapter_3", 3,
+        "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_3_adapter")
 
     if envs.VLLM_TORCH_PROFILER_DIR is not None:
         llm.start_profile()
-    outputs = llm.generate(prompts, sampling_params)
+    start = time.perf_counter()
+    outputs = llm.generate(prompt,
+                           sampling_params=sampling_params,
+                           lora_request=lora_request)
+    # print(f'xw32 outputs: {outputs}')  # prints [RequestOutput, ..., RequestOutput]
     if envs.VLLM_TORCH_PROFILER_DIR is not None:
         llm.stop_profile()
 
@@ -67,6 +72,8 @@ def main(args: dict):
         generated_text = output.outputs[0].text
         print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
         print("-" * 50)
+    end = time.perf_counter()
+    print(f'total time: {end - start} [secs].')
 
 
 if __name__ == "__main__":
@@ -76,14 +83,4 @@ if __name__ == "__main__":
     parser = create_parser()
     args: dict = vars(parser.parse_args())
 
-    if not disagg_utils.is_disagg_enabled():
-        main(args)
-    else:
-        from unittest.mock import patch
-
-        from tpu_inference.core.core_tpu import (DisaggEngineCore,
-                                                 DisaggEngineCoreProc)
-
-        with patch("vllm.v1.engine.core.EngineCore", DisaggEngineCore), patch(
-                "vllm.v1.engine.core.EngineCoreProc", DisaggEngineCoreProc):
-            main(args)
+    main(args)
