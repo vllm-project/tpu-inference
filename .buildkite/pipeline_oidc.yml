@@ -1,0 +1,20 @@
+env:
+  TWINE_USERNAME: __token__
+  TWINE_REPOSITORY_URL: https://test.pypi.org/legacy/
+  PYTHON_VERSION: "3.12"
+
+steps:
+  - label: ":python: Build & Publish to PyPI"
+    key: publish
+    branches: vllm/ernie_build_wheel
+
+    commands:
+      - pip install --upgrade pip
+      - pip install build twine
+      - python -m build
+      - export TWINE_PASSWORD=$(buildkite-agent oidc request-token --audience "pypi")
+      - twine upload dist/*
+    plugins:
+      - docker#v5.0.0:
+          image: "python:${PYTHON_VERSION}-slim"
+          propagate-environment: true
