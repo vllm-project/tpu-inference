@@ -38,13 +38,11 @@ class Qwen3Attention(nnx.Module):
                                          self.hidden_size // self.num_heads)
         self.head_dim = utils.get_padded_head_dim(self.head_dim_original)
 
-        print("qwen3 attention head_dim:", self.head_dim)
-        # TODO(wenxindong): with DP attention the following may not be needed anymore.
-        # sharding_size = mesh.shape["model"] 
-        # self.num_heads = utils.get_padded_num_heads(self.num_heads,
-        #                                             sharding_size)
-        # self.num_kv_heads = utils.get_padded_num_heads(self.num_kv_heads,
-        #                                                sharding_size)
+        sharding_size = mesh.shape["model"]
+        self.num_heads = utils.get_padded_num_heads(self.num_heads,
+                                                    sharding_size)
+        self.num_kv_heads = utils.get_padded_num_heads(self.num_kv_heads,
+                                                       sharding_size)
 
         self.mesh = mesh
 

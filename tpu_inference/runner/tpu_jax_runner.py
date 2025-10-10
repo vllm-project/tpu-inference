@@ -110,14 +110,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         self.devices = devices
         self.dtype = self.model_config.dtype
-        self.maybe_forbid_compile = (runner_utils.ForbidCompile()
-                                     if envs.VLLM_XLA_CHECK_RECOMPILATION else
-                                     nullcontext())
+        self.maybe_forbid_compile = runner_utils.ForbidCompile(
+        ) if envs.VLLM_XLA_CHECK_RECOMPILATION else nullcontext()
 
         self._init_random()
         self._init_mesh()
-        self.dp_size = self.mesh.shape["data"] * self.mesh.shape["attn_dp"]
-        print("self.dp_size", self.dp_size)
         self._init_phased_profiling()
         self._init_mm()
         self._init_inputs()
@@ -130,12 +127,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.kv_cache_manager = KVCacheManager(self)
         self.mm_manager = MultiModalManager(self)
         self.persistent_batch_manager = PersistentBatchManager(
-            self.requests,
-            self.input_batch,
-            self.encoder_cache,
-            self.uses_mrope,
-            self.model_config,
-        )
+            self.requests, self.input_batch, self.encoder_cache,
+            self.uses_mrope, self.model_config)
         self.lora_utils = LoraUtils(self)
 
         cache_config = self.cache_config
@@ -143,7 +136,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             model_dtype = self.dtype
             if isinstance(model_dtype, str):
                 self.kv_cache_dtype = TPU_STR_DTYPE_TO_TORCH_DTYPE[model_dtype]
-            elif isinstance(getattr(model_dtype, "dtype", None), jnp.dtype):
+            elif isinstance(getattr(model_dtype, 'dtype', None), jnp.dtype):
                 self.kv_cache_dtype = j2t_dtype(model_dtype.dtype)
             elif isinstance(model_dtype, torch.dtype):
                 self.kv_cache_dtype = model_dtype
@@ -155,9 +148,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.kv_cache_dtype = TPU_STR_DTYPE_TO_TORCH_DTYPE[
                 cache_config.cache_dtype]
 
+        self.dp_size = self.mesh.shape["data"] * self.mesh.shape["attn_dp"]
         self.data_parallel_sharding = NamedSharding(self.mesh,
                                                     PartitionSpec(MLP_DATA_AXIS_NAME))
-
+    
     def _init_random(self):
         if self.model_config.seed is None:
             self.model_config.seed = 0
@@ -168,8 +162,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def _init_mesh(self) -> None:
         try:
             # TODO: Update override steps.
-            sharding_strategy = self.vllm_config.additional_config["sharding"][
-                "sharding_strategy"]
+            sharding_strategy = \
+                self.vllm_config.additional_config["sharding"]["sharding_strategy"]
         except KeyError:
             sharding_strategy = {"tensor_parallelism": len(self.devices)}
 
@@ -185,11 +179,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             except KeyError:
                 tp = len(self.devices)
 
-            # if TP < number of kv heads 
             attn_dp = 1 
-            if self.model_config.hf_config.num_key_value_heads < tp:
-                attn_dp = tp // self.model_config.hf_config.num_key_value_heads
-                tp = tp//attn_dp
+            enable_dp = True #self.vllm_config.additional_config["sharding"]["enable_dp_attention"]
+            if enable_dp:
+                kv_heads = self.model_config.hf_config.num_key_value_heads
+                if kv_heads < tp:
+                    attn_dp = max(tp // kv_heads, 1)
+                    tp = tp//attn_dp
             
             axis_names = ("data", "attn_dp","expert", "model")
             mesh_shape = (dp, attn_dp, 1, tp)
@@ -197,7 +193,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.mesh = make_optimized_mesh(mesh_shape,
                                             axis_names,
                                             devices=self.devices)
-            print("_init_mesh self.mesh", self.mesh)
         logger.info(f"Init mesh | mesh={self.mesh}")
 
     def _init_phased_profiling(self) -> None:
@@ -236,13 +231,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # InputBatch needs to work with sampling tensors greater than padding
         # to avoid dynamic shapes. Also, avoid suboptimal alignment.
         self.max_num_reqs = max(scheduler_config.max_num_seqs, MIN_NUM_SEQS)
-        self.max_num_reqs_per_dp_rank = self.max_num_reqs //self.dp_size
         # [16, 32, 64, 128, 256, 512, 1024, 2048]
         self.num_tokens_paddings = runner_utils.get_token_paddings(
             min_token_size=16,
             max_token_size=scheduler_config.max_num_batched_tokens,
-            padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP,
-        )
+            padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
         # In case `max_num_tokens < max(num_tokens_paddings)` use the actual
         # padded max value to pre-allocate data structures and pre-compile.
         self.max_num_tokens = self.num_tokens_paddings[-1]
@@ -280,14 +273,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # With speculative decoding, each request has multiple positions to select from.
         max_logits_per_req = 1
         if self.speculative_config:
-            max_logits_per_req = (
-                self.speculative_config.num_speculative_tokens + 1
-            )  # Including bonus token
+            max_logits_per_req = self.speculative_config.num_speculative_tokens + 1  # Including bonus token
             self.num_logits_paddings = runner_utils.get_token_paddings(
                 min_token_size=MIN_NUM_SEQS,
                 max_token_size=self.max_num_reqs * max_logits_per_req,
-                padding_gap=0,
-            )
+                padding_gap=0)
         else:
             self.num_logits_paddings = None
 
@@ -430,7 +420,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # TODO: make _get_input_ids_embeds within this context
         # NOTE: right now, mm model will use embeddings as the input,
         # but text-only model will use input_ids
-        
         with self.maybe_forbid_compile:
 
             with set_forward_context(
@@ -454,17 +443,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)
-            breakpoint()
             logits = self.compute_logits_fn(
                 self.state,
                 hidden_states,
                 lora_metadata,
             )
             if scheduler_output.grammar_bitmask is not None:
-                (require_struct_decoding, grammar_bitmask_padded,
-                 arange) = (self.structured_decoding_manager.
-                            prepare_structured_decoding_input(
-                                logits, scheduler_output))
+                (
+                    require_struct_decoding, grammar_bitmask_padded, arange
+                ) = self.structured_decoding_manager.prepare_structured_decoding_input(
+                    logits, scheduler_output)
                 logits = self.structured_decoding_manager.structured_decode_fn(
                     require_struct_decoding,
                     grammar_bitmask_padded,
@@ -499,7 +487,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     sampling_metadata=tpu_sampling_metadata,
                     key=self.rng_params_for_sampling,
                 )
-            # TODO (wenxindong): test out this function
+
             if tpu_sampling_metadata.logprobs:
                 logprobs = self._compute_and_gather_logprobs(
                     logits, next_tokens, self.model_config.max_logprobs)
@@ -542,21 +530,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         if spec_decode_metadata is None:
             next_tokens = np.asarray(jax.device_get(next_tokens))
-            # mask out tokens where logit_indices = 0
-            # next_tokens = next_tokens[logits_indices_cpu != -1]
-            # Here need to map token positions back to the original request order
+            # Map tokens back to the pre DP shuffling order 
             if logits_indices_selector is not None:
                 next_tokens = next_tokens[logits_indices_selector]
             selected_token_ids = np.expand_dims(next_tokens[:num_reqs], 1)
             valid_sampled_token_ids = selected_token_ids.tolist()
         else:
             valid_sampled_token_ids = self.rejection_sampler.parse_output(
-                next_tokens,
-                self.input_batch.vocab_size,
-                spec_decode_metadata.draft_lengths_cpu,
-                num_reqs,
-                spec_decode_metadata.draft_token_ids.shape[0],
-            )
+                next_tokens, self.input_batch.vocab_size,
+                spec_decode_metadata.draft_lengths_cpu, num_reqs,
+                spec_decode_metadata.draft_token_ids.shape[0])
 
         # Mask out the sampled tokens that should not be sampled.
         for i in discard_sampled_tokens_req_indices:
@@ -633,6 +616,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         dp_size = self.dp_size
         num_reqs = self.input_batch.num_reqs
+        max_num_reqs_per_dp_rank = self.max_num_reqs // dp_size
         req_ids_dp = {dp_rank: [] for dp_rank in range(dp_size)}
         req_indices_dp = {dp_rank: [] for dp_rank in range(dp_size)}
         num_scheduled_tokens_per_dp_rank = {
@@ -677,7 +661,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         max_num_reqs_across_dp = max(
             len(req_ids) for req_ids in req_ids_dp.values())
         padded_num_reqs_per_dp_rank = runner_utils.get_padded_num_reqs_with_upper_limit(
-            max_num_reqs_across_dp, self.max_num_reqs_per_dp_rank)
+            max_num_reqs_across_dp, max_num_reqs_per_dp_rank)
         padded_num_reqs = padded_num_reqs_per_dp_rank * dp_size
 
         all_req_indices = np.concatenate(
@@ -695,7 +679,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 scheduled_tokens_per_dp_rank, num_req_per_dp_rank,
                 padded_num_scheduled_tokens_per_dp_rank, padded_num_reqs,
                 padded_total_num_scheduled_tokens,
-                cum_num_req_per_dp_rank_list, padded_num_reqs_per_dp_rank, logits_indices_selector)
+                cum_num_req_per_dp_rank_list, padded_num_reqs_per_dp_rank, logits_indices_selector, max_num_reqs_per_dp_rank)
 
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -709,7 +693,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
          scheduled_tokens_per_dp_rank, num_req_per_dp_rank,
          padded_num_scheduled_tokens_per_dp_rank, padded_num_reqs,
          padded_total_num_scheduled_tokens, cum_num_req_per_dp_rank_list,
-         padded_num_reqs_per_dp_rank, logits_indices_selector
+         padded_num_reqs_per_dp_rank, logits_indices_selector, max_num_reqs_per_dp_rank
          ) = self._prepare_dp_input_metadata(scheduler_output)
 
         # Multi-modal support
@@ -772,12 +756,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         # Prepare the attention metadata.
         for dp_rank in range(dp_size):
-            req_offset = dp_rank * self.max_num_reqs_per_dp_rank
+            req_offset = dp_rank * max_num_reqs_per_dp_rank
             query_start_loc_cpu = self.query_start_loc_cpu[
                 req_offset + dp_rank:req_offset +
-                self.max_num_reqs_per_dp_rank + dp_rank + 1]
+                max_num_reqs_per_dp_rank + dp_rank + 1]
             seq_lens_cpu = self.seq_lens_cpu[req_offset:req_offset +
-                                             self.max_num_reqs_per_dp_rank]
+                                             max_num_reqs_per_dp_rank]
             _num_reqs_so_far = cum_num_req_per_dp_rank_list[dp_rank]
             _num_reqs = num_req_per_dp_rank[dp_rank]
             num_scheduled_tokens_per_req = scheduled_tokens_per_dp_rank[
@@ -801,7 +785,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # populate logits_indices
         for dp_rank in range(dp_size):
             req_offset = dp_rank * padded_num_reqs_per_dp_rank
-            query_loc_req_offset = dp_rank * (self.max_num_reqs_per_dp_rank +
+            query_loc_req_offset = dp_rank * (max_num_reqs_per_dp_rank +
                                               1)
             _num_reqs = num_req_per_dp_rank[dp_rank]
 
@@ -831,7 +815,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         
         block_tables = self.block_table_cpu[:self.max_num_reqs]
         for dp_rank in range(dp_size):
-            req_offset = dp_rank * self.max_num_reqs_per_dp_rank
+            req_offset = dp_rank * max_num_reqs_per_dp_rank
             _num_reqs = num_req_per_dp_rank[dp_rank]
 
             block_tables[
@@ -1093,14 +1077,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # This is for making these cpu buffers hidden during tracing
         attention_metadata.query_start_loc_cpu = query_start_loc_cpu
         attention_metadata.seq_lens_cpu = seq_lens_cpu
-
+        logits_indices_selector = None
         return (
             input_ids,
             attention_metadata,
             sampling_metadata,
             logits_indices,
             spec_decode_metadata,
-            None
+            logits_indices_selector
         )
 
     def _get_input_ids_embeds(self, input_ids: jax.Array,
@@ -1147,7 +1131,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         mappings: Dict[str, Tuple[str, Tuple[str]]],
         transpose_keys: Dict[str, Tuple[int]],
         reshard_fn: Callable[[jaxtyping.PyTree, jaxtyping.PyTree],
-                             jaxtyping.PyTree] = None,
+                             jaxtyping.PyTree] = None
     ) -> None:
         """For RL framework integration."""
         if reshard_fn is not None:
@@ -1160,5 +1144,4 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             tgt_state=self.state,
             mappings=mappings,
             transpose_keys=transpose_keys,
-            shard=shard,
-        )
+            shard=shard)

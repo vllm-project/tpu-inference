@@ -11,7 +11,6 @@ from vllm.inputs import ProcessorInputs, PromptType
 from vllm.platforms.interface import Platform, PlatformEnum
 from vllm.sampling_params import SamplingParams, SamplingType
 
-
 from tpu_inference.logger import init_logger
 
 
@@ -19,7 +18,7 @@ if TYPE_CHECKING:
     from vllm.attention.backends.registry import _Backend
     from vllm.config import BlockSize, ModelConfig, VllmConfig
     from vllm.pooling_params import PoolingParams
-else:   
+else:
     BlockSize = None
     ModelConfig = None
     VllmConfig = None

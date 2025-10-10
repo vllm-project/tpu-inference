@@ -32,7 +32,7 @@ class CompilationManager:
     def __init__(self, runner: "TPUModelRunner"):
         self.runner = runner
         if not envs.VLLM_DISABLE_COMPILE_CACHE:
-            logger.info(f"Enabling JAX compile cache: {envs.VLLM_XLA_CACHE_PATH}")
+            logger.info("Enabling JAX compile cache.")
             jax.config.update("jax_compilation_cache_dir",
                               envs.VLLM_XLA_CACHE_PATH)
 

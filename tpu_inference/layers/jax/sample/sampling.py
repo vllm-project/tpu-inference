@@ -28,8 +28,7 @@ def sample(
     if tpu_sampling_metadata.do_sampling:
         # Unshard the logits explicity to avoid latency increase.
         logits = jax.lax.with_sharding_constraint(
-            # todo(wenxindongwork): verify if ATTN_DATA_AXIS_NAME or MLP_DATA_AXIS_NAME should be used here
-            logits, NamedSharding(mesh, P(ATTN_DATA_AXIS_NAME, None)))
+            logits, NamedSharding(mesh, P(MLP_DATA_AXIS_NAME, None)))
     greedy_sampled = jnp.argmax(logits, axis=-1)
     if not tpu_sampling_metadata.do_sampling:
         return greedy_sampled
@@ -46,7 +45,6 @@ def sample(
     next_tokens = jax.random.categorical(rng, logits)
     # Note: avoid using the sample result when temperature < _SAMPLING_EPS
     # If temperature < 0, logits /= temperatures will flip the result, causing error.
-
     return jnp.where(tpu_sampling_metadata.temperature < _SAMPLING_EPS,
                      greedy_sampled, next_tokens)
 

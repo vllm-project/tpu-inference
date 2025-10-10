@@ -141,7 +141,7 @@ def tensor_sharded_gmm_row_parallel(
         check_rep=False,
     )(lhs, rhs, group_sizes)
 
-# todo (wenxindongwork): support model level duplication here.  
+# todo (wenxindongwork): support model-wise duplication.  
 def expert_sharded_gmm(
     lhs: jax.Array,
     rhs: jax.Array,
@@ -191,7 +191,6 @@ def expert_sharded_gmm(
     #       0, 0, 0, 0     0, 0, 0, 0     0, 0, 0, 0     D, D, D, D
     #        shard-0        shard-1        shard-2        shard-3
     # The shard 0,1,2,3 each has 3 (A rows), 2 (B rows), 5 (C rows) and 4 (D rows).
-    print("getting into gmm")
     gmm_res = shard_map(
         _gmm,
         mesh=mesh,
@@ -199,8 +198,6 @@ def expert_sharded_gmm(
         out_specs=(P(EXPERT_AXIS_NAME, None)), 
         check_rep=False,
     )(lhs, rhs, group_sizes, group_offset)
-    print("gmm_res", gmm_res)
-    # (256, 2048), (128, 1536, 2048), (128,), (8, )
 
     # For i-th shard, it is responsible groups (AKA experts) from i*num_experts_per_shard to (i+1)*num_experts_per_shard
     # We sum them up to get total rows in that shard, and that is the size for shard to send to its peers. This is also
@@ -323,17 +320,16 @@ def jax_fused_moe_func(
     topk_weights = topk_weights.astype(dtype)
 
     topk_indices_flat = topk_indices.flatten()
-
     topk_argsort_indices = jnp.argsort(topk_indices_flat)
     topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)
     token_indices = jnp.arange(num_tokens, dtype=jnp.int32).repeat(topk)
     token_indices_sorted = token_indices[topk_argsort_indices]
     group_sizes = jnp.bincount(topk_indices_flat, length=global_num_experts)
-    
-    
+
     x = hidden_states[token_indices_sorted]
 
     if use_ep:
+        # todo (wenxindongwork): verify if this is necessary
         x = jax.lax.with_sharding_constraint(
             x, NamedSharding(mesh, P(None)))
         x = expert_sharded_gmm(x,

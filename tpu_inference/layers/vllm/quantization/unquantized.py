@@ -108,7 +108,6 @@ class VllmUnquantizedLinearMethod(UnquantizedLinearMethod):
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         with jax.named_scope(layer._get_name()):
             if in_sharding := self.jax_config.get_input_sharding(x):
-                print("layer:", layer, "in_sharding:", in_sharding)
                 x.shard_(NamedSharding(self.jax_config.mesh, in_sharding))
 
             if self.jax_config.fuse_matmuls:
@@ -174,8 +173,9 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         assert isinstance(layer, FusedMoE)
-        w2_weight = t2j(layer.w2_weight, use_dlpack=False) #[128, 2048, 768]
-        w13_weight = t2j(layer.w13_weight, use_dlpack=False) #[128, 1536, 2048]
+
+        w2_weight = t2j(layer.w2_weight, use_dlpack=False)
+        w13_weight = t2j(layer.w13_weight, use_dlpack=False)
 
         if layer.use_ep:
             w13_weight = jax.device_put(
@@ -255,10 +255,10 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             use_ep=layer.use_ep)
 
         output = _fused_moe_func(
-            jax_view(x), # PartitionSpec() #(32, 2048)
-            jax_view(layer.w13_weight), # PartitionSpec(('expert', 'model', 'attn_dp'), None, None)
-            jax_view(layer.w2_weight), # PartitionSpec(('expert', 'model', 'attn_dp'), None, None)
-            jax_view(router_logits), #PartitionSpec()
+            jax_view(x),
+            jax_view(layer.w13_weight),
+            jax_view(layer.w2_weight),
+            jax_view(router_logits),
         )
-        breakpoint()
+
         return torch_view(output)

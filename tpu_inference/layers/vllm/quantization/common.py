@@ -27,36 +27,36 @@ class JaxCommonLinearConfig:
 
     def __init__(self, vllm_config: VllmConfig, mesh: Mesh, layer: LinearBase):
         assert isinstance(layer, LinearBase)
-        # breakpoint()
-        print("wenxin: layer type", type(layer))
+
         self.mesh = mesh
         self.output_sizes = [layer.output_size]
         self.weight_sharding = P(None, None)
         self.fuse_matmuls = True
         self.enable_sequence_parallelism = vllm_config.compilation_config.pass_config.enable_sequence_parallelism
-        print("self.enable_sequence_parallelism", self.enable_sequence_parallelism)
         self.input_sharding = None
         self.output_sharding = None
-        
         self.tp_size = self.mesh.shape['model']*self.mesh.shape.get('attn_dp', 1)
+        
         if isinstance(layer, RowParallelLinear):
-            
-            self.weight_sharding = P(None, MLP_TENSOR_AXIS_NAME)
             if self.mesh.shape.get('attn_dp', 1) > 1:
+                # Replicate o_proj when using DP attention
                 self.weight_sharding = P(None)
+            else: 
+                self.weight_sharding = P(None, MLP_TENSOR_AXIS_NAME)
             if self.enable_sequence_parallelism:
                 self.output_sharding = P(MLP_TENSOR_AXIS_NAME, None)
         elif isinstance(layer, ColumnParallelLinear):
             if isinstance(
                     layer, QKVParallelLinear):
                 self.input_sharding = P(ATTN_DATA_AXIS_NAME, None)
-                self.weight_sharding = P(("model", "expert"), None)
+                self.weight_sharding = P('model', None)
                 self.output_sharding = P(ATTN_DATA_AXIS_NAME, "model")
             else:
                 self.weight_sharding = P(MLP_TENSOR_AXIS_NAME, None)
             
             if self.enable_sequence_parallelism:
-                self.input_sharding = P(MLP_TENSOR_AXIS_NAME, None) # todo(wenxindongwork): verify this
+                 # todo(wenxindongwork): verify this
+                self.input_sharding = P(MLP_TENSOR_AXIS_NAME, None)
 
             if isinstance(layer, MergedColumnParallelLinear) or isinstance(
                     layer, QKVParallelLinear):
@@ -78,7 +78,6 @@ class JaxCommonLinearConfig:
         self.n_shards = self.mesh.shape.get(self.weight_sharding[0], 1)
 
     def get_input_sharding(self, x: torchax.tensor.Tensor):
-        
         if self.enable_sequence_parallelism:
             token_num = x.shape[0]
             # NOTE(chengjiyao): make sure the sharded token_num is larger than TPU_SECOND_LAST_MINOR

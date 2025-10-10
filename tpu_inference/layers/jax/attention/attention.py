@@ -17,7 +17,6 @@ from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.layers.jax.sharding import ATTN_DATA_AXIS_NAME
 
-
 KVCache = Tuple[jax.Array, jax.Array]
 
 
@@ -219,10 +218,10 @@ class Attention(nnx.Module):
             self.keyvalue_skh,  # k
             self.keyvalue_skh,  # v
             kv_cache_spec,  # kv_cache
-            P(ATTN_DATA_AXIS_NAME),  # md.seq_lens: Replicated
-            P(ATTN_DATA_AXIS_NAME),  # page_indices_flat: Replicated
-            P(ATTN_DATA_AXIS_NAME),  # query_start_loc: Replicated
-            P(ATTN_DATA_AXIS_NAME),  # distribution: Replicated
+            P(ATTN_DATA_AXIS_NAME),  # md.seq_lens
+            P(ATTN_DATA_AXIS_NAME),  # page_indices_flat
+            P(ATTN_DATA_AXIS_NAME),  # query_start_loc
+            P(ATTN_DATA_AXIS_NAME),  # distribution
         )
 
         out_specs = (self.attn_o_tnh, kv_cache_spec)
@@ -253,5 +252,4 @@ class Attention(nnx.Module):
                 md.query_start_loc,
                 md.request_distribution,
             )
-        breakpoint()
         return kv_cache, output_TNH
