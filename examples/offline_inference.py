@@ -50,41 +50,140 @@ def main(args: dict):
     # Generate texts from the prompts. The output is a list of RequestOutput
     # objects that contain the prompt, generated text, and other information.
     prompts = [
-        "Hello, my name is",
-        "The capital of France is",
-        "The colors of the rainbow are",
-        "The future of AI is",
-        "The president of the United States is",
-        "How many players are on a standard soccer team on the field at one time?",
-        "In Greek mythology, who is the god of the sea?",
-        "In what year did the Titanic sink?",
-        "In which museum is the Mona Lisa displayed?",
-        "Mount Everest is located in which mountain range?",
-        "What ancient empire was ruled by Julius Caesar?",
-        "What are the four fundamental forces of nature?",
-        'What does "CPU" stand for?',
-        'What does "HTML" stand for?',
-        "What is the capital of Australia?",
-        "What is the chemical symbol for gold?",
-        "What is the currency of Switzerland?",
-        "What is the distance from the Earth to the Sun called?",
-        "What is the freezing point of water in Celsius?",
-        "What is the hardest known natural substance on Earth?",
-        "What is the largest planet in our solar system?",
-        "What is the longest river in the world?",
-        "What is the main function of the kidneys in the human body?",
-        "What is the main ingredient in guacamole?",
-        "What is the most spoken language in the world by number of native speakers?",
-        "What is the process by which plants use sunlight to create food?",
-        "Which country is known as the Land of the Rising Sun?",
-        "Who developed the theory of general relativity?",
-        'Who directed the original "Star Wars" trilogy?',
-        "Who is credited with inventing the telephone?",
-        "Who painted the ceiling of the Sistine Chapel?",
-        "Who was the first female Prime Minister of the United Kingdom?",
-        "Who was the first person to walk on the moon?",
-        "Who wrote the American Declaration of Independence?",
-        'Who wrote the novel "Pride and Prejudice"?',
+        # Prompt 1:
+        """The following are multiple choice questions (with answers) about abstract_algebra.
+
+    Q: Find all c in Z_3 such that Z_3[x]/(x^2 + c) is a field.
+    A: 0
+    B: 1
+    C: 2
+    D: 3
+    Answer: B
+
+    Q: "Statement 1 | If aH is an element of a factor group, then |aH| divides |a|. Statement 2 | If H and K are subgroups of G then HK is a subgroup of G."
+    A: True, True
+    B: False, False
+    C: True, False
+    D: False, True
+    Answer: B
+
+    Q: Statement 1 | Every element of a group generates a cyclic subgroup of the group. Statement 2 | The symmetric group S_10 has 10 elements.
+    A: True, True
+    B: False, False
+    C: True, False
+    D: False, True
+    Answer: C
+
+    Q: Statement 1| Every function from a finite set onto itself must be one to one. Statement 2 | Every subgroup of an abelian group is abelian.
+    A: True, True
+    B: False, False
+    C: True, False
+    D: False, True
+    Answer: A
+
+    Q: Find the characteristic of the ring 2Z.
+    A: 0
+    B: 3
+    C: 12
+    D: 30
+    Answer: A
+
+    Q: Find the degree for the given field extension Q(sqrt(2), sqrt(3), sqrt(18)) over Q.
+    A: 0
+    B: 4
+    C: 2
+    D: 6
+    Answer:""",
+
+        # Prompt 2:
+        """The following are multiple choice questions (with answers) about abstract_algebra.
+
+    Q: Find all c in Z_3 such that Z_3[x]/(x^2 + c) is a field.
+    A: 0
+    B: 1
+    C: 2
+    D: 3
+    Answer: B
+
+    Q: "Statement 1 | If aH is an element of a factor group, then |aH| divides |a|. Statement 2 | If H and K are subgroups of G then HK is a subgroup of G."
+    A: True, True
+    B: False, False
+    C: True, False
+    D: False, True
+    Answer: B
+
+    Q: Statement 1 | Every element of a group generates a cyclic subgroup of the group. Statement 2 | The symmetric group S_10 has 10 elements.
+    A: True, True
+    B: False, False
+    C: True, False
+    D: False, True
+    Answer: C
+
+    Q: Statement 1| Every function from a finite set onto itself must be one to one. Statement 2 | Every subgroup of an abelian group is abelian.
+    A: True, True
+    B: False, False
+    C: True, False
+    D: False, True
+    Answer: A
+
+    Q: Find the characteristic of the ring 2Z.
+    A: 0
+    B: 3
+    C: 12
+    D: 30
+    Answer: A
+
+    Q: Let p = (1, 2, 5, 4)(2, 3) in S_5 . Find the index of <p> in S_5.
+    A: 8
+    B: 2
+    C: 24
+    D: 120
+    Answer:""",
+
+        # Prompt 3:
+        """The following are multiple choice questions (with answers) about abstract_algebra.
+
+    Q: Find all c in Z_3 such that Z_3[x]/(x^2 + c) is a field.
+    A: 0
+    B: 1
+    C: 2
+    D: 3
+    Answer: B
+
+    Q: "Statement 1 | If aH is an element of a factor group, then |aH| divides |a|. Statement 2 | If H and K are subgroups of G then HK is a subgroup of G."
+    A: True, True
+    B: False, False
+    C: True, False
+    D: False, True
+    Answer: B
+
+    Q: Statement 1 | Every element of a group generates a cyclic subgroup of the group. Statement 2 | The symmetric group S_10 has 10 elements.
+    A: True, True
+    B: False, False
+    C: True, False
+    D: False, True
+    Answer: C
+
+    Q: Statement 1| Every function from a finite set onto itself must be one to one. Statement 2 | Every subgroup of an abelian group is abelian.
+    A: True, True
+    B: False, False
+    C: True, False
+    D: False, True
+    Answer: A
+
+    Q: Find the characteristic of the ring 2Z.
+    A: 0
+    B: 3
+    C: 12
+    D: 30
+    Answer: A
+
+    Q: Find all zeros in the indicated finite field of the given polynomial with coefficients in that field. x^5 + 3x^3 + x^2 + 2x in Z_5
+    A: 0
+    B: 1
+    C: 0,1
+    D: 0,4
+    Answer:"""
     ]
 
     if envs.VLLM_TORCH_PROFILER_DIR is not None:
