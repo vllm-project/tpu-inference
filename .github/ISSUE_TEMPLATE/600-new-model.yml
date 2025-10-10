@@ -19,7 +19,7 @@ body:
     required: true
 - type: textarea
   attributes:
-    label: The closest model vllm already supports.
+    label: The closest model TPU Inference already supports.
     description: >
       Here is the list of models already supported by TPU Inference: https://github.com/vllm-project/tpu-inference/blob/main/model_support_matrix.csv . Which model is the most similar to the model you want to add support for?
 - type: textarea
