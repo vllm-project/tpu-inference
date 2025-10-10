@@ -115,7 +115,8 @@ class DeepSeekV3(nnx.Module):
             qk_nope_head_dim=qk_nope_head_dim,
             qk_rope_head_dim=qk_rope_head_dim,
             v_head_dim=v_head_dim,
-            num_local_experts=num_local_experts)
+            num_local_experts=num_local_experts,
+            model_dtype=dtype)
 
         self.embedder = Embedder(vocab_size=vocab_size,
                                  hidden_size=hidden_size,
@@ -830,11 +831,10 @@ class DeepSeekV3WeightLoader:
 
 def weights_dequant_cpu(x: torch.Tensor,
                         s: torch.Tensor,
-                        output_dtype: torch.dtype,
+                        output_dtype: jnp.dtype,
                         block_size: int = 128) -> torch.Tensor:
     assert x.dim() == 2 and s.dim() == 2, "Both x and s must be 2D tensors"
     M, N = x.shape
-    torch_output_type = DTYPE_VIEW_MAP.get(jnp.dtype(output_dtype))
 
     x = x.to(torch.float32)
     s = s.to(torch.float32)
@@ -867,4 +867,4 @@ def weights_dequant_cpu(x: torch.Tensor,
             scale = s[M // block_size, j // block_size]
             y[M_main:M, j:j + block_size] = block * scale
 
-    return y.to(torch_output_type)
+    return y.to(j2t_dtype(output_dtype))
