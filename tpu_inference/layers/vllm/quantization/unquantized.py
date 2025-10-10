@@ -22,12 +22,12 @@ from vllm.model_executor.layers.quantization import \
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 
-from tpu_inference.models.vllm.jax_fused_moe import jax_fused_moe_func_padded
-from tpu_inference.models.vllm.jax_linear_common import (
+from tpu_inference.layers.vllm.jax_fused_moe import jax_fused_moe_func_padded
+from tpu_inference.layers.vllm.jax_linear_common import (
     reorder_concatenated_tensor_for_sharding,
     slice_sharded_tensor_for_concatenation, torch_to_jax_param)
-from tpu_inference.models.vllm.quantization.common import (JaxCommonConfig,
-                                                         JaxCommonLinearConfig)
+from tpu_inference.layers.vllm.quantization.common import (
+    JaxCommonConfig, JaxCommonLinearConfig)
 
 P = PartitionSpec
 logger = init_logger(__name__)

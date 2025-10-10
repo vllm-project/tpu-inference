@@ -115,7 +115,8 @@ class DeepSeekV3(nnx.Module):
             qk_nope_head_dim=qk_nope_head_dim,
             qk_rope_head_dim=qk_rope_head_dim,
             v_head_dim=v_head_dim,
-            num_local_experts=num_local_experts)
+            num_local_experts=num_local_experts,
+            model_dtype=dtype)
 
         self.embedder = Embedder(vocab_size=vocab_size,
                                  hidden_size=hidden_size,
@@ -355,7 +356,7 @@ class DeepSeekV3WeightLoader:
 
     def __init__(self, vllm_config: VllmConfig, num_layers, hidden_size,
                  q_lora_rank, kv_lora_rank, attn_heads, qk_nope_head_dim,
-                 qk_rope_head_dim, v_head_dim, num_local_experts):
+                 qk_rope_head_dim, v_head_dim, num_local_experts, model_dtype):
 
         self.num_layers = num_layers
         self.names_and_weights_generator = model_weights_generator(
@@ -365,6 +366,7 @@ class DeepSeekV3WeightLoader:
         self.is_verbose = vllm_config.additional_config.get(
             "is_verbose", None) is not None
         self.num_routed_experts = num_local_experts
+        self.model_dtype = model_dtype
 
         self._transpose_map = {
             # dense mlp
@@ -754,7 +756,8 @@ class DeepSeekV3WeightLoader:
                         weight_name = loaded_name.replace(
                             ".weight_scale_inv", ".weight")
                         loaded_weight = weights_dequant_cpu(
-                            quantized_weights[weight_name], loaded_weight)
+                            quantized_weights[weight_name], loaded_weight,
+                            self.model_dtype)
                         loaded_name = weight_name
                         del quantized_weights[weight_name]
                 # concat mlp.experts weights
@@ -828,6 +831,7 @@ class DeepSeekV3WeightLoader:
 
 def weights_dequant_cpu(x: torch.Tensor,
                         s: torch.Tensor,
+                        output_dtype: jnp.dtype,
                         block_size: int = 128) -> torch.Tensor:
     assert x.dim() == 2 and s.dim() == 2, "Both x and s must be 2D tensors"
     M, N = x.shape
@@ -863,4 +867,4 @@ def weights_dequant_cpu(x: torch.Tensor,
             scale = s[M // block_size, j // block_size]
             y[M_main:M, j:j + block_size] = block * scale
 
-    return y.to(torch.get_default_dtype())
+    return y.to(j2t_dtype(output_dtype))

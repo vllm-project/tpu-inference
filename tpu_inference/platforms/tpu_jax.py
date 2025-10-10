@@ -4,16 +4,16 @@ import os
 from typing import TYPE_CHECKING, Optional, Tuple, Union, cast
 
 import jax.numpy as jnp
-import vllm.envs as envs
 from torchax.ops.mappings import j2t_dtype
 from tpu_info import device
-from vllm.inputs import ProcessorInputs, PromptType
-from vllm.platforms.interface import Platform, PlatformEnum
-from vllm.sampling_params import SamplingParams, SamplingType
 
+import vllm.envs as envs
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.quantization.quantization_utils import \
     update_vllm_config_for_qwix_quantization
+from vllm.inputs import ProcessorInputs, PromptType
+from vllm.platforms.interface import Platform, PlatformEnum
+from vllm.sampling_params import SamplingParams, SamplingType
 
 if TYPE_CHECKING:
     from vllm.attention.backends.registry import _Backend
@@ -49,7 +49,10 @@ class TpuPlatform(Platform):
     ]
 
     additional_env_vars: list[str] = [
-        "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS", "TPU_MULTIHOST_BACKEND"
+        "JAX_RANDOM_WEIGHTS", "PHASED_PROFILING_DIR",
+        "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS",
+        "TPU_MULTIHOST_BACKEND", "VLLM_MLA_DISABLE", "NEW_MODEL_DESIGN",
+        "TPU_BACKEND_TYPE"
     ]
 
     @classmethod
@@ -63,7 +66,7 @@ class TpuPlatform(Platform):
 
         if use_v1:
             logger.info("Using Pallas V1 backend.")
-            return "tpu_inference.models.vllm.pallas_torchax.PallasAttentionBackend"
+            return "tpu_inference.layers.vllm.pallas_torchax.PallasAttentionBackend"
         else:
             logger.info("Using Pallas backend.")
             return "vllm.attention.backends.pallas.PallasAttentionBackend"

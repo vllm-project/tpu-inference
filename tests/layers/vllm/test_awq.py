@@ -6,7 +6,6 @@ import pytest
 import torch
 import torchax
 import utils as test_utils
-from compressed_tensors.quantization import QuantizationStrategy
 from jax.sharding import PartitionSpec
 from torchax.interop import torch_view
 from torchax.ops.mappings import j2t, t2j
@@ -19,112 +18,94 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import \
-    CompressedTensorsLinearMethod
+from vllm.model_executor.layers.quantization.utils.quant_utils import \
+    pack_quantized_values_into_int32
 from vllm.model_executor.model_loader import get_model as vllm_get_model
+from vllm.scalar_type import scalar_types
 
-from tpu_inference.models.vllm.quantization import get_tpu_quantization_config
-from tpu_inference.models.vllm.quantization.common import JaxCommonLinearConfig
-from tpu_inference.models.vllm.quantization.compressed_tensors.compressed_tensors import \
-    JaxCompressedTensorsConfig
-from tpu_inference.models.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import (
-    JaxCompressedTensorsW8A8Fp8, requantize_with_max_scale)
+from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
+from tpu_inference.layers.vllm.quantization.awq import (JaxAWQConfig,
+                                                        JaxAWQLinearMethod)
+from tpu_inference.layers.vllm.quantization.common import JaxCommonLinearConfig
 
 P = PartitionSpec
-MODELS = [
-    "RedHatAI/Llama-3.2-1B-Instruct-FP8-dynamic",
-    "RedHatAI/Llama-3.2-1B-Instruct-FP8"
-]
+MODELS = ["Qwen/Qwen2.5-1.5B-Instruct-AWQ"]
 
 
-def ref_quantize_fp8(x: torch.Tensor,
-                     dtype: torch.dtype,
-                     per_tensor: bool = False):
-    dtype_info = torch.finfo(dtype)
-    dtype_max = float(dtype_info.max)
-    dtype_min = float(dtype_info.min)
+def ref_quantize_uint4(x: torch.Tensor, group_size: int):
+    uint4_max = 15
 
-    dim = () if per_tensor else 1
-    x_abs_max = torch.amax(torch.abs(x), dim=dim, keepdim=True)
-    if per_tensor:
-        x_abs_max = torch.squeeze(x_abs_max, dim=-1)
-    x_s = x_abs_max / dtype_max
-    x_q = torch.clip(x / x_s, dtype_min, dtype_max).to(dtype)
-    return x_q, x_s.to(torch.float32)
+    # For group quantization, we reshape so that x[0], x[1], ... x[i] are
+    # quantized with different scale values.
+    x = torch.reshape(x, (-1, group_size) + (x.shape[1:]))
+
+    # Equation for asymmetric quantization is x_q = (x + x_z) / scale where
+    # x_z is calculated to ensure x + x_z does not contain any negative values.
+    offset = torch.clamp(-torch.amin(x, dim=1, keepdim=True), min=0)
+    x += offset
+    # After adding offset, x will not contain any negative values.
+    assert x.min() >= 0
+
+    x_abs_max = torch.amax(x, dim=1, keepdim=True)
+    x_s = x_abs_max / uint4_max
+    # torch does not support uint4, therefore, we cast to int32 instead.
+    x_q = torch.clip(x / x_s, 0, uint4_max).to(torch.int32)
+    x_z = torch.clip(offset / x_s, 0, uint4_max).to(torch.int32)
+    return x_q, x_z, x_s.to(torch.float32)
 
 
-def ref_w8a8_fp8_dynamic(x: torch.Tensor, w_q: torch.Tensor, w_s: torch.Tensor,
-                         b: Optional[torch.Tensor]):
-    x_q, x_s = ref_quantize_fp8(x, w_q.dtype)
-    out = torch.einsum('bd,fd->bf', x_q.to(torch.float32),
-                       w_q.to(torch.float32))
-    out = (out * x_s) * w_s.T
+def ref_w4a16(x: torch.Tensor, w_q: torch.Tensor, w_z: torch.Tensor,
+              w_s: torch.Tensor, b: Optional[torch.Tensor]):
+    # Dequantize asymetric quantized weight.
+    w = (w_q.to(torch.float32) - w_z.to(torch.float32)) * w_s
+    w = w.reshape((-1, w.shape[-1]))
+    out = torch.einsum('bd,df->bf', x.to(torch.float32), w)
     if b is not None:
         out += b
     return out.to(x.dtype)
 
 
-def ref_w8a8_fp8_static(x: torch.Tensor, x_s: torch.Tensor, w_q: torch.Tensor,
-                        w_s: torch.Tensor, b: Optional[torch.Tensor]):
-    dtype_info = torch.finfo(w_q.dtype)
-    dtype_max = float(dtype_info.max)
-    dtype_min = float(dtype_info.min)
+def pack_awq_weight_into_int32(weight: torch.Tensor):
+    # AWQ packs 8 uint4 into 32-bits in this order.
+    awq_order = (0, 2, 4, 6, 1, 3, 5, 7)
 
-    x_q = torch.clamp(x / x_s, dtype_min, dtype_max).to(w_q.dtype)
-    out = torch.einsum('bd,fd->bf', x_q.to(torch.float32),
-                       w_q.to(torch.float32))
-    out = (out * x_s) * w_s.T
-    if b is not None:
-        out += b
-    return out.to(x.dtype)
+    orig_shape = weight.shape
+    weight = weight.reshape(orig_shape[:-1] + (-1, 8))
+    weight = weight[..., awq_order].reshape(orig_shape)
+
+    return pack_quantized_values_into_int32(weight, scalar_types.uint4, 1)
 
 
-def return_ref_and_layer_output(layer: torch.nn.Module, batch_size: int = 16):
+def return_ref_and_layer_output(
+    layer: torch.nn.Module,
+    qweight: torch.Tensor,
+    qzeros: torch.Tensor,
+    scales: torch.Tensor,
+    batch_size: int = 16,
+):
     assert isinstance(layer, LinearBase)
-    scheme = layer.scheme
-    assert isinstance(scheme, JaxCompressedTensorsW8A8Fp8)
-    quant_config = scheme.jax_config
-    assert isinstance(quant_config, JaxCommonLinearConfig)
     quant_method = layer.quant_method
-    assert isinstance(quant_method, CompressedTensorsLinearMethod)
-    per_tensor = scheme.strategy == QuantizationStrategy.TENSOR
-    is_static_input_scheme = scheme.is_static_input_scheme
+    assert isinstance(quant_method, JaxAWQLinearMethod)
+    quant_config = quant_method.quant_config
+    assert isinstance(quant_config, JaxAWQConfig)
+    jax_config = quant_method.jax_config
+    assert isinstance(jax_config, JaxCommonLinearConfig)
 
     input_tensor = torch.rand(
         batch_size, layer.input_size, dtype=torch.bfloat16) / 10
     input_tensor = input_tensor.to('cpu')
 
-    weight_scale, weight = layer.weight_scale, layer.weight
-    input_scale = getattr(layer, 'input_scale', None)
-    # For per_tensor with merged layers, vLLM requenzites them so all merged
-    # layers shared the same scale values.
-    if per_tensor:
-        weight_scale, weight = requantize_with_max_scale(
-            layer.weight, layer.weight_scale, quant_config.output_sizes)
-        if input_scale is not None:
-            input_scale = input_scale.max()
-
-    # Run reference implementation
-    if is_static_input_scheme:
-        ref_output = ref_w8a8_fp8_static(
-            input_tensor,
-            input_scale,
-            weight,
-            weight_scale,
-            layer.bias,
-        )
-    else:
-        ref_output = ref_w8a8_fp8_dynamic(
-            input_tensor,
-            weight,
-            weight_scale,
-            layer.bias,
-        )
+    ref_output = ref_w4a16(
+        input_tensor,
+        qweight,
+        qzeros,
+        scales,
+        layer.bias,
+    )
 
     # Run torchax/jax function
+    quant_method.process_weights_after_loading(layer)
     with torchax.default_env():
-        quant_method.process_weights_after_loading(layer)
-
         jax_input_tensor = torch_view(t2j(input_tensor, use_dlpack=False))
         layer_output = layer(jax_input_tensor)
         layer_output = j2t(layer_output.to(torch.float32)).to(torch.bfloat16)
@@ -132,35 +113,43 @@ def return_ref_and_layer_output(layer: torch.nn.Module, batch_size: int = 16):
     return ref_output, layer_output
 
 
-def initialize_layer_weights(layer: torch.nn.Module):
+def initialize_and_return_layer_weights(layer: torch.nn.Module):
     assert isinstance(layer, LinearBase)
-    scheme = layer.scheme
-    assert isinstance(scheme, JaxCompressedTensorsW8A8Fp8)
-    quant_config = scheme.jax_config
-    assert isinstance(quant_config, JaxCommonLinearConfig)
-    per_tensor = scheme.strategy == QuantizationStrategy.TENSOR
+    quant_method = layer.quant_method
+    assert isinstance(quant_method, JaxAWQLinearMethod)
+    quant_config = quant_method.quant_config
+    assert isinstance(quant_config, JaxAWQConfig)
+    jax_config = quant_method.jax_config
+    assert isinstance(jax_config, JaxCommonLinearConfig)
 
-    weight_list = []
-    weight_scale_list = []
-    for output_size in quant_config.output_sizes:
-        weight = torch.rand(
-            (output_size, layer.input_size), dtype=torch.bfloat16) / 10
-        weight_, weight_scale_ = ref_quantize_fp8(weight, torch.float8_e4m3fn,
-                                                  per_tensor)
-        weight_list.append(weight_)
-        weight_scale_list.append(weight_scale_)
+    # torch.rand returns value in the range of [0, 1). We subtract by 0.2 to
+    # simulate asymmetry
+    weight = torch.rand((layer.input_size, layer.output_size)) - 0.2
+    qweight, qzeros, scales = ref_quantize_uint4(weight,
+                                                 quant_config.group_size)
 
-    weight = torch.concatenate(weight_list)
-    weight_scale = torch.concatenate(weight_scale_list)
+    # We modify uint4 quantized weights into AWQ format.
+    layer_qweight = qweight.reshape((-1, layer.output_size))
+    layer_qzeros = qzeros.reshape((-1, layer.output_size))
+    layer_scales = scales.reshape((-1, layer.output_size))
 
-    assert layer.weight.data.shape == weight.shape
-    assert layer.weight_scale.data.shape == weight_scale.shape
+    layer_qweight = pack_awq_weight_into_int32(layer_qweight)
+    layer_qzeros = pack_awq_weight_into_int32(layer_qzeros)
 
-    layer.weight.data = weight
-    layer.weight_scale.data = weight_scale
+    assert layer.qweight.data.shape == layer_qweight.shape
+    assert layer.qzeros.data.shape == layer_qzeros.shape
+    assert layer.scales.data.shape == layer_scales.shape
 
+    layer.qweight.data = layer_qweight
+    layer.qzeros.data = layer_qzeros
+    layer.scales.data = layer_scales
+
+    bias = None
     if layer.bias is not None:
-        layer.bias.data = torch.rand_like(layer.bias.data)
+        bias = torch.rand_like(layer.bias.data)
+        layer.bias.data = bias
+
+    return qweight, qzeros, scales, bias
 
 
 @pytest.fixture(autouse=True)
@@ -204,16 +193,22 @@ def test_quant_override(model, mesh):
     vllm_config.model_config.dtype = torch.bfloat16
 
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
-    assert isinstance(quant_config, JaxCompressedTensorsConfig)
+    assert isinstance(quant_config, JaxAWQConfig)
     assert quant_config.vllm_config == vllm_config
     assert quant_config.mesh == mesh
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("mesh", [
-    test_utils.get_spmd_mesh(1),
-    test_utils.get_spmd_mesh(jax.local_device_count())
-])
+@pytest.mark.parametrize(
+    "mesh",
+    [
+        test_utils.get_spmd_mesh(1),
+        # We limit device count by 2 instead of using all devices (like 8) since
+        # AWQ requires n_groups to be divisible by number of shards. Qwen uses
+        # group size of 128 and one of the layer has input size of 1536, meaning
+        # n_groups = 1536//128 = 12 - which is not divisible by 8.
+        test_utils.get_spmd_mesh(min(jax.local_device_count(), 2))
+    ])
 def test_loading_model(model, mesh):
     engine_args = EngineArgs(
         model=model,
@@ -229,9 +224,8 @@ def test_loading_model(model, mesh):
     vllm_model = vllm_get_model(vllm_config=vllm_config)
     layers = test_utils.find_all_layer_type(vllm_model, LinearBase)
     for layer in layers:
-        assert isinstance(layer.quant_config, JaxCompressedTensorsConfig)
-        assert isinstance(layer.quant_method, CompressedTensorsLinearMethod)
-        assert isinstance(layer.scheme, JaxCompressedTensorsW8A8Fp8)
+        assert isinstance(layer.quant_config, JaxAWQConfig)
+        assert isinstance(layer.quant_method, JaxAWQLinearMethod)
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -265,8 +259,10 @@ def test_jax_row_parallel_linear(model, bias, mesh, enable_sp):
             quant_config=quant_config,
         )
 
-    initialize_layer_weights(linear_layer)
-    ref_output, layer_output = return_ref_and_layer_output(linear_layer)
+    qweight, qzeros, scales, _ = initialize_and_return_layer_weights(
+        linear_layer)
+    ref_output, layer_output = return_ref_and_layer_output(
+        linear_layer, qweight, qzeros, scales)
     torch.testing.assert_close(ref_output, layer_output)
 
 
@@ -302,8 +298,10 @@ def test_jax_column_parallel_linear(model, bias, mesh, enable_sp):
             quant_config=quant_config,
         )
 
-    initialize_layer_weights(linear_layer)
-    ref_output, layer_output = return_ref_and_layer_output(linear_layer)
+    qweight, qzeros, scales, _ = initialize_and_return_layer_weights(
+        linear_layer)
+    ref_output, layer_output = return_ref_and_layer_output(
+        linear_layer, qweight, qzeros, scales)
     torch.testing.assert_close(ref_output, layer_output)
 
 
@@ -343,8 +341,10 @@ def test_jax_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
         )
         linear_layer.quant_method.fuse_matmuls = fuse_matmuls
 
-    initialize_layer_weights(linear_layer)
-    ref_output, layer_output = return_ref_and_layer_output(linear_layer)
+    qweight, qzeros, scales, _ = initialize_and_return_layer_weights(
+        linear_layer)
+    ref_output, layer_output = return_ref_and_layer_output(
+        linear_layer, qweight, qzeros, scales)
     torch.testing.assert_close(ref_output, layer_output)
 
 
@@ -383,6 +383,8 @@ def test_jax_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
         )
         linear_layer.quant_method.fuse_matmuls = fuse_matmuls
 
-    initialize_layer_weights(linear_layer)
-    ref_output, layer_output = return_ref_and_layer_output(linear_layer)
+    qweight, qzeros, scales, _ = initialize_and_return_layer_weights(
+        linear_layer)
+    ref_output, layer_output = return_ref_and_layer_output(
+        linear_layer, qweight, qzeros, scales)
     torch.testing.assert_close(ref_output, layer_output)

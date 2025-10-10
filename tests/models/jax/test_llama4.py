@@ -56,6 +56,17 @@ class MockVllmConfig:
 
         self.cache_config = MagicMock(cache_dtype="auto")
 
+        text_config_mock = MagicMock()
+        text_config_mock.interleave_moe_layer_step = 1
+        text_config_mock.num_attention_heads = 40
+        text_config_mock.num_key_value_heads = 8
+        text_config_mock.head_dim = 128
+        
+        hf_config_mock = MagicMock()
+        hf_config_mock.text_config = text_config_mock
+        
+        self.model_config.hf_config = hf_config_mock
+
 
 @pytest.fixture(scope="module")
 def mesh():
@@ -148,6 +159,17 @@ class TestLlama4WeightLoader:
                                   attn_heads=40,
                                   num_key_value_heads=8,
                                   attn_head_dim=128)
+    
+    @pytest.mark.parametrize("hf_key, expected_num", [
+        ("language_model.model.layers.15.self_attn.q_proj.weight", 15),
+        ("layers.0.feed_forward.router.weight", 0),
+        ("language_model.model.layers.99.norm.weight", 99),
+        ("language_model.model.norm.weight", None),
+        ("language_model.model.embed_tokens.weight", None),
+    ])
+    def test_get_layer_num(self, weight_loader, hf_key, expected_num):
+        """Tests the private _get_layer_num utility function."""
+        assert weight_loader._get_layer_num(hf_key) == expected_num
 
     @pytest.mark.parametrize("hf_key, expected", [
         ("language_model.model.layers.15.self_attn.q_proj.weight",

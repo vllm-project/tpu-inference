@@ -15,14 +15,15 @@ from vllm.config import VllmConfig
 
 from tpu_inference import utils as utils
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.jax.attention_interface import sharded_flash_attention
+from tpu_inference.layers.jax.attention_interface import \
+    sharded_flash_attention
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.qwen2 import Qwen2ForCausalLM
 # from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from tpu_inference.models.jax.utils.multi_modal_utils import (
     MultiModalEmbeddings, merge_multimodal_embeddings)
 from tpu_inference.models.jax.utils.weight_utils import (get_default_maps,
-                                                       load_hf_weights)
+                                                         load_hf_weights)
 
 logger = init_logger(__name__)
 
@@ -229,6 +230,7 @@ class Qwen2_5_VisionAttention(nnx.Module):
             mesh=mesh,
             causal=False,
             sm_scale=1.0 / math.sqrt(self.head_dim),
+            vmem_limit_bytes=128 * 1024 * 1024,
         )
 
     def __call__(
@@ -776,7 +778,17 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
                 self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"]
-            image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
+            image_embeds = []
+            current_idx = 0
+            for i, image_thw in enumerate(grid_thw):
+                t, h, w = image_thw
+                image_size = t * h * w
+                end_idx = current_idx + image_size
+                image_pixel_values = pixel_values[current_idx:end_idx, :]
+                image_embeds.append(
+                    self.visual(image_pixel_values, (image_thw, )))
+                current_idx = end_idx
+            image_embeds = jnp.concatenate(image_embeds, axis=0)
 
         # Split concatenated embeddings for each image item.
         merge_size = self.visual.config.spatial_merge_size
