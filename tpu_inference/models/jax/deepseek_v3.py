@@ -115,7 +115,8 @@ class DeepSeekV3(nnx.Module):
             qk_nope_head_dim=qk_nope_head_dim,
             qk_rope_head_dim=qk_rope_head_dim,
             v_head_dim=v_head_dim,
-            num_local_experts=num_local_experts)
+            num_local_experts=num_local_experts,
+            model_dtype=dtype)
 
         self.embedder = Embedder(vocab_size=vocab_size,
                                  hidden_size=hidden_size,
