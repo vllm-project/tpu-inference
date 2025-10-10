@@ -14,7 +14,6 @@ from tpu_inference import utils
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.attention_interface import attention
 from tpu_inference.logger import init_logger
-# Register custom op dispatcher.
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context
 

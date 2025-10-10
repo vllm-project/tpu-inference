@@ -25,8 +25,8 @@ from vllm.model_executor.model_loader import get_model as vllm_get_model
 
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.quantization.unquantized import (
-    JaxUnquantizedConfig, JaxUnquantizedFusedMoEMethod,
-    JaxUnquantizedLinearMethod)
+    VllmUnquantizedConfig, VllmUnquantizedFusedMoEMethod,
+    VllmUnquantizedLinearMethod)
 
 P = PartitionSpec
 MODELS = ["Qwen/Qwen2-1.5B-Instruct"]
@@ -73,7 +73,7 @@ def test_quant_override(model, mesh):
     vllm_config.model_config.dtype = torch.bfloat16
 
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
-    assert isinstance(quant_config, JaxUnquantizedConfig)
+    assert isinstance(quant_config, VllmUnquantizedConfig)
     assert quant_config.vllm_config == vllm_config
     assert quant_config.mesh == mesh
 
@@ -98,8 +98,8 @@ def test_loading_model(model, mesh):
     vllm_model = vllm_get_model(vllm_config=vllm_config)
     layers = test_utils.find_all_layer_type(vllm_model, LinearBase)
     for layer in layers:
-        assert isinstance(layer.quant_config, JaxUnquantizedConfig)
-        assert isinstance(layer.quant_method, JaxUnquantizedLinearMethod)
+        assert isinstance(layer.quant_config, VllmUnquantizedConfig)
+        assert isinstance(layer.quant_method, VllmUnquantizedLinearMethod)
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -109,7 +109,7 @@ def test_loading_model(model, mesh):
     test_utils.get_spmd_mesh(jax.local_device_count())
 ])
 @pytest.mark.parametrize("enable_sp", [False, True])
-def test_jax_row_parallel_linear(model, bias, mesh, enable_sp):
+def test_row_parallel_linear(model, bias, mesh, enable_sp):
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(
@@ -165,7 +165,7 @@ def test_jax_row_parallel_linear(model, bias, mesh, enable_sp):
                                 NamedSharding(mesh, P(None, None)))
     with torchax.default_env():
         assert isinstance(jax_row_linear.quant_method,
-                          JaxUnquantizedLinearMethod)
+                          VllmUnquantizedLinearMethod)
         jax_row_linear.quant_method.process_weights_after_loading(
             jax_row_linear)
         jax_output = jax_row_linear(jax_input_tensor)
@@ -182,7 +182,7 @@ def test_jax_row_parallel_linear(model, bias, mesh, enable_sp):
     test_utils.get_spmd_mesh(jax.local_device_count())
 ])
 @pytest.mark.parametrize("enable_sp", [False, True])
-def test_jax_column_parallel_linear(model, bias, mesh, enable_sp):
+def test_column_parallel_linear(model, bias, mesh, enable_sp):
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(
@@ -238,7 +238,7 @@ def test_jax_column_parallel_linear(model, bias, mesh, enable_sp):
                                 NamedSharding(mesh, P(None, None)))
     with torchax.default_env():
         assert isinstance(jax_column_linear.quant_method,
-                          JaxUnquantizedLinearMethod)
+                          VllmUnquantizedLinearMethod)
         jax_column_linear.quant_method.process_weights_after_loading(
             jax_column_linear)
         jax_output = jax_column_linear(jax_input_tensor)
@@ -255,7 +255,7 @@ def test_jax_column_parallel_linear(model, bias, mesh, enable_sp):
 ])
 @pytest.mark.parametrize("enable_sp", [False, True])
 @pytest.mark.parametrize("fuse_matmuls", [False, True])
-def test_jax_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
+def test_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(
@@ -316,7 +316,7 @@ def test_jax_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
                                 NamedSharding(mesh, P(None, None)))
     with torchax.default_env():
         assert isinstance(jax_qkv_linear.quant_method,
-                          JaxUnquantizedLinearMethod)
+                          VllmUnquantizedLinearMethod)
         jax_qkv_linear.quant_method.process_weights_after_loading(
             jax_qkv_linear)
         jax_output = jax_qkv_linear(jax_input_tensor)
@@ -333,8 +333,8 @@ def test_jax_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
 ])
 @pytest.mark.parametrize("fuse_matmuls", [False, True])
 @pytest.mark.parametrize("enable_sp", [False, True])
-def test_jax_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
-                                           enable_sp):
+def test_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
+                                       enable_sp):
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(
@@ -394,7 +394,7 @@ def test_jax_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
                                 NamedSharding(mesh, P(None, None)))
     with torchax.default_env():
         assert isinstance(jax_merged_column_linear.quant_method,
-                          JaxUnquantizedLinearMethod)
+                          VllmUnquantizedLinearMethod)
         jax_merged_column_linear.quant_method.process_weights_after_loading(
             jax_merged_column_linear)
         jax_output = jax_merged_column_linear(jax_input_tensor)
@@ -413,8 +413,8 @@ def test_jax_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
 @pytest.mark.parametrize("hidden_size", [128, 512])
 @pytest.mark.parametrize("num_experts", [8])
 @pytest.mark.parametrize("topk", [2])
-def test_jax_fused_moe(use_ep, mesh, num_tokens, intermediate_size,
-                       hidden_size, num_experts, topk):
+def test_fused_moe(use_ep, mesh, num_tokens, intermediate_size, hidden_size,
+                   num_experts, topk):
     torch.manual_seed(42)
     dtype = torch.bfloat16
 
@@ -469,7 +469,7 @@ def test_jax_fused_moe(use_ep, mesh, num_tokens, intermediate_size,
 
     with torchax.default_env(), set_forward_context(None, vllm_config):
         assert isinstance(vllm_fused_moe.quant_method,
-                          JaxUnquantizedFusedMoEMethod)
+                          VllmUnquantizedFusedMoEMethod)
         vllm_fused_moe.quant_method.process_weights_after_loading(
             vllm_fused_moe)
         jax_output = vllm_fused_moe(jax_a, score)

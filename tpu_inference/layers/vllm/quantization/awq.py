@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import torch
 from jax.sharding import NamedSharding, PartitionSpec
-from torchax.interop import torch_view
+from torchax.interop import jax_view, torch_view
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
@@ -19,19 +19,19 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import \
     unpack_quantized_values_into_int32
 from vllm.scalar_type import scalar_types
 
-from tpu_inference.layers.vllm.jax_linear_common import (
+from tpu_inference.layers.vllm.linear_common import (
     slice_sharded_tensor_for_concatenation, torch_to_jax_param)
 from tpu_inference.layers.vllm.quantization.common import (
     JaxCommonConfig, JaxCommonLinearConfig)
 from tpu_inference.layers.vllm.quantization.unquantized import \
-    JaxUnquantizedLinearMethod
+    VllmUnquantizedLinearMethod
 
 P = PartitionSpec
 logger = init_logger(__name__)
 
 
 @register_quantization_config("jax-awq")
-class JaxAWQConfig(AWQConfig, JaxCommonConfig):
+class VllmAWQConfig(AWQConfig, JaxCommonConfig):
 
     @classmethod
     def get_name(cls) -> str:
@@ -49,17 +49,17 @@ class JaxAWQConfig(AWQConfig, JaxCommonConfig):
         if isinstance(layer, LinearBase):
             linear_config = self.get_linear_config(layer)
             if is_layer_skipped_awq(prefix, self.modules_to_not_convert):
-                return JaxUnquantizedLinearMethod(linear_config)
-            return JaxAWQLinearMethod(self, linear_config)
+                return VllmUnquantizedLinearMethod(linear_config)
+            return VllmAWQLinearMethod(self, linear_config)
         elif isinstance(layer, FusedMoE):
             raise NotImplementedError(
                 "AWQ FusedMoE is currently not supported in torchax-jax")
         return None
 
 
-class JaxAWQLinearMethod(AWQLinearMethod):
+class VllmAWQLinearMethod(AWQLinearMethod):
 
-    def __init__(self, quant_config: JaxAWQConfig,
+    def __init__(self, quant_config: VllmAWQConfig,
                  jax_config: JaxCommonLinearConfig):
         super().__init__(quant_config)
         self.jax_config = jax_config
@@ -84,7 +84,7 @@ class JaxAWQLinearMethod(AWQLinearMethod):
                                      self.jax_config.fuse_matmuls,
                                      dim=2,
                                      jax_dtype=jnp.uint4)
-        delattr(layer, 'qweight')
+        delattr(layer, "qweight")
         layer.qweight = qweight
 
         qzeros = layer.qzeros
@@ -98,7 +98,7 @@ class JaxAWQLinearMethod(AWQLinearMethod):
                                     self.jax_config.fuse_matmuls,
                                     dim=1,
                                     jax_dtype=jnp.uint4)
-        delattr(layer, 'qzeros')
+        delattr(layer, "qzeros")
         layer.qzeros = qzeros
 
         scales = torch_to_jax_param(layer.scales,
@@ -109,7 +109,7 @@ class JaxAWQLinearMethod(AWQLinearMethod):
                                     self.jax_config.n_shards,
                                     self.jax_config.fuse_matmuls,
                                     dim=1)
-        delattr(layer, 'scales')
+        delattr(layer, "scales")
         layer.scales = scales
 
         if layer.bias is not None and not layer.skip_bias_add:
@@ -124,7 +124,7 @@ class JaxAWQLinearMethod(AWQLinearMethod):
                 self.jax_config.n_shards,
                 self.jax_config.fuse_matmuls,
             )
-            delattr(layer, 'bias')
+            delattr(layer, "bias")
             layer.bias = bias
 
     def apply(self,
@@ -144,18 +144,18 @@ class JaxAWQLinearMethod(AWQLinearMethod):
                      layer: torch.nn.Module,
                      x: torch.Tensor,
                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        x_jax = x.jax()
+        x_jax = jax_view(x)
 
-        qweight = layer.qweight.jax()
-        qzeros = jnp.expand_dims(layer.qzeros.jax(), 1)
-        scales = jnp.expand_dims(layer.scales.jax(), 1)
+        qweight = jax_view(layer.qweight)
+        qzeros = jnp.expand_dims(jax_view(layer.qzeros), 1)
+        scales = jnp.expand_dims(jax_view(layer.scales), 1)
 
         qweight = qweight.astype(jnp.int8)
         qzeros = qzeros.astype(jnp.int8)
 
         weight = (qweight - qzeros) * scales
         weight = weight.reshape((-1, weight.shape[-1]))
-        outs = jnp.einsum('bd,df->bf', x_jax, weight)
+        outs = jnp.einsum("bd,df->bf", x_jax, weight)
 
         if bias is not None and not layer.skip_bias_add:
             outs += bias.jax()
@@ -171,23 +171,23 @@ class JaxAWQLinearMethod(AWQLinearMethod):
                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         assert isinstance(layer.qweight, torch.nn.ParameterList)
 
-        x_jax = x.jax()
+        x_jax = jax_view(x)
         params = zip(layer.qweight, layer.qzeros, layer.scales)
         outs = []
         for i, (qweight, qzeros, scales) in enumerate(params):
-            qweight = qweight.jax()
-            scales = jnp.expand_dims(scales.jax(), 1)
-            qzeros = jnp.expand_dims(qzeros.jax(), 1)
+            qweight = jax_view(qweight)
+            scales = jnp.expand_dims(jax_view(scales), 1)
+            qzeros = jnp.expand_dims(jax_view(qzeros), 1)
 
             qweight = qweight.astype(jnp.int8)
             qzeros = qzeros.astype(jnp.int8)
 
             weight = (qweight - qzeros) * scales
             weight = weight.reshape((-1, weight.shape[-1]))
-            out = jnp.einsum('bd,df->bf', x_jax, weight)
+            out = jnp.einsum("bd,df->bf", x_jax, weight)
 
             if bias is not None and not layer.skip_bias_add:
-                out += bias[i].jax()
+                out += jax_view(bias[i])
 
             outs.append(out)
         out = jnp.concatenate(outs, axis=-1)

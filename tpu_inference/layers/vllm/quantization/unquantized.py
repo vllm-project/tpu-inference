@@ -22,8 +22,8 @@ from vllm.model_executor.layers.quantization import \
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 
-from tpu_inference.layers.vllm.jax_fused_moe import jax_fused_moe_func_padded
-from tpu_inference.layers.vllm.jax_linear_common import (
+from tpu_inference.layers.vllm.fused_moe import jax_fused_moe_func_padded
+from tpu_inference.layers.vllm.linear_common import (
     reorder_concatenated_tensor_for_sharding,
     slice_sharded_tensor_for_concatenation, torch_to_jax_param)
 from tpu_inference.layers.vllm.quantization.common import (
@@ -34,7 +34,7 @@ logger = init_logger(__name__)
 
 
 @register_quantization_config("jax-unquantized")
-class JaxUnquantizedConfig(QuantizationConfig, JaxCommonConfig):
+class VllmUnquantizedConfig(QuantizationConfig, JaxCommonConfig):
 
     @classmethod
     def get_name(cls) -> str:
@@ -53,23 +53,23 @@ class JaxUnquantizedConfig(QuantizationConfig, JaxCommonConfig):
         return []  # No extra configs required.
 
     @classmethod
-    def from_config(cls, _: dict[str, Any]) -> "JaxUnquantizedConfig":
+    def from_config(cls, _: dict[str, Any]) -> "VllmUnquantizedConfig":
         return cls()
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional[QuantizeMethodBase]:
         if isinstance(layer, LinearBase):
             linear_config = self.get_linear_config(layer)
-            return JaxUnquantizedLinearMethod(linear_config)
+            return VllmUnquantizedLinearMethod(linear_config)
         if isinstance(layer, FusedMoE):
             moe_config = self.get_moe_config(layer)
-            return JaxUnquantizedFusedMoEMethod(moe_config, self.mesh)
+            return VllmUnquantizedFusedMoEMethod(moe_config, self.mesh)
         if isinstance(layer, Attention):
             return None
         return None
 
 
-class JaxUnquantizedLinearMethod(UnquantizedLinearMethod):
+class VllmUnquantizedLinearMethod(UnquantizedLinearMethod):
 
     def __init__(self, jax_config: JaxCommonLinearConfig):
         self.jax_config = jax_config
@@ -83,7 +83,7 @@ class JaxUnquantizedLinearMethod(UnquantizedLinearMethod):
             self.jax_config.n_shards,
             self.jax_config.fuse_matmuls,
         )
-        delattr(layer, 'weight')
+        delattr(layer, "weight")
         layer.weight = weight
 
         if layer.bias is not None and not layer.skip_bias_add:
@@ -98,7 +98,7 @@ class JaxUnquantizedLinearMethod(UnquantizedLinearMethod):
                 self.jax_config.n_shards,
                 self.jax_config.fuse_matmuls,
             )
-            delattr(layer, 'bias')
+            delattr(layer, "bias")
             layer.bias = bias
 
     def apply(self,
@@ -123,10 +123,10 @@ class JaxUnquantizedLinearMethod(UnquantizedLinearMethod):
                      layer: torch.nn.Module,
                      x: torch.Tensor,
                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        x_jax = x.jax()
-        weight_jax = layer.weight.jax()
+        x_jax = jax_view(x)
+        weight_jax = jax_view(layer.weight)
 
-        outs = jnp.einsum('mn,pn->mp', x_jax, weight_jax)
+        outs = jnp.einsum("mn,pn->mp", x_jax, weight_jax)
         if bias is not None and not layer.skip_bias_add:
             outs += bias.jax()
 
@@ -144,18 +144,18 @@ class JaxUnquantizedLinearMethod(UnquantizedLinearMethod):
         x_jax = x.jax()
         outs = []
         for i, weight in enumerate(layer.weight):
-            weight_jax = weight.jax()
+            weight_jax = jax_view(weight)
 
-            out = jnp.einsum('mn,pn->mp', x_jax, weight_jax)
+            out = jnp.einsum("mn,pn->mp", x_jax, weight_jax)
             if bias is not None and not layer.skip_bias_add:
-                out += bias[i].jax()
+                out += jax_view(bias[i])
 
             outs.append(out)
         out = jnp.concatenate(outs, axis=-1)
         return torch_view(out)
 
 
-class JaxUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
+class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     def __init__(self, moe: FusedMoEConfig, mesh: Mesh):
         super().__init__(moe)
@@ -180,16 +180,16 @@ class JaxUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w13_weight = jax.device_put(
                 w13_weight,
                 Format(Layout((0, 1, 2)),
-                       NamedSharding(self.mesh, P('model', None, None))))
+                       NamedSharding(self.mesh, P("model", None, None))))
             w2_weight = jax.device_put(
                 w2_weight,
                 Format(Layout((0, 1, 2)),
-                       NamedSharding(self.mesh, P('model', None, None))))
+                       NamedSharding(self.mesh, P("model", None, None))))
         else:
             intermediate_size = w13_weight.shape[1] // 2
             assert intermediate_size == w2_weight.shape[-1]
             output_sizes = [intermediate_size, intermediate_size]
-            n_shards = self.mesh.shape['model']
+            n_shards = self.mesh.shape["model"]
             assert intermediate_size % n_shards == 0
             w13_weight = reorder_concatenated_tensor_for_sharding(w13_weight,
                                                                   output_sizes,
@@ -198,11 +198,11 @@ class JaxUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w13_weight = jax.device_put(
                 w13_weight,
                 Format(Layout((0, 1, 2)),
-                       NamedSharding(self.mesh, P(None, 'model', None))))
+                       NamedSharding(self.mesh, P(None, "model", None))))
             w2_weight = jax.device_put(
                 w2_weight,
                 Format(Layout((0, 1, 2)),
-                       NamedSharding(self.mesh, P(None, None, 'model'))))
+                       NamedSharding(self.mesh, P(None, None, "model"))))
         w13_weight = Parameter(torch_view(w13_weight), requires_grad=False)
         w2_weight = Parameter(torch_view(w2_weight), requires_grad=False)
 
