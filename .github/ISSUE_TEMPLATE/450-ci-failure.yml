@@ -43,7 +43,7 @@ body:
     label: 📝 History of failing test
     description: |
       Since when did the test start to fail?
-      You can look up its history via [Buildkite Test Suites](https://buildkite.com/organizations/vllm/analytics/suites/ci-1/tests?branch=main).
+      You can look up its history via [Buildkite Test Suites](https://buildkite.com/tpu-commons/tpu-inference-ci/builds?branch=main).
 
       If you have time, identify the PR that caused the test to fail on main. You can do so via the following methods:
 
