@@ -15,6 +15,7 @@
 model_name="Qwen/Qwen2.5-VL-3B-Instruct"
 max_batched_tokens=98304
 max_model_len=98304
+max_num_seqs=1
 dataset_name="hf"
 dataset_path="lmarena-ai/VisionArena-Chat"
 num_prompts=10
@@ -90,7 +91,7 @@ checkThroughputAndRouge() {
 }
 
 echo "Spinning up the vLLM server..."
-(SKIP_JAX_PRECOMPILE=1 VLLM_XLA_CHECK_RECOMPILATION=0 vllm serve "$model_name" --max-model-len "$max_model_len" --disable-log-requests --max-num-batched-tokens "$max_batched_tokens" 2>&1 | tee -a "$LOG_FILE") &
+(SKIP_JAX_PRECOMPILE=1 VLLM_XLA_CHECK_RECOMPILATION=0 vllm serve "$model_name" --max-model-len "$max_model_len" --max-num-seqs "$max_num_seqs" --disable-log-requests --max-num-batched-tokens "$max_batched_tokens" 2>&1 | tee -a "$LOG_FILE") &
 
 
 # Run a busy loop to block until the server is ready to receive requests
