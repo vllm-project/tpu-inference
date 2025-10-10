@@ -778,7 +778,17 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
                 self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"]
-            image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
+            image_embeds = []
+            current_idx = 0
+            for i, image_thw in enumerate(grid_thw):
+                t, h, w = image_thw
+                image_size = t * h * w
+                end_idx = current_idx + image_size
+                image_pixel_values = pixel_values[current_idx:end_idx, :]
+                image_embeds.append(
+                    self.visual(image_pixel_values, (image_thw, )))
+                current_idx = end_idx
+            image_embeds = jnp.concatenate(image_embeds, axis=0)
 
         # Split concatenated embeddings for each image item.
         merge_size = self.visual.config.spatial_merge_size
