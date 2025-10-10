@@ -7,7 +7,7 @@ A New High Performance TPU Backend Unifying PyTorch and JAX in vLLM
 </h3>
 
 <p align="center">
-| <a href="https://github.com/vllm-project/tpu-inference/tree/main/docs"><b>Documentation</b></a> | <a href="https://blog.vllm.ai/"><b>Blog</b></a> | <a href="https://discuss.vllm.ai/c/hardware-support/google-tpu-support/27"><b>User Forum</b></a> | <a href="https://slack.vllm.ai"><b>Developer Slack</b></a> (#sig-tpu) |
+| <a href="https://github.com/vllm-project/tpu-inference/tree/main/docs"><b>Documentation</b></a> | <a href="https://blog.vllm.ai/"><b>Blog</b></a> | <a href="https://discuss.vllm.ai/c/hardware-support/google-tpu-support/27"><b>User Forum</b></a> | <a href="https://join.slack.com/share/enQtOTY2OTUxMDIyNjY1OS00M2MxYWQwZjAyMGZjM2MyZjRjNTA0ZjRkNjkzOTRhMzg0NDM2OTlkZDAxOTAzYmJmNzdkNDc4OGZjYTUwMmRh"><b>Developer Slack</b></a> |
 </p>
 
 ---
@@ -20,8 +20,7 @@ _Upcoming Events_ 🔥
   
 _Latest News_ 🔥
 
-- [2025/10] vLLM TPU 2.0: A New Unified-Backend Supporting PyTorch and JAX on TPU
-<!--TODO: add link: Read Google Cloud's Blog Post about vLLM TPU 2.0!-->
+- [2025/10] vLLM TPU: A New Unified Backend Supporting PyTorch and JAX on TPU
 
 <details>
 <summary><i>Previous News</i> 🔥</summary>
@@ -38,26 +37,25 @@ vLLM TPU is now powered by `tpu-inference`, an expressive and powerful new hardw
 - Provide more flexibility to JAX and PyTorch users by running PyTorch model definitions performantly on TPU without any additional code changes, while also extending native support to JAX.
 - Retain vLLM standardization: keep the same user experience, telemetry, and interface.
 
-## Supported models and features
+## Recommended models and features
 
-See the following links for a list of stress-tested and validated models and features:
+Although vLLM TPU’s new unified backend makes out-of-the-box, high performance serving possible on any model supported in vLLM, we're still in the process of implementing a few core components.
 
-- [Model support matrix](https://github.com/vllm-project/tpu-inference/blob/main/model_support_matrix.csv)
-- [Feature support matrix](https://github.com/vllm-project/tpu-inference/blob/main/feature_support_matrix.csv)
+For this reason, we’ve provided a list of recommended [models](https://github.com/vllm-project/tpu-inference/blob/main/model_support_matrix.csv) and [features](https://github.com/vllm-project/tpu-inference/blob/main/feature_support_matrix.csv) that are validated for accuracy and stress-tested for performance.
 
 ## Get started
 
 Get started with vLLM on TPUs by following the [quickstart guide](https://github.com/vllm-project/tpu-inference/tree/main/docs/getting_started/quickstart.md).
 
-Visit our [documentation](https://github.com/vllm-project/tpu-inference/tree/main/docs) to learn more:
+Visit our [documentation](https://github.com/vllm-project/tpu-inference/tree/main/docs) to learn more.
 
 ## Contribute
 
-We're always looking for ways to partner with the community to accelerate vLLM TPU development. If you're interested in contributing to this effort, check the current [Issues](https://github.com/vllm-project/tpu-inference/issues) with the **First Timer** tag for recommend issues to get started with.
+We're always looking for ways to partner with the community to accelerate vLLM TPU development. If you're interested in contributing to this effort, check out the [Contributing guide](https://github.com/vllm-project/tpu-inference/blob/main/CONTRIBUTING.md) and [Issues](https://github.com/vllm-project/tpu-inference/issues) to start. We recommend filtering Issues on the **good first issue** tag if it's your first time contributing.
 
 ## Contact us
 
 - For technical questions and feature requests, open a GitHub [Issue](https://github.com/vllm-project/tpu-inference/issues)
 - For discussing with fellow users, use the [TPU support topic in the vLLM Forum](https://discuss.vllm.ai/c/hardware-support/google-tpu-support/27)
-- For coordinating contributions and development, use [Slack](https://slack.vllm.ai) (#sig-tpu)
+- For coordinating contributions and development, use the [Developer Slack](https://join.slack.com/share/enQtOTY2OTUxMDIyNjY1OS00M2MxYWQwZjAyMGZjM2MyZjRjNTA0ZjRkNjkzOTRhMzg0NDM2OTlkZDAxOTAzYmJmNzdkNDc4OGZjYTUwMmRh).
 - For collaborations and partnerships, contact us at [vllm-tpu@google.com](mailto:vllm-tpu@google.com)
