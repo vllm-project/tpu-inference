@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/tpu_header_new_preview_v1.png" alt="vLLM TPU 2.0">
+  <img src="docs/assets/tpu_header_new_preview_v1.png" alt="vLLM TPU 2.0" style="width: 80%; margin: 85px 0;">
 </p>
 
 <h3 align="center">
