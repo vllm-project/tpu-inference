@@ -121,7 +121,34 @@ def _shard_column_parallel_linear_lora(
 
 def _shard_qkv_parallel_linear_lora(layer: MergedQKVParallelLinearWithLoRA,
                                     mesh: Mesh) -> None:
-    _shard_base_linear_lora(layer, mesh)
+    # mesh=Mesh(axis_sizes=(1, 2), axis_names=('data', 'model'), axis_types=(Auto, Auto))
+    # NOTE: lora_a_stacked[i] has shape [max_loras, 1, num_out, num_in]
+    sharded_lora_a_tpu = torch.nn.ParameterList()
+    sharded_lora_b_tpu = torch.nn.ParameterList()
+    sharded_lora_bias_tpu = torch.nn.ParameterList()
+
+    assert layer.n_slices > 0, "layer.n_slices should be greater than 0"
+    lora_b_partition_spec = P(None, None, 'model', None)
+    lora_b_sharding = NamedSharding(mesh, lora_b_partition_spec)
+    lora_bias_partition_spec = P(None, None, 'model')
+    lora_bias_sharding = NamedSharding(mesh, lora_bias_partition_spec)
+    for i in range(layer.n_slices):
+        sharded_lora_a_tpu.append(
+            _shard_tensor_to_tpu_replicated(layer.lora_a_stacked[i], mesh))
+
+        sharded_lora_b_tpu.append(
+            _convert_to_torchax_and_shard(layer.lora_b_stacked[i],
+                                          lora_b_sharding))
+
+        if layer.lora_bias_stacked is not None:
+            sharded_lora_bias_tpu.append(
+                _convert_to_torchax_and_shard(layer.lora_bias_stacked[i],
+                                              lora_bias_sharding))
+
+    layer.lora_a_stacked = sharded_lora_a_tpu
+    layer.lora_b_stacked = sharded_lora_b_tpu
+    if layer.lora_bias_stacked is not None:
+        layer.lora_bias_stacked = sharded_lora_bias_tpu
 
 
 def _shard_row_parallel_linear_lora(layer: RowParallelLinearWithLoRA,
@@ -145,7 +172,7 @@ MODULE_TYPE_TO_SHARDING_FUNC = [
 def _shard_module_to_tpu(model: torch.nn.Module, mesh: Mesh) -> None:
     for path, module in model.named_modules():
         for module_type, sharding_func in MODULE_TYPE_TO_SHARDING_FUNC:
-            if isinstance(module, module_type):
+            if type(module) is module_type:
                 logger.debug("shard %s with %s", path, sharding_func)
                 sharding_func(module, mesh)
                 break
