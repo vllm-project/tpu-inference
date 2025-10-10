@@ -49,7 +49,7 @@ class TpuPlatform(Platform):
     ]
 
     additional_env_vars: list[str] = [
-        "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS", "TPU_MULTIHOST_BACKEND"
+        "JAX_RANDOM_WEIGHTS", "PHASED_PROFILING_DIR", "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS", "TPU_MULTIHOST_BACKEND", "VLLM_MLA_DISABLE", "NEW_MODEL_DESIGN", "TPU_BACKEND_TYPE"
     ]
 
     @classmethod
