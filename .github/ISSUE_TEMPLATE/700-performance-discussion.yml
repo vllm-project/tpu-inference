@@ -1,5 +1,5 @@
-name: ⚡ Discussion on the performance of vllm
-description: Submit a proposal/discussion about the performance of vllm
+name: ⚡ Discussion on the performance of TPU Inference
+description: Submit a proposal/discussion about the performance of TPU Inference
 title: "[Performance]: "
 labels: ["performance"]
 
@@ -12,7 +12,7 @@ body:
   attributes:
     label: Proposal to improve performance
     description: >
-      How do you plan to improve vllm's performance?
+      How do you plan to improve TPU Inference's performance?
   validations:
     required: false
 - type: textarea

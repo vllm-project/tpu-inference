@@ -30,11 +30,11 @@ body:
     required: true
 - type: textarea
   attributes:
-    label: How would you like to use vllm
+    label: How would you like to use TPU Inference
     description: |
-      A detailed description of how you want to use vllm.
+      A detailed description of how you want to use TPU Inference.
     value: |
-      I want to run inference of a [specific model](put link here). I don't know how to integrate it with vllm.
+      I want to run inference of a [specific model](put link here). I don't know how to integrate it with TPU Inference.
 - type: markdown
   attributes:
     value: >
