@@ -10,8 +10,6 @@ import jaxtyping
 import numpy as np
 import torch
 import vllm.envs as envs
-# Monkey patching vLLM scheduler
-import vllm.v1.core.sched.scheduler as vLLMScheduler
 from flax import nnx
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.ops.mappings import j2t_dtype
@@ -37,8 +35,6 @@ from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.sample.rejection_sampler import RejectionSampler
 from tpu_inference.layers.jax.sample.sampling import (compute_logprobs,
                                                     gather_logprobs, sample)
-from tpu_inference.core.sched.dp_scheduler import DPScheduler
-
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.layers.jax.sharding import build_mesh
@@ -61,8 +57,6 @@ from tpu_inference.runner.structured_decoding_manager import \
 from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
 from tpu_inference.utils import device_array, make_optimized_mesh
 from tpu_inference.layers.jax.sharding import MLP_DATA_AXIS_NAME
-
-vLLMScheduler.Scheduler = DPScheduler
 
 
 logger = init_logger(__name__)

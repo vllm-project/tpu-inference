@@ -141,6 +141,9 @@ class TPUWorker(AbstractTpuWorker):
                 pipeline_model_parallel_size=1,
             )
         ensure_kv_transfer_initialized(self.vllm_config)
+        
+        self._setup_scheduler()
+        
         self.model_runner = TPUModelRunner(self.vllm_config, self.devices)
         logger.info(f"Init worker | "
                     f"rank={self.rank} | "
@@ -177,6 +180,57 @@ class TPUWorker(AbstractTpuWorker):
                              f"increasing --gpu-memory-utilization from "
                              f"{gpu_memory_utilization} to a larger value.")
         return total_hbm_avail
+
+    def _setup_scheduler(self) -> None:
+        """Setup the appropriate scheduler based on DP size."""
+
+        dp_size = self._calculate_dp_size()
+        
+        if dp_size > 1:
+            logger.info(f"DP size ({dp_size}) > 1, using DPScheduler")
+
+            import vllm.v1.core.sched.scheduler as vLLMScheduler
+            from tpu_inference.core.sched.dp_scheduler import create_dp_scheduler
+            from vllm.v1.core.sched.scheduler import Scheduler
+            
+            DPScheduler = create_dp_scheduler(Scheduler)
+            vLLMScheduler.Scheduler = DPScheduler
+        else:
+            # Keep using the default scheduler - no changes needed
+            logger.info(f"DP size ({dp_size}) <= 1, using default Scheduler")
+    
+    def _calculate_dp_size(self) -> int:
+
+        try:
+            sharding_strategy = self.vllm_config.additional_config["sharding"]["sharding_strategy"]
+        except (KeyError, TypeError):
+            sharding_strategy = {"tensor_parallelism": len(self.devices)}
+        
+        # Get data parallelism size
+        try:
+            dp = sharding_strategy["data_parallelism"]
+        except KeyError:
+            dp = 1
+        
+        # Get tensor parallelism size
+        try:
+            tp = sharding_strategy["tensor_parallelism"]
+        except KeyError:
+            tp = len(self.devices)
+        
+        # Calculate attention DP
+        attn_dp = 1
+
+        enable_dp = True # todo(wenxindongwork): make it configurable
+        if enable_dp and hasattr(self.model_config, 'hf_config') and hasattr(self.model_config.hf_config, 'num_key_value_heads'):
+            kv_heads = self.model_config.hf_config.num_key_value_heads
+            if kv_heads < tp:
+                attn_dp = max(tp // kv_heads, 1)
+        
+        total_dp_size = dp * attn_dp
+        logger.info(f"Calculated DP size: dp={dp}, attn_dp={attn_dp}, total_dp_size={total_dp_size}")
+        
+        return total_dp_size
 
     def execute_model(
         self,

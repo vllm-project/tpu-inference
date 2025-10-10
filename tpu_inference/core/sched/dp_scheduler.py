@@ -249,6 +249,3 @@ def create_dp_scheduler(base_scheduler_class=Scheduler):
     
     return DPScheduler
 
-
-# Create the DP scheduler class
-DPScheduler = create_dp_scheduler(Scheduler)
