@@ -835,7 +835,6 @@ def weights_dequant_cpu(x: torch.Tensor,
                         block_size: int = 128) -> torch.Tensor:
     assert x.dim() == 2 and s.dim() == 2, "Both x and s must be 2D tensors"
     M, N = x.shape
-    torch_output_type = DTYPE_VIEW_MAP.get(jnp.dtype(output_dtype))
 
     x = x.to(torch.float32)
     s = s.to(torch.float32)
@@ -868,4 +867,4 @@ def weights_dequant_cpu(x: torch.Tensor,
             scale = s[M // block_size, j // block_size]
             y[M_main:M, j:j + block_size] = block * scale
 
-    return y.to(torch_output_type)
+    return y.to(j2t_dtype(output_dtype))
