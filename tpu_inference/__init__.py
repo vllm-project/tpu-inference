@@ -5,14 +5,6 @@ from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
 
-# The warning message to be displayed to the user
-PROD_WARNING = (
-    "🚨  CAUTION: You are using 'tpu_inference' , which is experimental "
-    "and NOT intended for production use yet. Please see the README for more details."
-)
-
-logger.warn(PROD_WARNING)
-
 if "proxy" in os.environ.get('JAX_PLATFORMS', '').lower():
     logger.info("Running vLLM on TPU via Pathways proxy.")
     # Must run pathwaysutils.initialize() before any JAX operations
