@@ -24,8 +24,8 @@ from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.scalar_type import scalar_types
 
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
-from tpu_inference.layers.vllm.quantization.awq import (JaxAWQConfig,
-                                                        JaxAWQLinearMethod)
+from tpu_inference.layers.vllm.quantization.awq import (VllmAWQConfig,
+                                                        VllmAWQLinearMethod)
 from tpu_inference.layers.vllm.quantization.common import JaxCommonLinearConfig
 
 P = PartitionSpec
@@ -85,9 +85,9 @@ def return_ref_and_layer_output(
 ):
     assert isinstance(layer, LinearBase)
     quant_method = layer.quant_method
-    assert isinstance(quant_method, JaxAWQLinearMethod)
+    assert isinstance(quant_method, VllmAWQLinearMethod)
     quant_config = quant_method.quant_config
-    assert isinstance(quant_config, JaxAWQConfig)
+    assert isinstance(quant_config, VllmAWQConfig)
     jax_config = quant_method.jax_config
     assert isinstance(jax_config, JaxCommonLinearConfig)
 
@@ -116,9 +116,9 @@ def return_ref_and_layer_output(
 def initialize_and_return_layer_weights(layer: torch.nn.Module):
     assert isinstance(layer, LinearBase)
     quant_method = layer.quant_method
-    assert isinstance(quant_method, JaxAWQLinearMethod)
+    assert isinstance(quant_method, VllmAWQLinearMethod)
     quant_config = quant_method.quant_config
-    assert isinstance(quant_config, JaxAWQConfig)
+    assert isinstance(quant_config, VllmAWQConfig)
     jax_config = quant_method.jax_config
     assert isinstance(jax_config, JaxCommonLinearConfig)
 
@@ -193,7 +193,7 @@ def test_quant_override(model, mesh):
     vllm_config.model_config.dtype = torch.bfloat16
 
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
-    assert isinstance(quant_config, JaxAWQConfig)
+    assert isinstance(quant_config, VllmAWQConfig)
     assert quant_config.vllm_config == vllm_config
     assert quant_config.mesh == mesh
 
@@ -224,8 +224,8 @@ def test_loading_model(model, mesh):
     vllm_model = vllm_get_model(vllm_config=vllm_config)
     layers = test_utils.find_all_layer_type(vllm_model, LinearBase)
     for layer in layers:
-        assert isinstance(layer.quant_config, JaxAWQConfig)
-        assert isinstance(layer.quant_method, JaxAWQLinearMethod)
+        assert isinstance(layer.quant_config, VllmAWQConfig)
+        assert isinstance(layer.quant_method, VllmAWQLinearMethod)
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -235,7 +235,7 @@ def test_loading_model(model, mesh):
     test_utils.get_spmd_mesh(jax.local_device_count())
 ])
 @pytest.mark.parametrize("enable_sp", [False, True])
-def test_jax_row_parallel_linear(model, bias, mesh, enable_sp):
+def test_row_parallel_linear(model, bias, mesh, enable_sp):
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(
@@ -273,7 +273,7 @@ def test_jax_row_parallel_linear(model, bias, mesh, enable_sp):
     test_utils.get_spmd_mesh(jax.local_device_count())
 ])
 @pytest.mark.parametrize("enable_sp", [False, True])
-def test_jax_column_parallel_linear(model, bias, mesh, enable_sp):
+def test_column_parallel_linear(model, bias, mesh, enable_sp):
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(
@@ -313,7 +313,7 @@ def test_jax_column_parallel_linear(model, bias, mesh, enable_sp):
 ])
 @pytest.mark.parametrize("enable_sp", [False, True])
 @pytest.mark.parametrize("fuse_matmuls", [False, True])
-def test_jax_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
+def test_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(
@@ -356,8 +356,8 @@ def test_jax_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
 ])
 @pytest.mark.parametrize("fuse_matmuls", [False, True])
 @pytest.mark.parametrize("enable_sp", [False, True])
-def test_jax_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
-                                           enable_sp):
+def test_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
+                                       enable_sp):
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(

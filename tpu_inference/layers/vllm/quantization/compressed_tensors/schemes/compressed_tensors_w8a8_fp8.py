@@ -6,14 +6,14 @@ import torch
 from compressed_tensors.quantization import (QuantizationArgs,
                                              QuantizationStrategy)
 from jax.sharding import NamedSharding, PartitionSpec
-from torchax.interop import torch_view
+from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import \
     CompressedTensorsW8A8Fp8
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import \
     per_tensor_dequantize
 
-from tpu_inference.layers.vllm.jax_linear_common import (
+from tpu_inference.layers.vllm.linear_common import (
     sharded_quantized_matmul, slice_sharded_tensor_for_concatenation,
     torch_to_jax_param)
 from tpu_inference.layers.vllm.quantization.common import JaxCommonLinearConfig
@@ -51,7 +51,7 @@ def requantize_with_max_scale(
     return max_w_scale, weight
 
 
-class JaxCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
+class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
 
     def __init__(
         self,
@@ -77,7 +77,7 @@ class JaxCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
                 NamedSharding(self.jax_config.mesh, P()))
             input_scale = torch.nn.Parameter(torch_view(input_scale),
                                              requires_grad=False)
-            delattr(layer, 'input_scale')
+            delattr(layer, "input_scale")
             layer.input_scale = input_scale
 
             # TODO(kyuyeunk): Investigate performance gain from merging scales.
@@ -101,7 +101,7 @@ class JaxCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
                               self.jax_config.bias_sharding),
                 self.jax_config.output_sizes, self.jax_config.n_shards,
                 self.jax_config.fuse_matmuls)
-        delattr(layer, 'weight_scale')
+        delattr(layer, "weight_scale")
         layer.weight_scale = weight_scale
 
         weight = torch_to_jax_param(
@@ -110,7 +110,7 @@ class JaxCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
                           self.jax_config.weight_sharding),
             self.jax_config.output_sizes, self.jax_config.n_shards,
             self.jax_config.fuse_matmuls)
-        delattr(layer, 'weight')
+        delattr(layer, "weight")
         layer.weight = weight
 
         if layer.bias is not None:
@@ -120,7 +120,7 @@ class JaxCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
                               self.jax_config.bias_sharding),
                 self.jax_config.output_sizes, self.jax_config.n_shards,
                 self.jax_config.fuse_matmuls)
-            delattr(layer, 'bias')
+            delattr(layer, "bias")
             layer.bias = bias
 
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,
@@ -133,13 +133,13 @@ class JaxCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
 
     def _apply_fused(self, layer: torch.nn.Module, x: torch.Tensor,
                      bias: Optional[torch.Tensor]) -> torch.Tensor:
-        x_jax = x.jax()
-        weight_jax = layer.weight.jax()
-        weight_scale_jax = layer.weight_scale.jax()
+        x_jax = jax_view(x)
+        weight_jax = jax_view(layer.weight)
+        weight_scale_jax = jax_view(layer.weight_scale)
 
         if self.is_static_input_scheme:
             # TODO(kyuyeunk): Add kernel support for static quant
-            input_scale = layer.input_scale.jax()
+            input_scale = jax_view(layer.input_scale)
             dtype_info = jnp.finfo(weight_jax.dtype)
             maxval = float(dtype_info.max)
             minval = float(dtype_info.min)
@@ -161,7 +161,7 @@ class JaxCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
                                             self.jax_config.weight_sharding)
 
         if bias is not None and not layer.skip_bias_add:
-            outs += bias.jax()
+            outs += jax_view(bias)
         outs = slice_sharded_tensor_for_concatenation(
             outs, self.jax_config.output_sizes, self.jax_config.n_shards)
         return torch_view(jnp.concatenate(outs, axis=-1))
@@ -170,16 +170,16 @@ class JaxCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
                      bias: Optional[torch.Tensor]) -> torch.Tensor:
         assert isinstance(layer.weight, torch.nn.ParameterList)
 
-        x_jax = x.jax()
+        x_jax = jax_view(x)
         outs = []
         for i, (weight, weight_scale) in enumerate(
                 zip(layer.weight, layer.weight_scale)):
-            weight_jax = weight.jax()
-            weight_scale_jax = weight_scale.jax()
+            weight_jax = jax_view(weight)
+            weight_scale_jax = jax_view(weight_scale)
 
             if self.is_static_input_scheme:
                 # TODO(kyuyeunk): Add kernel support for static quant
-                input_scale = layer.input_scale.jax()
+                input_scale = jax_view(layer.input_scale)
                 dtype_info = jnp.finfo(weight_jax.dtype)
                 maxval = float(dtype_info.max)
                 minval = float(dtype_info.min)
@@ -203,6 +203,6 @@ class JaxCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
                                                self.jax_config.weight_sharding)
 
             if bias is not None and not layer.skip_bias_add:
-                out += bias[i].jax()
+                out += jax_view(bias[i])
             outs.append(out)
         return torch_view(jnp.concatenate(outs, axis=-1))

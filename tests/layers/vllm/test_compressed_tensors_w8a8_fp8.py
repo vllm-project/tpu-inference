@@ -26,9 +26,9 @@ from vllm.model_executor.model_loader import get_model as vllm_get_model
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.quantization.common import JaxCommonLinearConfig
 from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors import \
-    JaxCompressedTensorsConfig
+    VllmCompressedTensorsConfig
 from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import (
-    JaxCompressedTensorsW8A8Fp8, requantize_with_max_scale)
+    VllmCompressedTensorsW8A8Fp8, requantize_with_max_scale)
 
 P = PartitionSpec
 MODELS = [
@@ -82,7 +82,7 @@ def ref_w8a8_fp8_static(x: torch.Tensor, x_s: torch.Tensor, w_q: torch.Tensor,
 def return_ref_and_layer_output(layer: torch.nn.Module, batch_size: int = 16):
     assert isinstance(layer, LinearBase)
     scheme = layer.scheme
-    assert isinstance(scheme, JaxCompressedTensorsW8A8Fp8)
+    assert isinstance(scheme, VllmCompressedTensorsW8A8Fp8)
     quant_config = scheme.jax_config
     assert isinstance(quant_config, JaxCommonLinearConfig)
     quant_method = layer.quant_method
@@ -135,7 +135,7 @@ def return_ref_and_layer_output(layer: torch.nn.Module, batch_size: int = 16):
 def initialize_layer_weights(layer: torch.nn.Module):
     assert isinstance(layer, LinearBase)
     scheme = layer.scheme
-    assert isinstance(scheme, JaxCompressedTensorsW8A8Fp8)
+    assert isinstance(scheme, VllmCompressedTensorsW8A8Fp8)
     quant_config = scheme.jax_config
     assert isinstance(quant_config, JaxCommonLinearConfig)
     per_tensor = scheme.strategy == QuantizationStrategy.TENSOR
@@ -204,7 +204,7 @@ def test_quant_override(model, mesh):
     vllm_config.model_config.dtype = torch.bfloat16
 
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
-    assert isinstance(quant_config, JaxCompressedTensorsConfig)
+    assert isinstance(quant_config, VllmCompressedTensorsConfig)
     assert quant_config.vllm_config == vllm_config
     assert quant_config.mesh == mesh
 
@@ -229,9 +229,9 @@ def test_loading_model(model, mesh):
     vllm_model = vllm_get_model(vllm_config=vllm_config)
     layers = test_utils.find_all_layer_type(vllm_model, LinearBase)
     for layer in layers:
-        assert isinstance(layer.quant_config, JaxCompressedTensorsConfig)
+        assert isinstance(layer.quant_config, VllmCompressedTensorsConfig)
         assert isinstance(layer.quant_method, CompressedTensorsLinearMethod)
-        assert isinstance(layer.scheme, JaxCompressedTensorsW8A8Fp8)
+        assert isinstance(layer.scheme, VllmCompressedTensorsW8A8Fp8)
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -241,7 +241,7 @@ def test_loading_model(model, mesh):
     test_utils.get_spmd_mesh(jax.local_device_count())
 ])
 @pytest.mark.parametrize("enable_sp", [False, True])
-def test_jax_row_parallel_linear(model, bias, mesh, enable_sp):
+def test_row_parallel_linear(model, bias, mesh, enable_sp):
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(
@@ -277,7 +277,7 @@ def test_jax_row_parallel_linear(model, bias, mesh, enable_sp):
     test_utils.get_spmd_mesh(jax.local_device_count())
 ])
 @pytest.mark.parametrize("enable_sp", [False, True])
-def test_jax_column_parallel_linear(model, bias, mesh, enable_sp):
+def test_column_parallel_linear(model, bias, mesh, enable_sp):
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(
@@ -315,7 +315,7 @@ def test_jax_column_parallel_linear(model, bias, mesh, enable_sp):
 ])
 @pytest.mark.parametrize("enable_sp", [False, True])
 @pytest.mark.parametrize("fuse_matmuls", [False, True])
-def test_jax_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
+def test_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(
@@ -356,8 +356,8 @@ def test_jax_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
 ])
 @pytest.mark.parametrize("fuse_matmuls", [False, True])
 @pytest.mark.parametrize("enable_sp", [False, True])
-def test_jax_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
-                                           enable_sp):
+def test_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
+                                       enable_sp):
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(

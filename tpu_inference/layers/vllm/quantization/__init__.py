@@ -5,12 +5,12 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizationConfig
 
-from tpu_inference.layers.vllm.quantization.awq import JaxAWQConfig
+from tpu_inference.layers.vllm.quantization.awq import VllmAWQConfig
 from tpu_inference.layers.vllm.quantization.common import JaxCommonConfig
 from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors import \
-    JaxCompressedTensorsConfig  # noqa: E501
+    VllmCompressedTensorsConfig  # noqa: E501
 from tpu_inference.layers.vllm.quantization.unquantized import \
-    JaxUnquantizedConfig
+    VllmUnquantizedConfig
 
 
 def get_tpu_quantization_config(vllm_config: VllmConfig,
@@ -18,9 +18,9 @@ def get_tpu_quantization_config(vllm_config: VllmConfig,
     model_config = copy.deepcopy(vllm_config.model_config)
     # TODO(kyuyeunk): Add support for "tpu_int8".
     method_to_config: dict[str, str] = {
-        None: JaxUnquantizedConfig,
-        "compressed-tensors": JaxCompressedTensorsConfig,
-        "awq": JaxAWQConfig,
+        None: VllmUnquantizedConfig,
+        "compressed-tensors": VllmCompressedTensorsConfig,
+        "awq": VllmAWQConfig,
     }
 
     if model_config.quantization not in method_to_config:
