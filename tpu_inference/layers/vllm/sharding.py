@@ -109,15 +109,9 @@ def _shard_base_linear_lora(layer: BaseLinearLayerWithLoRA,
             _shard_tensor_to_tpu_replicated(layer.lora_a_stacked[i], mesh))
         sharded_lora_b_tpu.append(
             _shard_tensor_to_tpu_replicated(layer.lora_b_stacked[i], mesh))
-        if layer.lora_bias_stacked is not None:
-            sharded_lora_bias_tpu.append(
-                _shard_tensor_to_tpu_replicated(layer.lora_bias_stacked[i],
-                                                mesh))
 
     layer.lora_a_stacked = sharded_lora_a_tpu
     layer.lora_b_stacked = sharded_lora_b_tpu
-    if layer.lora_bias_stacked is not None:
-        layer.lora_bias_stacked = sharded_lora_bias_tpu
 
 
 # TODO: Add custom sharding logic for following lora layers
