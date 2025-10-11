@@ -234,6 +234,9 @@ class TPUWorker(AbstractTpuWorker):
         # the model initialization and profiling.
         self.model_runner._init_random()
 
+    def reset_mm_cache(self) -> None:
+        pass
+
     def get_model(self):
         return self.model_runner.get_model()
 
