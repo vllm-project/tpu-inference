@@ -867,4 +867,4 @@ def weights_dequant_cpu(x: torch.Tensor,
             scale = s[M // block_size, j // block_size]
             y[M_main:M, j:j + block_size] = block * scale
 
-    return y.to(j2t_dtype(output_dtype))
+    return y.to(j2t_dtype(jnp.dtype(output_dtype)))
