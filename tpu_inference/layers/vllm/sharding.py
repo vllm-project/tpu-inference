@@ -102,7 +102,6 @@ def _shard_base_linear_lora(layer: BaseLinearLayerWithLoRA,
     # NOTE: lora_a_stacked[i] has shape [max_loras, 1, num_out, num_in]
     sharded_lora_a_tpu = torch.nn.ParameterList()
     sharded_lora_b_tpu = torch.nn.ParameterList()
-    sharded_lora_bias_tpu = torch.nn.ParameterList()
 
     for i in range(layer.n_slices):
         sharded_lora_a_tpu.append(
