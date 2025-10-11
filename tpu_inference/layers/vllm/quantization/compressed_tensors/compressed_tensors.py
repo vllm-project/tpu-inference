@@ -19,18 +19,18 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
 
 from tpu_inference.layers.vllm.quantization.common import JaxCommonConfig
 from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import \
-    JaxCompressedTensorsW8A8Fp8
+    VllmCompressedTensorsW8A8Fp8
 from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_int8 import \
-    JaxCompressedTensorsW8A8Int8
+    VllmCompressedTensorsW8A8Int8
 from tpu_inference.layers.vllm.quantization.unquantized import \
-    JaxUnquantizedConfig
+    VllmUnquantizedConfig
 
 P = PartitionSpec
 logger = init_logger(__name__)
 
 
 @register_quantization_config("jax-compressed-tensors")
-class JaxCompressedTensorsConfig(CompressedTensorsConfig, JaxCommonConfig):
+class VllmCompressedTensorsConfig(CompressedTensorsConfig, JaxCommonConfig):
 
     @classmethod
     def get_name(cls) -> str:
@@ -82,13 +82,13 @@ class JaxCompressedTensorsConfig(CompressedTensorsConfig, JaxCommonConfig):
         linear_config = self.get_linear_config(layer)
         if self._is_fp8_w8a8(weight_quant, input_quant):
             is_static_input_scheme = input_quant and not input_quant.dynamic
-            return JaxCompressedTensorsW8A8Fp8(
+            return VllmCompressedTensorsW8A8Fp8(
                 weight_quant=weight_quant,
                 is_static_input_scheme=is_static_input_scheme,
                 jax_config=linear_config,
             )
         if self._is_dynamic_token_w8a8(weight_quant, input_quant):
-            return JaxCompressedTensorsW8A8Int8(
+            return VllmCompressedTensorsW8A8Int8(
                 strategy=weight_quant.strategy,
                 is_static_input_scheme=False,
                 input_symmetric=input_quant.symmetric,
@@ -105,11 +105,11 @@ class JaxCompressedTensorsConfig(CompressedTensorsConfig, JaxCommonConfig):
         if should_ignore_layer(prefix,
                                ignore=self.ignore,
                                fused_mapping=self.packed_modules_mapping):
-            return JaxUnquantizedConfig.get_quant_method(self, layer, prefix)
+            return VllmUnquantizedConfig.get_quant_method(self, layer, prefix)
         if isinstance(layer, LinearBase):
             scheme = self.get_scheme(layer=layer, layer_name=prefix)
             if scheme is None:
-                return JaxUnquantizedConfig.get_quant_method(
+                return VllmUnquantizedConfig.get_quant_method(
                     self, layer, prefix)
             layer.scheme = scheme
             return CompressedTensorsLinearMethod(self)
