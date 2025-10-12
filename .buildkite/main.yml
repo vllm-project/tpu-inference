@@ -1,5 +1,6 @@
 steps:
    - label: "Upload Tests for Models & Features"
+#     if: build.env("NIGHTLY") == "1"
      agents:
        # TODO : can be done on non-TPU queues once they're set up b/449203039
        queue: tpu_v6e_queue
@@ -10,6 +11,7 @@ steps:
      continue_on_failure: true  # ensure we still generate support matrices even if some tests fail
 
    - label: "Generate support matrices"
+#     if: build.env("NIGHTLY") == "1"
      key: generate_support_matrices
      agents:
        queue: tpu_v6e_queue
@@ -17,39 +19,40 @@ steps:
      commands:
        - bash .buildkite/scripts/generate_support_matrices.sh
 
-   - label: "Notify test results"
-     key: notify_test_results
-     depends_on: generate_support_matrices
-     agents:
-       queue: tpu_v6e_queue
-     commands:
-       - bash .buildkite/scripts/notify_test_results.sh
+#   - label: "Notify test results"
+##     if: build.env("NIGHTLY") == "1"
+#     key: notify_test_results
+#     depends_on: generate_support_matrices
+#     agents:
+#       queue: tpu_v6e_queue
+#     commands:
+#       - bash .buildkite/scripts/notify_test_results.sh
 
-   - label: "Record verified commit hashes"
-     key: record_verified_commit_hashes
-     depends_on: notify_test_results
-     branches: "main"
-     agents:
-       queue: tpu_v6e_queue
-     commands:
-       # TODO : record verified vllm-tpu_inference commit hash pair if test successful (to be handled in separate PR)
-       - echo "committing verified commit hashes"
-
-   - label: "Commit support matrices if release tag specified"
-     if: build.tag =~ /^v\.?[0-9]+(\.[0-9]+)*$/
-     key: commit_support_matrices
-     depends_on: generate_support_matrices
-     agents:
-       queue: tpu_v6e_queue
-     command:
-       # TODO : commit support matrices if release tag specified (to be handled in separate PR)
-       - echo "committing support matrices to repo"
-
-   - label: "Handle release if release tag specified"
-     if: build.tag =~ /^v\.?[0-9]+(\.[0-9]+)*$/
-     depends_on: commit_support_matrices
-     agents:
-       queue: tpu_v6e_queue
-     command:
-       # TODO : handle release (to be handled in separate PR)
-       - echo "releasing"
+#   - label: "Record verified commit hashes"
+#     key: record_verified_commit_hashes
+#     depends_on: notify_test_results
+#     branches: "main"
+#     agents:
+#       queue: tpu_v6e_queue
+#     commands:
+#       # TODO : record verified vllm-tpu_inference commit hash pair if test successful (to be handled in separate PR)
+#       - echo "committing verified commit hashes"
+#
+#   - label: "Commit support matrices if release tag specified"
+#     if: build.tag =~ /^v\.?[0-9]+(\.[0-9]+)*$/
+#     key: commit_support_matrices
+#     depends_on: generate_support_matrices
+#     agents:
+#       queue: tpu_v6e_queue
+#     command:
+#       # TODO : commit support matrices if release tag specified (to be handled in separate PR)
+#       - echo "committing support matrices to repo"
+#
+#   - label: "Handle release if release tag specified"
+#     if: build.tag =~ /^v\.?[0-9]+(\.[0-9]+)*$/
+#     depends_on: commit_support_matrices
+#     agents:
+#       queue: tpu_v6e_queue
+#     command:
+#       # TODO : handle release (to be handled in separate PR)
+#       - echo "releasing"

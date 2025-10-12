@@ -1,9 +1,9 @@
 # {MODEL_NAME}
-agents:
-  queue: {QUEUE}
 steps:
   - label: "Unit tests for {MODEL_NAME}"
     key: "{SANITIZED_MODEL_NAME}_UnitTest"
+    agents:
+      queue: {QUEUE}
     soft_fail: true
     commands:
       - echo "placeholder"  # TODO: replace with your unit test command
@@ -22,6 +22,8 @@ steps:
   - label: "Integration tests for {MODEL_NAME}"
     key: "{SANITIZED_MODEL_NAME}_IntegrationTest"
     depends_on: "record_{SANITIZED_MODEL_NAME}_UnitTest"
+    agents:
+      queue: {QUEUE}
     soft_fail: true
     env:
       TEST_MODEL: {MODEL_NAME}
