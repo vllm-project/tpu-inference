@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e
 
 test_model=""
 tensor_parallel_size=1
