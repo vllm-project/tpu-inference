@@ -255,11 +255,9 @@ def replace_set_lora(model):
         lora_a: torch.Tensor,
         lora_b: torch.Tensor,
         embeddings_tensor: Optional[torch.Tensor],
-        bias: Optional[torch.Tensor] = None,
     ):
         with torchax.default_env():
-            self._original_set_lora(index, lora_a, lora_b, embeddings_tensor,
-                                    bias)
+            self._original_set_lora(index, lora_a, lora_b, embeddings_tensor)
 
     def _tpu_reset_lora(self, index: int):
         with torchax.default_env():
