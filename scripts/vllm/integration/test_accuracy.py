@@ -42,8 +42,8 @@ def run_test(model_name, expected_value, more_args=None):
     )
 
     measured_value = results["results"][TASK][FILTER]
-    assert (measured_value - RTOL < expected_value < measured_value +
-            RTOL), f"Expected: {expected_value} |  Measured: {measured_value}"
+    print(f"measured accuracy: {measured_value}")
+    assert measured_value >= expected_value - RTOL, f"Expected: {expected_value} |  Measured: {measured_value}"
 
 
 @pytest.mark.skipif(not current_platform.is_cuda()

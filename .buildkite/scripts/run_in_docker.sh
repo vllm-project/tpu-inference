@@ -19,6 +19,9 @@ ENV_VARS=(
   -e INPUT_LEN="${INPUT_LEN:-}"
   -e OUTPUT_LEN="${OUTPUT_LEN:-}"
   -e PREFIX_LEN="${PREFIX_LEN:-}"
+  -e MAX_MODEL_LEN="${MAX_MODEL_LEN:-}"
+  -e MAX_NUM_SEQS="${MAX_NUM_SEQS:-}"
+  -e MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-}"
 )
 
 if ! grep -q "^HF_TOKEN=" /etc/environment; then

@@ -11,7 +11,7 @@ steps:
     key: "record_{SANITIZED_FEATURE_NAME}_CorrectnessTest"
     depends_on: "{SANITIZED_FEATURE_NAME}_CorrectnessTest"
     env:
-      CI_TARGET: {FEATURE_NAME}
+      CI_TARGET: "{FEATURE_NAME}"
       CI_STAGE: "CorrectnessTest"
     agents:
       queue: tpu_v6e_queue
@@ -31,7 +31,7 @@ steps:
     key: "record_{SANITIZED_FEATURE_NAME}_PerformanceTest"
     depends_on: "{SANITIZED_FEATURE_NAME}_PerformanceTest"
     env:
-      CI_TARGET: {FEATURE_NAME}
+      CI_TARGET: "{FEATURE_NAME}"
       CI_STAGE: "PerformanceTest"
     agents:
       queue: tpu_v6e_queue

@@ -1,0 +1,40 @@
+# Speculative Decoding: Ngram
+steps:
+  - label: "Correctness tests for Speculative Decoding: Ngram"
+    key: "Speculative_Decoding-_Ngram_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - echo "covered by performance test"
+  - label: "Record correctness test result for Speculative Decoding: Ngram"
+    key: "record_Speculative_Decoding-_Ngram_CorrectnessTest"
+    depends_on: "Speculative_Decoding-_Ngram_CorrectnessTest"
+    env:
+      CI_TARGET: "Speculative Decoding: Ngram"
+      CI_STAGE: "CorrectnessTest"
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh Speculative_Decoding-_Ngram_CorrectnessTest
+
+  - label: "Performance tests for Speculative Decoding: Ngram"
+    key: "Speculative_Decoding-_Ngram_PerformanceTest"
+    depends_on: "record_Speculative_Decoding-_Ngram_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py
+  - label: "Record performance test result for Speculative Decoding: Ngram"
+    key: "record_Speculative_Decoding-_Ngram_PerformanceTest"
+    depends_on: "Speculative_Decoding-_Ngram_PerformanceTest"
+    env:
+      CI_TARGET: "Speculative Decoding: Ngram"
+      CI_STAGE: "PerformanceTest"
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh Speculative_Decoding-_Ngram_PerformanceTest
