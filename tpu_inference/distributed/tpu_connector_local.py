@@ -259,7 +259,7 @@ class RequestTracker:
     # request so far.
     block_ids: list[int]
     # The full, cumulative list of token IDs that have been processed for this
-    # request so far. In contrast to LMCache, this list only contains the
+    # request so far. This list only contains the
     # tokens to be computed, not the prefix loaded from cache.
     token_ids: list[int]
     # The number of tokens that were a hit in the CPU cache at the beginning
@@ -268,6 +268,8 @@ class RequestTracker:
     # A high-water mark indicating how many tokens from the start of the
     # computed tokens (`token_ids`) have already been saved to the CPU cache.
     num_saved_tokens: int = 0
+    # Whether the request is in the decoding phase (generating one token at a time).
+    is_decode_phase: bool = False
 
     def update(self, new_block_ids: list[int], new_token_ids: list[int]):
         """Appends new block IDs and token IDs to the tracker."""
@@ -284,6 +286,11 @@ class RequestTracker:
                 f"Unsupported new_block_ids type {type(new_block_ids)}")
         self.block_ids.extend(new_block_ids)
         self.token_ids.extend(new_token_ids)
+
+        # When a request is scheduled again, and the number of new tokens
+        # is 1 (excluding chunked prefill), the request is in decode phase.
+        if len(new_token_ids) == 1:
+            self.is_decode_phase = True
 
 
 @dataclass
@@ -405,22 +412,47 @@ class TPUConnectorScheduler():
         update of the tracker's save state.
         """
         save_spec = None
+        num_total_tokens = len(tracker.token_ids)
+        has_new_tokens = num_total_tokens > tracker.num_saved_tokens
+        logger.info(
+            f"Preparing req meta for req: {tracker.req_id}, num_total_tokens={num_total_tokens}, num_saved_tokens={tracker.num_saved_tokens}, has_new_tokens={has_new_tokens}, is_finished={is_finished}"
+        )
 
-        # 1. Decide if a save is necessary.
-        if len(tracker.token_ids) > tracker.num_saved_tokens:
+        # Determine if a save is needed for this step
+        should_save = False
+        if is_finished:
+            should_save = True
+        elif has_new_tokens:
+            if not tracker.is_decode_phase:
+                should_save = True  # Prefill
+            else:
+                # Decode: check for block boundary
+                next_block_boundary = (tracker.num_saved_tokens //
+                                       self.block_size + 1) * self.block_size
+                logger.info(
+                    f"in decode phase, next_block_boundary: {next_block_boundary}, "
+                )
+                if num_total_tokens >= next_block_boundary:
+                    should_save = True
+
+        logger.info(f"    - Preparing meta for req: {tracker.req_id}, "
+                    f"is_finished={is_finished}, "
+                    f"total_tokens={num_total_tokens}, "
+                    f"saved_tokens={tracker.num_saved_tokens}, "
+                    f"has_new={has_new_tokens}, "
+                    f"is_decode={tracker.is_decode_phase}, "
+                    f"should_save={should_save}")
+
+        if should_save:
             save_spec = SaveSpec(
                 skip_leading_tokens=tracker.num_saved_tokens,
                 is_final_save=is_finished,
             )
-            # Transactional update: advance the state *before* dispatching.
-            tracker.num_saved_tokens = len(tracker.token_ids)
-
-        # Also consider a save if the request is finished, even with no new tokens,
-        # to signal the worker this is the final step.
-        elif is_finished:
-            save_spec = SaveSpec(
-                skip_leading_tokens=tracker.num_saved_tokens,
-                is_final_save=True,
+            # Only update the saved token count if we actually processed new tokens.
+            if has_new_tokens:
+                tracker.num_saved_tokens = num_total_tokens
+            logger.info(
+                f"      -> SaveSpec created. New saved_tokens count: {tracker.num_saved_tokens}"
             )
 
         # 2. Determine if a work order is needed.
@@ -499,7 +531,7 @@ class TPUConnectorScheduler():
             # in this first step.
             tokens_for_tracker = request.prompt_token_ids[:end_idx]
             logger.info(
-                f"    - num_new_tokens: {num_new_tokens}, num_cached_tokens: {num_cached_tokens}"
+                f"    - num_new_tokens: {num_new_tokens}, num_cached_tokens: {num_cached_tokens}, end_idx: {end_idx}, request.prompt_token_ids length: {len(request.prompt_token_ids)}"
             )
             logger.info(
                 f"    - Slicing prompt[:{end_idx}] -> len(tokens_for_tracker): {len(tokens_for_tracker)}"
@@ -547,6 +579,12 @@ class TPUConnectorScheduler():
             tracker = self._request_trackers[req_id]
             full_request = self._unfinished_requests.get(req_id)
 
+            if full_request is None:
+                logger.warning(
+                    f"  - No full request found for cached req: {req_id}. Skipping."
+                )
+                continue
+
             # num_new_tokens: The number of *additional* tokens the scheduler is
             # processing in this step for this ongoing request.
             num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
@@ -556,9 +594,12 @@ class TPUConnectorScheduler():
             # already processed in previous steps.
             current_token_count = len(tracker.token_ids)
 
-            # new_token_ids: The slice of the full prompt corresponding to the
+            logger.info(
+                f"    - len(full_request.all_token_ids): {len(full_request.all_token_ids)}"
+            )
+            # new_token_ids: The slice of the full token sequence corresponding to the
             # new work being done in this step.
-            new_token_ids = full_request.prompt_token_ids[
+            new_token_ids = full_request.all_token_ids[
                 current_token_count:current_token_count + num_new_tokens]
 
             # new_blocks: The new physical blocks allocated for the new_token_ids.
@@ -638,6 +679,8 @@ class TPUConnectorWorker:
                                                 thread_name_prefix="tpu_saver")
         self.finished_save_reqs: set[ReqId] = set()
         self.finished_load_reqs: set[ReqId] = set()
+        # Tracks if wait_for_save has been called for the current step's metadata.
+        self._processed_save_for_step = False
 
     def __del__(self):
         logger.info("TPUConnectorWorker: Entering __del__")
@@ -710,6 +753,7 @@ class TPUConnectorWorker:
                     f"Shape of a single layer on CPU before reshape (num_blocks, block_size, ...): {kv_caches_on_cpu[0].shape}"
                 )
 
+            post_transfer_start_time = time.time()
             # Reshape per-layer data from (num_blocks, block_size, ...) to
             # a flat (total_tokens, ...) array for easy slicing.
             flat_kv_caches_on_cpu = [
@@ -718,6 +762,11 @@ class TPUConnectorWorker:
             ]
 
             if flat_kv_caches_on_cpu:
+                total_size_bytes = sum(layer.nbytes
+                                       for layer in flat_kv_caches_on_cpu)
+                logger.info(
+                    f"Total size of flat_kv_caches_on_cpu: {total_size_bytes / 1024**2:.2f} MB"
+                )
                 logger.info(
                     f"Shape of a single layer after reshape (total_tokens, ...): {flat_kv_caches_on_cpu[0].shape}"
                 )
@@ -735,6 +784,10 @@ class TPUConnectorWorker:
                     ]
                     self.cpu_backend.add(key, value_for_key)
 
+                post_transfer_duration = time.time() - post_transfer_start_time
+                logger.info(
+                    f"Request {req_id}: Reshaping and adding {len(keys)} keys to CPU backend took {post_transfer_duration:.4f} seconds."
+                )
                 logger.info(
                     f"Updated CPU backend with {len(keys)} new key-value pairs for request {req_id}."
                 )
@@ -754,15 +807,22 @@ class TPUConnectorWorker:
         Initiates and waits for all pending asynchronous save operations for the
         current step to complete.
         """
+        # This method is idempotent. If the save operations for the current
+        # step's metadata have already been processed, we can exit early.
+        if self._processed_save_for_step:
+            return
+
         # logger.info("TPUConnectorWorker: Entering wait_for_save")
         metadata = self.connector._connector_metadata
         if not isinstance(metadata, TPUConnectorMetadata):
             logger.info(
                 "wait_for_save:not an instances of TPUConnectorMetadata")
+            self._processed_save_for_step = True
             return
 
         if not metadata.requests_meta:
             # logger.info("wait_for_save:no reqs to save")
+            self._processed_save_for_step = True
             return
 
         pending_save_futures: list[tuple[Future, TPUReqMeta]] = []
@@ -778,6 +838,7 @@ class TPUConnectorWorker:
                 pending_save_futures.append((future, meta))
 
         if not pending_save_futures:
+            self._processed_save_for_step = True
             return
 
         logger.info(f"Waiting for {len(pending_save_futures)} save "
@@ -788,17 +849,21 @@ class TPUConnectorWorker:
             try:
                 # The result of _save_blocks_to_cpu is the request_id
                 finished_req_id = future.result()
+                logger.info(
+                    f"Save operation completed for request {finished_req_id}")
                 if meta.save_spec and meta.save_spec.is_final_save:
                     logger.info(
                         f"Request {finished_req_id}: Final save completed. Marking as finished."
                     )
                     self.finished_save_reqs.add(finished_req_id)
+
             except Exception as e:
                 logger.error(f"A save operation failed: {e}", exc_info=True)
 
         duration = time.time() - start_time
         logger.info(f"All {len(pending_save_futures)} save operations "
                     f"completed in {duration:.4f} seconds.")
+        self._processed_save_for_step = True
 
     def register_runner(self, runner: TPUModelRunner):
         logger.info("TPUConnectorWorker: Entering register_runner")
@@ -827,6 +892,8 @@ class TPUConnectorWorker:
         operation that ensures the cache is fully updated before the model's
         forward pass begins.
         """
+        # Reset the save processing flag at the start of a new step.
+        self._processed_save_for_step = False
         load_start_time = time.time()
         metadata = self.connector._get_connector_metadata()
         if not isinstance(metadata,
@@ -951,9 +1018,25 @@ class TPUConnectorWorker:
         """
         Returns the sets of request IDs for completed save and load operations.
         """
+        # Safeguard call to wait_for_save().
+        # In the final step for a request, the vLLM engine may not call
+        # `worker.execute_model()` if there's no computation to be done.
+        # This skips the usual `wait_for_save()` call, preventing the final
+        # save operation (marked with `is_final_save=True`) from being
+        # processed. Calling it here ensures that any pending save operations
+        # for the current step's metadata are executed, and the finished
+        # request IDs are correctly identified and reported back to the engine
+        # for resource cleanup. The `wait_for_save` method is idempotent,
+        # so this call is a no-op in the normal execution path.
+        logger.info("TPUConnectorWorker: Entering get_finished")
+        self.wait_for_save()
+
         finished_saves = self.finished_save_reqs
+        logger.info(f"Finished saves to report: {finished_saves}")
         self.finished_save_reqs = set()
 
         finished_loads = self.finished_load_reqs
         self.finished_load_reqs = set()
+        logger.info(f"Finished saves: {finished_saves}, "
+                    f"Finished loads: {finished_loads}")
         return finished_saves, finished_loads
