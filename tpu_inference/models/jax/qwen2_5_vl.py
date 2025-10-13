@@ -12,6 +12,8 @@ from transformers import modeling_flax_utils
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig)
 from vllm.config import VllmConfig
+from vllm.model_executor.models.qwen2_5_vl import \
+    Qwen2_5_VLForConditionalGeneration as vllm_model_cls
 
 from tpu_inference import utils as utils
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
@@ -686,6 +688,31 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             norm_eps=getattr(config, "rms_norm_eps", 1e-6),
         )
         self.language_model = Qwen2ForCausalLM(vllm_config, rng_key, mesh)
+
+    @classmethod
+    def get_mrope_input_positions(
+        cls,
+        input_tokens: list[int],
+        hf_config,
+        image_grid_thw,
+        video_grid_thw,
+        second_per_grid_ts: list[float],
+        context_len: int = 0,
+        seq_len: int | None = None,
+        audio_feature_lengths=None,
+        use_audio_in_video: bool = False,
+    ):
+        return vllm_model_cls.get_mrope_input_positions(
+            input_tokens=input_tokens,
+            hf_config=hf_config,
+            image_grid_thw=image_grid_thw,
+            video_grid_thw=video_grid_thw,
+            second_per_grid_ts=second_per_grid_ts,
+            context_len=context_len,
+            seq_len=seq_len,
+            audio_feature_lengths=audio_feature_lengths,
+            use_audio_in_video=use_audio_in_video,
+        )
 
     def _validate_and_reshape_mm_tensor(self, mm_input: object,
                                         name: str) -> jax.Array:
