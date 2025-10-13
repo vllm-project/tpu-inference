@@ -290,6 +290,7 @@ class _DisaggOrchestrator:
 
         while self.live:
             block = not decode_engine.scheduler.has_requests()
+
             while True:
                 # We need to check input batch as well as the request completion is delayed
                 # from scheduler to the runner.
@@ -335,7 +336,7 @@ class _DisaggOrchestrator:
                 vllm_request.num_computed_tokens = prompt_tokens
                 new_block_ids = kv_cache_manager.get_block_ids(req_id)
                 logger.debug(
-                    f"decoding {req_id} new_block_ids {new_block_ids}")
+                    f"inserting {req_id} new_block_ids {new_block_ids}")
                 assert (len(new_block_ids[0]) == math.ceil(
                     prompt_tokens / self._config.cache_config.block_size))
 
