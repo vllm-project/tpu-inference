@@ -26,14 +26,23 @@ exit_code=0
 
 helpFunction()
 {
-   echo ""
-   echo "Usage: $0 [-r root-dir-path] [-d dataset-name] [-p dataset-path] [-v vllm-download-dir] [-h]"
-   echo -e "\t-r, --root-dir-path\tThe path to your root directory (default: /workspace/, which is used in the Dockerfile)"
-   echo -e "\t-d, --dataset-name\tThe name of the dataset to use (default: sonnet)"
-   echo -e "\t-p, --dataset-path\tThe path to the processed dataset. This is required when using a custom model (default: benchmarks/sonnet.txt)."
-   echo -e "\t-v, --vllm-download-dir\tThe directory to download vLLM into (default: /tmp/hf_home)"
-   echo -e "\t-h, --help\tShow this help message"
-   exit 1
+    echo ""
+    echo "Usage: $0 [-r root-dir-path] [-d dataset-name] [-p dataset-path] [-v vllm-download-dir] [-h]"
+    echo -e "\t-r, --root-dir-path\tThe path to your root directory (default: /workspace/, which is used in the Dockerfile)"
+    echo -e "\t-d, --dataset-name\tThe name of the dataset to use (default: sonnet)"
+    echo -e "\t-p, --dataset-path\tThe path to the processed dataset. This is required when using a custom model (default: benchmarks/sonnet.txt)"
+    echo -e "\t-v, --vllm-download-dir\tThe directory to download vLLM into (default: /tmp/hf_home)"
+    echo -e "\t-h, --help\tShow this help message"
+    echo ""
+    echo "================================================================"
+    echo "REQUIRED ENVIRONMENT VARIABLES:"
+    echo "================================================================"
+    echo "  MAX_MODEL_LEN           Model context length (prompt and output)"
+    echo "  MAX_NUM_SEQS            Maximum number of sequences to be processed in a single iteration"
+    echo "  MAX_NUM_BATCHED_TOKENS  Maximum number of tokens to be processed in a single iteration"
+    echo ""
+    echo "Example: export MAX_MODEL_LEN=...; export MAX_NUM_SEQS=...; export MAX_NUM_BATCHED_TOKENS=...; bash $0"
+    exit 1
 }
 
 while [[ "$#" -gt 0 ]]; do
@@ -68,28 +77,28 @@ while [[ "$#" -gt 0 ]]; do
     esac
 done
 
-if [ -n "$TEST_MODEL" ]; then
-  test_model="$TEST_MODEL"
+if [ -n "${TEST_MODEL:-}" ]; then
+    test_model="$TEST_MODEL"
 fi
 
-if [ -n "$INPUT_LEN" ]; then
-  input_len="$INPUT_LEN"
+if [ -n "${INPUT_LEN:-}" ]; then
+    input_len="$INPUT_LEN"
 fi
 
-if [ -n "$OUTPUT_LEN" ]; then
-  output_len="$OUTPUT_LEN"
+if [ -n "${OUTPUT_LEN:-}" ]; then
+    output_len="$OUTPUT_LEN"
 fi
 
-if [ -n "$PREFIX_LEN" ]; then
-  prefix_len="$PREFIX_LEN"
+if [ -n "${PREFIX_LEN:-}" ]; then
+    prefix_len="$PREFIX_LEN"
 fi
 
-if [ -n "$MINIMUM_THROUGHPUT_THRESHOLD" ]; then
-  minimum_throughput_threshold="$MINIMUM_THROUGHPUT_THRESHOLD"
+if [ -n "${MINIMUM_THROUGHPUT_THRESHOLD:-}" ]; then
+    minimum_throughput_threshold="$MINIMUM_THROUGHPUT_THRESHOLD"
 fi
 
-if [ -n "$TENSOR_PARALLEL_SIZE" ]; then
-  tensor_parallel_size="$TENSOR_PARALLEL_SIZE"
+if [ -n "${TENSOR_PARALLEL_SIZE:-}" ]; then
+    tensor_parallel_size="$TENSOR_PARALLEL_SIZE"
 fi
 
 echo "Using the root directory at $root_dir"
@@ -103,9 +112,11 @@ echo "Using the dataset at $dataset_path"
 
 cd "$root_dir"/vllm || exit
 echo "Current working directory: $(pwd)"
+echo "Using vLLM hash: $(git rev-parse HEAD)"
 
 # Overwrite a few of the vLLM benchmarking scripts with the TPU Commons ones
 cp -r "$root_dir"/tpu_inference/scripts/vllm/benchmarking/*.py "$root_dir"/vllm/benchmarks/
+echo "Using TPU Inference hash: $(git -C "$root_dir"/tpu_inference rev-parse HEAD)"
 
 cleanUp() {
     echo "Stopping the vLLM server and cleaning up log files..."
@@ -120,9 +131,9 @@ cleanUp() {
 }
 
 checkThroughput() {
-    # This function checks whether the total token throughput from a benchmark
+    # This function checks whether the Request throughput from a benchmark
     # log file meet specified target value. It validates the presence and
-    # accessibility of the log file, extracts total token throughput, and
+    # accessibility of the log file, extracts Request throughput, and
     # compares them against predefined targets.
     # The function outputs the results of these comparisons and exits with a
     # status code indicating overall success or failure.
@@ -139,19 +150,19 @@ checkThroughput() {
         return
     fi
 
-    # Extract Total Token throughput
-    actual_throughput=$(awk '/Total Token throughput \(tok\/s\):/ {print $NF}' "$BENCHMARK_LOG_FILE")
+    # Extract Request throughput
+    actual_throughput=$(awk '/Request throughput \(req\/s\):/ {print $NF}' "$BENCHMARK_LOG_FILE")
 
     if [ -z "$actual_throughput" ]; then
         echo "Total Token throughput: NOT FOUND"
         throughput_pass=0
     else
-        echo "Total Token throughput: $actual_throughput"
+        echo "Total Request throughput: $actual_throughput"
         if awk -v actual="$actual_throughput" -v target="$minimum_throughput_threshold" 'BEGIN { exit !(actual >= target) }'; then
-            echo "Total Token throughput comparison (>= $minimum_throughput_threshold): PASSED"
+            echo "Total Request throughput comparison (>= $minimum_throughput_threshold): PASSED"
             throughput_pass=1
         else
-            echo "Total Token throughput comparison (>= $minimum_throughput_threshold): FAILED"
+            echo "Total Request throughput comparison (>= $minimum_throughput_threshold): FAILED"
             throughput_pass=0
         fi
     fi
@@ -170,23 +181,41 @@ checkThroughput() {
     fi
 }
 
-# If we have multiple args, we can add them in extra_serve_args.
-extra_serve_args=()
 
 echo "--------------------------------------------------"
 echo "Running benchmark for model: $test_model"
 echo "--------------------------------------------------"
 
-# Define model-specific arguments
-current_serve_args=("${extra_serve_args[@]}")
-max_batched_tokens=8192
-if [ "$USE_V6E8_QUEUE" == "True" ]; then
-    max_batched_tokens=1024
+# If we have multiple args, we can add them in extra_serve_args.
+extra_serve_args=()
+if [ -n "${MAX_MODEL_LEN:-}" ]; then
+    echo "Using customized max-model-len: $MAX_MODEL_LEN"
+    extra_serve_args+=(--max-model-len "$MAX_MODEL_LEN")
+else
+    echo "Error: The environment variable MAX_MODEL_LEN must be specified."
+    exit 1
 fi
+
+if [ -n "${MAX_NUM_SEQS:-}" ]; then
+    echo "Using customized max-num-seqs: $MAX_NUM_SEQS"
+    extra_serve_args+=(--max-num-seqs "$MAX_NUM_SEQS")
+else
+    echo "Error: The environment variable MAX_NUM_SEQS must be specified."
+    exit 1
+fi
+
+if [ -n "${MAX_NUM_BATCHED_TOKENS:-}" ]; then
+    echo "Using customized max-num-batched-tokens: $MAX_NUM_BATCHED_TOKENS"
+    extra_serve_args+=(--max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS")
+else
+    echo "Error: The environment variable MAX_NUM_BATCHED_TOKENS must be specified."
+    exit 1
+fi
+
 
 # Spin up the vLLM server
 echo "Spinning up the vLLM server..."
-(vllm serve "$test_model" --max-model-len="$((input_len + output_len + prefix_len))" --disable-log-requests --max-num-batched-tokens "$max_batched_tokens" --download_dir "$vllm_download_dir" --tensor-parallel-size "$tensor_parallel_size" "${current_serve_args[@]}" 2>&1 | tee -a "$LOG_FILE") &
+(vllm serve "$test_model" --disable-log-requests --download_dir "$vllm_download_dir" --tensor-parallel-size "$tensor_parallel_size" "${extra_serve_args[@]}" 2>&1 | tee -a "$LOG_FILE") &
 
 
 # Run a busy loop to block until the server is ready to receive requests
@@ -205,7 +234,13 @@ while true; do
         break
     fi
 
-    if grep -q "$READY_MESSAGE" "$LOG_FILE" ; then
+    if grep -Fq "raise RuntimeError" "$LOG_FILE"; then
+        echo "Detected RuntimeError, exiting."
+        break
+    fi
+
+    if grep -Fq "$READY_MESSAGE" "$LOG_FILE" ; then
+        echo "Application started"
         did_find_ready_message=true
         break
     fi
