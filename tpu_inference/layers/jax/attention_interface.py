@@ -276,6 +276,7 @@ def sharded_ragged_paged_attention(
     v_scale: float | None = None,
 ):
     """Shards along KV heads."""
+    
     qkv_spec = P(ATTN_DATA_AXIS_NAME, "model", None)
     kv_cache_spec = P(ATTN_DATA_AXIS_NAME, None, "model")
     in_specs = (
@@ -289,7 +290,6 @@ def sharded_ragged_paged_attention(
         P(ATTN_DATA_AXIS_NAME),  # distribution
     )
     out_specs = (qkv_spec, kv_cache_spec)
-
     def _ragged_paged_attention(*args):
         return ragged_paged_attention(
             *args,

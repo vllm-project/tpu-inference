@@ -4,6 +4,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+from tpu_inference.core.sched.utils import get_dp_size
 from vllm.distributed.kv_events import KVEventBatch
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
@@ -27,6 +28,7 @@ class DPSchedulerOutput(SchedulerOutput):
     assigned_dp_rank: dict[str, int] = None
 
 
+
 @dataclass
 class DPScheduler(Scheduler):
 
@@ -34,19 +36,7 @@ class DPScheduler(Scheduler):
         super(DPScheduler, self).__init__(*args, **kwargs)
 
         self.assigned_dp_rank: dict[str, int] = {}
-        try:
-            # breakpoint()
-            self.dp_size = self.vllm_config.additional_config["sharding"]["sharding_strategy"]["data_parallelism"]   
-            print("scheduler dp_size from config", self.dp_size)
-        except KeyError:
-            self.dp_size = 1
-        
-        # DP attention.
-        num_kv_heads = self.vllm_config.model_config.hf_config.num_key_value_heads
-        tp = self.vllm_config.parallel_config.tensor_parallel_size
-        attn_dp = max(tp // num_kv_heads, 1)
-        self.dp_size = self.dp_size * attn_dp
-        print("wenxin: scheduler dp:_size", self.dp_size)
+        _, _, self.dp_size = get_dp_size(self.vllm_config)
         
         # assert self.dp_size >= 2, "Data parallel size must be at least 2." # Debugging purpose
         self.dp_kv_cache_config = self.kv_cache_config

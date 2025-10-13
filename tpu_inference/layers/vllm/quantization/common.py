@@ -40,7 +40,7 @@ class JaxCommonLinearConfig:
         if isinstance(layer, RowParallelLinear):
             if self.mesh.shape.get('attn_dp', 1) > 1:
                 # Replicate o_proj when using DP attention
-                self.weight_sharding = P(None)
+                self.weight_sharding = P(None, MLP_TENSOR_AXIS_NAME)
             else: 
                 self.weight_sharding = P(None, MLP_TENSOR_AXIS_NAME)
             if self.enable_sequence_parallelism:

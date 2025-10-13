@@ -107,16 +107,19 @@ class VllmUnquantizedLinearMethod(UnquantizedLinearMethod):
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         with jax.named_scope(layer._get_name()):
+            # breakpoint()
             if in_sharding := self.jax_config.get_input_sharding(x):
                 x.shard_(NamedSharding(self.jax_config.mesh, in_sharding))
-
+                # breakpoint()
             if self.jax_config.fuse_matmuls:
                 out = self._apply_fused(layer, x, bias)
             else:
                 out = self._apply_split(layer, x, bias)
 
             if out_sharding := self.jax_config.get_output_sharding(out):
+                # breakpoint()
                 out.shard_(NamedSharding(self.jax_config.mesh, out_sharding))
+                # breakpoint()
 
         return out
 

@@ -7,6 +7,7 @@ from typing import Callable, Dict, Optional, Tuple, Union
 import jax
 import jax.numpy as jnp
 import jaxtyping
+from tpu_inference.core.sched.utils import get_dp_size
 import vllm.envs as envs
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
@@ -184,9 +185,10 @@ class TPUWorker(AbstractTpuWorker):
     def _setup_scheduler(self) -> None:
         """Setup the appropriate scheduler based on DP size."""
 
-        dp_size = self._calculate_dp_size()
-        
-        if dp_size > 1:
+        _, _, dp_size = get_dp_size(self.vllm_config)
+        # temp: 
+        use_dp_scheduler=True
+        if dp_size > 1 or use_dp_scheduler:
             logger.info(f"DP size ({dp_size}) > 1, using DPScheduler")
 
             import vllm.v1.core.sched.scheduler as vLLMScheduler
@@ -199,39 +201,6 @@ class TPUWorker(AbstractTpuWorker):
             # Keep using the default scheduler - no changes needed
             logger.info(f"DP size ({dp_size}) <= 1, using default Scheduler")
     
-    def _calculate_dp_size(self) -> int:
-
-        try:
-            sharding_strategy = self.vllm_config.additional_config["sharding"]["sharding_strategy"]
-        except (KeyError, TypeError):
-            sharding_strategy = {"tensor_parallelism": len(self.devices)}
-        
-        # Get data parallelism size
-        try:
-            dp = sharding_strategy["data_parallelism"]
-        except KeyError:
-            dp = 1
-        
-        # Get tensor parallelism size
-        try:
-            tp = sharding_strategy["tensor_parallelism"]
-        except KeyError:
-            tp = len(self.devices)
-        
-        # Calculate attention DP
-        attn_dp = 1
-
-        enable_dp = True # todo(wenxindongwork): make it configurable
-        if enable_dp and hasattr(self.model_config, 'hf_config') and hasattr(self.model_config.hf_config, 'num_key_value_heads'):
-            kv_heads = self.model_config.hf_config.num_key_value_heads
-            if kv_heads < tp:
-                attn_dp = max(tp // kv_heads, 1)
-        
-        total_dp_size = dp * attn_dp
-        logger.info(f"Calculated DP size: dp={dp}, attn_dp={attn_dp}, total_dp_size={total_dp_size}")
-        
-        return total_dp_size
-
     def execute_model(
         self,
         scheduler_output: Union[AbstractSchedulerOutput, SchedulerOutput],

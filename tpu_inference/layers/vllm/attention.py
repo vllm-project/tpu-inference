@@ -114,7 +114,6 @@ class PallasAttentionBackendImpl(AttentionImpl):
             # q_scale = layer._q_scale_float
             k_scale = layer._k_scale_float
             v_scale = layer._v_scale_float
-
         new_kv_cache, outputs = _jax_attn_func(kv_cache, query, key, value,
                                                attn_metadata, mesh, self.scale,
                                                self.head_size, self.num_heads,

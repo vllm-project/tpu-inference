@@ -9,6 +9,7 @@ import jax.numpy as jnp
 import jaxtyping
 import numpy as np
 import torch
+from tpu_inference.core.sched.utils import get_dp_size
 import vllm.envs as envs
 from flax import nnx
 from jax.sharding import NamedSharding, PartitionSpec
@@ -37,7 +38,7 @@ from tpu_inference.layers.jax.sample.sampling import (compute_logprobs,
                                                     gather_logprobs, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
-from tpu_inference.layers.jax.sharding import build_mesh
+from tpu_inference.layers.jax.sharding import ATTN_DATA_AXIS_NAME, build_mesh
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.model_loader import get_model
 from tpu_inference.models.jax.utils.weight_utils import (
@@ -145,7 +146,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.dp_size = self.mesh.shape["data"] * self.mesh.shape["attn_dp"]
         self.data_parallel_sharding = NamedSharding(self.mesh,
                                                     PartitionSpec(MLP_DATA_AXIS_NAME))
-    
+        self.data_parallel_attn_sharding = NamedSharding(self.mesh,
+                                                    PartitionSpec(ATTN_DATA_AXIS_NAME))
+
     def _init_random(self):
         if self.model_config.seed is None:
             self.model_config.seed = 0
@@ -173,14 +176,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             except KeyError:
                 tp = len(self.devices)
 
-            attn_dp = 1 
-            enable_dp = True #self.vllm_config.additional_config["sharding"]["enable_dp_attention"]
-            if enable_dp:
-                kv_heads = self.model_config.hf_config.num_key_value_heads
-                if kv_heads < tp:
-                    attn_dp = max(tp // kv_heads, 1)
-                    tp = tp//attn_dp
-            
+            _, attn_dp, _ = get_dp_size(self.vllm_config)
+            tp = tp//attn_dp
             axis_names = ("data", "attn_dp","expert", "model")
             mesh_shape = (dp, attn_dp, 1, tp)
 
@@ -355,7 +352,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         scheduler_output: "VllmSchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> ModelRunnerOutput:
-        # with jax.disable_jit():
+        if os.environ.get("DISABLE_JIT", "0") == "1":
+            with jax.disable_jit():
+                return self._execute_model(scheduler_output)[1]
         return self._execute_model(scheduler_output)[1]
 
     def _execute_model(
@@ -392,7 +391,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             spec_decode_metadata,
             logits_indices_selector,
         ) = self._prepare_inputs(scheduler_output)
-
         # multi-modal support
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.
@@ -423,7 +421,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     scheduler_output) as kv_connector_output:
                 # NOTE(Wenlong): It takes both `input_ids` and `inputs_embeds`,
                 # but one of them would be `None`
-
+                breakpoint()
                 (self.kv_caches, hidden_states,
                  aux_hidden_states) = self.model_fn(
                      self.state,
@@ -434,14 +432,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                      tuple(self.layer_name_to_kvcache_index.items()),
                      lora_metadata,
                  )
+            
+            breakpoint()
 
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)
+            breakpoint()
             logits = self.compute_logits_fn(
                 self.state,
                 hidden_states,
                 lora_metadata,
             )
+            breakpoint()
             if scheduler_output.grammar_bitmask is not None:
                 (
                     require_struct_decoding, grammar_bitmask_padded, arange
@@ -461,6 +463,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     logits,
                     tpu_sampling_metadata,
                 )
+                breakpoint()
             else:
                 bonus_logits = self._select_from_array_fn(
                     logits, spec_decode_metadata.bonus_logits_indices)
@@ -593,8 +596,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         ret = jax.shard_map(
             select_local_fn,
             mesh=self.mesh,
-            in_specs=(PartitionSpec('data'), PartitionSpec('data')),
-            out_specs=PartitionSpec('data'),
+            in_specs=(PartitionSpec(ATTN_DATA_AXIS_NAME), PartitionSpec(ATTN_DATA_AXIS_NAME)),
+            out_specs=PartitionSpec(ATTN_DATA_AXIS_NAME),
         )(array, indices_to_select)
 
         return ret
@@ -867,6 +870,28 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         seq_lens_cpu = seq_lens
         (
             input_ids,
+            # positions,
+            # block_tables,
+            # query_start_loc,
+            # seq_lens,
+            # logits_indices,
+            # request_distribution,
+        ) = device_array(
+            self.mesh,
+            (
+                input_ids,
+                # positions,
+                # block_tables,
+                # query_start_loc,
+                # seq_lens,
+                # logits_indices,
+                # request_distribution,
+            ),
+            sharding=self.data_parallel_sharding,
+        )
+        
+        (
+            # input_ids,
             positions,
             block_tables,
             query_start_loc,
@@ -876,7 +901,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         ) = device_array(
             self.mesh,
             (
-                input_ids,
+                # input_ids,
                 positions,
                 block_tables,
                 query_start_loc,
@@ -884,8 +909,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 logits_indices,
                 request_distribution,
             ),
-            sharding=self.data_parallel_sharding,
+            sharding=self.data_parallel_attn_sharding,
         )
+
 
         # breakpoint()
         # print("DP input_ids ", input_ids.shape, input_ids.sharding)
