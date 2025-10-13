@@ -236,9 +236,6 @@ def get_flax_model(
 
     # Multi-modal support only
     # This function calculates the image token's embeddings by VIT
-    @functools.partial(jax.jit,
-                       out_shardings=(logits_sharding),
-                       static_argnames=['image_grid_thw'])
     def run_get_multimodal_embeddings(graphdef, state, image_grid_thw,
                                       **kwargs):
         model = nnx.merge(graphdef, state)

@@ -768,6 +768,13 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             #         "video"] = self._parse_and_validate_video_input(**kwargs)
         return mm_input_by_modality
 
+    @partial(
+        jax.jit,
+        static_argnames=("image_grid_thw", ),
+    )
+    def get_single_image_embedding(self, image_pixel_values, image_grid_thw):
+        return self.visual(image_pixel_values, (image_grid_thw, ))
+
     def _process_image_input(
             self, image_input: Qwen2_5_VLImageInputs) -> tuple[jax.Array, ...]:
 
@@ -780,13 +787,14 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             pixel_values = image_input["pixel_values"]
             image_embeds = []
             current_idx = 0
-            for i, image_thw in enumerate(grid_thw):
+            for image_thw in grid_thw:
                 t, h, w = image_thw
                 image_size = t * h * w
                 end_idx = current_idx + image_size
                 image_pixel_values = pixel_values[current_idx:end_idx, :]
                 image_embeds.append(
-                    self.visual(image_pixel_values, (image_thw, )))
+                    self.get_single_image_embedding(image_pixel_values,
+                                                    image_thw))
                 current_idx = end_idx
             image_embeds = jnp.concatenate(image_embeds, axis=0)
 
