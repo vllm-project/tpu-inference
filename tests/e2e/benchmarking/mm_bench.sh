@@ -15,7 +15,7 @@
 model_name="Qwen/Qwen2.5-VL-3B-Instruct"
 max_batched_tokens=98304
 max_model_len=98304
-max_num_seqs=1
+max_num_seqs=128
 dataset_name="hf"
 dataset_path="lmarena-ai/VisionArena-Chat"
 num_prompts=10
