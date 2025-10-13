@@ -18,7 +18,7 @@ max_model_len=98304
 max_num_seqs=128
 dataset_name="hf"
 dataset_path="lmarena-ai/VisionArena-Chat"
-num_prompts=10
+num_prompts=100
 
 TIMEOUT_SECONDS=600
 READY_MESSAGE="Application startup complete."
