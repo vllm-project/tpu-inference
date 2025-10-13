@@ -175,6 +175,7 @@ cython_debug/
 
 # Results
 *.csv
+!commit_hashes.csv
 
 # Python pickle files
 *.pkl
