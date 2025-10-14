@@ -58,11 +58,11 @@ from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig as VllmKVCacheConfig
 
 from tpu_inference.adapters.vllm_adapters import (VllmKVCacheConfigAdapter,
-                                                VllmLoRARequestAdapter,
-                                                VllmSchedulerOutputAdapter)
+                                                  VllmLoRARequestAdapter,
+                                                  VllmSchedulerOutputAdapter)
 from tpu_inference.di.abstracts import (AbstractKVCacheConfig,
-                                      AbstractLoRARequest,
-                                      AbstractSchedulerOutput)
+                                        AbstractLoRARequest,
+                                        AbstractSchedulerOutput)
 
 logger = logging.getLogger(__name__)
 

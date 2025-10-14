@@ -6,9 +6,10 @@ from typing import Any, Optional
 import torch
 
 from tpu_inference.interfaces.config_parts import (ICacheConfig,
-                                                 ICompilationConfig,
-                                                 IModelConfig, IParallelConfig,
-                                                 ISchedulerConfig)
+                                                   ICompilationConfig,
+                                                   IModelConfig,
+                                                   IParallelConfig,
+                                                   ISchedulerConfig)
 
 
 class VllmCacheConfigAdapter(ICacheConfig):

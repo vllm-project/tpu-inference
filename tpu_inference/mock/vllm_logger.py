@@ -138,7 +138,8 @@ def _configure_vllm_root_logger() -> None:
     for formatter in logging_config.get("formatters", {}).values():
         # This provides backwards compatibility after #10134.
         if formatter.get(
-                "class") == "tpu_inference.vllm_logging_utils.NewLineFormatter":
+                "class"
+        ) == "tpu_inference.vllm_logging_utils.NewLineFormatter":
             formatter[
                 "class"] = "tpu_inference.mock.vllm_logging_utils.NewLineFormatter"
 

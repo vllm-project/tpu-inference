@@ -7,7 +7,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, SpeculativeConfig,
                          VllmConfig)

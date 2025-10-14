@@ -3,10 +3,10 @@
 from unittest.mock import Mock
 
 from tpu_inference.adapters.vllm_adapters import (VllmKVCacheConfigAdapter,
-                                                VllmKVCacheSpecAdapter,
-                                                VllmLoRARequestAdapter,
-                                                VllmModelRunnerOutputAdapter,
-                                                VllmSchedulerOutputAdapter)
+                                                  VllmKVCacheSpecAdapter,
+                                                  VllmLoRARequestAdapter,
+                                                  VllmModelRunnerOutputAdapter,
+                                                  VllmSchedulerOutputAdapter)
 
 
 def test_model_runner_output_adapter():

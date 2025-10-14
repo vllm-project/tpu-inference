@@ -231,7 +231,8 @@ class TestApplyQwixQuantization(unittest.TestCase):
             }
         }
 
-        with patch('tpu_inference.utils.get_padded_num_heads', return_value=128):
+        with patch('tpu_inference.utils.get_padded_num_heads',
+                   return_value=128):
             apply_qwix_quantization(self.mock_vllm_config,
                                     self.mock_model,
                                     self.mock_rng,
