@@ -296,7 +296,7 @@ class Llama4WeightLoader:
                  num_key_value_heads, attn_head_dim):
         self.names_and_weights_generator = model_weights_generator(
             model_name_or_path=vllm_config.model_config.model,
-            framework="flax",
+            framework="pt",
             filter_regex="language_model",
             download_dir=vllm_config.load_config.download_dir)
         self.is_verbose = getattr(vllm_config.additional_config, "is_verbose", False)
@@ -405,6 +405,11 @@ class Llama4WeightLoader:
                                  mapped_name)
             mapped_model_weight = get_param(model_params, mapped_name)
 
+            cast_type = mapped_model_weight.value.dtype
+            torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
+            loaded_weight = jnp.array(loaded_weight.view(torch_view_type).numpy()).view(cast_type)
+
+
             if mapped_model_weight.value.shape != loaded_weight.shape:
                 raise ValueError(
                     f"Loaded shape for {split_loaded_name}: {loaded_weight.shape} "
@@ -461,6 +466,10 @@ class Llama4WeightLoader:
                     continue
                 mapped_name = self.map_loaded_to_standardized_name(loaded_name)
                 model_weight = get_param(model_params, mapped_name)
+                
+                cast_type = model_weight.value.dtype
+                torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
+                loaded_weight = jnp.array(loaded_weight.view(torch_view_type).numpy()).view(cast_type)
 
                 if not loaded_name.endswith(".bias"):
                     loaded_weight = reshape_params(loaded_name, loaded_weight,
@@ -478,22 +487,20 @@ class Llama4WeightLoader:
                 )
 
                 # ============================= ADD ================================
-                cast_type = model_weight.value.dtype
-                torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
 
-                if torch_view_type:
-                    if isinstance(loaded_weight, jax.Array):
-                        loaded_weight_np = loaded_weight.copy()
-                    else:
-                        loaded_weight_np = loaded_weight
-                    loaded_weight_torch = torch.from_numpy(loaded_weight_np)
-                    raw_data_view = loaded_weight_torch.view(torch_view_type)
-                    weight_np = jnp.array(raw_data_view.numpy()).view(cast_type)
-                    model_weight.value = shard_put(weight_np,
-                                                   model_weight.sharding,
-                                                   mesh=model_for_loading.mesh)
+                # if torch_view_type:
+                    # if isinstance(loaded_weight, jax.Array):
+                    #     loaded_weight_np = loaded_weight.copy()
+                    # else:
+                    #     loaded_weight_np = loaded_weight
+                    # loaded_weight_torch = torch.from_numpy(loaded_weight_np)
+                    # raw_data_view = loaded_weight_torch.view(torch_view_type)
+                    # weight_np = jnp.array(raw_data_view.numpy()).view(cast_type)
+                    # model_weight.value = shard_put(weight_np,
+                    #                                model_weight.sharding,
+                    #                                mesh=model_for_loading.mesh)
 
-                elif loaded_name.endswith(".weight_scale"):
+                if loaded_name.endswith(".weight_scale"):
                     # assert model_weight is a qarray 
                     assert hasattr(model_weight, 'array'), \
                         f"Expected model_weight for scale '{loaded_name}' to be a quantized array (qarray), but it lacks an 'array' attribute."
