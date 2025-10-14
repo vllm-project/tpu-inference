@@ -3,7 +3,6 @@ import functools
 import os
 from collections.abc import Sequence
 from contextlib import nullcontext
-import time
 from typing import Any, List, Optional, Tuple
 from unittest.mock import patch
 
@@ -120,8 +119,6 @@ class VllmModelWrapper:
          
         with load_context, jax.default_device(jax.devices('cpu')[0]):
             vllm_model = vllm_get_model(vllm_config=vllm_config_for_load)
-        end_time = time.time()
-        print("wenxin: loading model time: ", end_time - start_time)
         lora_manager = None
         if vllm_config_for_load.lora_config is not None:
             # Replace layers in the model with LoRA layers.
@@ -136,11 +133,8 @@ class VllmModelWrapper:
         self.vllm_config.compilation_config.static_forward_context = static_forward_context
 
         self.model = _VllmRunner(vllm_model)
-        start_time = time.time()
         params_and_buffers = shard_model_to_tpu(self.model, self.mesh)
-        end_time = time.time()
-        print("wenxin: shard model to tpu time: ", end_time - start_time)
-        
+
         # Returning to the jax land, so we need to wrap it into a JaxValue.
         return jax_view(params_and_buffers), lora_manager
 
@@ -204,6 +198,7 @@ class VllmModelWrapper:
 
     def jit_compute_logits_func(self):
 
+        # TODO(wenxindongwork): should this be sharded on the attn_dp axis as well?
         @functools.partial(
             jax.jit,
             out_shardings=(NamedSharding(self.mesh,

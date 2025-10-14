@@ -38,11 +38,7 @@ class JaxCommonLinearConfig:
         self.tp_size = self.mesh.shape['model']*self.mesh.shape.get('attn_dp', 1)
         
         if isinstance(layer, RowParallelLinear):
-            if self.mesh.shape.get('attn_dp', 1) > 1:
-                # Replicate o_proj when using DP attention
-                self.weight_sharding = P(None, MLP_TENSOR_AXIS_NAME)
-            else: 
-                self.weight_sharding = P(None, MLP_TENSOR_AXIS_NAME)
+            self.weight_sharding = P(None, MLP_TENSOR_AXIS_NAME)
             if self.enable_sequence_parallelism:
                 self.output_sharding = P(MLP_TENSOR_AXIS_NAME, None)
         elif isinstance(layer, ColumnParallelLinear):
@@ -55,7 +51,7 @@ class JaxCommonLinearConfig:
                 self.weight_sharding = P(MLP_TENSOR_AXIS_NAME, None)
             
             if self.enable_sequence_parallelism:
-                 # todo(wenxindongwork): verify this
+                # TODO(wenxindongwork): should sequence be sharded on the attn_dp axis as well?
                 self.input_sharding = P(MLP_TENSOR_AXIS_NAME, None)
 
             if isinstance(layer, MergedColumnParallelLinear) or isinstance(
@@ -75,7 +71,12 @@ class JaxCommonLinearConfig:
                 " bad performance.", type(layer))
 
         self.bias_sharding = P(self.weight_sharding[0])
-        self.n_shards = self.mesh.shape.get(self.weight_sharding[0], 1)
+        if isinstance(self.weight_sharding[0], tuple):
+            self.n_shards = 1
+            for axis in self.weight_sharding[0]:
+                self.n_shards *= self.mesh.shape.get(axis, 1) 
+        else:
+            self.n_shards = self.mesh.shape.get(self.weight_sharding[0], 1)
 
     def get_input_sharding(self, x: torchax.tensor.Tensor):
         if self.enable_sequence_parallelism:

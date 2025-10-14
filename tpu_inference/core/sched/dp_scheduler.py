@@ -34,7 +34,6 @@ def create_dp_scheduler(base_scheduler_class=Scheduler):
         def _init_dp_config(self):
             """Initialize DP configuration from vllm_config."""
             _, _, self.dp_size = get_dp_size(self.vllm_config)
-
             logger.info(f"Scheduler initialized with DP size: {self.dp_size}")
         
         def _init_dp_state(self):
@@ -152,7 +151,7 @@ def create_dp_scheduler(base_scheduler_class=Scheduler):
             
             if best_rank is not None and best_tokens > 0:
                 self.assigned_dp_rank[request.request_id] = best_rank
-                print(f"{request.request_id}. prefix cache hit: {best_rank}")
+                logger.debug(f"{request.request_id}. prefix cache hit: {best_rank}")
                 return best_blocks, best_tokens
             else:
                 # No cache hit, assign new rank and get empty blocks
@@ -161,6 +160,7 @@ def create_dp_scheduler(base_scheduler_class=Scheduler):
         
         def schedule(self) -> SchedulerOutput:
             """Override schedule to return DP-specific output."""
+            
             base_output = super().schedule()
             
             # Create DP-specific output
@@ -175,8 +175,8 @@ def create_dp_scheduler(base_scheduler_class=Scheduler):
                 for req_id in scheduled_requests
                 if req_id in self.assigned_dp_rank
             }
-            print("Scheduled requests DP ranks:", assigned_dp_rank)
-            
+            logger.debug(f"Scheduled requests DP ranks: {assigned_dp_rank}")
+
             return DPSchedulerOutput(
                 scheduled_new_reqs=base_output.scheduled_new_reqs,
                 scheduled_cached_reqs=base_output.scheduled_cached_reqs,
@@ -230,6 +230,3 @@ def create_dp_scheduler(base_scheduler_class=Scheduler):
             )
     
     return DPScheduler
-
-
-# Note: DPScheduler is now created dynamically in tpu_jax_runner.py when needed

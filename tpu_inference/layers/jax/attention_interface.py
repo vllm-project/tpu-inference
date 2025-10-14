@@ -290,6 +290,7 @@ def sharded_ragged_paged_attention(
         P(ATTN_DATA_AXIS_NAME),  # distribution
     )
     out_specs = (qkv_spec, kv_cache_spec)
+
     def _ragged_paged_attention(*args):
         return ragged_paged_attention(
             *args,

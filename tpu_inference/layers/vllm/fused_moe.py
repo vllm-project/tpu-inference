@@ -8,7 +8,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 from tpu_inference.layers.vllm.linear_common import \
     slice_sharded_tensor_for_concatenation
-from tpu_inference.layers.jax.sharding import EXPERT_AXIS_NAME, MLP_DATA_AXIS_NAME, MLP_TENSOR_AXIS_NAME
+from tpu_inference.layers.jax.sharding import EXPERT_AXIS_NAME, MLP_TENSOR_AXIS_NAME
 
 P = PartitionSpec
 
@@ -141,7 +141,7 @@ def tensor_sharded_gmm_row_parallel(
         check_rep=False,
     )(lhs, rhs, group_sizes)
 
-# todo (wenxindongwork): support model-wise duplication.  
+# TODO (wenxindongwork): support model-wise DP.  
 def expert_sharded_gmm(
     lhs: jax.Array,
     rhs: jax.Array,
@@ -329,7 +329,6 @@ def jax_fused_moe_func(
     x = hidden_states[token_indices_sorted]
 
     if use_ep:
-        # todo (wenxindongwork): verify if this is necessary
         x = jax.lax.with_sharding_constraint(
             x, NamedSharding(mesh, P(None)))
         x = expert_sharded_gmm(x,

@@ -4,7 +4,6 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from tpu_inference.layers.jax.sharding import ATTN_DATA_AXIS_NAME, MLP_DATA_AXIS_NAME
 from vllm.v1.outputs import LogprobsTensors
 
 from tpu_inference.layers.jax.binary_search import topk_mask, topp_mask
@@ -27,7 +26,7 @@ def sample(
     # (B, vocab_size)
     if tpu_sampling_metadata.do_sampling:
         # Unshard the logits explicity to avoid latency increase.
-        # todo(wenxindongwork): verify if we should make this configurable. 
+        # TODO(wenxindongwork): should we make this configurable? 
         logits = jax.lax.with_sharding_constraint(
             logits, NamedSharding(mesh, P(None, None)))
     greedy_sampled = jnp.argmax(logits, axis=-1)

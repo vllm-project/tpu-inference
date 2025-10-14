@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple
 import jax
 import jax.numpy as jnp
 import numpy as np
+from tpu_inference.core.sched.utils import get_dp_size
 from tpu_inference.layers.jax.sharding import MLP_TENSOR_AXIS_NAME
 import vllm.envs as envs
 from jax.sharding import NamedSharding, PartitionSpec
@@ -94,7 +95,7 @@ class CompilationManager:
             num_tokens = inputs_embeds.shape[0]
         assert num_tokens is not None
 
-        dp_size = self.runner.mesh.shape["data"]
+        _, _, dp_size = get_dp_size(self.runner.vllm_config)
 
         # Keep existing pattern for complex array operations
         block_tables = self.runner.block_table_cpu[:self.runner.max_num_reqs]
