@@ -40,7 +40,7 @@ steps:
 #
    - label: "Commit support matrices if is nightly build"
      if: build.env("NIGHTLY") == "1"
-     key: commit_support_matrices
+     key: commit_nightly_support_matrices
      depends_on: generate_support_matrices
      agents:
        queue: tpu_v6e_queue
