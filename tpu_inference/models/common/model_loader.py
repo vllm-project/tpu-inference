@@ -269,7 +269,11 @@ def get_flax_model(
     combine_hidden_states_fn = functools.partial(combine_hidden_states,
                                                  graphdef)
 
-    return model_fn, compute_logits_fn, combine_hidden_states_fn, get_multimodal_embeddings_fn, get_input_embeddings_fn, model_class.get_mrope_input_positions, state, lora_manager, model
+    get_mrope_input_positions_fn = None if not hasattr(
+        model_class,
+        "get_mrope_input_positions") else model_class.get_mrope_input_positions
+
+    return model_fn, compute_logits_fn, combine_hidden_states_fn, get_multimodal_embeddings_fn, get_input_embeddings_fn, get_mrope_input_positions_fn, state, lora_manager, model
 
 
 def get_vllm_model(
