@@ -6,7 +6,7 @@ import pytest
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 from tpu_inference.runner.kv_cache import (create_kv_caches,
-                                         get_kv_cache_shape_with_mesh)
+                                           get_kv_cache_shape_with_mesh)
 
 
 @pytest.fixture

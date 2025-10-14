@@ -6,8 +6,8 @@ Google Cloud TPUs (Tensor Processing Units) accelerate machine learning workload
 
 ## Requirements
 
-* **Google Cloud TPU VM:** Access to a TPU VM. For more information, see [Manage TPU resources](https://cloud.google.com/tpu/docs/managing-tpus-tpu-vm).  
-* **TPU versions:** v6e, v5e   
+* **Google Cloud TPU VM:** Access to a TPU VM. For more information, see [Manage TPU resources](https://cloud.google.com/tpu/docs/managing-tpus-tpu-vm).
+* **TPU versions:** v6e, v5e
 * **Python:** 3.11 or newer (3.12 used in examples).
 
 ---
@@ -28,26 +28,26 @@ To install vLLM TPU, you can either install using `pip` (see section [Install us
 1. Set up a Python virtual environment:
 
     ```shell
-    python3.12 -m venv vllm_env --symlinks 
+    python3.12 -m venv vllm_env --symlinks
     source vllm_env/bin/activate
     ```
 
-    Note: You don’t need to clone the `vllm` and `tpu-inference` repos to execute any of the commands in this guide 
+    Note: You don’t need to clone the `vllm` and `tpu-inference` repos to execute any of the commands in this guide
 
 1. Use the following command to install vllm-tpu using `pip`
 
     ```shell
-    pip install vllm-tpu 
+    pip install vllm-tpu
     ```
 
 1. Get access to the ["meta-llama/Llama-3.1-8B" model](https://huggingface.co/meta-llama/Llama-3.1-8B) on Hugging Face. This is the model used in the following example, but you can use any supported model.
 
 1. Generate a new [Hugging Face token](https://huggingface.co/docs/hub/security-tokens) if you don't already have one:
 
-    1. Go to **Your Profile \> Settings \> Access Tokens**.  
-    2. Select **Create new token**.  
-    3. Specify a name of your choice and a role with at least **Read** permissions.  
-    4. Select **Generate a token**.  
+    1. Go to **Your Profile \> Settings \> Access Tokens**.
+    2. Select **Create new token**.
+    3. Specify a name of your choice and a role with at least **Read** permissions.
+    4. Select **Generate a token**.
     5. Copy the generated token to your clipboard, set it as an environment variable, and authenticate with the `huggingface-cli`. Replace `YOUR_TOKEN` with the generated token:
 
         ```shell
@@ -58,7 +58,7 @@ To install vLLM TPU, you can either install using `pip` (see section [Install us
 
 1. Launch the vLLM server:
 
-    The following command downloads the model weights from [Hugging Face Model Hub](https://huggingface.co/docs/hub/en/models-the-hub) to the TPU VM's `/tmp` directory, pre-compiles a range of input shapes, and writes the model compilation to `~/.cache/vllm/xla_cache`. 
+    The following command downloads the model weights from [Hugging Face Model Hub](https://huggingface.co/docs/hub/en/models-the-hub) to the TPU VM's `/tmp` directory, pre-compiles a range of input shapes, and writes the model compilation to `~/.cache/vllm/xla_cache`.
 
     ```shell
     cd ~/work-dir/vllm
@@ -115,7 +115,7 @@ To install vLLM TPU, you can either install using `pip` (see section [Install us
 
 ## For further reading
 
-* [Documentation](https://github.com/vllm-project/tpu-inference/tree/main/docs)   
-* [Examples](https://github.com/vllm-project/tpu-inference/tree/main/examples)   
-* [Recipes](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM)   
+* [Documentation](https://github.com/vllm-project/tpu-inference/tree/main/docs)
+* [Examples](https://github.com/vllm-project/tpu-inference/tree/main/examples)
+* [Recipes](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM)
 * [GKE serving with vLLM TPU](https://cloud.google.com/kubernetes-engine/docs/tutorials/serve-vllm-tpu)

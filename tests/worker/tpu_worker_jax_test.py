@@ -7,8 +7,8 @@ from vllm.v1.outputs import DraftTokenIds
 
 # Import the abstract classes and interfaces for mocking
 from tpu_inference.di.abstracts import (AbstractKVCacheConfig,
-                                      AbstractLoRARequest,
-                                      AbstractSchedulerOutput)
+                                        AbstractLoRARequest,
+                                        AbstractSchedulerOutput)
 from tpu_inference.di.interfaces import HostInterface
 # The class we are testing
 from tpu_inference.worker.tpu_worker_jax import TPUWorker
@@ -119,7 +119,8 @@ class TestTPUWorker:
     @patch('tpu_inference.worker.tpu_worker_jax.TPUModelRunner')
     @patch('tpu_inference.worker.tpu_worker_jax.utils')
     @patch('tpu_inference.worker.tpu_worker_jax.jax')
-    @patch('tpu_inference.worker.tpu_worker_jax.ensure_kv_transfer_initialized')
+    @patch(
+        'tpu_inference.worker.tpu_worker_jax.ensure_kv_transfer_initialized')
     def test_init_device_with_provided_devices(
             self, mock_ensure_kv_transfer_initialized, mock_jax, mock_utils,
             mock_runner_cls, mock_host_interface, mock_vllm_config):
@@ -141,7 +142,8 @@ class TestTPUWorker:
     @patch('tpu_inference.worker.tpu_worker_jax.TPUModelRunner')
     @patch('tpu_inference.worker.tpu_worker_jax.utils')
     @patch('tpu_inference.worker.tpu_worker_jax.jax')
-    @patch('tpu_inference.worker.tpu_worker_jax.ensure_kv_transfer_initialized')
+    @patch(
+        'tpu_inference.worker.tpu_worker_jax.ensure_kv_transfer_initialized')
     def test_init_device_autodetects_devices(
             self, mock_ensure_kv_transfer_initialized, mock_jax, mock_utils,
             mock_runner_cls, mock_host_interface, mock_vllm_config):
@@ -392,7 +394,8 @@ class TestTPUWorker:
         mock_runner_method = getattr(worker.model_runner, runner_method_name)
         mock_runner_method.assert_called_once_with(*method_args)
 
-    @patch('tpu_inference.worker.tpu_worker_jax.adapt_kv_cache_config_if_needed')
+    @patch(
+        'tpu_inference.worker.tpu_worker_jax.adapt_kv_cache_config_if_needed')
     def test_initialize_from_config(self, mock_adapter_fn, mock_host_interface,
                                     mock_vllm_config):
         """Tests the special case pass-through for initialize_from_config."""
@@ -412,7 +415,8 @@ class TestTPUWorker:
         worker.model_runner.initialize_kv_cache.assert_called_once_with(
             "concrete_vllm_object")
 
-    @patch('tpu_inference.worker.tpu_worker_jax.adapt_kv_cache_config_if_needed')
+    @patch(
+        'tpu_inference.worker.tpu_worker_jax.adapt_kv_cache_config_if_needed')
     def test_initialize_from_config_kv_cache_config(self, mock_adapter_fn,
                                                     mock_host_interface,
                                                     mock_vllm_config):

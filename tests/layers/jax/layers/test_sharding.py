@@ -4,8 +4,8 @@ from unittest.mock import MagicMock
 import jax
 
 from tpu_inference.layers.jax.sharding import (Sharding, ShardingConfig,
-                                             ShardingRulesConfig,
-                                             ShardingStrategy)
+                                               ShardingRulesConfig,
+                                               ShardingStrategy)
 
 
 class TestSharding(unittest.TestCase):

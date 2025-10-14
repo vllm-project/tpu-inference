@@ -10,7 +10,7 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh
 
 from tpu_inference.experimental.llama3_jax_stashed import (Llama3WeightLoader,
-                                                         LlamaForCausalLM)
+                                                           LlamaForCausalLM)
 
 
 class MockParam:

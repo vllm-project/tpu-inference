@@ -7,9 +7,9 @@ import pytest
 
 # Import the functions to be tested
 from tpu_inference.utils import (GBYTES, enable_megacore,
-                               get_jax_dtype_from_str_dtype, get_megacore,
-                               get_padded_head_dim, hbm_usage_bytes,
-                               hbm_usage_gb, quantize_kv)
+                                 get_jax_dtype_from_str_dtype, get_megacore,
+                                 get_padded_head_dim, hbm_usage_bytes,
+                                 hbm_usage_gb, quantize_kv)
 
 
 def test_enable_and_get_megacore():

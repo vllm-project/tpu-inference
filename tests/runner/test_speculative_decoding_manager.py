@@ -2,15 +2,16 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
-
-from tpu_inference.runner.input_batch_jax import CachedRequestState, InputBatch
-from tpu_inference.runner.speculative_decoding_manager import SpecDecodeMetadata
-from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
-from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
 from vllm.sampling_params import SamplingType
 from vllm.v1.outputs import DraftTokenIds
+
+from tpu_inference.runner.input_batch_jax import CachedRequestState, InputBatch
+from tpu_inference.runner.speculative_decoding_manager import \
+    SpecDecodeMetadata
+from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
+from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
 
 
 class TestSpeculativeDecodingManager:
