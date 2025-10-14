@@ -48,13 +48,14 @@ nav:
   - Developer Guides:
     - 'JAX Model Development': developer_guides/jax_model_development.md
     - 'Torch Model Development': developer_guides/torchax_model_development.md
-  - TPU Recipes: https://github.com/AI-Hypercomputer/tpu-recipes
+  - 'TPU Recipes (external)': https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM
 
 plugins:
   - search
   - same-dir
   - meta
   - glightbox
+  - open-in-new-tab
 
 markdown_extensions:
   - attr_list
