@@ -1,6 +1,6 @@
 # Qwen/Qwen2.5-VL-7B-Instruct
 agents:
-  queue: tpu_v6e_queue
+  queue: tpu_v6e_8_queue
 steps:
   - label: "Unit tests for Qwen/Qwen2.5-VL-7B-Instruct"
     key: "Qwen_Qwen2_5-VL-7B-Instruct_UnitTest"
@@ -28,7 +28,7 @@ steps:
     env:
       TEST_MODEL: Qwen/Qwen2.5-VL-7B-Instruct
       TENSOR_PARALLEL_SIZE: 1
-      MINIMUM_ACCURACY_THRESHOLD: 0.1  # TODO : update
+      MINIMUM_ACCURACY_THRESHOLD: 0.72 # check (Dennis)
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
@@ -50,7 +50,7 @@ steps:
     soft_fail: true
     env:
       TEST_MODEL: Qwen/Qwen2.5-VL-7B-Instruct
-      TENSOR_PARALLEL_SIZE: 1
+      TENSOR_PARALLEL_SIZE: 8 # check (Dennis)
       MINIMUM_THROUGHPUT_THRESHOLD: 0  # TODO : replace 0 with your performance threshold
       INPUT_LEN: 1800
       OUTPUT_LEN: 128

@@ -28,7 +28,7 @@ steps:
     env:
       TEST_MODEL: Qwen/Qwen3-30B-A3B
       TENSOR_PARALLEL_SIZE: 4
-      MINIMUM_ACCURACY_THRESHOLD: 0.1  # TODO : update
+      MINIMUM_ACCURACY_THRESHOLD: 0.89  # check (Dennis)
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
