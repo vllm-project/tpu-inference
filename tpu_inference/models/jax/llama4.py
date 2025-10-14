@@ -58,7 +58,8 @@ class Llama4ForCausalLM(nnx.Module):
 
         dtype: jnp.dtype = jnp.bfloat16
 
-        self.num_layers: int = getattr(text_config, "num_hidden_layers", 48)
+        self.num_layers = 4
+        # self.num_layers: int = getattr(text_config, "num_hidden_layers", 48)
 
         self.intermediate_size_moe: int = getattr(text_config, "intermediate_size", 8192)
         self.intermediate_size_mlp = getattr(text_config, "intermediate_size_mlp", 16384)
@@ -428,6 +429,8 @@ class Llama4WeightLoader:
                 layer_num = self._get_layer_num(loaded_name)
 
                 if layer_num is not None:
+                    if layer_num >= 4:
+                        continue
                     is_moe_layer = (layer_num + 1) % \
                             self.interleave_moe_layer_step == 0
                     self.expert_prefix = "shared_expert." if is_moe_layer else ""
