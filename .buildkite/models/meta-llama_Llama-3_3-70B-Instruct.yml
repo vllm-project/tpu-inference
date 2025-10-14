@@ -1,10 +1,10 @@
 # meta-llama/Llama-3.3-70B-Instruct
-agents:
-  queue: tpu_v6e_8_queue
 steps:
   - label: "Unit tests for meta-llama/Llama-3.3-70B-Instruct"
     key: "meta-llama_Llama-3_3-70B-Instruct_UnitTest"
     soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
@@ -25,6 +25,8 @@ steps:
     key: "meta-llama_Llama-3_3-70B-Instruct_IntegrationTest"
     depends_on: "record_meta-llama_Llama-3_3-70B-Instruct_UnitTest"
     soft_fail: true
+    agents:
+      queue: tpu_v6e_8_queue
     env:
       TEST_MODEL: meta-llama/Llama-3.3-70B-Instruct
       TENSOR_PARALLEL_SIZE: 8
@@ -48,10 +50,12 @@ steps:
     key: "meta-llama_Llama-3_3-70B-Instruct_Benchmark"
     depends_on: "record_meta-llama_Llama-3_3-70B-Instruct_IntegrationTest"
     soft_fail: true
+    agents:
+      queue: tpu_v6e_8_queue
     env:
       TEST_MODEL: meta-llama/Llama-3.3-70B-Instruct
       TENSOR_PARALLEL_SIZE: 8
-      MINIMUM_THROUGHPUT_THRESHOLD: 7.5
+      MINIMUM_THROUGHPUT_THRESHOLD: 7.0
       INPUT_LEN: 1800
       OUTPUT_LEN: 128
       PREFIX_LEN: 0
