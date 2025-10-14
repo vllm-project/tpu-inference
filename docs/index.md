@@ -25,22 +25,22 @@ If you are new to vLLM on TPU, we recommend starting with the **[Quickstart](get
 
 ## Key Features
 
-*   **High Performance:** vLLM on TPU is designed to deliver the best possible performance for large language models on Google TPUs.
-*   **Unified Backend:** Run your PyTorch models on TPUs without any code changes, and get native support for JAX.
-*   **vLLM Standardization:** Enjoy the same user experience, telemetry, and interface as the original vLLM project.
+* **High Performance:** vLLM on TPU is designed to deliver the best possible performance for large language models on Google TPUs.
+* **Unified Backend:** Run your PyTorch models on TPUs without any code changes, and get native support for JAX.
+* **vLLM Standardization:** Enjoy the same user experience, telemetry, and interface as the original vLLM project.
 
 ## Developer Guides
 
 If you are interested in contributing to the project or want to learn more about the internals, check out our developer guides:
 
-*   **[JAX Model Development](developer_guides/jax_model_development.md)**
-*   **[Torch Model Development](developer_guides/torchax_model_development.md)**
+* **[JAX Model Development](developer_guides/jax_model_development.md)**
+* **[Torch Model Development](developer_guides/torchax_model_development.md)**
 
 ## Community and Support
 
 Have questions or want to get involved?
 
-*   **[User Forum](https://discuss.vllm.ai/c/hardware-support/google-tpu-support/27)**
-*   **[Developer Slack](https://join.slack.com/share/enQtOTY2OTUxMDIyNjY1OS00M2MxYWQwZjAyMGZjM2MyZjRjNTA0ZjRkNjkzOTRhMzg0NDM2OTlkZDAxOTAzYmJmNzdkNDc4OGZjYTUwMmRh)**
-*   **[GitHub Issues](https://github.com/vllm-project/tpu-inference/issues)**
-*   **[Good First Issues](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+state%3Aopen+label%3A%22good+first+issue%22)**
+* **[User Forum](https://discuss.vllm.ai/c/hardware-support/google-tpu-support/27)**
+* **[Developer Slack](https://join.slack.com/share/enQtOTY2OTUxMDIyNjY1OS00M2MxYWQwZjAyMGZjM2MyZjRjNTA0ZjRkNjkzOTRhMzg0NDM2OTlkZDAxOTAzYmJmNzdkNDc4OGZjYTUwMmRh)**
+* **[GitHub Issues](https://github.com/vllm-project/tpu-inference/issues)**
+* **[Good First Issues](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+state%3Aopen+label%3A%22good+first+issue%22)**

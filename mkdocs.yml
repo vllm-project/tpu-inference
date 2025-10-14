@@ -1,5 +1,5 @@
 site_name: vLLM TPU
-site_url: !ENV READTHEDOCS_CANONICAL_URL
+site_url: ""
 repo_url: https://github.com/vllm-project/tpu-inference
 edit_uri: edit/main/docs/
 docs_dir: docs
@@ -17,7 +17,7 @@ theme:
         name: Switch to light mode
     # Palette toggle for light mode
     - media: "(prefers-color-scheme: light)"
-      scheme: default 
+      scheme: default
       primary: white
       toggle:
         icon: material/brightness-7

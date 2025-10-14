@@ -39,7 +39,6 @@ tpu_inference
    │   └── utils
 ```
 
-
 - registration of new Jax model types should be performed in [`tpu_inference/models/common/model_loader.py`](https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/models/common/model_loader.py)
 - new Jax model definitions should be added to [`tpu_inference/models/jax`](https://github.com/vllm-project/tpu-inference/tree/main/tpu_inference/models/jax).
 - commonly used layers (e.g. embedding, feed-forward) can be imported from [`tpu_inference/layers/jax`](https://github.com/vllm-project/tpu-inference/tree/main/tpu_inference/layers/jax).
@@ -56,7 +55,7 @@ Implementing a new model requires creating a dedicated model file (e.g. [deepsee
 The model file is intended to contain all of the information needed for defining the Transformer-based architecture.
 Each model file contains a model class with the following constructor interface:
 
-```
+```python
 class NewModel(nnx.Module):
   def __init__(self, vllm_config: VllmConfig, rng: nnx.Rngs,
                mesh: jax.sharding.Mesh)
@@ -109,7 +108,7 @@ For the sake of demonstration, we will be referencing [deepseek_v3.py](https://g
 
 ## Loading Pre-quantized Checkpoints and Applying Quantization Rules
 To correctly load a pre-quantized checkpoint, the following steps need to be run:
-- Define the quantization settings using a Qwix config, which can be exposed as a yaml file (e.g. [int8_default.yaml](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/models/jax/utils/quantization/configs/int8_default.yaml)) or [set within the code](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/models/jax/utils/quantization/quantization_utils.py#L37). Open source models' quantization settings are typically published in the respective HuggingFace quantization_config (e.g. [DeepSeek-R1](https://huggingface.co/deepseek-ai/DeepSeek-R1/blob/main/config.json#L37)).\
+- Define the quantization settings using a Qwix config, which can be exposed as a yaml file (e.g. [int8_default.yaml](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/models/jax/utils/quantization/configs/int8_default.yaml)) or [set within the code](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/models/jax/utils/quantization/quantization_utils.py#L37). Open source models' quantization settings are typically published in the respective HuggingFace quantization_config (e.g. [DeepSeek-R1](https://huggingface.co/deepseek-ai/DeepSeek-R1/blob/main/config.json#L37)).
 (For more information on the supported Qwix quantization options, please refer to the [Qwix documentation](https://github.com/google/qwix?tab=readme-ov-file#quantization-config)).
 - Set `use_abstract_model: True` in your Qwix config so that your NNX model graph is quantized before the weights are loaded in.
 - If the pre-quantized model contains dequantization scales, update the weight loading logic to [store them](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/models/jax/deepseek_v3.py#L693) as well. If loading the model’s weights required [applying transformations](#weight-loading), ensure that [dequantization scales are also transformed accordingly](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/models/jax/deepseek_v3.py#L602). The scale dimensions can be determined by the `weight_block_size` in the [HuggingFace config](https://huggingface.co/deepseek-ai/DeepSeek-V3/blob/main/config.json#L41) and [set](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/models/jax/deepseek_v3.py#L484) in the weight loading logic. The scale dimensions can also be cross-referenced against the [Safetensor files](https://huggingface.co/deepseek-ai/DeepSeek-R1/blob/main/model-00001-of-000163.safetensors).
