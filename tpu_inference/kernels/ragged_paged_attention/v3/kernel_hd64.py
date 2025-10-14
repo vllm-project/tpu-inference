@@ -1,5 +1,5 @@
-"""A variant of TPU-Friendly Ragged Paged Attention kernel optimized for
-
+"""
+A variant of TPU-Friendly Ragged Paged Attention kernel optimized for
 head_dim = 64.
 """
 
