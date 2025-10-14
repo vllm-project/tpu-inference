@@ -1,17 +1,19 @@
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
+import jax
 import jax.numpy as jnp
 import numpy as np
-from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
-from vllm.v1.outputs import DraftTokenIds
-from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
 from tpu_inference.utils import device_array
+from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
+from vllm.v1.outputs import DraftTokenIds
+from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
 if TYPE_CHECKING:
     from tpu_inference.layers.common.attention_metadata import \
@@ -76,6 +78,12 @@ class SpeculativeDecodingManager:
                 f"Speculative decoding method "
                 f"'{self.runner.speculative_config.method}' is not supported.")
 
+    @functools.partial(jax.jit, static_argnums=(0, ))
+    def _convert_list_to_device_array(self, lst: list[int]) -> jnp.ndarray:
+        """Jitted helper function to convert a list to a device array."""
+        arr = jnp.array(lst, dtype=jnp.int32)
+        return device_array(self.runner.mesh, arr)
+
     def propose_eagle3_draft_token_ids(
         self,
         sampled_token_ids: list[list[int]],
@@ -109,24 +117,21 @@ class SpeculativeDecodingManager:
         assert pad_len >= 0
         next_token_ids += [0] * pad_len
 
-        next_token_ids = jnp.array(next_token_ids, dtype=jnp.int32)
-        (next_token_ids, ) = device_array(self.runner.mesh, (next_token_ids, ))
+        next_token_ids = self._convert_list_to_device_array(next_token_ids)
 
         if spec_decode_metadata is None:
             num_rejected_tokens = None
         else:
             num_draft_tokens = spec_decode_metadata.draft_lengths_cpu
             num_rejected_tokens = [
-                n + 1 - len(sampled_token_ids[i]) if n > 0 else 0
+                int(n) + 1 - len(sampled_token_ids[i]) if n > 0 else 0
                 for i, n in enumerate(num_draft_tokens)
             ]
 
             pad_len = self.runner.max_num_reqs - len(num_rejected_tokens)
             num_rejected_tokens += [0] * pad_len
-
-            num_rejected_tokens = jnp.array(num_rejected_tokens)
-            (num_rejected_tokens, ) = device_array(self.runner.mesh,
-                                                   (num_rejected_tokens, ))
+            num_rejected_tokens = self._convert_list_to_device_array(
+                num_rejected_tokens)
 
         attn_metadata, target_token_ids, target_hidden_states = self.runner.drafter.prepare_inputs(
             attn_metadata,
@@ -138,7 +143,6 @@ class SpeculativeDecodingManager:
             kv_caches=self.runner.kv_caches,
             next_token_ids=next_token_ids,
             attn_metadata=attn_metadata,
-            input_ids=input_ids,
             target_token_ids=target_token_ids,
             target_hidden_states=target_hidden_states,
         )
