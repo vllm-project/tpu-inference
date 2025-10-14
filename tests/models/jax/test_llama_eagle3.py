@@ -11,7 +11,7 @@ from vllm.config import ModelConfig
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.models.jax.llama_eagle3 import (Eagle3LlamaDecoderLayer,
-                                                 EagleLlama3ForCausalLM)
+                                                   EagleLlama3ForCausalLM)
 from tpu_inference.runner.kv_cache import create_kv_caches
 
 

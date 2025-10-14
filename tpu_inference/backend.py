@@ -16,7 +16,7 @@ limitations under the License.
 from typing import Optional
 
 from tpu_inference.adapters.vllm_adapters import (VllmLoRARequestAdapter,
-                                                VllmSchedulerOutputAdapter)
+                                                  VllmSchedulerOutputAdapter)
 from tpu_inference.di.interfaces import BackendInterface, HostInterface
 from tpu_inference.worker.base import AbstractTpuWorker
 from tpu_inference.worker.tpu_worker_jax import TPUWorker

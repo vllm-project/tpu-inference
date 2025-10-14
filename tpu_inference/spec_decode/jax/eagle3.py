@@ -5,11 +5,11 @@ from typing import Any, Optional
 import jax
 import jax.numpy as jnp
 import numpy as np
+from vllm.config import VllmConfig
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.models.common.model_loader import get_model
 from tpu_inference.utils import device_array
-from vllm.config import VllmConfig
 
 
 class Eagle3Proposer:

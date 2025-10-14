@@ -12,8 +12,8 @@ from jax.experimental.pallas import tpu as pltpu
 from tpu_inference.kernels.quantized_matmul.tuned_block_sizes import (
     TunedValue, get_device_vmem_limit, get_tuned_block_sizes)
 from tpu_inference.kernels.quantized_matmul.util import (get_kernel_name,
-                                                       next_multiple,
-                                                       unfold_args)
+                                                         next_multiple,
+                                                         unfold_args)
 
 
 def quantize_array(

@@ -1,8 +1,8 @@
 <p align="center">
    <!-- This image will ONLY show up in GitHub's dark mode -->
-  <img src="docs/assets/tpu_inference _dark_mode_short.png#gh-dark-mode-only" alt="vLLM TPU" style="width: 86%;">
+  <img src="docs/assets/tpu_inference_dark_mode_short.png#gh-dark-mode-only" alt="vLLM TPU" style="width: 86%;">
     <!-- This image will ONLY show up in GitHub's light mode (and on other platforms) -->
-  <img src="docs/assets/tpu_inference _light_mode_short.png#gh-light-mode-only" alt="vLLM TPU" style="width: 86%;">
+  <img src="docs/assets/tpu_inference_light_mode_short.png#gh-light-mode-only" alt="vLLM TPU" style="width: 86%;">
 </p>
 
 <p align="center">
@@ -16,14 +16,14 @@ _Upcoming Events_ 🔥
 - Join us at the [PyTorch Conference, October 22-23](https://events.linuxfoundation.org/pytorch-conference/) in San Francisco!
 - Join us at [Ray Summit, November 3-5](https://www.anyscale.com/ray-summit/2025) in San Francisco!
 - Join us at [JAX DevLab on November 18th](https://rsvp.withgoogle.com/events/devlab-fall-2025) in Sunnyvale!
-  
+
 _Latest News_ 🔥
 
 - [2025/10] vLLM TPU: A New Unified Backend Supporting PyTorch and JAX on TPU
 
 <details>
 <summary><i>Previous News</i> 🔥</summary>
-  
+
 </details>
 
 ---

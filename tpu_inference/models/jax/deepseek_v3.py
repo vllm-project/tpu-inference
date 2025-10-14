@@ -18,17 +18,15 @@ from tpu_inference.layers.jax.attention.deepseek_v3_attention import MLA
 from tpu_inference.layers.jax.constants import KVCacheType
 from tpu_inference.layers.jax.layers import DenseFFW, Embedder, LMhead, RMSNorm
 from tpu_inference.layers.jax.moe.deepseek_v3_moe import (DeepSeekV3Router,
-                                                        SparseMoE)
+                                                          SparseMoE)
 from tpu_inference.layers.jax.moe.moe import MoE
 from tpu_inference.layers.jax.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.quantization.quantization_utils import \
     get_quant_dtype_from_qwix_config
-from tpu_inference.models.jax.utils.weight_utils import (get_param,
-                                                       model_weights_generator,
-                                                       print_param_info,
-                                                       reshape_params)
+from tpu_inference.models.jax.utils.weight_utils import (
+    get_param, model_weights_generator, print_param_info, reshape_params)
 
 logger = init_logger(__name__)
 

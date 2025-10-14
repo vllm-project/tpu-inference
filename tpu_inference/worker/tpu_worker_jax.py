@@ -22,11 +22,11 @@ from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 
 from tpu_inference import utils
 from tpu_inference.di.abstracts import (AbstractKVCacheConfig,
-                                      AbstractLoRARequest,
-                                      AbstractSchedulerOutput)
+                                        AbstractLoRARequest,
+                                        AbstractSchedulerOutput)
 from tpu_inference.di.interfaces import HostInterface
 from tpu_inference.distributed.utils import (get_host_ip, get_kv_transfer_port,
-                                           get_node_id)
+                                             get_node_id)
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.kv_cache import get_rpa_page_size_bytes
 from tpu_inference.runner.tpu_jax_runner import TPUModelRunner

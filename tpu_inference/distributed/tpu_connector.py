@@ -86,8 +86,9 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 from tpu_inference.distributed.utils import (get_host_ip, get_kv_ips,
-                                           get_kv_ports, get_kv_transfer_port,
-                                           get_node_id, get_side_channel_port)
+                                             get_kv_ports,
+                                             get_kv_transfer_port, get_node_id,
+                                             get_side_channel_port)
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
 from tpu_inference.utils import device_array

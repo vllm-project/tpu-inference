@@ -4,7 +4,7 @@ import numpy as np
 from vllm.v1.outputs import LogprobsTensors
 
 from tpu_inference.layers.jax.sample.sampling import (compute_logprobs,
-                                                    gather_logprobs)
+                                                      gather_logprobs)
 
 
 class TestSampling:
