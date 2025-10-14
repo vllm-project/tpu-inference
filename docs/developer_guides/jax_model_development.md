@@ -1,4 +1,5 @@
 # JAX Model Development Guide
+
 tpu-inference provides a flexible framework for implementing Transformer-based architectures in Flax NNX.
 
 The ingredients for integrating a new model type consist of:
@@ -10,7 +11,7 @@ The ingredients for integrating a new model type consist of:
 # Code Organization
 It is helpful to familiarize with the code organization before beginning model development:
 
-```
+```bash
 tpu_inference
 ├── layers
 │   ├── jax # Provide pre-implemented building blocks for tpu-inference models.
@@ -38,11 +39,12 @@ tpu_inference
    │   └── utils
 ```
 
-- registration of new Jax model types should be performed in `tpu_inference/models/common/model_loader.py`
-- new Jax model definitions should be added to `tpu_inference/models/jax`.
-- commonly used layers (e.g. embedding, feed-forward) can be imported from `tpu_inference/layers/jax`.
-- model-specific layer implementations should be added to `tpu_inference/layers/<layer_type>/<model_type>_<layer_type>`.py (e.g. `attention/deepseek_v3_attention.py`, `moe/deepseek_v3_moe.py`).
-- custom (Qwix) quantization configs (yaml files) should be stored in `tpu_inference/models/jax/utils/quantization/configs`.
+
+- registration of new Jax model types should be performed in [`tpu_inference/models/common/model_loader.py`](https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/models/common/model_loader.py)
+- new Jax model definitions should be added to [`tpu_inference/models/jax`](https://github.com/vllm-project/tpu-inference/tree/main/tpu_inference/models/jax).
+- commonly used layers (e.g. embedding, feed-forward) can be imported from [`tpu_inference/layers/jax`](https://github.com/vllm-project/tpu-inference/tree/main/tpu_inference/layers/jax).
+- model-specific layer implementations should be added to `tpu_inference/layers/<layer_type>/<model_type>_<layer_type>.py` (e.g. [`attention/deepseek_v3_attention.py`](https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/layers/jax/attention/deepseek_v3_attention.py), [`moe/deepseek_v3_moe.py`](https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/layers/jax/moe/deepseek_v3_moe.py)).
+- custom (Qwix) quantization configs (yaml files) should be stored in [`tpu_inference/models/jax/utils/quantization/configs`](https://github.com/vllm-project/tpu-inference/tree/main/tpu_inference/models/jax/utils/quantization/configs).
 
 # Model Implementation
 Implementing a new model requires creating a dedicated model file (e.g. [deepseek_v3.py](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/models/jax/deepseek_v3.py)) that contains the following components:
@@ -66,7 +68,7 @@ The constructor should set the architecture configuration (e.g. num_layers, hidd
 ## Implementing the forward pass
 The forward pass contains the logic for stitching together the layers that are defined in the model constructor and is expected to use the following interface:
 
-```
+```python
 def __call__(
    self,
    kv_caches: List[jax.Array],
@@ -76,8 +78,8 @@ def __call__(
 ) -> Tuple[List[KVCacheType], jax.Array, List[jax.Array]]
 ```
 
-The key assumption of this interface is that context is managed outside of the model (the exception being that the model is responsible for updating the KV cache tensors after self-attention), which is the case in vLLM.\
-(See [vLLM's Block schedule and management design](https://docs.vllm.ai/en/latest/design/hybrid_kv_cache_manager.html?h=kv+cache#implementation) and [tpu_jax_runner.py](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/runner/tpu_jax_runner.py#L556) for more details on how AttentionMetadata is prepared.)\
+The key assumption of this interface is that context is managed outside of the model (the exception being that the model is responsible for updating the KV cache tensors after self-attention), which is the case in vLLM.
+(See [vLLM's Block schedule and management design](https://docs.vllm.ai/en/latest/design/hybrid_kv_cache_manager.html?h=kv+cache#implementation) and [tpu_jax_runner.py](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/runner/tpu_jax_runner.py#L556) for more details on how AttentionMetadata is prepared.)
 The returned output is expected to contain the updated KV cache, final layer hidden states, and (optional) auxiliary final hidden state residuals (for speculative decoding).
 
 In addition to the forward pass logic, each model needs to implement a method to generate the logits using the following interface:
@@ -98,7 +100,7 @@ Weight loading logic is typically composed of several categories of steps:
 Please refer to [deepseek_v3.py](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/models/jax/deepseek_v3.py#L354) or [llama4.py](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/models/jax/llama4.py#L286) for some examples on how to implement weight loading.
 
 # Quantization Support
-Many large LLMs like DeepSeek-V3 employ quantization to reduce hardware requirements and improve performance. tpu-inference utilizes the [Qwix library](https://github.com/google/qwix) to support loading pre-quantized models and/or applying additional quantization settings to loaded model weights. tpu-inference is agnostic of how a pre-quantized checkpoint is generated (so you are free to use your choice of popular tools), as long as the results are saved in HuggingFace Safetensor format and the guidelines below are followed.\
+Many large LLMs like DeepSeek-V3 employ quantization to reduce hardware requirements and improve performance. tpu-inference utilizes the [Qwix library](https://github.com/google/qwix) to support loading pre-quantized models and/or applying additional quantization settings to loaded model weights. tpu-inference is agnostic of how a pre-quantized checkpoint is generated (so you are free to use your choice of popular tools), as long as the results are saved in HuggingFace Safetensor format and the guidelines below are followed.
 For more details on how to perform inference runs with Qwix on tpu-inference, please refer to the [general readme](https://github.com/vllm-project/tpu-inference/tree/31fa76a0187496ec161c634c98ac5eba144cb36c?tab=readme-ov-file#quantization).
 
 **Please note** that you may need to update the list of supported quantization types on TPU [here](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/platforms/tpu_jax.py#L48). vLLM will trigger a validation error if the `quant_method` listed in the [HuggingFace quantization_config](https://huggingface.co/deepseek-ai/DeepSeek-R1/blob/main/config.json#L40) is not one of the supported types.
@@ -117,7 +119,9 @@ Conversely, if the checkpoint is not pre-quantized then no custom model loading 
 **Please be aware** that the Qwix quantization settings are the source of truth and will override the data types used for the loaded weights (even if pre-quantized weights were provided).
 
 # Model Registration
-Once a new model type is implemented, it must be added to the model registry in [model_loader.py](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/models/common/model_loader.py#L29).\
-**WARNING:** per vLLM’s validation process, a model must be registered under a supported HuggingFace model name (see [here](https://github.com/vllm-project/vllm/blob/320feae6f506097c47b6b41a634a6197512cffc1/vllm/model_executor/models/registry.py#L428) for more detail).
+Once a new model type is implemented, it must be added to the model registry in [model_loader.py](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/models/common/model_loader.py#L29).
+
+!!! warning
+    per vLLM’s validation process, a model must be registered under a supported HuggingFace model name (see [here](https://github.com/vllm-project/vllm/blob/320feae6f506097c47b6b41a634a6197512cffc1/vllm/model_executor/models/registry.py#L428) for more detail).
 
 To plug in external Jax NNX modeling implementations into tpu-inference, please refer to the [dedicated documentation](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/docs/getting_started/out-of-tree.md).
