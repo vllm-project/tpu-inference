@@ -25,7 +25,7 @@ With torchax you can:
 It works by having a `torch.Tensor` subclass that holds an `jax.Array`,
 and implementing all `torch` operators that this tensor is supposed to support.
 
-![torchax](https://jax-torch-interop.readthedocs.io/en/latest/_images/torchax.png)
+![torchax](../assets/torchax.png)
 
 See  [this page](https://jax-torch-interop.readthedocs.io/en/latest) for more details on how torchax works.
 
