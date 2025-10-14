@@ -50,8 +50,7 @@ def main(args: dict):
     # Generate texts from the prompts. The output is a list of RequestOutput
     # objects that contain the prompt, generated text, and other information.
     prompts = [
-        # Prompt 1:
-        """The following are multiple choice questions (with answers) about abstract_algebra.
+        """<|begin_of_text|><|header_start|>system<|header_end|>You are an expert in abstract algebra who answers multiple-choice questions.<|eot|><|header_start|>user<|header_end|>The following are multiple choice questions (with answers) about abstract_algebra.
 
     Q: Find all c in Z_3 such that Z_3[x]/(x^2 + c) is a field.
     A: 0
@@ -93,10 +92,9 @@ def main(args: dict):
     B: 4
     C: 2
     D: 6
-    Answer:""",
+    Answer:<|eot|><|header_start|>assistant<|header_end|>""",
 
-        # Prompt 2:
-        """The following are multiple choice questions (with answers) about abstract_algebra.
+        """<|begin_of_text|><|header_start|>system<|header_end|>You are an expert in abstract algebra who answers multiple-choice questions.<|eot|><|header_start|>user<|header_end|>The following are multiple choice questions (with answers) about abstract_algebra.
 
     Q: Find all c in Z_3 such that Z_3[x]/(x^2 + c) is a field.
     A: 0
@@ -138,10 +136,9 @@ def main(args: dict):
     B: 2
     C: 24
     D: 120
-    Answer:""",
+    Answer:<|eot|><|header_start|>assistant<|header_end|>""",
 
-        # Prompt 3:
-        """The following are multiple choice questions (with answers) about abstract_algebra.
+        """<|begin_of_text|><|header_start|>system<|header_end|>You are an expert in abstract algebra who answers multiple-choice questions.<|eot|><|header_start|>user<|header_end|>The following are multiple choice questions (with answers) about abstract_algebra.
 
     Q: Find all c in Z_3 such that Z_3[x]/(x^2 + c) is a field.
     A: 0
@@ -183,7 +180,7 @@ def main(args: dict):
     B: 1
     C: 0,1
     D: 0,4
-    Answer:"""
+    Answer:<|eot|><|header_start|>assistant<|header_end|>"""
     ]
 
     if envs.VLLM_TORCH_PROFILER_DIR is not None:
