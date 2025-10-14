@@ -43,11 +43,11 @@ theme:
 nav:
   - Home: index.md
   - Getting Started:
-    - getting_started/quickstart.md
-    - getting_started/out-of-tree.md
+    - Quickstart: getting_started/quickstart.md
+    - 'Out-of-Tree Usage': getting_started/out-of-tree.md
   - Developer Guides:
-    - developer_guides/jax_model_development.md
-    - developer_guides/torchax_model_development.md
+    - 'JAX Model Development': developer_guides/jax_model_development.md
+    - 'Torch Model Development': developer_guides/torchax_model_development.md
   - TPU Recipes: https://github.com/AI-Hypercomputer/tpu-recipes
 
 plugins:
