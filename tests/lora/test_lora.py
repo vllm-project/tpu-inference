@@ -29,7 +29,8 @@ def use_v1_only(monkeypatch: pytest.MonkeyPatch):
 
 def setup_vllm(num_loras: int, tp: int = 1) -> vllm.LLM:
     return vllm.LLM(model="Qwen/Qwen2.5-3B-Instruct",
-                    max_model_len=64,
+                    max_model_len=256,
+                    max_num_batched_tokens=64,
                     max_num_seqs=8,
                     tensor_parallel_size=tp,
                     enable_lora=True,
@@ -108,6 +109,7 @@ def test_multi_lora(tp):
     We run "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_x_adapter" which
     will force Qwen2.5-3B-Instruct to claim 1+1=x, for a range of x.
     """
+    print(f"xw32 TP: {tp}")
     lora_name_template = \
         "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_{}_adapter"
     lora_requests = [
