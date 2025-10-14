@@ -8,6 +8,7 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from vllm.config import VllmConfig
+import torch
 
 from tpu_inference.layers.jax.attention.attention import AttentionMetadata
 from tpu_inference.layers.jax.attention.llama4_attention import Llama4Attention
@@ -25,6 +26,12 @@ from tpu_inference.models.jax.utils.weight_utils import (get_param,
                                                        transpose_params)
 
 logger = init_logger(__name__)
+
+DTYPE_VIEW_MAP = {
+    jnp.dtype(jnp.float8_e4m3fn): torch.uint8,
+    jnp.dtype(jnp.bfloat16): torch.uint16,
+    jnp.dtype(jnp.float32): torch.uint32,
+}
 
 
 class Llama4ForCausalLM(nnx.Module):
@@ -471,7 +478,22 @@ class Llama4WeightLoader:
                 )
 
                 # ============================= ADD ================================
-                if loaded_name.endswith(".weight_scale"):
+                cast_type = model_weight.value.dtype
+                torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
+
+                if torch_view_type:
+                    if isinstance(loaded_weight, jax.Array):
+                        loaded_weight_np = loaded_weight.copy()
+                    else:
+                        loaded_weight_np = loaded_weight
+                    loaded_weight_torch = torch.from_numpy(loaded_weight_np)
+                    raw_data_view = loaded_weight_torch.view(torch_view_type)
+                    weight_np = jnp.array(raw_data_view.numpy()).view(cast_type)
+                    model_weight.value = shard_put(weight_np,
+                                                   model_weight.sharding,
+                                                   mesh=model_for_loading.mesh)
+
+                elif loaded_name.endswith(".weight_scale"):
                     # assert model_weight is a qarray 
                     assert hasattr(model_weight, 'array'), \
                         f"Expected model_weight for scale '{loaded_name}' to be a quantized array (qarray), but it lacks an 'array' attribute."
