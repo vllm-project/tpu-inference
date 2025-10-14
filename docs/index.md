@@ -1,8 +1,8 @@
 <p align="center">
    <!-- This image will ONLY show up in GitHub's dark mode -->
-  <img src="assets/tpu_inference _dark_mode.png#gh-dark-mode-only" alt="vLLM TPU" style="width: 86%;">
+  <img src="assets/tpu_inference_dark_mode_short.png#gh-dark-mode-only" alt="vLLM TPU" style="width: 86%;">
     <!-- This image will ONLY show up in GitHub's light mode (and on other platforms) -->
-  <img src="assets/tpu_inference _light_mode.png#gh-light-mode-only" alt="vLLM TPU" style="width: 86%;">
+  <img src="assets/tpu_inference_light_mode_short.png#gh-light-mode-only" alt="vLLM TPU" style="width: 86%;">
 </p>
 
 <h3 align="center">
