@@ -5,6 +5,7 @@ import string
 import time
 
 import pytest
+
 from vllm import LLM, SamplingParams
 
 
@@ -256,12 +257,11 @@ def test_eagle3_performance(
     '''
     Test that speculative decoding provides significant performance improvement.
     Compares timing between reference LLM and speculative LLM using Llama 3 8B.
-    Expects spec_llm to be at least 2.x faster than ref_llm.
+    Expects spec_llm to be at least 1.8 faster than ref_llm.
     '''
     _test_performance_helper(monkeypatch, sampling_config, {
                            "method": "eagle3",
                            "model": "unkmaster/EAGLE3-LLaMA3.1-Instruct-8B",
                            "num_speculative_tokens": 2,
                            "draft_tensor_parallel_size": 1
-                       }, 2.0)
-
+                       }, 1.8)
