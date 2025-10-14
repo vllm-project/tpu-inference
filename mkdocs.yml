@@ -1,5 +1,5 @@
 site_name: vLLM TPU
-site_url: ""
+site_url: !ENV READTHEDOCS_CANONICAL_URL
 repo_url: https://github.com/vllm-project/tpu-inference
 edit_uri: edit/main/docs/
 docs_dir: docs
