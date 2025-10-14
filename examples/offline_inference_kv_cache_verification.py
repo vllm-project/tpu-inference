@@ -111,8 +111,7 @@ def main(args: dict):
     # 3. Run the test with the local tpu kv connector enabled
     print("\n--- Running Test (with TPUConnector) ---")
     # With the connector, we run generation twice to test the prefix cache
-    # TODO: Increase the num_invocations to >=2 to test prefix cache hit.
-    test_outputs = run_generation(args, num_invocations=1)
+    test_outputs = run_generation(args, num_invocations=2)
 
     # 4. Compare the outputs and determine the result
     print("\n--- Verification ---")
