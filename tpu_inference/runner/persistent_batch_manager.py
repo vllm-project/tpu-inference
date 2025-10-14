@@ -1,7 +1,6 @@
 from typing import Dict
 
 import jax
-from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
 from tpu_inference.logger import init_logger
@@ -63,7 +62,8 @@ class PersistentBatchManager:
 
         return swap_cnt
 
-    def update_states(self, scheduler_output: "VllmSchedulerOutput") -> bool:
+    def update_states(self, scheduler_output: "VllmSchedulerOutput",
+                      get_mrope_input_positions_fn) -> bool:
         """Update the cached states and the persistent batch with the scheduler
         output.
 
@@ -162,7 +162,7 @@ class PersistentBatchManager:
                 hf_config = self.model_config.hf_config
 
                 self.requests[req_id].mrope_positions, self.requests[
-                    req_id].mrope_position_delta = MRotaryEmbedding.get_input_positions_tensor(
+                    req_id].mrope_position_delta = get_mrope_input_positions_fn(
                         self.requests[req_id].prompt_token_ids,
                         hf_config=hf_config,
                         image_grid_thw=image_grid_thw,
