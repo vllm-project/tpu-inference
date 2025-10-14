@@ -155,6 +155,7 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
             MagicMock(),  # TPUModelRunner.combine_hidden_states_fn
             None,  # TPUModelRunner.get_multimodal_embeddings_fn
             None,  # TPUModelRunner.get_input_embeddings_fn
+            None,  # TPUModelRunner.get_mrope_input_positions_fn
             MagicMock(),  # TPUModelRunner.state (model params)
             None,  # TPUModelRunner.lora_manager
             None,  # TPUModelRunner.model
