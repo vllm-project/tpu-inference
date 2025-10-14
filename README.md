@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="docs/assets/tpu_inference _dark_20px_space.png" alt="vLLM TPU 2.0" style="width: 86%; margin: 85px 0;">
+   <!-- This image will ONLY show up in GitHub's dark mode -->
+  <img src="docs/assets/tpu_inference _dark_mode.png#gh-dark-mode-only" alt="vLLM TPU" style="width: 86%;">
+    <!-- This image will ONLY show up in GitHub's light mode (and on other platforms) -->
+  <img src="docs/assets/tpu_inference _light_mode.png#gh-light-mode-only" alt="vLLM TPU" style="width: 86%;">
 </p>
 
 <h3 align="center">
@@ -28,7 +31,6 @@ _Latest News_ 🔥
 </details>
 
 ---
-
 ## About
 
 vLLM TPU is now powered by `tpu-inference`, an expressive and powerful new hardware plugin unifying JAX and PyTorch under a single lowering path within the vLLM project. The new backend now provides a framework for developers to:
