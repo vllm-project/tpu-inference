@@ -1,4 +1,6 @@
 # https://github.com/vllm-project/vllm/blob/ed10f3cea199a7a1f3532fbe367f5c5479a6cae9/tests/tpu/lora/test_lora.py
+import os
+
 import pytest
 import vllm
 from vllm.lora.request import LoRARequest
@@ -27,7 +29,7 @@ def use_v1_only(monkeypatch: pytest.MonkeyPatch):
 
 def setup_vllm(num_loras: int, tp: int = 1) -> vllm.LLM:
     return vllm.LLM(model="Qwen/Qwen2.5-3B-Instruct",
-                    max_model_len=256,
+                    max_model_len=64,
                     max_num_seqs=8,
                     tensor_parallel_size=tp,
                     enable_lora=True,
@@ -35,8 +37,11 @@ def setup_vllm(num_loras: int, tp: int = 1) -> vllm.LLM:
                     max_lora_rank=8)
 
 
-# TODO(xw32): change tp=[1, 2], also add comments why only 2 devices. Change to all the 3 tests in this file.
-@pytest.mark.parametrize("tp", [2])
+# For multi-chip test, we only use TP=2 because the base model Qwen/Qwen2.5-3B-Instruct has 2 kv heads and the current attention kernel requires it to be divisible by tp_size.
+TP = [2] if os.environ.get("USE_V6E8_QUEUE", False) else [1]
+
+
+@pytest.mark.parametrize("tp", TP)
 def test_single_lora(tp):
     """
     This test ensures we can run a single LoRA adapter on the TPU backend.
@@ -62,7 +67,7 @@ def test_single_lora(tp):
     assert int(answer) == 2
 
 
-@pytest.mark.parametrize("tp", [2])
+@pytest.mark.parametrize("tp", TP)
 def test_lora_hotswapping(tp):
     """
     This test ensures we can run multiple LoRA adapters on the TPU backend, even
@@ -94,7 +99,7 @@ def test_lora_hotswapping(tp):
         assert int(answer) == i + 1, f"Expected {i + 1}, got {answer}"
 
 
-@pytest.mark.parametrize("tp", [2])
+@pytest.mark.parametrize("tp", TP)
 def test_multi_lora(tp):
     """
     This test ensures we can run multiple LoRA adapters on the TPU backend, when

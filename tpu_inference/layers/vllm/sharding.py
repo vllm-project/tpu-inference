@@ -121,12 +121,12 @@ def _shard_column_parallel_linear_lora(
 
 def _shard_qkv_parallel_linear_lora(layer: MergedQKVParallelLinearWithLoRA,
                                     mesh: Mesh) -> None:
-    # mesh=Mesh(axis_sizes=(1, 2), axis_names=('data', 'model'), axis_types=(Auto, Auto))
-    # NOTE: lora_a_stacked[i] has shape [max_loras, 1, num_out, num_in]
+    # lora_a_stacked[i] has shape [max_loras, 1, max_lora_rank, in_features]
     sharded_lora_a_tpu = torch.nn.ParameterList()
     sharded_lora_b_tpu = torch.nn.ParameterList()
 
     assert layer.n_slices > 0, "layer.n_slices should be greater than 0"
+    # lora_b_stacked[i] has shape [max_loras, 1, out_features, max_lora_rank]
     lora_b_partition_spec = P(None, None, 'model', None)
     lora_b_sharding = NamedSharding(mesh, lora_b_partition_spec)
     for i in range(layer.n_slices):

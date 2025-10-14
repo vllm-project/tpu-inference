@@ -61,7 +61,6 @@ def main(args: dict):
     outputs = llm.generate(prompt,
                            sampling_params=sampling_params,
                            lora_request=lora_request)
-    # print(f'xw32 outputs: {outputs}')  # prints [RequestOutput, ..., RequestOutput]
     if envs.VLLM_TORCH_PROFILER_DIR is not None:
         llm.stop_profile()
 
