@@ -127,6 +127,7 @@ class LoadSpec:
     """Internal scheduler state for a potential load operation."""
     num_matched_tokens: int
     can_load: bool = False
+    is_full_prefix_hit: bool = False
 
 
 @dataclass
@@ -179,7 +180,6 @@ class TPUConnector(KVConnectorBase_V1):
     def get_num_new_matched_tokens(
             self, request: "Request",
             num_computed_tokens: int) -> tuple[int, bool]:
-        # logger.info("TPUConnector: Entering get_num_new_matched_tokens")
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(
             request, num_computed_tokens)
@@ -372,15 +372,43 @@ class TPUConnectorScheduler():
         logger.info(
             f"Request {request.request_id}: Found {num_matched_tokens} matched tokens in CPU backend."
         )
+
+        is_full_prefix_hit = (num_matched_tokens > 0
+                              and num_matched_tokens == len(prompt_token_ids))
+        num_matched_for_scheduler = num_matched_tokens
+        if is_full_prefix_hit:
+            # When the entire prompt is found in the CPU cache (a "full hit"),
+            # report N-1 matched tokens to the vLLM scheduler instead
+            # of the true N. If we report a 100% match (N
+            # matched tokens for a prompt of length N), the scheduler sees
+            # zero new tokens and may not schedule the request for a prefill
+            # step at all and hits
+            # https://github.com/vllm-project/vllm/blob/b8b302cde434df8c9289a2b465406b47ebab1c2d/vllm/v1/core/sched/scheduler.py#L438 assetion.
+            # By reporting N-1, we ensure the scheduler allocates resources
+            # for and schedules the computation of the "last" token of the
+            # prompt. The worker-side logic (`start_load_kv`) is aware of this
+            # state via `is_full_prefix_hit` flag in the load_spec.
+            # It will load the true N tokens from the cache but only copy the first N-1 tokens'
+            # worth of KV data to the TPU, fitting perfectly into the allocation.
+            # The model then "re-computes" the final prompt token, and from there,
+            # the request can seamlessly transition to the decoding phase.
+            num_matched_for_scheduler = num_matched_tokens - 1
+            logger.info(
+                f"Request {request.request_id}: Full prompt hit. Reporting {num_matched_for_scheduler} matched tokens. Actual hit from backend is {num_matched_tokens} tokens"
+            )
+
         # We don't need to load tokens that are already computed locally in vLLM
-        num_to_load = max(0, num_matched_tokens - num_computed_tokens)
+        num_to_load = max(0, num_matched_for_scheduler - num_computed_tokens)
         logger.info(
-            f"Request {request.request_id}: After accounting for {num_computed_tokens} computed tokens, {num_to_load} tokens will be loaded."
+            f"Request {request.request_id}: After accounting for {num_computed_tokens} computed tokens, reporting {num_to_load} tokens to load."
         )
 
-        if num_to_load > 0:
+        if num_to_load > 0 or is_full_prefix_hit:
+            # For the worker, we store the TRUE number of matched tokens and the
+            # flag, so it can fetch the correct data from the cache.
             self.load_specs[request.request_id] = LoadSpec(
-                num_matched_tokens=num_matched_tokens)
+                num_matched_tokens=num_matched_tokens,
+                is_full_prefix_hit=is_full_prefix_hit)
         return num_to_load, False
 
     def update_state_after_alloc(self, request: "Request",
@@ -914,15 +942,21 @@ class TPUConnectorWorker:
                 continue
 
             logger.info("TPUConnectorWorker: Starting KV cache load process.")
-            tokens_to_load = meta.token_ids[:meta.load_spec.num_matched_tokens]
-            logger.info(f"Processing KV load for request {meta.req_id}: "
-                        f"{len(tokens_to_load)} tokens into "
-                        f"{len(meta.local_block_ids)} blocks.")
+            # The number of tokens to fetch from the backend is the true number
+            # of matched tokens stored in the spec.
+            tokens_to_fetch = meta.token_ids[:meta.load_spec.
+                                             num_matched_tokens]
+
+            logger.info(
+                f"Processing KV load for request {meta.req_id}: "
+                f"Fetching {len(tokens_to_fetch)} tokens from cache for "
+                f"{len(meta.local_block_ids)} blocks.")
 
             # 1. Generate keys and fetch data chunks from the CPU backend.
-            # The token processor regenerates the same keys that were used for saving.
+            # We use tokens_to_fetch to generate the correct keys that exist
+            # in the backend.
             keys_generator = self.token_processor.process_tokens(
-                tokens_to_load)
+                tokens_to_fetch)
             keys = list(keys_generator)
 
             if not keys:
@@ -966,8 +1000,22 @@ class TPUConnectorWorker:
                 f"Request {meta.req_id}: Assembled CPU data for one layer has shape {final_kv_on_cpu[0].shape}."
             )
 
+            # If the full prefix hit state for a given request is active, we fetched N tokens but must
+            # now truncate to N-1 before padding and loading, to match the
+            # allocation made by the scheduler.
+            if meta.load_spec.is_full_prefix_hit:
+                final_kv_on_cpu = [
+                    layer_data[:-1] for layer_data in final_kv_on_cpu
+                ]
+                logger.info(
+                    f"Request {meta.req_id}: is_full_prefix_hit = {meta.load_spec.is_full_prefix_hit}"
+                    "Truncated fetched cache data by 1 token. New shape: "
+                    f"{final_kv_on_cpu[0].shape if final_kv_on_cpu else 'N/A'}"
+                )
+
             # 3. Pad the data to fill a full number of blocks.
-            num_tokens_to_load = len(tokens_to_load)
+            num_tokens_to_load = final_kv_on_cpu[0].shape[
+                0] if final_kv_on_cpu else 0
             num_blocks_to_load = len(meta.local_block_ids)
             padded_token_len = num_blocks_to_load * self.block_size
 
