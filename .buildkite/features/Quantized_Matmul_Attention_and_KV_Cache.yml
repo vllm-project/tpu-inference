@@ -24,10 +24,10 @@ steps:
     depends_on: "record_Quantized_Matmul_Attention_and_KV_Cache_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_8_queue
+      queue: tpu_v6e_queue
     env:
       TEST_MODEL: RedHatAI/Meta-Llama-3.1-8B-Instruct-quantized.w8a8
-      TENSOR_PARALLEL_SIZE: 8
+      TENSOR_PARALLEL_SIZE: 1
       MINIMUM_THROUGHPUT_THRESHOLD: 0 # TODO : update
       INPUT_LEN: 1800
       OUTPUT_LEN: 128

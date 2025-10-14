@@ -154,15 +154,15 @@ checkThroughput() {
     actual_throughput=$(awk '/Request throughput \(req\/s\):/ {print $NF}' "$BENCHMARK_LOG_FILE")
 
     if [ -z "$actual_throughput" ]; then
-        echo "Total Token throughput: NOT FOUND"
+        echo "Request throughput: NOT FOUND"
         throughput_pass=0
     else
-        echo "Total Request throughput: $actual_throughput"
+        echo "Request throughput: $actual_throughput"
         if awk -v actual="$actual_throughput" -v target="$minimum_throughput_threshold" 'BEGIN { exit !(actual >= target) }'; then
-            echo "Total Request throughput comparison (>= $minimum_throughput_threshold): PASSED"
+            echo "Request throughput comparison (>= $minimum_throughput_threshold): PASSED"
             throughput_pass=1
         else
-            echo "Total Request throughput comparison (>= $minimum_throughput_threshold): FAILED"
+            echo "Request throughput comparison (>= $minimum_throughput_threshold): FAILED"
             throughput_pass=0
         fi
     fi
@@ -215,7 +215,11 @@ fi
 
 # Spin up the vLLM server
 echo "Spinning up the vLLM server..."
-(vllm serve "$test_model" --disable-log-requests --download_dir "$vllm_download_dir" --tensor-parallel-size "$tensor_parallel_size" "${extra_serve_args[@]}" 2>&1 | tee -a "$LOG_FILE") &
+if [[ "$test_model" == "RedHatAI/Meta-Llama-3.1-8B-Instruct-quantized.w8a8" ]]; then
+    (MODEL_IMPL_TYPE=vllm vllm serve "$test_model" --disable-log-requests --download_dir "$vllm_download_dir" --tensor-parallel-size "$tensor_parallel_size" "${extra_serve_args[@]}" 2>&1 | tee -a "$LOG_FILE") &
+else
+    (vllm serve "$test_model" --disable-log-requests --download_dir "$vllm_download_dir" --tensor-parallel-size "$tensor_parallel_size" "${extra_serve_args[@]}" 2>&1 | tee -a "$LOG_FILE") &
+fi
 
 
 # Run a busy loop to block until the server is ready to receive requests
