@@ -32,6 +32,15 @@ RUN python3 -m pip install --no-cache-dir \
 WORKDIR /workspace/tpu_inference
 # Install requirements first and cache so we don't need to re-install on code change.
 COPY requirements.txt .
+# ENV LDFLAGS="-ldl"
+# ENV CMAKE_ARGS="-DCMAKE_SHARED_LINKER_FLAGS='-ldl' -DCMAKE_EXE_LINKER_FLAGS='-ldl'"
+# ENV LIBS="-ldl"
+ENV CMAKE_EXE_LINKER_FLAGS="-ldl"
+ENV CMAKE_SHARED_LINKER_FLAGS="-ldl"
+
+# Also, tell the build system to skip the tests, which is where the failure occurs.
+ENV BUILD_TEST="0"
+# RUN echo "BUILD_TEST=$BUILD_TEST"
 RUN pip install -r requirements.txt
 COPY requirements_benchmarking.txt .
 # These are needed for the E2E benchmarking tests (i.e. tests/e2e/benchmarking/mlperf.sh)
