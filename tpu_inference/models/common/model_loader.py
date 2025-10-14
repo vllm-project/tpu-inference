@@ -224,7 +224,6 @@ def get_flax_model(
         model = nnx.merge(graphdef, state)
         return model(*args)
 
-    # TODO(wenxindongwork): Should this use ATTN sharding?
     logits_sharding = NamedSharding(mesh, PartitionSpec(MLP_DATA_AXIS_NAME, "model"))
 
     @functools.partial(

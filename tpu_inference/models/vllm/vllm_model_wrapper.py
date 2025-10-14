@@ -198,7 +198,6 @@ class VllmModelWrapper:
 
     def jit_compute_logits_func(self):
 
-        # TODO(wenxindongwork): should this be sharded on the attn_dp axis as well?
         @functools.partial(
             jax.jit,
             out_shardings=(NamedSharding(self.mesh,

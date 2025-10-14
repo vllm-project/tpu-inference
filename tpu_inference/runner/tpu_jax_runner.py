@@ -766,7 +766,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 dp_rank]
             
             if _num_reqs == 0:
-                query_start_loc_cpu[:] = 1
+                query_start_loc_cpu[:] = 0
                 seq_lens_cpu[:] = 0
                 continue
             
@@ -860,8 +860,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.mesh,
             self.input_batch,
             padded_num_reqs,
-            # TODO(wenxindongwork): should we shard on attn_dp too?
-            sharding=NamedSharding(self.mesh,PartitionSpec(('data', 'attn_dp'))),
+            # TODO(wenxindongwork): should we shard data when sampling?
+            sharding=NamedSharding(self.mesh,PartitionSpec(ATTN_DATA_AXIS_NAME)),
         )
         if self.uses_mrope:
             positions = mrope_positions
