@@ -96,7 +96,7 @@ class TPUWorker(AbstractTpuWorker):
         if envs.VLLM_TORCH_PROFILER_DIR and self.rank < 1:
             # For TPU, we can only have 1 active profiler session for 1 profiler
             # server. So we only profile on rank0.
-            # Tmp hack to upload profile to gs bucket
+            # Tmp hack to upload profile to gs bucket. will resert later.
             self.profile_dir = os.environ.get("VLLM_TORCH_PROFILER_DIR")
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         self.profile_dir)
@@ -186,9 +186,8 @@ class TPUWorker(AbstractTpuWorker):
         """Setup the appropriate scheduler based on DP size."""
 
         _, _, dp_size = get_dp_size(self.vllm_config)
-        # temp: 
-        use_dp_scheduler=True
-        if dp_size > 1 or use_dp_scheduler:
+        
+        if dp_size > 1:
             logger.info(f"DP size ({dp_size}) > 1, using DPScheduler")
 
             import vllm.v1.core.sched.scheduler as vLLMScheduler
@@ -198,7 +197,6 @@ class TPUWorker(AbstractTpuWorker):
             DPScheduler = create_dp_scheduler(Scheduler)
             vLLMScheduler.Scheduler = DPScheduler
         else:
-            # Keep using the default scheduler - no changes needed
             logger.info(f"DP size ({dp_size}) <= 1, using default Scheduler")
     
     def execute_model(
