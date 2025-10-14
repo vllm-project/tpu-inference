@@ -4,9 +4,18 @@ set -e
 # --- Configuration ---
 REPO_URL="https://github.com/vllm-project/tpu-inference.git"
 TARGET_BRANCH="main"
-COMMIT_TAG="${BUILDKITE_TAG:-unknown-tag}"
-COMMIT_MESSAGE="[skip ci] Update support matrices for ${COMMIT_TAG}"
-ARTIFACT_DOWNLOAD_PATH="result"
+
+# Conditional Configuration for Release vs. Nightly
+if [ "${NIGHTLY}" = "1" ]; then
+  # Set path and commit message for nightly builds.
+  ARTIFACT_DOWNLOAD_PATH="result/nightly"
+  COMMIT_MESSAGE="[skip ci] Update nightly support matrices"
+else
+  # Set path and commit message for release tag builds.
+  COMMIT_TAG="${BUILDKITE_TAG:-unknown-tag}"
+  ARTIFACT_DOWNLOAD_PATH="result"
+  COMMIT_MESSAGE="[skip ci] Update support matrices for ${COMMIT_TAG}"
+fi
 # Construct the repository URL with the access token for authentication.
 AUTHENTICATED_REPO_URL="https://x-access-token:${GITHUB_PAT}@${REPO_URL#https://}"
 

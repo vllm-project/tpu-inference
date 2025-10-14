@@ -46,6 +46,17 @@ steps:
      command:
        - bash .buildkite/scripts/commit_support_matrices.sh
 
+   - label: "Commit nightly support matrices if release tag specified"
+     if: build.env("NIGHTLY") == "1"
+     key: commit_support_matrices
+     depends_on: generate_support_matrices
+     agents:
+       queue: tpu_v6e_queue
+     secrets:
+      - GITHUB_PAT
+     command:
+       - bash .buildkite/scripts/commit_support_matrices.sh
+
    - label: "Handle release if release tag specified"
      if: build.tag =~ /^v\.?[0-9]+(\.[0-9]+)*$/
      depends_on: commit_support_matrices
