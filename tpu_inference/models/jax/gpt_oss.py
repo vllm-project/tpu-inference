@@ -22,12 +22,17 @@ from tpu_inference.layers.jax.layers import DenseFFW, Embedder, LMhead, RMSNorm
 from tpu_inference.layers.jax.moe.gpt_oss_moe import GptOssMoE, GptOssRouter
 from tpu_inference.layers.jax.transformer_block import TransformerBlock
 from tpu_inference.logger import init_logger
-from tpu_inference.models.jax.utils.weight_utils import (get_param,
-                                                          model_weights_generator,
-                                                          print_param_info)
-
+from tpu_inference.models.jax.utils.weight_utils import (model_weights_generator,
+                                                       print_param_info,
+                                                       get_param)
 logger = init_logger(__name__)
 
+# A map from JAX dtype to the corresponding PyTorch integer dtype for raw memory viewing.
+DTYPE_VIEW_MAP = {
+    jnp.dtype(jnp.float8_e4m3fn): torch.uint8,
+    jnp.dtype(jnp.bfloat16): torch.uint16,
+    jnp.dtype(jnp.float32): torch.uint32,
+}
 
 @dataclass
 class GptOss(nnx.Module):
@@ -43,6 +48,7 @@ class GptOss(nnx.Module):
         assert mesh is not None
 
         self.vllm_config = vllm_config
+        self.hf_config = vllm_config.model_config.hf_config
         self.rng = nnx.Rngs(rng)
 
         # Model hyperparameters from GPT-OSS config
@@ -72,17 +78,6 @@ class GptOss(nnx.Module):
         self.random_init = force_random_weights or self.vllm_config.additional_config.get(
             "random_weights", False)
         self.mesh = mesh
-
-        self.weight_loader = GptOssWeightLoader(
-            vllm_config=vllm_config,
-            num_layers=num_layers,
-            hidden_size=hidden_size,
-            num_attention_heads=num_attention_heads,
-            num_key_value_heads=num_key_value_heads,
-            head_dim=head_dim,
-            intermediate_size=ffw_intermediate_size,
-            num_experts=num_experts,
-        )
 
         self.embedder = Embedder(vocab_size=vocab_size,
                                  hidden_size=hidden_size,
@@ -152,30 +147,30 @@ class GptOss(nnx.Module):
                     dims=hidden_size,
                     random_init=self.random_init,
                     epsilon=rms_norm_eps,
-                    dtype=jnp.float32,
+                    dtype=dtype,
                     rngs=self.rng,
                 ),
                 pre_mlp_norm=RMSNorm(
                     dims=hidden_size,
                     random_init=self.random_init,
                     epsilon=rms_norm_eps,
-                    dtype=jnp.float32,
+                    dtype=dtype,
                     rngs=self.rng,
                 ),
                 attn=attn,
                 custom_module=moe_mlp
             )
             self.layers.append(block)
-
+        # Note: ALL RMSNorm does not upcast input to float32, while the pytorch does
         self.final_norm = RMSNorm(
             dims=hidden_size,
             rngs=self.rng,
             random_init=self.random_init,
             epsilon=rms_norm_eps,
-            dtype=jnp.float32,
+            dtype=dtype,
         )
 
-        self.unembedding = LMhead(vocab_size=vocab_size,
+        self.lm_head = LMhead(vocab_size=vocab_size,
                               hidden_size=hidden_size,
                               dtype=dtype,
                               rngs=self.rng,
@@ -188,8 +183,106 @@ class GptOss(nnx.Module):
         return self.__call__(*args, **kwargs)
 
     def load_weights(self, rng: PRNGKey, cache_dir: Optional[str] = None):
+        """Loads and transforms all weights from a checkpoint"""
         self.rng = nnx.Rngs(rng)
-        self.weight_loader.load_weights(self)
+        
+        # Format: 'hf_key': ('jax_model_path', transform_function, target_shape)
+        transforms = {
+            "transpose_reshape": lambda w, shape: w.T.reshape(shape),
+            "reshape": lambda b, shape: b.reshape(shape),
+            "transpose": lambda w, _: w.T,
+        }
+
+        mappings = {
+            # Embeddings, Norms, and LM Head
+            "model.embed_tokens.weight": ("embedder.input_embedding_table_VD", None, None),
+            "lm_head.weight": ("lm_head.input_embedding_table_DV", transforms["transpose"], None),
+            "model.norm.weight": ("final_norm.scale", None, None),
+            "model.layers.*.input_layernorm.weight": ("layers.*.pre_attention_norm.scale", None, None),
+            "model.layers.*.post_attention_layernorm.weight": ("layers.*.pre_mlp_norm.scale", None, None),
+
+            # Attention Weights
+            "model.layers.*.self_attn.q_proj.weight": ("layers.*.attn.kernel_q_DNH", transforms["transpose_reshape"], (self.hf_config.hidden_size, self.hf_config.num_attention_heads, self.hf_config.head_dim)),
+            "model.layers.*.self_attn.k_proj.weight": ("layers.*.attn.kernel_k_DKH", transforms["transpose_reshape"], (self.hf_config.hidden_size, self.hf_config.num_key_value_heads, self.hf_config.head_dim)),
+            "model.layers.*.self_attn.v_proj.weight": ("layers.*.attn.kernel_v_DKH", transforms["transpose_reshape"], (self.hf_config.hidden_size, self.hf_config.num_key_value_heads, self.hf_config.head_dim)),
+            "model.layers.*.self_attn.o_proj.weight": ("layers.*.attn.kernel_o_proj_NHD", transforms["transpose_reshape"], (self.hf_config.num_attention_heads, self.hf_config.head_dim, self.hf_config.hidden_size)),
+
+            # Attention Biases
+            "model.layers.*.self_attn.q_proj.bias": ("layers.*.attn.bias_q_NH", transforms["reshape"], (self.hf_config.num_attention_heads, self.hf_config.head_dim)),
+            "model.layers.*.self_attn.k_proj.bias": ("layers.*.attn.bias_k_KH", transforms["reshape"], (self.hf_config.num_key_value_heads, self.hf_config.head_dim)),
+            "model.layers.*.self_attn.v_proj.bias": ("layers.*.attn.bias_v_KH", transforms["reshape"], (self.hf_config.num_key_value_heads, self.hf_config.head_dim)),
+            "model.layers.*.self_attn.o_proj.bias": ("layers.*.attn.bias_o_D", None, None),
+            
+            # Sinks
+            "model.layers.*.self_attn.sinks": ("layers.*.attn.sinks_N", None, None),
+
+            # MoE Weights
+            "model.layers.*.mlp.router.weight": ("layers.*.custom_module.router.kernel_DE", transforms["transpose"], None),
+            "model.layers.*.mlp.router.bias": ("layers.*.custom_module.router.bias_E", None, None),
+            "model.layers.*.mlp.experts.gate_up_proj": ("layers.*.custom_module.mlp1_weight_EDF2", None, None),
+            "model.layers.*.mlp.experts.gate_up_proj_bias": ("layers.*.custom_module.mlp1_bias_EF2", None, None),
+            #TODO: decide if we need to transpose for down_proj.
+            "model.layers.*.mlp.experts.down_proj": ("layers.*.custom_module.mlp2_weight_EFD", lambda w, _: jnp.transpose(w, (0, 2, 1)), None),
+            "model.layers.*.mlp.experts.down_proj_bias": ("layers.*.custom_module.mlp2_bias_ED", None, None),
+        }
+
+        model_params = nnx.state(self)
+        is_verbose = self.vllm_config.additional_config.get("is_verbose", False)
+        
+        names_and_weights_generator = model_weights_generator(
+            model_name_or_path=self.vllm_config.model_config.model,
+            framework="pt",
+            download_dir=self.vllm_config.load_config.download_dir
+        )
+
+        with jax.default_device(jax.devices("cpu")[0]):
+            for loaded_name, loaded_weight in names_and_weights_generator:
+                hf_pattern = re.sub(r"layers\.(\d+)", "layers.*", loaded_name)
+                if hf_pattern not in mappings:
+                    logger.warning(f"No mapping found for checkpoint tensor: {loaded_name}. Skipping.")
+                    continue
+
+                jax_path_template, transform_fn, target_shape = mappings[hf_pattern]
+                
+                layer_num_match = re.search(r"layers\.(\d+)", loaded_name)
+                jax_path = jax_path_template
+                if layer_num_match:
+                    jax_path = jax_path_template.replace("*", layer_num_match.group(1))
+
+                model_weight = get_param(model_params, jax_path)
+                cast_type = model_weight.value.dtype
+
+                torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
+                if torch_view_type:
+                    # Avoid unnecessary upcasting and mem copy by viewing the tensor's
+                    # raw data as integers before converting to a JAX array.
+                    weight_np = jnp.array(
+                        loaded_weight.view(torch_view_type).numpy()
+                    ).view(cast_type)
+                else:
+                    raise ValueError(
+                        f"Unsupported dtype for tensor conversion: {cast_type}")
+
+                if transform_fn:
+                    transformed_weight = transform_fn(weight_np, target_shape)
+                else:
+                    transformed_weight = weight_np
+
+                if model_weight.value.shape != transformed_weight.shape:
+                    raise ValueError(f"Shape mismatch for '{jax_path}': Model expects {model_weight.value.shape}, but got {transformed_weight.shape} after transformation.")
+
+                def get_slice(index):
+                    return transformed_weight[index]
+                
+                sharded_array = jax.make_array_from_callback(
+                    transformed_weight.shape, NamedSharding(self.mesh, P(*model_weight.sharding)), get_slice
+                )
+                model_weight.value = sharded_array
+
+                if is_verbose:
+                    print_param_info(model_weight, loaded_name)
+
+        nnx.update(self, model_params)
 
     def __call__(
         self,
@@ -214,39 +307,5 @@ class GptOss(nnx.Module):
         return kv_caches, final_activation, []
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        return self.unembedding.decode(hidden_states)
-
-
-@dataclass
-class GptOssWeightLoader:
-    """
-    Handles loading weights from a PyTorch checkpoint into the JAX GptOss model.
-    """
-
-    def __init__(self, vllm_config: VllmConfig, num_layers, hidden_size,
-                 num_attention_heads, num_key_value_heads, head_dim,
-                 intermediate_size, num_experts):
-
-        self.vllm_config = vllm_config
-        self.num_layers = num_layers
-        self.hidden_size = hidden_size
-        self.num_attention_heads = num_attention_heads
-        self.num_key_value_heads = num_key_value_heads
-        self.head_dim = head_dim
-        self.intermediate_size = intermediate_size
-        self.num_experts = num_experts
-
-        self.names_and_weights_generator = model_weights_generator(
-            model_name_or_path=vllm_config.model_config.model,
-            framework="pt",
-            download_dir=vllm_config.load_config.download_dir)
-        self.is_verbose = vllm_config.additional_config.get(
-            "is_verbose", False)
-
-        self._transpose_map = {
-            r"attn\.out\.weight": (1, 0),
-            r"mlp\.gate\.weight": (1, 0),
-            r"mlp\.mlp2_weight": (0, 2, 1),
-            r"unembedding\.weight": (1, 0),
-        }
+        return self.lm_head.decode(hidden_states)
 

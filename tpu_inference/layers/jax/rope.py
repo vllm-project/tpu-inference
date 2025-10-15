@@ -180,7 +180,7 @@ class GptOssRotaryEmbedding(nnx.Module):
     rope_theta: float
     dtype: jnp.dtype
     initial_context_length: int = 4096
-    rope_scaling_factor: float = 32.0
+    rope_scaling_factor: float = 1.0
     rope_ntk_alpha: float = 1.0
     rope_ntk_beta: float = 32.0
 
