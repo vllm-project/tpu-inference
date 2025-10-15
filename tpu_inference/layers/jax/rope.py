@@ -1,6 +1,6 @@
 import math
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Tuple
 
 import jax
 from flax import nnx

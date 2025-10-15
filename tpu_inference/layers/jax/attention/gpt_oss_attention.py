@@ -17,7 +17,7 @@ from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import RMSNorm
-from tpu_inference.layers.jax.attention.gpt_oss_rope import GptOssRotaryEmbedding
+from tpu_inference.layers.jax.rope import GptOssRotaryEmbedding
 
 KVCache = Tuple[jax.Array, jax.Array]
 
@@ -39,12 +39,16 @@ class GptOssAttention(nnx.Module):
     rope_ntk_alpha: float = 1.0
     rope_ntk_beta: float = 32.0
 
+    query_tnh: P = P()
+    keyvalue_skh: P = P()
+    attn_o_tnh: P = P()
     dnh_sharding: Sharding = ()
     dkh_sharding: Sharding = ()
     nhd_sharding: Sharding = ()
     n_sharding: Sharding = ()
     
     random_init: bool = False
+    mesh: Mesh
     
     def __post_init__(self, rngs: nnx.Rngs):
         """Initializes weights, biases, and RoPE module."""
@@ -106,7 +110,7 @@ class GptOssAttention(nnx.Module):
             self.query_tnh,      # q
             self.keyvalue_skh,   # k
             self.keyvalue_skh,   # v
-            P(),                 # sinks
+            #P(),                 # sinks
             kv_cache_spec,       # kv_cache
             P(),                 # md.seq_lens: Replicated
             P(),                 # page_indices_flat: Replicated
@@ -134,17 +138,20 @@ class GptOssAttention(nnx.Module):
                 q_TNH,
                 k_SKH,
                 v_SKH,
-                sinks,
+                #sinks,
                 kv_cache,
                 md.seq_lens,
                 md.block_tables,
                 md.query_start_loc,
                 md.request_distribution,
-                self.sinks.value,
             )
         return kv_cache, output_TNH
-
-    def __call__(self, x_TD: Float, kv_cache: KVCache, attention_metadata: AttentionMetadata) -> Float:
+    def __call__(self,
+                 x_TD,
+                 is_prefill,
+                 kv_cache: KVCache,
+                 attention_metadata: AttentionMetadata,
+                 use_attention_rope: bool = True):
         """Forward pass for the Attention module using 3D kernels."""
         md = attention_metadata
         x_TD = jnp.asarray(x_TD, self.dtype)
@@ -154,8 +161,8 @@ class GptOssAttention(nnx.Module):
             k_TKH = jnp.einsum("TD,DKH->TKH", x_TD, self.kernel_k_DKH.value)
         with jax.named_scope("v_proj"):
             v_TKH = jnp.einsum("TD,DKH->TKH", x_TD, self.kernel_v_DKH.value)
-
-        q_TNH, k_TKH = self.rope(q_TNH, k_TKH, attention_metadata.positions)
+        if use_attention_rope:
+            q_TNH, k_TKH = self.rope(q_TNH, k_TKH, md.input_positions)
 
         with jax.named_scope("attn_op"):
             new_kv_cache, attn_out_TNH = self.attention(
@@ -164,7 +171,7 @@ class GptOssAttention(nnx.Module):
                 k_TKH,
                 v_TKH, 
                 self.sinks,
-                attention_metadata,
+                md,
                 self.mesh
             )
 
