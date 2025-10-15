@@ -1,10 +1,10 @@
 # {MODEL_NAME}
-agents:
-  queue: {QUEUE}
 steps:
   - label: "Unit tests for {MODEL_NAME}"
     key: "{SANITIZED_MODEL_NAME}_UnitTest"
     soft_fail: true
+    agents:
+      queue: {QUEUE}
     commands:
       - echo "placeholder"  # TODO: replace with your unit test command
   - label: "Record unit test result for {MODEL_NAME}"
@@ -23,6 +23,8 @@ steps:
     key: "{SANITIZED_MODEL_NAME}_IntegrationTest"
     depends_on: "record_{SANITIZED_MODEL_NAME}_UnitTest"
     soft_fail: true
+    agents:
+      queue: {QUEUE}
     env:
       TEST_MODEL: {MODEL_NAME}
       TENSOR_PARALLEL_SIZE: {TENSOR_PARALLEL_SIZE}
@@ -46,6 +48,8 @@ steps:
     key: "{SANITIZED_MODEL_NAME}_Benchmark"
     depends_on: "record_{SANITIZED_MODEL_NAME}_IntegrationTest"
     soft_fail: true
+    agents:
+      queue: {QUEUE}
     env:
       TEST_MODEL: {MODEL_NAME}
       TENSOR_PARALLEL_SIZE: {TENSOR_PARALLEL_SIZE}

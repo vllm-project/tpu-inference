@@ -35,9 +35,15 @@ def get_requirements() -> List[str]:
     return requirements
 
 
+def get_version():
+    if env_version := os.getenv("VLLM_VERSION_OVERRIDE"):
+        return env_version
+    return "0.0.0"
+
+
 setup(
     name="tpu_inference",
-    version="0.1.0",
+    version=get_version(),
     description="",
     long_description=open("README.md").read() if hasattr(
         open("README.md"), "read") else "",
@@ -55,6 +61,6 @@ setup(
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
-        "Topic :: Artificial Intelligence",
+        "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
 )
