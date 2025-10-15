@@ -1,0 +1,40 @@
+# Multimodal Inputs
+steps:
+  - label: "Correctness tests for Multimodal Inputs"
+    key: "Multimodal_Inputs_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_multimodal.py
+  - label: "Record correctness test result for Multimodal Inputs"
+    key: "record_Multimodal_Inputs_CorrectnessTest"
+    depends_on: "Multimodal_Inputs_CorrectnessTest"
+    env:
+      CI_TARGET: Multimodal Inputs
+      CI_STAGE: "CorrectnessTest"
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh Multimodal_Inputs_CorrectnessTest
+
+  - label: "Performance tests for Multimodal Inputs"
+    key: "Multimodal_Inputs_PerformanceTest"
+    depends_on: "record_Multimodal_Inputs_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench.sh
+  - label: "Record performance test result for Multimodal Inputs"
+    key: "record_Multimodal_Inputs_PerformanceTest"
+    depends_on: "Multimodal_Inputs_PerformanceTest"
+    env:
+      CI_TARGET: Multimodal Inputs
+      CI_STAGE: "PerformanceTest"
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh Multimodal_Inputs_PerformanceTest
