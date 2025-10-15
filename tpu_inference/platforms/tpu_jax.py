@@ -130,7 +130,7 @@ class TpuPlatform(Platform):
             cache_config.block_size = cast(BlockSize, 16)
         compilation_config = vllm_config.compilation_config
 
-        # TPU only supports DYNAMO_ONCE compilation mode
+        # TPU only supports DYNAMO_TRACE_ONCE compilation mode
         # NOTE(xiang): the compilation_config is not used by jax.
         if compilation_config.level != CompilationMode.DYNAMO_TRACE_ONCE:
             compilation_config.level = CompilationMode.DYNAMO_TRACE_ONCE
