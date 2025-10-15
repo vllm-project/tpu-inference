@@ -94,7 +94,7 @@ class CompilationManager:
             num_tokens = inputs_embeds.shape[0]
         assert num_tokens is not None
 
-        dp_size = self.runner.vllm_config.sharding_config.dp_size * self.runner.vllm_config.sharding_config.attn_dp_size
+        dp_size = self.runner.vllm_config.sharding_config.total_dp_size
 
         # Keep existing pattern for complex array operations
         block_tables = self.runner.block_table_cpu[:self.runner.max_num_reqs]

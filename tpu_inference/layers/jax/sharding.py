@@ -4,6 +4,7 @@ import math
 
 import numpy as np
 from jax.sharding import Mesh
+from tpu_inference import utils
 
 
 class ShardingAxisName:
@@ -59,9 +60,9 @@ class ShardingConfigManager:
         """
         self.sharding_strategy = sharding_strategy
         self.device_indexes = device_indexes
-        self.total_devices = math.prod(asdict(sharding_strategy).values())
+        self._total_devices = int(math.prod(asdict(sharding_strategy).values()))
         if device_indexes: 
-            assert self.total_devices == len(device_indexes)
+            assert self._total_devices == len(device_indexes)
     
     @classmethod
     def from_vllm_config(cls, vllm_config: "VllmConfig") -> 'ShardingConfigManager':
@@ -86,9 +87,12 @@ class ShardingConfigManager:
         # Replicate attention layer with num_kv_heads < TP
         enable_dp_attention = additional_config.get("enable_dp_attention", False)
         if enable_dp_attention:
-            num_kv_heads = vllm_config.model_config.get_num_kv_heads()
-            attn_dp = max(tensor_parallelism // num_kv_heads, 1)
-            tensor_parallelism /= attn_dp
+            num_kv_heads = vllm_config.model_config.get_total_num_kv_heads()
+            kv_dtype = utils.get_jax_dtype_from_str_dtype(
+                vllm_config.cache_config.cache_dtype)
+            actual_num_kv_heads = num_kv_heads / (4 // np.dtype(kv_dtype).itemsize)
+            attn_dp = max(int(tensor_parallelism // actual_num_kv_heads), 1)
+            tensor_parallelism = tensor_parallelism // attn_dp
         else:
             attn_dp = 1
             
@@ -143,7 +147,15 @@ class ShardingConfigManager:
     @property
     def sequence_size(self) -> int:
         return self.sharding_strategy.sequence_parallelism
-
+    @property
+    def total_devices(self) -> int:
+        return self._total_devices
+    
+    def __str__(self):
+        return (f"ShardingConfigManager(total_devices={self.total_devices}, "
+                f"sharding_strategy={self.sharding_strategy}, "
+                f"device_indexes={self.device_indexes})")
+    
 #TODO split this into block unique sharding config, i.e. attentionShardingConfig, MoEShardingConfig
 @dataclass
 class ShardingRulesConfig:

@@ -116,7 +116,6 @@ class TpuPlatform(Platform):
     def _initialize_sharding_config(cls, vllm_config: VllmConfig) -> None:
         
         sharding_config = ShardingConfigManager.from_vllm_config(vllm_config)
-        assert not hasattr(vllm_config, 'sharding_config')
         vllm_config.sharding_config = sharding_config
         
         logger.info(f"Initialized sharding configuration: {sharding_config}")
