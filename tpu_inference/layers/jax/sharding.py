@@ -105,7 +105,10 @@ class ShardingConfigManager:
         )
         
         # Must override to avoid vLLM spinning up multiple DP engines. 
-        vllm_config.parallel_config.data_parallel_size = 1
+        if vllm_config.parallel_config.data_parallel_size > 1:
+            vllm_config.parallel_config.data_parallel_size = 1
+            vllm_config.parallel_config.data_parallel_rank = 0 
+            vllm_config.parallel_config.data_parallel_size_local = 1
         
         cls.validate(vllm_config, sharding_strategy)
         return cls(sharding_strategy, device_indexes)
