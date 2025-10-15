@@ -5,7 +5,6 @@ import string
 import time
 
 import pytest
-
 from vllm import LLM, SamplingParams
 
 
