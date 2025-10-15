@@ -25,7 +25,7 @@ With torchax you can:
 It works by having a `torch.Tensor` subclass that holds an `jax.Array`,
 and implementing all `torch` operators that this tensor is supposed to support.
 
-![torchax](https://jax-torch-interop.readthedocs.io/en/latest/_images/torchax.png)
+![torchax](../assets/torchax.png)
 
 See  [this page](https://jax-torch-interop.readthedocs.io/en/latest) for more details on how torchax works.
 
@@ -51,12 +51,12 @@ a callable representing the model. The callable is a pure function (does not hav
 so both the weights, kv cache, as well as the input will be passed in
 as input to this function.
 
-![Get Model](assets/get_model.png)
+![Get Model](../assets/get_model.png)
 
 When the worker runs a model, it will call the model function. The model function
 that takes Jax Arrays as inputs.
 
-![Model fn](assets/model-fn.png)
+![Model fn](../assets/model-fn.png)
 
 ### Pure functions
 
@@ -134,7 +134,7 @@ KV cache, and we reassign the modification back.
 
 The code that uses the above technique is located at: `tpu_inference/models/torchax/torchax_wrapper.py#L55-L83` show below:
 
-![alt text](assets/wrap_model.png)
+![alt text](../assets/wrap_model.png)
 
 ## Mental model
 
@@ -146,7 +146,7 @@ the approach we are taking here is to:
 2. Use torchax to make `torch.nn.Module` look like a JAX model to the worker.
 3. Use JAX based approach for KV cache and Attention kernel (such as RaggedPagedAttention).
 
-![alt text](assets/sandwich.png)
+![alt text](../assets/sandwich.png)
 
 Model execution pseudo code:
 
