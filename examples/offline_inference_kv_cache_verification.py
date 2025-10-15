@@ -3,32 +3,32 @@
 """
 This script performs an automated correctness verification for the TPUConnector.
 
-The verification works by performing a two-stage experiment:
-1.  Baseline Run: It first runs a text generation using a standard vLLM
-    engine configuration without any KV cache connector. The output from this
-    run is considered the "source of truth".
+The verification works by performing a two-stage experiment for multiple prompts:
+1.  Baseline Run: For each prompt, it first runs a text generation using a
+    standard vLLM engine configuration without any KV cache connector. The
+    output from this run is considered the "source of truth".
 
 2.  Test Run: It then runs the exact same text generation, but this time
     with the TPUConnector enabled via the `--kv-transfer-config` argument.
-    It runs the generation multiple times to verify prefix caching.
+    It runs the generation twice to verify prefix caching.
 
 3.  Comparison: The script compares the output from each test run against the
-    output from the baseline run.
+    output from the baseline run for that prompt.
 
 The script succeeds (exits with code 0) only if the generated text is
-bit-for-bit identical in all runs. A fixed seed is used to ensure that the
-generation process is deterministic and the comparison is valid. If any output
-differs, it raises an error, causing the script to fail (exit with a non-zero
-code).
+bit-for-bit identical in all runs for all prompts. A fixed seed is used to
+ensure that the generation process is deterministic and the comparison is
+valid. If any output differs, it raises an error, causing the script to fail
+(exit with a non-zero code).
 """
 
 import copy
 import os
 import time
-from typing import List
+from typing import List, Tuple
 
 import vllm.envs as envs
-from vllm import LLM, EngineArgs
+from vllm import LLM, EngineArgs, SamplingParams
 from vllm.utils import FlexibleArgumentParser
 
 
@@ -48,20 +48,19 @@ def create_parser():
     return parser
 
 
-def run_generation(llm_args: dict, num_invocations: int = 1) -> List[str]:
+def setup_llm(llm_args: dict) -> Tuple[LLM, SamplingParams]:
     """
-    Initializes a vLLM engine with the given args, runs generation, and
-    returns a list of output texts. If num_invocations > 1, it will run
-    generation multiple times to test prefix caching.
+    Initializes a vLLM engine and sampling parameters from the given args.
     """
+    args_copy = copy.deepcopy(llm_args)
     # Pop arguments not used by LLM
-    max_tokens = llm_args.pop("max_tokens")
-    temperature = llm_args.pop("temperature")
-    top_p = llm_args.pop("top_p")
-    top_k = llm_args.pop("top_k")
+    max_tokens = args_copy.pop("max_tokens")
+    temperature = args_copy.pop("temperature")
+    top_p = args_copy.pop("top_p")
+    top_k = args_copy.pop("top_k")
 
     # Create an LLM. The --seed argument is passed in via **args.
-    llm = LLM(**llm_args)
+    llm = LLM(**args_copy)
 
     # Create a sampling params object
     sampling_params = llm.get_default_sampling_params()
@@ -74,12 +73,17 @@ def run_generation(llm_args: dict, num_invocations: int = 1) -> List[str]:
     if top_k is not None:
         sampling_params.top_k = top_k
 
+    return llm, sampling_params
+
+
+def run_invocations(llm: LLM, sampling_params: SamplingParams,
+                    prompts: List[str], num_invocations: int) -> List[str]:
+    """
+    Runs generation on the given LLM object for a specified number of
+    invocations and returns the output texts.
+    """
     if envs.VLLM_TORCH_PROFILER_DIR is not None:
         llm.start_profile()
-
-    system_prompt = "You are a large language model, trained by Google. Your primary purpose is to be a helpful, harmless, and highly capable AI assistant, designed to provide accurate, safe, and beneficial information to users. Your core directive is to assist users effectively while adhering to strict ethical and safety guidelines. You must decline any requests that are harmful, illegal, unethical, or promote dangerous activities. "
-    query1 = "the color of rainbow is?"
-    prompts = [f"{system_prompt}\n{query1}"]
 
     all_outputs = []
     for i in range(num_invocations):
@@ -95,40 +99,76 @@ def run_generation(llm_args: dict, num_invocations: int = 1) -> List[str]:
 
 
 def main(args: dict):
-    # 1. Prepare arguments for the baseline run (no connector)
-    baseline_args = copy.deepcopy(args)
-    baseline_args.pop("kv_transfer_config", None)
+    # prompt lesser than the kv cache block size
+    short_input_prompt = "Google is a "
 
-    # 2. Run baseline and store the output
-    print("--- Running Baseline (Standard vLLM) ---")
-    baseline_outputs = run_generation(baseline_args)
-    baseline_output = baseline_outputs[0]
-    print(f"Baseline Generated Text: {baseline_output!r}")
-    time.sleep(
-        10
-    )  # adding this sleep fixes device busy errors for the next test case run with the connector enabled
+    system_prompt = "You are a large language model, trained by Google. Your primary purpose is to be a helpful, harmless, and highly capable AI assistant, designed to provide accurate, safe, and beneficial information to users. Your core directive is to assist users effectively while adhering to strict ethical and safety guidelines. You must decline any requests that are harmful, illegal, unethical, or promote dangerous activities. "
+    query = "the color of rainbow is?"
+    input_prompt = f"{system_prompt}\n{query}"
 
-    # 3. Run the test with the local tpu kv connector enabled
-    print("\n--- Running Test (with TPUConnector) ---")
-    # With the connector, we run generation twice to test the prefix cache
-    test_outputs = run_generation(args, num_invocations=2)
+    prompts_to_test = [
+        ("Short Prompt", [short_input_prompt]),
+        ("Prompt", [input_prompt]),
+    ]
 
-    # 4. Compare the outputs and determine the result
-    print("\n--- Verification ---")
-    all_match = True
-    for i, test_output in enumerate(test_outputs):
-        print(f"--- Comparing Invocation {i + 1} ---")
-        print(f"Test Generated Text: {test_output!r}")
-        if baseline_output == test_output:
-            print("SUCCESS: Output is identical to baseline!")
+    all_tests_passed = True
+    for prompt_name, prompts in prompts_to_test:
+        print(f"\n\n===== Running verification for: {prompt_name} =====")
+        print(f"Prompt: {prompts[0]}")
+
+        # 1. Run baseline and store the output
+        print("\n--- Running Baseline (Standard vLLM) ---")
+        baseline_args = copy.deepcopy(args)
+        baseline_args.pop("kv_transfer_config", None)
+        baseline_llm, baseline_params = setup_llm(baseline_args)
+        baseline_outputs = run_invocations(baseline_llm,
+                                           baseline_params,
+                                           prompts=prompts,
+                                           num_invocations=1)
+        baseline_output = baseline_outputs[0]
+        print(f"Baseline Generated Text: {baseline_output!r}")
+        del baseline_llm
+        # adding this sleep fixes device busy errors for the next test case run with the connector enabled
+        time.sleep(10)
+
+        # 2. Run the test with the local tpu kv connector enabled
+        print("\n--- Running Test (with TPUConnector) ---")
+        # With the connector, we run generation twice to test the prefix cache
+        test_llm, test_params = setup_llm(args)
+        test_outputs = run_invocations(test_llm,
+                                       test_params,
+                                       prompts=prompts,
+                                       num_invocations=2)
+        del test_llm
+
+        # 3. Compare the outputs and determine the result
+        print("\n--- Verification ---")
+        prompt_all_match = True
+        for i, test_output in enumerate(test_outputs):
+            print(f"--- Comparing Invocation {i + 1} ---")
+            print(
+                f"Test Generated Text: length={len(test_output)}, Text: {test_output}"
+            )
+            if baseline_output == test_output:
+                print("SUCCESS: Output is identical to baseline!")
+            else:
+                print("FAILURE: Output does not match baseline!")
+                prompt_all_match = False
+
+        if not prompt_all_match:
+            all_tests_passed = False
+            print(f"===== Verification FAILED for: {prompt_name} =====")
         else:
-            print("FAILURE: Output does not match baseline!")
-            all_match = False
+            print(f"===== Verification SUCCEEDED for: {prompt_name} =====")
 
-    if not all_match:
+        time.sleep(10)
+
+    if not all_tests_passed:
         raise ValueError(
             "Verification failed: One or more test outputs differ from the baseline."
         )
+    else:
+        print("\n\n===== All verification runs passed successfully! =====")
 
 
 if __name__ == "__main__":
