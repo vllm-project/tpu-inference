@@ -9,6 +9,7 @@ repos:
     rev: v5.0.0
     hooks:
     -   id: check-yaml
+        exclude: ^mkdocs\.yml$ # Exclude mkdocs.yml from this check
     -   id: end-of-file-fixer
     -   id: trailing-whitespace
 - repo: https://github.com/PyCQA/isort

@@ -71,7 +71,7 @@ To install vLLM TPU, you can either install using `pip` (see section [Install us
     export MODEL="meta-llama/Llama-3.1-8B"
     pip install pandas
     pip install datasets
-    python benchmarks/benchmark_serving.py \
+    vllm bench serve \
         --backend vllm \
         --model $MODEL  \
         --dataset-name random \
