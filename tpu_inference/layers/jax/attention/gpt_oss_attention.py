@@ -46,6 +46,9 @@ class GptOssAttention(nnx.Module):
     dkh_sharding: Sharding = ()
     nhd_sharding: Sharding = ()
     n_sharding: Sharding = ()
+    nh_sharding: Sharding = ()
+    kh_sharding: Sharding = ()
+    d_sharding: Sharding = ()
     
     random_init: bool = False
     mesh: Mesh
@@ -56,7 +59,7 @@ class GptOssAttention(nnx.Module):
         
         self.sm_scale = 1.0 / (self.head_dim ** 0.5)
 
-        self.sinks = create_param(
+        self.sinks_N = create_param(
             rngs, shape=(self.num_attention_heads,), dtype=self.dtype,
             sharding=self.n_sharding, random_init=self.random_init
         )
@@ -66,19 +69,34 @@ class GptOssAttention(nnx.Module):
             rngs, shape=(self.hidden_size, self.num_attention_heads, self.head_dim),
             dtype=self.dtype, sharding=self.dnh_sharding, random_init=self.random_init
         )
+        self.bias_q_NH = create_param(
+            rngs, shape=(self.num_attention_heads, self.head_dim),
+            dtype=self.dtype, sharding=self.nh_sharding, random_init=self.random_init
+        )
         self.kernel_k_DKH = create_param(
             rngs, shape=(self.hidden_size, self.num_key_value_heads, self.head_dim),
             dtype=self.dtype, sharding=self.dkh_sharding, random_init=self.random_init
+        )
+        self.bias_k_KH = create_param(
+            rngs, shape=(self.num_key_value_heads, self.head_dim),
+            dtype=self.dtype, sharding=self.kh_sharding, random_init=self.random_init
         )
         self.kernel_v_DKH = create_param(
             rngs, shape=(self.hidden_size, self.num_key_value_heads, self.head_dim),
             dtype=self.dtype, sharding=self.dkh_sharding, random_init=self.random_init
         )
-
+        self.bias_v_KH = create_param(
+            rngs, shape=(self.num_key_value_heads, self.head_dim),
+            dtype=self.dtype, sharding=self.kh_sharding, random_init=self.random_init
+        )
         # Output projection kernel
         self.kernel_o_proj_NHD = create_param(
             rngs, shape=(self.num_attention_heads, self.head_dim, self.hidden_size),
             dtype=self.dtype, sharding=self.nhd_sharding, random_init=self.random_init
+        )
+        self.bias_o_D = create_param(
+            rngs, shape=(self.hidden_size,),
+            dtype=self.dtype, sharding=self.d_sharding, random_init=self.random_init
         )
         
         # RoPE Module
@@ -146,6 +164,7 @@ class GptOssAttention(nnx.Module):
                 md.request_distribution,
             )
         return kv_cache, output_TNH
+
     def __call__(self,
                  x_TD,
                  is_prefill,
@@ -155,12 +174,19 @@ class GptOssAttention(nnx.Module):
         """Forward pass for the Attention module using 3D kernels."""
         md = attention_metadata
         x_TD = jnp.asarray(x_TD, self.dtype)
+
         with jax.named_scope("q_proj"):
             q_TNH = jnp.einsum("TD,DNH->TNH", x_TD, self.kernel_q_DNH.value)
+            q_TNH += self.bias_q_NH.value
+        
         with jax.named_scope("k_proj"):
             k_TKH = jnp.einsum("TD,DKH->TKH", x_TD, self.kernel_k_DKH.value)
+            k_TKH += self.bias_k_KH.value
+        
         with jax.named_scope("v_proj"):
             v_TKH = jnp.einsum("TD,DKH->TKH", x_TD, self.kernel_v_DKH.value)
+            v_TKH += self.bias_v_KH.value
+
         if use_attention_rope:
             q_TNH, k_TKH = self.rope(q_TNH, k_TKH, md.input_positions)
 
@@ -178,12 +204,14 @@ class GptOssAttention(nnx.Module):
                 q_TNH,
                 k_TKH,
                 v_TKH, 
-                self.sinks,
+                self.sinks_N,
                 md,
                 self.mesh
             )
             attn_out_TNH = attn_out_TNH[..., :self.head_dim]
+            
         with jax.named_scope("o_proj"):
             output_TD = jnp.einsum("TNH,NHD->TD", attn_out_TNH, self.kernel_o_proj_NHD.value)
+            output_TD += self.bias_o_D.value
         
         return new_kv_cache, output_TD
