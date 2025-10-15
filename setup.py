@@ -4,6 +4,7 @@ import os
 from typing import List
 
 from setuptools import find_packages, setup
+from version import get_version
 
 ROOT_DIR = os.path.dirname(__file__)
 
@@ -37,7 +38,7 @@ def get_requirements() -> List[str]:
 
 setup(
     name="tpu_inference",
-    version="0.1.0",
+    version=get_version(),
     description="",
     long_description=open("README.md").read() if hasattr(
         open("README.md"), "read") else "",
@@ -55,6 +56,6 @@ setup(
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
-        "Topic :: Artificial Intelligence",
+        "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
 )
