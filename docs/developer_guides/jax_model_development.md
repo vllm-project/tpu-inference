@@ -39,11 +39,11 @@ tpu_inference
    │   └── utils
 ```
 
-- registration of new Jax model types should be performed in [`tpu_inference/models/common/model_loader.py`](https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/models/common/model_loader.py)
-- new Jax model definitions should be added to [`tpu_inference/models/jax`](https://github.com/vllm-project/tpu-inference/tree/main/tpu_inference/models/jax).
-- commonly used layers (e.g. embedding, feed-forward) can be imported from [`tpu_inference/layers/jax`](https://github.com/vllm-project/tpu-inference/tree/main/tpu_inference/layers/jax).
-- model-specific layer implementations should be added to `tpu_inference/layers/<layer_type>/<model_type>_<layer_type>.py` (e.g. [`attention/deepseek_v3_attention.py`](https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/layers/jax/attention/deepseek_v3_attention.py), [`moe/deepseek_v3_moe.py`](https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/layers/jax/moe/deepseek_v3_moe.py)).
-- custom (Qwix) quantization configs (yaml files) should be stored in [`tpu_inference/models/jax/utils/quantization/configs`](https://github.com/vllm-project/tpu-inference/tree/main/tpu_inference/models/jax/utils/quantization/configs).
+- Registration of new Jax model types should be performed in [`tpu_inference/models/common/model_loader.py`](https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/models/common/model_loader.py)
+- New Jax model definitions should be added to [`tpu_inference/models/jax`](https://github.com/vllm-project/tpu-inference/tree/main/tpu_inference/models/jax).
+- Commonly used layers (e.g. embedding, feed-forward) can be imported from [`tpu_inference/layers/jax`](https://github.com/vllm-project/tpu-inference/tree/main/tpu_inference/layers/jax).
+- Model-specific layer implementations should be added to `tpu_inference/layers/<layer_type>/<model_type>_<layer_type>.py` (e.g. [`attention/deepseek_v3_attention.py`](https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/layers/jax/attention/deepseek_v3_attention.py), [`moe/deepseek_v3_moe.py`](https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/layers/jax/moe/deepseek_v3_moe.py)).
+- Custom (Qwix) quantization configs (yaml files) should be stored in [`tpu_inference/models/jax/utils/quantization/configs`](https://github.com/vllm-project/tpu-inference/tree/main/tpu_inference/models/jax/utils/quantization/configs).
 
 # Model Implementation
 Implementing a new model requires creating a dedicated model file (e.g. [deepseek_v3.py](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/models/jax/deepseek_v3.py)) that contains the following components:
