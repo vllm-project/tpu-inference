@@ -15,28 +15,28 @@ It is helpful to familiarize with the code organization before beginning model d
 tpu_inference
 ├── layers
 │   ├── jax # Provide pre-implemented building blocks for tpu-inference models.
-│        ├── attention_interface.py # Core interfaces used for applying attention.
-│        ├── base.py
-│        ├── layers.py
-│        ├── transformer_block.py
-│        ├── sharding.py
-│        ├── rope.py
-│        ├── glossary.md
-│        ├── attention
-│             ├── attention.py # Pre-implemented attention layer.
-│             └── deepseek_v3_attention.py
-│        └── moe
-│             ├── moe.py
-│             └── deepseek_v3_moe.py
+│   │    ├── attention_interface.py # Core interfaces used for applying attention.
+│   │    ├── base.py
+│   │    ├── layers.py
+│   │    ├── transformer_block.py
+│   │    ├── sharding.py
+│   │    ├── rope.py
+│   │    ├── glossary.md
+│   │    ├── attention
+│   │    │    ├── attention.py # Pre-implemented attention layer.
+│   │    │    └── deepseek_v3_attention.py
+│   │    └── moe
+│   │         ├── moe.py
+│   │         └── deepseek_v3_moe.py
 │   └── common # Functionalities shared between torchax and jax implementations.
 └── models
    ├── common
    │   └── model_loader.py
    └── jax  # Contains model files for each type of model family.
-   │   ├── deepseek_v3.py
-   │   ├── llama3.py
-   │   ├── qwen3.py
-   │   └── utils
+       ├── deepseek_v3.py
+       ├── llama3.py
+       ├── qwen3.py
+       └── utils
 ```
 
 - Registration of new Jax model types should be performed in [`tpu_inference/models/common/model_loader.py`](https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/models/common/model_loader.py)
