@@ -5,7 +5,6 @@ import string
 import time
 
 import pytest
-
 from vllm import LLM, SamplingParams
 
 
@@ -20,14 +19,17 @@ def get_ngram_test_prompts():
 
     return prompts
 
+
 def get_eagle3_test_prompts():
     num_prompts = 100
     prompts = []
 
     for _ in range(num_prompts):
-        prompts.append("Predict the continuation of this sequence: 1 2 3 4 5 6 7 8")
+        prompts.append(
+            "Predict the continuation of this sequence: 1 2 3 4 5 6 7 8")
 
     return prompts
+
 
 def get_test_prompts(speculative_config: dict):
     if speculative_config['method'] == 'ngram':
@@ -35,7 +37,9 @@ def get_test_prompts(speculative_config: dict):
     elif speculative_config['method'] == 'eagle3':
         return get_eagle3_test_prompts()
     else:
-        raise NotImplementedError(f'{speculative_config['method']} is not supported yet.')
+        raise NotImplementedError(
+            f"{speculative_config['method']} is not supported yet.")
+
 
 @pytest.fixture
 def sampling_config():
@@ -109,12 +113,13 @@ def test_ngram_correctness_greedy(
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using ngram speculative decoding with greedy sampling.
     '''
-    _test_correctness_helper(monkeypatch, sampling_config, model_name, {
-                           "method": "ngram",
-                           "prompt_lookup_max": 5,
-                           "prompt_lookup_min": 3,
-                           "num_speculative_tokens": 3,
-                       })
+    _test_correctness_helper(
+        monkeypatch, sampling_config, model_name, {
+            "method": "ngram",
+            "prompt_lookup_max": 5,
+            "prompt_lookup_min": 3,
+            "num_speculative_tokens": 3,
+        })
 
 
 def test_ngram_correctness_random(
@@ -131,12 +136,13 @@ def test_ngram_correctness_random(
     sampling_config.top_p = 0.9
     sampling_config.top_k = 5
 
-    _test_correctness_helper(monkeypatch, sampling_config, model_name, {
-                           "method": "ngram",
-                           "prompt_lookup_max": 5,
-                           "prompt_lookup_min": 3,
-                           "num_speculative_tokens": 3,
-                       })
+    _test_correctness_helper(
+        monkeypatch, sampling_config, model_name, {
+            "method": "ngram",
+            "prompt_lookup_max": 5,
+            "prompt_lookup_min": 3,
+            "num_speculative_tokens": 3,
+        })
 
 
 def _test_performance_helper(
@@ -203,12 +209,13 @@ def test_ngram_performance_greedy(
     Compares timing between reference LLM and speculative LLM using Llama 3 8B.
     Expects spec_llm to be at least 3.x faster than ref_llm.
     '''
-    _test_performance_helper(monkeypatch, sampling_config, {
-                           "method": "ngram",
-                           "prompt_lookup_max": 2,
-                           "prompt_lookup_min": 2,
-                           "num_speculative_tokens": 4,
-                       }, 3.0)
+    _test_performance_helper(
+        monkeypatch, sampling_config, {
+            "method": "ngram",
+            "prompt_lookup_max": 2,
+            "prompt_lookup_min": 2,
+            "num_speculative_tokens": 4,
+        }, 3.0)
 
 
 def test_ngram_performance_random(
@@ -224,12 +231,13 @@ def test_ngram_performance_random(
     sampling_config.top_p = 0.9
     sampling_config.top_k = 5
 
-    _test_performance_helper(monkeypatch, sampling_config, {
-                           "method": "ngram",
-                           "prompt_lookup_max": 2,
-                           "prompt_lookup_min": 2,
-                           "num_speculative_tokens": 4,
-                       }, 3.0)
+    _test_performance_helper(
+        monkeypatch, sampling_config, {
+            "method": "ngram",
+            "prompt_lookup_max": 2,
+            "prompt_lookup_min": 2,
+            "num_speculative_tokens": 4,
+        }, 3.0)
 
 
 def test_eagle3_correctness(
@@ -242,12 +250,13 @@ def test_eagle3_correctness(
     '''
     model_name = 'meta-llama/Meta-Llama-3-8B-Instruct'
 
-    _test_correctness_helper(monkeypatch, sampling_config, model_name, {
-                            'model': "unkmaster/EAGLE3-LLaMA3.1-Instruct-8B",
-                            "num_speculative_tokens": 3,
-                            "method": "eagle3",
-                            "draft_tensor_parallel_size": 1
-                        })
+    _test_correctness_helper(
+        monkeypatch, sampling_config, model_name, {
+            'model': "unkmaster/EAGLE3-LLaMA3.1-Instruct-8B",
+            "num_speculative_tokens": 3,
+            "method": "eagle3",
+            "draft_tensor_parallel_size": 1
+        })
 
 
 def test_eagle3_performance(
@@ -259,9 +268,10 @@ def test_eagle3_performance(
     Compares timing between reference LLM and speculative LLM using Llama 3 8B.
     Expects spec_llm to be at least 1.8 faster than ref_llm.
     '''
-    _test_performance_helper(monkeypatch, sampling_config, {
-                           "method": "eagle3",
-                           "model": "unkmaster/EAGLE3-LLaMA3.1-Instruct-8B",
-                           "num_speculative_tokens": 2,
-                           "draft_tensor_parallel_size": 1
-                       }, 1.8)
+    _test_performance_helper(
+        monkeypatch, sampling_config, {
+            "method": "eagle3",
+            "model": "unkmaster/EAGLE3-LLaMA3.1-Instruct-8B",
+            "num_speculative_tokens": 2,
+            "draft_tensor_parallel_size": 1
+        }, 1.8)

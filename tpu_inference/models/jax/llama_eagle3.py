@@ -5,14 +5,14 @@ import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh
 from transformers import LlamaConfig
+from vllm.config import VllmConfig
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.llama3 import LlamaDecoderLayer
 from tpu_inference.models.jax.utils.weight_utils import (MetadataMap,
-                                                       get_default_maps,
-                                                       load_hf_weights)
-from vllm.config import VllmConfig
+                                                         get_default_maps,
+                                                         load_hf_weights)
 
 logger = init_logger(__name__)
 

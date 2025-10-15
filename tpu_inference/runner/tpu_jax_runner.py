@@ -9,15 +9,31 @@ import jax.numpy as jnp
 import jaxtyping
 import numpy as np
 import torch
+import vllm.envs as envs
 from flax import nnx
 from torchax.ops.mappings import j2t_dtype
+from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer import (get_kv_transfer_group,
+                                          has_kv_transfer_group)
+from vllm.forward_context import set_forward_context
+from vllm.sequence import IntermediateTensors
+from vllm.tasks import SupportedTask
+from vllm.utils import cdiv
+from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, DraftTokenIds,
+                             ModelRunnerOutput)
+from vllm.v1.request import Request
+from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+from vllm.v1.worker.kv_connector_model_runner_mixin import \
+    KVConnectorModelRunnerMixin
+from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
-import vllm.envs as envs
 from tpu_inference import utils as common_utils
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.sample.rejection_sampler import RejectionSampler
 from tpu_inference.layers.jax.sample.sampling import (compute_logprobs,
-                                                        gather_logprobs, sample)
+                                                      gather_logprobs, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.layers.jax.sharding import build_mesh
@@ -39,22 +55,6 @@ from tpu_inference.runner.structured_decoding_manager import \
     StructuredDecodingManager
 from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
 from tpu_inference.utils import device_array, make_optimized_mesh
-from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer import (get_kv_transfer_group,
-                                          has_kv_transfer_group)
-from vllm.forward_context import set_forward_context
-from vllm.sequence import IntermediateTensors
-from vllm.tasks import SupportedTask
-from vllm.utils import cdiv
-from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, DraftTokenIds,
-                             ModelRunnerOutput)
-from vllm.v1.request import Request
-from vllm.v1.spec_decode.ngram_proposer import NgramProposer
-from vllm.v1.worker.kv_connector_model_runner_mixin import \
-    KVConnectorModelRunnerMixin
-from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 logger = init_logger(__name__)
 
