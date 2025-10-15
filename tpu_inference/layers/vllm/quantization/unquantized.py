@@ -9,7 +9,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
-from tpu_inference.layers.jax.sharding import EXPERT_AXIS_NAME, MLP_TENSOR_AXIS_NAME
+from tpu_inference.layers.jax.sharding import ShardingAxisName
 from vllm.attention.layer import Attention
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import (
@@ -180,11 +180,11 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w13_weight = jax.device_put(
                 w13_weight,
                 Format(Layout((0, 1, 2)),
-                       NamedSharding(self.mesh, P(EXPERT_AXIS_NAME, None, None))))
+                       NamedSharding(self.mesh, P(ShardingAxisName.EXPERT, None, None))))
             w2_weight = jax.device_put(
                 w2_weight,
                 Format(Layout((0, 1, 2)),
-                       NamedSharding(self.mesh, P(EXPERT_AXIS_NAME, None, None))))
+                       NamedSharding(self.mesh, P(ShardingAxisName.EXPERT, None, None))))
         else:
             intermediate_size = w13_weight.shape[1] // 2
             assert intermediate_size == w2_weight.shape[-1]
@@ -198,11 +198,11 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w13_weight = jax.device_put(
                 w13_weight,
                 Format(Layout((0, 1, 2)),
-                       NamedSharding(self.mesh, P(None, MLP_TENSOR_AXIS_NAME, None))))
+                       NamedSharding(self.mesh, P(None, ShardingAxisName.MLP_TENSOR, None))))
             w2_weight = jax.device_put(
                 w2_weight,
                 Format(Layout((0, 1, 2)),
-                       NamedSharding(self.mesh, P(None, None, MLP_TENSOR_AXIS_NAME))))
+                       NamedSharding(self.mesh, P(None, None, ShardingAxisName.MLP_TENSOR))))
         w13_weight = Parameter(torch_view(w13_weight), requires_grad=False)
         w2_weight = Parameter(torch_view(w2_weight), requires_grad=False)
 

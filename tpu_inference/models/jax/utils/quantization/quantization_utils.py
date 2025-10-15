@@ -15,7 +15,6 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from qwix._src.core.qarray import QArray
 from qwix._src.providers import ptq
-from tpu_inference.core.sched.utils import get_dp_size
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig

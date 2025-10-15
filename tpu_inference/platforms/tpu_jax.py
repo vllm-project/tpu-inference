@@ -12,6 +12,7 @@ from vllm.platforms.interface import Platform, PlatformEnum
 from vllm.sampling_params import SamplingParams, SamplingType
 
 from tpu_inference.logger import init_logger
+from tpu_inference.layers.jax.sharding import ShardingConfigManager
 
 
 if TYPE_CHECKING:
@@ -112,33 +113,17 @@ class TpuPlatform(Platform):
         return True
 
     @classmethod
-    def _validate_data_parallelism_compatibility(cls, vllm_config: VllmConfig) -> None:
-        """Validate that data parallelism is compatible with other features."""
-        from tpu_inference.core.sched.utils import get_dp_size
-        dp_size, _, _ = get_dp_size(vllm_config)
+    def _initialize_sharding_config(cls, vllm_config: VllmConfig) -> None:
         
-        if dp_size <= 1:
-            return
-            
-        # Check speculative decoding
-        if vllm_config.speculative_config is not None:
-            raise ValueError(
-                f"Speculative decoding is not supported with data parallelism "
-                f"(DP size: {dp_size}). Please disable speculative decoding or "
-                f"set data parallelism to 1."
-            )
+        sharding_config = ShardingConfigManager.from_vllm_config(vllm_config)
+        assert not hasattr(vllm_config, 'sharding_config')
+        vllm_config.sharding_config = sharding_config
         
-        # Check LoRA
-        if vllm_config.lora_config is not None:
-            raise ValueError(
-                f"LoRA is not supported with data parallelism "
-                f"(DP size: {dp_size}). Please disable LoRA or "
-                f"set data parallelism to 1."
-            )
-        # TODO(wenxindongwork): What are some other features that should be checked?
-        
+        logger.info(f"Initialized sharding configuration: {sharding_config}")
+
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        
         if not envs.VLLM_USE_V1:
             raise RuntimeError("VLLM_USE_V1=1 must be set for JAX backend.")
 
@@ -146,8 +131,9 @@ class TpuPlatform(Platform):
             assert not envs.VLLM_ENABLE_V1_MULTIPROCESSING, (
                 "VLLM_ENABLE_V1_MULTIPROCESSING must be 0 when using Pathways(JAX_PLATFORMS=proxy)"
             )
-        cls._validate_data_parallelism_compatibility(vllm_config)
         
+        cls._initialize_sharding_config(vllm_config)
+ 
         from vllm.config import CompilationLevel
 
         cache_config = vllm_config.cache_config

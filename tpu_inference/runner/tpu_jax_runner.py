@@ -9,7 +9,7 @@ import jax.numpy as jnp
 import jaxtyping
 import numpy as np
 import torch
-from tpu_inference.core.sched.utils import get_dp_size
+from tpu_inference.layers.jax.sharding import ShardingConfigManager
 import vllm.envs as envs
 from flax import nnx
 from jax.sharding import NamedSharding, PartitionSpec
@@ -38,7 +38,7 @@ from tpu_inference.layers.jax.sample.sampling import (compute_logprobs,
                                                     gather_logprobs, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
-from tpu_inference.layers.jax.sharding import ATTN_DATA_AXIS_NAME, build_mesh
+from tpu_inference.layers.jax.sharding import ShardingAxisName, build_mesh
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.model_loader import get_model
 from tpu_inference.models.jax.utils.weight_utils import (
@@ -57,7 +57,7 @@ from tpu_inference.runner.structured_decoding_manager import \
     StructuredDecodingManager
 from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
 from tpu_inference.utils import device_array, make_optimized_mesh
-from tpu_inference.layers.jax.sharding import MLP_DATA_AXIS_NAME
+from tpu_inference.layers.jax.sharding import ShardingAxisName
 
 
 logger = init_logger(__name__)
@@ -143,11 +143,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.kv_cache_dtype = TPU_STR_DTYPE_TO_TORCH_DTYPE[
                 cache_config.cache_dtype]
 
-        _, _, self.dp_size = get_dp_size(self.vllm_config)
-        self.data_parallel_sharding = NamedSharding(self.mesh,
-                                                    PartitionSpec(MLP_DATA_AXIS_NAME))
+        self.dp_size = self.vllm_config.sharding_config.total_dp_size
+        self.data_parallel_mlp_sharding = NamedSharding(self.mesh,
+                                                    PartitionSpec(ShardingAxisName.MLP_DATA))
         self.data_parallel_attn_sharding = NamedSharding(self.mesh,
-                                                    PartitionSpec(ATTN_DATA_AXIS_NAME))
+                                                    PartitionSpec(ShardingAxisName.ATTN_DATA))
 
     def _init_random(self):
         if self.model_config.seed is None:
@@ -157,33 +157,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.rng_key = jax.random.key(self.model_config.seed)
 
     def _init_mesh(self) -> None:
-        try:
-            # TODO: Update override steps.
-            sharding_strategy = \
-                self.vllm_config.additional_config["sharding"]["sharding_strategy"]
-        except KeyError:
-            sharding_strategy = {"tensor_parallelism": len(self.devices)}
+        sharding_strategy: ShardingConfigManager = self.vllm_config.sharding_config
+        axis_names = ("data", "attn_dp", "expert", "model")
+        mesh_shape = (sharding_strategy.model_dp_size, sharding_strategy.attn_dp_size, sharding_strategy.expert_size, sharding_strategy.tp_size)
 
-        if os.getenv("NEW_MODEL_DESIGN", False):
-            self.mesh = build_mesh(self.devices, sharding_strategy)
-        else:
-            try:
-                dp = sharding_strategy["data_parallelism"]
-            except KeyError:
-                dp = 1
-            try:
-                tp = sharding_strategy["tensor_parallelism"]
-            except KeyError:
-                tp = len(self.devices)
-
-            _, attn_dp, _ = get_dp_size(self.vllm_config)
-            tp = tp//attn_dp
-            axis_names = ("data", "attn_dp","expert", "model")
-            mesh_shape = (dp, attn_dp, 1, tp)
-
-            self.mesh = make_optimized_mesh(mesh_shape,
-                                            axis_names,
-                                            devices=self.devices)
+        self.mesh = make_optimized_mesh(mesh_shape,
+                                        axis_names,
+                                        devices=self.devices)
         logger.info(f"Init mesh | mesh={self.mesh}")
 
     def _init_phased_profiling(self) -> None:
@@ -591,8 +571,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         ret = jax.shard_map(
             select_local_fn,
             mesh=self.mesh,
-            in_specs=(PartitionSpec(ATTN_DATA_AXIS_NAME), PartitionSpec(ATTN_DATA_AXIS_NAME)),
-            out_specs=PartitionSpec(ATTN_DATA_AXIS_NAME),
+            in_specs=(PartitionSpec(ShardingAxisName.ATTN_DATA), PartitionSpec(ShardingAxisName.ATTN_DATA)),
+            out_specs=PartitionSpec(ShardingAxisName.ATTN_DATA),
         )(array, indices_to_select)
 
         return ret
@@ -861,7 +841,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.input_batch,
             padded_num_reqs,
             # TODO(wenxindongwork): should we shard data when sampling?
-            sharding=NamedSharding(self.mesh,PartitionSpec(ATTN_DATA_AXIS_NAME)),
+            sharding=NamedSharding(self.mesh,PartitionSpec(ShardingAxisName.ATTN_DATA)),
         )
         if self.uses_mrope:
             positions = mrope_positions
@@ -881,7 +861,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             (
                 input_ids,
             ),
-            sharding=self.data_parallel_sharding,
+            sharding=self.data_parallel_mlp_sharding,
         )
         
         (

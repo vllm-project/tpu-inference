@@ -14,7 +14,7 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import TORCH_DTYPE_TO_JAX
-from tpu_inference.layers.jax.sharding import MLP_TENSOR_AXIS_NAME
+from tpu_inference.layers.jax.sharding import ShardingAxisName
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.lora.layers import BaseLayerWithLoRA
@@ -201,7 +201,7 @@ class VllmModelWrapper:
         @functools.partial(
             jax.jit,
             out_shardings=(NamedSharding(self.mesh,
-                                         PartitionSpec(None, MLP_TENSOR_AXIS_NAME))),
+                                         PartitionSpec(None, ShardingAxisName.MLP_TENSOR))),
         )
         def compute_logits_func(
             params_and_buffers: Any,

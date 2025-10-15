@@ -7,7 +7,7 @@ from typing import Callable, Dict, Optional, Tuple, Union
 import jax
 import jax.numpy as jnp
 import jaxtyping
-from tpu_inference.core.sched.utils import get_dp_size
+from tpu_inference.layers.jax.sharding import ShardingConfigManager
 import vllm.envs as envs
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
@@ -20,7 +20,6 @@ from vllm.v1.core.kv_cache_utils import get_num_blocks, get_uniform_page_size
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
-
 from tpu_inference import utils
 from tpu_inference.di.abstracts import (AbstractKVCacheConfig,
                                         AbstractLoRARequest,
@@ -118,13 +117,12 @@ class TPUWorker(AbstractTpuWorker):
 
     def init_device(self):
         if not self.devices:
-            try:
-                device_indexes = self.vllm_config.additional_config[
-                    "sharding"]["sharding_strategy"]["device_indexes"]
+            sharding_config: ShardingConfigManager = self.vllm_config.sharding_config
+            device_indexes = sharding_config.device_indexes
+            if device_indexes is not None: 
                 self.devices = [jax.devices()[i] for i in device_indexes]
-            except KeyError:
-                tp = self.parallel_config.tensor_parallel_size
-                self.devices = jax.devices()[:tp]
+            else:
+                self.devices = jax.devices()[:sharding_config.total_devices]
 
         # Initialize the vLLM distribution layer as a single chip environment,
         # we'll swap the model's parallel modules with TPU SPMD equivalents.
@@ -184,17 +182,15 @@ class TPUWorker(AbstractTpuWorker):
 
     def _setup_scheduler(self) -> None:
         """Setup the appropriate scheduler based on DP size."""
-
-        _, _, dp_size = get_dp_size(self.vllm_config)
+        sharding_config: ShardingConfigManager = self.vllm_config.sharding_config
+        dp_size = sharding_config.total_dp_size
         
         if dp_size > 1:
-            logger.info(f"DP size ({dp_size}) > 1, using DPScheduler")
+            logger.info(f"DP size({dp_size}) > 1, using DPScheduler")
 
             import vllm.v1.core.sched.scheduler as vLLMScheduler
-            from tpu_inference.core.sched.dp_scheduler import create_dp_scheduler
-            from vllm.v1.core.sched.scheduler import Scheduler
+            from tpu_inference.core.sched.dp_scheduler import DPScheduler
             
-            DPScheduler = create_dp_scheduler(Scheduler)
             vLLMScheduler.Scheduler = DPScheduler
         else:
             logger.info(f"DP size ({dp_size}) <= 1, using default Scheduler")

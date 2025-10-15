@@ -6,7 +6,7 @@ from torch.nn import Parameter
 from torch.utils import _pytree as pytree
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
-from tpu_inference.layers.jax.sharding import MLP_TENSOR_AXIS_NAME
+from tpu_inference.layers.jax.sharding import ShardingAxisName
 from vllm.lora.layers import (MergedColumnParallelLinearWithLoRA,
                               MergedQKVParallelLinearWithLoRA,
                               RowParallelLinearWithLoRA)
@@ -81,7 +81,7 @@ def _shard_tensor_to_tpu_replicated(tensor: torch.Tensor,
 def _shard_vocab_parallel_embedding(layer: VocabParallelEmbedding,
                                     mesh: Mesh) -> None:
     weight = _convert_to_torchax_and_shard(
-        layer.weight, NamedSharding(mesh, P(MLP_TENSOR_AXIS_NAME, None)))
+        layer.weight, NamedSharding(mesh, P(ShardingAxisName.MLP_TENSOR, None)))
     layer.weight = Parameter(weight, requires_grad=False)
 
 
@@ -90,11 +90,11 @@ def _shard_lm_head(layer: ParallelLMHead, mesh: Mesh):
     # if that config is set, then we should not create new weights but reuse the
     # weight from VocabParallelEmbedding
     weight = _convert_to_torchax_and_shard(
-        layer.weight, NamedSharding(mesh, P(MLP_TENSOR_AXIS_NAME, None)))
+        layer.weight, NamedSharding(mesh, P(ShardingAxisName.MLP_TENSOR, None)))
     layer.weight = Parameter(weight, requires_grad=False)
     if layer.bias is not None:
         bias = _convert_to_torchax_and_shard(layer.bias,
-                                             NamedSharding(mesh, P(MLP_TENSOR_AXIS_NAME)))
+                                             NamedSharding(mesh, P(ShardingAxisName.MLP_TENSOR)))
         layer.bias = Parameter(bias, requires_grad=False)
 
 

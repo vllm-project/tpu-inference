@@ -8,7 +8,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 from tpu_inference.layers.vllm.linear_common import \
     slice_sharded_tensor_for_concatenation
-from tpu_inference.layers.jax.sharding import EXPERT_AXIS_NAME, MLP_TENSOR_AXIS_NAME
+from tpu_inference.layers.jax.sharding import ShardingAxisName
 
 P = PartitionSpec
 
@@ -97,8 +97,8 @@ def tensor_sharded_gmm_merged_column_parallel(
     gmm_result = shard_map(
         _gmm,
         mesh=mesh,
-        in_specs=(P(), P(None, EXPERT_AXIS_NAME, None), P()),
-        out_specs=(P(None, MLP_TENSOR_AXIS_NAME)),
+        in_specs=(P(), P(None, ShardingAxisName.EXPERT, None), P()),
+        out_specs=(P(None, ShardingAxisName.MLP_TENSOR)),
         check_rep=False,
     )(lhs, rhs, group_sizes)
 
@@ -131,12 +131,12 @@ def tensor_sharded_gmm_row_parallel(
 
     def _gmm_all_reduce(lhs, rhs, group_sizes):
         r = _gmm(lhs, rhs, group_sizes)
-        return jax.lax.psum(r, axis_name=MLP_TENSOR_AXIS_NAME)
+        return jax.lax.psum(r, axis_name=ShardingAxisName.MLP_TENSOR)
 
     return shard_map(
         _gmm_all_reduce,
         mesh=mesh,
-        in_specs=(P(None, MLP_TENSOR_AXIS_NAME), P(None, None, MLP_TENSOR_AXIS_NAME), P()),
+        in_specs=(P(None, ShardingAxisName.MLP_TENSOR), P(None, None, ShardingAxisName.MLP_TENSOR), P()),
         out_specs=(P()),
         check_rep=False,
     )(lhs, rhs, group_sizes)
@@ -159,7 +159,7 @@ def expert_sharded_gmm(
     num_experts_per_shard = num_experts // ep_size
     group_offset = jnp.arange(0, num_experts, num_experts_per_shard)
     group_offset = jax.lax.with_sharding_constraint(
-        group_offset, NamedSharding(mesh, P(EXPERT_AXIS_NAME)))
+        group_offset, NamedSharding(mesh, P(ShardingAxisName.EXPERT)))
 
     def _gmm(lhs, rhs, group_sizes, group_offset):
         # Group offset for this shard. `group_offset` is sharded, and in this sharded
@@ -194,8 +194,8 @@ def expert_sharded_gmm(
     gmm_res = shard_map(
         _gmm,
         mesh=mesh,
-        in_specs=(P(), P(EXPERT_AXIS_NAME, None, None), P(), P(EXPERT_AXIS_NAME)),
-        out_specs=(P(EXPERT_AXIS_NAME, None)), 
+        in_specs=(P(), P(ShardingAxisName.EXPERT, None, None), P(), P(ShardingAxisName.EXPERT)),
+        out_specs=(P(ShardingAxisName.EXPERT, None)), 
         check_rep=False,
     )(lhs, rhs, group_sizes, group_offset)
 
@@ -213,11 +213,11 @@ def expert_sharded_gmm(
     recv_sizes = send_sizes
 
     input_offsets = jax.lax.with_sharding_constraint(
-        input_offsets, NamedSharding(mesh, P(EXPERT_AXIS_NAME)))
+        input_offsets, NamedSharding(mesh, P(ShardingAxisName.EXPERT)))
     send_sizes = jax.lax.with_sharding_constraint(
-        send_sizes, NamedSharding(mesh, P(EXPERT_AXIS_NAME)))
+        send_sizes, NamedSharding(mesh, P(ShardingAxisName.EXPERT)))
     output_offsets = jax.lax.with_sharding_constraint(
-        output_offsets, NamedSharding(mesh, P(EXPERT_AXIS_NAME)))
+        output_offsets, NamedSharding(mesh, P(ShardingAxisName.EXPERT)))
 
     def _ragged_all_to_all(operand, input_offsets, send_sizes, output_offsets,
                            recv_sizes):
@@ -245,7 +245,7 @@ def expert_sharded_gmm(
                                          send_sizes_of_shard,
                                          output_offsets_of_shard,
                                          recv_sizes_of_shard,
-                                         axis_name=EXPERT_AXIS_NAME)
+                                         axis_name=ShardingAxisName.EXPERT)
 
     # Use ragged_all_to_all to send the result from gmm for each expert to all the shards.
     # In the working example, the result would be:
@@ -267,7 +267,7 @@ def expert_sharded_gmm(
     return shard_map(
         _ragged_all_to_all,
         mesh=mesh,
-        in_specs=(P(EXPERT_AXIS_NAME, None), P(EXPERT_AXIS_NAME), P(EXPERT_AXIS_NAME), P(EXPERT_AXIS_NAME), P()),
+        in_specs=(P(ShardingAxisName.EXPERT, None), P(ShardingAxisName.EXPERT), P(ShardingAxisName.EXPERT), P(ShardingAxisName.EXPERT), P()),
         out_specs=(P()),
         check_rep=False,
     )(gmm_res, input_offsets, send_sizes, output_offsets, recv_sizes)
@@ -329,8 +329,6 @@ def jax_fused_moe_func(
     x = hidden_states[token_indices_sorted]
 
     if use_ep:
-        x = jax.lax.with_sharding_constraint(
-            x, NamedSharding(mesh, P(None)))
         x = expert_sharded_gmm(x,
                                w1,
                                group_sizes,
@@ -351,8 +349,6 @@ def jax_fused_moe_func(
     x = jax.nn.silu(x1) * x2
 
     if use_ep:
-        x = jax.lax.with_sharding_constraint(
-            x, NamedSharding(mesh, P(None)))
         x = expert_sharded_gmm(x,
                                w2,
                                group_sizes,

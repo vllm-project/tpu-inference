@@ -6,7 +6,6 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.ops.mappings import t2j_dtype
-from tpu_inference.core.sched.utils import get_dp_size
 from vllm.attention import Attention
 from vllm.attention.backends.abstract import AttentionType
 from vllm.config import get_layers_from_vllm_config
@@ -188,7 +187,7 @@ class KVCacheManager:
         for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
             assert kv_cache_tensor.size % page_size_bytes == 0
             num_blocks = kv_cache_tensor.size // page_size_bytes
-            _, _, dp_size = get_dp_size(self.runner.vllm_config)
+            dp_size = self.runner.vllm_config.sharding_config.total_dp_size
             # num_blocks must be a multiple of dp_size
             num_blocks = math.ceil(num_blocks / dp_size) * dp_size
             # NOTE: we'll multiply the num_kv_heads by 2 in the function

@@ -7,7 +7,7 @@ import torch
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.ops.mappings import j2t_dtype
-from tpu_inference.layers.jax.sharding import ATTN_DATA_AXIS_NAME, MLP_DATA_AXIS_NAME
+from tpu_inference.layers.jax.sharding import ShardingAxisName
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 from vllm.utils import supports_kw
@@ -202,8 +202,8 @@ def get_flax_model(
         model_class = _get_model_architecture(
             vllm_config.model_config.hf_config)
     jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh)
-    kv_cache_sharding = NamedSharding(mesh, PartitionSpec(ATTN_DATA_AXIS_NAME, None, "model"))
-    hidden_states_sharding = NamedSharding(mesh, PartitionSpec(MLP_DATA_AXIS_NAME,
+    kv_cache_sharding = NamedSharding(mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None, "model"))
+    hidden_states_sharding = NamedSharding(mesh, PartitionSpec(ShardingAxisName.MLP_DATA,
                                                                None))  # (T, D)
 
     # For performance consideration, refer to:
@@ -224,7 +224,7 @@ def get_flax_model(
         model = nnx.merge(graphdef, state)
         return model(*args)
 
-    logits_sharding = NamedSharding(mesh, PartitionSpec(MLP_DATA_AXIS_NAME, "model"))
+    logits_sharding = NamedSharding(mesh, PartitionSpec(ShardingAxisName.MLP_DATA, "model"))
 
     @functools.partial(
         jax.jit,

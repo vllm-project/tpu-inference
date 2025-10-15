@@ -1,6 +1,6 @@
 import torchax
 from jax.sharding import Mesh, PartitionSpec
-from tpu_inference.layers.jax.sharding import ATTN_DATA_AXIS_NAME, MLP_DATA_AXIS_NAME, MLP_TENSOR_AXIS_NAME
+from tpu_inference.layers.jax.sharding import ShardingAxisName
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE, FusedMoEConfig
@@ -38,21 +38,21 @@ class JaxCommonLinearConfig:
         self.tp_size = self.mesh.shape['model']*self.mesh.shape.get('attn_dp', 1)
         
         if isinstance(layer, RowParallelLinear):
-            self.weight_sharding = P(None, MLP_TENSOR_AXIS_NAME)
+            self.weight_sharding = P(None, ShardingAxisName.MLP_TENSOR)
             if self.enable_sequence_parallelism:
-                self.output_sharding = P(MLP_TENSOR_AXIS_NAME, None)
+                self.output_sharding = P(ShardingAxisName.MLP_TENSOR, None)
         elif isinstance(layer, ColumnParallelLinear):
             if isinstance(
                     layer, QKVParallelLinear):
-                self.input_sharding = P(ATTN_DATA_AXIS_NAME, None)
+                self.input_sharding = P(ShardingAxisName.ATTN_DATA, None)
                 self.weight_sharding = P('model', None)
-                self.output_sharding = P(ATTN_DATA_AXIS_NAME, "model")
+                self.output_sharding = P(ShardingAxisName.ATTN_DATA, "model")
             else:
-                self.weight_sharding = P(MLP_TENSOR_AXIS_NAME, None)
+                self.weight_sharding = P(ShardingAxisName.MLP_TENSOR, None)
             
             if self.enable_sequence_parallelism:
                 # TODO(wenxindongwork): should sequence be sharded on the attn_dp axis as well?
-                self.input_sharding = P(MLP_TENSOR_AXIS_NAME, None)
+                self.input_sharding = P(ShardingAxisName.MLP_TENSOR, None)
 
             if isinstance(layer, MergedColumnParallelLinear) or isinstance(
                     layer, QKVParallelLinear):

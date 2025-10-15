@@ -15,7 +15,7 @@ from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.rope_interface import apply_rope
-from tpu_inference.layers.jax.sharding import ATTN_DATA_AXIS_NAME
+from tpu_inference.layers.jax.sharding import ShardingAxisName
 
 KVCache = Tuple[jax.Array, jax.Array]
 
@@ -43,15 +43,15 @@ class Attention(nnx.Module):
     mesh: Mesh
     kv_cache_dtype: str
 
-    dnh_sharding: Sharding = (ATTN_DATA_AXIS_NAME)
-    dkh_sharding: Sharding = (ATTN_DATA_AXIS_NAME)
-    nhd_sharding: Sharding = (ATTN_DATA_AXIS_NAME)
+    dnh_sharding: Sharding = (ShardingAxisName.ATTN_DATA)
+    dkh_sharding: Sharding = (ShardingAxisName.ATTN_DATA)
+    nhd_sharding: Sharding = (ShardingAxisName.ATTN_DATA)
 
-    activation_q_td: Sharding = (ATTN_DATA_AXIS_NAME)
-    query_tnh: P = P(ATTN_DATA_AXIS_NAME)
-    keyvalue_skh: P = P(ATTN_DATA_AXIS_NAME)
+    activation_q_td: Sharding = (ShardingAxisName.ATTN_DATA)
+    query_tnh: P = P(ShardingAxisName.ATTN_DATA)
+    keyvalue_skh: P = P(ShardingAxisName.ATTN_DATA)
 
-    attn_o_tnh: P = P(ATTN_DATA_AXIS_NAME)
+    attn_o_tnh: P = P(ShardingAxisName.ATTN_DATA)
     rngs: InitVar[nnx.Rngs]
 
     random_init: bool = False
@@ -212,16 +212,16 @@ class Attention(nnx.Module):
                   `(seq, num_q_heads, head_dim)`.
         """
         md = attention_metadata
-        kv_cache_spec = P(ATTN_DATA_AXIS_NAME, None, "model")
+        kv_cache_spec = P(ShardingAxisName.ATTN_DATA, None, "model")
         in_specs = (
             self.query_tnh,  # q
             self.keyvalue_skh,  # k
             self.keyvalue_skh,  # v
             kv_cache_spec,  # kv_cache
-            P(ATTN_DATA_AXIS_NAME),  # md.seq_lens
-            P(ATTN_DATA_AXIS_NAME),  # page_indices_flat
-            P(ATTN_DATA_AXIS_NAME),  # query_start_loc
-            P(ATTN_DATA_AXIS_NAME),  # distribution
+            P(ShardingAxisName.ATTN_DATA),  # md.seq_lens
+            P(ShardingAxisName.ATTN_DATA),  # page_indices_flat
+            P(ShardingAxisName.ATTN_DATA),  # query_start_loc
+            P(ShardingAxisName.ATTN_DATA),  # distribution
         )
 
         out_specs = (self.attn_o_tnh, kv_cache_spec)

@@ -5,8 +5,7 @@ from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple
 import jax
 import jax.numpy as jnp
 import numpy as np
-from tpu_inference.core.sched.utils import get_dp_size
-from tpu_inference.layers.jax.sharding import MLP_TENSOR_AXIS_NAME
+from tpu_inference.layers.jax.sharding import ShardingAxisName
 import vllm.envs as envs
 from jax.sharding import NamedSharding, PartitionSpec
 from vllm.utils import cdiv
@@ -95,7 +94,7 @@ class CompilationManager:
             num_tokens = inputs_embeds.shape[0]
         assert num_tokens is not None
 
-        _, _, dp_size = get_dp_size(self.runner.vllm_config)
+        dp_size = self.runner.vllm_config.sharding_config.dp_size * self.runner.vllm_config.sharding_config.attn_dp_size
 
         # Keep existing pattern for complex array operations
         block_tables = self.runner.block_table_cpu[:self.runner.max_num_reqs]
@@ -255,7 +254,7 @@ class CompilationManager:
                 indices_paddings=self.runner.num_reqs_paddings,
                 hidden_dim=vocab_size,
                 sharding=NamedSharding(self.runner.mesh,
-                                       PartitionSpec(None, MLP_TENSOR_AXIS_NAME)),
+                                       PartitionSpec(None, ShardingAxisName.MLP_TENSOR)),
             )
             self._precompile_select_from_array_helper(
                 name="select target tokens for spec decoding",
@@ -263,7 +262,7 @@ class CompilationManager:
                 indices_paddings=self.runner.num_logits_paddings,
                 hidden_dim=vocab_size,
                 sharding=NamedSharding(self.runner.mesh,
-                                       PartitionSpec(None, MLP_TENSOR_AXIS_NAME)),
+                                       PartitionSpec(None, ShardingAxisName.MLP_TENSOR)),
                 only_equal_paddings=True,
             )
 
@@ -302,7 +301,7 @@ class CompilationManager:
         hsize = self.runner.model_config.get_vocab_size()
         for num_reqs in self.runner.num_reqs_paddings:
             sharding = NamedSharding(self.runner.mesh,
-                                     PartitionSpec(None, MLP_TENSOR_AXIS_NAME))
+                                     PartitionSpec(None, ShardingAxisName.MLP_TENSOR))
             logits = self._create_dummy_tensor((num_reqs, hsize), jnp.bfloat16,
                                                sharding)
             for do_sampling in (True, False):
@@ -387,7 +386,7 @@ class CompilationManager:
         for num_logits in self.runner.num_logits_paddings:
             for num_reqs in self.runner.num_reqs_paddings:
                 sharding = NamedSharding(self.runner.mesh,
-                                         PartitionSpec(None, MLP_TENSOR_AXIS_NAME))
+                                         PartitionSpec(None, ShardingAxisName.MLP_TENSOR))
                 target_probs = self._create_dummy_tensor(
                     (num_logits, vocab_size), jnp.bfloat16, sharding)
                 draft_token_ids = self._create_dummy_tensor((num_logits, ),
