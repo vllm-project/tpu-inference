@@ -47,6 +47,8 @@ class GptOss(nnx.Module):
 
         # Model hyperparameters from GPT-OSS config
         # TODO: verify the the default is 36(?)
+        # TODO: update the parameters to hf_config, instead of being hardcoded 
+        # after validating accuracy
         num_layers: int = 36
         num_experts: int = 128
         vocab_size: int = 201088
@@ -126,7 +128,7 @@ class GptOss(nnx.Module):
                 random_init=self.random_init,
                 activation_ffw_td=('data', None),
                 ed_sharding=('model', None),
-                e_sharding=('model'),
+                e_sharding=('model',),
             )
 
             moe_mlp = GptOssMoE(
@@ -165,7 +167,6 @@ class GptOss(nnx.Module):
             )
             self.layers.append(block)
 
-        # Note: RMSNorm does not upcast input to float32, while the pytorch does
         self.final_norm = RMSNorm(
             dims=hidden_size,
             rngs=self.rng,
@@ -202,15 +203,14 @@ class GptOss(nnx.Module):
 
         for i, block in enumerate(self.layers):
             kv_cache = kv_caches[i]
-            # Only apply sliding window to every other layer
-            current_sliding_window = self.sliding_window if i % 2 == 0 else 0
+            # TODO: Only apply sliding window to every other layer
+            current_sliding_window = self.sliding_window if i % 2 == 0 else None
             attention_metadata.sliding_window = current_sliding_window
             
             new_kv_cache, x = block(x, is_prefill, kv_cache, attention_metadata)
             kv_caches[i] = new_kv_cache
 
         final_activation = self.final_norm(x)
-
         return kv_caches, final_activation, []
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:

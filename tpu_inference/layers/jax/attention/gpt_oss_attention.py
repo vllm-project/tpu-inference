@@ -165,6 +165,14 @@ class GptOssAttention(nnx.Module):
             q_TNH, k_TKH = self.rope(q_TNH, k_TKH, md.input_positions)
 
         with jax.named_scope("attn_op"):
+            # Padding H dim of q,k,v to be the multiple of 128
+            multiple_of_128 = ((self.head_dim - 1) // 128 + 1) * 128
+            q_TNH = jnp.pad(q_TNH, ((0, 0), (0, 0),
+                                    (0, multiple_of_128 - self.head_dim)))
+            k_TKH = jnp.pad(k_TKH, ((0, 0), (0, 0),
+                                    (0, multiple_of_128 - self.head_dim)))
+            v_TKH = jnp.pad(v_TKH, ((0, 0), (0, 0),
+                                    (0, multiple_of_128 - self.head_dim)))
             new_kv_cache, attn_out_TNH = self.attention(
                 kv_cache,
                 q_TNH,
@@ -174,7 +182,7 @@ class GptOssAttention(nnx.Module):
                 md,
                 self.mesh
             )
-
+            attn_out_TNH = attn_out_TNH[..., :self.head_dim]
         with jax.named_scope("o_proj"):
             output_TD = jnp.einsum("TNH,NHD->TD", attn_out_TNH, self.kernel_o_proj_NHD.value)
         
