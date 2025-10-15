@@ -37,7 +37,7 @@ def get_requirements() -> List[str]:
 
 setup(
     name="tpu_inference",
-    version="0.1.0",
+    version=os.environ.get('VERSION'),
     description="",
     long_description=open("README.md").read() if hasattr(
         open("README.md"), "read") else "",
@@ -55,6 +55,6 @@ setup(
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
-        "Topic :: Artificial Intelligence",
+        "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
 )
