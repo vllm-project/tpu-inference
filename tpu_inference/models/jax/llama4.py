@@ -423,7 +423,14 @@ class Llama4WeightLoader:
             # ============================= ADD ================================
             # update loading logic to handle qarray 
             if loaded_weight.itemsize < 2: # check model weight elem nbits < 16
-                 #type check 
+                #type check 
+                assert hasattr(mapped_model_weight, 'array'), \
+                    f"Expected model_weight for quantized weight '{mapped_name}' to be a qarray."
+                
+                expected_qvalue_dtype = mapped_model_weight.array.qvalue.value.dtype
+                assert loaded_weight.dtype == expected_qvalue_dtype, \
+                    f"DType mismatch for QValue '{mapped_name}'. Loaded dtype ({loaded_weight.dtype}) != Expected dtype ({expected_qvalue_dtype})."
+                
                 mapped_model_weight.array.qvalue.value = shard_put(loaded_weight,
                                                   mapped_model_weight.array.qvalue.sharding,
                                                   mesh=model_for_loading.mesh)
