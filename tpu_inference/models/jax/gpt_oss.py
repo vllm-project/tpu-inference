@@ -251,17 +251,21 @@ class GptOss(nnx.Module):
 
                 model_weight = get_param(model_params, jax_path)
                 cast_type = model_weight.value.dtype
-
-                torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
-                if torch_view_type:
-                    # Avoid unnecessary upcasting and mem copy by viewing the tensor's
-                    # raw data as integers before converting to a JAX array.
-                    weight_np = jnp.array(
-                        loaded_weight.view(torch_view_type).numpy()
-                    ).view(cast_type)
+                
+                if jax_path_template == "layers.*.attn.sinks_N":
+                	  # Checkpoint is bf16, but we have to upcast sinks to f32, as required by RPA_v3 kernel
+                	  weight_np = jnp.array(loaded_weight.to(torch.float32).numpy())
                 else:
-                    raise ValueError(
-                        f"Unsupported dtype for tensor conversion: {cast_type}")
+                	  torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
+                	  if torch_view_type:
+                	  	  # Avoid unnecessary upcasting and mem copy by viewing the tensor's
+                	  	  # raw data as integers before converting to a JAX array.
+                	  	  weight_np = jnp.array(
+                	  	  	  loaded_weight.view(torch_view_type).numpy()
+                	  	  ).view(cast_type)
+                	  else:
+                	  	  raise ValueError(
+                	  	  	  f"Unsupported dtype for tensor conversion: {cast_type}")
 
                 if transform_fn:
                     transformed_weight = transform_fn(weight_np, target_shape)
