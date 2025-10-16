@@ -1,5 +1,4 @@
 import jax
-import numpy as np
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
@@ -21,31 +20,20 @@ def host_hbm_dma(x_ref, y_ref):
 # TODO(jcgu): verify single device sharding case
 def d2h_dma(
     input_array: jax.Array,
-    device_sharding: jax.sharding.NamedSharding,
+    out_sharding: jax.sharding.NamedSharding,
 ) -> jax.Array:
     """ DMA a device jax array to host memory.
     Args:
         input_array: input jax array on device hbm
-        host_sharding: output's host sharding
+        out_sharding: output's host sharding
     Returns:
         jax array on host memory with the same sharding
     """
-    if isinstance(device_sharding, jax.sharding.NamedSharding):
-        mesh = device_sharding.mesh
-        partition_spec = device_sharding.spec
-    elif isinstance(device_sharding, jax.sharding.SingleDeviceSharding):
-        device = list(input_array.devices())[0]
-        mesh = jax.sharding.Mesh(devices=np.array([device]),
-                                 axis_names=('x', ))
-        partition_spec = jax.sharding.PartitionSpec()
-
-    # device_sharding = input_array.sharding
-    # assert device_sharding.memory_kind == "device"
-    # assert host_sharding.memory_kind == "pinned_host"
-
-    host_sharding = jax.sharding.NamedSharding(mesh,
-                                               partition_spec,
-                                               memory_kind="pinned_host")
+    device_sharding = input_array.sharding
+    assert isinstance(device_sharding, jax.sharding.NamedSharding)
+    assert isinstance(out_sharding, jax.sharding.NamedSharding)
+    assert device_sharding.memory_kind == "device"
+    assert out_sharding.memory_kind == "pinned_host"
 
     @jax.jit
     def _d2h_dma_call(x):
@@ -62,11 +50,11 @@ def d2h_dma(
     d2h_dma_kernel = jax.jit(
         jax.shard_map(
             _d2h_dma_call,
-            mesh=mesh,
-            in_specs=partition_spec,
-            out_specs=partition_spec,
+            mesh=device_sharding.mesh,
+            in_specs=device_sharding.spec,
+            out_specs=out_sharding.spec,
         ),
-        out_shardings=host_sharding,
+        out_shardings=out_sharding,
     )
 
     return d2h_dma_kernel(input_array)
@@ -76,23 +64,23 @@ def d2h_dma(
 # TODO(jcgu): verify single device sharding case
 def h2d_dma(
     input_array: jax.Array,
-    device_sharding: jax.sharding.NamedSharding,
+    out_sharding: jax.sharding.NamedSharding,
 ) -> jax.Array:
     """ DMA a host jax array to device hbm.
     Args:
         input_array: input jax array on host memory
-        device_sharding: the device sharding for output
+        out_sharding: the device sharding for output
     Returns:
         jax array on device hbm with the assigned sharding
     """
-    if isinstance(device_sharding, jax.sharding.NamedSharding):
-        mesh = device_sharding.mesh
-        partition_spec = device_sharding.spec
-    elif isinstance(device_sharding, jax.sharding.SingleDeviceSharding):
-        device = device_sharding._device
-        mesh = jax.sharding.Mesh(devices=np.array([device]),
-                                 axis_names=('x', ))
-        partition_spec = jax.sharding.PartitionSpec()
+
+    host_sharding = input_array.sharding
+
+    # TODO(jcgu): support SingleDeviceSharding
+    assert isinstance(host_sharding, jax.sharding.NamedSharding)
+    assert isinstance(out_sharding, jax.sharding.NamedSharding)
+    assert host_sharding.memory_kind == "pinned_host"
+    assert out_sharding.memory_kind == "device"
 
     @jax.jit
     def _h2d_dma_call(x):
@@ -109,11 +97,11 @@ def h2d_dma(
     h2d_dma_kernel = jax.jit(
         jax.shard_map(
             _h2d_dma_call,
-            mesh=mesh,
-            in_specs=partition_spec,
-            out_specs=partition_spec,
+            mesh=host_sharding.mesh,
+            in_specs=host_sharding.spec,
+            out_specs=out_sharding.spec,
             check_vma=False,
         ),
-        out_shardings=device_sharding,
+        out_shardings=out_sharding,
     )
     return h2d_dma_kernel(input_array)
