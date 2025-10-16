@@ -60,7 +60,7 @@ class GptOssAttention(nnx.Module):
         self.sm_scale = 1.0 / (self.head_dim ** 0.5)
 
         self.sinks_N = create_param(
-            rngs, shape=(self.num_attention_heads,), dtype=self.dtype,
+            rngs, shape=(self.num_attention_heads,), dtype=jnp.float32,
             sharding=self.n_sharding, random_init=self.random_init
         )
 
@@ -133,7 +133,7 @@ class GptOssAttention(nnx.Module):
             P(),                 # page_indices_flat: Replicated
             P(),                 # query_start_loc: Replicated
             P(),                 # distribution: Replicated
-            #P(),                 # sinks
+            P(),                 # sinks
         )
         out_specs = (self.attn_o_tnh, kv_cache_spec)
 
@@ -161,7 +161,7 @@ class GptOssAttention(nnx.Module):
                 md.block_tables,
                 md.query_start_loc,
                 md.request_distribution,
-                #sinks,
+                sinks,
             )
         return kv_cache, output_TNH
 
@@ -204,7 +204,7 @@ class GptOssAttention(nnx.Module):
                 q_TNH,
                 k_TKH,
                 v_TKH, 
-                self.sinks_N,
+                self.sinks_N.value,
                 md,
                 self.mesh
             )
