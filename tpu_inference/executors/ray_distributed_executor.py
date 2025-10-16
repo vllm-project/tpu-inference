@@ -91,6 +91,7 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
 
         # KV connector setup
         self.has_connector = self.vllm_config.kv_transfer_config is not None
+        # TODO: any problems here?
         self.kv_output_aggregator = KVOutputAggregator(
             self.parallel_config.world_size)
         if self.has_connector:
@@ -120,10 +121,16 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
                 f"current platform {current_platform.device_name} does not "
                 "support ray.")
 
+        # each node (host) serves as a unit, if 2 hosts, ray only knows 2 hosts
+        # ray doesn't divide the TPUs inside each host.
+        # placement_group_specs: List[Dict[str, float]] = [{
+        #     device_str:
+        #     node['Resources'][device_str]
+        # } for node in ray.nodes()]
         placement_group_specs: List[Dict[str, float]] = [{
             device_str:
-            node['Resources'][device_str]
-        } for node in ray.nodes()]
+            self.parallel_config.tensor_parallel_size
+        } for i in range(self.parallel_config.pipeline_parallel_size)]
 
         # vLLM engine is also a worker to execute model with an accelerator,
         # so it requires to have the device in a current node. Check if
@@ -322,11 +329,17 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
                 distributed_init_method=distributed_init_method,
                 is_driver_worker=(not self.parallel_config)
                 or (rank % self.parallel_config.tensor_parallel_size == 0),
+                ip=sorted_worker_metadata[rank].ip,
+                prev_worker_ip=sorted_worker_metadata[rank - 1].ip
+                if rank > 0 else "",
             )
             all_kwargs.append(kwargs)
         self._run_workers("init_worker", all_kwargs)
 
         self._run_workers("init_device")
+
+        self._run_workers("initialize_pp_transfer_connect")
+
         self._run_workers("load_model",
                           max_concurrent_workers=self.parallel_config.
                           max_parallel_loading_workers)

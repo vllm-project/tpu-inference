@@ -9,7 +9,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.ops.mappings import j2t_dtype
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
-from vllm.utils.functools import supports_kw
+from vllm.utils.func_utils import supports_kw
 
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.quantization.quantization_utils import (
@@ -179,8 +179,10 @@ def _get_nnx_model(
         # Although the created model can already work, we still need to jit
         # the model creation again, otherwise the model forward will have
         # non-trivial overhead in PjitFunction.
+        from vllm.distributed import get_pp_group
+        rank = get_pp_group().rank_in_group
         with mesh:
-            model.load_weights(rng)
+            model.load_weights(rng, rank)
             jit_model = create_jit_model(
                 model,
                 use_qwix_on_abstract_model=should_apply_qwix_on_abstract_model)
@@ -217,7 +219,9 @@ def get_flax_model(
             hidden_states_sharding,  # aux hidden states
         ),
         donate_argnums=2,  # 0 is graphdef, 1 is state, 2 is kv_cache
-        static_argnums=6,  #6 is layer_name_to_kvcache_index
+        static_argnums=(
+            6, 9, 10
+        ),  #6 is layer_name_to_kvcache_index, 9 is is_first_rank, 10 is is_last_rank
     )
     def run_model(graphdef, state, *args):
         model = nnx.merge(graphdef, state)
@@ -282,12 +286,12 @@ def get_vllm_model(
     mesh: Mesh,
 ):
     from tpu_inference.models.vllm.vllm_model_wrapper import VllmModelWrapper
-
     model = VllmModelWrapper(
         vllm_config=vllm_config,
         rng=rng,
         mesh=mesh,
     )
+
     params, lora_manager = model.load_weights()
 
     jit_model = model.jit_step_func()
@@ -321,6 +325,7 @@ def get_model(
                 vllm_config.model_config.dtype.dtype)
             return get_vllm_model(vllm_config, rng, mesh)
     elif impl == "vllm":
+        logger.info("Using vLLM model implementation.")
         return get_vllm_model(vllm_config, rng, mesh)
     else:
         raise NotImplementedError("Unsupported MODEL_IMPL_TYPE")
