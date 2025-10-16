@@ -80,6 +80,7 @@ class TPUWorker(AbstractTpuWorker):
         self.distributed_init_method = distributed_init_method
         self.is_driver_worker = is_driver_worker
         self.devices = devices if devices is not None else []
+        self.device_ranks = set(device.id for device in self.devices)
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
@@ -92,7 +93,7 @@ class TPUWorker(AbstractTpuWorker):
         # TPU Worker is initialized. The profiler server needs to start after
         # MP runtime is initialized.
         self.profile_dir = None
-        if envs.VLLM_TORCH_PROFILER_DIR and self.rank < 1:
+        if envs.VLLM_TORCH_PROFILER_DIR and self.rank < 1 and 0 in self.device_ranks:
             # For TPU, we can only have 1 active profiler session for 1 profiler
             # server. So we only profile on rank0.
             self.profile_dir = envs.VLLM_TORCH_PROFILER_DIR
@@ -101,7 +102,7 @@ class TPUWorker(AbstractTpuWorker):
 
         use_jax_profiler_server = os.getenv("USE_JAX_PROFILER_SERVER", False)
         # Only one instance of profiler is allowed
-        if use_jax_profiler_server and self.rank < 1:
+        if use_jax_profiler_server and self.rank < 1 and 0 in self.device_ranks:
             jax_profiler_server_port = int(
                 os.getenv("JAX_PROFILER_SERVER_PORT", 9999))
             logger.info(
