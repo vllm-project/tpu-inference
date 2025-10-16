@@ -5,6 +5,10 @@ import hashlib
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Tuple
 
+from vllm.config import get_current_vllm_config
+from vllm.distributed.kv_transfer.kv_connector.factory import \
+    KVConnectorFactory
+
 from tpu_inference.logger import init_logger
 
 # Corresponds to the initial hash value
@@ -75,3 +79,21 @@ class TokenProcessor:
                 end_idx,
                 CacheKey(model_name=self.model_name, chunk_hash=prefix_hash),
             )
+
+
+def get_kv_connector_cache_layout():
+    """
+    Retrieve the required kv cache layout for the configured kv connector
+    Return: None, when no kv_transfer_config is found; otherwise, the layout str
+    """
+    vllm_config = get_current_vllm_config()
+    kv_config = vllm_config.kv_transfer_config
+    if kv_config is not None:
+        connector_cls = KVConnectorFactory.get_connector_class(kv_config)
+        required_kvcache_layout = \
+            connector_cls.get_required_kvcache_layout(vllm_config)
+        if required_kvcache_layout is not None:
+            return required_kvcache_layout
+        logger.info_once(
+            "Connectors do not specify a kv cache layout, defaulting to NHD.")
+    return None

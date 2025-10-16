@@ -8,12 +8,15 @@ from torchax.ops.mappings import t2j_dtype
 from vllm.attention import Attention
 from vllm.attention.backends.abstract import AttentionType
 from vllm.config import get_layers_from_vllm_config
+from vllm.v1.attention.backends.utils import (get_kv_cache_layout,
+                                              set_kv_cache_layout)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec, MLAAttentionSpec,
                                         SlidingWindowSpec)
 
 from tpu_inference import utils
 from tpu_inference import utils as common_utils
+from tpu_inference.distributed.util import get_kv_connector_cache_layout
 from tpu_inference.logger import init_logger
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.input_batch_jax import CachedRequestState, InputBatch
@@ -25,6 +28,8 @@ if TYPE_CHECKING:
     from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
 
 logger = init_logger(__name__)
+
+DEFAULT_KV_CACHE_LAYOUT = "NHD"
 
 
 class KVCacheManager:
@@ -152,6 +157,10 @@ class KVCacheManager:
                         f"Unknown attention type: {attn_module.attn_type}")
         return kv_cache_spec
 
+    def get_kv_cache_layout(self):
+        # return the layout (mostly "NHD" or "HND") of kv cache
+        return get_kv_cache_layout()
+
     def maybe_reinitialize_input_batch(self,
                                        kv_cache_config: KVCacheConfig) -> None:
         block_sizes = [
@@ -176,6 +185,19 @@ class KVCacheManager:
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         self.maybe_reinitialize_input_batch(kv_cache_config)
+
+        # set the kv cache layout which is needed by kv connectors
+        # NOTE(jcgu): please update the default value when NHD order changes
+        set_kv_cache_layout(DEFAULT_KV_CACHE_LAYOUT)
+
+        # verify kv cache layout is matched between the cache manager and
+        # the kv connector (if configured)
+        _required_kv_layout = get_kv_connector_cache_layout()
+        if (_required_kv_layout
+                and _required_kv_layout != DEFAULT_KV_CACHE_LAYOUT):
+            raise ValueError(
+                f"KV cache layout ({DEFAULT_KV_CACHE_LAYOUT}) does not match with the "
+                f"kv_connector's required layout ({_required_kv_layout})")
 
         # uniform page size.
         representative_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec

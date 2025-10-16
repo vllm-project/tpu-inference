@@ -115,6 +115,8 @@ ReqId = str
 
 logger = init_logger(__name__)
 
+REQUIRED_KV_CACHE_LAYOUT = "NHD"
+
 
 @dataclass
 class SaveSpec:
@@ -177,6 +179,27 @@ class TPUConnector(KVConnectorBase_V1):
             # The worker needs a reference to the base connector to access
             # the metadata object set by the engine.
             self.connector_worker = TPUConnectorWorker(vllm_config, self)
+
+    ############################################################
+    # Class Methods
+    ############################################################
+    @classmethod
+    def get_required_kvcache_layout(cls, vllm_config: VllmConfig):
+        if vllm_config.model_config is None:
+            logger.warning_once("Unable to detect current VLLM config. "
+                                "Fallback to default kv cache layout.")
+            return None
+
+        # TODO(jcgu): test mla
+        use_mla = vllm_config.model_config.use_mla
+        if use_mla:
+            # which fallback to the default behavior.
+            return None
+
+        logger.info_once(
+            "TPUConnector currently only supports %s KV cache layout.",
+            REQUIRED_KV_CACHE_LAYOUT)
+        return REQUIRED_KV_CACHE_LAYOUT
 
     ############################################################
     # Scheduler Side Methods
@@ -968,6 +991,7 @@ class TPUConnectorWorker:
         # Get the spec of the kv_caches
         kv_caches = runner.kv_caches
         if kv_caches:
+            self.kv_cache_layout = runner.get_kv_cache_layout()
             kv_layer = kv_caches[0]
             self.num_layers = len(kv_caches)
             self.shape = list(kv_layer.shape)
@@ -978,6 +1002,7 @@ class TPUConnectorWorker:
             logger.info(f"  - Shape per layer: {self.shape}")
             logger.info(f"  - DType: {self.dtype}")
             logger.info(f"  - Sharding: {self.sharding}")
+            logger.info(f"  - Layout: {self.kv_cache_layout}")
         else:
             logger.warning("TPUConnectorWorker registered with no KV caches.")
 
