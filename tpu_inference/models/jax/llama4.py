@@ -359,9 +359,13 @@ class Llama4WeightLoader:
             "language_model.model.layers.*.feed_forward.router.weight":
             "layers.*.custom_module.router.kernel_DE",
             # experts
-            "language_model.model.layers.*.feed_forward.experts.down_proj":
+            # "language_model.model.layers.*.feed_forward.experts.down_proj":
+            # "layers.*.custom_module.kernel_down_proj_EFD",
+            # "language_model.model.layers.*.feed_forward.experts.gate_up_proj":
+            # "layers.*.custom_module.kernel_up_proj_EDF",
+            "language_model.model.layers.*.feed_forward.experts.*.down_proj.weight":
             "layers.*.custom_module.kernel_down_proj_EFD",
-            "language_model.model.layers.*.feed_forward.experts.gate_up_proj":
+            "language_model.model.layers.*.feed_forward.experts.*.gate_up_proj.weight":
             "layers.*.custom_module.kernel_up_proj_EDF",
             # shared experts
             "language_model.model.layers.*.feed_forward.shared_expert.down_proj.weight":
@@ -383,7 +387,13 @@ class Llama4WeightLoader:
         # Find the corresponding model key using the HF key
         if "layer" in loaded_key:
             layer_num = re.search(r"layers\.(\d+)", loaded_key).group(1)
-            layer_key = re.sub(r"layers\.\d+", "layers.*", loaded_key)
+
+            # ============================= ADD ================================
+            # layer_key = re.sub(r"layers\.\d+", "layers.*", loaded_key)
+            layer_key = re.sub(r"layers\.\d+\.feed_forward\.experts\.\d+\.", "layers.*.feed_forward.experts.*.", loaded_key)
+            layer_key = re.sub(r"layers\.\d+", "layers.*", layer_key)
+            # ============================= ADD ================================
+
             mapped_key = self._loaded_to_standardized_keys.get(
                 layer_key, loaded_key)
             mapped_key = re.sub(r"layers\.\*", f"layers.{layer_num}",
@@ -464,6 +474,15 @@ class Llama4WeightLoader:
             return int(match.group(1))
         return None
 
+    # ============================= ADD ================================
+    def _get_expert_num(self, loaded_key: str) -> Optional[int]:
+        """Extracts the expert number from a HuggingFace weight key string."""
+        match = re.search(r"experts\.(\d+)", loaded_key) 
+        if match:
+            return int(match.group(1))
+        return None
+    # ============================= ADD ================================
+
     def load_weights(self, model_for_loading: nnx.Module):
         model_params = nnx.state(model_for_loading)
 
@@ -471,6 +490,9 @@ class Llama4WeightLoader:
             for loaded_name, loaded_weight in self.names_and_weights_generator:
                 is_moe_layer = False
                 layer_num = self._get_layer_num(loaded_name)
+                # ============================= ADD ================================
+                expert_num = self._get_expert_num(loaded_name)
+                # ============================= ADD ================================
 
                 if layer_num is not None:
                     is_moe_layer = (layer_num + 1) % \
@@ -484,6 +506,31 @@ class Llama4WeightLoader:
                     continue
                 mapped_name = self.map_loaded_to_standardized_name(loaded_name)
                 model_weight = get_param(model_params, mapped_name)
+
+                # ============================= ADD ================================
+                if expert_num is not None:
+                    loaded_weight = reshape_params(loaded_name, loaded_weight,
+                                                   self._weight_shape_map)
+                    loaded_weight = transpose_params(loaded_name,
+                                                     loaded_weight,
+                                                     self._transpose_map)
+                    
+                    cast_type = model_weight.value.dtype
+                    torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
+                    loaded_weight = jnp.array(loaded_weight.view(torch_view_type).numpy()).view(cast_type)
+
+                    if hasattr(model_weight, 'array'): # QArray case
+                        target_accessor = model_weight.array.qvalue
+                    else: # Full precision case
+                        target_accessor = model_weight
+                    
+                    target_array = target_accessor.value
+                    updated_array = target_array.at[expert_num].set(loaded_weight)
+                    target_accessor.value = shard_put(updated_array, target_accessor.sharding, mesh=model_for_loading.mesh)
+                    
+                    logger.debug(f"Accumulated expert {expert_num} for {loaded_name} into {mapped_name}")
+                    continue
+                # ============================= ADD ================================
 
                 # ============================= ADD ================================
                 cast_type = model_weight.value.dtype
