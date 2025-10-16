@@ -1,3 +1,4 @@
+import jax
 from jax.tree_util import register_pytree_node_class
 from typing import TYPE_CHECKING, Any, Dict, Union
 from vllm.sequence import IntermediateTensors
@@ -51,11 +52,7 @@ class JaxIntermediateTensors:
     def __len__(self):
         return len(self.tensors)
 
-    # def __eq__(self, other: object):
-    #     if not isinstance(other, self.__class__):
-    #         return False
-    #     if self.tensors.keys() != other.tensors.keys():
-    #         return False
-    #     return all(torch.equal(self.tensors[k], other.tensors[k]) for k in self.tensors)
-
-        return f"IntermediateTensors(tensors={self.tensors})"
+    def block_until_ready(self):
+        for tensor in self.tensors.values():
+            assert isinstance(tensor, jax.Array), "block_until_ready needs to be applied on jax arrays"
+            tensor.block_until_ready()
