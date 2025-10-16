@@ -365,7 +365,9 @@ class Llama4WeightLoader:
             "layers.*.custom_module.kernel_up_proj_EDF",
             # "language_model.model.layers.*.feed_forward.experts.*.down_proj.weight":
             # "layers.*.custom_module.kernel_down_proj_EFD",
-            # "language_model.model.layers.*.feed_forward.experts.*.gate_up_proj.weight":
+            # "language_model.model.layers.*.feed_forward.experts.*.gate_proj.weight":
+            # "layers.*.custom_module.kernel_up_proj_EDF",
+            # "language_model.model.layers.*.feed_forward.experts.*.up_proj.weight":
             # "layers.*.custom_module.kernel_up_proj_EDF",
             # shared experts
             "language_model.model.layers.*.feed_forward.shared_expert.down_proj.weight":
@@ -382,6 +384,8 @@ class Llama4WeightLoader:
             "language_model.model.layers.*.feed_forward.gate_proj.weight":
             "layers.*.custom_module.kernel_gating_DF",
         }
+
+
 
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
         # Find the corresponding model key using the HF key
@@ -403,6 +407,13 @@ class Llama4WeightLoader:
                                  loaded_weight: jax.Array):
         """HF's gate_up_proj is a fused tensor of gate and up projections. It needs to be split."""
         # gate_proj is first & up_proj is second
+        # if isinstance(loaded_weight, torch.Tensor):
+        #     loaded_weight = jnp.asarray(loaded_weight.cpu().numpy())
+
+        cast_type = jnp.dtype(jnp.bfloat16)
+        torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
+        loaded_weight = jnp.array(loaded_weight.view(torch_view_type).numpy()).view(cast_type)
+
         split_weights = jnp.split(loaded_weight, 2, axis=-1)
 
         for split_type in ["gate", "up"]:
@@ -466,6 +477,10 @@ class Llama4WeightLoader:
                 mapped_name = self.map_loaded_to_standardized_name(loaded_name)
                 model_weight = get_param(model_params, mapped_name)
 
+                cast_type = model_weight.value.dtype
+                torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
+                loaded_weight = jnp.array(loaded_weight.view(torch_view_type).numpy()).view(cast_type)
+                
                 if not loaded_name.endswith(".bias"):
                     loaded_weight = reshape_params(loaded_name, loaded_weight,
                                                    self._weight_shape_map)
