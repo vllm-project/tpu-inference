@@ -14,6 +14,7 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import TORCH_DTYPE_TO_JAX
+from tpu_inference.layers.jax.sharding import ShardingAxisName
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.lora.layers import BaseLayerWithLoRA
@@ -114,6 +115,8 @@ class VllmModelWrapper:
 
         # Load the vLLM model and wrap it into a new model whose forward
         # function can calculate the hidden_state and logits.
+        start_time = time.time()
+         
         with load_context, jax.default_device(jax.devices('cpu')[0]):
             vllm_model = vllm_get_model(vllm_config=vllm_config_for_load)
         lora_manager = None
@@ -198,7 +201,7 @@ class VllmModelWrapper:
         @functools.partial(
             jax.jit,
             out_shardings=(NamedSharding(self.mesh,
-                                         PartitionSpec(None, "model"))),
+                                         PartitionSpec(None, ShardingAxisName.MLP_TENSOR))),
         )
         def compute_logits_func(
             params_and_buffers: Any,
