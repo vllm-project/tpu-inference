@@ -183,6 +183,7 @@ class TPUWorker(AbstractTpuWorker):
 
         ensure_kv_transfer_initialized(self.vllm_config)
         self.model_runner = TPUModelRunner(self.vllm_config, self.devices,
+                                           self.rank,
                                            self.rank == 0,
                                            self.rank == self.world_size - 1)
         logger.info(f"Init worker | "

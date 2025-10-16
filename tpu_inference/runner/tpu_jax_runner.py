@@ -92,6 +92,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self,
         vllm_config: VllmConfig,
         devices: List[Any],
+        rank: int,
         is_first_rank: bool = True,
         is_last_rank: bool = True,
     ):
@@ -111,6 +112,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.dtype = self.model_config.dtype
         self.maybe_forbid_compile = runner_utils.ForbidCompile(
         ) if envs.VLLM_XLA_CHECK_RECOMPILATION else nullcontext()
+        self.rank = rank
         self.is_first_rank = is_first_rank
         self.is_last_rank = is_last_rank
 
@@ -152,7 +154,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.kv_cache_dtype = TPU_STR_DTYPE_TO_TORCH_DTYPE[
                 cache_config.cache_dtype]
         self.step_counter = -1
-        self.rank = '1' if self.is_last_rank else '0'
 
     def _init_random(self):
         if self.model_config.seed is None:
