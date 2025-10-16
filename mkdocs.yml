@@ -45,6 +45,7 @@ nav:
   - Getting Started:
     - Quickstart: getting_started/quickstart.md
     - 'Out-of-Tree Usage': getting_started/out-of-tree.md
+  - 'Support Matrix': support_matrix.md
   - Developer Guides:
     - 'JAX Model Development': developer_guides/jax_model_development.md
     - 'Torch Model Development': developer_guides/torchax_model_development.md
@@ -56,6 +57,7 @@ plugins:
   - meta
   - glightbox
   - open-in-new-tab
+  - table-reader
 
 markdown_extensions:
   - attr_list
