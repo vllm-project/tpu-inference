@@ -14,6 +14,13 @@ RUN apt-get update && apt-get install -y \
 RUN pip install --target=/workspace tpu-inference==0.11.1rc3
 RUN pip install --target=/workspace vllm-tpu==0.11.1rc3
 
+RUN echo '#!/usr/bin/env python3' > /workspace/bin/vllm && \
+    echo 'import sys' >> /workspace/bin/vllm && \
+    echo 'from vllm.entrypoints.cli.main import main' >> /workspace/bin/vllm && \
+    echo 'if __name__ == "__main__":' >> /workspace/bin/vllm && \
+    echo '    sys.exit(main())' >> /workspace/bin/vllm
+RUN chmod +x /workspace/bin/vllm
+
 # Build vLLM
 # WORKDIR /workspace/vllm
 # ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
@@ -35,6 +42,9 @@ RUN python3 -m pip install --no-cache-dir \
 WORKDIR /workspace/tpu_inference
 COPY scripts/vllm/benchmarking ./scripts/vllm/benchmarking
 COPY tests/e2e/benchmarking ./tests/e2e/benchmarking
+
+ENV PATH="/workspace/bin:$PATH"
+ENV PYTHONPATH="/workspace"
 
 # Install tpu_inference
 # WORKDIR /workspace/tpu_inference
