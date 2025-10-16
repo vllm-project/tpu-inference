@@ -14,8 +14,10 @@ def create_parser():
     parser = FlexibleArgumentParser()
     # Add engine args
     EngineArgs.add_cli_args(parser)
-    parser.set_defaults(model="meta-llama/Llama-3.2-1B-Instruct")
+    parser.set_defaults(model="meta-llama/Llama-3.1-8B-Instruct")
     parser.set_defaults(max_model_len=1024)
+    parser.set_defaults(pipeline_parallel_size=2)
+    # parser.set_defaults(tensor_parallel_size=2)
 
     # Add sampling params
     sampling_group = parser.add_argument_group("Sampling parameters")
@@ -46,6 +48,7 @@ def main(args: dict):
         sampling_params.top_p = top_p
     if top_k is not None:
         sampling_params.top_k = top_k
+    sampling_params.temperature = 0
 
     # Generate texts from the prompts. The output is a list of RequestOutput
     # objects that contain the prompt, generated text, and other information.
@@ -105,6 +108,7 @@ def main(args: dict):
 if __name__ == "__main__":
     # Skip long warmup for local simple test.
     os.environ['SKIP_JAX_PRECOMPILE'] = '1'
+    os.environ['MODEL_IMPL_TYPE'] = "vllm"
 
     parser = create_parser()
     args: dict = vars(parser.parse_args())
