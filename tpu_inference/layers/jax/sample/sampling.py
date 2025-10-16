@@ -24,6 +24,7 @@ def sample(
     logits: jax.Array,
     tpu_sampling_metadata: TPUSupportedSamplingMetadata,
 ) -> jax.Array:
+    print(f'[debug] jax sample {tpu_sampling_metadata.do_sampling=}')
     # (B, vocab_size)
     if tpu_sampling_metadata.do_sampling:
         # Unshard the logits explicity to avoid latency increase.

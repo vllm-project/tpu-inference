@@ -10,6 +10,7 @@ import jaxlib
 import jaxtyping
 import vllm.envs as envs
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.distributed import get_pp_group
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
                                           has_kv_transfer_group)
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
@@ -23,10 +24,13 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 
 from tpu_inference import utils
+from tpu_inference.distributed import jax_parallel_state
 from tpu_inference.distributed.utils import (get_host_ip, get_kv_transfer_port,
                                              get_node_id)
 from tpu_inference.layers.jax.sharding import ShardingConfigManager
 from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.jax_intermediate_tensor import \
+    JaxIntermediateTensors
 from tpu_inference.runner.kv_cache import get_rpa_page_size_bytes
 from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
 
@@ -47,7 +51,11 @@ class TPUWorker:
                  rank: int,
                  distributed_init_method: str,
                  is_driver_worker: bool = False,
-                 devices=None):
+                 devices=None,
+                 ip: str = "localhost",
+                 prev_worker_ip: str = "localhost",):
+        print(f'[debug] tpu worker init, {rank=}')
+
         # If we use vLLM's model implementation in PyTorch, we should set it
         # with torch version of the dtype.
         impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
@@ -74,6 +82,9 @@ class TPUWorker:
         self.devices = devices if devices is not None else []
         self.device_ranks = set(device.id for device in self.devices
                                 if isinstance(device, jaxlib._jax.Device))
+        self.ip = ip
+        self.prev_worker_ip = prev_worker_ip
+        self.world_size = self.parallel_config.pipeline_parallel_size
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
@@ -105,6 +116,8 @@ class TPUWorker:
                 )
                 jax.profiler.start_server(jax_profiler_server_port)
 
+        self.step_counter = 0
+
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
@@ -116,8 +129,8 @@ class TPUWorker:
             device_indexes = sharding_config.device_indexes
             if device_indexes is not None and len(device_indexes) > 0:
                 # Enforcing the devices sequence to be consistent with the specified device indexes
-                self.devices = [jax.devices()[i] for i in device_indexes]
-                all_devices = jax.devices()
+                self.devices = [jax.local_devices()[i] for i in device_indexes]
+                all_devices = jax.local_devices()
                 device_dict = {device.id: device for device in all_devices}
                 self.devices = []
                 for device_index in device_indexes:
@@ -130,8 +143,7 @@ class TPUWorker:
                     self.devices.append(device)
                 self.devices = self.devices[:sharding_config.total_devices]
             else:
-                self.devices = jax.devices()[:sharding_config.total_devices]
-
+                self.devices = jax.local_devices()[:sharding_config.total_devices]
         # Initialize the vLLM distribution layer as a single chip environment,
         # we'll swap the model's parallel modules with TPU SPMD equivalents.
         with set_current_vllm_config(self.vllm_config):
@@ -147,14 +159,29 @@ class TPUWorker:
                 tensor_model_parallel_size=1,
                 pipeline_model_parallel_size=1,
             )
+
+        jax_parallel_state.init_pp_distributed_environment(
+            self.ip,
+            self.rank,
+            self.parallel_config.pipeline_parallel_size,
+            self.devices[0],
+            need_pp=self.parallel_config.pipeline_parallel_size > 1)
+
         ensure_kv_transfer_initialized(self.vllm_config)
-        self.model_runner = TPUModelRunner(self.vllm_config, self.devices)
+        self.model_runner = TPUModelRunner(self.vllm_config, self.devices,
+                                           self.rank, self.rank == 0,
+                                           self.rank == self.world_size - 1)
         logger.info(f"Init worker | "
                     f"rank={self.rank} | "
                     f"node_id={get_node_id()} | "
                     f"is_driver_worker={self.is_driver_worker} | "
                     f"hbm={utils.hbm_usage_gb(self.devices)}GiB")
         vllm_utils.report_usage_stats(self.vllm_config)
+
+    def initialize_pp_transfer_connect(self):
+        if self.rank == 0:
+            return
+        jax_parallel_state.connect(self.prev_worker_ip, self.rank - 1)
 
     def determine_available_memory(self) -> int:
         gpu_memory_utilization = self.cache_config.gpu_memory_utilization
@@ -195,14 +222,43 @@ class TPUWorker:
         # deliberate, temporary compromise for the same reasons outlined in
         # the `get_kv_cache_spec` method.
 
-        output = self.model_runner.execute_model(scheduler_output)
+        if self.parallel_config.pipeline_parallel_size == 1 or self.rank == 0:
+            intermediate_tensors = None
+        else:
+            # receive intermediate tensors
+            uuid = self.model_runner.get_uuid_for_jax_transfer(
+                scheduler_output, self.rank - 1, self.step_counter)
+            # TODO: this method might only works for vllm model, not sure about jax models.
+            tensor_spec = self.model_runner.get_intermediate_tensor_spec(
+                scheduler_output.total_num_scheduled_tokens)
+            intermediate_tensors_dict = get_pp_group().recv_tensor_dict(
+                uuid, tensor_spec)
+            intermediate_tensors = JaxIntermediateTensors(
+                intermediate_tensors_dict)
 
-        # With a connector, the scheduler expects output from all workers
-        # TODO(mrjunwan): Figure out if this is ok after https://github.com/vllm-project/vllm/pull/26866
-        if has_kv_transfer_group():
-            return output
+        output = self.model_runner.execute_model(scheduler_output,
+                                                 intermediate_tensors)
 
-        return output if self.is_driver_worker else None
+        if isinstance(output, JaxIntermediateTensors):
+            assert self.parallel_config.pipeline_parallel_size > 1
+            assert not get_pp_group().is_last_rank
+            # send intermediate tensors
+            uuid = self.model_runner.get_uuid_for_jax_transfer(
+                scheduler_output, self.rank, self.step_counter)
+            get_pp_group().send_tensor_dict(uuid, output.tensors)
+            logger.info(
+                f'[debug] tpu_worker{self.rank}, {self.step_counter=} finish sending intermediate tensors, shape={output.tensors["hidden_states"].shape}'
+            )
+            self.step_counter += 1
+            return None
+        else:
+            self.step_count += 1
+            # With a connector, the scheduler expects output from all workers
+            # TODO(mrjunwan): Figure out if this is ok after https://github.com/vllm-project/vllm/pull/26866
+            if has_kv_transfer_group():
+                return output
+            return output if self.is_driver_worker else None
+            
 
     def sample_tokens(self,
                       grammar_output: GrammarOutput) -> ModelRunnerOutput:

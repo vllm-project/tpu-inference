@@ -15,6 +15,8 @@ from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.layers.jax.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.jax_intermediate_tensor import \
+    JaxIntermediateTensors
 from tpu_inference.utils import device_array
 
 if TYPE_CHECKING:
@@ -81,6 +83,8 @@ class CompilationManager:
                 self._precompile_backbone_with_inputs_embeds()
             if self.runner.scheduler_config.async_scheduling:
                 self._precompile_substitute_placeholder_token()
+            if not self.runner.is_last_rank:
+                return
             self._precompile_select_from_array()
             self._precompile_compute_logits()
             self._precompile_disagg_utils()
@@ -120,8 +124,15 @@ class CompilationManager:
                 num_tokens=num_tokens,
             )
 
-    def _precompile_backbone_helper(self, name, *, input_ids, positions,
-                                    inputs_embeds) -> None:
+    def _precompile_backbone_helper(self,
+                                    name,
+                                    *,
+                                    input_ids,
+                                    positions,
+                                    inputs_embeds,
+                                    intermediate_tensors=None,
+                                    is_first_rank=True,
+                                    is_last_rank=True) -> None:
         num_tokens = None
         if input_ids is not None:
             num_tokens = input_ids.shape[0]
@@ -168,10 +179,14 @@ class CompilationManager:
             inputs_embeds,
             layer_name_to_kvcache_index,
             lora_metadata,
+            intermediate_tensors,
+            is_first_rank,
+            is_last_rank,
         ):
             kv_caches, hidden_states, _ = self.runner.model_fn(
                 state, kv_caches, input_ids, attention_metadata, inputs_embeds,
-                layer_name_to_kvcache_index, lora_metadata)
+                layer_name_to_kvcache_index, lora_metadata,
+                intermediate_tensors, is_first_rank, is_last_rank)
             self.runner.kv_caches = kv_caches
             return hidden_states
 
@@ -189,6 +204,9 @@ class CompilationManager:
                 inputs_embeds,
                 tuple(self.runner.layer_name_to_kvcache_index.items()),
                 lora_metadata,
+                intermediate_tensors,
+                is_first_rank,
+                is_last_rank,
                 num_tokens=num_tokens,
             )
 
@@ -238,6 +256,7 @@ class CompilationManager:
                 )
 
     def _precompile_backbone_text_only(self) -> None:
+        hidden_size = self.runner.model_config.get_hidden_size()
         for num_tokens in self.runner.num_tokens_paddings:
             dp_sharding = NamedSharding(
                 self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, )
@@ -247,10 +266,28 @@ class CompilationManager:
                                                   dp_sharding)
             positions = self._create_dummy_tensor((num_tokens, ), jnp.int32,
                                                   dp_sharding)
-            self._precompile_backbone_helper("backbone",
-                                             input_ids=input_ids,
-                                             positions=positions,
-                                             inputs_embeds=None)
+            is_first_rank = self.runner.is_first_rank
+            is_last_rank = self.runner.is_last_rank
+            if not is_first_rank:
+                hidden_states = self._create_dummy_tensor(
+                    (num_tokens, hidden_size), jnp.bfloat16)
+                residual = self._create_dummy_tensor((num_tokens, hidden_size),
+                                                     jnp.bfloat16)
+                intermediate_tensors = JaxIntermediateTensors(
+                    tensors={
+                        "hidden_states": hidden_states,
+                        "residual": residual
+                    })
+            else:
+                intermediate_tensors = None
+            self._precompile_backbone_helper(
+                f"worker{self.runner.rank} backbone",
+                input_ids=input_ids,
+                positions=positions,
+                inputs_embeds=None,
+                intermediate_tensors=intermediate_tensors,
+                is_first_rank=is_first_rank,
+                is_last_rank=is_last_rank)
 
     def _precompile_backbone_with_inputs_embeds(self) -> None:
         hidden_size = self.runner.model_config.get_hidden_size()
@@ -264,10 +301,28 @@ class CompilationManager:
             else:
                 positions = self._create_dummy_tensor((num_tokens, ),
                                                       jnp.int32)
-            self._precompile_backbone_helper("backbone with embeds",
-                                             input_ids=None,
-                                             positions=positions,
-                                             inputs_embeds=inputs_embeds)
+            is_first_rank = self.runner.is_first_rank
+            is_last_rank = self.runner.is_last_rank
+            if not is_first_rank:
+                hidden_states = self._create_dummy_tensor(
+                    (num_tokens, hidden_size), jnp.bfloat16)
+                residual = self._create_dummy_tensor((num_tokens, hidden_size),
+                                                     jnp.bfloat16)
+                intermediate_tensors = JaxIntermediateTensors(
+                    tensors={
+                        "hidden_states": hidden_states,
+                        "residual": residual
+                    })
+            else:
+                intermediate_tensors = None
+            self._precompile_backbone_helper(
+                f"worker{self.runner.rank} backbone with embeds",
+                input_ids=None,
+                positions=positions,
+                inputs_embeds=inputs_embeds,
+                intermediate_tensors=intermediate_tensors,
+                is_first_rank=is_first_rank,
+                is_last_rank=is_last_rank)
 
     def _precompile_select_from_array_helper(
         self,
@@ -333,7 +388,7 @@ class CompilationManager:
                                     PartitionSpec(ShardingAxisName.ATTN_DATA))
         dp_size = self.runner.vllm_config.sharding_config.total_dp_size
         self._precompile_select_from_array_helper(
-            name="select all logits",
+            name=f"worker{self.runner.rank} select all logits",
             source_paddings=self.runner.num_tokens_paddings,
             indices_paddings=index_paddings,
             hidden_dim=hsize,
@@ -344,7 +399,8 @@ class CompilationManager:
         if self.runner.speculative_config:
             vocab_size = self.runner.model_config.get_vocab_size()
             self._precompile_select_from_array_helper(
-                name="select bonus tokens for spec decoding",
+                name=
+                f"worker{self.runner.rank} select bonus tokens for spec decoding",
                 source_paddings=self.runner.num_logits_paddings,
                 indices_paddings=self.runner.num_reqs_paddings,
                 hidden_dim=vocab_size,
@@ -352,7 +408,8 @@ class CompilationManager:
                                              PartitionSpec(None, "model")),
             )
             self._precompile_select_from_array_helper(
-                name="select target tokens for spec decoding",
+                name=
+                f"worker{self.runner.rank} select target tokens for spec decoding",
                 source_paddings=self.runner.num_logits_paddings,
                 indices_paddings=self.runner.num_logits_paddings,
                 hidden_dim=vocab_size,
@@ -375,7 +432,7 @@ class CompilationManager:
                     np.array([num_reqs], dtype=np.int32)):
                 lora_metadata = self.runner.lora_utils.extract_lora_metadata()
                 self._run_compilation(
-                    "compute_logits",
+                    f"worker{self.runner.rank} compute_logits",
                     self.runner.compute_logits_fn,
                     self.runner.state,
                     hidden_states,
@@ -417,7 +474,7 @@ class CompilationManager:
                     do_sampling=do_sampling,
                 )
                 self._run_compilation(
-                    "sample",
+                    f"worker{self.runner.rank} sample",
                     sample,
                     self.runner.rng_params_for_sampling,
                     self.runner.mesh,
@@ -458,7 +515,7 @@ class CompilationManager:
             logits = self._create_dummy_tensor((num_reqs, hsize), jnp.bfloat16)
             token_ids = self._create_dummy_tensor((num_reqs, ), jnp.int32)
             self._run_compilation(
-                "gather_logprobs",
+                f"worker{self.runner.rank} gather_logprobs",
                 self.runner._compute_and_gather_logprobs,
                 logits,
                 token_ids,
@@ -510,7 +567,7 @@ class CompilationManager:
                             do_sampling=do_sampling)
 
                     self._run_compilation(
-                        compilation_name,
+                        f"worker{self.runner.rank} {compilation_name}",
                         self.runner.rejection_sampler,
                         draft_token_ids,
                         num_draft_tokens,
