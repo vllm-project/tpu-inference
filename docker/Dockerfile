@@ -34,22 +34,26 @@ RUN python3 -m pip install --no-cache-dir \
     tblib \
     numba
 
-ENV COMMIT_HASH f26205594d29ada6a259834d9d0a7597904a552b
-ENV SVN_URL https://github.com/vllm-project/tpu-inference/branches/${COMMIT_HASH}/tests/e2e/benchmarking
-ENV TARGET_DIR /workspace/tpu-inference/tests/e2e/benchmarking
+WORKDIR /workspace/tpu_inference
+COPY scripts/vllm/benchmarking scripts/vllm/benchmarking
+COPY tests/e2e/benchmarking tests/e2e/benchmarking
 
-RUN mkdir -p ${TARGET_DIR} && \
-    cd ${TARGET_DIR} && \
-    svn checkout --force ${SVN_URL} . && \
-    rm -rf .svn
+# ENV COMMIT_HASH f26205594d29ada6a259834d9d0a7597904a552b
+# ENV SVN_URL https://github.com/vllm-project/tpu-inference/branches/${COMMIT_HASH}/tests/e2e/benchmarking
+# ENV TARGET_DIR /workspace/tpu-inference/tests/e2e/benchmarking
 
-ENV SVN_URL_2 https://github.com/vllm-project/tpu-inference/branches/${COMMIT_HASH}/scripts/vllm/benchmarking
-ENV TARGET_DIR_2 /workspace/tpu-inference/scripts/vllm/benchmarking
+# RUN mkdir -p ${TARGET_DIR} && \
+#     cd ${TARGET_DIR} && \
+#     svn checkout --force ${SVN_URL} . && \
+#     rm -rf .svn
 
-RUN mkdir -p ${TARGET_DIR_2} && \
-    cd ${TARGET_DIR_2} && \
-    svn checkout --force ${SVN_URL_2} . && \
-    rm -rf .svn
+# ENV SVN_URL_2 https://github.com/vllm-project/tpu-inference/branches/${COMMIT_HASH}/scripts/vllm/benchmarking
+# ENV TARGET_DIR_2 /workspace/tpu-inference/scripts/vllm/benchmarking
+
+# RUN mkdir -p ${TARGET_DIR_2} && \
+#     cd ${TARGET_DIR_2} && \
+#     svn checkout --force ${SVN_URL_2} . && \
+#     rm -rf .svn
 
 # Install tpu_inference
 # WORKDIR /workspace/tpu_inference
