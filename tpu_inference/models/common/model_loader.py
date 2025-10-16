@@ -288,6 +288,39 @@ def get_vllm_model(
         rng=rng,
         mesh=mesh,
     )
+    '''
+    # debug: intermediate tensor spec
+    print('start debugging intermediate tensor spec')
+    from unittest.mock import patch, MagicMock
+    from vllm.model_executor.model_loader import get_model_cls
+    from vllm.model_executor.custom_op import CustomOp
+
+    def no_op_compile_decorator(fn):
+        return fn
+
+    with patch("vllm.platforms.current_platform.is_tpu", return_value=False),\
+         patch("vllm.distributed.parallel_state.get_pp_group") as mock_get_pp_group, \
+         patch("vllm.compilation.decorators.support_torch_compile", new=no_op_compile_decorator), \
+         patch.object(CustomOp, "default_on", return_value=False), \
+         set_current_vllm_config(vllm_config), \
+         torch.device("meta"):
+        pp_group = MagicMock()
+        pp_group.is_first_rank.return_value = True
+        pp_group.is_last_rank.return_value = False
+        pp_group.rank_in_group = 0
+        pp_group.world_size = 4
+        mock_get_pp_group.return_value = pp_group
+        model_class = get_model_cls(vllm_config.model_config)
+        stage0_meta_model = model_class(vllm_config=vllm_config)
+    dummy_input_ids = torch.empty((1, ), dtype=torch.int32, device="meta")
+    dummy_positions = torch.empty((1, ), dtype=torch.int32, device="meta")
+    intermediate_output = stage0_meta_model(input_ids=dummy_input_ids, positions=dummy_positions)
+    for key, tensor in intermediate_output.tensors.items():
+        print(f'{key=}, {tensor.shape=}, {tensor.dtype=}')
+    del stage0_meta_model
+    print('finish debugging intermediate tensor spec')
+    '''
+
     params, lora_manager = model.load_weights()
 
     jit_model = model.jit_step_func()
@@ -321,6 +354,7 @@ def get_model(
                 vllm_config.model_config.dtype.dtype)
             return get_vllm_model(vllm_config, rng, mesh)
     elif impl == "vllm":
+        logger.info("Using vLLM model implementation.")
         return get_vllm_model(vllm_config, rng, mesh)
     else:
         raise NotImplementedError("Unsupported MODEL_IMPL_TYPE")
