@@ -9,7 +9,9 @@ RUN pip uninstall -y torch torch_xla torchvision
 # Install some basic utilities
 RUN apt-get update && apt-get install -y \
     git \
-    libopenblas-base libopenmpi-dev libomp-dev
+    libopenblas-base libopenmpi-dev libomp-dev \
+    subversion \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --target=/workspace tpu-inference==0.11.1rc3
 RUN pip install --target=/workspace vllm-tpu==0.11.1rc3
@@ -31,6 +33,23 @@ RUN python3 -m pip install --no-cache-dir \
     pytest-cov \
     tblib \
     numba
+
+ENV COMMIT_HASH f26205594d29ada6a259834d9d0a7597904a552b
+ENV SVN_URL https://github.com/vllm-project/tpu-inference/branches/${COMMIT_HASH}/tests/e2e/benchmarking
+ENV TARGET_DIR /workspace/tpu-inference/tests/e2e/benchmarking
+
+RUN mkdir -p ${TARGET_DIR} && \
+    cd ${TARGET_DIR} && \
+    svn checkout --force ${SVN_URL} . && \
+    rm -rf .svn
+
+ENV SVN_URL_2 https://github.com/vllm-project/tpu-inference/branches/${COMMIT_HASH}/scripts/vllm/benchmarking
+ENV TARGET_DIR_2 /workspace/tpu-inference/scripts/vllm/benchmarking
+
+RUN mkdir -p ${TARGET_DIR_2} && \
+    cd ${TARGET_DIR_2} && \
+    svn checkout --force ${SVN_URL_2} . && \
+    rm -rf .svn
 
 # Install tpu_inference
 # WORKDIR /workspace/tpu_inference
