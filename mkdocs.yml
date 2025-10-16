@@ -41,7 +41,7 @@ theme:
     - toc.follow
 
 nav:
-  - Home: index.md
+  - Home: README.md
   - Getting Started:
     - Quickstart: getting_started/quickstart.md
     - 'Out-of-Tree Usage': getting_started/out-of-tree.md
