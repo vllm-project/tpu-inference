@@ -69,6 +69,9 @@ class QuantizedLinear(nnx.Linear):
                          rngs=rngs,
                          **kwargs)
         self.model = model
+        # Sharding should be transposed as well as the weight shapes were transposed for quantized matmul.
+        self.weight_sharding = P(self.kernel.sharding[0],
+                                 self.kernel.sharding[1])
 
     # Overrided from nnx.linear.__call__, started by copy and paste.
     def __call__(self, inputs: jax.Array) -> jax.Array:
@@ -92,8 +95,6 @@ class QuantizedLinear(nnx.Linear):
                 break
         if weight_scale is None:
             raise ValueError(f"weight scale was not set for {path}")
-
-        weight_sharding = P(self.kernel.sharding[0], self.kernel.sharding[1])
         bias = self.bias.value if self.bias is not None else None
 
         y = sharded_quantized_matmul(
@@ -101,7 +102,7 @@ class QuantizedLinear(nnx.Linear):
             kernel,
             weight_scale,
             self.model.mesh,
-            weight_sharding,
+            self.weight_sharding,
         )
         assert self.use_bias == (bias is not None)
         if bias is not None:
@@ -122,7 +123,7 @@ class Qwen3QuantizedMLP(nnx.Module):
             intermediate_size,
             use_bias=False,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
+            kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
             model=model,
         )
@@ -131,7 +132,7 @@ class Qwen3QuantizedMLP(nnx.Module):
             intermediate_size,
             use_bias=False,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
+            kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
             model=model,
         )
@@ -140,7 +141,7 @@ class Qwen3QuantizedMLP(nnx.Module):
             hidden_size,
             use_bias=False,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
             rngs=rng,
             model=model,
         )
