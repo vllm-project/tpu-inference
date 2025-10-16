@@ -41,9 +41,10 @@ class LocalCPUBackend:
         if self._initialized:
             return
 
-        self.max_cpu_cache_size_bytes = int(
-            os.getenv("TPU_OFFLOAD_CPU_CACHE_SIZE_GB",
-                      str(int(DEFAULT_CPU_CACHE_SIZE_BYTES / GB)))) * GB
+        env_cache_size_gb = os.getenv("TPU_OFFLOAD_CPU_CACHE_SIZE_GB")
+        self.max_cpu_cache_size_bytes = (int(env_cache_size_gb) *
+                                         GB if env_cache_size_gb is not None
+                                         else max_cpu_cache_size_bytes)
 
         # The cache is an OrderedDict for LRU behavior.
         self.cache: OrderedDict[CacheKey, Any] = OrderedDict()
@@ -74,7 +75,6 @@ class LocalCPUBackend:
         entries until there is enough space.
         """
         value_size = self._get_value_size(value)
-
         # Do not add if the item itself is larger than the cache capacity.
         if value_size > self.max_cpu_cache_size_bytes:
             logger.warning(
