@@ -1,6 +1,6 @@
 steps:
    - label: "Upload Tests for Models & Features"
-     if: build.env("NIGHTLY") == "1" || build.tag =~ /^v?[0-9]+(\.[a-zA-Z0-9]+)*([a-zA-Z]+[0-9]*)?$/
+    #  if: build.env("NIGHTLY") == "1" || build.tag =~ /^v?[0-9]+(\.[a-zA-Z0-9]+)*([a-zA-Z]+[0-9]*)?$/
      agents:
        # TODO : can be done on non-TPU queues once they're set up b/449203039
        queue: tpu_v6e_queue

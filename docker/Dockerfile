@@ -11,16 +11,19 @@ RUN apt-get update && apt-get install -y \
     git \
     libopenblas-base libopenmpi-dev libomp-dev
 
+RUN pip install --target=/workspace tpu-inference==0.11.1rc3
+RUN pip install --target=/workspace vllm-tpu==0.11.1rc3
+
 # Build vLLM
-WORKDIR /workspace/vllm
-ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-RUN git clone $VLLM_REPO /workspace/vllm
-RUN git checkout v0.11.1rc1
-RUN pip install -r requirements/tpu.txt
-RUN VLLM_TARGET_DEVICE="tpu" pip install -e .
+# WORKDIR /workspace/vllm
+# ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
+# RUN git clone $VLLM_REPO /workspace/vllm
+# RUN git checkout v0.11.1rc1
+# RUN pip install -r requirements/tpu.txt
+# RUN VLLM_TARGET_DEVICE="tpu" pip install -e .
 
 # Install test dependencies
-RUN python3 -m pip install -e tests/vllm_test_utils
+# RUN python3 -m pip install -e tests/vllm_test_utils
 RUN python3 -m pip install --no-cache-dir \
     git+https://github.com/thuml/depyf.git \
     pytest-asyncio \
@@ -30,14 +33,14 @@ RUN python3 -m pip install --no-cache-dir \
     numba
 
 # Install tpu_inference
-WORKDIR /workspace/tpu_inference
-# Install requirements first and cache so we don't need to re-install on code change.
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-COPY requirements_benchmarking.txt .
-# These are needed for the E2E benchmarking tests (i.e. tests/e2e/benchmarking/mlperf.sh)
-RUN pip install -r requirements_benchmarking.txt
-COPY . .
-RUN pip install -e .
+# WORKDIR /workspace/tpu_inference
+# # Install requirements first and cache so we don't need to re-install on code change.
+# COPY requirements.txt .
+# RUN pip install -r requirements.txt
+# COPY requirements_benchmarking.txt .
+# # These are needed for the E2E benchmarking tests (i.e. tests/e2e/benchmarking/mlperf.sh)
+# RUN pip install -r requirements_benchmarking.txt
+# COPY . .
+# RUN pip install -e .
 
 CMD ["/bin/bash"]
