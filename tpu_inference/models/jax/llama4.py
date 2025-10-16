@@ -359,14 +359,14 @@ class Llama4WeightLoader:
             "language_model.model.layers.*.feed_forward.router.weight":
             "layers.*.custom_module.router.kernel_DE",
             # experts
-            # "language_model.model.layers.*.feed_forward.experts.down_proj":
-            # "layers.*.custom_module.kernel_down_proj_EFD",
-            # "language_model.model.layers.*.feed_forward.experts.gate_up_proj":
-            # "layers.*.custom_module.kernel_up_proj_EDF",
-            "language_model.model.layers.*.feed_forward.experts.*.down_proj.weight":
+            "language_model.model.layers.*.feed_forward.experts.down_proj":
             "layers.*.custom_module.kernel_down_proj_EFD",
-            "language_model.model.layers.*.feed_forward.experts.*.gate_up_proj.weight":
+            "language_model.model.layers.*.feed_forward.experts.gate_up_proj":
             "layers.*.custom_module.kernel_up_proj_EDF",
+            # "language_model.model.layers.*.feed_forward.experts.*.down_proj.weight":
+            # "layers.*.custom_module.kernel_down_proj_EFD",
+            # "language_model.model.layers.*.feed_forward.experts.*.gate_up_proj.weight":
+            # "layers.*.custom_module.kernel_up_proj_EDF",
             # shared experts
             "language_model.model.layers.*.feed_forward.shared_expert.down_proj.weight":
             "layers.*.shared_experts.kernel_down_proj_FD",
