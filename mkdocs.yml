@@ -93,3 +93,8 @@ extra_javascript:
   - https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS_HTML
 
 use_directory_urls: false
+
+extra:
+  analytics:
+    provider: google
+    property: G-XKQVS747Z2
