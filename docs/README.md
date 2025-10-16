@@ -1,9 +1,5 @@
-<p align="center">
-   <!-- This image will ONLY show up in GitHub's dark mode -->
-  <img src="assets/tpu_inference_dark_mode_short.png#gh-dark-mode-only" alt="vLLM TPU" style="width: 86%;">
-    <!-- This image will ONLY show up in GitHub's light mode (and on other platforms) -->
-  <img src="assets/tpu_inference_light_mode_short.png#gh-light-mode-only" alt="vLLM TPU" style="width: 86%;">
-</p>
+![vLLM TPU](assets/tpu_inference_light_mode_short.png#only-light){ align=center width="86%" }
+![vLLM TPU](assets/tpu_inference_dark_mode_short.png#only-dark){ align=center width="86%" }
 
 <p align="center">
 | <a href="https://docs.vllm.ai/projects/tpu/en/latest/"><b>Documentation</b></a> | <a href="https://blog.vllm.ai/"><b>Blog</b></a> | <a href="https://discuss.vllm.ai/c/hardware-support/google-tpu-support/27"><b>User Forum</b></a> | <a href="https://join.slack.com/share/enQtOTY2OTUxMDIyNjY1OS00M2MxYWQwZjAyMGZjM2MyZjRjNTA0ZjRkNjkzOTRhMzg0NDM2OTlkZDAxOTAzYmJmNzdkNDc4OGZjYTUwMmRh"><b>Developer Slack</b></a> |
