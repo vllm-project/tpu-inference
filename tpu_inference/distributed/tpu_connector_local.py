@@ -359,7 +359,7 @@ class TPUConnectorScheduler():
             logger.debug(
                 f"  Processing chunk {start_idx}-{end_idx} with hash {key.chunk_hash}"
             )
-            if self.cpu_backend.contains(key):
+            if self.cpu_backend.contains(key, pin_on_hit=True):
                 num_matched_tokens = end_idx
                 logger.debug(
                     f"  -> HIT. Total matched tokens so far: {num_matched_tokens}"
@@ -397,6 +397,13 @@ class TPUConnectorScheduler():
                 f"Request {request.request_id}: Full prompt hit. Reporting {num_matched_for_scheduler} matched tokens. Actual hit from backend is {num_matched_tokens} tokens"
             )
 
+        # Note on unpinning for the full prefix hit case: Although we report N-1 tokens
+        # to the scheduler, the RequestTracker (created later in
+        # `build_connector_meta`) stores the true, full N prompt tokens.
+        # The `get_finished` method on the worker side uses this complete
+        # token list to regenerate the keys, ensuring that all N keys
+        # originally pinned during this lookup are gracefully unpinned upon
+        # request completion.
         # We don't need to load tokens that are already computed locally in vLLM
         num_to_load = max(0, num_matched_for_scheduler - num_computed_tokens)
         logger.info(
@@ -707,6 +714,7 @@ class TPUConnectorWorker:
                                                 thread_name_prefix="tpu_saver")
         self.finished_save_reqs: set[ReqId] = set()
         self.finished_load_reqs: set[ReqId] = set()
+        self._tokens_to_unpin: dict[ReqId, list[int]] = {}
         # Tracks if wait_for_save has been called for the current step's metadata.
         self._processed_save_for_step = False
 
@@ -884,6 +892,7 @@ class TPUConnectorWorker:
                         f"Request {finished_req_id}: Final save completed. Marking as finished."
                     )
                     self.finished_save_reqs.add(finished_req_id)
+                    self._tokens_to_unpin[finished_req_id] = meta.token_ids
 
             except Exception as e:
                 logger.error(f"A save operation failed: {e}", exc_info=True)
@@ -1081,6 +1090,31 @@ class TPUConnectorWorker:
 
         finished_saves = self.finished_save_reqs
         logger.info(f"Finished saves to report: {finished_saves}")
+
+        # Unpinning logic:
+        # A finished request consists of N prompt tokens and M generated tokens.
+        # The N prompt tokens were pinned during the initial lookup in
+        # `get_num_new_matched_tokens`. The M generated tokens were never
+        # pinned, as they were directly added to the cache.
+        # Here, we generate keys for the full N+M sequence. The call to
+        # `unpin_keys` will correctly unpin the N prompt keys and perform
+        # a harmless no-op for the M generated keys, which were never in
+        # the pinned set to begin with.
+        keys_to_unpin = []
+        for req_id in finished_saves:
+            if req_id in self._tokens_to_unpin:
+                tokens = self._tokens_to_unpin.pop(req_id)
+                keys_generator = self.token_processor.process_tokens(tokens)
+                unpin_keys = [key for _, _, key in keys_generator]
+                keys_to_unpin.extend(unpin_keys)
+                logger.info(
+                    f"Generated {len(unpin_keys)} keys to unpin for request {req_id}."
+                )
+
+        if keys_to_unpin:
+            self.cpu_backend.unpin_keys(keys_to_unpin)
+            logger.info(f"Unpinned a total of {len(keys_to_unpin)} keys.")
+
         self.finished_save_reqs = set()
 
         finished_loads = self.finished_load_reqs
