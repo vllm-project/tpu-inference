@@ -21,6 +21,8 @@ DEFAULT_MASK_VALUE = -0.7 * float(jnp.finfo(jnp.dtype("float32")).max)
 DEFAULT_VMEM_LIMIT_BYTES = 100 * 1024 * 1024
 
 
+# TODO(chengjiyao): refactor this hd64 variant and the original kernel to make
+# sure most of the code is shared.
 def ref_ragged_paged_attention_hd64(
     queries: jax.
     Array,  # [max_num_tokens, actual_num_q_heads, actual_head_dim]
@@ -1203,39 +1205,39 @@ def ragged_paged_attention_hd64(
 ):
     """A special Ragged paged attention version for head_dim=64 that supports mixed
 
-  prefill and decode.
+    prefill and decode.
 
-  Args:
-    queries: concatenated all sequences' queries.
-    keys: concatenated all sequences' keys (quantized).
-    values: concatenated all sequences' values (quantized).
-    kv_cache: paged KV cache with TPU-friendly shape.
-    kv_lens: padded kv lengths. Only the first num_seqs values are valid.
-    page_indices: flattened page indices look-up table by (seq_id, page_id).
-    cu_q_lens: the cumulative sum of the effective query lengths. Similar to
-      kv_lens, only the first num_seqs+1 values are valid.
-    distribution: (i, j, k) represents that sequences[0:i] are decode-only,
-      sequences[i:j] are chunked-prefill-only, and sequences[j:k] are mixed. The
-      k is also the total number of sequences.
-    actual_head_dim: the actual head size of the attention. Here we assume k and
-      v have the same actual head size.
-    sm_scale: the softmax scale which will be applied to the Q@K^T.
-    sliding_window: the sliding window size for the attention.
-    soft_cap: the logit soft cap for the attention.
-    mask_value: mask value for causal mask.
-    k_scale: the scale for the key cache.
-    v_scale: the scale for the value cache.
-    num_kv_pages_per_block: number of kv pages to be processed in one flash
-      attention block in the pallas kernel.
-    num_queries_per_block: number of kv pages to be processed in one flash
-      attention block in the pallas kernel.
-    vmem_limit_bytes: the vmem limit for the pallas kernel.
-    debug_mode: if true, RPA does not issue any DMAs or run flash attention but
-      print debug info. Need to compile with `--xla_tpu_enable_log_recorder`.
+    Args:
+      queries: concatenated all sequences' queries.
+      keys: concatenated all sequences' keys (quantized).
+      values: concatenated all sequences' values (quantized).
+      kv_cache: paged KV cache with TPU-friendly shape.
+      kv_lens: padded kv lengths. Only the first num_seqs values are valid.
+      page_indices: flattened page indices look-up table by (seq_id, page_id).
+      cu_q_lens: the cumulative sum of the effective query lengths. Similar to
+        kv_lens, only the first num_seqs+1 values are valid.
+      distribution: (i, j, k) represents that sequences[0:i] are decode-only,
+        sequences[i:j] are chunked-prefill-only, and sequences[j:k] are mixed. The
+        k is also the total number of sequences.
+      actual_head_dim: the actual head size of the attention. Here we assume k and
+        v have the same actual head size.
+      sm_scale: the softmax scale which will be applied to the Q@K^T.
+      sliding_window: the sliding window size for the attention.
+      soft_cap: the logit soft cap for the attention.
+      mask_value: mask value for causal mask.
+      k_scale: the scale for the key cache.
+      v_scale: the scale for the value cache.
+      num_kv_pages_per_block: number of kv pages to be processed in one flash
+        attention block in the pallas kernel.
+      num_queries_per_block: number of kv pages to be processed in one flash
+        attention block in the pallas kernel.
+      vmem_limit_bytes: the vmem limit for the pallas kernel.
+      debug_mode: if true, RPA does not issue any DMAs or run flash attention but
+        print debug info. Need to compile with `--xla_tpu_enable_log_recorder`.
 
-  Returns:
-    The output of the attention.
-  """
+    Returns:
+      The output of the attention.
+    """
     q, k, v = queries, keys, values
     static_validate_inputs(
         q,
