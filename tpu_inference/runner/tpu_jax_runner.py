@@ -202,11 +202,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
         # InputBatch needs to work with sampling tensors greater than padding
         # to avoid dynamic shapes. Also, avoid suboptimal alignment.
-        self.max_num_reqs = max(scheduler_config.max_num_seqs, MIN_NUM_SEQS)
+        # The total number of requests is dp_size * max_num_seqs
+        self.max_num_reqs = max(scheduler_config.max_num_seqs * self.dp_size, MIN_NUM_SEQS)
         # [16, 32, 64, 128, 256, 512, 1024, 2048]
         self.num_tokens_paddings = runner_utils.get_token_paddings(
             min_token_size=max(16, self.dp_size),
-            max_token_size=scheduler_config.max_num_batched_tokens,
+            max_token_size=scheduler_config.max_num_batched_tokens * self.dp_size,
             padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
         self.num_tokens_paddings_per_dp = [padding//self.dp_size for padding in self.num_tokens_paddings]
         # In case `max_num_tokens < max(num_tokens_paddings)` use the actual
@@ -351,8 +352,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             if len(scheduler_output.finished_req_ids) == 0:
                 logger.warning(
                     "Should not schedule a request that does nothing!")
-                # raise Exception(
-                #     "Should not schedule a request that does nothing!")
+                raise Exception(
+                    "Should not schedule a request that does nothing!")
             return (
                 DUMMY_METADATA,
                 EMPTY_MODEL_RUNNER_OUTPUT,

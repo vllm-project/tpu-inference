@@ -56,7 +56,7 @@ class DPScheduler(Scheduler):
         # Budgets for each DP rank
         self.max_reqs_per_dp_rank = self.scheduler_config.max_num_seqs // self.dp_size
         self.max_tokens_per_dp_rank = self.scheduler_config.max_num_batched_tokens // self.dp_size
-
+                
         self.request_budget: dict[int, int] = {i: self.max_reqs_per_dp_rank for i in range(self.dp_size)}
         self.token_budget: dict[int, int] = {i: self.max_tokens_per_dp_rank for i in range(self.dp_size)}
 
@@ -234,36 +234,55 @@ class DPScheduler(Scheduler):
     
     def schedule(self) -> SchedulerOutput:
         """Override schedule to return DP-specific output."""
+        # Reset budgets for each scheduling round
         self.request_budget: dict[int, int] = {i: self.max_reqs_per_dp_rank for i in range(self.dp_size)}
         self.token_budget: dict[int, int] = {i: self.max_tokens_per_dp_rank for i in range(self.dp_size)}
         self.num_scheduled_tokens = {}
         
+        all_base_outputs = []
+        scheduled_request_ids = []
+        all_popped_requests =[]
 
-        base_output = super().schedule()
-        
-        # Extract scheduled request IDs and create assigned_dp_rank mapping
-        scheduled_requests = []
-        scheduled_requests.extend([req_data.req_id for req_data in base_output.scheduled_new_reqs])
-        scheduled_requests.extend(base_output.scheduled_cached_reqs.req_ids)
-        
+        for _ in range(self.dp_size):
+            base_output = super().schedule()
+            all_base_outputs.append(base_output)
+
+            scheduled_request_ids.extend(list(base_output.num_scheduled_tokens.keys()))
+            
+            pop_requests = []
+            for request in self.running:        
+                if request.request_id in scheduled_request_ids:
+                    pop_requests.append(request)
+            
+            for request in pop_requests:
+                self.running.remove(request)
+            all_popped_requests.extend(pop_requests)
+            
+
+        for request in all_popped_requests:
+            self.running.append(request)
+            
         assigned_dp_rank = {
             req_id: self.assigned_dp_rank[req_id]
-            for req_id in scheduled_requests
-            if req_id in self.assigned_dp_rank
+            for req_id in scheduled_request_ids
         }
-        logger.debug(f"Scheduled requests DP ranks: {assigned_dp_rank}")
+        
+        logger.debug(f"Scheduled {len(all_base_outputs)} DP outputs with assignments: {assigned_dp_rank}")
         
         # Log state after scheduling
         self._log_dp_state()
-
+        base_output = self._combine_base_outputs(all_base_outputs)
         return DPSchedulerOutput(**base_output.__dict__, assigned_dp_rank=assigned_dp_rank)
     
     def _free_blocks(self, request: Request):
         """Override to handle DP-specific block freeing."""
         assert request.is_finished()
-        req_dp_rank = self.assigned_dp_rank.get(request.request_id)
-        if req_dp_rank is not None:
-            self.dp_kv_cache_managers[req_dp_rank].free(request)
+        req_id = request.request_id
+        dp_rank = self.assigned_dp_rank.get(req_id)
+        if dp_rank is not None:
+            self.dp_kv_cache_managers[dp_rank].free(request)
+            # Clean up assignment
+            del self.assigned_dp_rank[req_id]
         del self.requests[request.request_id]
     
     def make_stats(self, spec_decoding_stats: Optional[SpecDecodingStats] = None, kv_connector_stats: Optional[KVConnectorStats] = None) -> Optional[SchedulerStats]:
@@ -293,5 +312,118 @@ class DPScheduler(Scheduler):
             num_corrupted_reqs=sum(req.is_output_corrupted for req in self.running),
             kv_connector_stats=kv_connector_stats.data if kv_connector_stats else None
         )
+    
+    def reset_prefix_cache(self) -> bool:
+        """Reset prefix cache for all DP ranks."""
+        for manager in self.dp_kv_cache_managers:
+            if not manager.reset_prefix_cache():
+                return False
+        return True
 
 
+
+    def _combine_base_outputs(self, base_outputs: list[SchedulerOutput]) -> SchedulerOutput:
+        """Combine multiple SchedulerOutput objects from different DP ranks into one.
+        
+        This method is used when we have multiple SchedulerOutput objects that need
+        to be merged into a single output for the combined DP scheduling result.
+        
+        Note: We could potentially use the parent's helper methods like:
+        - self._make_cached_request_data() to rebuild cached request data
+        - self.get_grammar_bitmask() to rebuild grammar bitmasks
+        
+        However, this would require:
+        1. Access to the original Request objects (self.requests)
+        2. The combined running_reqs, resumed_reqs lists
+        3. The combined req_to_new_blocks mapping
+        4. Proper reconstruction of structured output state
+        
+        For now, manual field combination is simpler and more straightforward.
+        """
+        from vllm.v1.core.sched.output import CachedRequestData
+        
+        # Combine scheduled new requests
+        combined_new_reqs = []
+        for output in base_outputs:
+            combined_new_reqs.extend(output.scheduled_new_reqs)
+        
+        # Combine cached request data
+        cached_reqs_data = []
+        for output in base_outputs:
+            if output.scheduled_cached_reqs.req_ids:
+                cached_reqs_data.append(output.scheduled_cached_reqs)
+        
+        if cached_reqs_data:
+            combined_cached_reqs = self._combine_cached_request_data(cached_reqs_data)
+        else:
+            combined_cached_reqs = CachedRequestData.make_empty()
+        
+        # Combine other fields
+        combined_num_scheduled_tokens = {}
+        combined_total_tokens = 0
+        combined_spec_decode_tokens = {}
+        combined_encoder_inputs = {}
+        combined_finished_req_ids = set()
+        combined_free_encoder_mm_hashes = []
+        combined_structured_output_request_ids = {}
+        
+        for output in base_outputs:
+            combined_num_scheduled_tokens.update(output.num_scheduled_tokens)
+            combined_total_tokens += output.total_num_scheduled_tokens
+            combined_spec_decode_tokens.update(output.scheduled_spec_decode_tokens)
+            combined_encoder_inputs.update(output.scheduled_encoder_inputs)
+            combined_finished_req_ids.update(output.finished_req_ids)
+            combined_free_encoder_mm_hashes.extend(output.free_encoder_mm_hashes)
+            combined_structured_output_request_ids.update(output.structured_output_request_ids)
+        
+        
+        # structured_output_request_ids, grammar_bitmask = self.get_grammar_bitmask(
+        #     combined_num_scheduled_tokens.keys(), combined_spec_decode_tokens
+        # )
+        
+        # Use the first output for single-value attributes
+        # first_output = base_outputs[0]
+        
+        # Create a new SchedulerOutput with combined data
+        from vllm.v1.core.sched.output import SchedulerOutput
+        return SchedulerOutput(
+            scheduled_new_reqs=combined_new_reqs,
+            scheduled_cached_reqs=combined_cached_reqs,
+            num_scheduled_tokens=combined_num_scheduled_tokens,
+            total_num_scheduled_tokens=combined_total_tokens,
+            scheduled_spec_decode_tokens=combined_spec_decode_tokens,
+            scheduled_encoder_inputs=combined_encoder_inputs,
+            num_common_prefix_blocks=base_outputs[0].num_common_prefix_blocks,
+            finished_req_ids=combined_finished_req_ids,
+            free_encoder_mm_hashes=combined_free_encoder_mm_hashes,
+            structured_output_request_ids={},
+            grammar_bitmask=None,
+        )
+
+    def _combine_cached_request_data(self, cached_reqs_list):
+        """Combine multiple CachedRequestData objects into one."""
+        from vllm.v1.core.sched.output import CachedRequestData
+        
+        combined_req_ids = []
+        combined_resumed_from_preemption = []
+        combined_new_token_ids = []
+        combined_new_block_ids = []
+        combined_num_computed_tokens = []
+        combined_num_output_tokens = []
+        
+        for cached_reqs in cached_reqs_list:
+            combined_req_ids.extend(cached_reqs.req_ids)
+            combined_resumed_from_preemption.extend(cached_reqs.resumed_from_preemption)
+            combined_new_token_ids.extend(cached_reqs.new_token_ids)
+            combined_new_block_ids.extend(cached_reqs.new_block_ids)
+            combined_num_computed_tokens.extend(cached_reqs.num_computed_tokens)
+            combined_num_output_tokens.extend(cached_reqs.num_output_tokens)
+        
+        return CachedRequestData(
+            req_ids=combined_req_ids,
+            resumed_from_preemption=combined_resumed_from_preemption,
+            new_token_ids=combined_new_token_ids,
+            new_block_ids=combined_new_block_ids,
+            num_computed_tokens=combined_num_computed_tokens,
+            num_output_tokens=combined_num_output_tokens,
+        )
