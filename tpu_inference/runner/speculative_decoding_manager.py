@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import functools
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
@@ -78,12 +76,6 @@ class SpeculativeDecodingManager:
                 f"Speculative decoding method "
                 f"'{self.runner.speculative_config.method}' is not supported.")
 
-    @functools.partial(jax.jit, static_argnums=(0, ))
-    def _convert_list_to_device_array(self, lst: list[int]) -> jnp.ndarray:
-        """Jitted helper function to convert a list to a device array."""
-        arr = jnp.array(lst, dtype=jnp.int32)
-        return device_array(self.runner.mesh, arr)
-
     def propose_eagle3_draft_token_ids(
         self,
         sampled_token_ids: list[list[int]],
@@ -117,7 +109,8 @@ class SpeculativeDecodingManager:
         assert pad_len >= 0
         next_token_ids += [0] * pad_len
 
-        next_token_ids = self._convert_list_to_device_array(next_token_ids)
+        next_token_ids = device_array(
+            self.runner.mesh, np.array(next_token_ids, dtype=jnp.int32))
 
         if spec_decode_metadata is None:
             num_rejected_tokens = None
@@ -130,8 +123,9 @@ class SpeculativeDecodingManager:
 
             pad_len = self.runner.max_num_reqs - len(num_rejected_tokens)
             num_rejected_tokens += [0] * pad_len
-            num_rejected_tokens = self._convert_list_to_device_array(
-                num_rejected_tokens)
+            num_rejected_tokens = device_array(
+                self.runner.mesh, np.array(num_rejected_tokens,
+                                           dtype=jnp.int32))
 
         attn_metadata, target_token_ids, target_hidden_states = self.runner.drafter.prepare_inputs(
             attn_metadata,
