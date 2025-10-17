@@ -75,17 +75,21 @@ class Llama4Attention(Attention):
         rope_theta = self.rope_theta
         H = self.head_dim
         l2_norm = L2Norm()
+        print("x_q_TD", x_q_TD[:5, :10])
 
         with jax.named_scope("q_proj"):
             q_TNH = jnp.einsum('TD,DNH -> TNH', x_q_TD,
                                self.kernel_q_proj_DNH.value)
+            print("q_TNH"...)
             if use_attention_rope:
                 q_TNH = apply_rope(q_TNH, md.input_positions, H, rope_theta,
                                    rope_scaling, self.rope_input_ordering)
+                print("q_TNH"...)
 
                 # Apply normaliation after RoPE
                 if self.use_qk_norm:
                     q_TNH = l2_norm(q_TNH)
+                    print("q_TNH"...)
             else:
                 if self.temperature_tuning:
                     q_TNH = self.apply_temperature_tuning(md, q_TNH)
@@ -131,12 +135,14 @@ class Llama4Attention(Attention):
                 k_scale=k_scale,
                 v_scale=v_scale,
             )
+            print("outputs_TNH")
 
         with jax.named_scope("o_proj"):
             o_TD = jnp.einsum('TNH,NHD -> TD', outputs_TNH,
                               self.kernel_o_proj_NHD.value)
             o_TD = nnx.with_sharding_constraint(
                 o_TD, self.activation_attention_out_td)
+            print("o_TD")
         return new_kv_cache, o_TD
 
     def apply_temperature_tuning(self, md: AttentionMetadata,
