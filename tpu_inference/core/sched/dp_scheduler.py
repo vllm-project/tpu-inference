@@ -3,7 +3,7 @@ import itertools
 from dataclasses import dataclass
 from typing import Optional
 
-from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.core.kv_cache_manager import KVCacheManager, KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request
@@ -38,8 +38,8 @@ class DPScheduler(Scheduler):
     
     def _log_dp_state(self):
         """Log current DP state for debugging."""
-        logger.debug(f"DP rank token budget: {self.token_budget}")
-        logger.debug(f"DP rank request budget: {self.request_budget}")
+        logger.debug(f"DP rank token budget (cap {self.max_tokens_per_dp_rank}): {self.token_budget}")
+        logger.debug(f"DP rank request budget (cap {self.max_reqs_per_dp_rank}): {self.request_budget}")
         logger.debug(f"Total assigned requests: {len(self.assigned_dp_rank)}")
     
     def _init_dp_state(self):
@@ -48,7 +48,10 @@ class DPScheduler(Scheduler):
         self.num_scheduled_tokens: dict[str, int] = {} #req_id -> num_tokens
         
         self.round_robin_counter = itertools.cycle(range(self.dp_size))
-        self.empty_kv_cache_blocks = self.kv_cache_manager.empty_kv_cache_blocks
+        
+        self.empty_kv_cache_blocks = KVCacheBlocks(
+            tuple(() for _ in range(self.kv_cache_manager.num_kv_cache_groups))
+        )
 
         # Budgets for each DP rank
         self.max_reqs_per_dp_rank = self.scheduler_config.max_num_seqs // self.dp_size
@@ -59,14 +62,11 @@ class DPScheduler(Scheduler):
 
     def _replace_kv_cache_manager(self):
         """Replace single KV cache manager with multiple DP managers."""
-        # Create DP-specific KV cache config
         dp_kv_cache_config = copy.deepcopy(self.kv_cache_config)
         dp_kv_cache_config.num_blocks = self.kv_cache_config.num_blocks // self.dp_size
         
-        # Store original manager for reference
         self._original_kv_cache_manager = self.kv_cache_manager
         
-        # Create multiple KV cache managers
         self.dp_kv_cache_managers = [
             KVCacheManager(
                 kv_cache_config=dp_kv_cache_config,
@@ -79,7 +79,6 @@ class DPScheduler(Scheduler):
             ) for _ in range(self.dp_size)
         ]
         
-        # Patch KV cache manager methods to handle DP logic
         self._patch_kv_operations()
     
     def _patch_kv_operations(self):
@@ -97,9 +96,7 @@ class DPScheduler(Scheduler):
                         # This can happen if the request was previously assigned a DP rank during prefix cache.
                         dp_rank = self.scheduler.assigned_dp_rank[req_id]
                         self.scheduler.request_budget[dp_rank] += 1
-                        del self.scheduler.assigned_dp_rank[req_id]
-
-                    
+                        self.scheduler.assigned_dp_rank.pop(req_id)
                     return None
                 self.scheduler._update_dp_rank_budget(request, dp_rank, num_new_tokens)
                 logger.debug(f"Request {req_id} allocated to DP rank {dp_rank} with {num_new_tokens} tokens")
@@ -124,9 +121,9 @@ class DPScheduler(Scheduler):
                     self.scheduler.dp_kv_cache_managers[dp_rank].free(request)
                     self.scheduler.request_budget[dp_rank] += 1
                     self.scheduler.token_budget[dp_rank] += self.scheduler.num_scheduled_tokens[req_id]
-                    # Clean up mappings
-                    del self.scheduler.assigned_dp_rank[req_id]
-                    del self.scheduler.num_scheduled_tokens[req_id]
+                    # Clean up state
+                    self.scheduler.assigned_dp_rank.pop(req_id)
+                    self.scheduler.num_scheduled_tokens.pop(req_id)
             
             def get_num_common_prefix_blocks(self, request_id):
                 dp_rank = self.scheduler.assigned_dp_rank[request_id]
