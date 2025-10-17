@@ -109,7 +109,6 @@ def test_multi_lora(tp):
     We run "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_x_adapter" which
     will force Qwen2.5-3B-Instruct to claim 1+1=x, for a range of x.
     """
-    print(f"xw32 TP: {tp}")
     lora_name_template = \
         "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_{}_adapter"
     lora_requests = [
