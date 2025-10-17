@@ -97,7 +97,7 @@ To install vLLM TPU, you can either install using `pip` (see section [Install us
 
     ```shell
     export HF_HOME=/dev/shm/vllm
-    export HF_TOKEN=<your-token>
+    export HF_TOKEN=(your-hf-token)
     export MAX_MODEL_LEN=4096
     export TP=1 # number of chips
     vllm serve meta-llama/Meta-Llama-3.1-8B \
