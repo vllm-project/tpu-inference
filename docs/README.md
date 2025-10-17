@@ -1,9 +1,5 @@
-<p align="center">
-   <!-- This image will ONLY show up in GitHub's dark mode -->
-  <img src="docs/assets/tpu_inference_dark_mode_short.png#gh-dark-mode-only" alt="vLLM TPU" style="width: 86%;">
-    <!-- This image will ONLY show up in GitHub's light mode (and on other platforms) -->
-  <img src="docs/assets/tpu_inference_light_mode_short.png#gh-light-mode-only" alt="vLLM TPU" style="width: 86%;">
-</p>
+![vLLM TPU](assets/tpu_inference_light_mode_short.png#only-light){ align=center width="86%" }
+![vLLM TPU](assets/tpu_inference_dark_mode_short.png#only-dark){ align=center width="86%" }
 
 <p align="center">
 | <a href="https://docs.vllm.ai/projects/tpu/en/latest/"><b>Documentation</b></a> | <a href="https://blog.vllm.ai/"><b>Blog</b></a> | <a href="https://discuss.vllm.ai/c/hardware-support/google-tpu-support/27"><b>User Forum</b></a> | <a href="https://join.slack.com/share/enQtOTY2OTUxMDIyNjY1OS00M2MxYWQwZjAyMGZjM2MyZjRjNTA0ZjRkNjkzOTRhMzg0NDM2OTlkZDAxOTAzYmJmNzdkNDc4OGZjYTUwMmRh"><b>Developer Slack</b></a> |
@@ -11,22 +7,6 @@
 
 ---
 
-_Upcoming Events_ 🔥
-
-- Join us at the [PyTorch Conference, October 22-23](https://events.linuxfoundation.org/pytorch-conference/) in San Francisco!
-- Join us at [Ray Summit, November 3-5](https://www.anyscale.com/ray-summit/2025) in San Francisco!
-- Join us at [JAX DevLab on November 18th](https://rsvp.withgoogle.com/events/devlab-fall-2025) in Sunnyvale!
-
-_Latest News_ 🔥
-
-- [2025/10] [vLLM TPU: A New Unified Backend Supporting PyTorch and JAX on TPU](https://blog.vllm.ai/2025/10/16/vllm-tpu.html)
-
-<details>
-<summary><i>Previous News</i> 🔥</summary>
-
-</details>
-
----
 ## About
 
 vLLM TPU is now powered by `tpu-inference`, an expressive and powerful new hardware plugin unifying JAX and PyTorch under a single lowering path within the vLLM project. The new backend now provides a framework for developers to:
@@ -39,13 +19,18 @@ vLLM TPU is now powered by `tpu-inference`, an expressive and powerful new hardw
 
 Although vLLM TPU’s new unified backend makes out-of-the-box high performance serving possible with any model supported in vLLM, the reality is that we're still in the process of implementing a few core components.
 
-For this reason, we’ve provided a **[Support Matrix](https://docs.vllm.ai/projects/tpu/en/latest/support_matrix.html)** detailing the recommended models and features. The raw data is also available directly ([models](https://github.com/vllm-project/tpu-inference/blob/main/support_matrices/model_support_matrix.csv), [features](https://github.com/vllm-project/tpu-inference/blob/main/support_matrices/feature_support_matrix.csv)).
+For this reason, we’ve provided a **[Support Matrix](support_matrix.md)** detailing the recommended models and features. The raw data is also available directly ([models](https://github.com/vllm-project/tpu-inference/blob/main/support_matrices/model_support_matrix.csv), [features](https://github.com/vllm-project/tpu-inference/blob/main/support_matrices/feature_support_matrix.csv)).
 
-## Get started
+## Getting Started
 
-Get started with vLLM on TPUs by following the [quickstart guide](https://docs.vllm.ai/projects/tpu/en/latest/getting_started/quickstart.html).
+If you are new to vLLM on TPU, we recommend starting with the **[Quickstart](getting_started/quickstart.md)** guide. It will walk you through the process of setting up your environment and running your first model.
 
-Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn more.
+## Developer Guides
+
+If you are interested in contributing to the project or want to learn more about the internals, check out our developer guides:
+
+- **[JAX Model Development](developer_guides/jax_model_development.md)**
+- **[Torch Model Development](developer_guides/torchax_model_development.md)**
 
 ## Contribute
 
