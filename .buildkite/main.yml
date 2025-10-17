@@ -11,7 +11,7 @@ steps:
        - echo $$(buildkite-agent meta-data get "TPU_INFERENCE_COMMIT_HASH")
 
    - label: "Upload Tests for Models & Features"
-     if: build.env("NIGHTLY") == "1" || build.tag =~ /^v?[0-9]+(\.[a-zA-Z0-9]+)*([a-zA-Z]+[0-9]*)?$/
+    #  if: build.env("NIGHTLY") == "1" || build.tag =~ /^v?[0-9]+(\.[a-zA-Z0-9]+)*([a-zA-Z]+[0-9]*)?$/
      depends_on: get_current_commit_hashes
      agents:
        # TODO : can be done on non-TPU queues once they're set up b/449203039
@@ -23,7 +23,7 @@ steps:
      continue_on_failure: true  # ensure we still generate support matrices even if some tests fail
 
    - label: "Generate support matrices"
-     if: build.env("NIGHTLY") == "1" || build.tag =~ /^v?[0-9]+(\.[a-zA-Z0-9]+)*([a-zA-Z]+[0-9]*)?$/
+    #  if: build.env("NIGHTLY") == "1" || build.tag =~ /^v?[0-9]+(\.[a-zA-Z0-9]+)*([a-zA-Z]+[0-9]*)?$/
      key: generate_support_matrices
      agents:
        queue: tpu_v6e_queue
@@ -31,33 +31,34 @@ steps:
      commands:
        - bash .buildkite/scripts/generate_support_matrices.sh
 
-  #  - label: "Notify test results"
-  #    if: build.env("NIGHTLY") == "1" || build.tag =~ /^v?[0-9]+(\.[a-zA-Z0-9]+)*([a-zA-Z]+[0-9]*)?$/
-  #    key: notify_test_results
-  #    depends_on: generate_support_matrices
-  #    agents:
-  #      queue: tpu_v6e_queue
-  #    commands:
-  #      - bash .buildkite/scripts/notify_test_results.sh
+   - label: "Notify test results"
+    #  if: build.env("NIGHTLY") == "1" || build.tag =~ /^v?[0-9]+(\.[a-zA-Z0-9]+)*([a-zA-Z]+[0-9]*)?$/
+     key: notify_test_results
+     depends_on: generate_support_matrices
+     agents:
+       queue: tpu_v6e_queue
+     commands:
+       - bash .buildkite/scripts/notify_test_results.sh
 
    - label: "Record verified commit hashes"
      key: record_verified_commit_hashes
-    #  depends_on: notify_test_results
-     branches: "main"
+     depends_on: notify_test_results
+    #  branches: "main"
      agents:
        queue: tpu_v6e_queue
+     secrets:
+      - GITHUB_PAT
      commands:
        - echo "committing verified commit hashes"
        - bash .buildkite/scripts/commit_push.sh .buildkite/scripts/git_add_commit_hashes.sh
 
    - label: "Commit support matrices if is nightly build or release tag specified"
-     if: build.env("NIGHTLY") == "1" || build.tag =~ /^v?[0-9]+(\.[a-zA-Z0-9]+)*([a-zA-Z]+[0-9]*)?$/
-     key: commit_nightly_support_matrices
-     depends_on: generate_support_matrices
+    #  if: build.env("NIGHTLY") == "1" || build.tag =~ /^v?[0-9]+(\.[a-zA-Z0-9]+)*([a-zA-Z]+[0-9]*)?$/
+     key: commit_support_matrices
+     depends_on: record_verified_commit_hashes
      agents:
        queue: tpu_v6e_queue
      secrets:
       - GITHUB_PAT
      command:
        - bash .buildkite/scripts/commit_push.sh .buildkite/scripts/git_add_support_matrices.sh
-      #  - bash .buildkite/scripts/commit_support_matrices.sh
