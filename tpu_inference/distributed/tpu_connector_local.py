@@ -106,8 +106,8 @@ if TYPE_CHECKING:
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
 
+from .cache_util import TokenProcessor
 from .local_cpu_backend import LocalCPUBackend
-from .util import ChunkedTokens
 
 EngineId = str
 ReqId = str
@@ -333,8 +333,10 @@ class TPUConnectorScheduler():
         self.load_specs: dict[ReqId, LoadSpec] = {}
         self.cpu_backend = LocalCPUBackend()
         model_name = self.vllm_config.model_config.model
-        logger.info("Model name is %s", model_name)
-        self.token_processor = ChunkedTokens(model_name=model_name)
+        logger.info(
+            f"Model name is {model_name}, KV block_size={self.block_size}")
+        self.token_processor = TokenProcessor(model_name=model_name,
+                                              chunk_size=self.block_size)
 
     def get_num_new_matched_tokens(
         self,
@@ -707,7 +709,10 @@ class TPUConnectorWorker:
         self.cpu_backend = LocalCPUBackend()
         # The worker needs its own token processor to generate keys.
         model_name = self.vllm_config.model_config.model
-        self.token_processor = ChunkedTokens(model_name=model_name)
+        logger.info(
+            f"Model name is {model_name}, KV block_size={self.block_size}")
+        self.token_processor = TokenProcessor(model_name=model_name,
+                                              chunk_size=self.block_size)
 
         # Thread pool for asynchronous TPU->CPU copies
         self.save_executor = ThreadPoolExecutor(max_workers=4,
