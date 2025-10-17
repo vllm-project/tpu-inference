@@ -1,5 +1,3 @@
-# gpt_oss.py
-
 import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
@@ -51,30 +49,28 @@ class GptOss(nnx.Module):
         self.hf_config = vllm_config.model_config.hf_config
         self.rng = nnx.Rngs(rng)
 
-        # Model hyperparameters from GPT-OSS config
-        # TODO: verify the the default is 36(?)
-        # TODO: update the parameters to hf_config, instead of being hardcoded 
-        # after validating accuracy
-        num_layers: int = 36
-        num_experts: int = 128
-        vocab_size: int = 201088
-        num_attention_heads: int = 64
-        num_key_value_heads: int = 8
-        head_dim: int = 64
-        hidden_size: int = 2880
-        ffw_intermediate_size: int = 2880
-        num_experts_per_token: int = 4
-        sliding_window: int = 128
-        swiglu_limit: float = 7.0
-        rms_norm_eps: float = 1e-05
-        rope_theta: float = 150000.0
-        rope_scaling_factor: float = 32.0
-        rope_ntk_alpha: float = 1.0
-        rope_ntk_beta: float = 32.0
-        initial_context_length: int = 4096
+        num_layers: int = self.hf_config.num_hidden_layers
+        num_experts: int = self.hf_config.num_local_experts
+        vocab_size: int = self.hf_config.vocab_size
+        num_attention_heads: int = self.hf_config.num_attention_heads
+        num_key_value_heads: int = self.hf_config.num_key_value_heads
+        head_dim: int = self.hf_config.head_dim
+        hidden_size: int = self.hf_config.hidden_size
+        ffw_intermediate_size: int = self.hf_config.intermediate_size
+        num_experts_per_token: int = self.hf_config.num_experts_per_tok
+        rms_norm_eps: float = self.hf_config.rms_norm_eps
+        swiglu_limit: float = self.hf_config.swiglu_limit
+
+        rope_theta: float = self.hf_config.rope_theta
+        rope_scaling_factor: float = self.hf_config.rope_scaling["factor"]
+        rope_ntk_alpha: float = self.hf_config.rope_scaling["beta_slow"]
+        rope_ntk_beta: float = self.hf_config.rope_scaling["beta_fast"]
+        initial_context_length: int = self.hf_config.rope_scaling["original_max_position_embeddings"]
+
         dtype: jnp.dtype = jnp.bfloat16
 
-        self.sliding_window = sliding_window
+        self.sliding_window = self.hf_config.sliding_window
+
         self.random_init = force_random_weights or self.vllm_config.additional_config.get(
             "random_weights", False)
         self.mesh = mesh
@@ -110,7 +106,6 @@ class GptOss(nnx.Module):
                 nhd_sharding=('model', None, None),
                 mesh=self.mesh
             )
-    
 
             # MoE MLP block
             router = GptOssRouter(
@@ -222,7 +217,6 @@ class GptOss(nnx.Module):
             "model.layers.*.mlp.experts.gate_up_proj": ("layers.*.custom_module.mlp1_weight_EDF2", None, None),
             "model.layers.*.mlp.experts.gate_up_proj_bias": ("layers.*.custom_module.mlp1_bias_EF2", None, None),
             "model.layers.*.mlp.experts.down_proj": ("layers.*.custom_module.mlp2_weight_EFD", None, None),
-
             "model.layers.*.mlp.experts.down_proj_bias": ("layers.*.custom_module.mlp2_bias_ED", None, None),
         }
 
@@ -300,7 +294,6 @@ class GptOss(nnx.Module):
 
         for i, block in enumerate(self.layers):
             kv_cache = kv_caches[i]
-            # TODO: Only apply sliding window to every other layer
             current_sliding_window = self.sliding_window if i % 2 == 0 else None
             attention_metadata.sliding_window = current_sliding_window
             
@@ -312,4 +305,3 @@ class GptOss(nnx.Module):
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         return self.lm_head.decode(hidden_states)
-
