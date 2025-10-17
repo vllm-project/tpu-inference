@@ -8,7 +8,7 @@ from typing import Any, List, Optional
 
 from tpu_inference.logger import init_logger
 
-from .util import CacheKey
+from .cache_util import CacheKey
 
 logger = init_logger(__name__)
 

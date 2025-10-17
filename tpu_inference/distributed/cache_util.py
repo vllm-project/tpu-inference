@@ -34,11 +34,12 @@ class CacheKey:
         return False
 
 
-class ChunkedTokens:
+class TokenProcessor:
 
     def __init__(self, model_name: str, chunk_size: int = 16):
         self.model_name = model_name
         self.chunk_size = chunk_size
+        logger.info(f"TokenProcessor initialized with chunk_size={chunk_size}")
 
     def _hash_tokens(
         self,
