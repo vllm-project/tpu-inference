@@ -85,7 +85,7 @@ class CompilationManager:
                 self._precompile_speculative_decoding()
 
     def _precompile_backbone_helper(self, name, *, input_ids, positions,
-                                    inputs_embeds) -> None:
+                                    inputs_embeds, is_pure_decode) -> None:
         num_tokens = None
         if input_ids is not None:
             num_tokens = input_ids.shape[0]
@@ -121,13 +121,15 @@ class CompilationManager:
             kv_caches,
             input_ids,
             attention_metadata,
+            is_pure_decode,
             inputs_embeds,
             layer_name_to_kvcache_index,
             lora_metadata,
         ):
             kv_caches, hidden_states, aux_hidden_states = self.runner.model_fn(
-                state, kv_caches, input_ids, attention_metadata, inputs_embeds,
-                layer_name_to_kvcache_index, lora_metadata)
+                state, kv_caches, input_ids, attention_metadata,
+                is_pure_decode, inputs_embeds, layer_name_to_kvcache_index,
+                lora_metadata)
             self.runner.kv_caches = kv_caches
             return hidden_states
 
@@ -142,20 +144,26 @@ class CompilationManager:
                 self.runner.kv_caches,
                 input_ids,
                 attention_metadata,
+                is_pure_decode,
                 inputs_embeds,
                 tuple(self.runner.layer_name_to_kvcache_index.items()),
                 lora_metadata,
                 num_tokens=num_tokens,
+                is_pure_decode=is_pure_decode,
             )
 
     def _precompile_backbone_text_only(self) -> None:
-        for num_tokens in self.runner.num_tokens_paddings:
-            input_ids = self._create_dummy_tensor((num_tokens, ), jnp.int32)
-            positions = self._create_dummy_tensor((num_tokens, ), jnp.int32)
-            self._precompile_backbone_helper("backbone",
-                                             input_ids=input_ids,
-                                             positions=positions,
-                                             inputs_embeds=None)
+        for is_pure_decode in [True, False]:
+            for num_tokens in self.runner.num_tokens_paddings:
+                input_ids = self._create_dummy_tensor((num_tokens, ),
+                                                      jnp.int32)
+                positions = self._create_dummy_tensor((num_tokens, ),
+                                                      jnp.int32)
+                self._precompile_backbone_helper("backbone",
+                                                 input_ids=input_ids,
+                                                 positions=positions,
+                                                 inputs_embeds=None,
+                                                 is_pure_decode=is_pure_decode)
 
     def _precompile_backbone_with_inputs_embeds(self) -> None:
         hidden_size = self.runner.model_config.get_hidden_size()

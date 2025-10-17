@@ -177,6 +177,8 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
                           seq_lens=seq_lens,
                           query_start_loc=query_start_loc,
                           request_distribution=request_distribution),
+        "is_pure_decode":
+        True,
     }
     model = qwix.quantize_model(model, qwix.PtqProvider(qwix_rules),
                                 **model_input)
