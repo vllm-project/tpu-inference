@@ -414,7 +414,7 @@ class PhasedBasedProfiler:
         have_seen_all_phases = all(self.inference_phase_seen.values())
         # We want to start profiling only after the first trial request
         is_past_initial_request = batch_composition_stats[
-            "num_reqs"] >= 1 and batch_composition_stats[
+            "num_reqs"] > 1 and batch_composition_stats[
                 "total_num_scheduled_tokens"] > 1
         if is_past_initial_request and (not have_seen_all_phases
                                         or self.current_phase != ""):
