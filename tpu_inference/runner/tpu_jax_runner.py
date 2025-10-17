@@ -125,11 +125,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         # Delegate functions to specific manager classes.
         self.compilation_manager = CompilationManager(self)
-         # TODO: only create them if this is the last rank.
-        self.speculative_decoding_manager = SpeculativeDecodingManager(self)
-        self.structured_decoding_manager = StructuredDecodingManager(self)
-        # TODO: it's still initializing the whole kv cache, 
-        # only partial is needed?
+        # TODO: verify this.
+        if self.is_last_rank:
+            self.speculative_decoding_manager = SpeculativeDecodingManager(self)
+            self.structured_decoding_manager = StructuredDecodingManager(self)
         self.kv_cache_manager = KVCacheManager(self)
         self.mm_manager = MultiModalManager(self)
         self.persistent_batch_manager = PersistentBatchManager(
