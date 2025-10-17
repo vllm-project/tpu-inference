@@ -133,7 +133,7 @@ class GptOssAttention(nnx.Module):
             P(),                 # page_indices_flat: Replicated
             P(),                 # query_start_loc: Replicated
             P(),                 # distribution: Replicated
-            P(),                 # sinks
+            P(('model')),                 # sinks
         )
         out_specs = (self.attn_o_tnh, kv_cache_spec)
 

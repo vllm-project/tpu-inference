@@ -221,8 +221,8 @@ class GptOss(nnx.Module):
             "model.layers.*.mlp.router.bias": ("layers.*.custom_module.router.bias_E", None, None),
             "model.layers.*.mlp.experts.gate_up_proj": ("layers.*.custom_module.mlp1_weight_EDF2", None, None),
             "model.layers.*.mlp.experts.gate_up_proj_bias": ("layers.*.custom_module.mlp1_bias_EF2", None, None),
-            #TODO: decide if we need to transpose for down_proj.
-            "model.layers.*.mlp.experts.down_proj": ("layers.*.custom_module.mlp2_weight_EFD", lambda w, _: jnp.transpose(w, (0, 2, 1)), None),
+            "model.layers.*.mlp.experts.down_proj": ("layers.*.custom_module.mlp2_weight_EFD", None, None),
+
             "model.layers.*.mlp.experts.down_proj_bias": ("layers.*.custom_module.mlp2_bias_ED", None, None),
         }
 

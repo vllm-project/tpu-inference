@@ -61,7 +61,7 @@ class GptOssRouter(Router):
 
 def _swiglu(x: Float, alpha: Float, limit: Float) -> Float:
     """Implements the specific SwiGLU from the golden implementation."""
-    x_glu, x_linear = jnp.split(x, 2, axis=-1)
+    x_glu, x_linear = x[..., ::2], x[..., 1::2]
 
     x_glu = jnp.clip(x_glu, a_max=limit)
     x_linear = jnp.clip(x_linear, a_min=-limit, a_max=limit)
