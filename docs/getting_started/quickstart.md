@@ -82,20 +82,32 @@ To install vLLM TPU, you can either install using `pip` (see section [Install us
 
 ### Run vllm-tpu as a Docker image
 
-1. Include the `--privileged`, `--net host`, and `--shm-size=16G` options to enable TPU interaction and shared memory.
+1. Include the `--privileged`, `--net host`, and `--shm-size=150gb` options to enable TPU interaction and shared memory.
 
     ```shell
-    docker run --privileged --net host --shm-size=16G -it vllm/vllm-tpu
+    export DOCKER_URI=vllm/vllm-tpu:latest
+    
+    sudo docker run -it --rm --name $USER-vllm --privileged --net=host \
+        -v /dev/shm:/dev/shm \
+        --shm-size 150gb \
+        -p 8000:8000 \
+        --entrypoint /bin/bash ${DOCKER_URI}
     ```
 
 1. Start the vLLM OpenAI API server (inside the container):
 
     ```shell
-    python -m vllm.entrypoints.openai.api_server \
-        --model meta-llama/Llama-3.1-8B \
-        --tensor-parallel-size 1 \
-        --host 0.0.0.0 \
-        --port 8000
+    export MAX_MODEL_LEN=4096
+    export TP=1 # number of chips
+
+    vllm serve meta-llama/Meta-Llama-3.1-8B \
+        --seed 42 \
+        --disable-log-requests \
+        --gpu-memory-utilization 0.98 \
+        --max-num-batched-tokens 2048 \
+        --max-num-seqs 256 \
+        --tensor-parallel-size $TP \
+        --max-model-len $MAX_MODEL_LEN
     ```
 
     Note: Adjust `--model` if you’re using a different model and `--tensor-parallel-size` if you want to use a different number of tensor parallel replicas.
