@@ -107,7 +107,7 @@ from tpu_inference.logger import init_logger
 from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
 
 from .local_cpu_backend import LocalCPUBackend
-from .util import ChunkedTokens
+from .util import ChunkedTokens, swap_ops
 
 EngineId = str
 ReqId = str
@@ -784,7 +784,7 @@ class TPUConnectorWorker:
 
         try:
             start_time = time.time()
-            cpu_device = jax.devices("cpu")[0]
+            # cpu_device = jax.devices("cpu")[0]
 
             # Extract blocks on TPU first
             extracted_blocks_tpu = [
@@ -794,7 +794,7 @@ class TPUConnectorWorker:
 
             # Initiate non-blocking copy to CPU
             kv_caches_on_cpu = [
-                jax.device_put(extracted_blocks, cpu_device)
+                swap_ops(extracted_blocks, None, "d2h", "jax")
                 for extracted_blocks in extracted_blocks_tpu
             ]
 
@@ -1077,7 +1077,7 @@ class TPUConnectorWorker:
 
             # 5. Transfer to TPU, applying the correct sharding.
             loaded_kv_sharded_on_tpu = [
-                jax.device_put(layer_data, device=self.sharding)
+                swap_ops(layer_data, self.sharding, "h2d", "jax")
                 for layer_data in block_shaped_kv_on_cpu
             ]
 
