@@ -82,11 +82,10 @@ To install vLLM TPU, you can either install using `pip` (see section [Install us
 
 ### Run vllm-tpu as a Docker image
 
-1. Include the `--privileged`, `--net host`, and `--shm-size=150gb` options to enable TPU interaction and shared memory.
+1. Include the `--privileged`, `--net=host`, and `--shm-size=150gb` options to enable TPU interaction and shared memory.
 
     ```shell
     export DOCKER_URI=vllm/vllm-tpu:latest
-    
     sudo docker run -it --rm --name $USER-vllm --privileged --net=host \
         -v /dev/shm:/dev/shm \
         --shm-size 150gb \
@@ -99,7 +98,6 @@ To install vLLM TPU, you can either install using `pip` (see section [Install us
     ```shell
     export MAX_MODEL_LEN=4096
     export TP=1 # number of chips
-
     vllm serve meta-llama/Meta-Llama-3.1-8B \
         --seed 42 \
         --disable-log-requests \
