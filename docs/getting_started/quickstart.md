@@ -61,7 +61,7 @@ To install vLLM TPU, you can either install using `pip` (see section [Install us
     The following command downloads the model weights from [Hugging Face Model Hub](https://huggingface.co/docs/hub/en/models-the-hub) to the TPU VM's `/tmp` directory, pre-compiles a range of input shapes, and writes the model compilation to `~/.cache/vllm/xla_cache`.
 
     ```shell
-    cd ~/work-dir/vllm
+    cd ~/work-dir
     vllm serve "meta-llama/Llama-3.1-8B" --download_dir /tmp --disable-log-requests --tensor_parallel_size=1 --max-model-len=2048 &> serve.log &
     ```
 
