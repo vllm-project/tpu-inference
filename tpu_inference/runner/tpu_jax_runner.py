@@ -112,6 +112,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self._init_mesh()
         self._init_phased_profiling()
         self._init_mm()
+        self.dp_size = self.vllm_config.sharding_config.total_dp_size
         self._init_inputs()
         self._init_speculative_decoding()
 
@@ -143,7 +144,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.kv_cache_dtype = TPU_STR_DTYPE_TO_TORCH_DTYPE[
                 cache_config.cache_dtype]
 
-        self.dp_size = self.vllm_config.sharding_config.total_dp_size
+        
         self.data_parallel_mlp_sharding = NamedSharding(self.mesh,
                                                     PartitionSpec(ShardingAxisName.MLP_DATA))
         self.data_parallel_attn_sharding = NamedSharding(self.mesh,
@@ -204,9 +205,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.max_num_reqs = max(scheduler_config.max_num_seqs, MIN_NUM_SEQS)
         # [16, 32, 64, 128, 256, 512, 1024, 2048]
         self.num_tokens_paddings = runner_utils.get_token_paddings(
-            min_token_size=16,
+            min_token_size=max(16, self.dp_size),
             max_token_size=scheduler_config.max_num_batched_tokens,
             padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
+        self.num_tokens_paddings_per_dp = [padding//self.dp_size for padding in self.num_tokens_paddings]
         # In case `max_num_tokens < max(num_tokens_paddings)` use the actual
         # padded max value to pre-allocate data structures and pre-compile.
         self.max_num_tokens = self.num_tokens_paddings[-1]
@@ -229,16 +231,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.positions_cpu = np.zeros(self.max_num_tokens, dtype=np.int32)
         self.block_table_cpu = np.zeros(
             (self.max_num_reqs, self.max_num_blocks_per_req), dtype=np.int32)
-        self.query_start_loc_cpu = np.zeros(self.max_num_tokens + 1,
+        self.query_start_loc_cpu = np.zeros(self.max_num_reqs + self.dp_size,
                                             dtype=np.int32)
-        self.seq_lens_cpu = np.zeros(self.max_num_tokens, dtype=np.int32)
+        self.seq_lens_cpu = np.zeros(self.max_num_reqs, dtype=np.int32)
         self.logits_indices_cpu = np.zeros(self.max_num_reqs, dtype=np.int32)
         # Range tensor with values [0 .. self.max_num_tokens - 1].
         # Used to initialize positions / context_lens / seq_lens
         # Keep in int64 to avoid overflow with long context
         self.arange_cpu = np.arange(self.max_num_tokens, dtype=np.int64)
+        min_num_reqs = max(MIN_NUM_SEQS, self.dp_size)
         self.num_reqs_paddings = runner_utils.get_req_paddings(
-            min_req_size=MIN_NUM_SEQS, max_req_size=self.max_num_reqs)
+            min_req_size=min_num_reqs, max_req_size=self.max_num_reqs)
+        self.num_reqs_paddings_per_dp = [padding//self.dp_size for padding in self.num_reqs_paddings]
 
         # Padding for logits. Without speculative decoding, each request has one position to select from.
         # With speculative decoding, each request has multiple positions to select from.
@@ -614,7 +618,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             num_scheduled_tokens_per_dp_rank.values())
 
         padded_num_scheduled_tokens_per_dp_rank = runner_utils.get_padded_token_len(
-            self.num_tokens_paddings, max_num_scheduled_tokens_across_dp)
+            self.num_tokens_paddings_per_dp, max_num_scheduled_tokens_across_dp)
 
         padded_total_num_scheduled_tokens = (
             padded_num_scheduled_tokens_per_dp_rank * dp_size)
@@ -624,8 +628,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # Find maximum number of requests across DP ranks
         max_num_reqs_across_dp = max(
             len(req_ids) for req_ids in req_ids_dp.values())
-        padded_num_reqs_per_dp_rank = runner_utils.get_padded_num_reqs_with_upper_limit(
-            max_num_reqs_across_dp, max_num_reqs_per_dp_rank)
+        padded_num_reqs_per_dp_rank = runner_utils.get_padded_token_len(
+            self.num_reqs_paddings_per_dp, max_num_reqs_across_dp)
         padded_num_reqs = padded_num_reqs_per_dp_rank * dp_size
 
         all_req_indices = np.concatenate(

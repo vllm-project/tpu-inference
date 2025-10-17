@@ -1,3 +1,4 @@
+import copy
 import itertools
 from dataclasses import dataclass
 from typing import Optional
@@ -32,16 +33,34 @@ class DPScheduler(Scheduler):
         self._replace_kv_cache_manager()
     
         logger.info(f"Scheduler initialized with DP size: {self.dp_size}")
+        logger.info(f"Max requests per DP rank: {self.max_reqs_per_dp_rank}")
+        logger.info(f"Max tokens per DP rank: {self.max_tokens_per_dp_rank}")
+    
+    def _log_dp_state(self):
+        """Log current DP state for debugging."""
+        logger.debug(f"DP rank token budget: {self.token_budget}")
+        logger.debug(f"DP rank request budget: {self.request_budget}")
+        logger.debug(f"Total assigned requests: {len(self.assigned_dp_rank)}")
     
     def _init_dp_state(self):
         """Initialize DP-specific state."""
-        self.assigned_dp_rank: dict[str, int] = {}
+        self.assigned_dp_rank: dict[str, int] = {} # req_id -> dp_rank
+        self.num_scheduled_tokens: dict[str, int] = {} #req_id -> num_tokens
+        
         self.round_robin_counter = itertools.cycle(range(self.dp_size))
-    
+        self.empty_kv_cache_blocks = self.kv_cache_manager.empty_kv_cache_blocks
+
+        # Budgets for each DP rank
+        self.max_reqs_per_dp_rank = self.scheduler_config.max_num_seqs // self.dp_size
+        self.max_tokens_per_dp_rank = self.scheduler_config.max_num_batched_tokens // self.dp_size
+
+        self.request_budget: dict[int, int] = {i: self.max_reqs_per_dp_rank for i in range(self.dp_size)}
+        self.token_budget: dict[int, int] = {i: self.max_tokens_per_dp_rank for i in range(self.dp_size)}
+
     def _replace_kv_cache_manager(self):
         """Replace single KV cache manager with multiple DP managers."""
         # Create DP-specific KV cache config
-        dp_kv_cache_config = self.kv_cache_config
+        dp_kv_cache_config = copy.deepcopy(self.kv_cache_config)
         dp_kv_cache_config.num_blocks = self.kv_cache_config.num_blocks // self.dp_size
         
         # Store original manager for reference
@@ -64,15 +83,27 @@ class DPScheduler(Scheduler):
         self._patch_kv_operations()
     
     def _patch_kv_operations(self):
-        """Patch KV cache operations to use DP logic."""
-        # Create a proxy object that handles method calls
         class KVCacheManagerProxy:
             def __init__(self, scheduler):
-                self.scheduler = scheduler
+                self.scheduler: DPScheduler = scheduler
             
-            def allocate_slots(self, request, *args, **kwargs):
-                dp_rank = self.scheduler._get_or_assign_dp_rank(request)
-                return self.scheduler.dp_kv_cache_managers[dp_rank].allocate_slots(request, *args, **kwargs)
+            def allocate_slots(self, request, num_new_tokens, *args, **kwargs):
+                dp_rank = self.scheduler._get_dp_rank_for_allocation(request, num_new_tokens)
+                req_id = request.request_id
+                if dp_rank is None: 
+                    logger.debug(f"Request {req_id} cannot be scheduled: no DP rank with capacity for {num_new_tokens} tokens")
+                    if req_id in self.scheduler.assigned_dp_rank:
+                        # Clean up any previous assignment if it exists. 
+                        # This can happen if the request was previously assigned a DP rank during prefix cache.
+                        dp_rank = self.scheduler.assigned_dp_rank[req_id]
+                        self.scheduler.request_budget[dp_rank] += 1
+                        del self.scheduler.assigned_dp_rank[req_id]
+
+                    
+                    return None
+                self.scheduler._update_dp_rank_budget(request, dp_rank, num_new_tokens)
+                logger.debug(f"Request {req_id} allocated to DP rank {dp_rank} with {num_new_tokens} tokens")
+                return self.scheduler.dp_kv_cache_managers[dp_rank].allocate_slots(request, num_new_tokens, *args, **kwargs)
             
             def get_computed_blocks(self, request):
                 return self.scheduler._get_computed_blocks_dp(request)
@@ -86,9 +117,16 @@ class DPScheduler(Scheduler):
                 return self.scheduler.dp_kv_cache_managers[dp_rank].get_block_ids(request_id)
             
             def free(self, request):
-                dp_rank = self.scheduler.assigned_dp_rank.get(request.request_id)
+                # Remove preempted requests
+                req_id = request.request_id
+                dp_rank = self.scheduler.assigned_dp_rank.get(req_id)
                 if dp_rank is not None:
                     self.scheduler.dp_kv_cache_managers[dp_rank].free(request)
+                    self.scheduler.request_budget[dp_rank] += 1
+                    self.scheduler.token_budget[dp_rank] += self.scheduler.num_scheduled_tokens[req_id]
+                    # Clean up mappings
+                    del self.scheduler.assigned_dp_rank[req_id]
+                    del self.scheduler.num_scheduled_tokens[req_id]
             
             def get_num_common_prefix_blocks(self, request_id):
                 dp_rank = self.scheduler.assigned_dp_rank[request_id]
@@ -124,40 +162,86 @@ class DPScheduler(Scheduler):
         # Replace the KV cache manager with our proxy
         self.kv_cache_manager = KVCacheManagerProxy(self)
     
-    def _get_or_assign_dp_rank(self, request: Request) -> int:
-        """Get or assign DP rank for a request."""
+    def _get_dp_rank_for_allocation(self, request: Request, num_tokens: int = 0) -> Optional[int]:
+        """Find an available DP rank for the incoming request. Each DP rank can only be assigned max_num_reqs // dp_size requests
+        and max_num_batched_tokens // dp_size tokens. 
+        
+        Returns None if the request cannot be scheduled. 
+        """
+        assert num_tokens > 0
         req_id = request.request_id
+        # Existing requests
         if req_id in self.assigned_dp_rank:
-            return self.assigned_dp_rank[req_id]
-        self.assigned_dp_rank[req_id] = next(self.round_robin_counter)
-        return self.assigned_dp_rank[req_id]
+            dp_rank = self.assigned_dp_rank[req_id]
+            if self._rank_has_capacity_for_existing_requests(dp_rank, num_tokens):
+                return dp_rank
+            return None
+            
+        # New requests
+        for _ in range(self.dp_size):
+            candidate_rank = next(self.round_robin_counter)
+            if self._rank_has_capacity_for_new_requests(candidate_rank, num_tokens):
+                return candidate_rank
+        return None
+    
+    def _update_dp_rank_budget(self, request: Request, dp_rank: int, num_tokens: int) -> Optional[int]:
+        req_id = request.request_id
+        if req_id not in self.assigned_dp_rank:
+            self.assigned_dp_rank[req_id] = dp_rank
+        else:
+            assert dp_rank == self.assigned_dp_rank[req_id], "DP rank mismatch in state update"
+        
+        self.request_budget[dp_rank] -= 1
+        self.token_budget[dp_rank] -= num_tokens
+        self.num_scheduled_tokens[req_id] = num_tokens
+
+    def _rank_has_capacity_for_new_requests(self, dp_rank: int, num_tokens: int) -> bool:
+        if (self.request_budget[dp_rank] > 0 and
+            self.token_budget[dp_rank] >= num_tokens):
+            return True
+        return False
+    
+    def _rank_has_capacity_for_existing_requests(self, dp_rank: int, num_tokens: int) -> bool:
+        if (self.token_budget[dp_rank]  >= num_tokens):
+            return True
+        return False
     
     def _get_computed_blocks_dp(self, request: Request):
-        """Get computed blocks with DP logic - check all managers for cache hits."""
+        """Get computed blocks with DP logic - check all ranks for cache hits."""
+        assert request.request_id not in self.assigned_dp_rank, "Request already has assigned DP rank"
         best_blocks = None
         best_tokens = 0
         best_rank = None
         
         # Check all DP managers for the best cache hit
         for rank in range(self.dp_size):
-            blocks, tokens = self.dp_kv_cache_managers[rank].get_computed_blocks(request)
-            if len(blocks.blocks[0]) > best_tokens:
-                best_blocks = blocks
-                best_tokens = tokens
-                best_rank = rank
+            # Only consider this rank if it has request capacity
+            # We cannot check for token capacity until we find out the number of new tokens needed
+            if self.request_budget[rank] > 0:
+                blocks, tokens = self.dp_kv_cache_managers[rank].get_computed_blocks(request)
+                if tokens > best_tokens:
+                    best_blocks = blocks
+                    best_tokens = tokens
+                    best_rank = rank
         
         if best_rank is not None and best_tokens > 0:
+            # Only assign rank  
+            # Token accounting will happen in allocate_slots
             self.assigned_dp_rank[request.request_id] = best_rank
+            self.request_budget[best_rank] -= 1
+
             logger.debug(f"{request.request_id}. prefix cache hit: {best_rank}")
             return best_blocks, best_tokens
         else:
-            # No cache hit, assign new rank and get empty blocks
-            rank = self._get_or_assign_dp_rank(request)
-            return self.dp_kv_cache_managers[rank].get_computed_blocks(request)
+            return self.empty_kv_cache_blocks, 0
     
     def schedule(self) -> SchedulerOutput:
         """Override schedule to return DP-specific output."""
+        self.request_budget: dict[int, int] = {i: self.max_reqs_per_dp_rank for i in range(self.dp_size)}
+        self.token_budget: dict[int, int] = {i: self.max_tokens_per_dp_rank for i in range(self.dp_size)}
+        self.num_scheduled_tokens = {}
         
+
         base_output = super().schedule()
         
         # Extract scheduled request IDs and create assigned_dp_rank mapping
@@ -171,6 +255,9 @@ class DPScheduler(Scheduler):
             if req_id in self.assigned_dp_rank
         }
         logger.debug(f"Scheduled requests DP ranks: {assigned_dp_rank}")
+        
+        # Log state after scheduling
+        self._log_dp_state()
 
         return DPSchedulerOutput(**base_output.__dict__, assigned_dp_rank=assigned_dp_rank)
     
