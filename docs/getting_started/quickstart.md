@@ -112,8 +112,14 @@ To install vLLM TPU, you can either install using `pip` (see section [Install us
 
     Note: Adjust `--model` if you’re using a different model and `--tensor-parallel-size` if you want to use a different number of tensor parallel replicas.
 
-1. Send a client request from your host or another machine. For example:
+1. Send a client request from your host or another terminal. For example:
 
+    First, let's try to get into the running docker:
+    ```shell
+    sudo docker exec -it $USER-vllm bash
+    ```
+
+    Now, we can send the request to the vllm server:
     ```shell
     curl http://YOUR_TPU_VM_EXTERNAL_IP:8000/v1/completions \
         -H "Content-Type: application/json" \
