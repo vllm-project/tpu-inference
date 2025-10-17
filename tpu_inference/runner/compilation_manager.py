@@ -479,13 +479,7 @@ class CompilationManager:
                 logits,
                 num_reqs=num_reqs_padding,
             )
-            self._run_compilation(
-                "convert_list_to_device_array",
-                self.runner.speculative_decoding_manager.
-                _convert_list_to_device_array,
-                [0] * num_reqs_padding,
-                num_reqs=num_reqs_padding,
-            )
+
             for i in range(1, self.runner.drafter.num_speculative_tokens + 1):
                 draft_token_ids_list = [
                     self._create_dummy_tensor(

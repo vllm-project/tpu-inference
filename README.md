@@ -19,7 +19,7 @@ _Upcoming Events_ 🔥
 
 _Latest News_ 🔥
 
-- [2025/10] vLLM TPU: A New Unified Backend Supporting PyTorch and JAX on TPU
+- [2025/10] [vLLM TPU: A New Unified Backend Supporting PyTorch and JAX on TPU](https://blog.vllm.ai/2025/10/16/vllm-tpu.html)
 
 <details>
 <summary><i>Previous News</i> 🔥</summary>
