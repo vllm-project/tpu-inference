@@ -34,8 +34,7 @@ def ref_ragged_paged_attention(
     page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     distribution: jax.Array,  # i32[3]
-    attention_sink: jax.Array | None = None,  # [actual_num_kv_heads]
-    *,
+    attention_sink: jax.Array | None = None,  # [actual_num_q_heads]    *,
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
     soft_cap: float | None = None,
@@ -145,11 +144,11 @@ def ref_ragged_paged_attention(
         attn += jnp.where(mask, mask_value, 0.0)
 
         if attention_sink is not None:
-            broadcasted_attention_sink = jnp.broadcast_to(
-                jnp.expand_dims(attention_sink, (1, 2)),
-                (actual_num_kv_heads, attn.shape[1], 1),
+            reshaped_attention_sink = attention_sink.reshape(actual_num_q_heads, 1, 1)
+            reshaped_attention_sink = jnp.repeat(
+                reshaped_attention_sink, q_len, axis=1
             )
-            attn = jnp.concat([broadcasted_attention_sink, attn], axis=2)
+            attn = jnp.concat([reshaped_attention_sink, attn], axis=2)
             attn = jax.nn.softmax(attn, axis=-1).astype(v.dtype)
             attn = attn[..., 1:]
         else:
@@ -383,10 +382,19 @@ def _ragged_paged_attention_kernel(
         s += jnp.where(mask, mask_value, 0.0)
         s_rowmax = jnp.max(s, axis=1, keepdims=True)
 
-        m_prev_init = -jnp.inf
         if attention_sink_ref is not None:
-            m_prev_init = attention_sink_ref[kv_head_idx]
-        m_prev = load_with_init(head_m_ref, m_prev_init)
+            start_idx = kv_head_idx * num_q_heads_per_kv_head
+            m_prevs = []
+
+            for i in range(num_q_heads_per_kv_head):
+                m_prev_init = attention_sink_ref[start_idx + i]
+                m_prevs.append(
+                    load_with_init(head_m_ref[i::num_q_heads_per_kv_head], m_prev_init)
+                )
+            m_prev = jnp.stack(m_prevs, axis=1).reshape(head_m_ref.shape)
+        else:
+            m_prev_init = -jnp.inf
+            m_prev = load_with_init(head_m_ref, m_prev_init)
 
         m_curr = jnp.maximum(m_prev, s_rowmax)
         head_m_ref[...] = m_curr
@@ -1240,7 +1248,7 @@ def ragged_paged_attention(
     page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     distribution: jax.Array,  # i32[3]
-    attention_sink: jax.Array | None = None,  # [actual_num_kv_heads]
+    attention_sink: jax.Array | None = None,  # f32[actual_num_q_heads]
     *,
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
