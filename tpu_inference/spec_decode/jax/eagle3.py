@@ -66,7 +66,7 @@ class Eagle3Proposer:
         return jnp.concatenate([h[token_indices] for h in aux_hidden_states],
                                axis=-1)
 
-    @functools.partial(jax.jit, static_argnums=(0, ))
+    # @functools.partial(jax.jit, static_argnums=(0, ))
     def _prepare_input_ids(self, query_start_loc: jax.Array,
                            target_token_ids: jax.Array,
                            next_token_ids: jax.Array,
@@ -92,7 +92,7 @@ class Eagle3Proposer:
 
         return input_ids, last_token_indices
 
-    @functools.partial(jax.jit, static_argnums=(0, ))
+    # @functools.partial(jax.jit, static_argnums=(0, ))
     def _prepare_input_loop(self, positions, seq_lens, block_tables):
         """JIT-compiled helper for preparing inputs in the loop of prediction."""
 
@@ -121,17 +121,17 @@ class Eagle3Proposer:
 
         return positions, clamped_positions, new_seq_lens, query_start_loc, new_block_tables
 
-    @functools.partial(jax.jit, static_argnums=(0, ))
+    # @functools.partial(jax.jit, static_argnums=(0, ))
     def _reshape_block_tables(self, block_tables: jax.Array) -> jax.Array:
         """JIT-compiled helper for reshaping block tables."""
         return block_tables.reshape(-1)
 
-    @functools.partial(jax.jit, static_argnums=(0, ))
+    # @functools.partial(jax.jit, static_argnums=(0, ))
     def _get_draft_token_ids(self, logits: jax.Array) -> jnp.ndarray:
         """JIT-compiled helper for getting draft token IDs from logits."""
         return jnp.argmax(logits, axis=-1)
 
-    @functools.partial(jax.jit, static_argnums=(0, ))
+    # @functools.partial(jax.jit, static_argnums=(0, ))
     def _stack_draft_token_ids(
             self, draft_token_ids_list: list[jax.Array]) -> jnp.ndarray:
         """JIT-compiled helper for stacking draft token IDs."""
@@ -248,6 +248,7 @@ class Eagle3Proposer:
         )
         return updated_attn, target_token_ids, target_hidden_states
 
+    @functools.partial(jax.jit, static_argnums=(0, ))
     def propose(
         self,
         kv_caches: list[jax.Array],
