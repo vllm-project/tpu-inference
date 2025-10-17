@@ -16,7 +16,7 @@ from jax.experimental.pallas import tpu as pltpu
 from tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes import \
     get_tuned_block_sizes
 from tpu_inference.kernels.ragged_paged_attention.v3.util import (
-    align_to, cdiv, get_dtype_packing)
+    align_to, cdiv, get_dtype_bitwidth, get_dtype_packing)
 
 DEFAULT_MASK_VALUE = -0.7 * float(jnp.finfo(jnp.dtype("float32")).max)
 
@@ -116,7 +116,7 @@ def ref_ragged_paged_attention(
         v = jnp.repeat(v, actual_num_q_heads_per_kv_head, axis=1)
 
         if q_scale is not None:
-            q = (q / q_scale)
+            q = q / q_scale
             if jnp.issubdtype(k.dtype, jnp.floating):
                 dtype_info = jnp.finfo(k.dtype)
                 minval = float(dtype_info.min)
@@ -343,7 +343,7 @@ def _ragged_paged_attention_kernel(
 
         # Follow FlashAttention-2 forward pass.
         if q_scale is not None:
-            q = (q / q_scale)
+            q = q / q_scale
             if jnp.issubdtype(k.dtype, jnp.floating):
                 dtype_info = jnp.finfo(k.dtype)
                 minval = float(dtype_info.min)
@@ -637,7 +637,7 @@ def _ragged_paged_attention_kernel(
             q_ref[:actual_bq_sz * num_q_heads_per_kv_head_per_packing],
             q_dtype)
 
-    def strided_load(ref, start, step, *, dtype=None):
+    def strided_load(ref, start, step):
         assert get_dtype_packing(ref.dtype) == 1
         assert len(ref.shape) == 2
         r, l = ref.shape  # noqa
@@ -647,11 +647,9 @@ def _ragged_paged_attention_kernel(
         start *= folds
         step *= folds
         vec = jnp.concat([ref[start + i::step] for i in range(folds)], axis=1)
-        if dtype is not None:
-            vec = pltpu.bitcast(vec, dtype)
         return vec
 
-    def strided_load_bkv(bkv_sem_idx, start, step, *, bkv_bitmask):
+    def strided_load_bkv(bkv_sem_idx, start, step, *, bkv_mask):
         assert start % kv_packing == 0
         assert step % kv_packing == 0
         start //= kv_packing
@@ -659,29 +657,70 @@ def _ragged_paged_attention_kernel(
         kv_ref = (bkv_x2_ref.bitcast(jnp.uint32).at[bkv_sem_idx].reshape(
             bkv_sz * step, head_dim))
 
-        def _mask_kv(k, v):
-            k = pltpu.bitcast(k, jnp.uint32)
-            v = pltpu.bitcast(v, jnp.uint32)
-            k = k & bkv_bitmask
-            v = v & bkv_bitmask
+        if kv_packing == 1:
+            k = strided_load(kv_ref, start, step)
+            v = strided_load(kv_ref, start + 1, step)
+
+            kv_zeros = jnp.zeros_like(k)
+            k = lax.select(bkv_mask, k, kv_zeros)
+            v = lax.select(bkv_mask, v, kv_zeros)
+
             k = pltpu.bitcast(k, kv_dtype)
             v = pltpu.bitcast(v, kv_dtype)
-            return (k, v)
-
-        if kv_packing == 1:
-            k = strided_load(kv_ref, start, step, dtype=kv_dtype)
-            v = strided_load(kv_ref, start + 1, step, dtype=kv_dtype)
-            return [_mask_kv(k, v)]
+            return [(k, v)]
 
         kv = strided_load(kv_ref, start, step)
+        # bkv_mask holds information about where each row of bkv is valid.  Because
+        # kv is packed, a single 32-bits value might contain multiple k & v from
+        # different kv heads. Despite this we can guarantee that all values in a
+        # single 32-bits will map to the same bkv row. Therefore, it is safe to
+        # apply bkv_mask to kv directly.
+        kv = lax.select(bkv_mask, kv, jnp.zeros_like(kv))
         bitwidth = 32 // kv_packing
-        repack_ty = jnp.dtype(f"uint{bitwidth}")
-        lst = []
-        for i in range(0, kv_packing, 2):
-            k = (kv >> (i * bitwidth)).astype(repack_ty)
-            v = (kv >> ((i + 1) * bitwidth)).astype(repack_ty)
-            lst.append(_mask_kv(k, v))
-        return lst
+
+        # If we want to convert 32-bits into 32//N number of N-bits value, naive
+        # approach would be to perform 32//N number of 32-bits to N-bits conversion.
+        # However, we can reduce number of instructions by utilizing binary tree.
+        # 0: [32]
+        # 1: [16, 16]
+        # ...
+        # log2(32//N): [N, N, ... N]
+
+        def _convert_to_target_bitwidth(val, target_bitwidth: int):
+            curr_dtype = val.dtype
+            curr_bitwidth = get_dtype_bitwidth(curr_dtype)
+            assert target_bitwidth != curr_bitwidth, "No conversion is needed."
+
+            # We split val into two vals (left and right) where each have half of the
+            # original bitwidth.
+            next_bitwidth = curr_bitwidth // 2
+            next_dtype = jnp.dtype(f"uint{next_bitwidth}")
+
+            left = val.astype(next_dtype)
+
+            # Bitwise shift is only supported in uint32.
+            val_u32 = pltpu.bitcast(val, jnp.uint32)
+            val_u32_shifted = val_u32 >> next_bitwidth
+            # Convert back to original dtype.
+            val_shifted = pltpu.bitcast(val_u32_shifted, curr_dtype)
+            right = val_shifted.astype(next_dtype)
+
+            if next_bitwidth == target_bitwidth:
+                k = pltpu.bitcast(left, kv_dtype)
+                v = pltpu.bitcast(right, kv_dtype)
+                return [(k, v)]
+            else:
+                left_out = _convert_to_target_bitwidth(
+                    left,
+                    target_bitwidth=target_bitwidth,
+                )
+                right_out = _convert_to_target_bitwidth(
+                    right,
+                    target_bitwidth=target_bitwidth,
+                )
+                return left_out + right_out
+
+        return _convert_to_target_bitwidth(kv, target_bitwidth=bitwidth)
 
     def broadcast_minor(src, shape):
         if src.shape == shape:
@@ -740,14 +779,6 @@ def _ragged_paged_attention_kernel(
                 bkv_shape = (bkv_sz, head_dim)
                 bkv_mask = lax.broadcasted_iota(jnp.int32, bkv_shape,
                                                 0) < actual_bkv_sz
-                bkv_bitmask = pltpu.bitcast(
-                    lax.select(
-                        bkv_mask,
-                        jnp.full(bkv_shape, 0xFFFFFFFF, dtype=jnp.uint32),
-                        jnp.full(bkv_shape, 0, dtype=jnp.uint32),
-                    ).astype(jnp.dtype(f"uint{32 // kv_packing}")),
-                    jnp.uint32,
-                )
 
                 # Get next bkv ids.
                 bkv_sem_idx = sem_ids_ref[1]
@@ -795,7 +826,7 @@ def _ragged_paged_attention_kernel(
                         bkv_sem_idx,
                         kv_head_start * 2,
                         num_kv_heads_x2,
-                        bkv_bitmask=bkv_bitmask,
+                        bkv_mask=bkv_mask,
                     )
                     assert len(bkv_lst) == heads_per_load
                     for i in range(heads_per_load):
@@ -1090,7 +1121,7 @@ def static_validate_inputs(
     q, k, v = queries, keys, values
     if not (len(q.shape) == len(k.shape) == len(v.shape) == 3):
         raise ValueError(
-            f"Expected 2D array for {q.shape=}, {k.shape=}, {v.shape=}")
+            f"Expected 3D array for {q.shape=}, {k.shape=}, {v.shape=}")
     if k.shape != v.shape:
         raise ValueError(f"Expected {k.shape=} to be equal to {v.shape=}")
     if not (q.shape[0] == k.shape[0] == v.shape[0]):
