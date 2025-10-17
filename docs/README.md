@@ -22,7 +22,7 @@ vLLM TPU is now powered by `tpu-inference`, an expressive and powerful new hardw
 
 Although vLLM TPU’s new unified backend makes out-of-the-box high performance serving possible with any model supported in vLLM, the reality is that we're still in the process of implementing a few core components.
 
-For this reason, we’ve provided a **[Support Matrix](support_matrix.md)** detailing the recommended models and features. The raw data is also available directly ([models](https://github.com/vllm-project/tpu-inference/blob/main/support_matrices/model_support_matrix.csv), [features](https://github.com/vllm-project/tpu-inference/blob/main/support_matrices/feature_support_matrix.csv)).
+For this reason, we’ve provided a **[Recommended Configurations](recommended_configurations.md)** page detailing the models and features that are validated through unit, integration, and performance testing.
 
 ## Getting Started
 

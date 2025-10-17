@@ -7,13 +7,13 @@ We are still landing components in tpu-inference that will improve performance f
 
 If you’d like us to prioritize something specific, please submit a GitHub feature request [here](https://github.com/vllm-project/tpu-inference/issues/new/choose).
 
-## Recommended Model Matrix
+## Recommended Models
 
 This table shows the models currently tested for accuracy and performance.
 
 {{ read_csv('../support_matrices/model_support_matrix.csv', keep_default_na=False) }}
 
-## Recommended Feature Matrix
+## Recommended Features
 
 This table shows the features currently tested for accuracy and performance.
 
