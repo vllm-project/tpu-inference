@@ -79,7 +79,7 @@ class GptOss(nnx.Module):
                                  hidden_size=hidden_size,
                                  dtype=dtype,
                                  rngs=self.rng,
-                                 vd_sharding=(('data', 'expert', 'model'),
+                                 vd_sharding=(('data', 'model'),
                                               None),
                                  random_init=self.random_init)
 
@@ -169,8 +169,8 @@ class GptOss(nnx.Module):
                               hidden_size=hidden_size,
                               dtype=dtype,
                               rngs=self.rng,
-                              vd_sharding=(('data', 'expert', 'model'), None),
-                              dv_sharding=(None, ('data', 'expert', 'model')),
+                              vd_sharding=(('data', 'model'), None),
+                              dv_sharding=(None, ('data', 'model')),
                               random_init=self.random_init)
 
     # For compatibility with flax.
