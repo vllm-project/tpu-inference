@@ -97,8 +97,8 @@ def _shard_lm_head(layer: ParallelLMHead, mesh: Mesh):
         layer.bias = Parameter(bias, requires_grad=False)
 
 
-def _shard_base_linear_lora(layer: BaseLinearLayerWithLoRA,
-                            mesh: Mesh) -> None:
+def _shard_base_linear_lora_replicated(layer: BaseLinearLayerWithLoRA,
+                                       mesh: Mesh) -> None:
     # NOTE: lora_a_stacked[i] has shape [max_loras, 1, num_out, num_in]
     sharded_lora_a_tpu = torch.nn.ParameterList()
     sharded_lora_b_tpu = torch.nn.ParameterList()
@@ -114,19 +114,36 @@ def _shard_base_linear_lora(layer: BaseLinearLayerWithLoRA,
 
 
 # TODO: Add custom sharding logic for following lora layers
-def _shard_column_parallel_linear_lora(
+def _shard_merged_column_parallel_linear_lora(
         layer: MergedColumnParallelLinearWithLoRA, mesh: Mesh) -> None:
-    _shard_base_linear_lora(layer, mesh)
+    # lora_a_stacked[i] has shape [max_loras, 1, max_lora_rank, in_features]
+    sharded_lora_a_tpu = torch.nn.ParameterList()
+    sharded_lora_b_tpu = torch.nn.ParameterList()
+
+    assert layer.n_slices > 0, "layer.n_slices should be greater than 0"
+    # lora_b_stacked[i] has shape [max_loras, 1, out_features, max_lora_rank]
+    lora_b_partition_spec = P(None, None, 'model', None)
+    lora_b_sharding = NamedSharding(mesh, lora_b_partition_spec)
+    for i in range(layer.n_slices):
+        sharded_lora_a_tpu.append(
+            _shard_tensor_to_tpu_replicated(layer.lora_a_stacked[i], mesh))
+
+        sharded_lora_b_tpu.append(
+            _convert_to_torchax_and_shard(layer.lora_b_stacked[i],
+                                          lora_b_sharding))
+
+    layer.lora_a_stacked = sharded_lora_a_tpu
+    layer.lora_b_stacked = sharded_lora_b_tpu
 
 
-def _shard_qkv_parallel_linear_lora(layer: MergedQKVParallelLinearWithLoRA,
-                                    mesh: Mesh) -> None:
-    _shard_base_linear_lora(layer, mesh)
+def _shard_merged_qkv_parallel_linear_lora(
+        layer: MergedQKVParallelLinearWithLoRA, mesh: Mesh) -> None:
+    _shard_merged_column_parallel_linear_lora(layer, mesh)
 
 
 def _shard_row_parallel_linear_lora(layer: RowParallelLinearWithLoRA,
                                     mesh: Mesh) -> None:
-    _shard_base_linear_lora(layer, mesh)
+    _shard_base_linear_lora_replicated(layer, mesh)
 
 
 # NOTE: Ordering is important as it calls first matched type of a given module
@@ -135,17 +152,17 @@ MODULE_TYPE_TO_SHARDING_FUNC = [
     (ParallelLMHead, _shard_lm_head),
     (VocabParallelEmbedding, _shard_vocab_parallel_embedding),
     # Shard LoRA layers
-    (MergedColumnParallelLinearWithLoRA, _shard_column_parallel_linear_lora),
-    (MergedQKVParallelLinearWithLoRA, _shard_qkv_parallel_linear_lora),
+    (MergedColumnParallelLinearWithLoRA,
+     _shard_merged_column_parallel_linear_lora),
+    (MergedQKVParallelLinearWithLoRA, _shard_merged_qkv_parallel_linear_lora),
     (RowParallelLinearWithLoRA, _shard_row_parallel_linear_lora),
-    (BaseLinearLayerWithLoRA, _shard_base_linear_lora),
 ]
 
 
 def _shard_module_to_tpu(model: torch.nn.Module, mesh: Mesh) -> None:
     for path, module in model.named_modules():
         for module_type, sharding_func in MODULE_TYPE_TO_SHARDING_FUNC:
-            if isinstance(module, module_type):
+            if type(module) is module_type:
                 logger.debug("shard %s with %s", path, sharding_func)
                 sharding_func(module, mesh)
                 break
