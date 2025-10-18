@@ -163,7 +163,9 @@ def get_param_and_sharding(params: nnx.State, shardings: Any,
                 slevel = slevel[key]
             else:
                 raise ValueError(f"{path} is not a valid param path")
-    return plevel, slevel.value
+    # slevel is the sharding specification, not a parameter
+    # It could be a NamedSharding object or a sharding spec
+    return plevel, slevel
 
 
 def shard_put(x: jax.Array, shardings, mesh: jax.sharding.Mesh) -> jax.Array:
@@ -301,13 +303,19 @@ def _load_hf_weights_on_thread(vllm_config,
         if "layers" in hf_key:
             layer_num = re.search(r"layers\.(\d+)", hf_key).group(1)
             layer_key = re.sub(r"layers\.\d+", "layers.*", hf_key)
-            model_key = name_map[layer_key]
-            model_key = re.sub(r"layers\.\*", f"layers.{layer_num}", model_key)
+            if layer_key in name_map:
+                model_key = name_map[layer_key]
+                model_key = re.sub(r"layers\.\*", f"layers.{layer_num}", model_key)
+            else:
+                model_key = name_map.get(hf_key, hf_key)
         elif "blocks" in hf_key:
             layer_num = re.search(r"blocks\.(\d+)", hf_key).group(1)
             layer_key = re.sub(r"blocks\.\d+", "blocks.*", hf_key)
-            model_key = name_map[layer_key]
-            model_key = re.sub(r"blocks\.\*", f"blocks.{layer_num}", model_key)
+            if layer_key in name_map:
+                model_key = name_map[layer_key]
+                model_key = re.sub(r"blocks\.\*", f"blocks.{layer_num}", model_key)
+            else:
+                model_key = name_map.get(hf_key, hf_key)
         else:
             if hf_key not in name_map and hf_key == "lm_head":
                 logger.warning(
@@ -319,8 +327,18 @@ def _load_hf_weights_on_thread(vllm_config,
                 )
                 continue
             model_key = name_map.get(hf_key, hf_key)
-        model_weight, model_sharding = get_param_and_sharding(
-            params, shardings, model_key)
+        try:
+            model_weight, model_sharding = get_param_and_sharding(
+                params, shardings, model_key)
+        except ValueError as e:
+            # Skip if the model key doesn't exist in the model
+            logger.warning(f"Skipping {hf_key} -> {model_key}: {e}")
+            continue
+            
+        # Check if model_weight is a valid parameter
+        if not hasattr(model_weight, 'value'):
+            logger.warning(f"Skipping {hf_key} -> {model_key}: not a parameter (no 'value' attribute)")
+            continue
 
         logger.debug(
             "before transform | "
