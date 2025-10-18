@@ -56,7 +56,7 @@ from tpu_inference.runner.speculative_decoding_manager import \
 from tpu_inference.runner.structured_decoding_manager import \
     StructuredDecodingManager
 from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
-from tpu_inference.utils import device_array, make_optimized_mesh
+from tpu_inference.utils import device_array, make_optimized_mesh, time_function
 from tpu_inference.layers.jax.sharding import ShardingAxisName
 
 
@@ -322,7 +322,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
     def capture_model(self) -> None:
         self.compilation_manager.capture_model()
-
+    
+    @time_function
     def execute_model(
         self,
         scheduler_output: "VllmSchedulerOutput",
@@ -367,6 +368,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             spec_decode_metadata,
             logits_indices_selector,
         ) = self._prepare_inputs(scheduler_output)
+        
+        logger.debug(f"input_ids {input_ids.shape}")
+        logger.debug(f"logits_indices {logits_indices.shape}")
+
         # multi-modal support
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.
@@ -567,8 +572,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         ret = jax.shard_map(
             select_local_fn,
             mesh=self.mesh,
-            in_specs=(PartitionSpec(ShardingAxisName.ATTN_DATA), PartitionSpec(ShardingAxisName.ATTN_DATA)),
-            out_specs=PartitionSpec(ShardingAxisName.ATTN_DATA),
+            in_specs=(PartitionSpec(ShardingAxisName.MLP_DATA), PartitionSpec(ShardingAxisName.MLP_DATA)),
+            out_specs=PartitionSpec(ShardingAxisName.MLP_DATA),
         )(array, indices_to_select)
 
         return ret
@@ -650,12 +655,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 padded_total_num_scheduled_tokens,
                 cum_num_req_per_dp_rank_list, padded_num_reqs_per_dp_rank, logits_indices_selector, max_num_reqs_per_dp_rank)
 
+    
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
         if self.dp_size > 1:
             return self._prepare_inputs_dp(scheduler_output)
         else:
             return self._prepare_inputs_non_dp(scheduler_output)
-
+    
     def _prepare_inputs_dp(self, scheduler_output: "VllmSchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
@@ -836,8 +842,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.mesh,
             self.input_batch,
             padded_num_reqs,
-            # TODO(wenxindongwork): should we shard data when sampling?
-            sharding=NamedSharding(self.mesh,PartitionSpec(ShardingAxisName.ATTN_DATA)),
+            sharding=NamedSharding(self.mesh,PartitionSpec(ShardingAxisName.MLP_DATA)),
         )
         if self.uses_mrope:
             positions = mrope_positions
