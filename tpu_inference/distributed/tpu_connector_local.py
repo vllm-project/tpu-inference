@@ -85,6 +85,7 @@ Worker Side Execution:
     KV data from TPU to CPU and update the CPU backend. It then waits for all
     submitted save tasks for the current step to complete.
 """
+import os
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -120,6 +121,9 @@ class SaveSpec:
     """A confirmed work order for the worker to save KV data."""
     skip_leading_tokens: int
     is_final_save: bool = False
+    # A direct signal to the worker to skip the data transfer but still
+    # process the completion signal if is_final_save is True.
+    skip_save: bool = False
 
 
 @dataclass
@@ -132,7 +136,7 @@ class LoadSpec:
 
 @dataclass
 class TPUReqMeta:
-    """A unified work order for a single request in a single step."""
+    """A unified work order for a single request in a single step that bundles the Load and Save specs."""
     req_id: str
     token_ids: list[int]
     local_block_ids: list[int]
@@ -264,10 +268,10 @@ class RequestTracker:
     token_ids: list[int]
     # The number of tokens that were a hit in the CPU cache at the beginning
     # of the request. This is constant for the lifetime of the request.
-    num_cached_tokens: int = 0
+    num_external_hits: int = 0
     # A high-water mark indicating how many tokens from the start of the
     # computed tokens (`token_ids`) have already been saved to the CPU cache.
-    num_saved_tokens: int = 0
+    save_watermark: int = 0
     # Whether the request is in the decoding phase (generating one token at a time).
     is_decode_phase: bool = False
 
@@ -331,12 +335,15 @@ class TPUConnectorScheduler():
         # as the scheduler output for these requests is minimal.
         self._unfinished_requests: dict[ReqId, "Request"] = {}
         self.load_specs: dict[ReqId, LoadSpec] = {}
+        self._external_cache_hits: dict[ReqId, int] = {}
         self.cpu_backend = LocalCPUBackend()
         model_name = self.vllm_config.model_config.model
         logger.info(
             f"Model name is {model_name}, KV block_size={self.block_size}")
         self.token_processor = TokenProcessor(model_name=model_name,
                                               chunk_size=self.block_size)
+        self.decode_save = os.getenv("TPU_OFFLOAD_DECODE_SAVE", "0") == "1"
+        logger.info(f"decode_save is {self.decode_save}")
 
     def get_num_new_matched_tokens(
         self,
@@ -412,9 +419,9 @@ class TPUConnectorScheduler():
             f"Request {request.request_id}: After accounting for {num_computed_tokens} computed tokens, reporting {num_to_load} tokens to load."
         )
 
+        self._external_cache_hits[request.request_id] = num_matched_tokens
+
         if num_to_load > 0 or is_full_prefix_hit:
-            # For the worker, we store the TRUE number of matched tokens and the
-            # flag, so it can fetch the correct data from the cache.
             self.load_specs[request.request_id] = LoadSpec(
                 num_matched_tokens=num_matched_tokens,
                 is_full_prefix_hit=is_full_prefix_hit)
@@ -450,21 +457,25 @@ class TPUConnectorScheduler():
         """
         save_spec = None
         num_total_tokens = len(tracker.token_ids)
-        has_new_tokens = num_total_tokens > tracker.num_saved_tokens
-        logger.info(
-            f"Preparing req meta for req: {tracker.req_id}, num_total_tokens={num_total_tokens}, num_saved_tokens={tracker.num_saved_tokens}, has_new_tokens={has_new_tokens}, is_finished={is_finished}"
-        )
-
+        has_new_tokens = num_total_tokens > tracker.save_watermark
         # Determine if a save is needed for this step
         should_save = False
         if is_finished:
-            should_save = True
+            # If the request finished during the decode phase, respect the decode_save flag for saving data.
+            # Otherwise (e.g., finished after prefill), always save data.
+            if tracker.is_decode_phase and not self.decode_save:
+                should_save = False
+                logger.info(
+                    f"Request {tracker.req_id}: Will skip saving final tokens for decoded request because decode_save is False."
+                )
+            else:
+                should_save = True
         elif has_new_tokens:
             if not tracker.is_decode_phase:
                 should_save = True  # Prefill
-            else:
+            elif self.decode_save:
                 # Decode: check for block boundary
-                next_block_boundary = (tracker.num_saved_tokens //
+                next_block_boundary = (tracker.save_watermark //
                                        self.block_size + 1) * self.block_size
                 logger.info(
                     f"in decode phase, next_block_boundary: {next_block_boundary}, "
@@ -475,21 +486,34 @@ class TPUConnectorScheduler():
         logger.info(f"    - Preparing meta for req: {tracker.req_id}, "
                     f"is_finished={is_finished}, "
                     f"total_tokens={num_total_tokens}, "
-                    f"saved_tokens={tracker.num_saved_tokens}, "
+                    f"saved_tokens={tracker.save_watermark}, "
                     f"has_new={has_new_tokens}, "
                     f"is_decode={tracker.is_decode_phase}, "
                     f"should_save={should_save}")
 
+        # A SaveSpec is always prepared for a finished request to signal completion,
+        # even if we don't save the underlying KV data. This is to ensure the TPUConnectorWorker
+        # can correctly report finished request.
+        save_spec = None
         if should_save:
+            # This is a real save operation.
             save_spec = SaveSpec(
-                skip_leading_tokens=tracker.num_saved_tokens,
+                skip_leading_tokens=tracker.save_watermark,
                 is_final_save=is_finished,
+                skip_save=False,
             )
-            # Only update the saved token count if we actually processed new tokens.
             if has_new_tokens:
-                tracker.num_saved_tokens = num_total_tokens
-            logger.info(
-                f"      -> SaveSpec created. New saved_tokens count: {tracker.num_saved_tokens}"
+                last_known_watermark = tracker.save_watermark
+                tracker.save_watermark = num_total_tokens
+                logger.info(
+                    f"      -> Old watermark {last_known_watermark}, new save_watermark count: {tracker.save_watermark}"
+                )
+        elif is_finished:
+            # This is a "completion-only" signal because should_save is False.
+            save_spec = SaveSpec(
+                skip_leading_tokens=tracker.save_watermark,
+                is_final_save=True,
+                skip_save=True,
             )
 
         # 2. Determine if a work order is needed.
@@ -550,29 +574,28 @@ class TPUConnectorScheduler():
         for request in scheduler_output.scheduled_new_reqs:
             req_id = request.req_id
             logger.info(f"  - Processing new req: {req_id}")
-            # num_new_tokens: The number of tokens the scheduler has decided to
-            # process in this very first step for this request.
-            num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            num_new_scheduled_tokens = scheduler_output.num_scheduled_tokens[
+                req_id]
 
-            # load_spec/num_cached_tokens: The result from the earlier
-            # `get_num_new_matched_tokens` call. This tells us how many tokens
-            # were found in the CPU cache.
-            load_spec = self.load_specs.get(req_id)
-            num_cached_tokens = load_spec.num_matched_tokens if load_spec else 0
+            # Get the external cache hit count from our new, reliable source.
+            num_external_hits = self._external_cache_hits.pop(req_id, 0)
 
-            # start_idx/end_idx: These are calculated to slice the full prompt.
-            # We only need to process the tokens that were *not* a cache hit.
-            end_idx = num_cached_tokens + num_new_tokens
-
-            # initial_tokens: The actual slice of tokens that vLLM will compute
-            # in this first step.
-            tokens_for_tracker = request.prompt_token_ids[:end_idx]
+            # Determine the total length of tokens the tracker should hold.
+            # This is vLLM's already computed tokens + newly scheduled tokens.
+            total_tokens_for_tracker = request.num_computed_tokens + num_new_scheduled_tokens
+            tokens_for_tracker = request.prompt_token_ids[:
+                                                          total_tokens_for_tracker]
             logger.info(
-                f"    - num_new_tokens: {num_new_tokens}, num_cached_tokens: {num_cached_tokens}, end_idx: {end_idx}, request.prompt_token_ids length: {len(request.prompt_token_ids)}"
+                f"    - num_new_scheduled_tokens: {num_new_scheduled_tokens}, num_vllm_computed: {request.num_computed_tokens}, num_external_hits: {num_external_hits}"
             )
             logger.info(
-                f"    - Slicing prompt[:{end_idx}] -> len(tokens_for_tracker): {len(tokens_for_tracker)}"
+                f"    - Slicing prompt[:{total_tokens_for_tracker}] -> len(tokens_for_tracker): {len(tokens_for_tracker)}"
             )
+
+            # Set the initial high-water mark for `save_watermark`.
+            # This is the maximum of what vLLM has computed and what's in our external cache.
+            initial_save_watermark = max(request.num_computed_tokens,
+                                         num_external_hits)
 
             # Create and store the tracker, which will maintain the request's
             # state for its entire lifetime.
@@ -581,9 +604,9 @@ class TPUConnectorScheduler():
                 prompt_len=len(request.prompt_token_ids),
                 block_ids=request.block_ids[0],
                 token_ids=tokens_for_tracker,
-                num_cached_tokens=num_cached_tokens,
+                num_external_hits=num_external_hits,
                 # The high-water mark for saved tokens starts after the cached prefix.
-                num_saved_tokens=num_cached_tokens,
+                save_watermark=initial_save_watermark,
             )
             self._request_trackers[req_id] = tracker
             logger.info(
@@ -591,11 +614,12 @@ class TPUConnectorScheduler():
                 f"prompt_len={tracker.prompt_len}, "
                 f"num_tokens={len(tracker.token_ids)}, "
                 f"num_blocks={len(tracker.block_ids)}, "
-                f"num_saved={tracker.num_saved_tokens}")
+                f"save_watermark={tracker.save_watermark}")
 
             # Immediately prepare metadata for this new request. This could include
             # both a load operation (for the cached part) and a save operation
             # (for the newly computed part).
+            load_spec = self.load_specs.get(req_id)
             req_meta = self._prepare_req_meta(tracker,
                                               load_spec,
                                               is_finished=False)
@@ -739,7 +763,6 @@ class TPUConnectorWorker:
                          "KV caches not registered.")
             return req_id
 
-        # --- NEW LOGIC: SLICE DATA BASED ON SPEC ---
         num_tokens_to_save = len(
             full_token_ids) - save_spec.skip_leading_tokens
         if num_tokens_to_save <= 0 and not save_spec.is_final_save:
@@ -751,6 +774,13 @@ class TPUConnectorWorker:
         # Calculate the block slice.
         start_block_idx = save_spec.skip_leading_tokens // self.block_size
         blocks_to_process = full_block_ids[start_block_idx:]
+
+        logger.info(f"Request {req_id} save details: "
+                    f"full_block_ids len={len(full_block_ids)}, "
+                    f"skip_leading_tokens={save_spec.skip_leading_tokens}, "
+                    f"num_tokens_to_save={num_tokens_to_save}, "
+                    f"start_block_idx={start_block_idx}, "
+                    f"blocks_to_process len={len(blocks_to_process)}")
 
         if not blocks_to_process and tokens_to_process:
             logger.warning(
@@ -812,31 +842,42 @@ class TPUConnectorWorker:
                     f"Shape of a single layer after reshape (total_tokens, ...): {flat_kv_caches_on_cpu[0].shape}"
                 )
 
-            # Generate keys and store them with their corresponding token data.
-            keys_generator = self.token_processor.process_tokens(
-                tokens_to_process)
-            keys = list(keys_generator)
-            if keys:
-                for start_idx, end_idx, key in keys:
-                    # For each key, slice the corresponding token data from each layer.
+            # Generate keys for the entire token sequence to get absolute positions. This to ensure that the delta
+            # tokens that is about to be captured in the cache are correctly mapped. These keys will be recreated
+            # during get_finished() to unpin the correct keys.
+            all_keys_generator = self.token_processor.process_tokens(
+                full_token_ids)
+            all_keys = list(all_keys_generator)
+
+            # Filter for keys that correspond to the new data we are saving.
+            relevant_keys = []
+            for abs_start_idx, abs_end_idx, key in all_keys:
+                if abs_start_idx >= save_spec.skip_leading_tokens:
+                    relevant_keys.append((abs_start_idx, abs_end_idx, key))
+
+            if relevant_keys:
+                # The flat_kv_caches_on_cpu array corresponds to the new tokens,
+                # so its indexing is relative to the start of the new data.
+                for abs_start_idx, abs_end_idx, key in relevant_keys:
+                    # Calculate indices relative to the start of our new data slice.
+                    rel_start_idx = abs_start_idx - save_spec.skip_leading_tokens
+                    rel_end_idx = abs_end_idx - save_spec.skip_leading_tokens
+
+                    # Slice the data and add to the backend.
                     value_for_key = [
-                        flat_layer_cache[start_idx:end_idx]
+                        flat_layer_cache[rel_start_idx:rel_end_idx]
                         for flat_layer_cache in flat_kv_caches_on_cpu
                     ]
                     self.cpu_backend.add(key, value_for_key)
 
-                post_transfer_duration = time.time() - post_transfer_start_time
                 logger.info(
-                    f"Request {req_id}: Reshaping and adding {len(keys)} keys to CPU backend took {post_transfer_duration:.4f} seconds."
-                )
-                logger.info(
-                    f"Updated CPU backend with {len(keys)} new key-value pairs for request {req_id}."
-                )
-            else:
-                logger.info(
-                    f"No new keys generated for request {req_id} ({len(tokens_to_process)} tokens)."
+                    f"Request {req_id}: Added {len(relevant_keys)} keys to CPU backend."
                 )
 
+            post_transfer_duration = time.time() - post_transfer_start_time
+            logger.info(
+                f"Request {req_id}: e2e host processing of {len(relevant_keys)} keys took {post_transfer_duration:.4f} seconds."
+            )
         except Exception as e:
             logger.error(f"Error saving blocks for request {req_id}: {e}",
                          exc_info=True)
@@ -870,6 +911,19 @@ class TPUConnectorWorker:
         # Handle save requests
         for meta in metadata.requests_meta:
             if meta.save_spec:
+                if meta.save_spec.skip_save:
+                    logger.info(
+                        f"Request {meta.req_id}: Scheduler signaled to skip save."
+                    )
+                    if meta.save_spec.is_final_save:
+                        logger.info(
+                            f"Request {meta.req_id}: Final save is a no-op. Marking as finished."
+                        )
+                        self.finished_save_reqs.add(meta.req_id)
+                        self._tokens_to_unpin[meta.req_id] = meta.token_ids
+                    continue
+
+                # If there are tokens to save, submit the task to the thread pool.
                 logger.info(f"Submitting save task for request {meta.req_id}")
                 future = self.save_executor.submit(self._save_blocks_to_cpu,
                                                    meta.req_id,
@@ -936,7 +990,6 @@ class TPUConnectorWorker:
         """
         # Reset the save processing flag at the start of a new step.
         self._processed_save_for_step = False
-        load_start_time = time.time()
         metadata = self.connector._get_connector_metadata()
         if not isinstance(metadata,
                           TPUConnectorMetadata) or not metadata.requests_meta:
@@ -951,10 +1004,12 @@ class TPUConnectorWorker:
         assert self.runner is not None and self.runner.kv_caches is not None
 
         # Process each request that needs its KV cache loaded
+        load_times = []
         for meta in metadata.requests_meta:
             if not (meta.load_spec and meta.load_spec.can_load):
                 continue
 
+            request_load_start_time = time.time()
             logger.info("TPUConnectorWorker: Starting KV cache load process.")
             # The number of tokens to fetch from the backend is the true number
             # of matched tokens stored in the spec.
@@ -1071,10 +1126,17 @@ class TPUConnectorWorker:
                 f"Successfully loaded {len(destination_blocks)} blocks into TPU KV cache for request {meta.req_id}"
             )
 
-        load_duration = time.time() - load_start_time
-        logger.info(
-            f"TPUConnectorWorker: Finished KV cache load process in {load_duration:.4f} seconds."
-        )
+            request_load_duration = time.time() - request_load_start_time
+            load_times.append(request_load_duration)
+            logger.info(
+                f"Request {meta.req_id}: KV cache load completed in {request_load_duration:.4f} seconds."
+            )
+
+        if load_times:
+            aggregate_load_time = sum(load_times)
+            logger.info(
+                f"TPUConnectorWorker: Aggregate KV cache load time for {len(load_times)} requests: {aggregate_load_time:.4f} seconds"
+            )
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         """
