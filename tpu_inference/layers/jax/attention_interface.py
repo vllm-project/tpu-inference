@@ -273,6 +273,7 @@ def sharded_ragged_paged_attention(
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
+    is_pure_decode: bool = False,
 ):
     """Shards along KV heads."""
     qkv_spec = P(None, "model", None)
@@ -297,6 +298,7 @@ def sharded_ragged_paged_attention(
             q_scale=q_scale,
             k_scale=k_scale,
             v_scale=v_scale,
+            is_pure_decode=is_pure_decode,
         )
 
     return jax.jit(
@@ -310,6 +312,7 @@ def sharded_ragged_paged_attention(
 
 
 def attention(
+    is_pure_decode: bool,
     kv_cache: jax.Array,
     q: jax.Array,
     k: jax.Array,
@@ -340,9 +343,10 @@ def attention(
     md = attention_metadata
 
     # (T, N, H)
+    bq_sz, bkv_p, bq_csz, bkv_cp = None, None, None, None if not is_pure_decode else (16, 8, 8, 8)
     output, kv_cache = sharded_ragged_paged_attention(
         head_dim_original**-0.5, mesh, attention_chunk_size, q_scale, k_scale,
-        v_scale)(
+        is_pure_decode)(
             q,
             k,
             v,

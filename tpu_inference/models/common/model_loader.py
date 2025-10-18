@@ -9,7 +9,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.ops.mappings import j2t_dtype
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
-from vllm.utils import supports_kw
+from vllm.utils.functools import supports_kw
 
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.quantization.quantization_utils import (
@@ -217,7 +217,7 @@ def get_flax_model(
             hidden_states_sharding,  # aux hidden states
         ),
         donate_argnums=2,  # 0 is graphdef, 1 is state, 2 is kv_cache
-        static_argnums=6,  #6 is layer_name_to_kvcache_index
+        static_argnums=(5,7),  #5 is is_pure_decode, 7 is layer_name_to_kvcache_index
     )
     def run_model(graphdef, state, *args):
         model = nnx.merge(graphdef, state)
