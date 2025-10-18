@@ -205,12 +205,14 @@ class Qwen2DecoderLayer(nnx.Module):
 
     def __call__(
         self,
+        is_pure_decode: bool,
         kv_cache: jax.Array,
         x: jax.Array,
         attention_metadata: AttentionMetadata,
     ) -> Tuple[jax.Array, jax.Array]:
         hidden_states = self.input_layernorm(x)
         kv_cache, attn_output = self.self_attn(
+            is_pure_decode,
             kv_cache,
             hidden_states,
             attention_metadata,
@@ -269,6 +271,7 @@ class Qwen2Model(nnx.Module):
 
     def __call__(
         self,
+        is_pure_decode: bool,
         kv_caches: List[jax.Array],
         input_ids: Optional[jax.Array],
         attention_metadata: AttentionMetadata,
@@ -281,6 +284,7 @@ class Qwen2Model(nnx.Module):
         for i, layer in enumerate(self.layers):
             kv_cache = kv_caches[i]
             kv_cache, x = layer(
+                is_pure_decode,
                 kv_cache,
                 x,
                 attention_metadata,

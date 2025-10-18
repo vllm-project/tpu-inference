@@ -99,6 +99,7 @@ class Qwen3Attention(nnx.Module):
 
     def __call__(
         self,
+        is_pure_decode: bool,
         kv_cache: Optional[jax.Array],
         x: jax.Array,
         attention_metadata: AttentionMetadata,
@@ -128,6 +129,7 @@ class Qwen3Attention(nnx.Module):
             k, v = utils.quantize_kv(k, v, self.kv_cache_quantized_dtype,
                                      k_scale, v_scale)
         new_kv_cache, outputs = attention(
+            is_pure_decode,
             kv_cache,
             q,
             k,
@@ -240,9 +242,11 @@ class Qwen3ForCausalLM(nnx.Module):
         kv_caches: List[jax.Array],
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
+        is_pure_decode: bool,
         *args,
     ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
         kv_caches, x = self.model(
+            is_pure_decode,
             kv_caches,
             input_ids,
             attention_metadata,

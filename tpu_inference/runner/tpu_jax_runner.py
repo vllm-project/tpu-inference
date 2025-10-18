@@ -355,7 +355,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 #     "Should not schedule a request that does nothing!")
             return DUMMY_METADATA, EMPTY_MODEL_RUNNER_OUTPUT,
 
-        (input_ids, attn_metadata, sampling_metadata, logits_indices,
+        (is_pure_decode, input_ids, attn_metadata, sampling_metadata, logits_indices,
          spec_decode_metadata) = self._prepare_inputs(scheduler_output)
 
         # multi-modal support
@@ -395,6 +395,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                      self.kv_caches,
                      input_ids,
                      attn_metadata,
+                    is_pure_decode,
                      inputs_embeds,
                      tuple(self.layer_name_to_kvcache_index.items()),
                      lora_metadata,
@@ -703,7 +704,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         attention_metadata.query_start_loc_cpu = query_start_loc_cpu
         attention_metadata.seq_lens_cpu = seq_lens_cpu
 
+        batch_composition_stats = runner_utils.get_batch_composition_stats(
+                self.input_batch, total_num_scheduled_tokens, num_reqs,
+                padded_total_num_scheduled_tokens, scheduler_output)
+
+        is_pure_decode = batch_composition_stats["num_reqs"] == batch_composition_stats["num_decode_tokens"]
         return (
+            is_pure_decode,
             input_ids,
             attention_metadata,
             sampling_metadata,
