@@ -156,7 +156,7 @@ steps:
      commands:
        - |
          .buildkite/scripts/run_in_docker.sh \
-           bash -c 'JAX_DEVICES=0,1 MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py'
+           bash -c 'MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py'
 
 
   # -----------------------------------------------------------------
