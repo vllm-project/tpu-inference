@@ -46,7 +46,11 @@ def run_after_each_test():
     yield  # This is where the test runs
     # --- Teardown code (runs after each test) ---
     command = "lsof -t /dev/vfio/* | xargs kill"
-    subprocess.run(command, shell=True, capture_output=True, text=True)
+    results = subprocess.run(command,
+                             shell=True,
+                             capture_output=True,
+                             text=True)
+    print(f"Killing TPU resources: {results.stdout}, {results.stderr}")
 
 
 # For multi-chip test, we only use TP=2 because the base model Qwen/Qwen2.5-3B-Instruct has 2 kv heads and the current attention kernel requires it to be divisible by tp_size.
