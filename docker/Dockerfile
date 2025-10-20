@@ -15,7 +15,6 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /workspace/vllm
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 RUN git clone $VLLM_REPO /workspace/vllm
-RUN git checkout v0.11.1rc1
 RUN pip install -r requirements/tpu.txt
 RUN VLLM_TARGET_DEVICE="tpu" pip install -e .
 
