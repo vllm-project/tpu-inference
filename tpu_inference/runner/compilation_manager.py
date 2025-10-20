@@ -441,13 +441,16 @@ class CompilationManager:
             (self.runner.max_num_reqs,
              cdiv(self.runner.max_model_len, self.runner.block_size)),
             jnp.int32)
-        # self._run_compilation(
-        #     "eagle3_reshape_block",
-        #     self.runner.drafter._reshape_block_tables,
-        #     block_tables,
-        # )
+        self._run_compilation(
+            "eagle3_reshape_block",
+            self.runner.drafter._reshape_block_tables,
+            block_tables,
+        )
         block_tables = self.runner.input_batch.block_table[
             draft_kv_cache_group_id].get_device_tensor().reshape(-1)
+        block_tables = jax.device_put(
+            block_tables, NamedSharding(self.runner.mesh,
+                                        PartitionSpec( )))
         block_tables_loop = jax.device_put(
             block_tables, NamedSharding(self.runner.mesh,
                                         PartitionSpec(None, )))
@@ -458,12 +461,12 @@ class CompilationManager:
                                              jnp.int32)
         query_start_loc = self._create_dummy_tensor(
             (self.runner.max_num_reqs + 1, ), jnp.int32)
-        # self._run_compilation("_prepare_input_loop for the first loop",
-        #                       self.runner.drafter._prepare_input_loop,
-        #                       selected_positions, seq_lens, block_tables)
-        # self._run_compilation("_prepare_input_loop for the subsequent loops",
-        #                       self.runner.drafter._prepare_input_loop,
-        #                       selected_positions, seq_lens, block_tables_loop)
+        self._run_compilation("_prepare_input_loop for the first loop",
+                              self.runner.drafter._prepare_input_loop,
+                              selected_positions, seq_lens, block_tables)
+        self._run_compilation("_prepare_input_loop for the subsequent loops",
+                              self.runner.drafter._prepare_input_loop,
+                              selected_positions, seq_lens, block_tables_loop)
 
         request_distribution = np.array([0, 0, 0], dtype=np.int32)
         request_distribution = device_array(self.runner.mesh,
@@ -473,12 +476,12 @@ class CompilationManager:
             logits = self._create_dummy_tensor(
                 (num_reqs_padding, self.runner.vocab_size), jnp.bfloat16,
                 NamedSharding(self.runner.mesh, PartitionSpec(None, "model")))
-            # self._run_compilation(
-            #     "_get_draft_token_ids",
-            #     self.runner.drafter._get_draft_token_ids,
-            #     logits,
-            #     num_reqs=num_reqs_padding,
-            # )
+            self._run_compilation(
+                "_get_draft_token_ids",
+                self.runner.drafter._get_draft_token_ids,
+                logits,
+                num_reqs=num_reqs_padding,
+            )
 
             for i in range(1, self.runner.drafter.num_speculative_tokens + 1):
                 draft_token_ids_list = [
@@ -487,12 +490,12 @@ class CompilationManager:
                         NamedSharding(self.runner.mesh, PartitionSpec()))
                     for _ in range(i)
                 ]
-                # self._run_compilation(
-                #     "_stack_draft_token_ids",
-                #     self.runner.drafter._stack_draft_token_ids,
-                #     draft_token_ids_list,
-                #     num_reqs=num_reqs_padding,
-                #     draft_token_ids_list_length=len(draft_token_ids_list))
+                self._run_compilation(
+                    "_stack_draft_token_ids",
+                    self.runner.drafter._stack_draft_token_ids,
+                    draft_token_ids_list,
+                    num_reqs=num_reqs_padding,
+                    draft_token_ids_list_length=len(draft_token_ids_list))
 
         for num_logits in self.runner.num_logits_paddings:
             hidden_states = self._create_dummy_tensor(
@@ -577,46 +580,46 @@ class CompilationManager:
                 (num_tokens, hidden_size), dtype,
                 NamedSharding(self.runner.mesh, PartitionSpec(None, "model")))
 
-            # def draft_model_fn_wrapper(
-            #     state,
-            #     kv_caches,
-            #     input_ids,
-            #     target_hidden_states,
-            #     attention_metadata,
-            # ):
-            #     kv_caches, hidden_states, _ = self.runner.drafter.model_fn(
-            #         state, kv_caches, input_ids, target_hidden_states,
-            #         attention_metadata)
-            #     self.runner.kv_caches = kv_caches
-            #     return hidden_states
-
-            # self._run_compilation(
-            #     "draft_model_fn",
-            #     draft_model_fn_wrapper,
-            #     self.runner.drafter.state,
-            #     self.runner.kv_caches,
-            #     input_ids,
-            #     target_hidden_states,
-            #     attention_metadata,
-            #     num_tokens=num_tokens,
-            # )
-
-
-
-            target_hidden_states = self._create_dummy_tensor(
-                (num_tokens, draft_hidden_size), dtype)
-            target_token_ids = self._create_dummy_tensor((num_tokens, ),
-                                                         jnp.int32)
-            self._run_compilation(
-                "propose",
-                self.runner.drafter.propose,
-                self.runner.kv_caches,
-                next_token_ids,
-                attention_metadata,
-                target_token_ids,
+            def draft_model_fn_wrapper(
+                state,
+                kv_caches,
+                input_ids,
                 target_hidden_states,
+                attention_metadata,
+            ):
+                kv_caches, hidden_states, _ = self.runner.drafter.model_fn(
+                    state, kv_caches, input_ids, target_hidden_states,
+                    attention_metadata)
+                self.runner.kv_caches = kv_caches
+                return hidden_states
+
+            self._run_compilation(
+                "draft_model_fn",
+                draft_model_fn_wrapper,
+                self.runner.drafter.state,
+                self.runner.kv_caches,
+                input_ids,
+                target_hidden_states,
+                attention_metadata,
                 num_tokens=num_tokens,
             )
+
+
+
+            # target_hidden_states = self._create_dummy_tensor(
+            #     (num_tokens, draft_hidden_size), dtype)
+            # target_token_ids = self._create_dummy_tensor((num_tokens, ),
+            #                                              jnp.int32)
+            # self._run_compilation(
+            #     "propose",
+            #     self.runner.drafter.propose,
+            #     self.runner.kv_caches,
+            #     next_token_ids,
+            #     attention_metadata,
+            #     target_token_ids,
+            #     target_hidden_states,
+            #     num_tokens=num_tokens,
+            # )
 
 
 
@@ -626,16 +629,16 @@ class CompilationManager:
             attention_metadata.block_tables = block_tables_loop
             attention_metadata.input_positions = self._create_dummy_tensor(
                 (self.runner.max_num_reqs, ), jnp.int32)
-            # self._run_compilation(
-            #     "draft_model_fn in a loop",
-            #     draft_model_fn_wrapper,
-            #     self.runner.drafter.state,
-            #     self.runner.kv_caches,
-            #     input_ids_loop,
-            #     target_hidden_state_loop,
-            #     attention_metadata,
-            #     num_tokens=num_tokens,
-            # )
+            self._run_compilation(
+                "draft_model_fn in a loop",
+                draft_model_fn_wrapper,
+                self.runner.drafter.state,
+                self.runner.kv_caches,
+                input_ids_loop,
+                target_hidden_state_loop,
+                attention_metadata,
+                num_tokens=num_tokens,
+            )
 
             target_hidden_states = self._create_dummy_tensor(
                 (num_tokens, draft_hidden_size), dtype)
@@ -649,14 +652,21 @@ class CompilationManager:
 
             target_token_ids = self._create_dummy_tensor((num_tokens, ),
                                                          jnp.int32)
-            # self._run_compilation(
-            #     "_prepare_input_ids",
-            #     self.runner.drafter._prepare_input_ids,
-            #     query_start_loc,
-            #     target_token_ids,
-            #     next_token_ids,
-            #     self.runner.input_batch.num_reqs,
-            # )
+            raw_block_tables = jnp.ones(
+                (self.runner.max_num_reqs,
+                cdiv(self.runner.max_model_len, self.runner.block_size)),
+                jnp.int32)
+            self._run_compilation(
+                "_prepare_input_ids",
+                self.runner.drafter._prepare_input_ids,
+                query_start_loc,
+                target_token_ids,
+                next_token_ids,
+                self.runner.input_batch.num_reqs,
+                self.runner.drafter.state,
+                target_hidden_states,
+                raw_block_tables,
+            )
 
     def _precompile_structured_decoding(self) -> None:
         logger.info(

@@ -70,7 +70,10 @@ class Eagle3Proposer:
     def _prepare_input_ids(self, query_start_loc: jax.Array,
                            target_token_ids: jax.Array,
                            next_token_ids: jax.Array,
-                           num_reqs: int) -> tuple[jnp.ndarray, jnp.ndarray]:
+                           num_reqs: int, 
+                           state: Any,
+                           target_hidden_states: Any,
+                           block_tables: Any) -> tuple[jnp.ndarray, jnp.ndarray]:
         """JIT-compiled helper for preparing the input IDs for the draft model."""
 
         last_token_indices = query_start_loc[1:] - 1
@@ -90,7 +93,12 @@ class Eagle3Proposer:
 
         input_ids = rolled_input_ids.at[last_token_indices].set(values_to_set)
 
-        return input_ids, last_token_indices
+        target_hidden_states = self.combine_hidden_states_fn(
+            state, target_hidden_states)
+        
+        block_tables = block_tables.reshape(-1)
+
+        return input_ids, last_token_indices, target_hidden_states, block_tables
 
     # @functools.partial(jax.jit, static_argnums=(0, ))
     def _prepare_input_loop(self, positions, seq_lens, block_tables):
@@ -121,28 +129,31 @@ class Eagle3Proposer:
 
         return positions, clamped_positions, new_seq_lens, query_start_loc, new_block_tables
 
-    # @functools.partial(jax.jit, static_argnums=(0, ))
+    @functools.partial(jax.jit, static_argnums=(0, ))
     def _reshape_block_tables(self, block_tables: jax.Array) -> jax.Array:
         """JIT-compiled helper for reshaping block tables."""
         return block_tables.reshape(-1)
 
-    # @functools.partial(jax.jit, static_argnums=(0, ))
+    @functools.partial(jax.jit, static_argnums=(0, ))
     def _get_draft_token_ids(self, logits: jax.Array) -> jnp.ndarray:
         """JIT-compiled helper for getting draft token IDs from logits."""
         return jnp.argmax(logits, axis=-1)
 
-    # @functools.partial(jax.jit, static_argnums=(0, ))
+    @functools.partial(jax.jit, static_argnums=(0, ))
     def _stack_draft_token_ids(
             self, draft_token_ids_list: list[jax.Array]) -> jnp.ndarray:
         """JIT-compiled helper for stacking draft token IDs."""
         return jnp.stack(draft_token_ids_list, axis=1)
 
+
+    # @functools.partial(jax.jit, static_argnums=(0, ))
     def prepare_inputs(
         self,
         attn_metadata: AttentionMetadata,
         input_ids: jax.Array,
         aux_hidden_states: tuple[jax.Array, ...],
         num_rejected_tokens: Optional[jax.Array] = None,
+        next_token_ids: jax.Array = None,
     ) -> tuple[AttentionMetadata, jnp.ndarray, jnp.ndarray]:
         """Prepare drafter inputs based on target forward outputs.
 
@@ -160,8 +171,18 @@ class Eagle3Proposer:
             "EAGLE3 requires auxiliary hidden states from the target model.")
 
         if num_rejected_tokens is None:
-            return attn_metadata, input_ids, self._concate_hidden_states(
-                aux_hidden_states)
+            num_kv_cache_groups = len(self.runner.kv_cache_config.kv_cache_groups)
+            draft_kv_cache_group_id = num_kv_cache_groups - 1
+            block_tables = self.runner.input_batch.block_table[
+                draft_kv_cache_group_id].get_device_tensor()
+
+            input_ids, last_token_indices, target_hidden_states, block_tables = self._prepare_input_ids(
+                attn_metadata.query_start_loc, input_ids, next_token_ids,
+                self.runner.input_batch.num_reqs, self.state, self._concate_hidden_states(
+                aux_hidden_states), block_tables)
+
+            attn_metadata = replace(attn_metadata, block_tables=block_tables)
+            return attn_metadata, target_hidden_states, input_ids, last_token_indices
 
         # Number of active requests in this step (un-padded count).
         num_reqs = self.runner.input_batch.num_reqs
@@ -217,6 +238,64 @@ class Eagle3Proposer:
         token_indices_cpu = np.pad(token_indices_cpu, (0, pad_width),
                                    "constant",
                                    constant_values=0)
+        
+
+
+        # token_indices = jnp.asarray(token_indices_cpu, dtype=jnp.int32)
+        # # Select tokens and hidden states.
+        # target_token_ids = self.runner._select_from_array_fn(
+        #     input_ids, token_indices)
+        # target_hidden_states = self._select_target_hidden_states(
+        #     aux_hidden_states, token_indices)
+        # # Update positions to match the selected tokens.
+        # if attn_metadata.input_positions.ndim == 2:
+        #     input_positions = attn_metadata.input_positions[:, token_indices]
+        # else:
+        #     input_positions = self.runner._select_from_array_fn(
+        #         attn_metadata.input_positions, token_indices)
+
+        # # Update seq_lens for active requests only: new_seq_lens = s - n.
+        new_seq_lens_cpu = seq_lens_cpu - nrt_cpu
+
+        # query_start_loc, seq_lens = device_array(self.mesh, (
+        #     new_query_start_loc_cpu,
+        #     new_seq_lens_cpu,
+        # ))
+
+        # # Return updated metadata with positions, qsl, and seq_lens.
+        # updated_attn = AttentionMetadata(
+        #     input_positions=input_positions,
+        #     block_tables=attn_metadata.block_tables,
+        #     seq_lens=seq_lens,
+        #     query_start_loc=query_start_loc,
+        #     request_distribution=attn_metadata.request_distribution,
+        # )
+
+        updated_attn, input_ids, last_token_indices, target_hidden_states = self._process_inputs(
+            attn_metadata,
+            input_ids,
+            token_indices_cpu,
+            aux_hidden_states,
+            next_token_ids,
+            new_seq_lens_cpu,
+            new_query_start_loc_cpu
+        )
+        # return updated_attn, target_token_ids, target_hidden_states
+
+        return updated_attn, target_hidden_states, input_ids, last_token_indices
+    
+
+    @functools.partial(jax.jit, static_argnums=(0, ))
+    def _process_inputs(
+            self,
+            attn_metadata,
+            input_ids,
+            token_indices_cpu,
+            aux_hidden_states,
+            next_token_ids,
+            new_seq_lens_cpu,
+            new_query_start_loc_cpu
+    ):
         token_indices = jnp.asarray(token_indices_cpu, dtype=jnp.int32)
         # Select tokens and hidden states.
         target_token_ids = self.runner._select_from_array_fn(
@@ -230,31 +309,54 @@ class Eagle3Proposer:
             input_positions = self.runner._select_from_array_fn(
                 attn_metadata.input_positions, token_indices)
 
-        # Update seq_lens for active requests only: new_seq_lens = s - n.
-        new_seq_lens_cpu = seq_lens_cpu - nrt_cpu
-
         query_start_loc, seq_lens = device_array(self.mesh, (
             new_query_start_loc_cpu,
             new_seq_lens_cpu,
         ))
 
+        # The last KV cache group is for the draft model.
+        num_kv_cache_groups = len(self.runner.kv_cache_config.kv_cache_groups)
+        draft_kv_cache_group_id = num_kv_cache_groups - 1
+        block_tables = self.runner.input_batch.block_table[
+            draft_kv_cache_group_id].get_device_tensor()
+        # block_tables = self._reshape_block_tables(block_tables)
+
+        input_ids, last_token_indices, target_hidden_states, block_tables = self._prepare_input_ids(
+            query_start_loc, target_token_ids, next_token_ids,
+            self.runner.input_batch.num_reqs, self.state, target_hidden_states, block_tables)
+
         # Return updated metadata with positions, qsl, and seq_lens.
-        updated_attn = AttentionMetadata(
+        attn_metadata = AttentionMetadata(
             input_positions=input_positions,
-            block_tables=attn_metadata.block_tables,
+            block_tables=block_tables,
             seq_lens=seq_lens,
             query_start_loc=query_start_loc,
             request_distribution=attn_metadata.request_distribution,
         )
-        return updated_attn, target_token_ids, target_hidden_states
+        
+        return attn_metadata, input_ids, last_token_indices, target_hidden_states
 
     @functools.partial(jax.jit, static_argnums=(0, ))
+    def _get_stack_draft_token_ids(
+        self,
+        hidden_states,
+        last_token_indices,
+    ):
+        sample_hidden_states = hidden_states[last_token_indices]
+        lora_metadata = None
+        logits = self.compute_logits_fn(self.state, sample_hidden_states,
+                                        lora_metadata)
+        draft_token_ids = jnp.argmax(logits, axis=-1)
+
+        draft_token_ids_list = [draft_token_ids]
+        return jnp.stack(draft_token_ids_list, axis=1)
+
     def propose(
         self,
         kv_caches: list[jax.Array],
-        next_token_ids: jnp.ndarray,  # [batch_size]
         attn_metadata: AttentionMetadata,
-        target_token_ids,
+        input_ids,
+        last_token_indices: jax.Array,
         target_hidden_states,
     ) -> tuple[list[jax.Array], jnp.ndarray]:
         """Proposes draft tokens using the draft model.
@@ -263,21 +365,10 @@ class Eagle3Proposer:
             draft token IDs.
         """
 
-        target_hidden_states = self.combine_hidden_states_fn(
-            self.state, target_hidden_states)
+        # target_hidden_states = self.combine_hidden_states_fn(
+        #     self.state, target_hidden_states)
+        
 
-        input_ids, last_token_indices = self._prepare_input_ids(
-            attn_metadata.query_start_loc, target_token_ids, next_token_ids,
-            self.runner.input_batch.num_reqs)
-        # NOTE(pooyam): For now, we don't support multimodal.
-
-        # The last KV cache group is for the draft model.
-        num_kv_cache_groups = len(self.runner.kv_cache_config.kv_cache_groups)
-        draft_kv_cache_group_id = num_kv_cache_groups - 1
-        block_tables = self.runner.input_batch.block_table[
-            draft_kv_cache_group_id].get_device_tensor()
-        block_tables = self._reshape_block_tables(block_tables)
-        attn_metadata = replace(attn_metadata, block_tables=block_tables)
 
         kv_caches, hidden_states, residual = self.model_fn(
             self.state,
@@ -286,6 +377,10 @@ class Eagle3Proposer:
             target_hidden_states,
             attn_metadata,
         )
+        # Early exit if there is only one draft token to be generated.
+        if self.num_speculative_tokens == 1:
+            return kv_caches, self._get_stack_draft_token_ids(hidden_states, last_token_indices)
+        
         sample_hidden_states = self.runner._select_from_array_fn(
             hidden_states, last_token_indices)
         lora_metadata = None
@@ -294,9 +389,6 @@ class Eagle3Proposer:
         draft_token_ids = self._get_draft_token_ids(logits)
 
         draft_token_ids_list = [draft_token_ids]
-        # Early exit if there is only one draft token to be generated.
-        if self.num_speculative_tokens == 1:
-            return kv_caches, self._stack_draft_token_ids(draft_token_ids_list)
 
         positions = self.runner._select_from_array_fn(
             attn_metadata.input_positions, last_token_indices)
