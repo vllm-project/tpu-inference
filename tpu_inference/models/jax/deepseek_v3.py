@@ -38,6 +38,7 @@ DTYPE_VIEW_MAP = {
 }
 
 
+
 @dataclass
 class DeepSeekV3(nnx.Module):
 
@@ -54,7 +55,6 @@ class DeepSeekV3(nnx.Module):
         # NOTE: the default is 61
         num_layers: int = vllm_config.model_config.hf_config.num_hidden_layers
         num_local_experts: int = 256
-        self.metrics = {}
 
         vocab_size: int = 129280
         hidden_size: int = 7168
@@ -190,7 +190,6 @@ class DeepSeekV3(nnx.Module):
 
         for i in range(first_k_dense_replace, num_layers):
             is_moe_layer = ((i + 1) % interleave_moe_layer_step == 0)
-            self.metrics[f'layer_{i}'] = {}
             router = DeepSeekV3Router(
                 random_init=self.random_init,
                 hidden_size=hidden_size,
@@ -247,8 +246,7 @@ class DeepSeekV3(nnx.Module):
                     activation_ffw_ted=('data', None, None),
                     edf_sharding=('model', None, None),
                     efd_sharding=('model', None, None),
-                    router=router,
-                    metrics=self.metrics[f'layer_{i}']) if is_moe_layer else DenseFFW(
+                    router=router) if is_moe_layer else DenseFFW(
                         dtype=dtype,
                         hidden_act=hidden_act,
                         hidden_size=hidden_size,
@@ -348,7 +346,7 @@ class DeepSeekV3(nnx.Module):
 
         final_activation = self.final_norm(x)
 
-        return kv_caches, final_activation, [], self.metrics
+        return kv_caches, final_activation, [] 
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         return self.lm_head.decode(hidden_states)

@@ -125,7 +125,7 @@ class CompilationManager:
             layer_name_to_kvcache_index,
             lora_metadata,
         ):
-            kv_caches, hidden_states, aux_hidden_states, metrics = self.runner.model_fn(
+            kv_caches, hidden_states, aux_hidden_states = self.runner.model_fn(
                 state, kv_caches, input_ids, attention_metadata, inputs_embeds,
                 layer_name_to_kvcache_index, lora_metadata)
             self.runner.kv_caches = kv_caches

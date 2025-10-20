@@ -485,8 +485,9 @@ def load_random_weights_into_qwix_abstract_model(rng: PRNGKey,
 
     # Iterate through all variables and initialize them
     prev_param_shape = None
+    from tpu_inference.layers.jax.moe.moe import MoEMetric
     for path, param in nnx.iter_graph(model):
-        if not isinstance(param, nnx.Variable):
+        if isinstance(param, MoEMetric) or not isinstance(param, nnx.Variable):
             continue
         if path[0] == 'rng' and path[-1] == "key":
             param.value = rng

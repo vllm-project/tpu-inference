@@ -391,7 +391,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 # but one of them would be `None`
 
                 (self.kv_caches, hidden_states, 
-                 aux_hidden_states, metrics) = self.model_fn(
+                 aux_hidden_states) = self.model_fn(
                      self.state,
                      self.kv_caches,
                      input_ids,
@@ -400,11 +400,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                      tuple(self.layer_name_to_kvcache_index.items()),
                      lora_metadata,
                  )
-            logger.info(f"metrics = {metrics}")
             # if True:
             # if metric:
             if True:
-                metrics_cpu = jax.device_get(metrics)
+                from tpu_inference.layers.jax.moe.moe import MoEMetric
+                new_state, _ = nnx.split(model)
+                metrics_state = new_state.filter(MoEMetric)
+                metrics_tree = jax.tree_map(lambda m: m.value, metrics_state)
+                metrics_cpu = jax.device_get(metrics_tre)
                 metrics_path = self.vllm_config.additional_config["metrics_path"]
                 if os.path.exists(metrics_path):
                     with open(metrics_path) as f:

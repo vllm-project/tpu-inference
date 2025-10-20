@@ -13,6 +13,17 @@ from tpu_inference.layers.jax.layers import FlaxUtils
 modeling_flax_utils = FlaxUtils()
 logger = init_logger(__name__)
 
+class MoEMetric(nnx.Variable):
+  """A Variable that *always* holds MoE metrics."""
+
+  def __init__(self, value=None):
+    # If no value is provided, create the default structure
+    if value is None:
+      value = {
+          'max_load_proportion': jnp.float32(0.0),
+      }
+    # Pass this value up to the base nnx.Variable
+    super().__init__(value)
 
 @dataclass(kw_only=True)
 class Router(nnx.Module):
@@ -89,7 +100,9 @@ class MoE(nnx.Module):
     edf_sharding: Sharding
     efd_sharding: Sharding
     random_init: bool = False
-    metrics: dict = None
+
+    def __init__(self):
+        self.metrics = MoEMetrics()
 
     def __call__(self, x_TD: Float):
         """Performs the forward pass of the MoE layer.
@@ -108,9 +121,9 @@ class MoE(nnx.Module):
         # if self.metrics is not None:
         if True:
             expert_counts = jnp.unique_counts(indices_TX.flatten(), size=self.num_local_experts, fill_value=0)[1]
-            # expert_counts = jnp.arange(10)
             expert_max_proportion = jnp.max(expert_counts/jnp.sum(expert_counts))
-            self.metrics['max_load_proportion'] = expert_max_proportion 
+            self.metrics.value = {'max_load_proportion': expert_max_proportion}
+        # self.sow('moe_load_metrics'] = metrics
         one_hot_indices_TXE = jax.nn.one_hot(
             indices_TX, num_classes=self.num_local_experts, dtype=self.dtype)
         full_weights_TE = jnp.sum(one_hot_indices_TXE * weights_TX[..., None],

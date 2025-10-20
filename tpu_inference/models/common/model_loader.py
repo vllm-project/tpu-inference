@@ -15,6 +15,7 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.quantization.quantization_utils import (
     apply_qwix_on_abstract_model, apply_qwix_quantization,
     load_random_weights_into_qwix_abstract_model)
+from tpu_inference.layers.jax.moe.moe import MoEMetric
 
 logger = init_logger(__name__)
 
@@ -122,6 +123,25 @@ def _get_nnx_model(
                 apply_to_abstract_model=True)
 
             model = nnx.eval_shape(abstract_model_fn)
+            graphdef, abstract_state = nnx.split(model)
+            # --- 3. Dynamically discover all variable types ---
+            # Get a flat list of all variable *instances* in the state
+            all_variables = jax.tree_util.tree_leaves(abstract_state, is_leaf=lambda node: isinstance(node, nnx.Variable))
+
+            # Get the unique *types* of all those variables
+            # This will be a set like: {nnx.Param, nnx.BatchStat, Metric, ...}
+            all_types = set(type(v) for v in all_variables)
+
+            # --- 4. Create the final list of types to *keep* ---
+            # Filter the set to remove the Metric type
+            types_to_keep = {t for t in all_types if t is not MoEMetric}
+            logger.warning(f"types_to_keep = {types_to_keep}")
+
+            # --- 5. Call nnx.filter with the dynamic list of types ---
+            # The * operator unpacks the set into separate arguments for filter
+            # e.g., nnx.filter(abstract_state, nnx.Param, nnx.BatchStat, ...)
+            kept_state = abstract_state.filter(*types_to_keep)
+            model = nnx.merge(graphdef, kept_state)
             quantization_config = vllm_config.model_config.hf_config.quantization_config if hasattr(
                 vllm_config.model_config.hf_config,
                 "quantization_config") else {}
