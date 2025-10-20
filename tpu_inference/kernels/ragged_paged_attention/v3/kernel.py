@@ -1302,6 +1302,10 @@ def get_fixed_fetch_and_compute_block_sizes(
         "vmem_limit_bytes",
         "debug_mode",
         "is_pure_decode",
+        "bq_sz",
+        "bkv_p",
+        "bq_csz",
+        "bkv_cp",
     ),
     donate_argnames=("kv_cache", ),
 )
@@ -1332,6 +1336,10 @@ def ragged_paged_attention(
     vmem_limit_bytes: int | None = None,
     # Debug params.
     debug_mode: bool = False,
+    bq_sz: int | None = None,
+    bkv_p: int | None = None,
+    bq_csz: int | None = None,
+    bkv_cp: int | None = None,
 ):
     """Ragged paged attention that supports mixed prefill and decode.
 
@@ -1412,19 +1420,19 @@ def ragged_paged_attention(
     # TODO(jevinjiang): use passed in block sizes.
     #   del num_kv_pages_per_block
     #   del num_queries_per_block
-    if is_pure_decode:
-        bq_sz, bkv_p, bq_csz, bkv_cp = 16, 8, 8, 8
-    else:
-        bq_sz, bkv_p, bq_csz, bkv_cp = get_fixed_fetch_and_compute_block_sizes(
-            q.dtype,
-            kv_cache.dtype,
-            actual_num_q_heads,
-            actual_num_kv_heads,
-            head_dim,
-            page_size,
-            max_num_tokens,
-            pages_per_seq,
-        )
+    # if is_pure_decode:
+    #     bq_sz, bkv_p, bq_csz, bkv_cp = 16, 8, 8, 8
+    # else:
+    #     bq_sz, bkv_p, bq_csz, bkv_cp = get_fixed_fetch_and_compute_block_sizes(
+    #         q.dtype,
+    #         kv_cache.dtype,
+    #         actual_num_q_heads,
+    #         actual_num_kv_heads,
+    #         head_dim,
+    #         page_size,
+    #         max_num_tokens,
+    #         pages_per_seq,
+    #     )
     bkv_sz = bkv_p * page_size
     bkv_csz = bkv_cp * page_size
     if vmem_limit_bytes is None:
