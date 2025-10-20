@@ -1,5 +1,6 @@
 ARG NIGHTLY_DATE="20250714"
 ARG BASE_IMAGE="us-central1-docker.pkg.dev/tpu-pytorch-releases/docker/xla:nightly_3.12_tpuvm_$NIGHTLY_DATE"
+ARG VLLM_COMMIT_HASH="None"
 
 FROM $BASE_IMAGE
 
