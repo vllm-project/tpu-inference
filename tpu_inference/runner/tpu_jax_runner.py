@@ -2,17 +2,17 @@ import functools
 import os
 import random
 from contextlib import nullcontext
-from typing import Any, Callable, Dict, List, Optional, Tuple, cast, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
 
 import jax
 import jax.numpy as jnp
-from jax.sharding import NamedSharding
-from jax.sharding import PartitionSpec as P
 import jaxtyping
 import numpy as np
 import torch
 import vllm.envs as envs
 from flax import nnx
+from jax.sharding import NamedSharding
+from jax.sharding import PartitionSpec as P
 from torchax.ops.mappings import j2t_dtype
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
@@ -37,14 +37,13 @@ from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.sample.rejection_sampler import RejectionSampler
 from tpu_inference.layers.jax.sample.sampling import (compute_logprobs,
                                                       gather_logprobs, sample)
-from tpu_inference.logger import init_logger
-from tpu_inference.models.jax.jax_intermediate_tensor import \
-    JaxIntermediateTensors
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.layers.jax.sharding import build_mesh
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.model_loader import get_model
+from tpu_inference.models.jax.jax_intermediate_tensor import \
+    JaxIntermediateTensors
 from tpu_inference.models.jax.utils.weight_utils import (
     shard_put, transfer_state_with_mappings)
 from tpu_inference.runner import utils as runner_utils
@@ -127,7 +126,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.compilation_manager = CompilationManager(self)
         # TODO: verify this.
         if self.is_last_rank:
-            self.speculative_decoding_manager = SpeculativeDecodingManager(self)
+            self.speculative_decoding_manager = SpeculativeDecodingManager(
+                self)
             self.structured_decoding_manager = StructuredDecodingManager(self)
         self.kv_cache_manager = KVCacheManager(self)
         self.mm_manager = MultiModalManager(self)
@@ -310,8 +310,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.rng_key,
             self.mesh,
         )
-        # for key in self.state.keys():
-        #     logger.info(f'{key}')
         if self.drafter is not None:
             logger.info("Loading drafter model...")
             self.drafter.load_model(self.state)
@@ -352,11 +350,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self,
         scheduler_output: "VllmSchedulerOutput",
         intermediate_tensors: Optional[JaxIntermediateTensors] = None,
-    ) -> tuple[AttentionMetadata, Union[ModelRunnerOutput, JaxIntermediateTensors]]:
+    ) -> tuple[AttentionMetadata, Union[ModelRunnerOutput,
+                                        JaxIntermediateTensors]]:
         self.step_counter += 1
         self.persistent_batch_manager.update_states(
             scheduler_output, self.get_mrope_input_positions_fn)
-        
+
         if not scheduler_output.total_num_scheduled_tokens:
             if has_kv_transfer_group():
                 return DUMMY_METADATA, self.kv_connector_no_forward(
@@ -373,9 +372,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 # raise Exception(
                 #     "Should not schedule a request that does nothing!")
             return DUMMY_METADATA, EMPTY_MODEL_RUNNER_OUTPUT,
-        
-        logger.info(f'worker{self.rank} step{self.step_counter} {scheduler_output.scheduled_new_reqs=}')
-        logger.info(f'worker{self.rank} step{self.step_counter} {scheduler_output.scheduled_cached_reqs=}')
+
+        # logger.info(
+        #     f'worker{self.rank} step{self.step_counter} {scheduler_output.scheduled_new_reqs=}'
+        # )
+        # logger.info(
+        #     f'worker{self.rank} step{self.step_counter} {scheduler_output.scheduled_cached_reqs=}'
+        # )
         (input_ids, attn_metadata, sampling_metadata, logits_indices,
          spec_decode_metadata) = self._prepare_inputs(scheduler_output)
 
@@ -634,7 +637,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # where M is the max_model_len.
         token_indices = (positions_np +
                          req_indices * self.input_batch.token_ids_cpu.shape[1])
-        print(f'worker{self.rank} step{self.step_counter} {token_indices=}')
 
         # NOTE(woosuk): We use torch.index_select instead of np.take here
         # because torch.index_select is much faster than np.take for large
@@ -802,18 +804,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         from torchax.ops.mappings import t2j_dtype
         jax_dtype = t2j_dtype(self.dtype)
         num_padded_tokens = runner_utils.get_padded_token_len(
-            self.num_tokens_paddings,
-            num_tokens)
+            self.num_tokens_paddings, num_tokens)
         sharding = NamedSharding(self.mesh, P())
         hidden_size = self.model_config.get_hidden_size()
-        spec = jax.ShapeDtypeStruct(shape=(num_padded_tokens, hidden_size), dtype=jax_dtype, sharding=sharding)
-        tensor_spec = {
-            "hidden_states": spec,  #(num_token, 4096)
-            "residual": spec  #(num_token, 4096)
-        }
+        spec = jax.ShapeDtypeStruct(shape=(num_padded_tokens, hidden_size),
+                                    dtype=jax_dtype,
+                                    sharding=sharding)
+        tensor_spec = {"hidden_states": spec, "residual": spec}
         return tensor_spec
-    
-    def get_uuid_for_jax_transfer(self, scheduler_output: "VllmSchedulerOutput", rank: int, step: int) -> int:
+
+    def get_uuid_for_jax_transfer(self,
+                                  scheduler_output: "VllmSchedulerOutput",
+                                  rank: int, step: int) -> int:
         '''
         Get a uuid for jax.transfer, here we use the hash of
         scheduler_output + counter_step + sender's rank

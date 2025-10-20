@@ -15,9 +15,9 @@ from tpu_inference.layers.jax.sample.sampling import sample
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import device_array
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
+from tpu_inference.utils import device_array
 
 if TYPE_CHECKING:
     from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
@@ -88,9 +88,15 @@ class CompilationManager:
             if self.runner.speculative_config:
                 self._precompile_speculative_decoding()
 
-    def _precompile_backbone_helper(self, name, *, input_ids, positions,
-                                    inputs_embeds, intermediate_tensors=None, 
-                                    is_first_rank=True, is_last_rank=True) -> None:
+    def _precompile_backbone_helper(self,
+                                    name,
+                                    *,
+                                    input_ids,
+                                    positions,
+                                    inputs_embeds,
+                                    intermediate_tensors=None,
+                                    is_first_rank=True,
+                                    is_last_rank=True) -> None:
         num_tokens = None
         if input_ids is not None:
             num_tokens = input_ids.shape[0]
@@ -169,20 +175,25 @@ class CompilationManager:
             is_first_rank = self.runner.is_first_rank
             is_last_rank = self.runner.is_last_rank
             if not is_first_rank:
-                hidden_states = self._create_dummy_tensor((num_tokens, hidden_size), jnp.bfloat16)
-                residual = self._create_dummy_tensor((num_tokens, hidden_size), jnp.bfloat16)
+                hidden_states = self._create_dummy_tensor(
+                    (num_tokens, hidden_size), jnp.bfloat16)
+                residual = self._create_dummy_tensor((num_tokens, hidden_size),
+                                                     jnp.bfloat16)
                 intermediate_tensors = JaxIntermediateTensors(
-                    tensors = {"hidden_states": hidden_states, "residual": residual}
-                )
+                    tensors={
+                        "hidden_states": hidden_states,
+                        "residual": residual
+                    })
             else:
                 intermediate_tensors = None
-            self._precompile_backbone_helper(f"worker{self.runner.rank} backbone",
-                                            input_ids=input_ids,
-                                            positions=positions,
-                                            inputs_embeds=None,
-                                            intermediate_tensors=intermediate_tensors,
-                                            is_first_rank=is_first_rank,
-                                            is_last_rank=is_last_rank)
+            self._precompile_backbone_helper(
+                f"worker{self.runner.rank} backbone",
+                input_ids=input_ids,
+                positions=positions,
+                inputs_embeds=None,
+                intermediate_tensors=intermediate_tensors,
+                is_first_rank=is_first_rank,
+                is_last_rank=is_last_rank)
 
     def _precompile_backbone_with_inputs_embeds(self) -> None:
         hidden_size = self.runner.model_config.get_hidden_size()
@@ -199,20 +210,25 @@ class CompilationManager:
             is_first_rank = self.runner.is_first_rank
             is_last_rank = self.runner.is_last_rank
             if not is_first_rank:
-                hidden_states = self._create_dummy_tensor((num_tokens, hidden_size), jnp.bfloat16)
-                residual = self._create_dummy_tensor((num_tokens, hidden_size), jnp.bfloat16)
+                hidden_states = self._create_dummy_tensor(
+                    (num_tokens, hidden_size), jnp.bfloat16)
+                residual = self._create_dummy_tensor((num_tokens, hidden_size),
+                                                     jnp.bfloat16)
                 intermediate_tensors = JaxIntermediateTensors(
-                    tensors = {"hidden_states": hidden_states, "residual": residual}
-                )
+                    tensors={
+                        "hidden_states": hidden_states,
+                        "residual": residual
+                    })
             else:
                 intermediate_tensors = None
-            self._precompile_backbone_helper(f"worker{self.runner.rank} backbone with embeds",
-                                             input_ids=None,
-                                             positions=positions,
-                                             inputs_embeds=inputs_embeds,
-                                             intermediate_tensors=intermediate_tensors,
-                                             is_first_rank=is_first_rank,
-                                             is_last_rank=is_last_rank)
+            self._precompile_backbone_helper(
+                f"worker{self.runner.rank} backbone with embeds",
+                input_ids=None,
+                positions=positions,
+                inputs_embeds=inputs_embeds,
+                intermediate_tensors=intermediate_tensors,
+                is_first_rank=is_first_rank,
+                is_last_rank=is_last_rank)
 
     def _precompile_select_from_array_helper(
         self,
@@ -286,7 +302,8 @@ class CompilationManager:
         if self.runner.speculative_config:
             vocab_size = self.runner.model_config.get_vocab_size()
             self._precompile_select_from_array_helper(
-                name=f"worker{self.runner.rank} select bonus tokens for spec decoding",
+                name=
+                f"worker{self.runner.rank} select bonus tokens for spec decoding",
                 source_paddings=self.runner.num_logits_paddings,
                 indices_paddings=self.runner.num_reqs_paddings,
                 hidden_dim=vocab_size,
@@ -294,7 +311,8 @@ class CompilationManager:
                                        PartitionSpec(None, "model")),
             )
             self._precompile_select_from_array_helper(
-                name=f"worker{self.runner.rank} select target tokens for spec decoding",
+                name=
+                f"worker{self.runner.rank} select target tokens for spec decoding",
                 source_paddings=self.runner.num_logits_paddings,
                 indices_paddings=self.runner.num_logits_paddings,
                 hidden_dim=vocab_size,
@@ -304,7 +322,8 @@ class CompilationManager:
             )
 
             self._precompile_select_from_array_helper(
-                name=f"worker{self.runner.rank} select hidden states for eagle-3",
+                name=
+                f"worker{self.runner.rank} select hidden states for eagle-3",
                 source_paddings=self.runner.num_tokens_paddings,
                 indices_paddings=[self.runner.max_num_reqs],
                 hidden_dim=hsize,

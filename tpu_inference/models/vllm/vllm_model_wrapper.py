@@ -68,7 +68,7 @@ class _VllmRunner(torch.nn.Module):
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        hidden_state= self.vllm_model(input_ids, positions,
+        hidden_state = self.vllm_model(input_ids, positions,
                                        intermediate_tensors, inputs_embeds)
         return hidden_state
 
@@ -148,12 +148,13 @@ class VllmModelWrapper:
                 "xla_tpu_reduce_scatter_collective_matmul_mode":
                 "post_spmd_conservative"
             },
-            static_argnames=("layer_name_to_kvcache_index", "is_first_rank", "is_last_rank"),
+            static_argnames=("layer_name_to_kvcache_index", "is_first_rank",
+                             "is_last_rank"),
         )
         def step_fun(
             params_and_buffers,  # This has been wrapped into torchax TorchValue
             kv_caches: List[jax.Array],
-            input_ids: jax.Array,   #(num_tokens,)
+            input_ids: jax.Array,
             attn_metadata: AttentionMetadata,
             input_embeds: jax.Array,
             layer_name_to_kvcache_index: Sequence[Tuple[str, int]],
@@ -182,12 +183,8 @@ class VllmModelWrapper:
                     self.model,
                     torch_view(params_and_buffers),
                     kwargs={
-                        "input_ids": torch_view(
-                            input_ids
-                        ),
-                        "positions": torch_view(
-                            attn_metadata.input_positions
-                        ),
+                        "input_ids": torch_view(input_ids),
+                        "positions": torch_view(attn_metadata.input_positions),
                         "intermediate_tensors": intermediate_tensors,
                         "inputs_embeds": None,
                     },

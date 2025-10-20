@@ -8,7 +8,6 @@ import jax
 import jax.numpy as jnp
 import jaxtyping
 import vllm.envs as envs
-from torchax.ops.mappings import t2j_dtype
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed import get_pp_group
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
@@ -27,18 +26,18 @@ from tpu_inference.di.abstracts import (AbstractKVCacheConfig,
                                         AbstractLoRARequest,
                                         AbstractSchedulerOutput)
 from tpu_inference.di.interfaces import HostInterface
+from tpu_inference.distributed import jax_parallel_state
 from tpu_inference.distributed.utils import (get_host_ip, get_kv_transfer_port,
                                              get_node_id)
 from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.jax_intermediate_tensor import \
+    JaxIntermediateTensors
 from tpu_inference.runner.kv_cache import get_rpa_page_size_bytes
 from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
 from tpu_inference.worker._temporary_vllm_compat import (
     adapt_kv_cache_config_if_needed, adapt_lora_request_if_needed,
     adapt_scheduler_output_if_needed)
 from tpu_inference.worker.base import AbstractTpuWorker
-from tpu_inference.distributed import jax_parallel_state
-from tpu_inference.models.jax.jax_intermediate_tensor import \
-    JaxIntermediateTensors
 
 logger = init_logger(__name__)
 
@@ -183,8 +182,7 @@ class TPUWorker(AbstractTpuWorker):
 
         ensure_kv_transfer_initialized(self.vllm_config)
         self.model_runner = TPUModelRunner(self.vllm_config, self.devices,
-                                           self.rank,
-                                           self.rank == 0,
+                                           self.rank, self.rank == 0,
                                            self.rank == self.world_size - 1)
         logger.info(f"Init worker | "
                     f"rank={self.rank} | "
@@ -246,24 +244,29 @@ class TPUWorker(AbstractTpuWorker):
             intermediate_tensors = None
         else:
             # receive intermediate tensors
-            uuid = self.model_runner.get_uuid_for_jax_transfer(vllm_scheduler_output, self.rank - 1, self.step_counter)
+            uuid = self.model_runner.get_uuid_for_jax_transfer(
+                vllm_scheduler_output, self.rank - 1, self.step_counter)
             # TODO: this method might only works for vllm model, not sure about jax models.
-            tensor_spec = self.model_runner.get_intermediate_tensor_spec(scheduler_output.total_num_scheduled_tokens)
+            tensor_spec = self.model_runner.get_intermediate_tensor_spec(
+                scheduler_output.total_num_scheduled_tokens)
             intermediate_tensors_dict = get_pp_group().recv_tensor_dict(
                 uuid, tensor_spec)
-            # here we receives a dict, we need to wrap it to JaxIntermediateTensors
-            intermediate_tensors = JaxIntermediateTensors(intermediate_tensors_dict)
+            intermediate_tensors = JaxIntermediateTensors(
+                intermediate_tensors_dict)
 
         output = self.model_runner.execute_model(vllm_scheduler_output,
-                                                 intermediate_tensors)        
+                                                 intermediate_tensors)
 
         if isinstance(output, JaxIntermediateTensors):
             assert self.parallel_config.pipeline_parallel_size > 1
             assert not get_pp_group().is_last_rank
             # send intermediate tensors
-            uuid = self.model_runner.get_uuid_for_jax_transfer(vllm_scheduler_output, self.rank, self.step_counter)
+            uuid = self.model_runner.get_uuid_for_jax_transfer(
+                vllm_scheduler_output, self.rank, self.step_counter)
             get_pp_group().send_tensor_dict(uuid, output.tensors)
-            logger.info(f'[debug] tpu_worker{self.rank}, {self.step_counter=} finish sending intermediate tensors, shape={output.tensors["hidden_states"].shape}')
+            logger.info(
+                f'[debug] tpu_worker{self.rank}, {self.step_counter=} finish sending intermediate tensors, shape={output.tensors["hidden_states"].shape}'
+            )
             self.step_counter += 1
             return None
         else:
@@ -271,7 +274,9 @@ class TPUWorker(AbstractTpuWorker):
             # either last rank, or other ranks when scheduler output is empty
             if not self.is_driver_worker and not has_kv_transfer_group():
                 self.step_counter += 1
-                logger.info(f'[debug] tpu_worker{self.rank}, {self.step_counter=} return None')
+                logger.info(
+                    f'[debug] tpu_worker{self.rank}, {self.step_counter=} return None'
+                )
                 return None
             # logger.info(f'[debug] tpu_worker{self.rank}, {self.step_counter=}, return output {output.sampled_token_ids=}')
             self.step_counter += 1

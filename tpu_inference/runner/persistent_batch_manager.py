@@ -1,8 +1,8 @@
 from typing import Dict
 
 import jax
-from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.distributed import get_pp_group
+from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.input_batch_jax import CachedRequestState, InputBatch
@@ -182,9 +182,9 @@ class PersistentBatchManager:
             new_block_ids = req_data.new_block_ids[i]
             resumed_from_preemption = req_data.resumed_from_preemption[i]
             num_output_tokens = req_data.num_output_tokens[i]
-            
+
             # Update the cached states.
-            req_state.num_computed_tokens = num_computed_tokens     #req_state is internal state kept in model runner, update num_computed_tokens from req_data.num_computed_tokens
+            req_state.num_computed_tokens = num_computed_tokens
             req_index = self.input_batch.req_id_to_index.get(req_id)
 
             if not is_last_rank:
@@ -194,20 +194,18 @@ class PersistentBatchManager:
                 new_token_ids = req_data.new_token_ids[i]
                 # Add the sampled token(s) from the previous step (if any).
                 # This doesn't include "unverified" tokens like spec tokens.
-                num_new_tokens = (
-                    num_computed_tokens + len(new_token_ids) - req_state.num_tokens
-                )
+                num_new_tokens = (num_computed_tokens + len(new_token_ids) -
+                                  req_state.num_tokens)
                 if num_new_tokens == 1:
                     req_state.output_token_ids.append(new_token_ids[-1])
                 elif num_new_tokens > 0:
-                    req_state.output_token_ids.extend(new_token_ids[-num_new_tokens:])
+                    req_state.output_token_ids.extend(
+                        new_token_ids[-num_new_tokens:])
             elif num_output_tokens < len(req_state.output_token_ids):
                 del req_state.output_token_ids[num_output_tokens:]
                 if req_index is not None:
-                    end_idx = (
-                        self.input_batch.num_prompt_tokens[req_index]
-                        + num_output_tokens
-                    )
+                    end_idx = (self.input_batch.num_prompt_tokens[req_index] +
+                               num_output_tokens)
                     self.input_batch.num_tokens[req_index] = end_idx
                     self.input_batch.num_tokens_no_spec[req_index] = end_idx
 
@@ -224,7 +222,6 @@ class PersistentBatchManager:
                 # Replace the existing block IDs with the new ones.
                 req_state.block_ids = new_block_ids
 
-            
             if req_index is None:
                 # The request is not in the persistent batch.
                 # The request was either preempted and resumed later, or was not
@@ -238,14 +235,17 @@ class PersistentBatchManager:
             if new_block_ids is not None:
                 self.input_batch.block_table.append_row(
                     new_block_ids, req_index)
-            
+
             # For the last rank, we don't need to update the token_ids_cpu
             # because the sampled tokens are already cached.
             if not is_last_rank:
                 start_token_index = num_computed_tokens
                 end_token_index = num_computed_tokens + len(new_token_ids)
-                self.input_batch.token_ids_cpu[req_index, start_token_index:end_token_index] = new_token_ids
-                self.input_batch.num_tokens_no_spec[req_index] = end_token_index
+                self.input_batch.token_ids_cpu[
+                    req_index,
+                    start_token_index:end_token_index] = new_token_ids
+                self.input_batch.num_tokens_no_spec[
+                    req_index] = end_token_index
                 self.input_batch.num_tokens[req_index] = end_token_index
 
             # Add spec_token_ids to token_ids_cpu.
