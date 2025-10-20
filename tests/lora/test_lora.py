@@ -1,6 +1,6 @@
 # https://github.com/vllm-project/vllm/blob/ed10f3cea199a7a1f3532fbe367f5c5479a6cae9/tests/tpu/lora/test_lora.py
 import os
-import time
+import subprocess
 
 import pytest
 import vllm
@@ -39,6 +39,16 @@ def setup_vllm(num_loras: int, tp: int = 1) -> vllm.LLM:
                     max_lora_rank=8)
 
 
+@pytest.fixture(autouse=True)
+def run_after_each_test():
+    # --- Setup code (runs before each test) ---
+    # print("\nSetting up...")
+    yield  # This is where the test runs
+    # --- Teardown code (runs after each test) ---
+    command = "lsof -t /dev/vfio/* | xargs kill"
+    subprocess.run(command, shell=True, capture_output=True, text=True)
+
+
 # For multi-chip test, we only use TP=2 because the base model Qwen/Qwen2.5-3B-Instruct has 2 kv heads and the current attention kernel requires it to be divisible by tp_size.
 TP = [2] if os.environ.get("USE_V6E8_QUEUE", False) else [1]
 
@@ -67,7 +77,6 @@ def test_single_lora(tp):
 
     assert answer.isdigit()
     assert int(answer) == 2
-    time.sleep(5)
 
 
 @pytest.mark.parametrize("tp", TP)
@@ -100,8 +109,6 @@ def test_lora_hotswapping(tp):
 
         assert answer.isdigit()
         assert int(answer) == i + 1, f"Expected {i + 1}, got {answer}"
-
-    time.sleep(5)
 
 
 @pytest.mark.parametrize("tp", TP)
@@ -136,5 +143,3 @@ def test_multi_lora(tp):
         assert int(
             output.strip()
             [0]) == i + 1, f"Expected {i + 1}, got {int(output.strip()[0])}"
-
-    time.sleep(5)
