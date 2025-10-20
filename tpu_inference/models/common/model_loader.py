@@ -179,8 +179,10 @@ def _get_nnx_model(
         # Although the created model can already work, we still need to jit
         # the model creation again, otherwise the model forward will have
         # non-trivial overhead in PjitFunction.
+        from vllm.distributed import get_pp_group
+        rank = get_pp_group().rank_in_group
         with mesh:
-            model.load_weights(rng)
+            model.load_weights(rng, rank)
             jit_model = create_jit_model(
                 model,
                 use_qwix_on_abstract_model=should_apply_qwix_on_abstract_model)
@@ -217,7 +219,7 @@ def get_flax_model(
             hidden_states_sharding,  # aux hidden states
         ),
         donate_argnums=2,  # 0 is graphdef, 1 is state, 2 is kv_cache
-        static_argnums=6,  #6 is layer_name_to_kvcache_index
+        static_argnums=(6,9,10),  #6 is layer_name_to_kvcache_index, 9 is is_first_rank, 10 is is_last_rank
     )
     def run_model(graphdef, state, *args):
         model = nnx.merge(graphdef, state)
