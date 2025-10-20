@@ -41,7 +41,6 @@ gcloud auth configure-docker ${LOCATION}-docker.pkg.dev -q
 echo "--- Build Docker Image ---"
 docker build \
     --label "buildkite-job-id=${BUILDKITE_JOB_ID}" \
-    # --build-arg VLLM_COMMIT_HASH=${VLLM_COMMIT_HASH} \
     --no-cache -f docker/Dockerfile -t "${IMAGE_TAG}" .
 
 echo "--- Push Docker Image to Artifact Registry ---"
