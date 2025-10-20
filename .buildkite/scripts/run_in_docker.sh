@@ -89,8 +89,24 @@ docker builder prune -f
 
 echo "Cleanup complete."
 
-IMAGE_NAME="vllm-tpu"
-docker build --no-cache -f docker/Dockerfile -t "${IMAGE_NAME}:${BUILDKITE_COMMIT}" .
+# IMAGE_NAME="vllm-tpu"
+# docker build --no-cache -f docker/Dockerfile -t "${IMAGE_NAME}:${BUILDKITE_COMMIT}" .
+# export LOCATION="us-central1"
+gcloud auth configure-docker ${LOCATION}-docker.pkg.dev -q
+
+export TAG_FILE_NAME="vllm_image_tag"
+buildkite-agent artifact download $TAG_FILE_NAME .
+export IMAGE_TAG=$(cat $TAG_FILE_NAME)
+
+if [ -z "$IMAGE_TAG" ]; then
+    echo "Error: Can't get Image Tag"
+    exit 1
+fi
+
+echo "Image to pull: ${IMAGE_TAG}"
+docker pull "${IMAGE_TAG}"
+
+echo "--- Running Docker Container ---"
 
 exec docker run \
   --privileged \
@@ -111,5 +127,6 @@ exec docker run \
   ${JAX_RANDOM_WEIGHTS:+-e JAX_RANDOM_WEIGHTS="$JAX_RANDOM_WEIGHTS"} \
   ${SKIP_ACCURACY_TESTS:+-e SKIP_ACCURACY_TESTS="$SKIP_ACCURACY_TESTS"} \
   ${VLLM_MLA_DISABLE:+-e VLLM_MLA_DISABLE="$VLLM_MLA_DISABLE"} \
-  "${IMAGE_NAME}:${BUILDKITE_COMMIT}" \
+  # "${IMAGE_NAME}:${BUILDKITE_COMMIT}" \
+  "${IMAGE_TAG}" \
   "$@" # Pass all script arguments as the command to run in the container
