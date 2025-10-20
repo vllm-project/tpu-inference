@@ -2,6 +2,7 @@ import functools
 import os
 import random
 from contextlib import nullcontext
+from time import time
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 import jax
@@ -121,6 +122,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.requests, self.input_batch, self.encoder_cache,
             self.uses_mrope, self.model_config)
         self.lora_utils = LoraUtils(self)
+        self.start_time = 0
 
         cache_config = self.cache_config
         if cache_config.cache_dtype == "auto":
@@ -330,6 +332,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         scheduler_output: "VllmSchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> ModelRunnerOutput:
+        if os.path.exists("/mnt/disks/jacobplatin/tmp.txt"):
+            if not self.start_time:
+                print("Starting profiling...")
+                self.start_time = time()
+                options = jax.profiler.ProfileOptions()
+                options.python_tracer_level = os.getenv(
+                    "PYTHON_TRACER_LEVEL", 0)
+                jax.profiler.start_trace("trace-first-30s")
+            elif time() - self.start_time > 30:
+                jax.profiler.stop_trace()
+                print("Stopped profiling after 30s.")
+                raise ValueError
         return self._execute_model(scheduler_output)[1]
 
     def _execute_model(
@@ -633,12 +647,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             total_num_scheduled_tokens:padded_total_num_scheduled_tokens] = 0
 
         # Please see runner_utils.PhasedBasedProfiler for details
-        if self.phase_based_profiler:
-            batch_composition_stats = runner_utils.get_batch_composition_stats(
-                self.input_batch, total_num_scheduled_tokens, num_reqs,
-                padded_total_num_scheduled_tokens, scheduler_output)
-
-            self.phase_based_profiler.step(batch_composition_stats)
+        #  if self.phase_based_profiler:
+        batch_composition_stats = runner_utils.get_batch_composition_stats(
+            self.input_batch, total_num_scheduled_tokens, num_reqs,
+            padded_total_num_scheduled_tokens, scheduler_output)
+        logger.info(f"Batch composition stats: {batch_composition_stats}")
+        #    self.phase_based_profiler.step(batch_composition_stats)
 
         # Inputs
         input_ids = self.input_ids_cpu[:padded_total_num_scheduled_tokens]
