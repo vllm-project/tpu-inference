@@ -118,7 +118,9 @@ def get_device_hbm_limit() -> int:
     elif device_kind == "TPU v6e" or device_kind == "TPU v4":
         return 32 * GBYTES
     elif device_kind == "TPU v7":
-        return 192 * GBYTES
+        # 192 * GBYTES / 2 because each JAX device (v7x core) has
+        # 1/2 of the total chip HBM
+        return 96 * GBYTES
     else:
         raise ValueError(f"Unknown device kind: {device_kind}")
 
