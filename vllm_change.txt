@@ -1,0 +1,11 @@
++++ b/vllm/benchmarks/serve.py
+@@ -592,6 +592,9 @@ async def benchmark(
+
+     distribution = "Poisson process" if burstiness == 1.0 else "Gamma distribution"
+
++    with open("/mnt/disks/jacobplatin/tmp.txt", "w") as f:
++        f.write("profiling started")
++
+     if ramp_up_strategy is not None:
+         print(f"Traffic ramp-up strategy: {ramp_up_strategy}.")
+         print(
