@@ -12,13 +12,6 @@ steps:
    - wait: ~
      depends_on: build_docker_image
 
-   - label: "Wait Docker Build Image"
-     depends_on: build_docker_image
-     agents:
-       queue: tpu_v6e_queue
-     commands:
-       - echo "Docker image build completed"
-
    - label: "E2E MLPerf tests for JAX models"
      key: test_0
      soft_fail: true
