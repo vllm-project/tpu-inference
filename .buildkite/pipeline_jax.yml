@@ -11,14 +11,6 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - echo "Docker image build completed"
-
-   - label: "E2E MLPerf tests for JAX models"
-     key: test_0
-     soft_fail: true
-     agents:
-       queue: tpu_v6e_queue
-     commands:
        - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
 
    - label: "E2E MLPerf tests for JAX models with quantization"
