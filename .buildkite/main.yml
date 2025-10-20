@@ -8,8 +8,7 @@ steps:
        # TODO : can be done on non-TPU queues once they're set up b/449203039
        queue: tpu_v6e_queue
      commands:
-       - echo "Do test"
-      #  - bash .buildkite/scripts/upload_models_and_features.sh
+       - bash .buildkite/scripts/upload_models_and_features.sh
 
    - wait: ~
      continue_on_failure: true  # ensure we still generate support matrices even if some tests fail
