@@ -3,6 +3,7 @@ import functools
 import jax
 import jax.numpy as jnp
 import numpy as np
+from einshape import jax_einshape
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 from jax.sharding import NamedSharding, PartitionSpec
@@ -59,7 +60,8 @@ def test_d2h_h2d_roundtrip():
     cache_dtype = jnp.bfloat16
 
     cpu_backend = LocalCPUBackend()
-    token_processor = TokenProcessor(model_name="debug", chunk_size=block_size)
+    token_processor = TokenProcessor(model_name="debug",
+                                     chunk_size=block_size // 2)
 
     axis_shapes = (1, 8)
     axis_names = ("data", "model")
@@ -110,7 +112,7 @@ def test_d2h_h2d_roundtrip():
 
     # d2h: 1.flat
     flat_blocks_cpu = [
-        layer_cache.reshape(-1, *layer_cache.shape[2:])
+        jax_einshape("ab...->(ab)...", layer_cache)
         for layer_cache in blocks_cpu
     ]
     jax.block_until_ready(flat_blocks_cpu)
@@ -136,7 +138,10 @@ def test_d2h_h2d_roundtrip():
 
     # h2d
     # h2d: 0. get key and fetch data blocks
-    fetch_keys_generator = token_processor.process_tokens(target_tokens)
+    num_matched_tokens = 48
+    retrieve_tokens = target_tokens[:num_matched_tokens]
+    # retrieve_tokens = target_tokens
+    fetch_keys_generator = token_processor.process_tokens(retrieve_tokens)
     fetch_keys = list(fetch_keys_generator)
 
     assemble_blocks_on_cpu = [[] for _ in range(num_layers)]
@@ -146,7 +151,7 @@ def test_d2h_h2d_roundtrip():
         if cache:
             for i in range(num_layers):
                 assemble_blocks_on_cpu[i].append(cache[i])
-        print(
+        logger.info(
             f"get ({sidx}, {eidx}, {key}) cache: {cache[0].shape}, {cache[0].sharding}"
         )
 
@@ -160,12 +165,29 @@ def test_d2h_h2d_roundtrip():
     )
 
     # h2d: TODO: 2. padding
+    padding_size = num_target_blocks * block_size - final_kv_on_cpu[0].shape[0]
+    if padding_size > 0:
+        padding_config = [(0, padding_size, 0)
+                          ] + [(0, 0, 0)] * (len(final_kv_on_cpu[0].shape) - 1)
+        pad_value = jnp.array(0, dtype=final_kv_on_cpu[0].dtype)
+        padded_final_kv_on_cpu = [
+            jax.lax.pad(layer_cpu, pad_value, padding_config)
+            for layer_cpu in final_kv_on_cpu
+        ]
+        jax.block_until_ready(padded_final_kv_on_cpu)
+        logger.info(
+            f"padded_final_kv_on_cpu[0]: {padded_final_kv_on_cpu[0].shape}, {padded_final_kv_on_cpu[0].sharding}"
+        )
+    else:
+        padded_final_kv_on_cpu = final_kv_on_cpu
 
     # h2d: 3. reshape
-    num_load_blocks = num_target_blocks
+    # num_load_blocks = num_target_blocks
     blocked_kv_on_cpu = [
-        layer_cache.reshape(num_load_blocks, block_size, num_heads, 2,
-                            head_size) for layer_cache in final_kv_on_cpu
+        # layer_cache.reshape(num_load_blocks, block_size, num_heads, 2,
+        #                     head_size) for layer_cache in padded_final_kv_on_cpu
+        jax_einshape("(nb)...->nb...", layer_cache, b=block_size)
+        for layer_cache in padded_final_kv_on_cpu
     ]
     jax.block_until_ready(blocked_kv_on_cpu)
     logger.info(
@@ -188,17 +210,25 @@ def test_d2h_h2d_roundtrip():
                                              ...].set(loaded_kv_on_tpu[i])
     jax.block_until_ready(dst_kv_cache)
 
+    remaining_tokens = num_matched_tokens
     for block_id in target_block_ids:
         print(f"testing: {block_id}")
+        if remaining_tokens > block_size:
+            num_test_tokens = block_size
+        else:
+            num_test_tokens = remaining_tokens
         np.testing.assert_array_equal(
-            np.array(src_kv_cache[0][block_id]),
-            np.array(dst_kv_cache[0][block_id]),
+            np.array(src_kv_cache[0][block_id][:num_test_tokens]),
+            np.array(dst_kv_cache[0][block_id][:num_test_tokens]),
         )
-        src_data_sample = src_kv_cache[0][block_id].flatten()[:10]
-        dst_data_sample = dst_kv_cache[0][block_id].flatten()[:10]
+        src_data_sample = src_kv_cache[0][block_id].flatten(
+        )[:num_test_tokens // 2]
+        dst_data_sample = dst_kv_cache[0][block_id].flatten(
+        )[:num_test_tokens // 2]
         logger.info(
             f"---checking block {block_id}---: \n{src_data_sample}\n{dst_data_sample}"
         )
+        remaining_tokens -= block_size
 
 
 def test_host_input_host_to_hbm_dma():
