@@ -16,8 +16,8 @@ def host_hbm_dma(x_ref, y_ref):
     pl.run_scoped(body, pltpu.SemaphoreType.DMA)
 
 
-# TODO(jcgu): unit tests
-# TODO(jcgu): verify single device sharding case
+# NOTE(jcgu): input / out arrays should have the same sharding, but different memory_kind
+# NOTE(jcgu): only support NamedSharding, does not support SingleDeviceSharding
 def d2h_dma(
     input_array: jax.Array,
     out_sharding: jax.sharding.NamedSharding,
@@ -60,8 +60,8 @@ def d2h_dma(
     return d2h_dma_kernel(input_array)
 
 
-# TODO(jcgu): unit tests
-# TODO(jcgu): verify single device sharding case
+# NOTE(jcgu): input / out arrays should have the same sharding, but different memory_kind
+# NOTE(jcgu): only support NamedSharding, does not support SingleDeviceSharding
 def h2d_dma(
     input_array: jax.Array,
     out_sharding: jax.sharding.NamedSharding,
@@ -76,7 +76,6 @@ def h2d_dma(
 
     host_sharding = input_array.sharding
 
-    # TODO(jcgu): support SingleDeviceSharding
     assert isinstance(host_sharding, jax.sharding.NamedSharding)
     assert isinstance(out_sharding, jax.sharding.NamedSharding)
     assert host_sharding.memory_kind == "pinned_host"
