@@ -103,8 +103,7 @@ class DPScheduler(Scheduler):
                 dp_rank = self.scheduler._get_dp_rank_for_allocation(request, num_new_tokens)
                 req_id = request.request_id
                 if dp_rank is None: 
-                    if req_id in self.scheduler.assigned_dp_rank:
-                        # Clean up any previous assignment if it exists. 
+                    if req_id in self.scheduler.assigned_dp_rank and self.scheduler.num_scheduled_tokens.get(req_id, 0)==0:
                         # This can happen if the request was previously assigned a DP rank during prefix cache.
                         dp_rank = self.scheduler.assigned_dp_rank[req_id]
                         self.scheduler.request_budget[dp_rank] += 1
