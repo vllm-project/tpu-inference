@@ -368,10 +368,10 @@ def test_phased_profiler_ignores_initial_request(profiler_fixture):
     mock_start.assert_not_called()
 
     profiler.step({"num_reqs": 1, "total_num_scheduled_tokens": 100})
-    mock_start.assert_called_once()
+    mock_start.assert_not_called()
 
     profiler.step({"num_reqs": 2, "total_num_scheduled_tokens": 1})
-    mock_start.assert_called_once()
+    mock_start.assert_not_called()
 
     profiler.step({"num_reqs": 2, "total_num_scheduled_tokens": 2})
     mock_start.assert_called_once()
