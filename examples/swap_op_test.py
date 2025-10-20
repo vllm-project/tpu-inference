@@ -27,28 +27,6 @@ def create_default_mesh(axis_shapes, axis_names):
         return None
 
 
-def example_flatten_and_print():
-    """
-    An example function to demonstrate how to flatten a JAX array and
-    print its first 10 elements.
-    """
-    print("\n--- Example: Flattening a JAX array ---")
-    # 1. Create a multi-dimensional JAX array
-    original_array = jnp.arange(100).reshape((10, 10))
-    print(f"Original array shape: {original_array.shape}")
-    print("Original array:")
-    print(original_array)
-
-    # 2. Flatten the array using the .flatten() method
-    flattened_array = original_array.flatten()
-    print(f"\nFlattened array shape: {flattened_array.shape}")
-
-    # 3. Print the first 10 elements using standard Python slicing
-    first_10_elements = flattened_array[:10]
-    print(f"First 10 elements of the flattened array: {first_10_elements}")
-    print("--- End of Example ---\n")
-
-
 def test_d2h_h2d_roundtrip():
     # Define cache properties
     num_layers = 10
@@ -288,4 +266,7 @@ def test_sharded_host_to_hbm_dma():
 
 
 if __name__ == "__main__":
+    from jax._src import test_util as jtu
+    if not jtu.if_cloud_tpu_at_least(2025, 8, 14):
+        raise RuntimeError("libtpu version does not support DMA host-hbm")
     test_d2h_h2d_roundtrip()
