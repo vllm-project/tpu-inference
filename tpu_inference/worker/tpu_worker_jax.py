@@ -192,6 +192,10 @@ class TPUWorker(AbstractTpuWorker):
             from tpu_inference.core.sched.dp_scheduler import DPScheduler
             
             vLLMScheduler.Scheduler = DPScheduler
+            
+            self.vllm_config.scheduler_config.max_num_seqs = self.vllm_config.scheduler_config.max_num_seqs * dp_size
+            self.vllm_config.scheduler_config.max_num_batched_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens * dp_size
+
         else:
             logger.info(f"DP size ({dp_size}) <= 1, using default Scheduler")
     

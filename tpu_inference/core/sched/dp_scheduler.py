@@ -36,7 +36,6 @@ class DPScheduler(Scheduler):
     
         logger.info(f"Scheduler initialized with DP size: {self.dp_size}")
         logger.info(f"Max requests per DP rank: {self.max_reqs_per_dp_rank}")
-        logger.info(f"Max tokens per DP rank: {self.max_tokens_per_dp_rank}")
     
     def _log_dp_state(self):
         """Log current DP state for debugging."""
@@ -56,15 +55,8 @@ class DPScheduler(Scheduler):
         )
 
         # Budgets for each DP rank
-        self.max_reqs_per_dp_rank = self.scheduler_config.max_num_seqs
-        self.max_tokens_per_dp_rank = self.scheduler_config.max_num_batched_tokens
-    
-        
-        self.scheduler_config.max_num_seqs = self.scheduler_config.max_num_seqs * self.dp_size
-        self.scheduler_config.max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens * self.dp_size
-        
-        self.max_num_scheduled_tokens = self.max_num_scheduled_tokens  * self.dp_size
-        self.max_num_running_reqs = self.max_num_running_reqs * self.dp_size
+        self.max_reqs_per_dp_rank = self.scheduler_config.max_num_seqs // self.dp_size
+        self.max_tokens_per_dp_rank = self.scheduler_config.max_num_batched_tokens // self.dp_size 
         
         self.request_budget: dict[int, int] = {i: self.max_reqs_per_dp_rank for i in range(self.dp_size)}
         self.token_budget: dict[int, int] = {i: self.max_tokens_per_dp_rank for i in range(self.dp_size)}
@@ -119,7 +111,11 @@ class DPScheduler(Scheduler):
                         self.scheduler.assigned_dp_rank.pop(req_id)
                     return None
                 self.scheduler._update_dp_rank_budget(request, dp_rank, num_new_tokens)
-                return self.scheduler.dp_kv_cache_managers[dp_rank].allocate_slots(request, num_new_tokens, *args, **kwargs)
+                new_blocks = self.scheduler.dp_kv_cache_managers[dp_rank].allocate_slots(request, num_new_tokens, *args, **kwargs)
+                
+                if new_blocks is not None and len(new_blocks.get_block_ids()[0])>1:
+                    logger.debug(f"dp scheduler allocated {num_new_tokens} tokens for request {req_id} with {len(new_blocks.get_block_ids()[0])} blocks.")
+                return new_blocks
             
             def get_computed_blocks(self, request):
                 return self.scheduler._get_computed_blocks_dp(request)
@@ -133,18 +129,19 @@ class DPScheduler(Scheduler):
                 return self.scheduler.dp_kv_cache_managers[dp_rank].get_block_ids(request_id)
             
             def free(self, request):
+                logger.debug(f"Freeing request {request.request_id} (DP rank {self.scheduler.assigned_dp_rank.get(request.request_id)})")
                 # Remove preempted requests
                 req_id = request.request_id
                 dp_rank = self.scheduler.assigned_dp_rank.get(req_id)
-                if dp_rank is not None:
-                    self.scheduler.dp_kv_cache_managers[dp_rank].free(request)
-                    self.scheduler.request_budget[dp_rank] += 1
+                if dp_rank is not None:                    
                     # Clean up state
                     self.scheduler.assigned_dp_rank.pop(req_id)
                     self.scheduler.request_budget[dp_rank] += 1
                     if req_id in self.scheduler.num_scheduled_tokens:
                         self.scheduler.token_budget[dp_rank] += self.scheduler.num_scheduled_tokens[req_id]
                         self.scheduler.num_scheduled_tokens.pop(req_id)
+                    
+                    self.scheduler.dp_kv_cache_managers[dp_rank].free(request)
             
             def get_num_common_prefix_blocks(self, request_id):
                 dp_rank = self.scheduler.assigned_dp_rank[request_id]
@@ -193,7 +190,7 @@ class DPScheduler(Scheduler):
             dp_rank = self.assigned_dp_rank[req_id]
             if self._rank_has_capacity_for_existing_requests(dp_rank, num_tokens):
                 return dp_rank
-            logger.debug(f"Running request {req_id} cannot be scheduled: no DP rank with capacity for {num_tokens} tokens. Current token budget: {self.token_budget[dp_rank]}" )
+            logger.debug(f"Running request {req_id} cannot be scheduled: no DP rank with capacity for {num_tokens} tokens. Current token budget ({dp_rank}): {self.token_budget[dp_rank]}" )
             return None
             
         # New requests

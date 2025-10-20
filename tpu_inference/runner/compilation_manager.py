@@ -653,6 +653,11 @@ class CompilationManager:
     def _precompile_structured_decoding(self) -> None:
         logger.info(
             "Compiling structured_decoding with different input shapes.")
+        if self.runner.vllm_config.sharding_config.total_dp_size > 1:
+            logger.warning(
+                "Structured decoding precompilation skipped since structured decoding is not supported with DP."
+            )
+            return
         for num_reqs in self.runner.num_reqs_paddings:
             dummy_logits = self._create_dummy_tensor(
                 (num_reqs, self.runner.vocab_size), jnp.bfloat16)
