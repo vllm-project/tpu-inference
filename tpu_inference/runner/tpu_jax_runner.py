@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 import jax
 import jax.numpy as jnp
 import jaxtyping
+import json
 import numpy as np
 import torch
 import vllm.envs as envs
@@ -389,8 +390,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 # NOTE(Wenlong): It takes both `input_ids` and `inputs_embeds`,
                 # but one of them would be `None`
 
-                (self.kv_caches, hidden_states,
-                 aux_hidden_states) = self.model_fn(
+                (self.kv_caches, hidden_states, 
+                 aux_hidden_states, metrics) = self.model_fn(
                      self.state,
                      self.kv_caches,
                      input_ids,
@@ -399,7 +400,20 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                      tuple(self.layer_name_to_kvcache_index.items()),
                      lora_metadata,
                  )
-
+            logger.info(f"metrics = {metrics}")
+            # if True:
+            # if metric:
+            if True:
+                metrics_cpu = jax.device_get(metrics)
+                metrics_path = self.vllm_config.additional_config["metrics_path"]
+                if os.path.exists(metrics_path):
+                    with open(metrics_path) as f:
+                        metrics_json = json.load(f)
+                else:
+                    metrics_json = []
+                metrics_json.append(metrics_cpu)
+                with open(metrics_path, 'w') as f:
+                    json.dump(metrics_json, f)
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)
             logits = self.compute_logits_fn(

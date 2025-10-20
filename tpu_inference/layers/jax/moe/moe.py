@@ -5,11 +5,13 @@ import jax.numpy as jnp
 from flax import nnx
 from flax.typing import Sharding
 from jaxtyping import Float
+from tpu_inference.logger import init_logger
 
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import FlaxUtils
 
 modeling_flax_utils = FlaxUtils()
+logger = init_logger(__name__)
 
 
 @dataclass(kw_only=True)
@@ -87,6 +89,7 @@ class MoE(nnx.Module):
     edf_sharding: Sharding
     efd_sharding: Sharding
     random_init: bool = False
+    metrics: dict = None
 
     def __call__(self, x_TD: Float):
         """Performs the forward pass of the MoE layer.
@@ -100,6 +103,14 @@ class MoE(nnx.Module):
         x_TD = jnp.asarray(x_TD, self.dtype)
         x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
         weights_TX, indices_TX = self.router(x_TD)
+        # logger.info(f"metrics type in moe.py = {self.metrics}")
+        # jax.debug.print("metrics in moe.py = {value}", value=self.metrics.get('max_load_proportion', None))
+        # if self.metrics is not None:
+        if True:
+            expert_counts = jnp.unique_counts(indices_TX.flatten(), size=self.num_local_experts, fill_value=0)[1]
+            # expert_counts = jnp.arange(10)
+            expert_max_proportion = jnp.max(expert_counts/jnp.sum(expert_counts))
+            self.metrics['max_load_proportion'] = expert_max_proportion 
         one_hot_indices_TXE = jax.nn.one_hot(
             indices_TX, num_classes=self.num_local_experts, dtype=self.dtype)
         full_weights_TE = jnp.sum(one_hot_indices_TXE * weights_TX[..., None],
