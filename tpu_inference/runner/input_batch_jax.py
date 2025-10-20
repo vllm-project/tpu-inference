@@ -9,7 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingType
-from vllm.utils.collections import swap_dict_values
+from vllm.utils import swap_dict_values
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 
