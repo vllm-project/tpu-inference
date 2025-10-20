@@ -305,7 +305,8 @@ def _load_hf_weights_on_thread(vllm_config,
             layer_key = re.sub(r"layers\.\d+", "layers.*", hf_key)
             if layer_key in name_map:
                 model_key = name_map[layer_key]
-                model_key = re.sub(r"layers\.\*", f"layers.{layer_num}", model_key)
+                model_key = re.sub(r"layers\.\*", f"layers.{layer_num}",
+                                   model_key)
             else:
                 model_key = name_map.get(hf_key, hf_key)
         elif "blocks" in hf_key:
@@ -313,7 +314,8 @@ def _load_hf_weights_on_thread(vllm_config,
             layer_key = re.sub(r"blocks\.\d+", "blocks.*", hf_key)
             if layer_key in name_map:
                 model_key = name_map[layer_key]
-                model_key = re.sub(r"blocks\.\*", f"blocks.{layer_num}", model_key)
+                model_key = re.sub(r"blocks\.\*", f"blocks.{layer_num}",
+                                   model_key)
             else:
                 model_key = name_map.get(hf_key, hf_key)
         else:
@@ -337,7 +339,9 @@ def _load_hf_weights_on_thread(vllm_config,
 
         # Check if model_weight is a valid parameter
         if not hasattr(model_weight, 'value'):
-            logger.warning(f"Skipping {hf_key} -> {model_key}: not a parameter (no 'value' attribute)")
+            logger.warning(
+                f"Skipping {hf_key} -> {model_key}: not a parameter (no 'value' attribute)"
+            )
             continue
 
         logger.debug(

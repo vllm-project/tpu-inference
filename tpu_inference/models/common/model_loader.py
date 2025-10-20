@@ -300,17 +300,23 @@ def get_vllm_model(
         vllm_model = model.model.vllm_model
         if hasattr(vllm_model, 'get_mrope_input_positions'):
             get_mrope_input_positions_fn = vllm_model.get_mrope_input_positions
-            logger.info(f"Found get_mrope_input_positions function in {type(vllm_model).__name__}")
+            logger.info(
+                f"Found get_mrope_input_positions function in {type(vllm_model).__name__}"
+            )
         else:
-            logger.info(f"No get_mrope_input_positions function found in {type(vllm_model).__name__}")
+            logger.info(
+                f"No get_mrope_input_positions function found in {type(vllm_model).__name__}"
+            )
     else:
-        logger.info("Could not access vllm_model to check for get_mrope_input_positions")
+        logger.info(
+            "Could not access vllm_model to check for get_mrope_input_positions"
+        )
 
     jit_model = model.jit_step_func()
     compute_logits_fn = model.jit_compute_logits_func()
     # the model needs to be returned because lora weights are neither torch.nn.parameter nor torch.nn.buffer. After we load the lora weights and set it to the torch.nn.Module, we can shard it and move it to TPU.
     combine_hidden_states_fn = None
-    
+
     return jit_model, compute_logits_fn, combine_hidden_states_fn, None, None, get_mrope_input_positions_fn, params, lora_manager, model
 
 

@@ -158,8 +158,8 @@ def apply_rotary_pos_emb_vision(x: jax.Array,
 
 class Qwen2VisionAttention(nnx.Module):
 
-    def __init__(self, config: Qwen2VLConfig, dtype: jnp.dtype,
-                 rngs: nnx.Rngs, mesh: Mesh):
+    def __init__(self, config: Qwen2VLConfig, dtype: jnp.dtype, rngs: nnx.Rngs,
+                 mesh: Mesh):
         vision_config = config.vision_config
         # Qwen2VL uses embed_dim for the actual hidden size in vision blocks
         self.hidden_size = vision_config.embed_dim  # 1280 instead of 3584
@@ -257,10 +257,8 @@ class Qwen2VisionAttention(nnx.Module):
         v = jnp.pad(v, pad_width, 'constant')
 
         # For Qwen2VL, use simple segment ids without windowing
-        segment_ids = SegmentIds(
-            q=jnp.ones((1, padded_T), dtype=jnp.int32),
-            kv=jnp.ones((1, padded_T), dtype=jnp.int32)
-        )
+        segment_ids = SegmentIds(q=jnp.ones((1, padded_T), dtype=jnp.int32),
+                                 kv=jnp.ones((1, padded_T), dtype=jnp.int32))
 
         # TODO (jacobplatin): add support for quantized KV cache?
         output = self.flash_attention(q, k, v, segment_ids)
@@ -280,18 +278,17 @@ class Qwen2VisionAttention(nnx.Module):
 
 class Qwen2VisionBlock(nnx.Module):
 
-    def __init__(self, config: Qwen2VLConfig, dtype: jnp.dtype,
-                 rngs: nnx.Rngs, mesh: Mesh):
+    def __init__(self, config: Qwen2VLConfig, dtype: jnp.dtype, rngs: nnx.Rngs,
+                 mesh: Mesh):
         vision_config = config.vision_config
         # Use embed_dim for vision blocks
         dim = vision_config.embed_dim
         # Qwen2VL vision uses LayerNorm, not RMSNorm
-        norm_layer = partial(nnx.LayerNorm,
-                             epsilon=1e-6,
-                             scale_init=nnx.with_partitioning(
-                                 init_fn, (None, )),
-                             bias_init=nnx.with_partitioning(
-                                 init_fn, (None, )))
+        norm_layer = partial(
+            nnx.LayerNorm,
+            epsilon=1e-6,
+            scale_init=nnx.with_partitioning(init_fn, (None, )),
+            bias_init=nnx.with_partitioning(init_fn, (None, )))
 
         self.norm1 = norm_layer(dim, dtype=dtype, rngs=rngs)
         self.norm2 = norm_layer(dim, dtype=dtype, rngs=rngs)
@@ -299,13 +296,9 @@ class Qwen2VisionBlock(nnx.Module):
                                          dtype=dtype,
                                          rngs=rngs,
                                          mesh=mesh)
-        self.mlp = Qwen2VisionMLP(config=vision_config,
-                                  dtype=dtype,
-                                  rngs=rngs)
+        self.mlp = Qwen2VisionMLP(config=vision_config, dtype=dtype, rngs=rngs)
 
-    def __call__(self,
-                 x: jax.Array,
-                 rotary_pos_emb: jax.Array) -> jax.Array:
+    def __call__(self, x: jax.Array, rotary_pos_emb: jax.Array) -> jax.Array:
 
         x = x + self.attn(self.norm1(x), rotary_pos_emb)
         x = x + self.mlp(self.norm2(x))
@@ -361,13 +354,12 @@ class Qwen2VisionPatchMerger(nnx.Module):
     def __init__(self, d_model: int, context_dim: int, norm_layer: Callable,
                  spatial_merge_size: int, dtype: jnp.dtype, rngs: nnx.Rngs):
         self.hidden_size = context_dim * (spatial_merge_size**2)
-        self.ln_q = norm_layer(context_dim,
-                               dtype=dtype,
-                               rngs=rngs,
-                               scale_init=nnx.with_partitioning(
-                                   init_fn, (None, )),
-                               bias_init=nnx.with_partitioning(
-                                   init_fn, (None, )))
+        self.ln_q = norm_layer(
+            context_dim,
+            dtype=dtype,
+            rngs=rngs,
+            scale_init=nnx.with_partitioning(init_fn, (None, )),
+            bias_init=nnx.with_partitioning(init_fn, (None, )))
         self.mlp_fc1 = nnx.Linear(
             self.hidden_size,
             self.hidden_size,
@@ -458,8 +450,10 @@ class Qwen2VisionTransformer(nnx.Module):
         ]
         # For Qwen2VL, the output dimension should match the language model's hidden size
         self.merger = Qwen2VisionPatchMerger(
-            d_model=hf_config.text_config.hidden_size,  # Language model's hidden size
-            context_dim=vision_config.embed_dim,  # Use embed_dim for vision context
+            d_model=hf_config.text_config.
+            hidden_size,  # Language model's hidden size
+            context_dim=vision_config.
+            embed_dim,  # Use embed_dim for vision context
             norm_layer=partial(nnx.LayerNorm, epsilon=1e-6),
             spatial_merge_size=vision_config.spatial_merge_size,
             dtype=dtype,
@@ -490,7 +484,7 @@ class Qwen2VisionTransformer(nnx.Module):
         # We need to return shape: [t*h*w, head_dim//2] for apply_rotary_pos_emb_vision
         rotary_pos_emb = rotary_pos_emb_full[pos_ids].reshape(
             pos_ids.shape[0], -1)
-        
+
         # Don't reshape further - keep it as [seq_len, head_dim//2]
         return rotary_pos_emb
 
@@ -535,7 +529,7 @@ class Qwen2VisionTransformer(nnx.Module):
         # Reshape for spatial merge
         hidden_states = hidden_states.reshape(
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
-        
+
         # Reshape back to sequence format
         hidden_states = hidden_states.reshape(seq_len, -1)
         hidden_states = jnp.expand_dims(hidden_states, axis=1)
@@ -546,7 +540,7 @@ class Qwen2VisionTransformer(nnx.Module):
 
         # adapter
         hidden_states = self.merger(hidden_states)
-        
+
         return hidden_states
 
 
@@ -840,10 +834,12 @@ class Qwen2VLForConditionalGeneration(nnx.Module):
             # Qwen2VL uses fc1/fc2 naming for vision MLP layers
             "visual.blocks.*.mlp.fc1.bias": "visual.blocks.*.mlp.fc1.bias",
             "visual.blocks.*.mlp.fc1.weight": "visual.blocks.*.mlp.fc1.kernel",
-            "visual.blocks.*.mlp.fc1": "visual.blocks.*.mlp.fc1.kernel",  # Without .weight suffix
+            "visual.blocks.*.mlp.fc1":
+            "visual.blocks.*.mlp.fc1.kernel",  # Without .weight suffix
             "visual.blocks.*.mlp.fc2.bias": "visual.blocks.*.mlp.fc2.bias",
             "visual.blocks.*.mlp.fc2.weight": "visual.blocks.*.mlp.fc2.kernel",
-            "visual.blocks.*.mlp.fc2": "visual.blocks.*.mlp.fc2.kernel",  # Without .weight suffix
+            "visual.blocks.*.mlp.fc2":
+            "visual.blocks.*.mlp.fc2.kernel",  # Without .weight suffix
             "visual.blocks.*.norm1.weight": "visual.blocks.*.norm1.scale",
             "visual.blocks.*.norm1.bias": "visual.blocks.*.norm1.bias",
             "visual.blocks.*.norm2.weight": "visual.blocks.*.norm2.scale",
@@ -869,21 +865,22 @@ class Qwen2VLForConditionalGeneration(nnx.Module):
                         model=self,
                         metadata_map=metadata_map,
                         mesh=self.mesh)
-        
+
         # Check if all parameters have been loaded using nnx's built-in functionality
         from jax._src.core import ShapeDtypeStruct
-        
+
         # Use nnx.iter_graph to safely iterate through all parameters
         unloaded_params = []
         for path, node in nnx.iter_graph(self):
-            if isinstance(node, nnx.Param) and isinstance(node.value, ShapeDtypeStruct):
+            if isinstance(node, nnx.Param) and isinstance(
+                    node.value, ShapeDtypeStruct):
                 # Convert the path tuple to a string
                 path_str = ".".join(str(p) for p in path)
                 unloaded_params.append(path_str)
-        
+
         if unloaded_params:
             logger.error(f"Found {len(unloaded_params)} unloaded parameters:")
-            
+
             # Group by prefix to identify patterns
             prefixes = {}
             for path in unloaded_params:
@@ -891,14 +888,17 @@ class Qwen2VLForConditionalGeneration(nnx.Module):
                 parts = path.split('.')
                 prefix = '.'.join(parts[:2]) if len(parts) > 1 else parts[0]
                 prefixes[prefix] = prefixes.get(prefix, 0) + 1
-            
+
             logger.error("Unloaded parameters by prefix:")
-            for prefix, count in sorted(prefixes.items(), key=lambda x: -x[1])[:10]:
+            for prefix, count in sorted(prefixes.items(),
+                                        key=lambda x: -x[1])[:10]:
                 logger.error(f"  {prefix}: {count} parameters")
-            
+
             # Show some specific examples
             logger.error("\nExamples of unloaded parameters:")
             for i, path in enumerate(sorted(unloaded_params)[:10]):
                 logger.error(f"  {i+1}. {path}")
-            
-            raise ValueError(f"Not all parameters were loaded. Found {len(unloaded_params)} unloaded parameters.")
+
+            raise ValueError(
+                f"Not all parameters were loaded. Found {len(unloaded_params)} unloaded parameters."
+            )
