@@ -6,6 +6,7 @@ from flax import nnx
 from flax.typing import Sharding
 from jaxtyping import Float
 from tpu_inference.logger import init_logger
+from jax import ShapeDtypeStruct
 
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import FlaxUtils
@@ -101,9 +102,6 @@ class MoE(nnx.Module):
     efd_sharding: Sharding
     random_init: bool = False
 
-    def __init__(self):
-        self.metrics = MoEMetrics()
-
     def __call__(self, x_TD: Float):
         """Performs the forward pass of the MoE layer.
 
@@ -122,7 +120,9 @@ class MoE(nnx.Module):
         if True:
             expert_counts = jnp.unique_counts(indices_TX.flatten(), size=self.num_local_experts, fill_value=0)[1]
             expert_max_proportion = jnp.max(expert_counts/jnp.sum(expert_counts))
-            self.metrics.value = {'max_load_proportion': expert_max_proportion}
+            if not isinstance(x_TD, ShapeDtypeStruct):
+                self.sow(nnx.Intermediate, 'max_load_proportion', expert_max_proportion)
+            # self.metrics.value = {'max_load_proportion': expert_max_proportion}
         # self.sow('moe_load_metrics'] = metrics
         one_hot_indices_TXE = jax.nn.one_hot(
             indices_TX, num_classes=self.num_local_experts, dtype=self.dtype)
