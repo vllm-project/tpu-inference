@@ -116,6 +116,7 @@ ReqId = str
 logger = init_logger(__name__)
 
 REQUIRED_KV_CACHE_LAYOUT = "NHD"
+SWAP_OP_TYPE = "pallas"
 
 
 @dataclass
@@ -829,7 +830,8 @@ class TPUConnectorWorker:
 
             # Initiate non-blocking copy to CPU
             kv_caches_on_cpu = [
-                swap_ops(extracted_blocks, None, "d2h", "jax")
+                swap_ops(extracted_blocks, self.host_sharding, "d2h",
+                         SWAP_OP_TYPE)
                 for extracted_blocks in extracted_blocks_tpu
             ]
 
@@ -854,6 +856,15 @@ class TPUConnectorWorker:
                 layer_cache.reshape(-1, *layer_cache.shape[2:])
                 for layer_cache in kv_caches_on_cpu
             ]
+            # flat_kv_caches_on_cpu = [
+            #     jax_einshape("ab...->(ab)...", layer_cache)
+            #     for layer_cache in kv_caches_on_cpu
+            # ]
+
+            jax.block_until_ready(flat_kv_caches_on_cpu)
+            print(
+                f"flat_kv_caches_on_cpu: shape: {flat_kv_caches_on_cpu[0].shape}"
+            )
 
             if flat_kv_caches_on_cpu:
                 total_size_bytes = sum(layer.nbytes
@@ -888,9 +899,13 @@ class TPUConnectorWorker:
 
                     # Slice the data and add to the backend.
                     value_for_key = [
-                        flat_layer_cache[rel_start_idx:rel_end_idx]
+                        jax.lax.slice_in_dim(flat_layer_cache,
+                                             start_idx,
+                                             end_idx,
+                                             axis=0)
                         for flat_layer_cache in flat_kv_caches_on_cpu
                     ]
+                    jax.block_until_ready(value_for_key)
                     self.cpu_backend.add(key, value_for_key)
 
                 logger.info(
@@ -996,12 +1011,18 @@ class TPUConnectorWorker:
             self.num_layers = len(kv_caches)
             self.shape = list(kv_layer.shape)
             self.dtype = kv_layer.dtype
-            self.sharding = kv_layer.sharding
+            self.device_sharding = kv_layer.sharding
+            # TODO(jcgu): handle SingleDeviceSharding
+            self.host_sharding = jax.sharding.NamedSharding(
+                mesh=self.device_sharding.mesh,
+                spec=self.device_sharding.spec,
+                memory_kind="pinned_host")
+
             logger.info("KV Cache details registered in TPUConnectorWorker:")
             logger.info(f"  - Num layers: {self.num_layers}")
             logger.info(f"  - Shape per layer: {self.shape}")
             logger.info(f"  - DType: {self.dtype}")
-            logger.info(f"  - Sharding: {self.sharding}")
+            logger.info(f"  - Device sharding: {self.device_sharding}")
             logger.info(f"  - Layout: {self.kv_cache_layout}")
         else:
             logger.warning("TPUConnectorWorker registered with no KV caches.")
@@ -1021,7 +1042,7 @@ class TPUConnectorWorker:
             logger.info("No load operations scheduled for this step.")
             return
 
-        if not self.sharding:
+        if not self.device_sharding:
             raise RuntimeError(
                 "KV cache sharding info not available. Was register_runner called?"
             )
@@ -1077,18 +1098,34 @@ class TPUConnectorWorker:
                         f"Cache key {key.chunk_hash} not found in CPU backend for request {meta.req_id}. Inconsistent state!"
                     )
                     return
+            for _, _data in enumerate(assembled_kv_on_cpu[0]):
+                print(
+                    f"assembled_kv_on_cpu[0]: {_data.shape}, {_data.dtype}, {_data.sharding}"
+                )
 
             # Concatenate all chunks for each layer into a single, contiguous array.
             final_kv_on_cpu = [
                 jnp.concatenate(layer_chunks, axis=0)
                 for layer_chunks in assembled_kv_on_cpu
             ]
+            # print("---------------before concatenate-----------")
+            # final_kv_on_cpu = []
+            # for layer_chunks in assembled_kv_on_cpu:
+            #     np_chunks = [jnp.asarray(chunk) for chunk in layer_chunks]
+            #     _out = jnp.concatenate(np_chunks, axis=0)
+            #     print(f"final_kv_on_cpu: {_out.shape}, {_out.dtype}, {_out.sharding}")
+            #     final_kv_on_cpu.append(jnp.array(_out, out_sharding=self.host_sharding))
 
             if not final_kv_on_cpu:
                 logger.warning(
                     f"No cache data found in CPU backend for request {meta.req_id}"
                 )
                 continue
+
+            jax.block_until_ready(final_kv_on_cpu)
+            print(
+                f"final_kv_on_cpu: {final_kv_on_cpu[0].shape}, {final_kv_on_cpu[0].dtype}, {final_kv_on_cpu[0].sharding}"
+            )
 
             logger.info(
                 f"Request {meta.req_id}: Assembled CPU data for one layer has shape {final_kv_on_cpu[0].shape}."
@@ -1114,15 +1151,36 @@ class TPUConnectorWorker:
             padded_token_len = num_blocks_to_load * self.block_size
 
             padded_kv_on_cpu = []
-            for layer_data in final_kv_on_cpu:
-                pad_width = padded_token_len - num_tokens_to_load
-                if pad_width > 0:
-                    padding = jnp.zeros((pad_width, *layer_data.shape[1:]),
-                                        dtype=layer_data.dtype)
-                    padded_kv_on_cpu.append(
-                        jnp.concatenate([layer_data, padding], axis=0))
-                else:
-                    padded_kv_on_cpu.append(layer_data)
+            pad_width = padded_token_len - num_tokens_to_load
+            if pad_width > 0:
+                pad_value = jnp.array(0, dtype=self.dtype)
+                padding_config = [
+                    (0, pad_width, 0)
+                ] + [(0, 0, 0)] * (len(final_kv_on_cpu[0].shape) - 1)
+                padded_kv_on_cpu = [
+                    jax.lax.pad(layer_cpu, pad_value, padding_config)
+                    for layer_cpu in final_kv_on_cpu
+                ]
+                jax.block_until_ready(padded_kv_on_cpu)
+                logger.info(
+                    f"padded_kv_on_cpu[0]: {padded_kv_on_cpu[0].shape}, {padded_kv_on_cpu[0].sharding}"
+                )
+            else:
+                padded_kv_on_cpu = final_kv_on_cpu
+            # for layer_data in final_kv_on_cpu:
+            #     pad_width = padded_token_len - num_tokens_to_load
+            #     if pad_width > 0:
+            #         # TODO(jcgu): add cpu
+            #         padding = jnp.zeros((pad_width, *layer_data.shape[1:]),
+            #                             dtype=layer_data.dtype)
+            #         # padding = jnp.zeros((pad_width, *layer_data.shape[1:]),
+            #         #                     dtype=layer_data.dtype,
+            #         #                     out_sharding=self.host_sharding)
+            #         jax.block_until_ready(padding)
+            #         padded_kv_on_cpu.append(
+            #             jnp.concatenate([layer_data, padding], axis=0))
+            #     else:
+            #         padded_kv_on_cpu.append(layer_data)
 
             # 4. Reshape data back to block format for the update operation.
             block_shaped_kv_on_cpu = [
@@ -1130,23 +1188,29 @@ class TPUConnectorWorker:
                                    *layer_data.shape[1:])
                 for layer_data in padded_kv_on_cpu
             ]
+            # jax_einshape("(nb)...->nb...", layer_cache, b=block_size)
 
+            jax.block_until_ready(block_shaped_kv_on_cpu)
             logger.info(
                 f"Request {meta.req_id}: Reshaped data for transfer to TPU. Shape for one layer: {block_shaped_kv_on_cpu[0].shape}."
             )
 
             # 5. Transfer to TPU, applying the correct sharding.
             loaded_kv_sharded_on_tpu = [
-                swap_ops(layer_data, self.sharding, "h2d", "jax")
+                swap_ops(layer_data, self.device_sharding, "h2d", SWAP_OP_TYPE)
                 for layer_data in block_shaped_kv_on_cpu
             ]
+            jax.block_until_ready(loaded_kv_sharded_on_tpu)
+            logger.info(
+                f"loaded_kv_on_tpu[0]: {loaded_kv_sharded_on_tpu[0].shape}, {loaded_kv_sharded_on_tpu[0].sharding}"
+            )
 
             # 6. Update the runner's KV cache with the correctly sharded data.
             destination_blocks = meta.local_block_ids
             for i in range(len(self.runner.kv_caches)):
                 self.runner.kv_caches[i] = self.runner.kv_caches[i].at[
                     destination_blocks, ...].set(loaded_kv_sharded_on_tpu[i])
-
+            jax.block_until_ready(self.runner.kv_caches)
             logger.info(
                 f"Successfully loaded {len(destination_blocks)} blocks into TPU KV cache for request {meta.req_id}"
             )
