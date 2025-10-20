@@ -1,13 +1,13 @@
 steps:
-   
-   - label: "Wait test 2"
-     depends_on: build_docker_image
-     agents:
-       queue: tpu_v6e_queue
-     commands:
-       - echo "Wait test 2"
+  #  - label: "Wait Docker Build Image"
+  #    depends_on: build_docker_image
+  #    agents:
+  #      queue: tpu_v6e_queue
+  #    commands:
+  #      - echo "Docker image build completed"
 
    - wait: ~
+     depends_on: build_docker_image
 
    - label: "Upload Tests for Models & Features"
     #  if: build.env("NIGHTLY") == "1" || build.tag =~ /^v?[0-9]+(\.[a-zA-Z0-9]+)*([a-zA-Z]+[0-9]*)?$/
@@ -15,8 +15,7 @@ steps:
        # TODO : can be done on non-TPU queues once they're set up b/449203039
        queue: tpu_v6e_queue
      commands:
-       - echo "Do test"
-      #  - bash .buildkite/scripts/upload_models_and_features.sh
+       - bash .buildkite/scripts/upload_models_and_features.sh
 
    - wait: ~
      continue_on_failure: true  # ensure we still generate support matrices even if some tests fail
