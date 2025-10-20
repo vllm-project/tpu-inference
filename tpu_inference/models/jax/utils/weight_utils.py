@@ -334,7 +334,7 @@ def _load_hf_weights_on_thread(vllm_config,
             # Skip if the model key doesn't exist in the model
             logger.warning(f"Skipping {hf_key} -> {model_key}: {e}")
             continue
-            
+
         # Check if model_weight is a valid parameter
         if not hasattr(model_weight, 'value'):
             logger.warning(f"Skipping {hf_key} -> {model_key}: not a parameter (no 'value' attribute)")

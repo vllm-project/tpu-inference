@@ -518,9 +518,6 @@ class Qwen2VisionTransformer(nnx.Module):
         for i in range(num_grids):
             t, h, w = grid_thw[i]
 
-            llm_h = h // self.spatial_merge_size
-            llm_w = w // self.spatial_merge_size
-
             rotary_pos_emb_thw = self.rotary_pos_emb_thw(t, h, w)
             cu_seqlens_thw = jnp.full(t, h * w, dtype=jnp.int32)
 
