@@ -115,8 +115,6 @@ class VllmModelWrapper:
 
         # Load the vLLM model and wrap it into a new model whose forward
         # function can calculate the hidden_state and logits.
-        start_time = time.time()
-         
         with load_context, jax.default_device(jax.devices('cpu')[0]):
             vllm_model = vllm_get_model(vllm_config=vllm_config_for_load)
         lora_manager = None

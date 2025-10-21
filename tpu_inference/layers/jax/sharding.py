@@ -16,7 +16,7 @@ class ShardingAxisName:
     MLP_TENSOR = ('model', 'expert', 'attn_dp')
     MOE_TENSOR = ('model', 'attn_dp')
     EXPERT = ('expert', 'model', 'attn_dp')
-    VOCAB = ('data', 'expert', 'attn_dp', 'model')
+    VOCAB = ('expert', 'attn_dp', 'model')
 
 
 @dataclass
@@ -80,7 +80,6 @@ class ShardingConfigManager:
         parallel_config = vllm_config.parallel_config
         tensor_parallelism = parallel_config.tensor_parallel_size
         data_parallelism = parallel_config.data_parallel_size
-        # TODO(wenxindongwork): Remove expert_parallelism from ShardingStrategy.
         expert_parallelism = additional_config.get("expert_parallelism", 1)
         sequence_parallelism = additional_config.get("sequence_parallelism", 1)
         
@@ -90,7 +89,8 @@ class ShardingConfigManager:
             num_kv_heads = vllm_config.model_config.get_total_num_kv_heads()
             kv_dtype = utils.get_jax_dtype_from_str_dtype(
                 vllm_config.cache_config.cache_dtype)
-            actual_num_kv_heads = num_kv_heads / (4 // np.dtype(kv_dtype).itemsize)
+            # DO_NOT_SUBMIT(wenxindong): Should this be 2 or 4?
+            actual_num_kv_heads = num_kv_heads / (2 // np.dtype(kv_dtype).itemsize)
             attn_dp = max(int(tensor_parallelism // actual_num_kv_heads), 1)
             tensor_parallelism = tensor_parallelism // attn_dp
         else:

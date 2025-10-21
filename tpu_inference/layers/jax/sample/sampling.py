@@ -26,7 +26,6 @@ def sample(
     # (B, vocab_size)
     if tpu_sampling_metadata.do_sampling:
         # Unshard the logits explicity to avoid latency increase.
-        # TODO(wenxindongwork): should we make this configurable? 
         logits = jax.lax.with_sharding_constraint(
             logits, NamedSharding(mesh, P(None, None)))
     greedy_sampled = jnp.argmax(logits, axis=-1)
