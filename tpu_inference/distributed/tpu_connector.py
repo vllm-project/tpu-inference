@@ -77,7 +77,8 @@ from jax.sharding import Mesh
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
-from vllm.utils import make_zmq_path, make_zmq_socket, round_down
+from vllm.utils import round_down
+from vllm.utils.network_utils import make_zmq_path, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
 
