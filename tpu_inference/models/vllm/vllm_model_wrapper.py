@@ -40,24 +40,15 @@ class _VllmRunner(torch.nn.Module):
         self.vllm_model = vllm_model
 
     def forward(self, **kwargs) -> torch.Tensor:
-        # We don't support multimodal input in Gemma3, but we need patch it to
-        # None to workaround vLLM Gemma3 model bug that
-        # `get_multimodal_embeddings` returns empty list but it's caller checks
-        # for None.
-        with patch(
-                "vllm.model_executor.models.gemma3_mm."
-                "Gemma3ForConditionalGeneration."
-                "get_multimodal_embeddings",
-                return_value=None):
-            if "hidden_state" in kwargs:
-                return self.compute_logits(kwargs["hidden_state"])
-            else:
-                return self.compute_hidden_state(
-                    kwargs["input_ids"],
-                    kwargs["positions"],
-                    kwargs["intermediate_tensors"],
-                    kwargs["inputs_embeds"],
-                )
+        if "hidden_state" in kwargs:
+            return self.compute_logits(kwargs["hidden_state"])
+        else:
+            return self.compute_hidden_state(
+                kwargs["input_ids"],
+                kwargs["positions"],
+                kwargs["intermediate_tensors"],
+                kwargs["inputs_embeds"],
+            )
 
     def compute_hidden_state(
         self,
