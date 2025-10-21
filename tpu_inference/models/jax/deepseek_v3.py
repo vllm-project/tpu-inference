@@ -345,8 +345,9 @@ class DeepSeekV3(nnx.Module):
             kv_caches[i] = new_kv_cache
 
         final_activation = self.final_norm(x)
+        metrics_collection = nnx.pop(self, nnx.Intermediate)
 
-        return kv_caches, final_activation, [] 
+        return kv_caches, final_activation, [], metrics_collection
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         return self.lm_head.decode(hidden_states)

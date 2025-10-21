@@ -80,6 +80,13 @@ TPU_STR_DTYPE_TO_TORCH_DTYPE = {
     "uint8": torch.uint8,
 }
 
+def to_python_types(pytree):
+    """Converts a PyTree of JAX/NumPy arrays to Python lists/floats."""
+    return jax.tree_util.tree_map(
+        lambda x: x.tolist() if isinstance(x, (np.ndarray, jax.Array)) else x,
+        pytree
+    )
+
 
 class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
@@ -391,7 +398,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 # but one of them would be `None`
 
                 (self.kv_caches, hidden_states, 
-                 aux_hidden_states) = self.model_fn(
+                 aux_hidden_states, metrics) = self.model_fn(
                      self.state,
                      self.kv_caches,
                      input_ids,
@@ -407,18 +414,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 # new_state, _ = nnx.split(model)
                 # metrics_state = new_state.filter(MoEMetric)
                 # metrics_tree = jax.tree_map(lambda m: m.value, metrics_state)
-                intermediates = nnx.pop(model, nnx.Intermediate)
-                logger.warning(f"intermediate = {intermediates}")
+                # intermediates = nnx.pop(self.model, nnx.Intermediate)
+                metrics_cpu = to_python_types(jax.device_get(metrics))
+                # logger.warning(f"intermediate = {metrics_cpu}")
                 # metrics_cpu = jax.device_get(metrics_tre)
-                # metrics_path = self.vllm_config.additional_config["metrics_path"]
-                # if os.path.exists(metrics_path):
-                #     with open(metrics_path) as f:
-                #         metrics_json = json.load(f)
-                # else:
-                #     metrics_json = []
-                # metrics_json.append(metrics_cpu)
-                # with open(metrics_path, 'w') as f:
-                #     json.dump(metrics_json, f)
+                metrics_path = self.vllm_config.additional_config["metrics_path"]
+                if os.path.exists(metrics_path):
+                    with open(metrics_path) as f:
+                        metrics_json = json.load(f)
+                else:
+                    metrics_json = []
+                metrics_json.append(metrics_cpu.to_pure_dict())
+                with open(metrics_path, 'w') as f:
+                    json.dump(metrics_json, f)
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)
             logits = self.compute_logits_fn(

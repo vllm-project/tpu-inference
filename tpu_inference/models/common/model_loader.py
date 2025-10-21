@@ -64,6 +64,27 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
         f"Model architectures {architectures} are not supported for now. "
         f"Supported architectures: {list(_MODEL_REGISTRY.keys())}")
 
+def remove_all_intermediate_state(module: nnx.Module):
+    """
+    Recursively finds and deletes all 'intermediate' attributes
+    (created by nnx.sow) from a module and all its submodules.
+    """
+    # Iterate over a copy of attribute names to allow deletion
+    for name in list(vars(module)):
+        value = getattr(module, name)
+
+        # if isinstance(value, nnx.Intermediate) and name == 'intermediate':
+        if isinstance(value, nnx.Intermediate):
+            logger.warning("Found one, delete it!")
+            delattr(module, name)
+        elif isinstance(value, nnx.Module):
+            # Recurse into submodule
+            remove_all_intermediate_state(value)
+        elif isinstance(value, (list, tuple)):
+            # Recurse into lists/tuples of modules (like nnx.Sequential)
+            for item in value:
+                if isinstance(item, nnx.Module):
+                    remove_all_intermediate_state(item)
 
 def _get_nnx_model(
     model_class: Any,
@@ -123,11 +144,13 @@ def _get_nnx_model(
                 apply_to_abstract_model=True)
 
             model = nnx.eval_shape(abstract_model_fn)
-            if hasattr(model, 'intermediate'):
-                print("Removing 'intermediate' state added by eval_shape trace...")
-                del model.intermediate
-            else:
-                print("No 'intermediate' state found. (This is also fine)")
+            remove_all_intermediate_state(model)
+            # if hasattr(model, 'intermediate'):
+            #     print("Removing 'intermediate' state added by eval_shape trace...")
+            #     del model.intermediate
+            # else:
+            #     print("No 'intermediate' state found. (This is also fine)")
+
             # params, rest = nnx.partition(model, nnx.Param)
             # # graphdef, abstract_state = nnx.split(model)
             # #  --- 3. Dynamically discover all variable types ---
@@ -244,6 +267,7 @@ def get_flax_model(
             kv_cache_sharding,
             hidden_states_sharding,
             hidden_states_sharding,  # aux hidden states
+            None,
         ),
         donate_argnums=2,  # 0 is graphdef, 1 is state, 2 is kv_cache
         static_argnums=6,  #6 is layer_name_to_kvcache_index
