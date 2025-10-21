@@ -8,7 +8,6 @@ import jax
 import jax.numpy as jnp
 import jaxlib
 import jaxtyping
-from tpu_inference.layers.jax.sharding import ShardingConfigManager
 import vllm.envs as envs
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
@@ -22,6 +21,7 @@ from vllm.v1.core.kv_cache_utils import get_num_blocks, get_uniform_page_size
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+
 from tpu_inference import utils
 from tpu_inference.di.abstracts import (AbstractKVCacheConfig,
                                         AbstractLoRARequest,
@@ -29,6 +29,7 @@ from tpu_inference.di.abstracts import (AbstractKVCacheConfig,
 from tpu_inference.di.interfaces import HostInterface
 from tpu_inference.distributed.utils import (get_host_ip, get_kv_transfer_port,
                                              get_node_id)
+from tpu_inference.layers.jax.sharding import ShardingConfigManager
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.kv_cache import get_rpa_page_size_bytes
 from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
@@ -127,7 +128,7 @@ class TPUWorker(AbstractTpuWorker):
         if not self.devices:
             sharding_config: ShardingConfigManager = self.vllm_config.sharding_config
             device_indexes = sharding_config.device_indexes
-            if device_indexes is not None: 
+            if device_indexes is not None:
                 self.devices = [jax.devices()[i] for i in device_indexes]
             else:
                 self.devices = jax.devices()[:sharding_config.total_devices]
@@ -163,9 +164,9 @@ class TPUWorker(AbstractTpuWorker):
                 pipeline_model_parallel_size=1,
             )
         ensure_kv_transfer_initialized(self.vllm_config)
-        
+
         self._setup_scheduler()
-        
+
         self.model_runner = TPUModelRunner(self.vllm_config, self.devices)
         logger.info(f"Init worker | "
                     f"rank={self.rank} | "
@@ -208,21 +209,22 @@ class TPUWorker(AbstractTpuWorker):
         """Setup the appropriate scheduler based on DP size."""
         sharding_config: ShardingConfigManager = self.vllm_config.sharding_config
         dp_size = sharding_config.total_dp_size
-        
+
         if dp_size > 1:
             logger.info(f"DP size({dp_size}) > 1, using DPScheduler")
 
             import vllm.v1.core.sched.scheduler as vLLMScheduler
+
             from tpu_inference.core.sched.dp_scheduler import DPScheduler
-            
+
             vLLMScheduler.Scheduler = DPScheduler
-            
+
             self.vllm_config.scheduler_config.max_num_seqs = self.vllm_config.scheduler_config.max_num_seqs * dp_size
             self.vllm_config.scheduler_config.max_num_batched_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens * dp_size
 
         else:
             logger.info(f"DP size ({dp_size}) <= 1, using default Scheduler")
-    
+
     def execute_model(
         self,
         scheduler_output: Union[AbstractSchedulerOutput, SchedulerOutput],

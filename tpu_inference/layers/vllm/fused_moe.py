@@ -6,9 +6,9 @@ from jax.experimental.pallas.ops.tpu.megablox.gmm import gmm
 from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
+from tpu_inference.layers.jax.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.linear_common import \
     slice_sharded_tensor_for_concatenation
-from tpu_inference.layers.jax.sharding import ShardingAxisName
 
 P = PartitionSpec
 
@@ -136,12 +136,14 @@ def tensor_sharded_gmm_row_parallel(
     return shard_map(
         _gmm_all_reduce,
         mesh=mesh,
-        in_specs=(P(None, ShardingAxisName.MLP_TENSOR), P(None, None, ShardingAxisName.MLP_TENSOR), P()),
+        in_specs=(P(None, ShardingAxisName.MLP_TENSOR),
+                  P(None, None, ShardingAxisName.MLP_TENSOR), P()),
         out_specs=(P()),
         check_rep=False,
     )(lhs, rhs, group_sizes)
 
-# TODO (wenxindongwork): support model-wise DP.  
+
+# TODO (wenxindongwork): support model-wise DP.
 def expert_sharded_gmm(
     lhs: jax.Array,
     rhs: jax.Array,
@@ -194,8 +196,9 @@ def expert_sharded_gmm(
     gmm_res = shard_map(
         _gmm,
         mesh=mesh,
-        in_specs=(P(), P(ShardingAxisName.EXPERT, None, None), P(), P(ShardingAxisName.EXPERT)),
-        out_specs=(P(ShardingAxisName.EXPERT, None)), 
+        in_specs=(P(), P(ShardingAxisName.EXPERT, None,
+                         None), P(), P(ShardingAxisName.EXPERT)),
+        out_specs=(P(ShardingAxisName.EXPERT, None)),
         check_rep=False,
     )(lhs, rhs, group_sizes, group_offset)
 
@@ -267,7 +270,8 @@ def expert_sharded_gmm(
     return shard_map(
         _ragged_all_to_all,
         mesh=mesh,
-        in_specs=(P(ShardingAxisName.EXPERT, None), P(ShardingAxisName.EXPERT), P(ShardingAxisName.EXPERT), P(ShardingAxisName.EXPERT), P()),
+        in_specs=(P(ShardingAxisName.EXPERT, None), P(ShardingAxisName.EXPERT),
+                  P(ShardingAxisName.EXPERT), P(ShardingAxisName.EXPERT), P()),
         out_specs=(P()),
         check_rep=False,
     )(gmm_res, input_offsets, send_sizes, output_offsets, recv_sizes)
@@ -297,7 +301,8 @@ def jax_fused_moe_func(
     hidden_size = hidden_states.shape[-1]
     num_tokens = hidden_states.size // hidden_size
     assert global_num_experts == w1.shape[0]
-    ep_size = mesh.shape['model'] * mesh.shape["attn_dp"] # only used if use_ep is True.
+    ep_size = mesh.shape['model'] * mesh.shape[
+        "attn_dp"]  # only used if use_ep is True.
     intermediate_size = w2.shape[-1]
     dtype = hidden_states.dtype
     assert (num_tokens * topk) % 16 == 0, (
@@ -305,11 +310,11 @@ def jax_fused_moe_func(
         f"16 but got {num_tokens}*{topk}={num_tokens*topk}")
 
     hidden_states = jax.lax.with_sharding_constraint(
-            hidden_states, NamedSharding(mesh, P(None)))
+        hidden_states, NamedSharding(mesh, P(None)))
 
     gating_output = jax.lax.with_sharding_constraint(
-            gating_output, NamedSharding(mesh, P(None)))
-    
+        gating_output, NamedSharding(mesh, P(None)))
+
     hidden_states = hidden_states.reshape(num_tokens, hidden_size)
     gating_output = gating_output.reshape(num_tokens, global_num_experts)
 

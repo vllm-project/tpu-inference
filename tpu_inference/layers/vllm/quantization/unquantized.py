@@ -9,7 +9,6 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
-from tpu_inference.layers.jax.sharding import ShardingAxisName
 from vllm.attention.layer import Attention
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import (
@@ -23,6 +22,7 @@ from vllm.model_executor.layers.quantization import \
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 
+from tpu_inference.layers.jax.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.fused_moe import jax_fused_moe_func_padded
 from tpu_inference.layers.vllm.linear_common import (
     reorder_concatenated_tensor_for_sharding,
@@ -179,17 +179,22 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         if layer.use_ep:
             w13_weight = jax.device_put(
                 w13_weight,
-                Format(Layout((0, 1, 2)),
-                       NamedSharding(self.mesh, P(ShardingAxisName.EXPERT, None, None))))
+                Format(
+                    Layout((0, 1, 2)),
+                    NamedSharding(self.mesh,
+                                  P(ShardingAxisName.EXPERT, None, None))))
             w2_weight = jax.device_put(
                 w2_weight,
-                Format(Layout((0, 1, 2)),
-                       NamedSharding(self.mesh, P(ShardingAxisName.EXPERT, None, None))))
+                Format(
+                    Layout((0, 1, 2)),
+                    NamedSharding(self.mesh,
+                                  P(ShardingAxisName.EXPERT, None, None))))
         else:
             intermediate_size = w13_weight.shape[1] // 2
             assert intermediate_size == w2_weight.shape[-1]
             output_sizes = [intermediate_size, intermediate_size]
-            n_shards = self.mesh.shape['model'] * self.mesh.shape.get("attn_dp", 1)
+            n_shards = self.mesh.shape['model'] * self.mesh.shape.get(
+                "attn_dp", 1)
             assert intermediate_size % n_shards == 0
             w13_weight = reorder_concatenated_tensor_for_sharding(w13_weight,
                                                                   output_sizes,
@@ -197,12 +202,16 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                                                                   dim=1)
             w13_weight = jax.device_put(
                 w13_weight,
-                Format(Layout((0, 1, 2)),
-                       NamedSharding(self.mesh, P(None, ShardingAxisName.MLP_TENSOR, None))))
+                Format(
+                    Layout((0, 1, 2)),
+                    NamedSharding(self.mesh,
+                                  P(None, ShardingAxisName.MLP_TENSOR, None))))
             w2_weight = jax.device_put(
                 w2_weight,
-                Format(Layout((0, 1, 2)),
-                       NamedSharding(self.mesh, P(None, None, ShardingAxisName.MLP_TENSOR))))
+                Format(
+                    Layout((0, 1, 2)),
+                    NamedSharding(self.mesh,
+                                  P(None, None, ShardingAxisName.MLP_TENSOR))))
         w13_weight = Parameter(torch_view(w13_weight), requires_grad=False)
         w2_weight = Parameter(torch_view(w2_weight), requires_grad=False)
 

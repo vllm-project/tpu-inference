@@ -9,7 +9,6 @@ import jax.numpy as jnp
 import jaxtyping
 import numpy as np
 import torch
-from tpu_inference.layers.jax.sharding import ShardingConfigManager
 import vllm.envs as envs
 from flax import nnx
 from jax.sharding import NamedSharding, PartitionSpec
@@ -35,10 +34,11 @@ from tpu_inference import utils as common_utils
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.sample.rejection_sampler import RejectionSampler
 from tpu_inference.layers.jax.sample.sampling import (compute_logprobs,
-                                                    gather_logprobs, sample)
+                                                      gather_logprobs, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
-from tpu_inference.layers.jax.sharding import ShardingAxisName, build_mesh
+from tpu_inference.layers.jax.sharding import (ShardingAxisName,
+                                               ShardingConfigManager)
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.model_loader import get_model
 from tpu_inference.models.jax.utils.weight_utils import (
@@ -56,9 +56,8 @@ from tpu_inference.runner.speculative_decoding_manager import \
 from tpu_inference.runner.structured_decoding_manager import \
     StructuredDecodingManager
 from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
-from tpu_inference.utils import device_array, make_optimized_mesh, time_function
-from tpu_inference.layers.jax.sharding import ShardingAxisName
-
+from tpu_inference.utils import (device_array, make_optimized_mesh,
+                                 time_function)
 
 logger = init_logger(__name__)
 
@@ -144,11 +143,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.kv_cache_dtype = TPU_STR_DTYPE_TO_TORCH_DTYPE[
                 cache_config.cache_dtype]
 
-        
-        self.data_parallel_mlp_sharding = NamedSharding(self.mesh,
-                                                    PartitionSpec(ShardingAxisName.MLP_DATA))
-        self.data_parallel_attn_sharding = NamedSharding(self.mesh,
-                                                    PartitionSpec(ShardingAxisName.ATTN_DATA))
+        self.data_parallel_mlp_sharding = NamedSharding(
+            self.mesh, PartitionSpec(ShardingAxisName.MLP_DATA))
+        self.data_parallel_attn_sharding = NamedSharding(
+            self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
 
     def _init_random(self):
         if self.model_config.seed is None:
@@ -160,7 +158,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def _init_mesh(self) -> None:
         sharding_strategy: ShardingConfigManager = self.vllm_config.sharding_config
         axis_names = ("data", "attn_dp", "expert", "model")
-        mesh_shape = (sharding_strategy.model_dp_size, sharding_strategy.attn_dp_size, sharding_strategy.expert_size, sharding_strategy.tp_size)
+        mesh_shape = (sharding_strategy.model_dp_size,
+                      sharding_strategy.attn_dp_size,
+                      sharding_strategy.expert_size, sharding_strategy.tp_size)
 
         enforce_device_order = self.vllm_config.sharding_config.device_indexes is not None
         if enforce_device_order:
@@ -215,7 +215,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             min_token_size=max(16, self.dp_size),
             max_token_size=scheduler_config.max_num_batched_tokens,
             padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
-        self.num_tokens_paddings_per_dp = [padding//self.dp_size for padding in self.num_tokens_paddings]
+        self.num_tokens_paddings_per_dp = [
+            padding // self.dp_size for padding in self.num_tokens_paddings
+        ]
         # In case `max_num_tokens < max(num_tokens_paddings)` use the actual
         # padded max value to pre-allocate data structures and pre-compile.
         self.max_num_tokens = self.num_tokens_paddings[-1]
@@ -249,7 +251,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         min_num_reqs = max(MIN_NUM_SEQS, self.dp_size)
         self.num_reqs_paddings = runner_utils.get_req_paddings(
             min_req_size=min_num_reqs, max_req_size=self.max_num_reqs)
-        self.num_reqs_paddings_per_dp = [padding//self.dp_size for padding in self.num_reqs_paddings]
+        self.num_reqs_paddings_per_dp = [
+            padding // self.dp_size for padding in self.num_reqs_paddings
+        ]
 
         # Padding for logits. Without speculative decoding, each request has one position to select from.
         # With speculative decoding, each request has multiple positions to select from.
@@ -328,7 +332,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
     def capture_model(self) -> None:
         self.compilation_manager.capture_model()
-    
+
     @time_function
     def execute_model(
         self,
@@ -374,7 +378,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             spec_decode_metadata,
             logits_indices_selector,
         ) = self._prepare_inputs(scheduler_output)
-        
+
         logger.debug(f"input_ids {input_ids.shape}")
         logger.debug(f"logits_indices {logits_indices.shape}")
 
@@ -509,7 +513,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         if spec_decode_metadata is None:
             next_tokens = np.asarray(jax.device_get(next_tokens))
-            # Map tokens back to the pre-dp shuffling order 
+            # Map tokens back to the pre-dp shuffling order
             if logits_indices_selector is not None:
                 next_tokens = next_tokens[logits_indices_selector]
             selected_token_ids = np.expand_dims(next_tokens[:num_reqs], 1)
@@ -578,7 +582,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         ret = jax.shard_map(
             select_local_fn,
             mesh=self.mesh,
-            in_specs=(PartitionSpec(ShardingAxisName.MLP_DATA), PartitionSpec(ShardingAxisName.MLP_DATA)),
+            in_specs=(PartitionSpec(ShardingAxisName.MLP_DATA),
+                      PartitionSpec(ShardingAxisName.MLP_DATA)),
             out_specs=PartitionSpec(ShardingAxisName.MLP_DATA),
         )(array, indices_to_select)
 
@@ -618,13 +623,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             scheduled_tokens_per_dp_rank[dp_rank].append(
                 scheduler_output.num_scheduled_tokens[req_id])
             num_req_per_dp_rank[dp_rank] += 1
-        
+
         # Find maximum number of scheduled tokens across DP ranks
         max_num_scheduled_tokens_across_dp = max(
             num_scheduled_tokens_per_dp_rank.values())
 
         padded_num_scheduled_tokens_per_dp_rank = runner_utils.get_padded_token_len(
-            self.num_tokens_paddings_per_dp, max_num_scheduled_tokens_across_dp)
+            self.num_tokens_paddings_per_dp,
+            max_num_scheduled_tokens_across_dp)
 
         padded_total_num_scheduled_tokens = (
             padded_num_scheduled_tokens_per_dp_rank * dp_size)
@@ -652,16 +658,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         return (req_ids_dp, req_indices_dp, num_scheduled_tokens_per_dp_rank,
                 scheduled_tokens_per_dp_rank, num_req_per_dp_rank,
                 padded_num_scheduled_tokens_per_dp_rank, padded_num_reqs,
-                padded_total_num_scheduled_tokens,
-                padded_num_reqs_per_dp_rank, logits_indices_selector, max_num_reqs_per_dp_rank)
+                padded_total_num_scheduled_tokens, padded_num_reqs_per_dp_rank,
+                logits_indices_selector, max_num_reqs_per_dp_rank)
 
-    
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
         if self.dp_size > 1:
             return self._prepare_inputs_dp(scheduler_output)
         else:
             return self._prepare_inputs_non_dp(scheduler_output)
-    
+
     def _prepare_inputs_dp(self, scheduler_output: "VllmSchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
@@ -673,8 +678,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         (req_ids_dp, req_indices_dp, num_scheduled_tokens_per_dp_rank,
          scheduled_tokens_per_dp_rank, num_req_per_dp_rank,
          padded_num_scheduled_tokens_per_dp_rank, padded_num_reqs,
-         padded_total_num_scheduled_tokens,
-         padded_num_reqs_per_dp_rank, logits_indices_selector, max_num_reqs_per_dp_rank
+         padded_total_num_scheduled_tokens, padded_num_reqs_per_dp_rank,
+         logits_indices_selector, max_num_reqs_per_dp_rank
          ) = self._prepare_dp_input_metadata(scheduler_output)
 
         # Multi-modal support
@@ -737,20 +742,20 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         for dp_rank in range(dp_size):
             req_offset = dp_rank * max_num_reqs_per_dp_rank
             query_start_loc_cpu = self.query_start_loc_cpu[
-                req_offset + dp_rank:req_offset +
-                max_num_reqs_per_dp_rank + dp_rank + 1]
+                req_offset + dp_rank:req_offset + max_num_reqs_per_dp_rank +
+                dp_rank + 1]
             seq_lens_cpu = self.seq_lens_cpu[req_offset:req_offset +
                                              max_num_reqs_per_dp_rank]
             _num_reqs = num_req_per_dp_rank[dp_rank]
             req_indices = req_indices_dp[dp_rank]
             num_scheduled_tokens_per_req = scheduled_tokens_per_dp_rank[
                 dp_rank]
-            
+
             if _num_reqs == 0:
                 query_start_loc_cpu[:] = 0
                 seq_lens_cpu[:] = 0
                 continue
-            
+
             np.cumsum(
                 num_scheduled_tokens_per_req,
                 out=query_start_loc_cpu[1:_num_reqs + 1],
@@ -758,16 +763,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             query_start_loc_cpu[_num_reqs + 1:] = 1
 
             seq_lens_cpu[:_num_reqs] = (
-                self.input_batch.
-                num_computed_tokens_cpu[req_indices] +
+                self.input_batch.num_computed_tokens_cpu[req_indices] +
                 num_scheduled_tokens_per_req)
             seq_lens_cpu[_num_reqs:] = 0
 
         # populate logits_indices
         for dp_rank in range(dp_size):
             req_offset = dp_rank * padded_num_reqs_per_dp_rank
-            query_loc_req_offset = dp_rank * (max_num_reqs_per_dp_rank +
-                                              1)
+            query_loc_req_offset = dp_rank * (max_num_reqs_per_dp_rank + 1)
             _num_reqs = num_req_per_dp_rank[dp_rank]
 
             logits_indices_cpu = self.logits_indices_cpu[
@@ -793,7 +796,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         positions = self.positions_cpu[:padded_total_num_scheduled_tokens]
         mrope_positions = self.mrope_positions_cpu[:, :
                                                    padded_total_num_scheduled_tokens]
-        
+
         block_tables = self.block_table_cpu[:self.max_num_reqs]
         for dp_rank in range(dp_size):
             req_offset = dp_rank * max_num_reqs_per_dp_rank
@@ -840,7 +843,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.mesh,
             self.input_batch,
             padded_num_reqs,
-            sharding=NamedSharding(self.mesh,PartitionSpec(ShardingAxisName.MLP_DATA)),
+            sharding=NamedSharding(self.mesh,
+                                   PartitionSpec(ShardingAxisName.MLP_DATA)),
         )
         if self.uses_mrope:
             positions = mrope_positions
@@ -851,18 +855,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         query_start_loc_cpu = query_start_loc
         logits_indices_cpu = logits_indices
         seq_lens_cpu = seq_lens
-        
+
         # Place tensors on device
-        (
-            input_ids,
-        ) = device_array(
+        (input_ids, ) = device_array(
             self.mesh,
-            (
-                input_ids,
-            ),
+            (input_ids, ),
             sharding=self.data_parallel_mlp_sharding,
         )
-        
+
         (
             positions,
             block_tables,
@@ -1058,14 +1058,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         attention_metadata.query_start_loc_cpu = query_start_loc_cpu
         attention_metadata.seq_lens_cpu = seq_lens_cpu
         logits_indices_selector = None
-        return (
-            input_ids,
-            attention_metadata,
-            sampling_metadata,
-            logits_indices,
-            spec_decode_metadata,
-            logits_indices_selector
-        )
+        return (input_ids, attention_metadata, sampling_metadata,
+                logits_indices, spec_decode_metadata, logits_indices_selector)
 
     def _get_input_ids_embeds(self, input_ids: jax.Array,
                               mm_embeds: list[jax.Array]):

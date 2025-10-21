@@ -4,7 +4,6 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh
-from tpu_inference.layers.jax.sharding import ShardingAxisName
 from transformers import LlamaConfig, modeling_flax_utils
 from vllm.config import VllmConfig
 
@@ -12,6 +11,7 @@ from tpu_inference import utils
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.attention_interface import attention
 from tpu_inference.layers.jax.rope_interface import apply_rope
+from tpu_inference.layers.jax.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (get_default_maps,
                                                          load_hf_weights)
@@ -33,7 +33,8 @@ class LlamaMLP(nnx.Module):
             intermediate_size,
             use_bias=False,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, ShardingAxisName.MLP_TENSOR)),
+            kernel_init=nnx.with_partitioning(
+                init_fn, (None, ShardingAxisName.MLP_TENSOR)),
             rngs=rng,
         )
         self.up_proj = nnx.Linear(
@@ -41,7 +42,8 @@ class LlamaMLP(nnx.Module):
             intermediate_size,
             use_bias=False,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, ShardingAxisName.MLP_TENSOR)),
+            kernel_init=nnx.with_partitioning(
+                init_fn, (None, ShardingAxisName.MLP_TENSOR)),
             rngs=rng,
         )
         self.down_proj = nnx.Linear(
@@ -49,7 +51,8 @@ class LlamaMLP(nnx.Module):
             hidden_size,
             use_bias=False,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (ShardingAxisName.MLP_TENSOR, None)),
+            kernel_init=nnx.with_partitioning(
+                init_fn, (ShardingAxisName.MLP_TENSOR, None)),
             rngs=rng,
         )
         self.act_fn = modeling_flax_utils.ACT2FN[act]
@@ -88,28 +91,32 @@ class LlamaAttention(nnx.Module):
             "TD,DNH->TNH",
             (self.hidden_size, self.num_heads, self.head_dim),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, ShardingAxisName.ATTN_HEAD, None)),
+            kernel_init=nnx.with_partitioning(
+                init_fn, (None, ShardingAxisName.ATTN_HEAD, None)),
             rngs=rng,
         )
         self.k_proj = nnx.Einsum(
             "TD,DKH->TKH",
             (self.hidden_size, self.num_kv_heads, self.head_dim),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, ShardingAxisName.ATTN_HEAD, None)),
+            kernel_init=nnx.with_partitioning(
+                init_fn, (None, ShardingAxisName.ATTN_HEAD, None)),
             rngs=rng,
         )
         self.v_proj = nnx.Einsum(
             "TD,DKH->TKH",
             (self.hidden_size, self.num_kv_heads, self.head_dim),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, ShardingAxisName.ATTN_HEAD, None)),
+            kernel_init=nnx.with_partitioning(
+                init_fn, (None, ShardingAxisName.ATTN_HEAD, None)),
             rngs=rng,
         )
         self.o_proj = nnx.Einsum(
             "TNH,NHD->TD",
             (self.num_heads, self.head_dim, self.hidden_size),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (ShardingAxisName.ATTN_HEAD, None, None)),
+            kernel_init=nnx.with_partitioning(
+                init_fn, (ShardingAxisName.ATTN_HEAD, None, None)),
             rngs=rng,
         )
 
@@ -232,7 +239,8 @@ class LlamaModel(nnx.Module):
             num_embeddings=vocab_size,
             features=hidden_size,
             param_dtype=dtype,
-            embedding_init=nnx.with_partitioning(init_fn, (ShardingAxisName.VOCAB, None)),
+            embedding_init=nnx.with_partitioning(
+                init_fn, (ShardingAxisName.VOCAB, None)),
             rngs=rng,
         )
         self.layers = [

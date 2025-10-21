@@ -1,6 +1,5 @@
 import torchax
 from jax.sharding import Mesh, PartitionSpec
-from tpu_inference.layers.jax.sharding import ShardingAxisName
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE, FusedMoEConfig
@@ -12,6 +11,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 
+from tpu_inference.layers.jax.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.linear_common import \
     get_model_matmul_fusion_assignment
 from tpu_inference.utils import TPU_SECOND_LAST_MINOR
@@ -35,21 +35,21 @@ class JaxCommonLinearConfig:
         self.enable_sequence_parallelism = vllm_config.compilation_config.pass_config.enable_sequence_parallelism
         self.input_sharding = None
         self.output_sharding = None
-        self.tp_size = self.mesh.shape['model']*self.mesh.shape.get('attn_dp', 1)
-        
+        self.tp_size = self.mesh.shape['model'] * self.mesh.shape.get(
+            'attn_dp', 1)
+
         if isinstance(layer, RowParallelLinear):
             self.weight_sharding = P(None, ShardingAxisName.MLP_TENSOR)
             if self.enable_sequence_parallelism:
                 self.output_sharding = P(ShardingAxisName.MLP_TENSOR, None)
         elif isinstance(layer, ColumnParallelLinear):
-            if isinstance(
-                    layer, QKVParallelLinear):
+            if isinstance(layer, QKVParallelLinear):
                 self.input_sharding = P(ShardingAxisName.ATTN_DATA, None)
                 self.weight_sharding = P('model', None)
                 self.output_sharding = P(ShardingAxisName.ATTN_DATA, "model")
             else:
                 self.weight_sharding = P(ShardingAxisName.MLP_TENSOR, None)
-            
+
             if self.enable_sequence_parallelism:
                 # TODO(wenxindongwork): should sequence be sharded on the attn_dp axis as well?
                 self.input_sharding = P(ShardingAxisName.MLP_TENSOR, None)
@@ -74,7 +74,7 @@ class JaxCommonLinearConfig:
         if isinstance(self.weight_sharding[0], tuple):
             self.n_shards = 1
             for axis in self.weight_sharding[0]:
-                self.n_shards *= self.mesh.shape.get(axis, 1) 
+                self.n_shards *= self.mesh.shape.get(axis, 1)
         else:
             self.n_shards = self.mesh.shape.get(self.weight_sharding[0], 1)
 

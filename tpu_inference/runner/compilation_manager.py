@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple
 import jax
 import jax.numpy as jnp
 import numpy as np
-from tpu_inference.layers.jax.sharding import ShardingAxisName
 import vllm.envs as envs
 from jax.sharding import NamedSharding, PartitionSpec
 
@@ -14,6 +13,7 @@ from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.sample.sampling import sample
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
+from tpu_inference.layers.jax.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import device_array
 
@@ -95,12 +95,15 @@ class CompilationManager:
         assert num_tokens is not None
 
         dp_size = self.runner.vllm_config.sharding_config.total_dp_size
-        dp_sharding = NamedSharding(self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, ))
-    
+        dp_sharding = NamedSharding(
+            self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, ))
+
         # Keep existing pattern for complex array operations
         block_tables = self.runner.block_table_cpu[:self.runner.max_num_reqs]
         block_tables = block_tables.reshape(-1)
-        block_tables = device_array(self.runner.mesh, block_tables, sharding=dp_sharding)
+        block_tables = device_array(self.runner.mesh,
+                                    block_tables,
+                                    sharding=dp_sharding)
 
         seq_lens = self._create_dummy_tensor((self.runner.max_num_reqs, ),
                                              jnp.int32, dp_sharding)
@@ -110,7 +113,8 @@ class CompilationManager:
         # Keep existing pattern for specific value arrays
         request_distribution = np.array([0, 0, 0] * dp_size, dtype=np.int32)
         request_distribution = device_array(self.runner.mesh,
-                                            request_distribution, sharding=dp_sharding)
+                                            request_distribution,
+                                            sharding=dp_sharding)
 
         attention_metadata = AttentionMetadata(
             input_positions=positions,
@@ -154,9 +158,12 @@ class CompilationManager:
 
     def _precompile_backbone_text_only(self) -> None:
         for num_tokens in self.runner.num_tokens_paddings:
-            dp_sharding = NamedSharding(self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, ))
-            input_ids = self._create_dummy_tensor((num_tokens, ), jnp.int32, dp_sharding)
-            positions = self._create_dummy_tensor((num_tokens, ), jnp.int32, dp_sharding)
+            dp_sharding = NamedSharding(
+                self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, ))
+            input_ids = self._create_dummy_tensor((num_tokens, ), jnp.int32,
+                                                  dp_sharding)
+            positions = self._create_dummy_tensor((num_tokens, ), jnp.int32,
+                                                  dp_sharding)
             self._precompile_backbone_helper("backbone",
                                              input_ids=input_ids,
                                              positions=positions,
@@ -244,9 +251,10 @@ class CompilationManager:
             source_paddings=self.runner.num_tokens_paddings,
             indices_paddings=index_paddings,
             hidden_dim=hsize,
-            sharding=NamedSharding(self.runner.mesh, PartitionSpec(ShardingAxisName.MLP_DATA)),
+            sharding=NamedSharding(self.runner.mesh,
+                                   PartitionSpec(ShardingAxisName.MLP_DATA)),
         )
-        
+
         if self.runner.speculative_config:
             vocab_size = self.runner.model_config.get_vocab_size()
             self._precompile_select_from_array_helper(
@@ -272,8 +280,10 @@ class CompilationManager:
         hsize = self.runner.model_config.get_hidden_size()
         leading_shape = self.runner.num_reqs_paddings if not self.runner.speculative_config else self.runner.num_logits_paddings
         for num_reqs in leading_shape:
-            hidden_states = self._create_dummy_tensor((num_reqs, hsize),
-                                                      jnp.bfloat16, NamedSharding(self.runner.mesh, PartitionSpec(ShardingAxisName.MLP_DATA)))
+            hidden_states = self._create_dummy_tensor(
+                (num_reqs, hsize), jnp.bfloat16,
+                NamedSharding(self.runner.mesh,
+                              PartitionSpec(ShardingAxisName.MLP_DATA)))
             with self.runner.maybe_select_dummy_loras(
                     self.runner.lora_config,
                     np.array([num_reqs], dtype=np.int32)):
@@ -291,8 +301,9 @@ class CompilationManager:
         logger.info("Compiling sampling with different input shapes.")
         hsize = self.runner.model_config.get_vocab_size()
         for num_reqs in self.runner.num_reqs_paddings:
-            sharding = NamedSharding(self.runner.mesh,
-                                     PartitionSpec(ShardingAxisName.MLP_DATA, "model"))
+            sharding = NamedSharding(
+                self.runner.mesh,
+                PartitionSpec(ShardingAxisName.MLP_DATA, "model"))
             logits = self._create_dummy_tensor((num_reqs, hsize), jnp.bfloat16,
                                                sharding)
             for do_sampling in (True, False):
@@ -474,8 +485,9 @@ class CompilationManager:
 
         for num_logits in self.runner.num_logits_paddings:
             hidden_states = self._create_dummy_tensor(
-                (num_logits, hidden_size), jnp.bfloat16, NamedSharding(self.runner.mesh,
-                                     PartitionSpec(ShardingAxisName.MLP_DATA)))
+                (num_logits, hidden_size), jnp.bfloat16,
+                NamedSharding(self.runner.mesh,
+                              PartitionSpec(ShardingAxisName.MLP_DATA)))
             self._run_compilation(
                 "eagle3_get_draft_token_ids",
                 self.runner.drafter._get_draft_token_ids,
