@@ -330,7 +330,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         scheduler_output: "VllmSchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> ModelRunnerOutput:
-        return self._execute_model(scheduler_output)[1]
+        with jax.disable_jit():
+            return self._execute_model(scheduler_output)[1]
 
     def _execute_model(
         self,
