@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 import os
+import time
 from collections import defaultdict
 from collections.abc import Sequence
+from functools import wraps
 from typing import Any, Callable, List, Tuple
 
 import jax
@@ -294,10 +296,6 @@ def get_jax_dtype_from_str_dtype(str_dtype: str) -> jnp.dtype:
     """
     str_dtype = str_dtype.lower().strip()
     return TPU_STR_DTYPE_TO_JAX_DTYPE.get(str_dtype)
-
-
-import time
-from functools import wraps
 
 
 def time_function(func):
