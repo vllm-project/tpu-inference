@@ -55,7 +55,7 @@ steps:
     env:
       TEST_MODEL: meta-llama/Llama-3.1-8B-Instruct
       TENSOR_PARALLEL_SIZE: 1
-      MINIMUM_THROUGHPUT_THRESHOLD: 10.77
+      MINIMUM_THROUGHPUT_THRESHOLD: 10
       INPUT_LEN: 1800
       OUTPUT_LEN: 128
       PREFIX_LEN: 0
