@@ -1,11 +1,15 @@
 import json
 import math
 from dataclasses import asdict, dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 from jax.sharding import Mesh
 
 from tpu_inference import utils
+
+if TYPE_CHECKING:
+    from vllm.v1.configs.vllm_config import VllmConfig
 
 
 class ShardingAxisName:
@@ -71,7 +75,7 @@ class ShardingConfigManager:
 
     @classmethod
     def from_vllm_config(cls,
-                         vllm_config: "VllmConfig") -> 'ShardingConfigManager':
+                         vllm_config: 'VllmConfig') -> 'ShardingConfigManager':
         """Create a ShardingConfigManager from a VllmConfig object.
 
         Args:
@@ -349,7 +353,7 @@ class Sharding:
                  prefill_rules: dict | None = None,
                  generate_rules: dict | None = None,
                  default_rules_cls=ShardingRulesConfig,
-                 vllm_config: "VllmConfig" = None):
+                 vllm_config: 'VllmConfig' = None):
         """Initializes the Sharding manager.
 
         Args:
