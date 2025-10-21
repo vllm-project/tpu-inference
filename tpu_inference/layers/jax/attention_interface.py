@@ -276,7 +276,7 @@ def sharded_ragged_paged_attention(
     v_scale: float | None = None,
 ):
     """Shards along KV heads."""
-    
+
     qkv_spec = P(ShardingAxisName.ATTN_DATA, "model", None)
     kv_cache_spec = P(ShardingAxisName.ATTN_DATA, None, "model")
     in_specs = (

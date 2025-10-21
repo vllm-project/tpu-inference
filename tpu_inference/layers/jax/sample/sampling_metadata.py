@@ -62,9 +62,15 @@ class TPUSupportedSamplingMetadata:
 
         # Slice persistent device tensors to a fixed pre-compiled padded shape.
         return cls(
-            temperature=device_array(mesh, temp_tensor[:padded_num_reqs], sharding=sharding),
-            top_p=device_array(mesh, top_p_tensor[:padded_num_reqs], sharding=sharding),
-            top_k=device_array(mesh, top_k_tensor[:padded_num_reqs], sharding=sharding),
+            temperature=device_array(mesh,
+                                     temp_tensor[:padded_num_reqs],
+                                     sharding=sharding),
+            top_p=device_array(mesh,
+                               top_p_tensor[:padded_num_reqs],
+                               sharding=sharding),
+            top_k=device_array(mesh,
+                               top_k_tensor[:padded_num_reqs],
+                               sharding=sharding),
             do_sampling=not input_batch.all_greedy,
             logprobs=needs_logprobs,
         )

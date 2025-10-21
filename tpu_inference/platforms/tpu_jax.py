@@ -11,9 +11,8 @@ from vllm.inputs import ProcessorInputs, PromptType
 from vllm.platforms.interface import Platform, PlatformEnum
 from vllm.sampling_params import SamplingParams, SamplingType
 
-from tpu_inference.logger import init_logger
 from tpu_inference.layers.jax.sharding import ShardingConfigManager
-
+from tpu_inference.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.attention.backends.registry import _Backend
@@ -114,15 +113,15 @@ class TpuPlatform(Platform):
 
     @classmethod
     def _initialize_sharding_config(cls, vllm_config: VllmConfig) -> None:
-        
+
         sharding_config = ShardingConfigManager.from_vllm_config(vllm_config)
         vllm_config.sharding_config = sharding_config
-        
+
         logger.info(f"Initialized sharding configuration: {sharding_config}")
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        
+
         if not envs.VLLM_USE_V1:
             raise RuntimeError("VLLM_USE_V1=1 must be set for JAX backend.")
 
@@ -130,7 +129,7 @@ class TpuPlatform(Platform):
             assert not envs.VLLM_ENABLE_V1_MULTIPROCESSING, (
                 "VLLM_ENABLE_V1_MULTIPROCESSING must be 0 when using Pathways(JAX_PLATFORMS=proxy)"
             )
-        
+
         cls._initialize_sharding_config(vllm_config)
  
         from vllm.config import CompilationMode
@@ -220,7 +219,7 @@ class TpuPlatform(Platform):
             assert kv_transfer_config.kv_connector == "TPUConnector"
         # Late initialization to avoid circular import
         from tpu_inference.models.jax.utils.quantization.quantization_utils import \
-        update_vllm_config_for_qwix_quantization
+            update_vllm_config_for_qwix_quantization
 
         update_vllm_config_for_qwix_quantization(vllm_config)
 
