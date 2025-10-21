@@ -132,8 +132,8 @@ class TpuPlatform(Platform):
 
         # TPU only supports DYNAMO_TRACE_ONCE compilation level
         # NOTE(xiang): the compilation_config is not used by jax.
-        if compilation_config.level != CompilationMode.DYNAMO_TRACE_ONCE:
-            compilation_config.level = CompilationMode.DYNAMO_TRACE_ONCE
+        if compilation_config.mode != CompilationMode.DYNAMO_TRACE_ONCE:
+            compilation_config.mode = CompilationMode.DYNAMO_TRACE_ONCE
 
         if compilation_config.backend == "":
             compilation_config.backend = "openxla"
