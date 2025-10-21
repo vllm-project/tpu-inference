@@ -11,14 +11,14 @@ from vllm.distributed import get_pp_group
 
 from tpu_inference import utils
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
 from tpu_inference.layers.jax.attention_interface import attention
+from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
 from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.logger import init_logger
-from tpu_inference.models.jax.utils.weight_utils import (get_default_maps,
-                                                         load_hf_weights)
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
+from tpu_inference.models.jax.utils.weight_utils import (get_default_maps,
+                                                         load_hf_weights)
 
 logger = init_logger(__name__)
 
@@ -235,8 +235,8 @@ class LlamaModel(nnx.Module):
         self.is_first_rank = get_pp_group().is_first_rank
         self.is_last_rank = get_pp_group().is_last_rank
 
-        if get_pp_group().is_first_rank or (
-            hf_config.tie_word_embeddings and get_pp_group().is_last_rank):
+        if get_pp_group().is_first_rank or (hf_config.tie_word_embeddings
+                                            and get_pp_group().is_last_rank):
             self.embed = nnx.Embed(
                 num_embeddings=vocab_size,
                 features=hidden_size,
@@ -254,8 +254,7 @@ class LlamaModel(nnx.Module):
                 rng=rng,
                 mesh=mesh,
                 # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
-                kv_cache_dtype=vllm_config.cache_config.cache_dtype)
-        )
+                kv_cache_dtype=vllm_config.cache_config.cache_dtype))
         if get_pp_group().is_last_rank:
             self.norm = nnx.RMSNorm(
                 hidden_size,
@@ -266,7 +265,7 @@ class LlamaModel(nnx.Module):
             )
         else:
             self.norm = PPMissingLayer()
-        
+
         if get_pp_group().is_last_rank:
             if model_config.hf_config.tie_word_embeddings:
                 self.lm_head = self.embed.embedding
@@ -293,7 +292,8 @@ class LlamaModel(nnx.Module):
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
         intermediate_tensors: JaxIntermediateTensors | None,
-    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]] | Tuple[List[jax.Array], JaxIntermediateTensors]:
+    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]] | Tuple[
+            List[jax.Array], JaxIntermediateTensors]:
         if self.is_first_rank:
             x = self.embed(input_ids)
         else:
@@ -301,10 +301,8 @@ class LlamaModel(nnx.Module):
             x = intermediate_tensors["hidden_states"]
 
         aux_hidden_states = []
-        # for i, layer in enumerate(self.layers):
         for i, layer in enumerate(
-            islice(self.layers, self.start_layer, self.end_layer)
-        ):
+                islice(self.layers, self.start_layer, self.end_layer)):
             if i in self.aux_hidden_state_layers:
                 aux_hidden_states.append(x)
             kv_cache = kv_caches[i]
@@ -315,9 +313,9 @@ class LlamaModel(nnx.Module):
             )
             kv_caches[i] = kv_cache
         if not self.is_last_rank:
-            return kv_caches, JaxIntermediateTensors(
-                {"hidden_states": x}
-            ), aux_hidden_states    # add aux_hidden_states to make the return consistent.
+            # Note: add aux_hidden_states to make the output spec consistent.
+            return kv_caches, JaxIntermediateTensors({"hidden_states":
+                                                      x}), aux_hidden_states
         x = self.norm(x)
         return kv_caches, x, aux_hidden_states
 
@@ -355,13 +353,8 @@ class LlamaForCausalLM(nnx.Module):
         _is_first_rank: bool,
         _is_last_rank: bool,
         *args,
-    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]] | Tuple[List[jax.Array], JaxIntermediateTensors]:
-        # kv_caches, x, aux_hidden_states = self.model(
-        #     kv_caches,
-        #     input_ids,
-        #     attention_metadata,
-        # )
-        # return kv_caches, x, aux_hidden_states
+    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]] | Tuple[
+            List[jax.Array], JaxIntermediateTensors]:
         return self.model(
             kv_caches,
             input_ids,

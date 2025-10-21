@@ -13,7 +13,7 @@ import vllm.envs as envs
 from flax import nnx
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
-from torchax.ops.mappings import j2t_dtype
+from torchax.ops.mappings import j2t_dtype, t2j_dtype
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
@@ -801,8 +801,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             shard=shard)
 
     def get_intermediate_tensor_spec(self, num_tokens: int):
-        from torchax.ops.mappings import t2j_dtype
-        jax_dtype = t2j_dtype(self.dtype)
+        impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
+        jax_dtype = t2j_dtype(self.dtype) if impl == "vllm" else self.dtype
         num_padded_tokens = runner_utils.get_padded_token_len(
             self.num_tokens_paddings, num_tokens)
         sharding = NamedSharding(self.mesh, P())

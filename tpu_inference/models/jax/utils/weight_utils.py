@@ -148,8 +148,8 @@ def get_param(params: nnx.State, path: str) -> nnx.State:
     return plevel
 
 
-def get_param_and_sharding(params: nnx.State, shardings: Any,
-                           path: str, rank: int) -> tuple[nnx.State, nnx.State]:
+def get_param_and_sharding(params: nnx.State, shardings: Any, path: str,
+                           rank: int) -> tuple[nnx.State, nnx.State]:
     keys = path.split(".")
     plevel = params
     slevel = shardings
@@ -325,12 +325,15 @@ def _load_hf_weights_on_thread(vllm_config,
             has_digit = any(char.isdigit() for char in hf_key)
             # add the suffix after digits to avoid it matches "layers.10" with "layers.1"
             suffix = "." if has_digit else ""
-            return any(f'{pp_missing_layer}{suffix}' in hf_key for pp_missing_layer in pp_missing_layers)
-            
+            return any(f'{pp_missing_layer}{suffix}' in hf_key
+                       for pp_missing_layer in pp_missing_layers)
+
         if pp_missing_layers and is_pp_missing_layer(hf_key):
-            logger.warning(f'{rank=} Skip loading {hf_key} as it does not belong to the current PP rank')
+            logger.warning(
+                f'{rank=} Skip loading {hf_key} as it does not belong to the current PP rank'
+            )
             continue
-            
+
         model_weight, model_sharding = get_param_and_sharding(
             params, shardings, model_key, rank)
 
@@ -404,6 +407,7 @@ def load_hf_weights(vllm_config,
                     keep_original_dtype_keys_regex: list[str] | None = None,
                     pp_missing_layers: list[str] | None = None,
                     rank: int | None = 0):
+    # TODO: remove rank after debug finishes.
     """Load weights from all model weights files to the model, run in multi threads."""
     if is_draft_model:
         model_path = vllm_config.speculative_config.draft_model_config.model
@@ -431,8 +435,7 @@ def load_hf_weights(vllm_config,
                 filter_regex=filter_regex,
                 keep_original_dtype_keys_regex=keep_original_dtype_keys_regex,
                 pp_missing_layers=pp_missing_layers,
-                rank=rank)
-            for weights_file in weights_files
+                rank=rank) for weights_file in weights_files
         ]
         for future in futures:
             future.result()
