@@ -4,6 +4,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh
+from tpu_inference.layers.jax.sharding import ShardingAxisName
 from transformers import Qwen2Config, modeling_flax_utils
 from vllm.config import VllmConfig
 
@@ -32,7 +33,7 @@ class Qwen2MLP(nnx.Module):
             intermediate_size,
             use_bias=False,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
+            kernel_init=nnx.with_partitioning(init_fn, (None, ShardingAxisName.MLP_TENSOR)),
             rngs=rng,
         )
         self.up_proj = nnx.Linear(
@@ -40,7 +41,7 @@ class Qwen2MLP(nnx.Module):
             intermediate_size,
             use_bias=False,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
+            kernel_init=nnx.with_partitioning(init_fn, (None, ShardingAxisName.MLP_TENSOR)),
             rngs=rng,
         )
         self.down_proj = nnx.Linear(
@@ -48,7 +49,7 @@ class Qwen2MLP(nnx.Module):
             hidden_size,
             use_bias=False,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
+            kernel_init=nnx.with_partitioning(init_fn, (ShardingAxisName.MLP_TENSOR, None)),
             rngs=rng,
         )
         self.act_fn = modeling_flax_utils.ACT2FN[act]

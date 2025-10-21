@@ -1,19 +1,22 @@
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+import math
 
 import numpy as np
 from jax.sharding import Mesh
-from vllm.config import VllmConfig
+from tpu_inference import utils
 
-BATCH_AXIS_NAME = 'data'
-SEQUENCE_AXIS_NAME = 'data'
-DATA_AXIS_NAME = 'data'
-ATTN_HEAD_AXIS_NAME = 'model'
-ATTN_TENSOR_AXIS_NAME = None
-MLP_TENSOR_AXIS_NAME = ('model', 'expert')
-MOE_TENSOR_AXIS_NAME = 'model'
-EXPERT_AXIS_NAME = 'expert'
-VOCAB_AXIS_NAME = ('data', 'expert', 'model')
+
+class ShardingAxisName:
+    SEQUENCE = ('data', 'attn_dp')
+    ATTN_DATA = ('data', 'attn_dp')
+    MLP_DATA = 'data'
+    ATTN_HEAD = 'model'
+    ATTN_TENSOR = None
+    MLP_TENSOR = ('model', 'expert', 'attn_dp')
+    MOE_TENSOR = ('model', 'attn_dp')
+    EXPERT = ('expert', 'model', 'attn_dp')
+    VOCAB = ('expert', 'attn_dp', 'model')
 
 
 @dataclass
@@ -36,8 +39,126 @@ class ShardingStrategy:
     expert_parallelism: int = 1
     sequence_parallelism: int = 1
     data_parallelism: int = 1
+    attention_data_parallelism: int = 1
 
+class ShardingConfigManager:
+    """Manages sharding configuration parsing and access from vLLM config.
+        
+    Usage:
+        # During vLLM initialization
+        sharding_config = ShardingConfigManager.from_vllm_config(vllm_config)
+        
+        # Clean access to config values
+        tp_size = sharding_config.tp_size
+    """
+    
+    def __init__(self, sharding_strategy: ShardingStrategy, device_indexes: list = None):
+        """
+        Args:
+            sharding_strategy: The parsed ShardingStrategy object.
+            device_indexes: Optional list of device indexes to use.
+        """
+        self.sharding_strategy = sharding_strategy
+        self.device_indexes = device_indexes
+        self._total_devices = int(math.prod(asdict(sharding_strategy).values()))
+        if device_indexes: 
+            assert self._total_devices == len(device_indexes)
+    
+    @classmethod
+    def from_vllm_config(cls, vllm_config: "VllmConfig") -> 'ShardingConfigManager':
+        """Create a ShardingConfigManager from a VllmConfig object.
+        
+        Args:
+            vllm_config: The vLLM configuration object.
+            
+        Returns:
+            A configured ShardingConfigManager instance.
+        """
+        additional_config = vllm_config.additional_config.get("sharding", {}).get("sharding_strategy", {})
+        device_indexes = additional_config.get("device_indexes")
+        
+        parallel_config = vllm_config.parallel_config
+        tensor_parallelism = parallel_config.tensor_parallel_size
+        data_parallelism = parallel_config.data_parallel_size
+        expert_parallelism = additional_config.get("expert_parallelism", 1)
+        sequence_parallelism = additional_config.get("sequence_parallelism", 1)
+        
+        # Replicate attention layer with num_kv_heads < TP
+        enable_dp_attention = additional_config.get("enable_dp_attention", False)
+        if enable_dp_attention:
+            num_kv_heads = vllm_config.model_config.get_total_num_kv_heads()
+            kv_dtype = utils.get_jax_dtype_from_str_dtype(
+                vllm_config.cache_config.cache_dtype)
+            # DO_NOT_SUBMIT(wenxindong): Should this be 2 or 4?
+            actual_num_kv_heads = num_kv_heads / (2 // np.dtype(kv_dtype).itemsize)
+            attn_dp = max(int(tensor_parallelism // actual_num_kv_heads), 1)
+            tensor_parallelism = tensor_parallelism // attn_dp
+        else:
+            attn_dp = 1
+            
+        sharding_strategy = ShardingStrategy(
+            tensor_parallelism=tensor_parallelism,
+            data_parallelism=data_parallelism,
+            expert_parallelism=expert_parallelism,
+            sequence_parallelism=sequence_parallelism,
+            attention_data_parallelism = attn_dp
+        )
+        
+        # Must override to avoid vLLM spinning up multiple DP engines. 
+        if vllm_config.parallel_config.data_parallel_size > 1:
+            vllm_config.parallel_config.data_parallel_size = 1
+            vllm_config.parallel_config.data_parallel_rank = 0 
+            vllm_config.parallel_config.data_parallel_size_local = 1
+        
+        cls.validate(vllm_config, sharding_strategy)
+        return cls(sharding_strategy, device_indexes)
+    
+    @classmethod
+    def validate(cls, vllm_config, sharding_strategy):
+        # Check speculative decoding
+        if vllm_config.speculative_config is not None:
+            total_dp_size = sharding_strategy.data_parallelism * sharding_strategy.attention_data_parallelism
+            raise ValueError(
+                f"Speculative decoding is not supported with data parallelism "
+                f"(DP size: {total_dp_size}). Please disable speculative decoding or "
+                f"set data parallelism to 1."
+            )
+        # Check LoRA
+        if vllm_config.lora_config is not None:
+            total_dp_size = sharding_strategy.data_parallelism * sharding_strategy.attention_data_parallelism
+            raise ValueError(
+                f"LoRA is not supported with data parallelism "
+                f"(DP size: {total_dp_size}). Please disable LoRA or "
+                f"set data parallelism to 1."
+            )
 
+    @property
+    def total_dp_size(self) -> int:
+        return self.sharding_strategy.data_parallelism * self.sharding_strategy.attention_data_parallelism
+    @property
+    def model_dp_size(self) -> int:
+        return self.sharding_strategy.data_parallelism
+    @property
+    def attn_dp_size(self) -> int:
+        return self.sharding_strategy.attention_data_parallelism
+    @property
+    def tp_size(self) -> int:
+        return self.sharding_strategy.tensor_parallelism
+    @property
+    def expert_size(self) -> int:
+        return self.sharding_strategy.expert_parallelism
+    @property
+    def sequence_size(self) -> int:
+        return self.sharding_strategy.sequence_parallelism
+    @property
+    def total_devices(self) -> int:
+        return self._total_devices
+    
+    def __str__(self):
+        return (f"ShardingConfigManager(total_devices={self.total_devices}, "
+                f"sharding_strategy={self.sharding_strategy}, "
+                f"device_indexes={self.device_indexes})")
+    
 #TODO split this into block unique sharding config, i.e. attentionShardingConfig, MoEShardingConfig
 @dataclass
 class ShardingRulesConfig:
@@ -215,7 +336,7 @@ class Sharding:
                  prefill_rules: dict | None = None,
                  generate_rules: dict | None = None,
                  default_rules_cls=ShardingRulesConfig,
-                 vllm_config: VllmConfig = None):
+                 vllm_config: "VllmConfig" = None):
         """Initializes the Sharding manager.
 
         Args:
@@ -298,61 +419,61 @@ class Sharding:
 
         # Populate Prefill Config
         # During prefill, sequence length is long, so we shard along the sequence axis.
-        prefill_rules.activation_attention_td = (DATA_AXIS_NAME,
-                                                 ATTN_TENSOR_AXIS_NAME)
-        prefill_rules.activation_attention_out_td = (DATA_AXIS_NAME,
-                                                     ATTN_TENSOR_AXIS_NAME)
-        prefill_rules.activation_q_td = (DATA_AXIS_NAME, ATTN_TENSOR_AXIS_NAME)
+        prefill_rules.activation_attention_td = (ShardingAxisName.ATTN_DATA,
+                                                 ShardingAxisName.ATTN_TENSOR)
+        prefill_rules.activation_attention_out_td = (ShardingAxisName.ATTN_DATA,
+                                                     ShardingAxisName.ATTN_TENSOR)
+        prefill_rules.activation_q_td = (ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_TENSOR)
         #TODO: the default qkv and kvcache is sharded on head dim
         # We may change it after we finalize the KVCache design
-        prefill_rules.attn_o_tnh = (DATA_AXIS_NAME, ATTN_HEAD_AXIS_NAME, None)
-        prefill_rules.query_tnh = (DATA_AXIS_NAME, ATTN_HEAD_AXIS_NAME, None)
-        prefill_rules.keyvalue_skh = (DATA_AXIS_NAME, ATTN_HEAD_AXIS_NAME,
+        prefill_rules.attn_o_tnh = (ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
+        prefill_rules.query_tnh = (ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
+        prefill_rules.keyvalue_skh = (ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD,
                                       None)
 
         # Populate Generate (Decode) Config
         # During decode, batch size is the large dimension, so we shard along the batch axis.
-        generate_rules.activation_attention_td = (DATA_AXIS_NAME,
-                                                  ATTN_TENSOR_AXIS_NAME)
-        generate_rules.activation_attention_out_td = (DATA_AXIS_NAME,
-                                                      ATTN_TENSOR_AXIS_NAME)
-        generate_rules.activation_q_td = (DATA_AXIS_NAME,
-                                          ATTN_TENSOR_AXIS_NAME)
+        generate_rules.activation_attention_td = (ShardingAxisName.ATTN_DATA,
+                                                  ShardingAxisName.ATTN_TENSOR)
+        generate_rules.activation_attention_out_td = (ShardingAxisName.MLP_DATA,
+                                                      ShardingAxisName.ATTN_TENSOR)
+        generate_rules.activation_q_td = (ShardingAxisName.ATTN_DATA,
+                                          ShardingAxisName.ATTN_TENSOR)
         #TODO: the default qkv and kvcache is sharded on head dim
         # We may change it after we finalize the KVCache design
-        generate_rules.attn_o_tnh = (DATA_AXIS_NAME, ATTN_HEAD_AXIS_NAME, None)
-        generate_rules.query_tnh = (DATA_AXIS_NAME, ATTN_HEAD_AXIS_NAME, None)
-        generate_rules.keyvalue_skh = (DATA_AXIS_NAME, ATTN_HEAD_AXIS_NAME,
+        generate_rules.attn_o_tnh = (ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
+        generate_rules.query_tnh = (ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
+        generate_rules.keyvalue_skh = (ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD,
                                        None)
-        generate_rules.attn_q_weight_dnh = (None, ATTN_HEAD_AXIS_NAME,
-                                            ATTN_TENSOR_AXIS_NAME)
-        generate_rules.attn_k_weight_dkh = (None, ATTN_HEAD_AXIS_NAME,
-                                            ATTN_TENSOR_AXIS_NAME)
-        generate_rules.attn_v_weight_dkh = (None, ATTN_HEAD_AXIS_NAME,
-                                            ATTN_TENSOR_AXIS_NAME)
-        generate_rules.attn_o_weight_nhd = (ATTN_HEAD_AXIS_NAME, None,
-                                            ATTN_TENSOR_AXIS_NAME)
-        generate_rules.activation_ffw_td = (DATA_AXIS_NAME, None)
-        generate_rules.activation_ffw_ted = (DATA_AXIS_NAME, EXPERT_AXIS_NAME,
+        generate_rules.attn_q_weight_dnh = (None, ShardingAxisName.ATTN_HEAD,
+                                            ShardingAxisName.ATTN_TENSOR)
+        generate_rules.attn_k_weight_dkh = (None, ShardingAxisName.ATTN_HEAD,
+                                            ShardingAxisName.ATTN_TENSOR)
+        generate_rules.attn_v_weight_dkh = (None, ShardingAxisName.ATTN_HEAD,
+                                            ShardingAxisName.ATTN_TENSOR)
+        generate_rules.attn_o_weight_nhd = (ShardingAxisName.ATTN_HEAD, None,
+                                            ShardingAxisName.ATTN_TENSOR)
+        generate_rules.activation_ffw_td = (ShardingAxisName.MLP_DATA, None)
+        generate_rules.activation_ffw_ted = (ShardingAxisName.MLP_DATA, ShardingAxisName.EXPERT,
                                              None)
-        generate_rules.ffw_hidden_tf = (DATA_AXIS_NAME, MLP_TENSOR_AXIS_NAME)
+        generate_rules.ffw_hidden_tf = (ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR)
         # FFW weights are typically sharded along the hidden dimension (F).
-        generate_rules.ffw_weight_df = (None, MLP_TENSOR_AXIS_NAME)
-        generate_rules.ffw_weight_fd = (MLP_TENSOR_AXIS_NAME, None)
+        generate_rules.ffw_weight_df = (None, ShardingAxisName.MLP_TENSOR)
+        generate_rules.ffw_weight_fd = (ShardingAxisName.MLP_TENSOR, None)
         # MoE weights are sharded along the expert axis and the hidden dimension.
-        generate_rules.moe_weights_edf = (EXPERT_AXIS_NAME, None,
-                                          MOE_TENSOR_AXIS_NAME)
-        generate_rules.moe_weights_efd = (EXPERT_AXIS_NAME,
-                                          MOE_TENSOR_AXIS_NAME, None)
-        generate_rules.moe_router_de = (None, EXPERT_AXIS_NAME)
+        generate_rules.moe_weights_edf = (ShardingAxisName.EXPERT, None,
+                                          ShardingAxisName.MOE_TENSOR)
+        generate_rules.moe_weights_efd = (ShardingAxisName.EXPERT,
+                                          ShardingAxisName.MOE_TENSOR, None)
+        generate_rules.moe_router_de = (None, ShardingAxisName.EXPERT)
 
         # Embedding weight: (VocabSize, Dim)
-        generate_rules.emb_weight_vd = (MLP_TENSOR_AXIS_NAME, None)
-        generate_rules.activation_td = (DATA_AXIS_NAME, ATTN_TENSOR_AXIS_NAME)
-        generate_rules.prelogit_td = (DATA_AXIS_NAME, ATTN_TENSOR_AXIS_NAME)
-        generate_rules.logits_tv = (DATA_AXIS_NAME, MLP_TENSOR_AXIS_NAME)
-        generate_rules.vocab_vd = (VOCAB_AXIS_NAME, None)
-        generate_rules.vocab_dv = (None, VOCAB_AXIS_NAME)
+        generate_rules.emb_weight_vd = (ShardingAxisName.MLP_TENSOR, None)
+        generate_rules.activation_td = (ShardingAxisName.MLP_DATA, ShardingAxisName.ATTN_TENSOR)
+        generate_rules.prelogit_td = (ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR)
+        generate_rules.logits_tv = (ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR)
+        generate_rules.vocab_vd = (ShardingAxisName.VOCAB, None)
+        generate_rules.vocab_dv = (None, ShardingAxisName.VOCAB)
 
     def make_sharding_config(
             self,

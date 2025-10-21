@@ -130,6 +130,8 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
         mesh=mesh,
         layer_names=[f"layer.{i}" for i in range(num_hidden_layers)],
         cache_dtype=kv_cache_jnp_dtype)
+    
+    dp_size = mesh.shape.get("data", 1) * mesh.shape.get("attn", 1)
 
     # NOTE: the inputs don't need to match the actual ones, as long as the consumed weights are the same
     input_ids = jax.random.randint(rng,
@@ -149,7 +151,7 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
                                       100,
                                       dtype=jnp.int32)
     query_start_loc = jax.random.randint(
-        rng, (DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS + 1, ),
+        rng, (DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS + dp_size, ),
         0,
         100,
         dtype=jnp.int32)
@@ -159,7 +161,7 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
                                   100,
                                   dtype=jnp.int32)
     num_seqs = jax.random.randint(rng, (1, ), 0, 100, dtype=jnp.int32)
-    request_distribution = jnp.array([0, 0, num_seqs[0]], dtype=jnp.int32)
+    request_distribution = jnp.array([0, 0, num_seqs[0]] * dp_size, dtype=jnp.int32)
 
     (input_ids, positions, block_tables,
      query_start_loc, seq_lens, request_distribution) = device_array(

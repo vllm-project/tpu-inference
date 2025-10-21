@@ -8,6 +8,7 @@ import jax
 import jax.numpy as jnp
 import jaxlib
 import jaxtyping
+from tpu_inference.layers.jax.sharding import ShardingConfigManager
 import vllm.envs as envs
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
@@ -21,7 +22,6 @@ from vllm.v1.core.kv_cache_utils import get_num_blocks, get_uniform_page_size
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
-
 from tpu_inference import utils
 from tpu_inference.di.abstracts import (AbstractKVCacheConfig,
                                         AbstractLoRARequest,
@@ -101,6 +101,9 @@ class TPUWorker(AbstractTpuWorker):
                 # For TPU, we can only have 1 active profiler session for 1 profiler
                 # server. So we only profile on rank0.
                 self.profile_dir = envs.VLLM_TORCH_PROFILER_DIR
+                # DO_NOT_SUBMIT: tmp hack to upload profile to gs bucket. will revert.
+                self.profile_dir = os.environ.get("VLLM_TORCH_PROFILER_DIR")
+
                 logger.info("Profiling enabled. Traces will be saved to: %s",
                             self.profile_dir)
 
@@ -122,13 +125,12 @@ class TPUWorker(AbstractTpuWorker):
 
     def init_device(self):
         if not self.devices:
-            device_indexes = []
-            tp = self.parallel_config.tensor_parallel_size
-            try:
-                device_indexes = self.vllm_config.additional_config[
-                    "sharding"]["sharding_strategy"]["device_indexes"]
-            except KeyError:
-                self.devices = jax.devices()[:tp]
+            sharding_config: ShardingConfigManager = self.vllm_config.sharding_config
+            device_indexes = sharding_config.device_indexes
+            if device_indexes is not None: 
+                self.devices = [jax.devices()[i] for i in device_indexes]
+            else:
+                self.devices = jax.devices()[:sharding_config.total_devices]
 
             # Enforcing the devices sequence to be consistent with the specified device indexes
             if not self.devices:
@@ -161,6 +163,9 @@ class TPUWorker(AbstractTpuWorker):
                 pipeline_model_parallel_size=1,
             )
         ensure_kv_transfer_initialized(self.vllm_config)
+        
+        self._setup_scheduler()
+        
         self.model_runner = TPUModelRunner(self.vllm_config, self.devices)
         logger.info(f"Init worker | "
                     f"rank={self.rank} | "
@@ -199,6 +204,25 @@ class TPUWorker(AbstractTpuWorker):
                              f"{gpu_memory_utilization} to a larger value.")
         return total_hbm_avail
 
+    def _setup_scheduler(self) -> None:
+        """Setup the appropriate scheduler based on DP size."""
+        sharding_config: ShardingConfigManager = self.vllm_config.sharding_config
+        dp_size = sharding_config.total_dp_size
+        
+        if dp_size > 1:
+            logger.info(f"DP size({dp_size}) > 1, using DPScheduler")
+
+            import vllm.v1.core.sched.scheduler as vLLMScheduler
+            from tpu_inference.core.sched.dp_scheduler import DPScheduler
+            
+            vLLMScheduler.Scheduler = DPScheduler
+            
+            self.vllm_config.scheduler_config.max_num_seqs = self.vllm_config.scheduler_config.max_num_seqs * dp_size
+            self.vllm_config.scheduler_config.max_num_batched_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens * dp_size
+
+        else:
+            logger.info(f"DP size ({dp_size}) <= 1, using default Scheduler")
+    
     def execute_model(
         self,
         scheduler_output: Union[AbstractSchedulerOutput, SchedulerOutput],
