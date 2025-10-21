@@ -13,6 +13,7 @@ from tpu_inference.kernels.dma.host_dma import d2h_dma, h2d_dma
 DATA_LOCATION = Literal["device", "host"]
 
 
+# TODO(jcgu): add into CI tests
 @jtu.with_config(jax_numpy_dtype_promotion='strict')
 class HostHbmDmaTest(jtu.JaxTestCase):
 
@@ -34,9 +35,9 @@ class HostHbmDmaTest(jtu.JaxTestCase):
             num_required_devices = np.prod(axis_shapes)
             devices = np.array(jax.devices())
             if len(devices) < num_required_devices:
-                self.skip("Not enough devices to create mesh of shape"
-                          f" {axis_shapes}. Have {len(devices)}, need"
-                          f" {num_required_devices}.")
+                self.skipTest("Not enough devices to create mesh of shape"
+                              f" {axis_shapes}. Have {len(devices)}, need"
+                              f" {num_required_devices}.")
             device_array = devices[:num_required_devices].reshape(axis_shapes)
             return jax.sharding.Mesh(device_array, axis_names)
         except RuntimeError:

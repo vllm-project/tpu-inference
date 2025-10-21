@@ -753,7 +753,7 @@ class TPUConnectorWorker:
 
         self.runner: Optional[TPUModelRunner] = None
         self.mesh: Optional[Mesh] = None
-        self.swap_op_type = os.getenv("TPU_HOST_SWAP_OP_TYPE",
+        self.swap_op_type = os.getenv("TPU_KV_OFFLOADING_SWAP_OP_TYPE",
                                       default=DEFAULT_HOST_HBM_SWAP_OP_TYPE)
         assert self.swap_op_type in get_args(CPU_OFFLOADING_SWAP_OP_TYPE)
         # TODO(jcgu): double confirm libtpu version requirement
@@ -761,6 +761,8 @@ class TPUConnectorWorker:
                 2025, 8, 14):
             logger.warning("libtpu version does not support DMA host-hbm")
             self.swap_op_type = "jax"
+        logger.info(
+            f"(cpu offloading) swap operation type is {self.swap_op_type}")
 
         self.host = self.config.kv_ip
         self.kv_transfer_port = self.config.kv_port
