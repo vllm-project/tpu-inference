@@ -613,12 +613,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 scheduler_output.num_scheduled_tokens[req_id])
             num_req_per_dp_rank[dp_rank] += 1
         
-        num_req_per_dp_rank_list = [
-            num_req_per_dp_rank[dp_rank] for dp_rank in range(dp_size)
-        ]
-        cum_num_req_per_dp_rank_list = np.cumsum([0] +
-                                                 num_req_per_dp_rank_list)
-
         # Find maximum number of scheduled tokens across DP ranks
         max_num_scheduled_tokens_across_dp = max(
             num_scheduled_tokens_per_dp_rank.values())
@@ -653,7 +647,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 scheduled_tokens_per_dp_rank, num_req_per_dp_rank,
                 padded_num_scheduled_tokens_per_dp_rank, padded_num_reqs,
                 padded_total_num_scheduled_tokens,
-                cum_num_req_per_dp_rank_list, padded_num_reqs_per_dp_rank, logits_indices_selector, max_num_reqs_per_dp_rank)
+                padded_num_reqs_per_dp_rank, logits_indices_selector, max_num_reqs_per_dp_rank)
 
     
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
@@ -673,7 +667,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         (req_ids_dp, req_indices_dp, num_scheduled_tokens_per_dp_rank,
          scheduled_tokens_per_dp_rank, num_req_per_dp_rank,
          padded_num_scheduled_tokens_per_dp_rank, padded_num_reqs,
-         padded_total_num_scheduled_tokens, cum_num_req_per_dp_rank_list,
+         padded_total_num_scheduled_tokens,
          padded_num_reqs_per_dp_rank, logits_indices_selector, max_num_reqs_per_dp_rank
          ) = self._prepare_dp_input_metadata(scheduler_output)
 
@@ -709,7 +703,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             arange = np.concatenate(
                 [self.arange_cpu[:n] for n in num_scheduled_tokens_per_req])
             # Get positions.
-
             positions_np = positions_cpu[:total_num_scheduled_tokens]
             np.add(
                 self.input_batch.num_computed_tokens_cpu[req_indices],
@@ -742,8 +735,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 max_num_reqs_per_dp_rank + dp_rank + 1]
             seq_lens_cpu = self.seq_lens_cpu[req_offset:req_offset +
                                              max_num_reqs_per_dp_rank]
-            _num_reqs_so_far = cum_num_req_per_dp_rank_list[dp_rank]
             _num_reqs = num_req_per_dp_rank[dp_rank]
+            req_indices = req_indices_dp[dp_rank]
             num_scheduled_tokens_per_req = scheduled_tokens_per_dp_rank[
                 dp_rank]
             
@@ -760,8 +753,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             seq_lens_cpu[:_num_reqs] = (
                 self.input_batch.
-                num_computed_tokens_cpu[_num_reqs_so_far:_num_reqs_so_far +
-                                        _num_reqs] +
+                num_computed_tokens_cpu[req_indices] +
                 num_scheduled_tokens_per_req)
             seq_lens_cpu[_num_reqs:] = 0
 
