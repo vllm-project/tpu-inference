@@ -89,10 +89,11 @@ import os
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, get_args
 
 import jax
 import jax.numpy as jnp
+from jax._src import test_util as jtu
 from jax.sharding import Mesh
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -107,7 +108,7 @@ if TYPE_CHECKING:
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
 
-from .cache_util import TokenProcessor, swap_ops
+from .cache_util import CPU_OFFLOADING_SWAP_OP_TYPE, TokenProcessor, swap_ops
 from .local_cpu_backend import LocalCPUBackend
 
 EngineId = str
@@ -115,8 +116,11 @@ ReqId = str
 
 logger = init_logger(__name__)
 
+# kv cache layout needed by cpu offloading mechanism
 REQUIRED_KV_CACHE_LAYOUT = "NHD"
-SWAP_OP_TYPE = "pallas"
+
+# default swap op type
+DEFAULT_HOST_HBM_SWAP_OP_TYPE = "pallas"
 
 
 @dataclass
@@ -749,6 +753,14 @@ class TPUConnectorWorker:
 
         self.runner: Optional[TPUModelRunner] = None
         self.mesh: Optional[Mesh] = None
+        self.swap_op_type = os.getenv("TPU_HOST_SWAP_OP_TYPE",
+                                      default=DEFAULT_HOST_HBM_SWAP_OP_TYPE)
+        assert self.swap_op_type in get_args(CPU_OFFLOADING_SWAP_OP_TYPE)
+        # TODO(jcgu): double confirm libtpu version requirement
+        if self.swap_op_type == "pallas" and not jtu.if_cloud_tpu_at_least(
+                2025, 8, 14):
+            logger.warning("libtpu version does not support DMA host-hbm")
+            self.swap_op_type = "jax"
 
         self.host = self.config.kv_ip
         self.kv_transfer_port = self.config.kv_port
@@ -831,7 +843,7 @@ class TPUConnectorWorker:
             # Initiate non-blocking copy to CPU
             kv_caches_on_cpu = [
                 swap_ops(extracted_blocks, self.host_sharding, "d2h",
-                         SWAP_OP_TYPE)
+                         self.swap_op_type)
                 for extracted_blocks in extracted_blocks_tpu
             ]
 
@@ -1197,7 +1209,8 @@ class TPUConnectorWorker:
 
             # 5. Transfer to TPU, applying the correct sharding.
             loaded_kv_sharded_on_tpu = [
-                swap_ops(layer_data, self.device_sharding, "h2d", SWAP_OP_TYPE)
+                swap_ops(layer_data, self.device_sharding, "h2d",
+                         self.swap_op_type)
                 for layer_data in block_shaped_kv_on_cpu
             ]
             jax.block_until_ready(loaded_kv_sharded_on_tpu)

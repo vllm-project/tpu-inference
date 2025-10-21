@@ -23,6 +23,8 @@ logger = init_logger(__name__)
 #         str, torch.Tensor], list[int], list[int], Literal["h2d", "d2h"]
 # ], None]
 
+CPU_OFFLOADING_SWAP_OP_TYPE = Literal["jax", "pallas"]
+
 
 @dataclass(order=True)
 class CacheKey:
@@ -110,7 +112,7 @@ def swap_ops(
     src_kv_cache: jax.Array,
     out_sharding: Optional[jax.sharding.NamedSharding],
     direction: Literal["h2d", "d2h"],
-    op_type: Literal["jax", "pallas"],
+    op_type: CPU_OFFLOADING_SWAP_OP_TYPE,
 ) -> jax.Array:
     if op_type == "jax":
         return jax_swap_kv_cache(src_kv_cache, out_sharding, direction)
@@ -131,7 +133,7 @@ def jax_swap_kv_cache(
 def dma_kv_cache(
     src_kv_cache: jax.Array,
     out_sharding: jax.sharding.NamedSharding,
-    direction: Literal["h2d", "d2h"],
+    direction: CPU_OFFLOADING_SWAP_OP_TYPE,
 ) -> jax.Array:
     dma_fn = d2h_dma if direction == "d2h" else h2d_dma
     return dma_fn(src_kv_cache, out_sharding)
