@@ -10,7 +10,7 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.request import Request
 
-from tpu_inference.core.sched.dp_scheduler import (create_dp_scheduler)
+from tpu_inference.core.sched.dp_scheduler import create_dp_scheduler
 
 
 class TestDPScheduler(unittest.TestCase):
