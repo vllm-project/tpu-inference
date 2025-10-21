@@ -1,19 +1,22 @@
 import os
-from typing import Dict, List, Optional
+from array import array
+from typing import Any, Dict, List, Optional
 
 import ray
 import vllm.envs as envs
 from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
-from vllm.executor.ray_distributed_executor import RayWorkerMetaData
-from vllm.executor.ray_utils import RayWorkerWrapper, _wait_until_pg_ready
+from vllm.multimodal.inputs import MultiModalKwargs
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
+from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE
 from vllm.utils.network_utils import (get_distributed_init_method, get_ip,
                                       get_open_port)
 from vllm.v1.executor.ray_distributed_executor import \
     RayDistributedExecutor as RayDistributedExecutorV1
+from vllm.v1.executor.ray_executor import RayWorkerMetaData
+from vllm.v1.executor.ray_utils import RayWorkerWrapper, _wait_until_pg_ready
 
 from tpu_inference.logger import init_logger
 
@@ -28,12 +31,25 @@ import asyncio
 from collections import defaultdict
 
 import msgspec
-from vllm.executor.msgspec_utils import encode_hook
 from vllm.v1.outputs import SamplerOutput
 
 from tpu_inference.distributed.utils import set_node_kv_ip_port
 
 logger = init_logger(__name__)
+
+
+def _encode_hook(obj: Any) -> Any:
+    """Custom msgspec enc hook that supports array types and MultiModalKwargs.
+
+    See https://jcristharif.com/msgspec/api.html#msgspec.msgpack.Encoder
+    """
+    if isinstance(obj, array):
+        assert obj.typecode == VLLM_TOKEN_ID_ARRAY_TYPE, (
+            f"vLLM array type should use '{VLLM_TOKEN_ID_ARRAY_TYPE}' type. "
+            f"Given array has a type code of {obj.typecode}.")
+        return obj.tobytes()
+    if isinstance(obj, MultiModalKwargs):
+        return dict(obj)
 
 
 class RayDistributedExecutor(RayDistributedExecutorV1):
@@ -83,7 +99,7 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         # Create the parallel GPU workers.
         self._init_workers_ray(placement_group)
 
-        self.input_encoder = msgspec.msgpack.Encoder(enc_hook=encode_hook)
+        self.input_encoder = msgspec.msgpack.Encoder(enc_hook=_encode_hook)
         self.output_decoder = msgspec.msgpack.Decoder(
             Optional[List[SamplerOutput]])
         self.use_v1 = envs.VLLM_USE_V1
