@@ -1,6 +1,6 @@
 import os
 
-from vllm.utils import get_ip
+from vllm.utils.network_utils import get_ip
 
 from tpu_inference.logger import init_logger
 
