@@ -1,7 +1,9 @@
+import copy
 import functools
 import os
 import random
 from contextlib import nullcontext
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 import jax
@@ -21,8 +23,8 @@ from vllm.tasks import SupportedTask
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, DraftTokenIds,
-                             ModelRunnerOutput)
+from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
+                             DraftTokenIds, ModelRunnerOutput)
 from vllm.v1.request import Request
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.worker.kv_connector_model_runner_mixin import \
@@ -78,6 +80,91 @@ TPU_STR_DTYPE_TO_TORCH_DTYPE = {
     "int8": torch.int8,
     "uint8": torch.uint8,
 }
+
+
+class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
+    """Holds asynchronous model output specifically from a TPU runner.
+
+    This class acts as a wrapper around the standard ModelRunnerOutput. Its
+    primary purpose is to hold references to data still on the TPU device
+    (like the `next_tokens` JAX array) without blocking the main thread.
+
+    The `get_output()` method is called to resolve these async results,
+    triggering the JAX device-to-host (CPU) data transfer and populating
+    the final `ModelRunnerOutput` object.
+    """
+
+    def __init__(
+        self,
+        model_runner_output: ModelRunnerOutput,
+        next_tokens: jax.Array,
+        num_reqs: int,
+        discard_sampled_tokens_req_indices: list[int],
+    ):
+        self._model_runner_output = model_runner_output
+        self._next_tokens = next_tokens
+        self._num_reqs = num_reqs
+        self._discard_sampled_tokens_req_indices = discard_sampled_tokens_req_indices
+
+    def get_output(self) -> ModelRunnerOutput:
+        next_tokens_cpu = np.asarray(jax.device_get(self._next_tokens))
+        selected_token_ids = np.expand_dims(next_tokens_cpu[:self._num_reqs],
+                                            1)
+        valid_sampled_token_ids = selected_token_ids.tolist()
+        for i in self._discard_sampled_tokens_req_indices:
+            valid_sampled_token_ids[i].clear()
+        self._model_runner_output.sampled_token_ids = valid_sampled_token_ids
+        return self._model_runner_output
+
+
+@dataclass
+class AsyncPreResults:
+    req_ids: list[str]
+    next_tokens: jax.Array
+    request_seq_lens: list[tuple[int, CachedRequestState, int]]
+    discard_sampled_tokens_req_indices: list[int]
+    placeholder_req_id_to_index: dict[str, int]
+
+
+@functools.partial(jax.jit, donate_argnums=(0, 1, 2))
+def _substitute_placeholder_token(
+        input_ids: jax.Array, token_in_tpu_cur_input_indices: jax.Array,
+        token_in_tpu_pre_next_tokens_indices: jax.Array,
+        next_tokens: jax.Array, placeholder_num: int):
+    """Substitute placeholder tokens from TPU for async scheduler
+
+    Args:
+        input_ids: possible input_ids size
+        token_in_tpu_cur_input_indices: replace holder idx in input_ids. Length the same to input_ids.
+        token_in_tpu_pre_next_tokens_indices: value idx in next_tokens. Length the same to input_ids.
+        next_tokens: next tokens on the TPU from previous step.
+        placeholder_num: number of placeholders. placeholder_num <= len(token_in_tpu_cur_input_indices)
+    Return:
+        input_ids after replace placeholder tokens
+    """
+    assert input_ids.shape == token_in_tpu_cur_input_indices.shape == token_in_tpu_pre_next_tokens_indices.shape, \
+        f"Shape mismatch: input_ids and index arrays must have identical shapes due to precompilation assumptions. " \
+        f"Got: {input_ids.shape=}, {token_in_tpu_cur_input_indices.shape=}, {token_in_tpu_pre_next_tokens_indices.shape=}"
+
+    def updated_input_ids_array(i: int,
+                                current_input_ids: jax.Array) -> jax.Array:
+        """
+        Iteratively updates the input_ids for all placeholders.
+å
+        Args:
+            i: The current loop index.
+            current_input_ids: The loop carry state (the input_ids being modified).
+
+        Returns:
+            The updated input_ids array.
+        """
+        update_idx = token_in_tpu_cur_input_indices[i]
+        value_idx = token_in_tpu_pre_next_tokens_indices[i]
+        new_token_value = next_tokens[value_idx]
+        return current_input_ids.at[update_idx].set(new_token_value)
+
+    return jax.lax.fori_loop(0, placeholder_num, updated_input_ids_array,
+                             input_ids)
 
 
 class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
@@ -138,6 +225,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         else:
             self.kv_cache_dtype = TPU_STR_DTYPE_TO_TORCH_DTYPE[
                 cache_config.cache_dtype]
+
+        self._pre_async_results: AsyncPreResults | None = None
+        self._substitute_placeholder_token_fn = _substitute_placeholder_token
 
     def _init_random(self):
         if self.model_config.seed is None:
@@ -343,13 +433,88 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self,
         scheduler_output: "VllmSchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> ModelRunnerOutput:
+    ) -> ModelRunnerOutput | AsyncTPUModelRunnerOutput:
+
         return self._execute_model(scheduler_output)[1]
+
+    def _modify_prev_results(self):
+        # If copy to host has not been done, we just wait.
+        # device_get should return immediately as we have scheduled it in previous function call.
+        assert self._pre_async_results is not None, "When we call _modify_prev_results(), self._pre_async_results should already exist"
+        pre_req_ids = self._pre_async_results.req_ids
+        pre_next_tokens = self._pre_async_results.next_tokens
+        pre_request_seq_lens = self._pre_async_results.request_seq_lens
+        pre_discard_sampled_tokens_req_indices = self._pre_async_results.discard_sampled_tokens_req_indices
+
+        next_tokens_cpu = np.asarray(jax.device_get(pre_next_tokens))
+        selected_token_ids = np.expand_dims(next_tokens_cpu[:len(pre_req_ids)],
+                                            1)
+        valid_sampled_token_ids = selected_token_ids.tolist()
+
+        # Mask out the sampled tokens that should not be sampled.
+        for i in pre_discard_sampled_tokens_req_indices:
+            valid_sampled_token_ids[i].clear()
+        # Append sampled tokens
+        for pre_req_idx, req_state, _ in pre_request_seq_lens:
+            sampled_ids = valid_sampled_token_ids[pre_req_idx]
+            if not sampled_ids:
+                continue
+
+            # If request not active in the *current* batch (e.g. finished or evicted), skip it.
+            req_id = pre_req_ids[pre_req_idx]
+            if req_id not in self.input_batch.req_id_to_index:
+                continue
+
+            req_idx = self.input_batch.req_id_to_index[req_id]
+            assert req_state is self.requests[
+                req_id], "The req_state should be valid and identical"
+
+            # Updated on previous execute
+            end_idx = self.input_batch.num_tokens_no_spec[req_idx]
+            assert len(sampled_ids) == 1, "do not support spec decode yet"
+            start_idx = end_idx - 1
+            assert end_idx <= self.max_model_len, (
+                "Sampled token IDs exceed the max model length. "
+                f"Total number of tokens: {end_idx} > max_model_len: "
+                f"{self.max_model_len}")
+
+            self.input_batch.token_ids_cpu[req_idx,
+                                           start_idx:end_idx] = sampled_ids
+            # Replace previous placeholder
+            req_state.output_token_ids[-1] = sampled_ids[-1]
+
+    def _update_placeholder(self, discard_sampled_tokens_req_indices,
+                            request_seq_lens):
+        placeholder_req_id_to_index: dict[str, int] = {}
+        discard_sampled_tokens_req_indices_set = set(
+            discard_sampled_tokens_req_indices)
+        for req_idx, req_state, _ in request_seq_lens:
+            if req_idx in discard_sampled_tokens_req_indices_set:
+                continue
+
+            start_idx = self.input_batch.num_tokens_no_spec[req_idx]
+            # Not supporting spec decode yet, assume only 1 new token
+            end_idx = start_idx + 1
+            assert end_idx <= self.max_model_len, (
+                "Sampled token IDs exceed the max model length. "
+                f"Total number of tokens: {end_idx} > max_model_len: "
+                f"{self.max_model_len}")
+
+            # Update cpu tokens at next execute and prepare input from tpu
+            self.input_batch.num_tokens_no_spec[req_idx] = end_idx
+            self.input_batch.num_tokens[req_idx] = end_idx
+
+            # For placeholder, should be update on next execute.
+            req_state.output_token_ids.extend([0])
+
+            placeholder_req_id_to_index[req_state.req_id] = req_idx
+        return placeholder_req_id_to_index
 
     def _execute_model(
         self,
         scheduler_output: "VllmSchedulerOutput",
-    ) -> tuple[AttentionMetadata, ModelRunnerOutput]:
+    ) -> tuple[AttentionMetadata, ModelRunnerOutput
+               | AsyncTPUModelRunnerOutput]:
         self.persistent_batch_manager.update_states(
             scheduler_output, self.get_mrope_input_positions_fn)
         if not scheduler_output.total_num_scheduled_tokens:
@@ -470,7 +635,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         num_reqs = self.input_batch.num_reqs
 
         # Update the cache state concurrently. Code above will not block until
-        # we use `selected_token_ids`. Add mark_step if post-processing changes
+        # We use `selected_token_ids`. Add mark_step if post-processing changes
         request_seq_lens: list[tuple[int, CachedRequestState, int]] = []
         discard_sampled_tokens_req_indices = []
         for i, req_id in zip(range(num_reqs), self.input_batch.req_ids):
@@ -500,6 +665,51 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         prompt_logprobs_dict = {}
         for req_id in self.input_batch.req_ids[:num_reqs]:
             prompt_logprobs_dict[req_id] = None
+
+        # If async scheduler enabled
+        if self.scheduler_config.async_scheduling:
+            # Get previous results from TPU and replace the placeholder.
+            if self._pre_async_results is not None:
+                assert not self.speculative_config and spec_decode_metadata is None, "Async scheduler does not support speculative decoding yet."
+                self._modify_prev_results()
+
+            # Set placeholder for next tokens that is not yet generated
+            placeholder_req_id_to_index: dict[
+                str, int] = self._update_placeholder(
+                    discard_sampled_tokens_req_indices, request_seq_lens)
+
+            if logprobs is not None:
+                logprobs_lists = logprobs.tolists()
+            else:
+                logprobs_lists = None
+
+            # Save the previous results
+            next_tokens = jax.copy_to_host_async(next_tokens)
+            self._pre_async_results = AsyncPreResults(
+                req_ids=req_ids,
+                next_tokens=next_tokens,
+                request_seq_lens=request_seq_lens,
+                discard_sampled_tokens_req_indices=
+                discard_sampled_tokens_req_indices,
+                placeholder_req_id_to_index=placeholder_req_id_to_index,
+            )
+
+            # Return Model output to executor
+            model_runner_output = ModelRunnerOutput(
+                req_ids=req_ids,
+                req_id_to_index=copy.deepcopy(
+                    self.input_batch.req_id_to_index),
+                sampled_token_ids=[],  # Fill in async get
+                logprobs=logprobs_lists,
+                prompt_logprobs_dict=prompt_logprobs_dict,
+                pooler_output=[],
+                kv_connector_output=kv_connector_output,
+            )
+            # Return attn_metadata, model_runner_output
+            async_model_runner_output = AsyncTPUModelRunnerOutput(
+                model_runner_output, next_tokens, num_reqs,
+                discard_sampled_tokens_req_indices)
+            return attn_metadata, async_model_runner_output
 
         if spec_decode_metadata is None:
             next_tokens = np.asarray(jax.device_get(next_tokens))
@@ -596,6 +806,30 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # For each scheduled token, what are the corresponding req index.
         req_indices = np.repeat(self.arange_cpu[:num_reqs],
                                 num_scheduled_tokens_per_req)
+        token_in_tpu_cur_input_indices = np.array([])
+        token_in_tpu_pre_next_tokens_indices = np.array([])
+        if self.scheduler_config.async_scheduling and self._pre_async_results is not None:
+            # If async previous results exists, we will prepare for the token substitution here
+            # The actual substitution will be performed in tpu during later parts of this function.
+            token_in_tpu_cur_input_indices_list = []
+            token_in_tpu_pre_next_tokens_indices_list = []
+            acc_cur_len = 0
+            for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+                acc_cur_len += num_scheduled_tokens_per_req[i]
+                assert req_id is not None
+                if req_id not in self._pre_async_results.placeholder_req_id_to_index:
+                    continue
+
+                token_in_tpu_cur_input_indices_list.append(acc_cur_len - 1)
+                token_in_tpu_pre_next_tokens_indices_list.append(
+                    self._pre_async_results.placeholder_req_id_to_index[req_id]
+                )
+
+            if len(token_in_tpu_cur_input_indices_list) > 0:
+                token_in_tpu_cur_input_indices = np.array(
+                    token_in_tpu_cur_input_indices_list)
+                token_in_tpu_pre_next_tokens_indices = np.array(
+                    token_in_tpu_pre_next_tokens_indices_list)
 
         # Get batched arange.
         # E.g., [2, 5, 3] -> [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
@@ -700,6 +934,21 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
          logits_indices, request_distribution) = device_array(
              self.mesh, (input_ids, positions, block_tables, query_start_loc,
                          seq_lens, logits_indices, request_distribution))
+
+        if self.scheduler_config.async_scheduling and len(
+                token_in_tpu_cur_input_indices) > 0:
+            assert self._pre_async_results is not None
+            idx_pad_len = len(input_ids) - len(token_in_tpu_cur_input_indices)
+            padded_token_in_tpu_cur_input_indices = np.pad(
+                token_in_tpu_cur_input_indices, (0, idx_pad_len))
+            padded_token_in_tpu_pre_next_tokens_indices = np.pad(
+                token_in_tpu_pre_next_tokens_indices, (0, idx_pad_len))
+            with self.maybe_forbid_compile:
+                input_ids = self._substitute_placeholder_token_fn(
+                    input_ids, padded_token_in_tpu_cur_input_indices,
+                    padded_token_in_tpu_pre_next_tokens_indices,
+                    self._pre_async_results.next_tokens,
+                    len(token_in_tpu_cur_input_indices))
 
         if self.lora_config is not None:
             self.lora_utils.set_active_loras(
