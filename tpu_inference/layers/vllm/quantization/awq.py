@@ -11,12 +11,11 @@ from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
 from vllm.model_executor.layers.quantization.awq import (AWQConfig,
-                                                         AWQLinearMethod,
-                                                         is_layer_skipped_awq)
+                                                         AWQLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizeMethodBase
-from vllm.model_executor.layers.quantization.utils.quant_utils import \
-    unpack_quantized_values_into_int32
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    is_layer_skipped, unpack_quantized_values_into_int32)
 from vllm.scalar_type import scalar_types
 
 from tpu_inference.layers.vllm.linear_common import (
@@ -48,7 +47,7 @@ class VllmAWQConfig(AWQConfig, JaxCommonConfig):
     ) -> Optional[Union["LinearMethodBase", "QuantizeMethodBase"]]:
         if isinstance(layer, LinearBase):
             linear_config = self.get_linear_config(layer)
-            if is_layer_skipped_awq(prefix, self.modules_to_not_convert):
+            if is_layer_skipped(prefix, self.modules_to_not_convert):
                 return VllmUnquantizedLinearMethod(linear_config)
             return VllmAWQLinearMethod(self, linear_config)
         elif isinstance(layer, FusedMoE):

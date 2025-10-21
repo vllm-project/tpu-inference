@@ -1,3 +1,4 @@
+import os
 import tempfile
 
 import jax
@@ -415,6 +416,7 @@ def test_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
 @pytest.mark.parametrize("topk", [2])
 def test_fused_moe(use_ep, mesh, num_tokens, intermediate_size, hidden_size,
                    num_experts, topk):
+    os.environ['VLLM_DISABLE_SHARED_EXPERTS_STREAM'] = '1'
     torch.manual_seed(42)
     dtype = torch.bfloat16
 
