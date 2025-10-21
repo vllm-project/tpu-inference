@@ -57,9 +57,9 @@ class TPUWorker(AbstractTpuWorker):
                  distributed_init_method: str,
                  is_driver_worker: bool = False,
                  devices=None,
+                 host_interface: Optional[HostInterface] = None,
                  ip: str = "localhost",
-                 prev_worker_ip: str = "",
-                 host_interface: Optional[HostInterface] = None):
+                 prev_worker_ip: str = "localhost",):
         super().__init__(host_interface)
         print(f'[debug] tpu worker init, {rank=}')
 
