@@ -91,7 +91,7 @@ echo "Cleanup complete."
 
 # IMAGE_NAME="vllm-tpu"
 # docker build --no-cache -f docker/Dockerfile -t "${IMAGE_NAME}:${BUILDKITE_COMMIT}" .
-# export LOCATION="us-central1"
+export LOCATION="us-central1"
 gcloud auth configure-docker ${LOCATION}-docker.pkg.dev -q
 
 export TAG_FILE_NAME="vllm_image_tag"
