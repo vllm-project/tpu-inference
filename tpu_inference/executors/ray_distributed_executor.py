@@ -10,7 +10,8 @@ from vllm.executor.ray_distributed_executor import RayWorkerMetaData
 from vllm.executor.ray_utils import RayWorkerWrapper, _wait_until_pg_ready
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
-from vllm.utils import get_distributed_init_method, get_ip, get_open_port
+from vllm.utils.network_utils import (get_distributed_init_method, get_ip,
+                                      get_open_port)
 from vllm.v1.executor.ray_distributed_executor import \
     RayDistributedExecutor as RayDistributedExecutorV1
 
