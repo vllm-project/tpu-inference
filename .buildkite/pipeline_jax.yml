@@ -164,6 +164,7 @@ steps:
   # NOTIFICATION STEP
   # -----------------------------------------------------------------
    - label: "TPU Test Notification"
+     key: tpu_test_notification
      depends_on:
        - test_0
        - test_1
@@ -185,3 +186,15 @@ steps:
        - |
          .buildkite/scripts/check_results.sh \
            "TPU JAX Tests Failed" test_0 test_1 test_2 test_3 test_4 test_5 test_6 test_7 test_8 test_9 test_10 test_11 test_12 test_13
+
+   - label: "Record verified commit hashes"
+     key: record_verified_commit_hashes
+     depends_on: tpu_test_notification
+     agents:
+       queue: tpu_v6e_queue
+     secrets:
+      - GITHUB_PAT
+     commands:
+       - |
+         export COMMIT_MESSAGE="Update verified commit hashes"
+         bash .buildkite/scripts/commit_push.sh .buildkite/scripts/git_add_commit_hashes.sh
