@@ -127,6 +127,5 @@ exec docker run \
   ${JAX_RANDOM_WEIGHTS:+-e JAX_RANDOM_WEIGHTS="$JAX_RANDOM_WEIGHTS"} \
   ${SKIP_ACCURACY_TESTS:+-e SKIP_ACCURACY_TESTS="$SKIP_ACCURACY_TESTS"} \
   ${VLLM_MLA_DISABLE:+-e VLLM_MLA_DISABLE="$VLLM_MLA_DISABLE"} \
-  # "${IMAGE_NAME}:${BUILDKITE_COMMIT}" \
   "${IMAGE_TAG}" \
   "$@" # Pass all script arguments as the command to run in the container
