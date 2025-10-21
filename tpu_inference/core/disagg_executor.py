@@ -6,8 +6,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import worker_receiver_cache_from_config
-from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
-                        run_method)
+from vllm.utils import run_method
+from vllm.utils.network_utils import (get_distributed_init_method, get_ip,
+                                      get_open_port)
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import AsyncModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerWrapperBase
