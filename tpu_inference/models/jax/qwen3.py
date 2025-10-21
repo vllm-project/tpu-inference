@@ -4,6 +4,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh
+from tpu_inference.layers.jax.sharding import ShardingAxisName
 from transformers import Qwen3Config
 from vllm.config import VllmConfig
 
@@ -38,7 +39,7 @@ class Qwen3Attention(nnx.Module):
                                          self.hidden_size // self.num_heads)
         self.head_dim = utils.get_padded_head_dim(self.head_dim_original)
 
-        sharding_size = mesh.shape["model"]
+        sharding_size = mesh.shape["model"] * mesh.shape["attn_dp"]
         self.num_heads = utils.get_padded_num_heads(self.num_heads,
                                                     sharding_size)
         self.num_kv_heads = utils.get_padded_num_heads(self.num_kv_heads,
@@ -50,7 +51,7 @@ class Qwen3Attention(nnx.Module):
             "TD,DNH->TNH",
             (self.hidden_size, self.num_heads, self.head_dim),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
+            kernel_init=nnx.with_partitioning(init_fn, (None, ShardingAxisName.ATTN_HEAD, None)),
             rngs=rng,
         )
         self.q_norm = nnx.RMSNorm(
@@ -64,7 +65,7 @@ class Qwen3Attention(nnx.Module):
             "TD,DKH->TKH",
             (self.hidden_size, self.num_kv_heads, self.head_dim),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
+            kernel_init=nnx.with_partitioning(init_fn, (None, ShardingAxisName.ATTN_HEAD, None)),
             rngs=rng,
         )
         self.k_norm = nnx.RMSNorm(
@@ -78,14 +79,14 @@ class Qwen3Attention(nnx.Module):
             "TD,DKH->TKH",
             (self.hidden_size, self.num_kv_heads, self.head_dim),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
+            kernel_init=nnx.with_partitioning(init_fn, (None, ShardingAxisName.ATTN_HEAD, None)),
             rngs=rng,
         )
         self.o_proj = nnx.Einsum(
             "TNH,NHD->TD",
             (self.num_heads, self.head_dim, self.hidden_size),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
+            kernel_init=nnx.with_partitioning(init_fn, (ShardingAxisName.ATTN_HEAD, None, None)),
             rngs=rng,
         )
 
@@ -192,7 +193,7 @@ class Qwen3Model(Qwen2Model):
             num_embeddings=vocab_size,
             features=hidden_size,
             param_dtype=dtype,
-            embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
+            embedding_init=nnx.with_partitioning(init_fn, (ShardingAxisName.VOCAB, None)),
             rngs=rng,
         )
         self.layers = [
@@ -217,7 +218,7 @@ class Qwen3Model(Qwen2Model):
         else:
             self.lm_head = nnx.Param(
                 init_fn(rng.params(), (hidden_size, vocab_size), dtype),
-                sharding=(None, "model"),
+                sharding=(None, ShardingAxisName.VOCAB),
             )
 
 
