@@ -357,6 +357,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         (input_ids, attn_metadata, sampling_metadata, logits_indices,
          spec_decode_metadata) = self._prepare_inputs(scheduler_output)
+        
+        logger.info(f"input_ids: {np.asarray(jax.device_get(input_ids))}")
 
         # multi-modal support
         if self.is_multimodal_model:

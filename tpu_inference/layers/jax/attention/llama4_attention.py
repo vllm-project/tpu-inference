@@ -71,6 +71,9 @@ class Llama4Attention(Attention):
         x = jnp.asarray(x, self.dtype)
         x_SD = nnx.with_sharding_constraint(x, self.activation_attention_td)
         x_q_TD = nnx.with_sharding_constraint(x, self.activation_q_td)
+
+        jax.debug.print("x_q_TD shape: {s}, value: {v}", s=x_q_TD.shape, v=x_q_TD)
+
         rope_scaling = self.rope_scaling
         rope_theta = self.rope_theta
         H = self.head_dim
@@ -79,6 +82,8 @@ class Llama4Attention(Attention):
         with jax.named_scope("q_proj"):
             q_TNH = jnp.einsum('TD,DNH -> TNH', x_q_TD,
                                self.kernel_q_proj_DNH.value)
+            jax.debug.print("q_TNH (raw) shape: {s}, value: {v}", s=q_TNH.shape, v=q_TNH)
+
             if use_attention_rope:
                 q_TNH = apply_rope(q_TNH, md.input_positions, H, rope_theta,
                                    rope_scaling, self.rope_input_ordering)
@@ -89,6 +94,8 @@ class Llama4Attention(Attention):
             else:
                 if self.temperature_tuning:
                     q_TNH = self.apply_temperature_tuning(md, q_TNH)
+            
+            jax.debug.print("q_TNH (final) shape: {s}, value: {v}", s=q_TNH.shape, v=q_TNH)
 
             q_TNH = nnx.with_sharding_constraint(q_TNH, self.query_tnh)
         with jax.named_scope("k_proj"):

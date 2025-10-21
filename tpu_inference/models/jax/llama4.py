@@ -56,7 +56,8 @@ class Llama4ForCausalLM(nnx.Module):
 
         dtype: jnp.dtype = jnp.bfloat16
 
-        self.num_layers: int = getattr(text_config, "num_hidden_layers", 48)
+        self.num_layers = 4
+        # self.num_layers: int = getattr(text_config, "num_hidden_layers", 48)
 
         self.intermediate_size_moe: int = getattr(text_config,
                                                   "intermediate_size", 8192)
@@ -270,6 +271,7 @@ class Llama4ForCausalLM(nnx.Module):
         attention_metadata: AttentionMetadata,
         *args,
     ) -> Tuple[List[KVCacheType], jax.Array, List[jax.Array]]:
+
         is_prefill = False
         x_TD = self.embedder.encode(input_ids)
 
@@ -279,6 +281,17 @@ class Llama4ForCausalLM(nnx.Module):
                                        attention_metadata)
             jax.block_until_ready(x_TD)
             kv_caches[i] = new_kv_cache
+
+            jax.debug.print("\n--- Layer {} Output ---", i)
+            jax.debug.print("Shape: {}", x_TD.shape)
+            jax.debug.print("Max value: {}", jnp.max(x_TD))
+            jax.debug.print("Min value: {}", jnp.min(x_TD))
+            jax.debug.print("Sum of values: {}", jnp.sum(x_TD))
+
+            if x_TD.ndim == 2:
+                jax.debug.print("Partial content (first 10 values of first token): {}", x_TD[:6, :10])
+            elif x_TD.ndim == 3:
+                jax.debug.print("Partial content (first 10 values of first token of first sequence): {}", x_TD[0, :6, :10])
 
         final_activation_TD = self.final_norm(x_TD)
 
@@ -438,6 +451,8 @@ class Llama4WeightLoader:
                 layer_num = self._get_layer_num(loaded_name)
 
                 if layer_num is not None:
+                    if layer_num >= 4:
+                        continue
                     is_moe_layer = (layer_num + 1) % \
                             self.interleave_moe_layer_step == 0
                     self.expert_prefix = "shared_expert." if is_moe_layer else ""
