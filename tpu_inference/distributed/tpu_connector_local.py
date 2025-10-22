@@ -906,8 +906,8 @@ class TPUConnectorWorker:
                     # Slice the data and add to the backend.
                     value_for_key = [
                         jax.lax.slice_in_dim(flat_layer_cache,
-                                             start_idx,
-                                             end_idx,
+                                             rel_start_idx,
+                                             rel_end_idx,
                                              axis=0)
                         for flat_layer_cache in flat_kv_caches_on_cpu
                     ]
