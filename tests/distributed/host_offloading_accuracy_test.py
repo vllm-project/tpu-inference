@@ -50,8 +50,6 @@ def test_kv_cache_cpu_offloading_accuracy(
     sampling_config: SamplingParams,
     kv_transfer_config: KVTransferConfig,
 ):
-    # Pop arguments not used by LLM
-    # Create an LLM
     with monkeypatch.context():
         os.environ['SKIP_JAX_PRECOMPILE'] = '1'
         llm = LLM(model="meta-llama/Llama-3.2-3B",
