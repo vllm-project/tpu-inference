@@ -86,18 +86,78 @@ def apply_rope(
         # positions = freqs_cis_stacked: (S, D_rot, 2)
 
         # Unstack to get the complex rotation factors (cos + i*sin)
-        split_positions = jnp.split(positions, 2, axis=-1)
-        cos = jnp.squeeze(split_positions[0], axis=-1)
-        sin = jnp.squeeze(split_positions[1], axis=-1)
+        # split_positions = jnp.split(positions, 2, axis=-1) #TODO: ENCOUNTERING ERROR HERE
+        # cos = jnp.squeeze(split_positions[0], axis=-1)
+        # sin = jnp.squeeze(split_positions[1], axis=-1)
         # FIX END
 
-        # Add num_heads dimension for broadcasting: (seq_len, 1, head_dim//2)
-        cos = cos[:, jnp.newaxis, :]
-        sin = sin[:, jnp.newaxis, :]
+        # 1. Get the shape of the array
+        shape = positions.shape
+
+        print("this is the type of positions: ", type(positions))
+        #print("this is the value of positions: ", positions)
+
+        # 2. Slice out the cosine component (start index 0, size 1 on axis -1)
+        cos_stacked = jax.lax.dynamic_slice(
+            positions,
+            (0, ) * (positions.ndim - 1) +
+            (0, ),  # Start index for each dimension
+            shape[:-1] + (1, )  # Slice shape
+        )
+
+        # 3. Slice out the sine component (start index 1, size 1 on axis -1)
+        sin_stacked = jax.lax.dynamic_slice(
+            positions,
+            (0, ) * (positions.ndim - 1) +
+            (1, ),  # Start index for each dimension
+            shape[:-1] + (1, )  # Slice shape
+        )
+
+        print("This is the shape of cos_stacked: ", cos_stacked.shape)
+        print("This is the shape of sin_stacked: ", sin_stacked.shape)
+
+        # The rest of the logic remains the same:
+        cos = jnp.squeeze(cos_stacked, axis=-1)  # Shape (S, D_rot)
+        sin = jnp.squeeze(sin_stacked, axis=-1)  # Shape (S, D_rot)
+
+        print("This is the shape of cos after squeeze: ", cos.shape)
+        print("This is the shape of sin after squeeze: ", sin.shape)
+
+        # ----------------------------------------------------
+        # The Problem: This reshapes to (S, 1, D_rot)
+        # cos = cos[:, jnp.newaxis, :]
+        # sin = sin[:, jnp.newaxis, :]
+        # ----------------------------------------------------
 
         # Apply rotation (Standard split logic)
         inputs_real = inputs[..., :head_dim // 2]
         inputs_imag = inputs[..., head_dim // 2:head_dim]
+
+        # --- FIX: Reshape to correctly broadcast over the flattened input ---
+        # The input is (Total_Tokens, Num_Heads, Half_Head_Dim) -> (9232, 16, 44)
+        # We need the RoPE factors to match: (Total_Tokens, 1, Half_Head_Dim)
+
+        # 1. Tile the positional frequencies (S, D_rot) by the Batch Size (B=16)
+        #    to match the (B*S) = 9232 dimension.
+        batch_size = inputs_real.shape[0] // cos.shape[0]  # 9232 // 577 = 16
+
+        cos_tiled = jnp.tile(
+            cos, (batch_size, 1))  # Shape (B*S, D_rot) -> (9232, 44)
+        sin_tiled = jnp.tile(
+            sin, (batch_size, 1))  # Shape (B*S, D_rot) -> (9232, 44)
+
+        # 2. Add the Num_Heads dimension (H=16) for broadcasting
+        # The target shape for cos/sin is (B*S, 1, D_rot) -> (9232, 1, 44)
+        cos = cos_tiled[:, jnp.newaxis, :]  # Shape (9232, 1, 44)
+        sin = sin_tiled[:, jnp.newaxis, :]  # Shape (9232, 1, 44)
+        # -------------------------------------------------------------------
+
+        print("This is the shape of input: ", inputs.shape)
+        print("This is the shape of positions: ", positions.shape)
+        print("This is the shape of inputs_real: ", inputs_real.shape)
+        print("This is the shape of cos after slice: ", cos.shape)
+        print("This is the shape of inputs_imag: ", inputs_imag.shape)
+        print("This is the shape of sin after slice: ", sin.shape)
 
         outputs_real = inputs_real * cos - inputs_imag * sin
         outputs_imag = inputs_real * sin + inputs_imag * cos

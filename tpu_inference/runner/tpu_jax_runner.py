@@ -33,7 +33,7 @@ from tpu_inference import utils as common_utils
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.sample.rejection_sampler import RejectionSampler
 from tpu_inference.layers.jax.sample.sampling import (compute_logprobs,
-                                                    gather_logprobs, sample)
+                                                      gather_logprobs, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.layers.jax.sharding import build_mesh
@@ -47,7 +47,8 @@ from tpu_inference.runner.input_batch_jax import CachedRequestState, InputBatch
 from tpu_inference.runner.kv_cache_manager import KVCacheManager
 from tpu_inference.runner.lora_utils import LoraUtils
 from tpu_inference.runner.multimodal_manager import MultiModalManager
-from tpu_inference.runner.persistent_batch_manager import PersistentBatchManager
+from tpu_inference.runner.persistent_batch_manager import \
+    PersistentBatchManager
 from tpu_inference.runner.speculative_decoding_manager import \
     SpeculativeDecodingManager
 from tpu_inference.runner.structured_decoding_manager import \
@@ -711,10 +712,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def _get_input_ids_embeds(self, input_ids: jax.Array,
                               mm_embeds: list[jax.Array]):
         if self.is_multimodal_model:
+            jax_mm_embeds = []
+            for embed in mm_embeds:
+                embed_f32 = embed.to(torch.float32)
+
+                jax_embed = jnp.asarray(embed_f32, dtype=self.dtype)
+                jax_mm_embeds.append(jax_embed)
+
             inputs_embeds = self.get_input_embeddings_fn(
                 self.state,
                 input_ids=input_ids,
-                multimodal_embeddings=mm_embeds,
+                multimodal_embeddings=jax_mm_embeds,
             )
             return None, inputs_embeds
         else:

@@ -148,6 +148,72 @@ class Llama4Attention(Attention):
                                              self.kv_cache_quantized_dtype,
                                              k_scale, v_scale)
 
+        if not self.is_causal and self.head_dim == 88:
+            ACTUAL_HEAD_DIM = 88
+            TARGET_HEAD_DIM = 128
+            PAD_WIDTH = TARGET_HEAD_DIM - ACTUAL_HEAD_DIM
+            #DUMMY_INT = jnp.zeros((1, ), dtype=jnp.int32)
+
+            # 1. Pad Q, K, V from 88 to 128 to satisfy the kernel's static shape alignment
+            q_TNH = jnp.pad(q_TNH, [(0, 0), (0, 0), (0, PAD_WIDTH)],
+                            mode='constant',
+                            constant_values=0)
+            k_SKH = jnp.pad(k_SKH, [(0, 0), (0, 0), (0, PAD_WIDTH)],
+                            mode='constant',
+                            constant_values=0)
+            v_SKH = jnp.pad(v_SKH, [(0, 0), (0, 0), (0, PAD_WIDTH)],
+                            mode='constant',
+                            constant_values=0)
+
+            # 2. Store original dim and temporarily set module's head dim for the kernel call
+            original_head_dim = self.head_dim
+            self.head_dim = TARGET_HEAD_DIM
+
+            # 3. Inject DUMMY KV CACHE (Replaces kv_cache=None from VisionEncoderLayer)
+            dummy_num_blocks = 1
+            dummy_block_size = 2  # <-- INCREASED from 1 to 2 to be divisible by kv_packing=2
+
+            # Create a zero-filled placeholder array
+            kv_cache = jnp.zeros((dummy_num_blocks, dummy_block_size,
+                                  self.num_key_value_heads, 2, self.head_dim),
+                                 dtype=x.dtype)
+
+            # 4. Inject DUMMY METADATA (Replaces None values for kernel's dtype check)
+            # Assuming the AttentionMetadata object is mutable and md is a reference to it.
+            # We check the fields expected by the kernel's static_validate_inputs (line 1153)
+            # and replace them with minimal arrays of the expected dtype (jnp.int32).
+
+            DUMMY_INT_1 = jnp.zeros((1, ), dtype=jnp.int32)
+
+            # 1. Replace block_tables (corresponds to page_indices/page_indices_ref in kernel)
+            if attention_metadata.block_tables is None:
+                attention_metadata.block_tables = DUMMY_INT_1
+
+            # 2. Replace seq_lens (corresponds to kv_lens/kv_lens_ref in kernel)
+            if attention_metadata.seq_lens is None:
+                attention_metadata.seq_lens = DUMMY_INT_1
+
+            # 3. Replace query_start_loc (corresponds to cu_q_lens/cu_q_lens_ref in kernel)
+            if attention_metadata.query_start_loc is None:
+                # cu_q_lens typically needs shape (num_seqs + 1), minimal is (2,) for 1 sequence
+                attention_metadata.query_start_loc = jnp.zeros((2, ),
+                                                               dtype=jnp.int32)
+
+            # 4. Replace distribution (the immediate cause of the current error)
+            if attention_metadata.request_distribution is None:
+                # distribution requires shape (3,). Since it's bidirectional, we set it to (0, 0, 1)
+                # which indicates 1 sequence is active, but none are decode or prefill.
+                attention_metadata.request_distribution = jnp.array(
+                    [0, 0, 1], dtype=jnp.int32)
+
+            # 5. Handle kv_lens that kernel checks but is not explicitly in AttentionMetadata
+            # Since seq_lens is handled, we'll create a new attribute if the kernel expects it under 'kv_lens'.
+            # NOTE: If your AttentionMetadata wrapper eventually unpacks 'seq_lens' into 'kv_lens',
+            # this step might be unnecessary, but we include it as a fallback if 'kv_lens' is a required attribute of 'attention_metadata'.
+            if not hasattr(attention_metadata,
+                           'kv_lens') or attention_metadata.kv_lens is None:
+                attention_metadata.kv_lens = DUMMY_INT_1  # Use DUMMY_INT_1 (shape (1,))
+
         with jax.named_scope("attn_op"):
             new_kv_cache, outputs_TNH = self.attention(
                 is_prefill,
@@ -165,6 +231,13 @@ class Llama4Attention(Attention):
         # This is the "Attention Output (before projection)" from your last log.
         # jax.debug.print("JAX Attention output (before projection): {}",
         #                 outputs_TNH[0, -1, :5])
+
+        if not self.is_causal and self.head_dim == TARGET_HEAD_DIM:
+            # Crop the output back to the original size (88)
+            outputs_TNH = outputs_TNH[..., :original_head_dim]
+
+            # Restore the original head dimension
+            self.head_dim = original_head_dim
 
         with jax.named_scope("o_proj"):
             o_TD = jnp.einsum('TNH,NHD -> TD', outputs_TNH,

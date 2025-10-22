@@ -238,13 +238,27 @@ def get_flax_model(
 
     # Multi-modal support only
     # This function calculates the image token's embeddings by VIT
-    @functools.partial(jax.jit,
-                       out_shardings=(logits_sharding),
-                       static_argnames=['image_grid_thw'])
-    def run_get_multimodal_embeddings(graphdef, state, image_grid_thw,
-                                      **kwargs):
+    # @functools.partial(jax.jit,
+    #                    out_shardings=(logits_sharding),)# ,
+    #                    #static_argnames=[])#'image_grid_thw']) #HACK: REMOVING image_grid_thw FROM STATIC ARGNAMES
+    def run_get_multimodal_embeddings(
+            graphdef,
+            state,
+            required_lengths,  #image_grid_thw, #HACK: REPLACEING IMAGE_GRID_THW with *args
+            **kwargs):
         model = nnx.merge(graphdef, state)
-        return model.get_multimodal_embeddings(image_grid_thw, **kwargs)
+
+        safe_kwargs = {}
+        if 'pixel_values' in kwargs:
+            safe_kwargs['pixel_values'] = kwargs['pixel_values']
+
+        if 'patches_per_image' in kwargs:
+            safe_kwargs['patches_per_image'] = kwargs['patches_per_image']
+
+        if 'aspect_ratios' in kwargs:
+            safe_kwargs['aspect_ratios'] = kwargs['aspect_ratios']
+
+        return model.get_multimodal_embeddings(required_lengths, **safe_kwargs)
 
     # This function will calculates the embeddings of input texts and then merge with the image embeddings
     @functools.partial(

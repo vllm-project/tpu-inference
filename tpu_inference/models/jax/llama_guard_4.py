@@ -11,18 +11,15 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from vllm.config import VllmConfig
 
-from tpu_inference.logger import init_logger
-from tpu_inference.models.jax.common.attention.attention import \
-    AttentionMetadata
-from tpu_inference.models.jax.common.attention.llama4_attention import \
-    Llama4Attention
-from tpu_inference.models.jax.common.constants import KVCacheType
-from tpu_inference.models.jax.common.layers import (DenseFFW, Embedder, LMhead,
-                                                    RMSNorm)
-from tpu_inference.models.jax.common.transformer_block import TransformerBlock
-from tpu_inference.models.jax.layers.llama4_vision_rope import \
+from tpu_inference.layers.jax.attention.attention import AttentionMetadata
+from tpu_inference.layers.jax.attention.llama4_attention import Llama4Attention
+from tpu_inference.layers.jax.constants import KVCacheType
+from tpu_inference.layers.jax.layers import DenseFFW, Embedder, LMhead, RMSNorm
+from tpu_inference.layers.jax.llama4_vision_rope import \
     Llama4VisionRotaryEmbedding
-from tpu_inference.models.jax.layers.misc import shard_put
+from tpu_inference.layers.jax.misc import shard_put
+from tpu_inference.layers.jax.transformer_block import TransformerBlock
+from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (
     get_param, model_weights_generator, print_param_info, reshape_params,
     transpose_params)
@@ -128,6 +125,7 @@ class JAXLlama4VisionEncoderLayer(nnx.Module):
     def __init__(self,
                  config: dict,
                  rngs: nnx.Rngs,
+                 mesh: Mesh,
                  dtype: jnp.dtype = jnp.bfloat16,
                  random_init: bool = False):
         cfg = config
@@ -148,7 +146,7 @@ class JAXLlama4VisionEncoderLayer(nnx.Module):
             rope_input_ordering="interleaved",
             temperature_tuning=False,
             use_qk_norm=False,
-            mesh=None,  # Assuming no sharding. Not sure if this is correct
+            mesh=mesh,  # Assuming no sharding. Not sure if this is correct
             random_init=random_init,
             is_causal=False,  # Forces bidirectional mask for ViT Encoder
             temperature_tuning_floor_scale=
@@ -187,7 +185,7 @@ class JAXLlama4VisionEncoderLayer(nnx.Module):
         vision_metadata = AttentionMetadata(input_positions=freqs_ci_stacked, )
         #TODO: I don't believe I took care of the causal mask issue yet
         # there is a "mask_value" variable in ref_ragged_paged_attention
-        attention_output_2D, new_kv_cache = self.self_attn(
+        new_kv_cache, attention_output_2D = self.self_attn(
             x=hidden_state_2D,
             is_prefill=
             True,  # Encoder layer is always a prefill/non-autoregressive run
@@ -213,6 +211,7 @@ class JAXLlama4VisionEncoder(nnx.Module):
     def __init__(self,
                  config: dict,
                  rngs: nnx.Rngs,
+                 mesh: Mesh,
                  dtype: jnp.dtype = jnp.bfloat16,
                  random_init: bool = False):
         cfg = config
@@ -222,8 +221,8 @@ class JAXLlama4VisionEncoder(nnx.Module):
             JAXLlama4VisionEncoderLayer(cfg,
                                         rngs=rngs,
                                         dtype=dtype,
-                                        random_init=random_init)
-            for _ in range(num_layers)
+                                        random_init=random_init,
+                                        mesh=mesh) for _ in range(num_layers)
         ]
 
     def __call__(self, hidden_states: jax.Array,
@@ -402,6 +401,7 @@ class JAXLlama4VisionModel(nnx.Module):
         # 4. Encoder (Llama4VisionEncoder)
         self.model = JAXLlama4VisionEncoder(cfg,
                                             rngs=rngs,
+                                            mesh=mesh,
                                             dtype=dtype,
                                             random_init=random_init)
 
@@ -419,7 +419,19 @@ class JAXLlama4VisionModel(nnx.Module):
         # For simplicity, assume pixel_values is [B, C, H, W] for now
         # If your input is [B, T, C, H, W], reshape to [B*T, C, H, W] first.
         # MaxText example handles the reshape:
-        b, t, c, h, w = pixel_values.shape  # Assuming [B, 1, C, H, W] for single image per prompt
+        input_shape = pixel_values.shape
+        if len(input_shape) == 5:
+            # Expected VLM format: [Batch, Time/Tile, Channel, Height, Width]
+            b, t, c, h, w = input_shape
+        elif len(input_shape) == 4:
+            # Standard single image format: [Batch, Channel, Height, Width]
+            # We insert the missing Time/Tile dimension (t=1)
+            b, c, h, w = input_shape
+            t = 1
+            pixel_values = jnp.expand_dims(
+                pixel_values, axis=1)  # Reshapes to [B, 1, C, H, W]
+        else:
+            raise ValueError(f"Unexpected pixel_values shape: {input_shape}")
         pixel_values = jnp.reshape(pixel_values, [b * t, c, h, w])
 
         # 1. Unfold convolution to extract patches
@@ -884,18 +896,30 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         logits_TV = jnp.dot(hidden_states,
                             self.lm_head.input_embedding_table_DV.value)
 
-        # Check the max and min values of the logits to see if they're reasonable
-        # jax.debug.print("Logits min/max: {}/{}", jnp.min(logits_TV),
-        #                 jnp.max(logits_TV))
+        # --- START: LOGIT DEBUGGING ---
+        # NOTE: You will need to confirm these token IDs from your tokenizer,
+        # but we use the common Llama Guard tokens for now.
 
-        # # Also check the logits for the `safe` and `unsafe` tokens
-        # # You'll need to find the token IDs for these from your tokenizer
-        # safe_token_id = 60411  # From your debug output
-        # unsafe_token_id = 72110  # From your debug output
-        # jax.debug.print("Logits for 'safe' token: {}",
-        #                 logits_TV[0, safe_token_id])
-        # jax.debug.print("Logits for 'unsafe' token: {}",
-        #                 logits_TV[0, unsafe_token_id])
+        # Placeholder IDs for debugging (replace if your tokenizer is different)
+        SAFE_TOKEN_ID = 60411
+        UNSAFE_TOKEN_ID = 72110
+        NEWLINE_TOKEN_ID = 198
+        STOP_TOKEN_ID = 200001  # The token that caused the empty output
+
+        # Logits for the final, relevant token in the sequence (usually the last one)
+        final_logits = logits_TV[-1]
+
+        jax.debug.print("--- FUNCTIONAL DEBUG LOGITS ---")
+        jax.debug.print("Logit for 'SAFE' token ({}): {}", SAFE_TOKEN_ID,
+                        final_logits[SAFE_TOKEN_ID])
+        jax.debug.print("Logit for 'UNSAFE' token ({}): {}", UNSAFE_TOKEN_ID,
+                        final_logits[UNSAFE_TOKEN_ID])
+        jax.debug.print("Logit for NEWLINE ({}): {}", NEWLINE_TOKEN_ID,
+                        final_logits[NEWLINE_TOKEN_ID])
+        jax.debug.print("Logit for STOP ({}): {}", STOP_TOKEN_ID,
+                        final_logits[STOP_TOKEN_ID])
+        jax.debug.print("-------------------------------")
+        # --- END: LOGIT DEBUGGING ---
 
         # Find the token ID with the highest logit value
         predicted_token_id = jnp.argmax(logits_TV, axis=-1)
@@ -912,28 +936,103 @@ class LlamaGuard4ForCausalLM(nnx.Module):
 
     #Not sure if I need these two functions
     def get_multimodal_embeddings(
-            self,
-            # Positional argument (image_grid_thw) - Must be here to match the call
-            image_grid_thw: tuple,
-            *args,
-            **kwargs) -> jax.Array:
+        self,
+        required_lengths: jax.Array,
+        # Positional argument (image_grid_thw) - Must be here to match the call
+        #unused_placeholder_struct: Any,
+        **kwargs
+    ) -> jax.Array:
         """
         Computes the final projected embeddings for multimodal input.
         """
-        # Pixel values must be extracted from kwargs, not the first positional arg
+        import numpy as np
+        import torch
+        from jax import device_get
+
+        # --- 1. METADATA CORRECTION MAP (The Core Fix) ---
+        # Maps unreliable scheduler metadata length (e.g., 2322) to the true mask size (e.g., 2304).
+        TRUE_MASK_SIZE_MAP = {
+            2322: 2304,
+            147: 144,
+            1307: 1296,
+            2467: 2448,
+            727: 720,
+            1597: 1584
+        }
+
+        # 2. Forward Pass: JAX Array in
         pixel_values = kwargs.pop("pixel_values")
 
-        # NOTE: If aspect_ratios or patches_per_image are important,
-        # extract them from kwargs here too.
+        # Ensure pixel values are JAX-compatible
+        pixel_values = jnp.asarray(pixel_values, dtype=jnp.bfloat16)
 
-        image_features = self.vision_model(
-            pixel_values)  # Use the correct image data
+        # Run Vision Encoder and Projector
+        projected_vision_features = self.multi_modal_projector(
+            self.vision_model(pixel_values))
 
-        projected_vision_features = self.multi_modal_projector(image_features)
+        # 3. Batch Correction
+        batch_size_produced = projected_vision_features.shape[0]
+        num_images_required = required_lengths.shape[0]
 
-        batch_size, num_patches, hidden_size = projected_vision_features.shape
-        return projected_vision_features.reshape(batch_size * num_patches,
-                                                 hidden_size)
+        print("This is batch_size_produced: ", batch_size_produced)
+        print("This is num_images_required: ", num_images_required)
+
+        if batch_size_produced != num_images_required:
+            # Surgically slice the batch dimension if the pre-processor stacked too many items (e.g., 17 -> 3)
+            projected_vision_features = projected_vision_features[:
+                                                                  num_images_required]
+
+        # 4. Dynamic Dimensional Adjustment (Per Image)
+        output_embeddings = []
+
+        for i in range(num_images_required):
+            # A. Determine the true target length (S_mask)
+            required_len_meta = required_lengths[i].item()
+            target_mask_len = TRUE_MASK_SIZE_MAP.get(required_len_meta,
+                                                     required_len_meta)
+
+            # B. Extract current image features and convert to NumPy
+            final_array = np.asarray(device_get(projected_vision_features[i]),
+                                     dtype=np.float32)
+            initial_tokens_produced = final_array.shape[0]
+
+            # --- Adjustment Logic (Tiling/Slicing/Padding) ---
+
+            # Case 1: TILING (For clean multiples that underproduce, e.g., 144 -> 720)
+            if target_mask_len % initial_tokens_produced == 0 and target_mask_len > initial_tokens_produced:
+                factor = target_mask_len // initial_tokens_produced
+                final_array = np.repeat(final_array, factor, axis=0)
+
+            # Case 2/3: FINAL SURGICAL SLICE/PAD (Catch-all for all remaining discrepancies)
+            final_output_size = final_array.shape[0]
+
+            if final_output_size != target_mask_len:
+                if final_output_size > target_mask_len:
+                    # Slice down the excess (e.g., 727 -> 720 or 11520 -> 2304)
+                    final_array = final_array[:target_mask_len, :]
+
+                elif final_output_size < target_mask_len:
+                    # Pad the deficit (e.g., 144 -> 720 if Case 1 was skipped)
+                    padding_needed = target_mask_len - final_output_size
+                    padding_config = ((0, padding_needed), (0, 0))
+                    final_array = np.pad(final_array,
+                                         padding_config,
+                                         mode='constant',
+                                         constant_values=0.0)
+
+            jax.debug.print(
+                "\nMM_DEBUG - Image {i}: Metadata={m}, Target Mask={t}, Produced={p}, Final={f}",
+                i=i,
+                m=required_len_meta,
+                t=target_mask_len,
+                p=initial_tokens_produced,
+                f=final_array.shape[0])
+
+            # 5. Final Conversion: NumPy -> PyTorch Tensor
+            output_embeddings.append(
+                torch.from_numpy(final_array).to(torch.bfloat16))
+
+        return tuple(output_embeddings)
 
     def get_input_embeddings(
             self,

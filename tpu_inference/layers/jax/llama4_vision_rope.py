@@ -23,7 +23,20 @@ class Llama4VisionRotaryEmbedding(nnx.Module):
     # Stored complex frequency tensor
     freqs_ci: jnp.ndarray = field(init=False, default=None)
 
-    def __post_init__(self):
+    #def __post_init__(self):
+
+    def __call__(
+            self
+    ) -> jax.Array:  #TODO: used to have "x: jax.Array" as an argument
+        """Returns the pre-calculated complex rotation factors."""
+        # The input x is needed only to get the batch dimensions if necessary, but here
+        # we return the static frequencies calculated in __init__.
+
+        # The final rotation array must be expanded to handle the batch dimension of x.
+        # x is typically (B, S, D). freqs_ci is (S, D_rot)
+
+        # We return the static frequencies. The calling attention layer (Llama4VisionAttention)
+        # is responsible for handling batch and head dimensions.
         # Calculate the size of the patch grid (e.g., 336 / 14 = 24)
         idx = self.image_size // self.patch_size
         num_patches = idx * idx
@@ -96,16 +109,7 @@ class Llama4VisionRotaryEmbedding(nnx.Module):
         # Store as parameter/attribute for checkpointing
         self.freqs_ci = freqs_cis_stacked.astype(self.dtype)
 
-    def __call__(
-            self
-    ) -> jax.Array:  #TODO: used to have "x: jax.Array" as an argument
-        """Returns the pre-calculated complex rotation factors."""
-        # The input x is needed only to get the batch dimensions if necessary, but here
-        # we return the static frequencies calculated in __init__.
+        print("self.freqs_ci type: ", type(self.freqs_ci))
+        print("value of self.freqs_ci: ", self.freqs_ci)
 
-        # The final rotation array must be expanded to handle the batch dimension of x.
-        # x is typically (B, S, D). freqs_ci is (S, D_rot)
-
-        # We return the static frequencies. The calling attention layer (Llama4VisionAttention)
-        # is responsible for handling batch and head dimensions.
         return self.freqs_ci
