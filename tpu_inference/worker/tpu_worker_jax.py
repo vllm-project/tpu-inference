@@ -164,7 +164,6 @@ class TPUWorker(AbstractTpuWorker):
                 pipeline_model_parallel_size=1,
             )
         ensure_kv_transfer_initialized(self.vllm_config)
-
         self.model_runner = TPUModelRunner(self.vllm_config, self.devices)
         logger.info(f"Init worker | "
                     f"rank={self.rank} | "

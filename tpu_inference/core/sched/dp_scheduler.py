@@ -408,3 +408,15 @@ class DPScheduler(Scheduler):
             f"DP rank request budget (cap {self.max_reqs_per_dp_rank}): {self.request_budget}"
         )
         logger.debug(f"Total assigned requests: {len(self.assigned_dp_rank)}")
+
+
+def update_vllm_config_for_dp_scheduler(vllm_config):
+    dp_size = vllm_config.sharding_config.total_dp_size
+    if dp_size > 1:
+        from tpu_inference.core.sched.dp_scheduler import DPScheduler
+        vllm_config.scheduler_config.max_num_seqs *= dp_size
+        vllm_config.scheduler_config.max_num_batched_tokens *= dp_size
+        vllm_config.scheduler_config.scheduler_cls = DPScheduler
+        logger.info(f"DP size({dp_size}) >= 2, using DPScheduler")
+    else:
+        logger.info(f"DP size ({dp_size}) < 2, using default Scheduler")
