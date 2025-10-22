@@ -128,8 +128,8 @@ class TpuPlatform(Platform):
                 "VLLM_ENABLE_V1_MULTIPROCESSING must be 0 when using Pathways(JAX_PLATFORMS=proxy)"
             )
         cls._initialize_sharding_config(vllm_config)
- 
-        from vllm.config import CompilationMode
+
+        from vllm.config import CompilationLevel
 
         cache_config = vllm_config.cache_config
         # For v0, the default block size is 16.
@@ -137,10 +137,10 @@ class TpuPlatform(Platform):
             cache_config.block_size = cast(BlockSize, 16)
         compilation_config = vllm_config.compilation_config
 
-        # TPU only supports DYNAMO_TRACE_ONCE compilation level
+        # TPU only supports DYNAMO_ONCE compilation level
         # NOTE(xiang): the compilation_config is not used by jax.
-        if compilation_config.mode != CompilationMode.DYNAMO_TRACE_ONCE:
-            compilation_config.mode = CompilationMode.DYNAMO_TRACE_ONCE
+        if compilation_config.level != CompilationLevel.DYNAMO_ONCE:
+            compilation_config.level = CompilationLevel.DYNAMO_ONCE
 
         if compilation_config.backend == "":
             compilation_config.backend = "openxla"

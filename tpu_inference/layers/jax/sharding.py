@@ -1,7 +1,7 @@
 import json
 import math
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, List, Optional
 
 import numpy as np
 from jax.sharding import Mesh
@@ -51,25 +51,22 @@ class ShardingConfigManager:
     """Manages sharding configuration parsing and access from vLLM config.
 
     Usage:
-        # During vLLM initialization
         sharding_config = ShardingConfigManager.from_vllm_config(vllm_config)
-
-        # Clean access to config values
         tp_size = sharding_config.tp_size
     """
 
     def __init__(self,
                  sharding_strategy: ShardingStrategy,
-                 device_indexes: list = None):
+                 device_indexes: Optional[List] = None):
         """
         Args:
             sharding_strategy: The parsed ShardingStrategy object.
             device_indexes: Optional list of device indexes to use.
         """
-        self.sharding_strategy = sharding_strategy
-        self.device_indexes = device_indexes
-        self._total_devices = int(math.prod(
-            asdict(sharding_strategy).values()))
+        self.sharding_strategy: ShardingStrategy = sharding_strategy
+        self.device_indexes: Optional[List[int]] = device_indexes
+        self._total_devices: int = int(
+            math.prod(asdict(sharding_strategy).values()))
         if device_indexes:
             assert self._total_devices == len(device_indexes)
 
@@ -127,14 +124,12 @@ class ShardingConfigManager:
 
     @classmethod
     def validate(cls, vllm_config, sharding_strategy):
-        # Check speculative decoding
         if vllm_config.speculative_config is not None:
             total_dp_size = sharding_strategy.data_parallelism * sharding_strategy.attention_data_parallelism
             raise ValueError(
                 f"Speculative decoding is not supported with data parallelism "
                 f"(DP size: {total_dp_size}). Please disable speculative decoding or "
                 f"set data parallelism to 1.")
-        # Check LoRA
         if vllm_config.lora_config is not None:
             total_dp_size = sharding_strategy.data_parallelism * sharding_strategy.attention_data_parallelism
             raise ValueError(
