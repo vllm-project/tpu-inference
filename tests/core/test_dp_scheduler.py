@@ -10,7 +10,7 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.request import Request
 
-from tpu_inference.core.sched.dp_scheduler import create_dp_scheduler
+from tpu_inference.core.sched.dp_scheduler import DPScheduler
 
 
 class TestDPScheduler(unittest.TestCase):
@@ -19,13 +19,14 @@ class TestDPScheduler(unittest.TestCase):
         """Set up test fixtures for DP scheduler tests."""
         # Create mock vllm_config with DP configuration
         self.mock_vllm_config = MagicMock(spec=VllmConfig)
-        self.mock_vllm_config.additional_config = {
-            "sharding": {
-                "sharding_strategy": {
-                    "data_parallelism": 4
-                }
-            }
-        }
+        self.mock_sharding_config = MagicMock()
+        self.mock_sharding_config.total_dp_size = 4
+        self.mock_vllm_config.sharding_config = self.mock_sharding_config
+
+        # Create mock scheduler config
+        self.mock_scheduler_config = MagicMock()
+        self.mock_scheduler_config.max_num_seqs = 32
+        self.mock_scheduler_config.max_num_batched_tokens = 1024
 
         # Create mock configs
         self.mock_kv_cache_config = MagicMock()
@@ -36,10 +37,12 @@ class TestDPScheduler(unittest.TestCase):
 
         # Create mock KV cache manager
         self.mock_kv_cache_manager = MagicMock(spec=KVCacheManager)
+        self.mock_kv_cache_manager.num_kv_cache_groups = 1
 
         # Create base scheduler args
         self.base_scheduler_args = {
             'vllm_config': self.mock_vllm_config,
+            'scheduler_config': self.mock_scheduler_config,
             'kv_cache_config': self.mock_kv_cache_config,
             'cache_config': self.mock_cache_config,
             'max_model_len': 2048,
@@ -60,30 +63,50 @@ class TestDPScheduler(unittest.TestCase):
         """Clean up test fixtures."""
         self.kv_cache_manager_patcher.stop()
 
-    def test_create_dp_scheduler_returns_class(self):
-        """Test that create_dp_scheduler returns a class."""
-        DPScheduler = create_dp_scheduler()
+    def _create_mock_scheduler_instance(self):
+        """Helper to create a properly mocked DPScheduler instance."""
+        # Mock the parent Scheduler.__init__ to avoid complex setup
+        with patch('tpu_inference.core.sched.dp_scheduler.Scheduler.__init__'
+                   ) as mock_super_init:
+            mock_super_init.return_value = None
+
+            # Create instance with manually set attributes (similar to working test)
+            scheduler = DPScheduler.__new__(DPScheduler)
+            scheduler.vllm_config = self.mock_vllm_config
+            scheduler.scheduler_config = self.mock_scheduler_config
+            scheduler.kv_cache_config = self.mock_kv_cache_config
+            scheduler.cache_config = self.mock_cache_config
+            scheduler.max_model_len = 2048
+            scheduler.use_eagle = False
+            scheduler.log_stats = True
+            scheduler.enable_kv_cache_events = False
+            scheduler.dcp_world_size = 1
+            scheduler.kv_cache_manager = self.mock_kv_cache_manager
+
+            # Now call the real __init__ to set up DP state
+            scheduler.__init__(**self.base_scheduler_args)
+
+            # Mock running and waiting queues (these might not be set by real init)
+            if not hasattr(scheduler, 'running'):
+                scheduler.running = []
+            if not hasattr(scheduler, 'waiting'):
+                scheduler.waiting = []
+
+            return scheduler
+
+    def test_dp_scheduler_is_subclass(self):
+        """Test that DPScheduler is a subclass of Scheduler."""
         self.assertTrue(issubclass(DPScheduler, Scheduler))
-
-    def test_create_dp_scheduler_with_custom_base(self):
-        """Test creating DP scheduler with custom base class."""
-
-        class CustomScheduler(Scheduler):
-            pass
-
-        DPScheduler = create_dp_scheduler(CustomScheduler)
-        self.assertTrue(issubclass(DPScheduler, CustomScheduler))
 
     @patch('tpu_inference.core.sched.dp_scheduler.Scheduler.__init__')
     def test_dp_scheduler_initialization(self, mock_super_init):
         """Test DP scheduler initialization."""
         mock_super_init.return_value = None
 
-        DPScheduler = create_dp_scheduler()
-
         # Create instance with mocked attributes
         scheduler = DPScheduler.__new__(DPScheduler)
         scheduler.vllm_config = self.mock_vllm_config
+        scheduler.scheduler_config = self.mock_scheduler_config
         scheduler.kv_cache_config = self.mock_kv_cache_config
         scheduler.cache_config = self.mock_cache_config
         scheduler.max_model_len = 2048
@@ -93,38 +116,36 @@ class TestDPScheduler(unittest.TestCase):
         scheduler.dcp_world_size = 1
         scheduler.kv_cache_manager = self.mock_kv_cache_manager
 
-        scheduler.__init__(dp_size=4)
+        scheduler.__init__(**self.base_scheduler_args)
 
         # Verify initialization
         self.assertEqual(scheduler.dp_size, 4)
         self.assertIsInstance(scheduler.assigned_dp_rank, dict)
         self.assertIsInstance(scheduler.round_robin_counter, itertools.cycle)
         self.assertEqual(len(scheduler.dp_kv_cache_managers), 4)
+        self.assertEqual(scheduler.max_reqs_per_dp_rank, 8)  # 32 // 4
+        self.assertEqual(scheduler.max_tokens_per_dp_rank, 256)  # 1024 // 4
 
-    def test_get_or_assign_dp_rank_new_request(self):
-        """Test DP rank assignment for new requests."""
-        DPScheduler = create_dp_scheduler()
-
+    def test_get_dp_rank_for_allocation_new_request(self):
+        """Test DP rank allocation for new requests."""
         # Create scheduler instance with mocked setup
-        scheduler = self._create_mock_scheduler_instance(DPScheduler)
+        scheduler = self._create_mock_scheduler_instance()
 
         # Create mock request
         mock_request = MagicMock(spec=Request)
         mock_request.request_id = "test_req_1"
 
-        # Test assignment for new request
-        rank = scheduler._get_or_assign_dp_rank(mock_request)
+        # Test allocation for new request
+        rank = scheduler._get_or_find_dp_rank(mock_request,
+                                              num_tokens=10)
 
         # Should assign rank 0 (first in round robin)
         self.assertEqual(rank, 0)
-        self.assertEqual(scheduler.assigned_dp_rank["test_req_1"], 0)
 
-    def test_get_or_assign_dp_rank_existing_request(self):
-        """Test DP rank retrieval for existing requests."""
-        DPScheduler = create_dp_scheduler()
-
+    def test_get_dp_rank_for_allocation_existing_request(self):
+        """Test DP rank allocation for existing requests."""
         # Create scheduler instance with mocked setup
-        scheduler = self._create_mock_scheduler_instance(DPScheduler)
+        scheduler = self._create_mock_scheduler_instance()
 
         # Create mock request
         mock_request = MagicMock(spec=Request)
@@ -133,26 +154,28 @@ class TestDPScheduler(unittest.TestCase):
         # Pre-assign a rank
         scheduler.assigned_dp_rank["test_req_1"] = 2
 
-        # Test retrieval
-        rank = scheduler._get_or_assign_dp_rank(mock_request)
+        # Test allocation with existing request
+        rank = scheduler._get_or_find_dp_rank(mock_request,
+                                              num_tokens=10)
 
         # Should return existing rank
         self.assertEqual(rank, 2)
 
     def test_round_robin_assignment(self):
         """Test round-robin assignment across multiple requests."""
-        DPScheduler = create_dp_scheduler()
-
         # Create scheduler instance with mocked setup
-        scheduler = self._create_mock_scheduler_instance(DPScheduler)
+        scheduler = self._create_mock_scheduler_instance()
 
         # Create multiple mock requests
         requests = [MagicMock(spec=Request) for _ in range(6)]
         for i, req in enumerate(requests):
             req.request_id = f"test_req_{i}"
 
-        # Assign ranks
-        ranks = [scheduler._get_or_assign_dp_rank(req) for req in requests]
+        # Allocate ranks
+        ranks = [
+            scheduler._get_or_find_dp_rank(req, num_tokens=10)
+            for req in requests
+        ]
 
         # Should cycle through [0, 1, 2, 3, 0, 1]
         expected_ranks = [0, 1, 2, 3, 0, 1]
@@ -160,8 +183,7 @@ class TestDPScheduler(unittest.TestCase):
 
     def test_get_computed_blocks_dp_cache_hit(self):
         """Test get_computed_blocks_dp with cache hit."""
-        DPScheduler = create_dp_scheduler()
-        scheduler = self._create_mock_scheduler_instance(DPScheduler)
+        scheduler = self._create_mock_scheduler_instance()
 
         # Create mock request
         mock_request = MagicMock(spec=Request)
@@ -185,9 +207,8 @@ class TestDPScheduler(unittest.TestCase):
         scheduler.dp_kv_cache_managers = mock_managers
 
         # Call get_computed_blocks_dp
-        with patch('builtins.print'):  # Suppress print output
-            result_blocks, result_tokens = scheduler._get_computed_blocks_dp(
-                mock_request)
+        result_blocks, result_tokens = scheduler._get_computed_blocks_dp(
+            mock_request)
 
         # Should assign to manager 2 and return its blocks
         self.assertEqual(scheduler.assigned_dp_rank["test_req"], 2)
@@ -195,8 +216,7 @@ class TestDPScheduler(unittest.TestCase):
 
     def test_get_computed_blocks_dp_no_cache_hit(self):
         """Test get_computed_blocks_dp with no cache hit."""
-        DPScheduler = create_dp_scheduler()
-        scheduler = self._create_mock_scheduler_instance(DPScheduler)
+        scheduler = self._create_mock_scheduler_instance()
 
         # Create mock request
         mock_request = MagicMock(spec=Request)
@@ -217,38 +237,40 @@ class TestDPScheduler(unittest.TestCase):
         result_blocks, result_tokens = scheduler._get_computed_blocks_dp(
             mock_request)
 
-        # Should assign using round robin (rank 0)
-        self.assertEqual(scheduler.assigned_dp_rank["test_req"], 0)
+        # Should return empty blocks and 0 tokens since no cache hit
+        self.assertEqual(result_tokens, 0)
 
-    def test_free_blocks_removes_request(self):
-        """Test _free_blocks removes request from assigned ranks."""
-        DPScheduler = create_dp_scheduler()
-        scheduler = self._create_mock_scheduler_instance(DPScheduler)
+    def test_kv_cache_manager_proxy_free_request(self):
+        """Test KV cache manager proxy free method removes request from assigned ranks."""
+        scheduler = self._create_mock_scheduler_instance()
 
         # Create mock request
         mock_request = MagicMock(spec=Request)
         mock_request.request_id = "test_req"
-        mock_request.is_finished.return_value = True
 
         # Set up state
         scheduler.assigned_dp_rank["test_req"] = 1
-        scheduler.requests = {"test_req": mock_request}
+        scheduler.num_scheduled_tokens["test_req"] = 50
 
         # Mock managers
         mock_managers = [MagicMock() for _ in range(4)]
         scheduler.dp_kv_cache_managers = mock_managers
 
-        # Call _free_blocks
-        scheduler._free_blocks(mock_request)
+        # Call free through the proxy
+        scheduler.kv_cache_manager.free(mock_request)
 
-        # Verify manager free called and request removed
+        # Verify manager free called and request removed from state
         mock_managers[1].free.assert_called_once_with(mock_request)
-        self.assertNotIn("test_req", scheduler.requests)
+        self.assertNotIn("test_req", scheduler.assigned_dp_rank)
+        self.assertNotIn("test_req", scheduler.num_scheduled_tokens)
+        self.assertEqual(scheduler.request_budget[1],
+                         9)  # Should be incremented
+        self.assertEqual(scheduler.token_budget[1],
+                         306)  # Should be incremented by 50
 
     def test_make_stats_combines_manager_stats(self):
         """Test make_stats combines statistics from all DP managers."""
-        DPScheduler = create_dp_scheduler()
-        scheduler = self._create_mock_scheduler_instance(DPScheduler)
+        scheduler = self._create_mock_scheduler_instance()
 
         # Set up scheduler state
         scheduler.log_stats = True
@@ -288,25 +310,63 @@ class TestDPScheduler(unittest.TestCase):
         self.assertEqual(stats.prefix_cache_stats.queries, 20 + 21 + 22 + 23)
         self.assertEqual(stats.prefix_cache_stats.hits, 5 + 6 + 7 + 8)
 
-    def test_kv_cache_manager_proxy_usage_property(self):
-        """Test KV cache manager proxy usage property."""
-        DPScheduler = create_dp_scheduler()
-        scheduler = self._create_mock_scheduler_instance(DPScheduler)
+    def test_dynamic_token_budget(self):
+        """Test get_dynamic_token_budget method."""
+        scheduler = self._create_mock_scheduler_instance()
 
-        # Mock managers with different usage
-        mock_managers = []
-        usages = [0.2, 0.4, 0.6, 0.8]
-        for usage in usages:
-            manager = MagicMock()
-            manager.usage = usage
-            mock_managers.append(manager)
+        # Create mock request
+        mock_request = MagicMock(spec=Request)
+        mock_request.request_id = "test_req"
 
-        scheduler.dp_kv_cache_managers = mock_managers
+        # Test with unassigned request
+        budget = scheduler.get_dynamic_token_budget(mock_request,
+                                                    available_budget=1000)
+        self.assertEqual(budget, 256)  # Should return max budget
 
-        # Test usage property
-        avg_usage = scheduler.kv_cache_manager.usage
-        expected_avg = sum(usages) / len(usages)  # 0.5
-        self.assertEqual(avg_usage, expected_avg)
+        # Test with assigned request
+        scheduler.assigned_dp_rank["test_req"] = 1
+        scheduler.token_budget[1] = 100
+        budget = scheduler.get_dynamic_token_budget(mock_request,
+                                                    available_budget=1000)
+        self.assertEqual(budget, 100)  # Should return specific DP rank budget
+
+    def test_rank_capacity_checks(self):
+        """Test DP rank capacity check methods."""
+        scheduler = self._create_mock_scheduler_instance()
+
+        # Test new request capacity
+        self.assertTrue(scheduler._rank_has_capacity_for_new_requests(0, 50))
+        self.assertFalse(scheduler._rank_has_capacity_for_new_requests(
+            0, 500))  # Too many tokens
+
+        # Exhaust request budget
+        scheduler.request_budget[0] = 0
+        self.assertFalse(scheduler._rank_has_capacity_for_new_requests(0, 50))
+
+        # Test existing request capacity
+        scheduler.request_budget[0] = 8  # Reset
+        self.assertTrue(
+            scheduler._rank_has_capacity_for_existing_requests(0, 50))
+        self.assertFalse(
+            scheduler._rank_has_capacity_for_existing_requests(0, 500))
+
+    def test_update_dp_rank_budget(self):
+        """Test DP rank budget update method."""
+        scheduler = self._create_mock_scheduler_instance()
+
+        # Create mock request
+        mock_request = MagicMock(spec=Request)
+        mock_request.request_id = "test_req"
+
+        # Update budget for new request
+        scheduler._assign_rank_and_update_budget(mock_request, 1, 50)
+
+        # Verify state updates
+        self.assertEqual(scheduler.assigned_dp_rank["test_req"], 1)
+        self.assertEqual(scheduler.num_scheduled_tokens["test_req"], 50)
+        self.assertEqual(scheduler.request_budget[1], 7)  # Decremented from 8
+        self.assertEqual(scheduler.token_budget[1],
+                         206)  # Decremented by 50 from 256
 
 
 if __name__ == '__main__':
