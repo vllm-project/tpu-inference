@@ -93,7 +93,6 @@ from typing import TYPE_CHECKING, Any, Optional, get_args
 
 import jax
 import jax.numpy as jnp
-from jax._src import test_util as jtu
 from jax.sharding import Mesh
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -756,11 +755,8 @@ class TPUConnectorWorker:
         self.swap_op_type = os.getenv("TPU_KV_OFFLOADING_SWAP_OP_TYPE",
                                       default=DEFAULT_HOST_HBM_SWAP_OP_TYPE)
         assert self.swap_op_type in get_args(CPU_OFFLOADING_SWAP_OP_TYPE)
-        # TODO(jcgu): double confirm libtpu version requirement
-        if self.swap_op_type == "pallas" and not jtu.if_cloud_tpu_at_least(
-                2025, 8, 14):
-            logger.warning("libtpu version does not support DMA host-hbm")
-            self.swap_op_type = "jax"
+        # TODO(jcgu): check libtpu compatibility for pallas dma kernel
+        # directly import jax._src.test_util crashes the process
         logger.info(
             f"(cpu offloading) swap operation type is {self.swap_op_type}")
 
