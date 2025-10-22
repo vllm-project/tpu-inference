@@ -92,9 +92,13 @@ class Llama4ForCausalLM(nnx.Module):
             self.rope_scaling = rope_scaling
         else:
             self.rope_scaling["scale_factor"] = rope_scaling["factor"]
-            self.rope_scaling["low_freq_factor"] = rope_scaling["low_freq_factor"]
-            self.rope_scaling["high_freq_factor"] = rope_scaling["high_freq_factor"]
-            self.rope_scaling["original_max_position_embeddings"] = rope_scaling["original_max_position_embeddings"]
+            self.rope_scaling["low_freq_factor"] = rope_scaling[
+                "low_freq_factor"]
+            self.rope_scaling["high_freq_factor"] = rope_scaling[
+                "high_freq_factor"]
+            self.rope_scaling[
+                "original_max_position_embeddings"] = rope_scaling[
+                    "original_max_position_embeddings"]
 
         self.use_qk_norm = getattr(text_config, "use_qk_norm", True)
 
@@ -161,13 +165,13 @@ class Llama4ForCausalLM(nnx.Module):
                 head_dim=self.head_dim,
                 rope_theta=500000.0,
                 # https://huggingface.co/meta-llama/Llama-4-Scout-17B-16E-Instruct/blob/main/config.json
-                rope_scaling = self.rope_scaling,
+                rope_scaling=self.rope_scaling,
                 rngs=self.rng,
                 rope_input_ordering="interleaved",
                 temperature_tuning=True,
                 temperature_tuning_scale=0.1,
                 temperature_tuning_floor_scale=8192,
-                use_qk_norm = self.use_qk_norm,
+                use_qk_norm=self.use_qk_norm,
                 attention_chunk_size=None if use_attention_rope else 8192,
                 mesh=self.mesh,
                 random_init=force_random_weights,
