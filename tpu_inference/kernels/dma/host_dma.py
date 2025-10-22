@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+""" Host <-> HBM DMA kernel"""
 import jax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
