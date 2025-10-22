@@ -123,8 +123,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.uses_mrope, self.model_config)
         self.lora_utils = LoraUtils(self)
         self.start_time = 0
-        self.has_started_profiling_1 = False
-        self.has_started_profiling_2 = False
+        self.has_started_profiling = False
+        jax.numpy.set_printoptions(threshold=np.inf)
+        np.set_printoptions(threshold=np.inf)
 
         cache_config = self.cache_config
         if cache_config.cache_dtype == "auto":
@@ -334,24 +335,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         scheduler_output: "VllmSchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> ModelRunnerOutput:
-        if os.path.exists("/mnt/disks/jacobplatin/tmp.txt"):
-            # wait 5 minutes to start profiling
-            if not self.has_started_profiling_1:
+        if os.path.exists("/tmp/tmp_sentinel.txt"):
+            if not self.has_started_profiling:
+                self.has_started_profiling = True
+                print("Starting profiling...")
                 self.start_time = time()
-                self.has_started_profiling_1 = True
-            else:
-                if time() - self.start_time > 300 and self.has_started_profiling_2 is False:
-                    self.has_started_profiling_2 = True
-                    self.start_time = time()
-                    print("Starting profiling...")
-                    options = jax.profiler.ProfileOptions()
-                    options.python_tracer_level = os.getenv(
-                        "PYTHON_TRACER_LEVEL", 0)
-                    jax.profiler.start_trace("trace-first-30s")
-                elif time() - self.start_time > 30 and self.has_started_profiling_2 is True:
-                    jax.profiler.stop_trace()
-                    print("Stopped profiling after 30s.")
-                    raise ValueError
+                options = jax.profiler.ProfileOptions()
+                options.python_tracer_level = os.getenv(
+                    "PYTHON_TRACER_LEVEL", 0)
+                jax.profiler.start_trace("trace-first-30s")
+            elif time() - self.start_time > 30:
+                jax.profiler.stop_trace()
+                print("Stopped profiling after 30s.")
+                raise ValueError
         return self._execute_model(scheduler_output)[1]
 
     def _execute_model(
@@ -379,6 +375,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         (input_ids, attn_metadata, sampling_metadata, logits_indices,
          spec_decode_metadata) = self._prepare_inputs(scheduler_output)
+
+        if self.has_started_profiling:
+            print("input_positions:", attn_metadata.input_positions,
+                  "block_tables:", attn_metadata.block_tables, "seq_lens:",
+                  attn_metadata.seq_lens, "query_start_loc:",
+                  attn_metadata.query_start_loc, "request_distribution:",
+                  attn_metadata.request_distribution)
 
         # multi-modal support
         if self.is_multimodal_model:
@@ -726,8 +729,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         attention_metadata.seq_lens_cpu = seq_lens_cpu
 
         batch_composition_stats = runner_utils.get_batch_composition_stats(
-                self.input_batch, total_num_scheduled_tokens, num_reqs,
-                padded_total_num_scheduled_tokens, scheduler_output)
+            self.input_batch, total_num_scheduled_tokens, num_reqs,
+            padded_total_num_scheduled_tokens, scheduler_output)
 
         logger.info("Batch composition stats %s", batch_composition_stats)
 
