@@ -219,8 +219,9 @@ class TpuPlatform(Platform):
             update_vllm_config_for_qwix_quantization
 
         update_vllm_config_for_qwix_quantization(vllm_config)
-        
-        from tpu_inference.core.sched.dp_scheduler import update_vllm_config_for_dp_scheduler
+
+        from tpu_inference.core.sched.dp_scheduler import \
+            update_vllm_config_for_dp_scheduler
         update_vllm_config_for_dp_scheduler(vllm_config)
 
     @classmethod

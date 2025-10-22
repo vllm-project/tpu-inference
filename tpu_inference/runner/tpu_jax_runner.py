@@ -107,7 +107,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.maybe_forbid_compile = runner_utils.ForbidCompile(
         ) if envs.VLLM_XLA_CHECK_RECOMPILATION else nullcontext()
         self.dp_size = self.vllm_config.sharding_config.total_dp_size
-        
+
         self._init_random()
         self._init_mesh()
         self._init_phased_profiling()
@@ -142,7 +142,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         else:
             self.kv_cache_dtype = TPU_STR_DTYPE_TO_TORCH_DTYPE[
                 cache_config.cache_dtype]
-        
+
         self.data_parallel_mlp_sharding = NamedSharding(
             self.mesh, PartitionSpec(ShardingAxisName.MLP_DATA))
         self.data_parallel_attn_sharding = NamedSharding(
