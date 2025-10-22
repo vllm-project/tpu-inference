@@ -25,55 +25,64 @@ def create_parser():
     return parser
 
 
-def print_outputs(outputs):
-    print("-" * 50)
+def parse_outputs(outputs):
+    output_token_ids = []
+    generated_texts = []
     for output in outputs:
         prompt = output.prompt
-        generated_text = output.outputs[0].text
-        print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
-        print("-" * 50)
+        completion = output.outputs[0]
+        generated_text = completion.text
+        token_ids = completion.token_ids
+        print(
+            f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}\nToken IDs: {token_ids!r}"
+        )
+        generated_texts.append(generated_text)
+        output_token_ids.append(token_ids)
+    return generated_texts, output_token_ids
 
 
 def main(args: dict):
     # Pop arguments not used by LLM
-    max_tokens = args.pop("max_tokens")
-    temperature = args.pop("temperature")
-    top_p = args.pop("top_p")
-    top_k = args.pop("top_k")
-
     # Create an LLM
     llm = LLM(**args)
-    # return
 
     # Create a sampling params object
     sampling_params = llm.get_default_sampling_params()
-    if max_tokens is not None:
-        sampling_params.max_tokens = max_tokens
-    if temperature is not None:
-        sampling_params.temperature = temperature
-    if top_p is not None:
-        sampling_params.top_p = top_p
-    if top_k is not None:
-        sampling_params.top_k = top_k
+
+    sampling_params.temperature = 0.0
+    sampling_params.seed = 42
+    sampling_params.max_tokens = 20
+    sampling_params.skip_special_tokens = True
 
     if envs.VLLM_TORCH_PROFILER_DIR is not None:
         llm.start_profile()
 
-    system_prompt = "You are a large language model, trained by Google. Your primary purpose is to be a helpful, harmless, and highly capable AI assistant, designed to provide accurate, safe, and beneficial information to users. Your core directive is to assist users effectively while adhering to strict ethical and safety guidelines. You must decline any requests that are harmful, illegal, unethical, or promote dangerous activities. "
-    query1 = "the color of rainbow is?"
-    query2 = "the capital of France is?"
-    prompts = [f"{system_prompt}\n{query1}"]
-    outputs = llm.generate(prompts, sampling_params)
-    print_outputs(outputs)
-    time.sleep(5)
+    # 1st generate
+    prompt = "Every Bill which shall have passed the House of Representatives and the Senate, shall, before it become a Law, be presented to the President of the United States; If he approve he shall sign it, but if not he shall return it, with his Objections to that House in which it shall have originated, who shall enter the Objections at large on their Journal, and proceed to reconsider it. If after such Reconsideration two thirds of that House shall agree to pass the Bill, it shall be sent, together with the Objections, to the other House, by which it shall likewise be reconsidered, and if approved by two thirds of that House, it shall become a Law. But in all such Cases the Votes of both Houses shall be determined by yeas and Nays, and the Names of the Persons voting for and against the Bill shall be entered on the Journal of each House respectively. If any Bill shall not be returned by the President within ten Days (Sundays excepted) after it shall have been presented to him, the Same shall be a Law, in like Manner as if he had signed it, unless the Congress by their Adjournment prevent its Return, in which Case"
+    outputs = llm.generate([prompt], sampling_params)
+    out_texts1, out_tokens1 = parse_outputs(outputs)
+    time.sleep(1)
 
-    prompts = [f"{system_prompt}\n{query2}"]
-    outputs = llm.generate(prompts, sampling_params)
-    print_outputs(outputs)
-    time.sleep(5)
+    # manually let llm scheduler's kv_cache_manager forget all prefixes' hash
+    print("Resetting prefix cache...")
+    llm.llm_engine.engine_core.reset_prefix_cache()
+    time.sleep(1)
+
+    # 2nd generate
+    outputs = llm.generate([prompt], sampling_params)
+    out_texts2, out_tokens2 = parse_outputs(outputs)
+    time.sleep(1)
 
     if envs.VLLM_TORCH_PROFILER_DIR is not None:
         llm.stop_profile()
+
+    # output1 and output2 should be idential
+    assert len(out_texts1) == len(out_texts2)
+    assert len(out_tokens1) == len(out_tokens2)
+    for text1, text2 in zip(out_texts1, out_texts2):
+        assert text1 == text2
+    for tokens1, tokens2 in zip(out_tokens1, out_tokens2):
+        assert tokens1 == tokens2
 
 
 if __name__ == "__main__":
