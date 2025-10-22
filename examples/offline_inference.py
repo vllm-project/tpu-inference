@@ -98,7 +98,9 @@ def main(args: dict):
     for output in outputs:
         prompt = output.prompt
         generated_text = output.outputs[0].text
+        output_token_ids = output.outputs[0].token_ids
         print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
+        print(f"Output IDs: {output_token_ids}")
         print("-" * 50)
 
 
