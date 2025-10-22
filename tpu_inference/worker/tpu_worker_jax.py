@@ -129,12 +129,8 @@ class TPUWorker(AbstractTpuWorker):
             sharding_config: ShardingConfigManager = self.vllm_config.sharding_config
             device_indexes = sharding_config.device_indexes
             if device_indexes is not None:
+                # Enforcing the devices sequence to be consistent with the specified device indexes
                 self.devices = [jax.devices()[i] for i in device_indexes]
-            else:
-                self.devices = jax.devices()[:sharding_config.total_devices]
-
-            # Enforcing the devices sequence to be consistent with the specified device indexes
-            if not self.devices:
                 all_devices = jax.devices()
                 device_dict = {device.id: device for device in all_devices}
                 self.devices = []
@@ -146,7 +142,9 @@ class TPUWorker(AbstractTpuWorker):
                             f"jax.devices() with IDs {list(device_dict.keys())}!"
                         )
                     self.devices.append(device)
-                self.devices = self.devices[:tp]
+                self.devices = self.devices[:sharding_config.total_devices]
+            else:
+                self.devices = jax.devices()[:sharding_config.total_devices]
 
         # Initialize the vLLM distribution layer as a single chip environment,
         # we'll swap the model's parallel modules with TPU SPMD equivalents.
