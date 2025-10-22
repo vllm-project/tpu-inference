@@ -113,6 +113,10 @@ class TPUWorker(AbstractTpuWorker):
                     f"Starting JAX profiler server on port {jax_profiler_server_port}"
                 )
                 jax.profiler.start_server(jax_profiler_server_port)
+        try:
+            os.remove("/tmp/tmp_sentinel.txt")
+        except Exception:
+            pass
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:

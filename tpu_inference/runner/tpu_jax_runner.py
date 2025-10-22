@@ -143,6 +143,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.kv_cache_dtype = TPU_STR_DTYPE_TO_TORCH_DTYPE[
                 cache_config.cache_dtype]
 
+        # Don't truncate printing
+        jax.numpy.set_printoptions(threshold=np.inf)
+        np.set_printoptions(threshold=np.inf)
+
     def _init_random(self):
         if self.model_config.seed is None:
             self.model_config.seed = 0
@@ -334,7 +338,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         scheduler_output: "VllmSchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> ModelRunnerOutput:
-        if os.path.exists("/mnt/disks/jacobplatin/tmp.txt"):
+        if os.path.exists("/tmp/tmp_sentinel.txt"):
             # wait 5 minutes to start profiling
             if not self.has_started_profiling_1:
                 self.start_time = time()
@@ -379,6 +383,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         (input_ids, attn_metadata, sampling_metadata, logits_indices,
          spec_decode_metadata) = self._prepare_inputs(scheduler_output)
+
+        if self.has_started_profiling_2:
+            print("input_positions:", attn_metadata.input_positions,
+                  "block_tables:", attn_metadata.block_tables,
+                  "seq_lens:", attn_metadata.seq_lens,
+                  "query_start_loc:", attn_metadata.query_start_loc,
+                  "request_distribution:", attn_metadata.request_distribution)
 
         # multi-modal support
         if self.is_multimodal_model:
