@@ -72,23 +72,23 @@ class Llama4Attention(Attention):
         x_SD = nnx.with_sharding_constraint(x, self.activation_attention_td)
         x_q_TD = nnx.with_sharding_constraint(x, self.activation_q_td)
  
-        # jax.debug.print("x_q_TD Stats: Max={m}, Min={i}, Sum={s}", m=jnp.max(x_q_TD), i=jnp.min(x_q_TD),s=jnp.sum(x_q_TD, dtype=jnp.float32))
-        print(f"x_q_TD Stats: Max={jnp.max(x_q_TD)}, Min={jnp.min(x_q_TD)}, Sum={jnp.sum(x_q_TD, dtype=jnp.float32)}")
-        # jax.debug.print("x_q_TD shape: {s}, value: {v}", s=x_q_TD.shape, v=x_q_TD)
-        print(f"x_q_TD shape: {x_q_TD.shape}, value: {x_q_TD}")
+        # # jax.debug.print("x_q_TD Stats: Max={m}, Min={i}, Sum={s}", m=jnp.max(x_q_TD), i=jnp.min(x_q_TD),s=jnp.sum(x_q_TD, dtype=jnp.float32))
+        # print(f"x_q_TD Stats: Max={jnp.max(x_q_TD)}, Min={jnp.min(x_q_TD)}, Sum={jnp.sum(x_q_TD, dtype=jnp.float32)}")
+        # # jax.debug.print("x_q_TD shape: {s}, value: {v}", s=x_q_TD.shape, v=x_q_TD)
+        # print(f"x_q_TD shape: {x_q_TD.shape}, value: {x_q_TD}")
         
         num_tokens_to_print = x_q_TD.shape[0]
-        print(f"--- Printing stats for the first {num_tokens_to_print} tokens of x_q_TD ---")
-        for i in range(num_tokens_to_print):
-            token_vector = x_q_TD[i, :]
-            print(
-                f"  Token {i}: "
-                f"Shape: {token_vector.shape}, "
-                f"Mean: {jnp.mean(token_vector):.4f}, "
-                f"Max: {jnp.max(token_vector):.4f}, "
-                f"Min: {jnp.min(token_vector):.4f}, "
-                f"First 5 values: {token_vector[:5]}"
-            )
+        # print(f"--- Printing stats for the first {num_tokens_to_print} tokens of x_q_TD ---")
+        # for i in range(num_tokens_to_print):
+        #     token_vector = x_q_TD[i, :]
+        #     print(
+        #         f"  Token {i}: "
+        #         f"Shape: {token_vector.shape}, "
+        #         f"Mean: {jnp.mean(token_vector)}, "
+        #         f"Max: {jnp.max(token_vector)}, "
+        #         f"Min: {jnp.min(token_vector)}, "
+        #         f"First 5 values: {token_vector[:5]}"
+        #     )
 
         rope_scaling = self.rope_scaling
         rope_theta = self.rope_theta
@@ -110,37 +110,75 @@ class Llama4Attention(Attention):
                 print(
                     f"  Token {i}: "
                     f"Shape: {token_q_vector.shape}, "
-                    f"Mean: {jnp.mean(token_q_vector):.4f}, "
-                    f"Max: {jnp.max(token_q_vector):.4f}, "
-                    f"Min: {jnp.min(token_q_vector):.4f}, "
+                    f"Mean: {jnp.mean(token_q_vector)}, "
+                    f"Max: {jnp.max(token_q_vector)}, "
+                    f"Min: {jnp.min(token_q_vector)}, "
                     f"First head's first 5 values: {token_q_vector[0, :5]}"
                 )
 
             if use_attention_rope:
+                print("use_attention_rope is True")
                 q_TNH = apply_rope(q_TNH, md.input_positions, H, rope_theta,
                                    rope_scaling, self.rope_input_ordering)
+            
+            # jax.debug.print("q_TNH (final) Stats: Max={m}, Min={i}, Sum={s}", m=jnp.max(q_TNH), i=jnp.min(q_TNH),s=jnp.sum(q_TNH, dtype=jnp.float32))
+            print(f"q_TNH (rope) Stats: Max={jnp.max(q_TNH)}, Min={jnp.min(q_TNH)}, Sum={jnp.sum(q_TNH, dtype=jnp.float32)}")
+            # jax.debug.print("q_TNH (final) shape: {s}, value: {v}", s=q_TNH.shape, v=q_TNH)
+            print(f"q_TNH (rope) shape: {q_TNH.shape}, value: {q_TNH}")
 
-                # Apply normaliation after RoPE
-                if self.use_qk_norm:
-                    q_TNH = l2_norm(q_TNH)
-            else:
-                if self.temperature_tuning:
-                    q_TNH = self.apply_temperature_tuning(md, q_TNH)
+            print(f"--- Printing stats for the first {num_tokens_to_print} tokens of q_TNH (rope) ---")
+            for i in range(num_tokens_to_print):
+                token_q_vector = q_TNH[i, :, :]
+                print(
+                    f"  Token {i}: "
+                    f"Shape: {token_q_vector.shape}, "
+                    f"Mean: {jnp.mean(token_q_vector)}, "
+                    f"Max: {jnp.max(token_q_vector)}, "
+                    f"Min: {jnp.min(token_q_vector)}, "
+                    f"First head's first 5 values: {token_q_vector[0, :5]}"
+                )
+
+            # Apply normaliation after RoPE
+            if self.use_qk_norm:
+                print("use_qk_norm a is True")
+                q_TNH = l2_norm(q_TNH)
+            
+            # jax.debug.print("q_TNH (final) Stats: Max={m}, Min={i}, Sum={s}", m=jnp.max(q_TNH), i=jnp.min(q_TNH),s=jnp.sum(q_TNH, dtype=jnp.float32))
+            print(f"q_TNH (norm) Stats: Max={jnp.max(q_TNH)}, Min={jnp.min(q_TNH)}, Sum={jnp.sum(q_TNH, dtype=jnp.float32)}")
+            # jax.debug.print("q_TNH (final) shape: {s}, value: {v}", s=q_TNH.shape, v=q_TNH)
+            print(f"q_TNH (norm) shape: {q_TNH.shape}, value: {q_TNH}")
+
+            print(f"--- Printing stats for the first {num_tokens_to_print} tokens of q_TNH (norm) ---")
+            for i in range(num_tokens_to_print):
+                token_q_vector = q_TNH[i, :, :]
+                print(
+                    f"  Token {i}: "
+                    f"Shape: {token_q_vector.shape}, "
+                    f"Mean: {jnp.mean(token_q_vector)}, "
+                    f"Max: {jnp.max(token_q_vector)}, "
+                    f"Min: {jnp.min(token_q_vector)}, "
+                    f"First head's first 5 values: {token_q_vector[0, :5]}"
+                )
+
+            # else:
+            if self.temperature_tuning and not use_attention_rope:
+                print("temperature_tuning is True")
+                q_TNH = self.apply_temperature_tuning(md, q_TNH)
 
             # jax.debug.print("q_TNH (final) Stats: Max={m}, Min={i}, Sum={s}", m=jnp.max(q_TNH), i=jnp.min(q_TNH),s=jnp.sum(q_TNH, dtype=jnp.float32))
             print(f"q_TNH (final) Stats: Max={jnp.max(q_TNH)}, Min={jnp.min(q_TNH)}, Sum={jnp.sum(q_TNH, dtype=jnp.float32)}")
             # jax.debug.print("q_TNH (final) shape: {s}, value: {v}", s=q_TNH.shape, v=q_TNH)
             print(f"q_TNH (final) shape: {q_TNH.shape}, value: {q_TNH}")
 
-            print(f"--- Printing stats for the first {num_tokens_to_print} tokens of q_TNH (raw) ---")
+            print(f"--- Printing stats for the first {num_tokens_to_print} tokens of q_TNH (final) ---")
             for i in range(num_tokens_to_print):
                 token_q_vector = q_TNH[i, :, :]
                 print(
                     f"  Token {i}: "
                     f"Shape: {token_q_vector.shape}, "
-                    f"Mean: {jnp.mean(token_q_vector):.4f}, "
-                    f"Max: {jnp.max(token_q_vector):.4f}, "
-                    f"Min: {jnp.min(token_q_vector):.4f}, "
+                    f"Mean: {jnp.mean(token_q_vector)}, "
+                    f"Max: {jnp.max(token_q_vector)}, "
+                    f"Min: {jnp.min(token_q_vector)}, "
                     f"First head's first 5 values: {token_q_vector[0, :5]}"
                 )
 

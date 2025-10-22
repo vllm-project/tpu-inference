@@ -288,18 +288,24 @@ class Llama4ForCausalLM(nnx.Module):
             # jax.debug.print("Min value: {}", jnp.min(x_TD))
             # jax.debug.print("Sum of values: {}", jnp.sum(x_TD, axis=-1, dtype=jnp.float32))
 
-            print("\n--- Layer {} Output ---", i)
-            print("Shape: {}", x_TD.shape)
-            print("Max value: {}", jnp.max(x_TD))
-            print("Min value: {}", jnp.min(x_TD))
-            print("Sum of values: {}", jnp.sum(x_TD, axis=-1, dtype=jnp.float32))
+            print(f"\n--- Layer {i} Output ---")
+            print(f"Shape: {x_TD.shape}")
+            print(f"Max value: {jnp.max(x_TD)}")
+            print(f"Min value: {jnp.min(x_TD)}")
+            print(f"Sum of values: {jnp.sum(x_TD, axis=-1, dtype=jnp.float32)}")
 
             if x_TD.ndim == 2:
                 # jax.debug.print("Partial content (first 10 values of first token): {}", x_TD[:6, :10])
-                print("Partial content (first 10 values of first token): {}", x_TD[:6, :10])
+                print(f"Partial content (first 10 values of first token): { x_TD[:6, :10]}")
             elif x_TD.ndim == 3:
                 # jax.debug.print("Partial content (first 10 values of first token of first sequence): {}", x_TD[0, :6, :10])
-                print("Partial content (first 10 values of first token of first sequence): {}", x_TD[0, :6, :10])
+                print(f"Partial content (first 10 values of first token of first sequence): {x_TD[0, :6, :10]}")
+            
+            # =================DEBUG====================
+            print("\n")   
+            print(f"DEBUG: Layer {i} Done") 
+            print("="*50 + "\n")
+            # =================DEBUG====================
 
         final_activation_TD = self.final_norm(x_TD)
 
