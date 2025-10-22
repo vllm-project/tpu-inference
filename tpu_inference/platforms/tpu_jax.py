@@ -116,12 +116,10 @@ class TpuPlatform(Platform):
 
         sharding_config = ShardingConfigManager.from_vllm_config(vllm_config)
         vllm_config.sharding_config = sharding_config
-
         logger.info(f"Initialized sharding configuration: {sharding_config}")
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-
         if not envs.VLLM_USE_V1:
             raise RuntimeError("VLLM_USE_V1=1 must be set for JAX backend.")
 
@@ -129,7 +127,6 @@ class TpuPlatform(Platform):
             assert not envs.VLLM_ENABLE_V1_MULTIPROCESSING, (
                 "VLLM_ENABLE_V1_MULTIPROCESSING must be 0 when using Pathways(JAX_PLATFORMS=proxy)"
             )
-
         cls._initialize_sharding_config(vllm_config)
  
         from vllm.config import CompilationMode
@@ -222,16 +219,9 @@ class TpuPlatform(Platform):
             update_vllm_config_for_qwix_quantization
 
         update_vllm_config_for_qwix_quantization(vllm_config)
-
-        dp_size = vllm_config.sharding_config.total_dp_size
-        if dp_size > 1:
-            from tpu_inference.core.sched.dp_scheduler import DPScheduler
-            vllm_config.scheduler_config.max_num_seqs *= dp_size
-            vllm_config.scheduler_config.max_num_batched_tokens *= dp_size
-            vllm_config.scheduler_config.scheduler_cls = DPScheduler
-            logger.info(f"DP size({dp_size}) >= 2, using DPScheduler")
-        else:
-            logger.info(f"DP size ({dp_size}) < 2, using default Scheduler")
+        
+        from tpu_inference.core.sched.dp_scheduler import update_vllm_config_for_dp_scheduler
+        update_vllm_config_for_dp_scheduler(vllm_config)
 
     @classmethod
     def is_pin_memory_available(cls):
