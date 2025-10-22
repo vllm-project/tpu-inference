@@ -127,17 +127,19 @@ class SpeculativeDecodingManager:
                 self.runner.mesh, np.array(num_rejected_tokens,
                                            dtype=jnp.int32))
 
-        attn_metadata, target_token_ids, target_hidden_states = self.runner.drafter.prepare_inputs(
+        target_hidden_states, input_ids, last_token_indices, attn_metadata = self.runner.drafter.prepare_inputs(
             attn_metadata,
             input_ids,
             aux_hidden_states,
+            next_token_ids,
             num_rejected_tokens,
         )
+
         self.runner.kv_caches, draft_token_ids = self.runner.drafter.propose(
             kv_caches=self.runner.kv_caches,
-            next_token_ids=next_token_ids,
+            input_ids=input_ids,
             attn_metadata=attn_metadata,
-            target_token_ids=target_token_ids,
+            last_token_indices=last_token_indices,
             target_hidden_states=target_hidden_states,
         )
         result = draft_token_ids.tolist()

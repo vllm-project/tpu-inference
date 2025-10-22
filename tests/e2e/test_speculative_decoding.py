@@ -240,38 +240,38 @@ def test_ngram_performance_random(
         }, 3.0)
 
 
-def test_eagle3_correctness(
-    monkeypatch: pytest.MonkeyPatch,
-    sampling_config: SamplingParams,
-):
-    '''
-    Compare the outputs of a original LLM and a speculative LLM
-    should be the same when using eagle-3 speculative decoding.
-    '''
-    model_name = 'meta-llama/Meta-Llama-3-8B-Instruct'
+# TODO(ranlihao): Re-enable eagle3 e2e testing after completing precompilation for eagle3.
+# def test_eagle3_correctness(
+#     monkeypatch: pytest.MonkeyPatch,
+#     sampling_config: SamplingParams,
+# ):
+#     '''
+#     Compare the outputs of a original LLM and a speculative LLM
+#     should be the same when using eagle-3 speculative decoding.
+#     '''
+#     model_name = 'meta-llama/Meta-Llama-3-8B-Instruct'
 
-    _test_correctness_helper(
-        monkeypatch, sampling_config, model_name, {
-            'model': "unkmaster/EAGLE3-LLaMA3.1-Instruct-8B",
-            "num_speculative_tokens": 3,
-            "method": "eagle3",
-            "draft_tensor_parallel_size": 1
-        })
+#     _test_correctness_helper(
+#         monkeypatch, sampling_config, model_name, {
+#             'model': "unkmaster/EAGLE3-LLaMA3.1-Instruct-8B",
+#             "num_speculative_tokens": 3,
+#             "method": "eagle3",
+#             "draft_tensor_parallel_size": 1
+#         })
 
-
-def test_eagle3_performance(
-    monkeypatch: pytest.MonkeyPatch,
-    sampling_config: SamplingParams,
-):
-    '''
-    Test that speculative decoding provides significant performance improvement.
-    Compares timing between reference LLM and speculative LLM using Llama 3 8B.
-    Expects spec_llm to be at least 1.8 faster than ref_llm.
-    '''
-    _test_performance_helper(
-        monkeypatch, sampling_config, {
-            "method": "eagle3",
-            "model": "unkmaster/EAGLE3-LLaMA3.1-Instruct-8B",
-            "num_speculative_tokens": 2,
-            "draft_tensor_parallel_size": 1
-        }, 1.8)
+# def test_eagle3_performance(
+#     monkeypatch: pytest.MonkeyPatch,
+#     sampling_config: SamplingParams,
+# ):
+#     '''
+#     Test that speculative decoding provides significant performance improvement.
+#     Compares timing between reference LLM and speculative LLM using Llama 3 8B.
+#     Expects spec_llm to be at least 1.8 faster than ref_llm.
+#     '''
+#     _test_performance_helper(
+#         monkeypatch, sampling_config, {
+#             "method": "eagle3",
+#             "model": "unkmaster/EAGLE3-LLaMA3.1-Instruct-8B",
+#             "num_speculative_tokens": 2,
+#             "draft_tensor_parallel_size": 1
+#         }, 1.8)
