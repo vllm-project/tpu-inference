@@ -165,8 +165,6 @@ class TPUWorker(AbstractTpuWorker):
             )
         ensure_kv_transfer_initialized(self.vllm_config)
 
-        self._setup_scheduler()
-
         self.model_runner = TPUModelRunner(self.vllm_config, self.devices)
         logger.info(f"Init worker | "
                     f"rank={self.rank} | "
@@ -204,26 +202,6 @@ class TPUWorker(AbstractTpuWorker):
                              f"increasing --gpu-memory-utilization from "
                              f"{gpu_memory_utilization} to a larger value.")
         return total_hbm_avail
-
-    def _setup_scheduler(self) -> None:
-        """Setup the appropriate scheduler based on DP size."""
-        sharding_config: ShardingConfigManager = self.vllm_config.sharding_config
-        dp_size = sharding_config.total_dp_size
-
-        if dp_size > 1:
-            logger.info(f"DP size({dp_size}) > 1, using DPScheduler")
-
-            import vllm.v1.core.sched.scheduler as vLLMScheduler
-
-            from tpu_inference.core.sched.dp_scheduler import DPScheduler
-
-            vLLMScheduler.Scheduler = DPScheduler
-
-            self.vllm_config.scheduler_config.max_num_seqs = self.vllm_config.scheduler_config.max_num_seqs * dp_size
-            self.vllm_config.scheduler_config.max_num_batched_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens * dp_size
-
-        else:
-            logger.info(f"DP size ({dp_size}) <= 1, using default Scheduler")
 
     def execute_model(
         self,

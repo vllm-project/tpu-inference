@@ -223,6 +223,16 @@ class TpuPlatform(Platform):
 
         update_vllm_config_for_qwix_quantization(vllm_config)
 
+        dp_size = vllm_config.sharding_config.total_dp_size
+        if dp_size > 1:
+            from tpu_inference.core.sched.dp_scheduler import DPScheduler
+            vllm_config.scheduler_config.max_num_seqs = vllm_config.scheduler_config.max_num_seqs * dp_size
+            vllm_config.scheduler_config.max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens * dp_size
+            vllm_config.scheduler_config.scheduler_cls = DPScheduler
+            logger.info(f"DP size({dp_size}) >= 2, using DPScheduler")
+        else:
+            logger.info(f"DP size ({dp_size}) < 2, using default Scheduler")
+
     @classmethod
     def is_pin_memory_available(cls):
         logger.warning("Pin memory is not supported on TPU.")

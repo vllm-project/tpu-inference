@@ -73,18 +73,24 @@ class DPScheduler(Scheduler):
             for i in range(self.dp_size)
         }
 
-    #TODO(wenxindongwork): Currently we require a small change in the vLLM scheduler for this logic to work
-    def long_prefill_token_threshold(self, request) -> int:
-        # Find the maximum number of token budget across all DP ranks
-        if self.scheduler_config.long_prefill_token_threshold:
-            temp = min(self.scheduler_config.long_prefill_token_threshold,
-                       max(self.token_budget.values()))
-        else:
-            temp = max(self.token_budget.values())
+    def get_dynamic_token_budget(self, request, available_budget: int) -> int:
+        """Override token budget based on DP rank constraints.
+
+        For DP scheduling, we need to constrain the token budget based on:
+        1. The maximum token budget across all DP ranks
+        2. The specific DP rank assigned to the request (if any)
+
+        This ensures requests don't exceed the capacity of their assigned DP rank.
+        """
         if request.request_id in self.assigned_dp_rank:
             dp_rank = self.assigned_dp_rank[request.request_id]
-            temp = min(temp, self.token_budget[dp_rank])
-        return temp
+            assert available_budget >= self.token_budget[
+                dp_rank], f"Available budget {available_budget} is less than DP rank {dp_rank} budget {self.token_budget[dp_rank]}"
+            return self.token_budget[dp_rank]
+        else:
+            max_budget = max(self.token_budget.values())
+            assert available_budget >= max_budget, f"Available budget {available_budget} is less than max DP rank budget {max_budget}"
+            return max_budget
 
     def _replace_kv_cache_manager(self):
         """Replace single KV cache manager with multiple DP managers."""
