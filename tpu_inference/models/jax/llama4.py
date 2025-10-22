@@ -81,6 +81,8 @@ class Llama4ForCausalLM(nnx.Module):
         self.num_shared_experts = getattr(text_config, "num_experts_per_tok", 1)
         self.rms_norm_eps = getattr(text_config, "rms_norm_eps", 1e-5)
 
+        self.use_qk_norm = getattr(text_config, "use_qk_norm", True)
+
         self.embedder = Embedder(vocab_size=self.vocab_size,
                                  hidden_size=self.hidden_size,
                                  dtype=dtype,
