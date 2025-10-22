@@ -6,7 +6,7 @@ import jax
 from flax import nnx
 
 from tpu_inference.layers.jax.attention.attention import (AttentionMetadata,
-                                                        KVCache)
+                                                          KVCache)
 from tpu_inference.layers.jax.layers import DenseFFW
 from tpu_inference.layers.jax.moe.moe import MoE
 

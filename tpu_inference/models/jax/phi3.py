@@ -13,7 +13,7 @@ from tpu_inference.layers.jax.attention_interface import attention
 from tpu_inference.layers.jax.rope_interface import apply_longrope, apply_rope
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (MetadataMap,
-                                                       load_hf_weights)
+                                                         load_hf_weights)
 
 logger = init_logger(__name__)
 

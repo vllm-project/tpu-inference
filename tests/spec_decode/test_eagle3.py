@@ -7,13 +7,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, SpeculativeConfig,
                          VllmConfig)
 from vllm.config.load import LoadConfig
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.runner import utils as runner_utils
 from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
 
 # Use a real model dir for config, but we will mock model loading/execution
@@ -77,6 +77,10 @@ def test_prepare_inputs():
 
     # Mock runner attributes
     proposer.runner.input_batch.num_reqs = num_reqs
+    proposer.runner.num_tokens_paddings = runner_utils.get_token_paddings(
+        min_token_size=16, max_token_size=1024, padding_gap=0)
+    proposer.runner._select_from_array_fn = (
+        lambda array, indices: array[indices])
     qsl_cpu = np.zeros(max_num_seqs + 1, dtype=np.int32)
     query_lens = np.zeros(max_num_seqs, dtype=np.int32)
     query_lens[:num_reqs] = [4, 7, 5]
@@ -122,6 +126,8 @@ def test_prepare_inputs():
     expected_new_seq_lens[:num_reqs] = [3, 4, 3]
 
     expected_total_tokens = int(expected_new_qsl[-1])
+    expected_total_tokens = runner_utils.get_padded_token_len(
+        proposer.runner.num_tokens_paddings, expected_total_tokens)
 
     # Execute
     updated_metadata, target_token_ids, target_hidden_states = (
@@ -202,21 +208,22 @@ def test_propose(method, num_speculative_tokens):
         block_tables=jnp.zeros((2, 10), dtype=jnp.int32),
         request_distribution=None,
     )
-    input_ids = jnp.zeros(total_tokens, dtype=jnp.int32)
     target_token_ids = jnp.zeros(total_tokens, dtype=jnp.int32)
     target_hidden_states = jnp.zeros((total_tokens, hidden_size))
 
     # Mock runner for block tables
+    proposer.runner.input_batch.num_reqs = batch_size
     proposer.runner.input_batch.block_table = [mock.MagicMock()]
     (proposer.runner.input_batch.block_table[0].get_device_tensor.return_value
      ) = attn_metadata.block_tables
+    proposer.runner._select_from_array_fn = (
+        lambda array, indices: array[indices])
 
     # Execute
     _, draft_token_ids = proposer.propose(
         kv_caches,
         next_token_ids,
         attn_metadata,
-        input_ids,
         target_token_ids,
         target_hidden_states,
     )

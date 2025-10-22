@@ -10,13 +10,13 @@ from jax.sharding import PartitionSpec as P
 from vllm.config import VllmConfig
 
 from tpu_inference.layers.jax.attention.attention import (Attention,
-                                                        AttentionMetadata)
+                                                          AttentionMetadata)
 from tpu_inference.layers.jax.constants import KVCacheType
 from tpu_inference.layers.jax.layers import DenseFFW, Embedder, LMhead, RMSNorm
 from tpu_inference.layers.jax.transformer_block import TransformerBlock
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (MetadataMap,
-                                                       load_hf_weights)
+                                                         load_hf_weights)
 
 logger = init_logger(__name__)
 

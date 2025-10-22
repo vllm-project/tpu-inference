@@ -1,0 +1,48 @@
+name: 🛠️ Installation
+description: Report an issue here when you hit errors during installation.
+title: "[Installation]: "
+labels: ["installation"]
+
+body:
+- type: markdown
+  attributes:
+    value: >
+      #### Before submitting an issue, please make sure the issue hasn't been already addressed by searching through [the existing and past issues](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+sort%3Acreated-desc+).
+- type: textarea
+  attributes:
+    label: Your current environment
+    description: |
+      Please run the following and paste the output below.
+      ```sh
+      wget https://raw.githubusercontent.com/vllm-project/vllm/main/vllm/collect_env.py
+      # For security purposes, please feel free to check the contents of collect_env.py before running it.
+      python collect_env.py
+      python -c "import jax; jax.print_environment_info()"
+      ```
+      It is suggested to download and execute the latest script, as vllm might frequently update the diagnosis information needed for accurately and quickly responding to issues.
+    value: |
+      ```text
+      Outputs of the commands above
+      ```
+  validations:
+    required: true
+- type: textarea
+  attributes:
+    label: How you are installing TPU inference?
+    description: |
+      Paste the full command you are trying to execute.
+    value: |
+      ```sh
+      pip install -e .
+      ```
+- type: markdown
+  attributes:
+    value: >
+      Thanks for contributing 🎉!
+- type: checkboxes
+  id: askllm
+  attributes:
+    label: Before submitting a new issue...
+    options:
+      - label: Make sure you already searched for relevant issues and checked the [documentation page](https://github.com/vllm-project/tpu-inference/tree/main/docs).
+        required: true

@@ -5,8 +5,8 @@ import pytest
 import requests
 
 from tpu_inference.tpu_info import (get_node_name, get_node_worker_id,
-                                  get_num_chips, get_num_cores_per_chip,
-                                  get_tpu_metadata, get_tpu_type)
+                                    get_num_chips, get_num_cores_per_chip,
+                                    get_tpu_metadata, get_tpu_type)
 
 
 # Mock requests.get for get_tpu_metadata tests

@@ -13,8 +13,8 @@ from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.jax.attention.llama4_attention import (L2Norm,
-                                                               Llama4Attention)
+from tpu_inference.layers.jax.attention.llama4_attention import (
+    L2Norm, Llama4Attention)
 from tpu_inference.layers.jax.sharding import build_mesh
 
 

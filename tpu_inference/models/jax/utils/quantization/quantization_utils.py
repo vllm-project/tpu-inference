@@ -23,7 +23,7 @@ from tpu_inference import utils
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.kv_cache import (DEFAULT_KV_CACHE_DTYPE,
-                                         create_kv_caches)
+                                           create_kv_caches)
 from tpu_inference.utils import device_array
 
 logger = init_logger(__name__)

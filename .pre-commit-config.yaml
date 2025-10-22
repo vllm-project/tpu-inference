@@ -9,6 +9,7 @@ repos:
     rev: v5.0.0
     hooks:
     -   id: check-yaml
+        exclude: ^mkdocs\.yml$ # Exclude mkdocs.yml from this check
     -   id: end-of-file-fixer
     -   id: trailing-whitespace
 - repo: https://github.com/PyCQA/isort
@@ -52,11 +53,6 @@ repos:
     -   id: shellcheck
 - repo: local
   hooks:
-  - id: png-lint
-    name: Lint PNG exports from excalidraw
-    entry: tools/png-lint.sh
-    language: script
-    types: [png]
   - id: signoff-commit
     name: Sign-off Commit
     entry: bash

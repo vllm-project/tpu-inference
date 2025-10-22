@@ -33,7 +33,7 @@ from tpu_inference import utils as common_utils
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.sample.rejection_sampler import RejectionSampler
 from tpu_inference.layers.jax.sample.sampling import (compute_logprobs,
-                                                    gather_logprobs, sample)
+                                                      gather_logprobs, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.layers.jax.sharding import build_mesh
@@ -47,7 +47,8 @@ from tpu_inference.runner.input_batch_jax import CachedRequestState, InputBatch
 from tpu_inference.runner.kv_cache_manager import KVCacheManager
 from tpu_inference.runner.lora_utils import LoraUtils
 from tpu_inference.runner.multimodal_manager import MultiModalManager
-from tpu_inference.runner.persistent_batch_manager import PersistentBatchManager
+from tpu_inference.runner.persistent_batch_manager import \
+    PersistentBatchManager
 from tpu_inference.runner.speculative_decoding_manager import \
     SpeculativeDecodingManager
 from tpu_inference.runner.structured_decoding_manager import \
@@ -153,6 +154,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         except KeyError:
             sharding_strategy = {"tensor_parallelism": len(self.devices)}
 
+        try:
+            enforce_device_order = self.vllm_config.additional_config[
+                "sharding"]["sharding_strategy"]["device_indexes"] is not None
+
+        except KeyError:
+            enforce_device_order = False
+
+        logger.info(f"Device sequence enforced: {enforce_device_order}")
+
         if os.getenv("NEW_MODEL_DESIGN", False):
             self.mesh = build_mesh(self.devices, sharding_strategy)
         else:
@@ -168,9 +178,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             axis_names = ("data", "model")
             mesh_shape = (dp, tp)
 
-            self.mesh = make_optimized_mesh(mesh_shape,
-                                            axis_names,
-                                            devices=self.devices)
+            if enforce_device_order:
+                self.mesh = jax.make_mesh(mesh_shape,
+                                          axis_names,
+                                          devices=self.devices)
+            else:
+                self.mesh = make_optimized_mesh(mesh_shape,
+                                                axis_names,
+                                                devices=self.devices)
         logger.info(f"Init mesh | mesh={self.mesh}")
 
     def _init_phased_profiling(self) -> None:
@@ -289,7 +304,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                             dtype=np.int64)
 
     def load_model(self):
-        self.model_fn, self.compute_logits_fn, self.combine_hidden_states_fn, self.get_multimodal_embeddings_fn, self.get_input_embeddings_fn, self.state, self.lora_manager, self.model = get_model(
+        self.model_fn, self.compute_logits_fn, self.combine_hidden_states_fn, self.get_multimodal_embeddings_fn, self.get_input_embeddings_fn, self.get_mrope_input_positions_fn, self.state, self.lora_manager, self.model = get_model(
             self.vllm_config,
             self.rng_key,
             self.mesh,
@@ -335,7 +350,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self,
         scheduler_output: "VllmSchedulerOutput",
     ) -> tuple[AttentionMetadata, ModelRunnerOutput]:
-        self.persistent_batch_manager.update_states(scheduler_output)
+        self.persistent_batch_manager.update_states(
+            scheduler_output, self.get_mrope_input_positions_fn)
         if not scheduler_output.total_num_scheduled_tokens:
             if has_kv_transfer_group():
                 return DUMMY_METADATA, self.kv_connector_no_forward(
@@ -523,14 +539,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             logprobs_lists = None
 
         if self.speculative_config:
-            self.speculative_decoding_manager.propose_draft_token_ids(
-                valid_sampled_token_ids,
-                aux_hidden_states,
-                attn_metadata,
-                spec_decode_metadata,
-                scheduler_output,
-                input_ids,
-            )
+            with self.maybe_forbid_compile:
+                self.speculative_decoding_manager.propose_draft_token_ids(
+                    valid_sampled_token_ids,
+                    aux_hidden_states,
+                    attn_metadata,
+                    spec_decode_metadata,
+                    scheduler_output,
+                    input_ids,
+                )
 
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,

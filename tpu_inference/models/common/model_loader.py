@@ -9,7 +9,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.ops.mappings import j2t_dtype
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
-from vllm.utils import supports_kw
+from vllm.utils.func_utils import supports_kw
 
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.quantization.quantization_utils import (
@@ -236,9 +236,6 @@ def get_flax_model(
 
     # Multi-modal support only
     # This function calculates the image token's embeddings by VIT
-    @functools.partial(jax.jit,
-                       out_shardings=(logits_sharding),
-                       static_argnames=['image_grid_thw'])
     def run_get_multimodal_embeddings(graphdef, state, image_grid_thw,
                                       **kwargs):
         model = nnx.merge(graphdef, state)
@@ -272,7 +269,11 @@ def get_flax_model(
     combine_hidden_states_fn = functools.partial(combine_hidden_states,
                                                  graphdef)
 
-    return model_fn, compute_logits_fn, combine_hidden_states_fn, get_multimodal_embeddings_fn, get_input_embeddings_fn, state, lora_manager, model
+    get_mrope_input_positions_fn = None if not hasattr(
+        model_class,
+        "get_mrope_input_positions") else model_class.get_mrope_input_positions
+
+    return model_fn, compute_logits_fn, combine_hidden_states_fn, get_multimodal_embeddings_fn, get_input_embeddings_fn, get_mrope_input_positions_fn, state, lora_manager, model
 
 
 def get_vllm_model(
@@ -293,7 +294,7 @@ def get_vllm_model(
     compute_logits_fn = model.jit_compute_logits_func()
     # the model needs to be returned because lora weights are neither torch.nn.parameter nor torch.nn.buffer. After we load the lora weights and set it to the torch.nn.Module, we can shard it and move it to TPU.
     combine_hidden_states_fn = None
-    return jit_model, compute_logits_fn, combine_hidden_states_fn, None, None, params, lora_manager, model
+    return jit_model, compute_logits_fn, combine_hidden_states_fn, None, None, None, params, lora_manager, model
 
 
 def get_model(

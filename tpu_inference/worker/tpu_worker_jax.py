@@ -6,6 +6,7 @@ from typing import Callable, Dict, Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
+import jaxlib
 import jaxtyping
 import vllm.envs as envs
 from vllm.config import VllmConfig, set_current_vllm_config
@@ -22,11 +23,11 @@ from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 
 from tpu_inference import utils
 from tpu_inference.di.abstracts import (AbstractKVCacheConfig,
-                                      AbstractLoRARequest,
-                                      AbstractSchedulerOutput)
+                                        AbstractLoRARequest,
+                                        AbstractSchedulerOutput)
 from tpu_inference.di.interfaces import HostInterface
 from tpu_inference.distributed.utils import (get_host_ip, get_kv_transfer_port,
-                                           get_node_id)
+                                             get_node_id)
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.kv_cache import get_rpa_page_size_bytes
 from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
@@ -80,6 +81,8 @@ class TPUWorker(AbstractTpuWorker):
         self.distributed_init_method = distributed_init_method
         self.is_driver_worker = is_driver_worker
         self.devices = devices if devices is not None else []
+        self.device_ranks = set(device.id for device in self.devices
+                                if isinstance(device, jaxlib._jax.Device))
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
@@ -93,21 +96,23 @@ class TPUWorker(AbstractTpuWorker):
         # MP runtime is initialized.
         self.profile_dir = None
         if envs.VLLM_TORCH_PROFILER_DIR and self.rank < 1:
-            # For TPU, we can only have 1 active profiler session for 1 profiler
-            # server. So we only profile on rank0.
-            self.profile_dir = envs.VLLM_TORCH_PROFILER_DIR
-            logger.info("Profiling enabled. Traces will be saved to: %s",
-                        self.profile_dir)
+            if not self.devices or 0 in self.device_ranks:
+                # For TPU, we can only have 1 active profiler session for 1 profiler
+                # server. So we only profile on rank0.
+                self.profile_dir = envs.VLLM_TORCH_PROFILER_DIR
+                logger.info("Profiling enabled. Traces will be saved to: %s",
+                            self.profile_dir)
 
         use_jax_profiler_server = os.getenv("USE_JAX_PROFILER_SERVER", False)
         # Only one instance of profiler is allowed
-        if use_jax_profiler_server and jax.devices()[0] == self.devices[0]:
-            jax_profiler_server_port = int(
-                os.getenv("JAX_PROFILER_SERVER_PORT", 9999))
-            logger.info(
-                f"Starting JAX profiler server on port {jax_profiler_server_port}"
-            )
-            jax.profiler.start_server(jax_profiler_server_port)
+        if use_jax_profiler_server and self.rank < 1:
+            if not self.devices or 0 in self.device_ranks:
+                jax_profiler_server_port = int(
+                    os.getenv("JAX_PROFILER_SERVER_PORT", 9999))
+                logger.info(
+                    f"Starting JAX profiler server on port {jax_profiler_server_port}"
+                )
+                jax.profiler.start_server(jax_profiler_server_port)
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
@@ -116,13 +121,28 @@ class TPUWorker(AbstractTpuWorker):
 
     def init_device(self):
         if not self.devices:
+            device_indexes = []
+            tp = self.parallel_config.tensor_parallel_size
             try:
                 device_indexes = self.vllm_config.additional_config[
                     "sharding"]["sharding_strategy"]["device_indexes"]
-                self.devices = [jax.devices()[i] for i in device_indexes]
             except KeyError:
-                tp = self.parallel_config.tensor_parallel_size
                 self.devices = jax.devices()[:tp]
+
+            # Enforcing the devices sequence to be consistent with the specified device indexes
+            if not self.devices:
+                all_devices = jax.devices()
+                device_dict = {device.id: device for device in all_devices}
+                self.devices = []
+                for device_index in device_indexes:
+                    device = device_dict[device_index]
+                    if device is None:
+                        raise KeyError(
+                            f"Device index {device_index} not found in "
+                            f"jax.devices() with IDs {list(device_dict.keys())}!"
+                        )
+                    self.devices.append(device)
+                self.devices = self.devices[:tp]
 
         # Initialize the vLLM distribution layer as a single chip environment,
         # we'll swap the model's parallel modules with TPU SPMD equivalents.
@@ -233,6 +253,9 @@ class TPUWorker(AbstractTpuWorker):
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         self.model_runner._init_random()
+
+    def reset_mm_cache(self) -> None:
+        pass
 
     def get_model(self):
         return self.model_runner.get_model()

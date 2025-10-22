@@ -12,17 +12,20 @@ from transformers import modeling_flax_utils
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig)
 from vllm.config import VllmConfig
+from vllm.model_executor.models.qwen2_5_vl import \
+    Qwen2_5_VLForConditionalGeneration as vllm_model_cls
 
 from tpu_inference import utils as utils
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.jax.attention_interface import sharded_flash_attention
+from tpu_inference.layers.jax.attention_interface import \
+    sharded_flash_attention
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.qwen2 import Qwen2ForCausalLM
 # from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from tpu_inference.models.jax.utils.multi_modal_utils import (
     MultiModalEmbeddings, merge_multimodal_embeddings)
 from tpu_inference.models.jax.utils.weight_utils import (get_default_maps,
-                                                       load_hf_weights)
+                                                         load_hf_weights)
 
 logger = init_logger(__name__)
 
@@ -229,6 +232,7 @@ class Qwen2_5_VisionAttention(nnx.Module):
             mesh=mesh,
             causal=False,
             sm_scale=1.0 / math.sqrt(self.head_dim),
+            vmem_limit_bytes=128 * 1024 * 1024,
         )
 
     def __call__(
@@ -685,6 +689,31 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         )
         self.language_model = Qwen2ForCausalLM(vllm_config, rng_key, mesh)
 
+    @classmethod
+    def get_mrope_input_positions(
+        cls,
+        input_tokens: list[int],
+        hf_config,
+        image_grid_thw,
+        video_grid_thw,
+        second_per_grid_ts: list[float],
+        context_len: int = 0,
+        seq_len: int | None = None,
+        audio_feature_lengths=None,
+        use_audio_in_video: bool = False,
+    ):
+        return vllm_model_cls.get_mrope_input_positions(
+            input_tokens=input_tokens,
+            hf_config=hf_config,
+            image_grid_thw=image_grid_thw,
+            video_grid_thw=video_grid_thw,
+            second_per_grid_ts=second_per_grid_ts,
+            context_len=context_len,
+            seq_len=seq_len,
+            audio_feature_lengths=audio_feature_lengths,
+            use_audio_in_video=use_audio_in_video,
+        )
+
     def _validate_and_reshape_mm_tensor(self, mm_input: object,
                                         name: str) -> jax.Array:
         if isinstance(mm_input, list):
@@ -766,6 +795,13 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             #         "video"] = self._parse_and_validate_video_input(**kwargs)
         return mm_input_by_modality
 
+    @partial(
+        jax.jit,
+        static_argnames=("image_grid_thw", ),
+    )
+    def get_single_image_embedding(self, image_pixel_values, image_grid_thw):
+        return self.visual(image_pixel_values, (image_grid_thw, ))
+
     def _process_image_input(
             self, image_input: Qwen2_5_VLImageInputs) -> tuple[jax.Array, ...]:
 
@@ -776,7 +812,18 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
                 self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"]
-            image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
+            image_embeds = []
+            current_idx = 0
+            for image_thw in grid_thw:
+                t, h, w = image_thw
+                image_size = t * h * w
+                end_idx = current_idx + image_size
+                image_pixel_values = pixel_values[current_idx:end_idx, :]
+                image_embeds.append(
+                    self.get_single_image_embedding(image_pixel_values,
+                                                    image_thw))
+                current_idx = end_idx
+            image_embeds = jnp.concatenate(image_embeds, axis=0)
 
         # Split concatenated embeddings for each image item.
         merge_size = self.visual.config.spatial_merge_size

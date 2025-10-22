@@ -7,7 +7,7 @@ from torchax.interop import jax_view
 from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
 from vllm.lora.request import LoRARequest
 
-from tpu_inference.models.vllm.sharding import shard_model_to_tpu
+from tpu_inference.layers.vllm.sharding import shard_model_to_tpu
 
 if TYPE_CHECKING:
     from tpu_inference.runner.tpu_jax_runner import TPUModelRunner

@@ -10,8 +10,9 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
 
 from tpu_inference.di.abstracts import (AbstractKVCacheConfig,
-                                      AbstractKVCacheSpec, AbstractLoRARequest,
-                                      AbstractSchedulerOutput)
+                                        AbstractKVCacheSpec,
+                                        AbstractLoRARequest,
+                                        AbstractSchedulerOutput)
 from tpu_inference.di.interfaces import HostInterface
 
 

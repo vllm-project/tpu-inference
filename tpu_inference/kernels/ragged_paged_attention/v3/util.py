@@ -12,8 +12,12 @@ def align_to(x, a):
     return cdiv(x, a) * a
 
 
+def get_dtype_bitwidth(dtype):
+    return dtypes.bit_width(dtype)
+
+
 def get_dtype_packing(dtype):
-    bits = dtypes.bit_width(dtype)
+    bits = get_dtype_bitwidth(dtype)
     return 32 // bits
 
 

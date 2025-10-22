@@ -10,7 +10,8 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh
 from vllm.config import ModelConfig
 
-from tpu_inference.models.jax.llama4 import Llama4ForCausalLM, Llama4WeightLoader
+from tpu_inference.models.jax.llama4 import (Llama4ForCausalLM,
+                                             Llama4WeightLoader)
 
 
 class MockParamLlama4:
@@ -61,10 +62,14 @@ class MockVllmConfig:
         text_config_mock.num_attention_heads = 40
         text_config_mock.num_key_value_heads = 8
         text_config_mock.head_dim = 128
+<<<<<<< HEAD
         
+=======
+
+>>>>>>> cb170bc495dd9e78664fa9e8feb2f455209d8212
         hf_config_mock = MagicMock()
         hf_config_mock.text_config = text_config_mock
-        
+
         self.model_config.hf_config = hf_config_mock
 
 
@@ -159,7 +164,7 @@ class TestLlama4WeightLoader:
                                   attn_heads=40,
                                   num_key_value_heads=8,
                                   attn_head_dim=128)
-    
+
     @pytest.mark.parametrize("hf_key, expected_num", [
         ("language_model.model.layers.15.self_attn.q_proj.weight", 15),
         ("layers.0.feed_forward.router.weight", 0),

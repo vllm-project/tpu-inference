@@ -16,7 +16,7 @@ from tpu_inference.models.jax.qwen2 import Qwen2DecoderLayer
 from tpu_inference.models.jax.qwen2 import Qwen2MLP as Qwen3MLP
 from tpu_inference.models.jax.qwen2 import Qwen2Model
 from tpu_inference.models.jax.utils.weight_utils import (get_default_maps,
-                                                       load_hf_weights)
+                                                         load_hf_weights)
 
 logger = init_logger(__name__)
 

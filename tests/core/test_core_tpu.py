@@ -9,9 +9,10 @@ from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request
 
 from tpu_inference.core.adapters import (VllmConfigAdapter, VllmEngineAdapter,
-                                       VllmRequestAdapter)
-from tpu_inference.core.core_tpu import (DisaggEngineCore, DisaggEngineCoreProc,
-                                       _DisaggOrchestrator)
+                                         VllmRequestAdapter)
+from tpu_inference.core.core_tpu import (DisaggEngineCore,
+                                         DisaggEngineCoreProc,
+                                         _DisaggOrchestrator)
 from tpu_inference.interfaces.config import IConfig
 from tpu_inference.interfaces.engine import IEngineCore
 
@@ -339,8 +340,8 @@ class TestDisaggOrchestrator(unittest.TestCase):
         self.mock_decode_engine.model_executor = MagicMock()
 
         # Patch threads to avoid them running in the background.
-        self.jet_thread_patcher = patch("tpu_inference.core.core_tpu.JetThread",
-                                        MagicMock)
+        self.jet_thread_patcher = patch(
+            "tpu_inference.core.core_tpu.JetThread", MagicMock)
         self.mock_jet_thread = self.jet_thread_patcher.start()
         self.addCleanup(self.jet_thread_patcher.stop)
 

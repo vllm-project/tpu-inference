@@ -461,7 +461,7 @@ class TestQwen2_5_VLForConditionalGeneration:
                                                  image_grid_thw=grid_thw)
 
         tokens_per_image = (2 * 28 * 28) // (vc.spatial_merge_size**2)
-        mock_embeds = jnp.ones((tokens_per_image * 2, vc.out_hidden_size))
+        mock_embeds = jnp.ones((tokens_per_image, vc.out_hidden_size))
         model.visual.return_value = mock_embeds
 
         embeddings = model._process_image_input(image_input)
@@ -469,7 +469,7 @@ class TestQwen2_5_VLForConditionalGeneration:
         assert len(embeddings) == 2
         assert embeddings[0].shape == (tokens_per_image, vc.out_hidden_size)
         assert embeddings[1].shape == (tokens_per_image, vc.out_hidden_size)
-        model.visual.assert_called_once_with(pixel_values, grid_thw=grid_thw)
+        assert model.visual.call_count == 2
 
     def test_get_multimodal_embeddings(
             self, model: Qwen2_5_VLForConditionalGeneration):

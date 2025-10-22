@@ -11,8 +11,8 @@ from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.llama3 import LlamaDecoderLayer
 from tpu_inference.models.jax.utils.weight_utils import (MetadataMap,
-                                                       get_default_maps,
-                                                       load_hf_weights)
+                                                         get_default_maps,
+                                                         load_hf_weights)
 
 logger = init_logger(__name__)
 

@@ -3,6 +3,8 @@ ARG BASE_IMAGE="us-central1-docker.pkg.dev/tpu-pytorch-releases/docker/xla:night
 
 FROM $BASE_IMAGE
 
+ARG IS_FOR_V7X="false"
+
 # Remove existing versions of dependencies
 RUN pip uninstall -y torch torch_xla torchvision
 
@@ -38,5 +40,13 @@ COPY requirements_benchmarking.txt .
 RUN pip install -r requirements_benchmarking.txt
 COPY . .
 RUN pip install -e .
+
+# TODO (jacobplatin): remove when v7x is supported in JAX/Libtpu officially
+# NOTE: it's important that this is done after installing tpu_inference above,
+# so that the v7x-specific dependencies can override any existing ones.
+COPY requirements_v7x.txt .
+RUN if [ "$IS_FOR_V7X" = "true" ]; then \
+        pip install -r requirements_v7x.txt; \
+    fi
 
 CMD ["/bin/bash"]

@@ -23,9 +23,9 @@ from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm.sequence import IntermediateTensors
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
+from tpu_inference.layers.vllm.sharding import shard_model_to_tpu
 from tpu_inference.logger import init_logger
-from tpu_inference.models.vllm.quantization import get_tpu_quantization_config
-from tpu_inference.models.vllm.sharding import shard_model_to_tpu
 from tpu_inference.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 from tpu_inference.runner.lora_utils import replace_lora_metadata
@@ -40,24 +40,15 @@ class _VllmRunner(torch.nn.Module):
         self.vllm_model = vllm_model
 
     def forward(self, **kwargs) -> torch.Tensor:
-        # We don't support multimodal input in Gemma3, but we need patch it to
-        # None to workaround vLLM Gemma3 model bug that
-        # `get_multimodal_embeddings` returns empty list but it's caller checks
-        # for None.
-        with patch(
-                "vllm.model_executor.models.gemma3_mm."
-                "Gemma3ForConditionalGeneration."
-                "get_multimodal_embeddings",
-                return_value=None):
-            if "hidden_state" in kwargs:
-                return self.compute_logits(kwargs["hidden_state"])
-            else:
-                return self.compute_hidden_state(
-                    kwargs["input_ids"],
-                    kwargs["positions"],
-                    kwargs["intermediate_tensors"],
-                    kwargs["inputs_embeds"],
-                )
+        if "hidden_state" in kwargs:
+            return self.compute_logits(kwargs["hidden_state"])
+        else:
+            return self.compute_hidden_state(
+                kwargs["input_ids"],
+                kwargs["positions"],
+                kwargs["intermediate_tensors"],
+                kwargs["inputs_embeds"],
+            )
 
     def compute_hidden_state(
         self,
@@ -255,11 +246,9 @@ def replace_set_lora(model):
         lora_a: torch.Tensor,
         lora_b: torch.Tensor,
         embeddings_tensor: Optional[torch.Tensor],
-        bias: Optional[torch.Tensor] = None,
     ):
         with torchax.default_env():
-            self._original_set_lora(index, lora_a, lora_b, embeddings_tensor,
-                                    bias)
+            self._original_set_lora(index, lora_a, lora_b, embeddings_tensor)
 
     def _tpu_reset_lora(self, index: int):
         with torchax.default_env():

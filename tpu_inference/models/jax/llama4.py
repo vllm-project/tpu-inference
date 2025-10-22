@@ -18,11 +18,9 @@ from tpu_inference.layers.jax.moe.moe import MoE, Router
 from tpu_inference.layers.jax.transformer_block import \
     SharedExpertsTransformerBlock
 from tpu_inference.logger import init_logger
-from tpu_inference.models.jax.utils.weight_utils import (get_param,
-                                                       model_weights_generator,
-                                                       print_param_info,
-                                                       reshape_params,
-                                                       transpose_params)
+from tpu_inference.models.jax.utils.weight_utils import (
+    get_param, model_weights_generator, print_param_info, reshape_params,
+    transpose_params)
 
 logger = init_logger(__name__)
 
@@ -61,24 +59,33 @@ class Llama4ForCausalLM(nnx.Module):
         self.num_layers = 4
         # self.num_layers: int = getattr(text_config, "num_hidden_layers", 48)
 
-        self.intermediate_size_moe: int = getattr(text_config, "intermediate_size", 8192)
-        self.intermediate_size_mlp = getattr(text_config, "intermediate_size_mlp", 16384)
+        self.intermediate_size_moe: int = getattr(text_config,
+                                                  "intermediate_size", 8192)
+        self.intermediate_size_mlp = getattr(text_config,
+                                             "intermediate_size_mlp", 16384)
 
         # num_local_experts: uses 16 experts for Llama-4-Scout-17B-16E-Instruct and uses 128 experts Llama-4-Maverick-17B-128E-Instruct.
         # The default value is set to 16 for compatibility with Llama-4-Scout.
-        self.num_local_experts: int = getattr(text_config, "num_local_experts", 16)
+        self.num_local_experts: int = getattr(text_config, "num_local_experts",
+                                              16)
         self.hidden_act: str = getattr(text_config, "hidden_act", "silu")
-        self.no_rope_layer_interval = getattr(text_config, "no_rope_layers", [])
+        self.no_rope_layer_interval = getattr(text_config, "no_rope_layers",
+                                              [])
 
         # interleave_moe_layer_step has a layer step of 2 to interleave MoE and dense layers for Llama-4-Maverick-17B-128E-Instruct.
         # The default value is set to 1 for compatibility with Llama-4-Scout.
-        self.interleave_moe_layer_step = getattr(text_config, "interleave_moe_layer_step", 1)
+        self.interleave_moe_layer_step = getattr(text_config,
+                                                 "interleave_moe_layer_step",
+                                                 1)
 
-        self.num_attention_heads = getattr(text_config, "num_attention_heads", 40)
-        self.num_key_value_heads = getattr(text_config, "num_key_value_heads", 8)
+        self.num_attention_heads = getattr(text_config, "num_attention_heads",
+                                           40)
+        self.num_key_value_heads = getattr(text_config, "num_key_value_heads",
+                                           8)
         self.head_dim = getattr(text_config, "head_dim", 128)
 
-        self.num_shared_experts = getattr(text_config, "num_experts_per_tok", 1)
+        self.num_shared_experts = getattr(text_config, "num_experts_per_tok",
+                                          1)
         self.rms_norm_eps = getattr(text_config, "rms_norm_eps", 1e-5)
 
         self.use_qk_norm = getattr(text_config, "use_qk_norm", True)
@@ -86,7 +93,8 @@ class Llama4ForCausalLM(nnx.Module):
         self.embedder = Embedder(vocab_size=self.vocab_size,
                                  hidden_size=self.hidden_size,
                                  dtype=dtype,
-                                 vd_sharding=(('data', 'expert', 'model'), None),
+                                 vd_sharding=(('data', 'expert', 'model'),
+                                              None),
                                  rngs=self.rng,
                                  random_init=force_random_weights)
 
@@ -129,8 +137,7 @@ class Llama4ForCausalLM(nnx.Module):
                 dtype=dtype,
                 hidden_act=self.hidden_act,
                 hidden_size=self.hidden_size,
-                intermediate_size=self.
-                intermediate_size_mlp,
+                intermediate_size=self.intermediate_size_mlp,
                 random_init=force_random_weights,
                 rngs=self.rng,
                 df_sharding=(None, 'model'),
@@ -295,8 +302,11 @@ class Llama4WeightLoader:
             framework="flax",
             filter_regex="language_model",
             download_dir=vllm_config.load_config.download_dir)
-        self.is_verbose = getattr(vllm_config.additional_config, "is_verbose", False)
-        self.interleave_moe_layer_step = getattr(vllm_config.model_config.hf_config.text_config, "interleave_moe_layer_step", 1)
+        self.is_verbose = getattr(vllm_config.additional_config, "is_verbose",
+                                  False)
+        self.interleave_moe_layer_step = getattr(
+            vllm_config.model_config.hf_config.text_config,
+            "interleave_moe_layer_step", 1)
 
         self.expert_prefix = "shared_expert."
         self._transpose_map = {
@@ -411,7 +421,7 @@ class Llama4WeightLoader:
             )
             if self.is_verbose:
                 print_param_info(mapped_model_weight, mapped_name)
-    
+
     def _get_layer_num(self, loaded_key: str) -> Optional[int]:
         """
         Extracts the layer number from a HuggingFace weight key string.
