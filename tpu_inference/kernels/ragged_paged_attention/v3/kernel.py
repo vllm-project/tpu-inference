@@ -13,6 +13,7 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
+from tpu_inference.kernels.ragged_paged_attention.v3 import kernel_hd64
 from tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes import \
     get_tuned_block_sizes
 from tpu_inference.kernels.ragged_paged_attention.v3.util import (
@@ -44,10 +45,54 @@ def ref_ragged_paged_attention(
     k_scale: float | None = None,
     v_scale: float | None = None,
 ):
+    if queries.shape[2] == 64:
+        impl = kernel_hd64.ref_ragged_paged_attention_hd64
+    else:
+        impl = _ref_ragged_paged_attention_default
+    return impl(
+        queries,
+        keys,
+        values,
+        kv_cache,
+        kv_lens,
+        page_indices,
+        cu_q_lens,
+        distribution,
+        sm_scale=sm_scale,
+        sliding_window=sliding_window,
+        soft_cap=soft_cap,
+        mask_value=mask_value,
+        q_scale=q_scale,
+        k_scale=k_scale,
+        v_scale=v_scale,
+    )
+
+
+def _ref_ragged_paged_attention_default(
+    queries: jax.
+    Array,  # [max_num_tokens, actual_num_q_heads, actual_head_dim]
+    keys: jax.Array,  # [max_num_tokens, actual_num_kv_heads, actual_head_dim]
+    values: jax.
+    Array,  # [max_num_tokens, actual_num_kv_heads, actual_head_dim]
+    kv_cache: jax.
+    Array,  # [total_num_pages, page_size, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
+    kv_lens: jax.Array,  # i32[max_num_seqs]
+    page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
+    cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
+    distribution: jax.Array,  # i32[3]
+    *,
+    sm_scale: float = 1.0,
+    sliding_window: int | None = None,
+    soft_cap: float | None = None,
+    mask_value: float | None = DEFAULT_MASK_VALUE,
+    q_scale: float | None = None,
+    k_scale: float | None = None,
+    v_scale: float | None = None,
+):
     if mask_value is None:
         mask_value = DEFAULT_MASK_VALUE
 
-    dynamic_validate_inputs(
+    _dynamic_validate_inputs_default(
         queries,
         keys,
         values,
@@ -183,6 +228,30 @@ def get_vmem_estimate_bytes(
     q_dtype,
     kv_dtype,
 ):
+    if actual_head_dim == 64:
+        impl = kernel_hd64.get_vmem_estimate_bytes
+    else:
+        impl = _get_vmem_estimate_bytes_default
+    return impl(
+        actual_num_kv_heads,
+        actual_num_q_heads_per_kv_head,
+        actual_head_dim,
+        bq_sz,
+        bkv_sz,
+        q_dtype,
+        kv_dtype,
+    )
+
+
+def _get_vmem_estimate_bytes_default(
+    actual_num_kv_heads,
+    actual_num_q_heads_per_kv_head,
+    actual_head_dim,
+    bq_sz,
+    bkv_sz,
+    q_dtype,
+    kv_dtype,
+):
     q_packing = get_dtype_packing(q_dtype)
     kv_packing = get_dtype_packing(kv_dtype)
     num_q_heads_per_kv_head = align_to(actual_num_q_heads_per_kv_head,
@@ -206,6 +275,26 @@ def get_vmem_estimate_bytes(
 
 
 def get_kv_cache_shape(
+    total_num_pages,
+    page_size,
+    actual_num_kv_heads,
+    actual_head_dim,
+    kv_dtype,
+):
+    if actual_head_dim == 64:
+        impl = kernel_hd64.get_kv_cache_shape
+    else:
+        impl = _get_kv_cache_shape_default
+    return impl(
+        total_num_pages,
+        page_size,
+        actual_num_kv_heads,
+        actual_head_dim,
+        kv_dtype,
+    )
+
+
+def _get_kv_cache_shape_default(
     total_num_pages,
     page_size,
     actual_num_kv_heads,
@@ -1027,8 +1116,65 @@ def dynamic_validate_inputs(
     # Debug params.
     debug_mode: bool = False,
 ):
+    if queries.shape[2] == 64:
+        impl = kernel_hd64.dynamic_validate_inputs
+    else:
+        impl = _dynamic_validate_inputs_default
+    return impl(
+        queries,
+        keys,
+        values,
+        kv_cache,
+        kv_lens,
+        page_indices,
+        cu_q_lens,
+        distribution,
+        sm_scale=sm_scale,
+        sliding_window=sliding_window,
+        soft_cap=soft_cap,
+        mask_value=mask_value,
+        q_scale=q_scale,
+        k_scale=k_scale,
+        v_scale=v_scale,
+        chunk_prefill_size=chunk_prefill_size,
+        num_kv_pages_per_block=num_kv_pages_per_block,
+        num_queries_per_block=num_queries_per_block,
+        vmem_limit_bytes=vmem_limit_bytes,
+        debug_mode=debug_mode,
+    )
+
+
+def _dynamic_validate_inputs_default(
+    queries: jax.
+    Array,  # [max_num_tokens, actual_num_q_heads, actual_head_dim]
+    keys: jax.Array,  # [max_num_tokens, actual_num_kv_heads, actual_head_dim]
+    values: jax.
+    Array,  # [max_num_tokens, actual_num_kv_heads, actual_head_dim]
+    kv_cache: jax.
+    Array,  # [total_num_pages, page_size, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
+    kv_lens: jax.Array,  # i32[max_num_seqs]
+    page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
+    cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
+    distribution: jax.Array,  # i32[3]
+    *,
+    sm_scale: float = 1.0,
+    sliding_window: int | None = None,
+    soft_cap: float | None = None,
+    mask_value: float | None = DEFAULT_MASK_VALUE,
+    q_scale: float | None = None,
+    k_scale: float | None = None,
+    v_scale: float | None = None,
+    # Kernel optimization params.
+    chunk_prefill_size: int | None = None,
+    # Kernel tuning params.
+    num_kv_pages_per_block: int | None = None,
+    num_queries_per_block: int | None = None,
+    vmem_limit_bytes: int | None = None,
+    # Debug params.
+    debug_mode: bool = False,
+):
     q, k, v = queries, keys, values
-    static_validate_inputs(
+    _static_validate_inputs_default(
         q,
         k,
         v,
@@ -1089,6 +1235,63 @@ def dynamic_validate_inputs(
 
 # Expect to run this validation during compile time.
 def static_validate_inputs(
+    queries: jax.
+    Array,  # [max_num_tokens, actual_num_q_heads, actual_head_dim]
+    keys: jax.Array,  # [max_num_tokens, actual_num_kv_heads, actual_head_dim]
+    values: jax.
+    Array,  # [max_num_tokens, actual_num_kv_heads, actual_head_dim]
+    kv_cache: jax.
+    Array,  # [total_num_pages, page_size, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
+    kv_lens: jax.Array,  # i32[max_num_seqs]
+    page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
+    cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
+    distribution: jax.Array,  # i32[3]
+    *,
+    sm_scale: float = 1.0,
+    sliding_window: int | None = None,
+    soft_cap: float | None = None,
+    mask_value: float | None = DEFAULT_MASK_VALUE,
+    q_scale: float | None = None,
+    k_scale: float | None = None,
+    v_scale: float | None = None,
+    # Kernel optimization params.
+    chunk_prefill_size: int | None = None,
+    # Kernel tuning params.
+    num_kv_pages_per_block: int | None = None,
+    num_queries_per_block: int | None = None,
+    vmem_limit_bytes: int | None = None,
+    # Debug params.
+    debug_mode: bool = False,
+):
+    if queries.shape[2] == 64:
+        impl = kernel_hd64.static_validate_inputs
+    else:
+        impl = _static_validate_inputs_default
+    return impl(
+        queries,
+        keys,
+        values,
+        kv_cache,
+        kv_lens,
+        page_indices,
+        cu_q_lens,
+        distribution,
+        sm_scale=sm_scale,
+        sliding_window=sliding_window,
+        soft_cap=soft_cap,
+        mask_value=mask_value,
+        q_scale=q_scale,
+        k_scale=k_scale,
+        v_scale=v_scale,
+        chunk_prefill_size=chunk_prefill_size,
+        num_kv_pages_per_block=num_kv_pages_per_block,
+        num_queries_per_block=num_queries_per_block,
+        vmem_limit_bytes=vmem_limit_bytes,
+        debug_mode=debug_mode,
+    )
+
+
+def _static_validate_inputs_default(
     queries: jax.
     Array,  # [max_num_tokens, actual_num_q_heads, actual_head_dim]
     keys: jax.Array,  # [max_num_tokens, actual_num_kv_heads, actual_head_dim]
@@ -1272,6 +1475,81 @@ def ragged_paged_attention(
     # Debug params.
     debug_mode: bool = False,
 ):
+    if queries.shape[2] == 64:
+        impl = kernel_hd64.ragged_paged_attention_hd64
+    else:
+        impl = _ragged_paged_attention_default
+    return impl(
+        queries,
+        keys,
+        values,
+        kv_cache,
+        kv_lens,
+        page_indices,
+        cu_q_lens,
+        distribution,
+        sm_scale=sm_scale,
+        sliding_window=sliding_window,
+        soft_cap=soft_cap,
+        mask_value=mask_value,
+        q_scale=q_scale,
+        k_scale=k_scale,
+        v_scale=v_scale,
+        chunk_prefill_size=chunk_prefill_size,
+        num_kv_pages_per_block=num_kv_pages_per_block,
+        num_queries_per_block=num_queries_per_block,
+        vmem_limit_bytes=vmem_limit_bytes,
+        debug_mode=debug_mode,
+    )
+
+
+@functools.partial(
+    jax.jit,
+    static_argnames=(
+        "sm_scale",
+        "sliding_window",
+        "soft_cap",
+        "mask_value",
+        "q_scale",
+        "k_scale",
+        "v_scale",
+        "chunk_prefill_size",
+        "num_kv_pages_per_block",
+        "num_queries_per_block",
+        "vmem_limit_bytes",
+        "debug_mode",
+    ),
+    donate_argnames=("kv_cache", ),
+)
+def _ragged_paged_attention_default(
+    queries: jax.
+    Array,  # [max_num_tokens, actual_num_q_heads, actual_head_dim]
+    keys: jax.Array,  # [max_num_tokens, actual_num_kv_heads, actual_head_dim]
+    values: jax.
+    Array,  # [max_num_tokens, actual_num_kv_heads, actual_head_dim]
+    kv_cache: jax.
+    Array,  # [total_num_pages, page_size, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
+    kv_lens: jax.Array,  # i32[max_num_seqs]
+    page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
+    cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
+    distribution: jax.Array,  # i32[3]
+    *,
+    sm_scale: float = 1.0,
+    sliding_window: int | None = None,
+    soft_cap: float | None = None,
+    mask_value: float | None = DEFAULT_MASK_VALUE,
+    q_scale: float | None = None,
+    k_scale: float | None = None,
+    v_scale: float | None = None,
+    # Kernel optimization params.
+    chunk_prefill_size: int | None = None,
+    # Kernel tuning params.
+    num_kv_pages_per_block: int | None = None,
+    num_queries_per_block: int | None = None,
+    vmem_limit_bytes: int | None = None,
+    # Debug params.
+    debug_mode: bool = False,
+):
     """Ragged paged attention that supports mixed prefill and decode.
 
   Args:
@@ -1306,7 +1584,7 @@ def ragged_paged_attention(
     The output of the attention.
   """
     q, k, v = queries, keys, values
-    static_validate_inputs(
+    _static_validate_inputs_default(
         q,
         k,
         v,
