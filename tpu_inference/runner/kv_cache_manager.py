@@ -29,6 +29,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# default layout (order) used by kv cache manager
+# N=num_blocks, H=num_heads and D=head_size
 DEFAULT_KV_CACHE_LAYOUT = "NHD"
 
 

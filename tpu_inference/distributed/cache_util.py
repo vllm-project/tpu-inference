@@ -18,11 +18,6 @@ NONE_HASH = 0
 
 logger = init_logger(__name__)
 
-# CopyBlocksOp = Callable[[
-#     dict[str, torch.Tensor], dict[
-#         str, torch.Tensor], list[int], list[int], Literal["h2d", "d2h"]
-# ], None]
-
 CPU_OFFLOADING_SWAP_OP_TYPE = Literal["jax", "pallas"]
 
 
@@ -116,8 +111,7 @@ def swap_ops(
 ) -> jax.Array:
     if op_type == "jax":
         return jax_swap_kv_cache(src_kv_cache, out_sharding, direction)
-    else:
-        return dma_kv_cache(src_kv_cache, out_sharding, direction)
+    return dma_kv_cache(src_kv_cache, out_sharding, direction)
 
 
 def jax_swap_kv_cache(

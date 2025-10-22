@@ -119,7 +119,7 @@ logger = init_logger(__name__)
 REQUIRED_KV_CACHE_LAYOUT = "NHD"
 
 # default swap op type
-DEFAULT_HOST_HBM_SWAP_OP_TYPE = "pallas"
+DEFAULT_HOST_HBM_SWAP_OP_TYPE = "jax"
 
 
 @dataclass
@@ -752,11 +752,10 @@ class TPUConnectorWorker:
 
         self.runner: Optional[TPUModelRunner] = None
         self.mesh: Optional[Mesh] = None
-        self.swap_op_type = os.getenv("TPU_KV_OFFLOADING_SWAP_OP_TYPE",
+        self.swap_op_type = os.getenv("TPU_OFFLOADING_SWAP_OP_TYPE",
                                       default=DEFAULT_HOST_HBM_SWAP_OP_TYPE)
         assert self.swap_op_type in get_args(CPU_OFFLOADING_SWAP_OP_TYPE)
         # TODO(jcgu): check libtpu compatibility for pallas dma kernel
-        # directly import jax._src.test_util crashes the process
         logger.info(
             f"(cpu offloading) swap operation type is {self.swap_op_type}")
 
@@ -865,10 +864,6 @@ class TPUConnectorWorker:
                 layer_cache.reshape(-1, *layer_cache.shape[2:])
                 for layer_cache in kv_caches_on_cpu
             ]
-            # flat_kv_caches_on_cpu = [
-            #     jax_einshape("ab...->(ab)...", layer_cache)
-            #     for layer_cache in kv_caches_on_cpu
-            # ]
 
             jax.block_until_ready(flat_kv_caches_on_cpu)
 
@@ -1165,7 +1160,6 @@ class TPUConnectorWorker:
                                    *layer_data.shape[1:])
                 for layer_data in padded_kv_on_cpu
             ]
-            # jax_einshape("(nb)...->nb...", layer_cache, b=block_size)
 
             jax.block_until_ready(block_shaped_kv_on_cpu)
             logger.info(
