@@ -32,6 +32,14 @@ def setup_vllm(num_loras: int, tp: int = 1) -> vllm.LLM:
 def run_after_each_test():
     # --- Setup code (runs before each test) ---
     # print("\nSetting up...")
+    command = "lsof -t /dev/vfio/* | xargs kill"
+    results = subprocess.run(command,
+                             shell=True,
+                             capture_output=True,
+                             text=True)
+    print(
+        f"Setting up: Killing TPU resources: {results.stdout}, {results.stderr}"
+    )
     yield  # This is where the test runs
     # --- Teardown code (runs after each test) ---
     command = "lsof -t /dev/vfio/* | xargs kill"
@@ -39,7 +47,9 @@ def run_after_each_test():
                              shell=True,
                              capture_output=True,
                              text=True)
-    print(f"Killing TPU resources: {results.stdout}, {results.stderr}")
+    print(
+        f"Tear down: Killing TPU resources: {results.stdout}, {results.stderr}"
+    )
 
 
 # For multi-chip test, we only use TP=2 because the base model Qwen/Qwen2.5-3B-Instruct has 2 kv heads and the current attention kernel requires it to be divisible by tp_size.
