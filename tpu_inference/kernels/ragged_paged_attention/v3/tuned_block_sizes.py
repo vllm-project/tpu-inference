@@ -1,5 +1,7 @@
 """Auto-tuned block sizes for ragged paged attention."""
 
+from typing import NamedTuple
+
 import jax.numpy as jnp
 
 from tpu_inference.kernels.ragged_paged_attention.v3.util import (
@@ -17,6 +19,21 @@ logger = init_logger(__name__)
 #           - max_model_len
 # value:
 #   - (num_kv_pages_per_block, num_queries_per_block)
+
+
+class BlockSizes(NamedTuple):
+    num_queries_per_block: int
+    num_kv_pages_per_block: int
+    num_query_compute_per_block: int
+    num_kv_compute_per_block: int
+
+
+class TunedValues(NamedTuple):
+    decode_block_size: BlockSizes
+    prefill_block_size: BlockSizes
+    mixed_block_size: BlockSizes
+
+
 TUNED_BLOCK_SIZES = {
     'TPU v6e': {
         128: {

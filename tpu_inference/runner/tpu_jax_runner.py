@@ -652,7 +652,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 self.input_batch, total_num_scheduled_tokens, num_reqs,
                 padded_total_num_scheduled_tokens, scheduler_output)
 
-            self.phase_based_profiler.step(batch_composition_stats)
+        # print(batch_composition_stats)
 
         # Inputs
         input_ids = self.input_ids_cpu[:padded_total_num_scheduled_tokens]
