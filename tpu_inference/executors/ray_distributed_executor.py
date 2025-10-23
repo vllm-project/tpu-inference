@@ -160,7 +160,7 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         current_placement_group = ray.util.placement_group(
             placement_group_specs, strategy="PACK")
         _wait_until_pg_ready(current_placement_group)
-        
+
         assert current_placement_group is not None
         # Set the placement group in the parallel config
         self.parallel_config.placement_group = current_placement_group
