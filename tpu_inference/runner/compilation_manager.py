@@ -483,11 +483,8 @@ class CompilationManager:
         target_hidden_state_loop = self._create_dummy_tensor(
             (self.runner.max_num_reqs, hidden_size), dtype,
             NamedSharding(self.runner.mesh, PartitionSpec(None, None)))
-        new_seq_lens_cpu = np.ones((self.runner.max_num_reqs, ), jnp.int32)
         next_token_ids = self._create_dummy_tensor(
             (self.runner.max_num_reqs, ), jnp.int32)
-        new_query_start_loc_cpu = np.ones((self.runner.max_num_reqs + 1, ),
-                                          jnp.int32)
         last_token_indices = self._create_dummy_tensor(
             (self.runner.max_num_reqs, ), jnp.int32)
         for num_tokens in self.runner.num_tokens_paddings:
@@ -535,6 +532,7 @@ class CompilationManager:
                 return target_hidden_states, input_ids, last_token_indices
 
             token_indices_cpu = np.ones((num_tokens, ), dtype=np.int32)
+            token_indices = jnp.asarray(token_indices_cpu, dtype=jnp.int32)
             input_ids = self._create_dummy_tensor(
                 (num_tokens, ), jnp.int32,
                 NamedSharding(self.runner.mesh, PartitionSpec()))
@@ -555,9 +553,9 @@ class CompilationManager:
             self._run_compilation(
                 "eagle3_prepare_inputs_in_jit",
                 prepare_inputs_in_jit_wrapper,
-                token_indices_cpu,
-                new_query_start_loc_cpu,
-                new_seq_lens_cpu,
+                token_indices,
+                query_start_loc,
+                seq_lens,
                 input_ids,
                 aux_hidden_states,
                 attention_metadata,
@@ -630,13 +628,6 @@ class CompilationManager:
             hidden_states = self._create_dummy_tensor(
                 (num_tokens, hidden_size), jnp.bfloat16,
                 NamedSharding(self.runner.mesh, PartitionSpec(None, None)))
-            self._run_compilation(
-                "eagle3_select_draft_token_ids_in_jit",
-                self.runner.drafter._select_draft_token_ids_in_jit,
-                hidden_states,
-                last_token_indices,
-                num_tokens=num_tokens,
-            )
 
             self._run_compilation(
                 "eagle3_select_and_stack_draft_token_ids_in_jit",
@@ -648,8 +639,9 @@ class CompilationManager:
 
             self._run_compilation(
                 "eagle3_select_positions_and_hidden_states_in_jit",
-                self.runner.drafter._select_positions_and_hidden_states_in_jit,
+                self.runner.drafter._select_inputs_for_loop_in_jit,
                 positions,
+                hidden_states,
                 hidden_states,
                 last_token_indices,
                 num_tokens=num_tokens,

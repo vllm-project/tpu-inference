@@ -217,18 +217,23 @@ class Eagle3Proposer:
         # Update seq_lens for active requests only: new_seq_lens = s - n.
         new_seq_lens_cpu = seq_lens_cpu - nrt_cpu
 
-        return self._prepare_inputs_in_jit(token_indices_cpu,
-                                           new_query_start_loc_cpu,
-                                           new_seq_lens_cpu, input_ids,
+        token_indices = jnp.asarray(token_indices_cpu, dtype=jnp.int32)
+        query_start_loc, seq_lens = device_array(self.mesh, (
+            new_query_start_loc_cpu,
+            new_seq_lens_cpu,
+        ))
+
+        return self._prepare_inputs_in_jit(token_indices, query_start_loc,
+                                           seq_lens, input_ids,
                                            aux_hidden_states, attn_metadata,
                                            next_token_ids, block_tables)
 
     @functools.partial(jax.jit, static_argnums=(0, ))
     def _prepare_inputs_in_jit(
         self,
-        token_indices_cpu: np.ndarray,
-        new_query_start_loc_cpu: np.ndarray,
-        new_seq_lens_cpu: np.ndarray,
+        token_indices: jax.Array,
+        query_start_loc: jax.Array,
+        seq_lens: jax.Array,
         input_ids: jax.Array,
         aux_hidden_states: tuple[jax.Array, ...],
         attn_metadata: AttentionMetadata,
@@ -236,11 +241,6 @@ class Eagle3Proposer:
         block_tables: jax.Array,
     ) -> tuple[jax.Array, jax.Array, jax.Array, AttentionMetadata]:
 
-        token_indices = jnp.asarray(token_indices_cpu, dtype=jnp.int32)
-        query_start_loc, seq_lens = device_array(self.mesh, (
-            new_query_start_loc_cpu,
-            new_seq_lens_cpu,
-        ))
         # Select tokens and hidden states.
         target_token_ids = input_ids[token_indices]
         target_hidden_states = jnp.concatenate(
@@ -259,7 +259,7 @@ class Eagle3Proposer:
             request_distribution=attn_metadata.request_distribution,
         )
 
-        target_hidden_states, input_ids, last_token_indices, block_tables = self._prepare_draft_inputs(
+        target_hidden_states, input_ids, last_token_indices, block_tables = self._prepare_draft_inputs_in_jit(
             target_hidden_states, query_start_loc, target_token_ids,
             next_token_ids, block_tables)
 
@@ -272,16 +272,6 @@ class Eagle3Proposer:
         target_token_ids: jax.Array, next_token_ids: jax.Array,
         block_tables: jax.Array
     ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
-        return self._prepare_draft_inputs(target_hidden_states,
-                                          query_start_loc, target_token_ids,
-                                          next_token_ids, block_tables)
-
-    def _prepare_draft_inputs(
-        self, target_hidden_states: jax.Array, query_start_loc: jax.Array,
-        target_token_ids: jax.Array, next_token_ids: jax.Array,
-        block_tables: jax.Array
-    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
-
         target_hidden_states = self.combine_hidden_states_fn(
             self.state, target_hidden_states)
 
@@ -294,13 +284,13 @@ class Eagle3Proposer:
 
         return target_hidden_states, input_ids, last_token_indices, block_tables
 
-    @functools.partial(jax.jit, static_argnums=(0, ))
-    def _select_draft_token_ids_in_jit(
+    def _select_draft_token_ids(
         self,
         hidden_states: jax.Array,
         last_token_indices: jax.Array,
     ) -> jax.Array:
-        return self._select_draft_token_ids(hidden_states, last_token_indices)
+        sample_hidden_states = hidden_states[last_token_indices]
+        return self._get_draft_token_ids_in_jit(sample_hidden_states)
 
     @functools.partial(jax.jit, static_argnums=(0, ))
     def _select_and_stack_draft_token_ids_in_jit(
@@ -312,30 +302,22 @@ class Eagle3Proposer:
                                                        last_token_indices)
         return jnp.stack([draft_token_ids], axis=1)
 
-    def _select_draft_token_ids(
-        self,
-        hidden_states: jax.Array,
-        last_token_indices: jax.Array,
-    ) -> jax.Array:
-        sample_hidden_states = hidden_states[last_token_indices]
-        return self._get_draft_token_ids(sample_hidden_states)
-
-    def _get_draft_token_ids(self, hidden_states: jax.Array) -> jax.Array:
+    @functools.partial(jax.jit, static_argnums=(0, ))
+    def _get_draft_token_ids_in_jit(self,
+                                    hidden_states: jax.Array) -> jax.Array:
         lora_metadata = None
         logits = self.compute_logits_fn(self.state, hidden_states,
                                         lora_metadata)
         return jnp.argmax(logits, axis=-1)
 
     @functools.partial(jax.jit, static_argnums=(0, ))
-    def _get_draft_token_ids_in_jit(self,
-                                    hidden_states: jax.Array) -> jax.Array:
-        return self._get_draft_token_ids(hidden_states)
-
-    @functools.partial(jax.jit, static_argnums=(0, ))
-    def _select_positions_and_hidden_states_in_jit(
-            self, positions: jax.Array, hidden_states: jax.Array,
+    def _select_inputs_for_loop_in_jit(
+            self, positions: jax.Array, residual: jax.Array,
+            hidden_states: jax.Array,
             last_token_indices: jax.Array) -> tuple[jax.Array, jax.Array]:
-        return positions[last_token_indices], hidden_states[last_token_indices]
+        return positions[last_token_indices], residual[
+            last_token_indices], self._select_draft_token_ids(
+                hidden_states, last_token_indices)
 
     def propose(
         self,
@@ -364,13 +346,11 @@ class Eagle3Proposer:
             return kv_caches, self._select_and_stack_draft_token_ids_in_jit(
                 hidden_states, last_token_indices)
 
-        draft_token_ids = self._select_draft_token_ids_in_jit(
-            hidden_states, last_token_indices)
+        positions, hidden_states, draft_token_ids = self._select_inputs_for_loop_in_jit(
+            attn_metadata.input_positions, residual[0], hidden_states,
+            last_token_indices)
 
         draft_token_ids_list = [draft_token_ids]
-
-        positions, hidden_states = self._select_positions_and_hidden_states_in_jit(
-            attn_metadata.input_positions, residual[0], last_token_indices)
 
         for _ in range(self.num_speculative_tokens - 1):
             input_ids_loop = draft_token_ids_list[-1]
