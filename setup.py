@@ -52,6 +52,7 @@ setup(
     packages=find_packages(),
     python_requires=">=3.10",
     install_requires=get_requirements(),
+    include_package_data=True,
     classifiers=[
         "Development Status :: 3 - Alpha",
         "Intended Audience :: Developers",
