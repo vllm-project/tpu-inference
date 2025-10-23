@@ -8,6 +8,7 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from vllm.config import VllmConfig
+import torch
 
 from tpu_inference.layers.jax.attention.attention import AttentionMetadata
 from tpu_inference.layers.jax.attention.llama4_attention import Llama4Attention
@@ -23,6 +24,12 @@ from tpu_inference.models.jax.utils.weight_utils import (
     transpose_params)
 
 logger = init_logger(__name__)
+
+DTYPE_VIEW_MAP = {
+    jnp.dtype(jnp.float8_e4m3fn): torch.uint8,
+    jnp.dtype(jnp.bfloat16): torch.uint16,
+    jnp.dtype(jnp.float32): torch.uint32,
+}
 
 
 class Llama4ForCausalLM(nnx.Module):
@@ -86,9 +93,21 @@ class Llama4ForCausalLM(nnx.Module):
                                           1)
         self.rms_norm_eps = getattr(text_config, "rms_norm_eps", 1e-5)
 
-        self.rope_scaling = getattr(text_config, "rope_scaling", None)
-        if self.rope_scaling:
-            self.rope_scaling["scale_factor"] = self.rope_scaling.pop("factor")
+        self.use_qk_norm = getattr(text_config, "use_qk_norm", True)
+
+        self.rope_scaling = {}
+        rope_scaling = getattr(text_config, "rope_scaling", None)
+        if rope_scaling is None:
+            self.rope_scaling = rope_scaling
+        else:
+            self.rope_scaling["scale_factor"] = rope_scaling["factor"]
+            self.rope_scaling["low_freq_factor"] = rope_scaling[
+                "low_freq_factor"]
+            self.rope_scaling["high_freq_factor"] = rope_scaling[
+                "high_freq_factor"]
+            self.rope_scaling[
+                "original_max_position_embeddings"] = rope_scaling[
+                    "original_max_position_embeddings"]
 
         self.use_qk_norm = getattr(text_config, "use_qk_norm", True)
 
@@ -155,13 +174,13 @@ class Llama4ForCausalLM(nnx.Module):
                 head_dim=self.head_dim,
                 rope_theta=500000.0,
                 # https://huggingface.co/meta-llama/Llama-4-Scout-17B-16E-Instruct/blob/main/config.json
-                rope_scaling=self.rope_scaling,
+                rope_scaling = self.rope_scaling,
                 rngs=self.rng,
                 rope_input_ordering="interleaved",
                 temperature_tuning=True,
                 temperature_tuning_scale=0.1,
                 temperature_tuning_floor_scale=8192,
-                use_qk_norm=self.use_qk_norm,
+                use_qk_norm = self.use_qk_norm,
                 attention_chunk_size=None if use_attention_rope else 8192,
                 mesh=self.mesh,
                 random_init=force_random_weights,
@@ -296,7 +315,7 @@ class Llama4WeightLoader:
                  num_key_value_heads, attn_head_dim):
         self.names_and_weights_generator = model_weights_generator(
             model_name_or_path=vllm_config.model_config.model,
-            framework="flax",
+            framework="pt",
             filter_regex="language_model",
             download_dir=vllm_config.load_config.download_dir)
         self.is_verbose = getattr(vllm_config.additional_config, "is_verbose",
@@ -304,6 +323,14 @@ class Llama4WeightLoader:
         self.interleave_moe_layer_step = getattr(
             vllm_config.model_config.hf_config.text_config,
             "interleave_moe_layer_step", 1)
+        
+        # ============================= ADD ================================
+        self.quantization_config = getattr(vllm_config.model_config.hf_config, "quantization_config", None)
+
+        logger.debug(f"self.quantization_config is {self.quantization_config}")
+
+        self.expert_weights_buffer = {}
+        # ============================= ADD ================================
 
         self.expert_prefix = "shared_expert."
         self._transpose_map = {
@@ -329,7 +356,35 @@ class Llama4WeightLoader:
             "o_proj": (hidden_size, attn_heads, attn_head_dim),
         }
 
+        # ============================= ADD ================================
         # Set the mappings from loaded parameter keys to standardized names.
+        EXPERT_MAPPINGS_FUSED = {
+            "language_model.model.layers.*.feed_forward.experts.down_proj":
+                "layers.*.custom_module.kernel_down_proj_EFD",
+            "language_model.model.layers.*.feed_forward.experts.gate_up_proj":
+                "layers.*.custom_module.kernel_up_proj_EDF",
+        }
+
+        EXPERT_MAPPINGS_UNFUSED = {
+            "language_model.model.layers.*.feed_forward.experts.*.down_proj.weight":
+                "layers.*.custom_module.kernel_down_proj_EFD",
+            "language_model.model.layers.*.feed_forward.experts.*.down_proj.weight_scale":
+                "layers.*.custom_module.kernel_down_proj_EFD",
+            "language_model.model.layers.*.feed_forward.experts.*.gate_proj.weight":
+                "layers.*.custom_module.kernel_gating_EDF",
+            "language_model.model.layers.*.feed_forward.experts.*.gate_proj.weight_scale":
+                "layers.*.custom_module.kernel_gating_EDF",
+            "language_model.model.layers.*.feed_forward.experts.*.up_proj.weight":
+                "layers.*.custom_module.kernel_up_proj_EDF",
+            "language_model.model.layers.*.feed_forward.experts.*.up_proj.weight_scale":
+                "layers.*.custom_module.kernel_up_proj_EDF",
+        }
+
+        if self.quantization_config is None:
+            expert_mappings_to_use = EXPERT_MAPPINGS_FUSED
+        else:
+            expert_mappings_to_use = EXPERT_MAPPINGS_UNFUSED
+
         self._loaded_to_standardized_keys = {
             "language_model.model.embed_tokens.weight":
             "embedder.input_embedding_table_VD",
@@ -351,16 +406,14 @@ class Llama4WeightLoader:
             "layers.*.attn.kernel_o_proj_NHD",
             "language_model.model.layers.*.feed_forward.router.weight":
             "layers.*.custom_module.router.kernel_DE",
-            "language_model.model.layers.*.feed_forward.experts.down_proj":
-            "layers.*.custom_module.kernel_down_proj_EFD",
-            "language_model.model.layers.*.feed_forward.experts.gate_up_proj":
-            "layers.*.custom_module.kernel_up_proj_EDF",
+            # shared experts
             "language_model.model.layers.*.feed_forward.shared_expert.down_proj.weight":
             "layers.*.shared_experts.kernel_down_proj_FD",
             "language_model.model.layers.*.feed_forward.shared_expert.gate_proj.weight":
             "layers.*.shared_experts.kernel_gating_DF",
             "language_model.model.layers.*.feed_forward.shared_expert.up_proj.weight":
             "layers.*.shared_experts.kernel_up_proj_DF",
+            # dense layers
             "language_model.model.layers.*.feed_forward.down_proj.weight":
             "layers.*.custom_module.kernel_down_proj_FD",
             "language_model.model.layers.*.feed_forward.up_proj.weight":
@@ -369,11 +422,23 @@ class Llama4WeightLoader:
             "layers.*.custom_module.kernel_gating_DF",
         }
 
+        self._loaded_to_standardized_keys.update(expert_mappings_to_use)
+
+        # ============================= ADD ================================
+
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
         # Find the corresponding model key using the HF key
         if "layer" in loaded_key:
             layer_num = re.search(r"layers\.(\d+)", loaded_key).group(1)
             layer_key = re.sub(r"layers\.\d+", "layers.*", loaded_key)
+            
+            # ============================= ADD ================================
+            expert_match = re.search(r"experts\.(\d+)", layer_key)
+            if expert_match:
+                # Key for lookup: layers.*.feed_forward.experts.*.down_proj.weight
+                layer_key = re.sub(r"experts\.\d+", "experts.*", layer_key)
+            # ============================= ADD ================================
+
             mapped_key = self._loaded_to_standardized_keys.get(
                 layer_key, loaded_key)
             mapped_key = re.sub(r"layers\.\*", f"layers.{layer_num}",
@@ -387,8 +452,16 @@ class Llama4WeightLoader:
                                  model_params: nnx.State, loaded_name: str,
                                  loaded_weight: jax.Array):
         """HF's gate_up_proj is a fused tensor of gate and up projections. It needs to be split."""
-        # gate_proj is first & up_proj is second
+
+        cast_type = jnp.dtype(jnp.bfloat16)
+        torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
+        loaded_weight = jnp.array(loaded_weight.view(torch_view_type).numpy()).view(cast_type)
+
         split_weights = jnp.split(loaded_weight, 2, axis=-1)
+
+        # ============================= ADD ================================
+        layer_num = self._get_layer_num(loaded_name)
+        # ============================= ADD ================================
 
         for split_type in ["gate", "up"]:
             split_loaded_name = loaded_name.replace("gate_up_proj",
@@ -400,19 +473,45 @@ class Llama4WeightLoader:
                 mapped_name = "layers.*.custom_module.kernel_up_proj_EDF"
                 loaded_weight = split_weights[1]
 
-            layer_num = re.search(r"layers\.(\d+)", split_loaded_name).group(1)
+            # layer_num = re.search(r"layers\.(\d+)", split_loaded_name).group(1)
             mapped_name = re.sub(r"layers\.\*", f"layers.{layer_num}",
                                  mapped_name)
+            
             mapped_model_weight = get_param(model_params, mapped_name)
+
+            # ============================= ADD ================================
+            cast_type = mapped_model_weight.value.dtype
+            torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
+            loaded_weight = jnp.array(loaded_weight.view(torch_view_type).numpy()).view(cast_type)
+            # ============================= ADD ================================
 
             if mapped_model_weight.value.shape != loaded_weight.shape:
                 raise ValueError(
                     f"Loaded shape for {split_loaded_name}: {loaded_weight.shape} "
                     f"does not match model shape for {mapped_name}: {mapped_model_weight.value.shape}!"
                 )
-            mapped_model_weight.value = shard_put(loaded_weight,
-                                                  mapped_model_weight.sharding,
+            # ============================= ADD ================================
+            # update loading logic to handle qarray 
+            if loaded_weight.itemsize < 2: # check model weight elem nbits < 16
+                #type check 
+                assert hasattr(mapped_model_weight, 'array'), \
+                    f"Expected model_weight for quantized weight '{mapped_name}' to be a qarray."
+                
+                expected_qvalue_dtype = mapped_model_weight.array.qvalue.value.dtype
+                assert loaded_weight.dtype == expected_qvalue_dtype, \
+                    f"DType mismatch for QValue '{mapped_name}'. Loaded dtype ({loaded_weight.dtype}) != Expected dtype ({expected_qvalue_dtype})."
+                
+                mapped_model_weight.array.qvalue.value = shard_put(loaded_weight,
+                                                  mapped_model_weight.array.qvalue.sharding,
                                                   mesh=model_for_loading.mesh)
+            else: 
+                mapped_model_weight.value = shard_put(loaded_weight,
+                                                    mapped_model_weight.sharding,
+                                                    mesh=model_for_loading.mesh)
+            # ============================= ADD ================================
+            # mapped_model_weight.value = shard_put(loaded_weight,
+            #                                       mapped_model_weight.sharding,
+            #                                       mesh=model_for_loading.mesh)
             logger.debug(
                 f"{split_loaded_name}: {loaded_weight.shape}  -->  {mapped_name}: {mapped_model_weight.value.shape}"
             )
@@ -428,6 +527,16 @@ class Llama4WeightLoader:
         if match:
             return int(match.group(1))
         return None
+    
+    def _get_expect_num(self, loaded_key: str) -> Optional[int]:
+        """
+        Extracts the expect number from a HuggingFace weight key string.
+        Returns the expect number (int) or None if no expect number is found.
+        """
+        match = re.search(r"experts\.(\d+)\.", loaded_key)
+        if match:
+            return int(match.group(1))
+        return None
 
     def load_weights(self, model_for_loading: nnx.Module):
         model_params = nnx.state(model_for_loading)
@@ -436,6 +545,30 @@ class Llama4WeightLoader:
             for loaded_name, loaded_weight in self.names_and_weights_generator:
                 is_moe_layer = False
                 layer_num = self._get_layer_num(loaded_name)
+                expert_num = self._get_expect_num(loaded_name)
+                is_unfused_expert = self.quantization_config is not None and expert_num is not None
+
+                if is_unfused_expert:
+                    if layer_num is not None:  
+
+                        if not loaded_name.endswith(".bias"):
+                            loaded_weight = reshape_params(loaded_name, loaded_weight,
+                                                           self._weight_shape_map)
+                            # Transpose MoE weights (like down_proj) here
+                            loaded_weight = transpose_params(loaded_name,
+                                                             loaded_weight,
+                                                             self._transpose_map)
+
+                        mapped_name = self.map_loaded_to_standardized_name(loaded_name)
+                        model_weight = get_param(model_params, mapped_name) # Need model_weight to get dtype
+                        cast_type = model_weight.value.dtype
+                        torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
+                        loaded_weight = jnp.array(loaded_weight.view(torch_view_type).numpy()).view(cast_type)
+
+                        if mapped_name not in self.expert_weights_buffer:
+                            self.expert_weights_buffer[mapped_name] = {}
+                        self.expert_weights_buffer[mapped_name][expert_num] = loaded_weight
+                        continue
 
                 if layer_num is not None:
                     is_moe_layer = (layer_num + 1) % \
@@ -447,8 +580,15 @@ class Llama4WeightLoader:
                                                   model_params, loaded_name,
                                                   loaded_weight)
                     continue
+
                 mapped_name = self.map_loaded_to_standardized_name(loaded_name)
                 model_weight = get_param(model_params, mapped_name)
+
+                # ============================= ADD ================================
+                cast_type = model_weight.value.dtype
+                torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
+                loaded_weight = jnp.array(loaded_weight.view(torch_view_type).numpy()).view(cast_type)
+                # ============================= ADD ================================
 
                 if not loaded_name.endswith(".bias"):
                     loaded_weight = reshape_params(loaded_name, loaded_weight,
@@ -464,10 +604,74 @@ class Llama4WeightLoader:
                 logger.debug(
                     f"Transformed parameter {loaded_name} to {mapped_name}: {loaded_weight.shape} --> {model_weight.value.shape}"
                 )
-                model_weight.value = shard_put(loaded_weight,
-                                               model_weight.sharding,
+
+                # ============================= ADD ================================
+                if loaded_name.endswith(".weight_scale"):
+                    # assert model_weight is a qarray 
+                    assert hasattr(model_weight, 'array'), \
+                        f"Expected model_weight for scale '{loaded_name}' to be a quantized array (qarray), but it lacks an 'array' attribute."
+                    expected_scale_dtype = model_weight.array.scale.value.dtype
+                    assert loaded_weight.dtype == expected_scale_dtype, \
+                        f"DType mismatch for scale '{loaded_name}'. Loaded dtype ({loaded_weight.dtype}) != Expected dtype ({expected_scale_dtype})."
+                    
+                    model_weight.array.scale.value = shard_put(loaded_weight,
+                                               model_weight.array.qvalue.sharding,
                                                mesh=model_for_loading.mesh)
+                
+                elif loaded_weight.itemsize < 2: # check model weight elem nbits < 16
+                    assert hasattr(model_weight, 'array'), \
+                        f"Expected model_weight for quantized weight '{loaded_name}' to be a quantized array (qarray), but it lacks an 'array' attribute."
+                    expected_qvalue_dtype = model_weight.array.qvalue.value.dtype
+                    assert loaded_weight.dtype == expected_qvalue_dtype, \
+                        f"DType mismatch for quantized weight '{loaded_name}'. Loaded dtype ({loaded_weight.dtype}) != Expected dtype ({expected_qvalue_dtype})."
+                    assert loaded_weight.shape == model_weight.array.qvalue.value.shape, \
+                        f"Shape mismatch for quantized weight '{loaded_name}'. Loaded shape ({loaded_weight.shape}) != Expected shape ({model_weight.array.qvalue.value.shape})."
+                    
+                    model_weight.array.qvalue.value = shard_put(loaded_weight,
+                                               model_weight.array.qvalue.sharding,
+                                               mesh=model_for_loading.mesh)
+                else: 
+                    expected_dtype = model_weight.value.dtype
+                    assert loaded_weight.dtype == expected_dtype, \
+                        f"DType mismatch for full-precision weight '{loaded_name}'. Loaded dtype ({loaded_weight.dtype}) != Expected dtype ({expected_dtype})."
+                    # assert loaded_weight.shape == model_weight.value.shape, \
+                    #     f"Shape mismatch for full-precision weight '{loaded_name}'. Loaded shape ({loaded_weight.shape}) != Expected shape ({model_weight.value.shape})."
+                    
+                    model_weight.value = shard_put(loaded_weight,
+                                                model_weight.sharding,
+                                                mesh=model_for_loading.mesh)
+                # ============================= ADD ================================   
+
+                # model_weight.value = shard_put(loaded_weight,
+                #                                model_weight.sharding,
+                #                                mesh=model_for_loading.mesh)
                 if self.is_verbose:
                     print_param_info(model_weight, loaded_name)
+            
+            with jax.default_device(jax.devices("cpu")[0]):
+                for mapped_name, expert_map in self.expert_weights_buffer.items():
+                    model_weight = get_param(model_params, mapped_name)
+
+                    sorted_exp_nums = sorted(expert_map.keys())
+                    expert_weights_list = [expert_map[k] for k in sorted_exp_nums]
+                    
+                    loaded_weight = jnp.stack(expert_weights_list, axis=0)
+
+                    cast_type = model_weight.value.dtype
+                    torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
+                    loaded_weight = jnp.array(loaded_weight.view(torch_view_type).numpy()).view(cast_type)
+
+                    if model_weight.value.shape != loaded_weight.shape:
+                        raise ValueError(
+                            f"[AGGREGATED] Loaded shape {loaded_weight.shape} "
+                            f"does not match model shape for {mapped_name}: {model_weight.value.shape}!"
+                        )
+                    
+                    if loaded_weight.itemsize < 2:
+                        model_weight.array.qvalue.value = shard_put(loaded_weight, model_weight.array.qvalue.sharding, mesh=model_for_loading.mesh)
+                    else: 
+                        model_weight.value = shard_put(loaded_weight, model_weight.sharding, mesh=model_for_loading.mesh)
+                    
+                    logger.debug(f"Aggregated and loaded {mapped_name}: {loaded_weight.shape}")
 
         nnx.update(model_for_loading, model_params)
