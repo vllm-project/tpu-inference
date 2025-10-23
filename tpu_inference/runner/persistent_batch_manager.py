@@ -57,7 +57,7 @@ class PersistentBatchManager:
             self.input_batch.req_ids[i]] == 1)
 
         self.input_batch.request_distribution = [
-            num_decode, num_decode, num_reqs
+            num_decode, num_reqs, num_reqs
         ]
 
         return swap_cnt

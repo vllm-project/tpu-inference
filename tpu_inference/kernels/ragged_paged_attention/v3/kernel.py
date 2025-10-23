@@ -1513,9 +1513,9 @@ def ragged_paged_attention(
         ),
         prefill_block_size=BlockSizes(
             num_queries_per_block=128,
-            num_kv_pages_per_block=4,
+            num_kv_pages_per_block=8,
             num_query_compute_per_block=32,
-            num_kv_compute_per_block=1,
+            num_kv_compute_per_block=2,
         ),
         mixed_block_size=BlockSizes(
             num_queries_per_block=16,
