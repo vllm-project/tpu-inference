@@ -108,7 +108,8 @@ from tpu_inference.logger import init_logger
 from tpu_inference.runner.kv_cache_manager import KVCacheManager
 from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
 
-from .cache_util import CPU_OFFLOADING_SWAP_OP_TYPE, TokenProcessor, swap_ops
+from .cache_util import (CPU_OFFLOADING_SWAP_OP_TYPE, TokenProcessor,
+                         get_jitted_swap_fn)
 from .local_cpu_backend import LocalCPUBackend
 
 EngineId = str
@@ -760,6 +761,9 @@ class TPUConnectorWorker:
         logger.info(
             f"(cpu offloading) swap operation type is {self.swap_op_type}")
 
+        self.swap_in_fn = None
+        self.swap_out_fn = None
+
         self.host = self.config.kv_ip
         self.kv_transfer_port = self.config.kv_port
 
@@ -784,6 +788,52 @@ class TPUConnectorWorker:
     def __del__(self):
         logger.info("TPUConnectorWorker: Entering __del__")
         self.save_executor.shutdown(wait=True)
+
+    def register_runner(self, runner: TPUModelRunner):
+        logger.info("TPUConnectorWorker: Entering register_runner")
+        self.runner = runner
+        self.mesh = runner.mesh
+        # Get the spec of the kv_caches
+        kv_caches = runner.kv_caches
+        if kv_caches:
+            self.kv_cache_layout = runner.get_kv_cache_layout()
+            kv_layer = kv_caches[0]
+            self.num_layers = len(kv_caches)
+            self.shape = list(kv_layer.shape)
+            self.dtype = kv_layer.dtype
+            self.device_sharding = kv_layer.sharding
+            # TODO(jcgu): handle SingleDeviceSharding
+            self.host_sharding = jax.sharding.NamedSharding(
+                mesh=self.device_sharding.mesh,
+                spec=self.device_sharding.spec,
+                memory_kind="pinned_host")
+
+            # NOTE(jcgu): needed when sliced-kv is [num_tokens, num_head, head_dim]
+            self.flatten_device_sharding = jax.sharding.NamedSharding(
+                mesh=self.device_sharding.mesh,
+                spec=jax.sharding.PartitionSpec(None, "model"),
+                memory_kind="device")
+            self.flatten_host_sharding = jax.sharding.NamedSharding(
+                mesh=self.device_sharding.mesh,
+                spec=jax.sharding.PartitionSpec(None, "model"),
+                memory_kind="pinned_host")
+
+            self.swap_in_fn, self.swap_out_fn = get_jitted_swap_fn(
+                self.swap_op_type,
+                host_sharding=self.flatten_host_sharding,
+                device_sharding=self.flatten_device_sharding)
+
+            logger.info("KV Cache details registered in TPUConnectorWorker:")
+            logger.info(f"  - Num layers: {self.num_layers}")
+            logger.info(f"  - Shape per layer: {self.shape}")
+            logger.info(f"  - DType: {self.dtype}")
+            logger.info(f"  - Device sharding: {self.device_sharding}")
+            logger.info(
+                f"  - Flatten Device sharding: {self.flatten_device_sharding}")
+            logger.info(f"  - Layout: {self.kv_cache_layout}")
+        else:
+            raise ValueError(
+                "TPUConnectorWorker registered with no KV caches.")
 
     def _save_blocks_to_cpu(self, req_id: ReqId, full_block_ids: list[int],
                             full_token_ids: list[int],
@@ -840,13 +890,9 @@ class TPUConnectorWorker:
                 f"extracted_blocks_tpu: {extracted_blocks_tpu[0].shape}, {extracted_blocks_tpu[0].sharding}"
             )
 
-            # Initiate non-blocking copy to CPU
-            kv_caches_on_cpu = [
-                swap_ops(extracted_blocks, self.flatten_host_sharding, "d2h",
-                         self.swap_op_type)
-                for extracted_blocks in extracted_blocks_tpu
-            ]
-
+            kv_caches_on_cpu = self.swap_out_fn(extracted_blocks_tpu,
+                                                self.flatten_device_sharding,
+                                                self.flatten_host_sharding)
             # Block until the transfer is complete
             if kv_caches_on_cpu:
                 jax.block_until_ready(kv_caches_on_cpu)
@@ -995,45 +1041,6 @@ class TPUConnectorWorker:
                     f"completed in {duration:.4f} seconds.")
         self._processed_save_for_step = True
 
-    def register_runner(self, runner: TPUModelRunner):
-        logger.info("TPUConnectorWorker: Entering register_runner")
-        self.runner = runner
-        self.mesh = runner.mesh
-        # Get the spec of the kv_caches
-        kv_caches = runner.kv_caches
-        if kv_caches:
-            self.kv_cache_layout = runner.get_kv_cache_layout()
-            kv_layer = kv_caches[0]
-            self.num_layers = len(kv_caches)
-            self.shape = list(kv_layer.shape)
-            self.dtype = kv_layer.dtype
-            self.device_sharding = kv_layer.sharding
-            # TODO(jcgu): handle SingleDeviceSharding
-            self.host_sharding = jax.sharding.NamedSharding(
-                mesh=self.device_sharding.mesh,
-                spec=self.device_sharding.spec,
-                memory_kind="pinned_host")
-
-            self.flatten_device_sharding = jax.sharding.NamedSharding(
-                mesh=self.device_sharding.mesh,
-                spec=jax.sharding.PartitionSpec(None, "model"),
-                memory_kind="device")
-            self.flatten_host_sharding = jax.sharding.NamedSharding(
-                mesh=self.device_sharding.mesh,
-                spec=jax.sharding.PartitionSpec(None, "model"),
-                memory_kind="pinned_host")
-
-            logger.info("KV Cache details registered in TPUConnectorWorker:")
-            logger.info(f"  - Num layers: {self.num_layers}")
-            logger.info(f"  - Shape per layer: {self.shape}")
-            logger.info(f"  - DType: {self.dtype}")
-            logger.info(f"  - Device sharding: {self.device_sharding}")
-            logger.info(
-                f"  - Flatten Device sharding: {self.flatten_device_sharding}")
-            logger.info(f"  - Layout: {self.kv_cache_layout}")
-        else:
-            logger.warning("TPUConnectorWorker registered with no KV caches.")
-
     def start_load_kv(self, fwd_ctx: "ForwardContext") -> None:
         """
         This function is the worker-side entry point for loading data from the
@@ -1167,10 +1174,9 @@ class TPUConnectorWorker:
             )
 
             # 5. Transfer to TPU, applying the correct sharding.
-            loaded_kv_sharded_on_tpu = [
-                swap_ops(layer_data, self.flatten_device_sharding, "h2d",
-                         self.swap_op_type) for layer_data in padded_kv_on_cpu
-            ]
+            loaded_kv_sharded_on_tpu = self.swap_in_fn(
+                padded_kv_on_cpu, self.flatten_host_sharding,
+                self.flatten_device_sharding)  #, "h2d")
             jax.block_until_ready(loaded_kv_sharded_on_tpu)
             logger.info(
                 f"loaded_kv_on_tpu[0]: {loaded_kv_sharded_on_tpu[0].shape}, {loaded_kv_sharded_on_tpu[0].sharding}"
