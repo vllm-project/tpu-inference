@@ -7,7 +7,6 @@ import jax.numpy as jnp
 import numpy as np
 import vllm.envs as envs
 from jax.sharding import NamedSharding, PartitionSpec
-from vllm.utils import cdiv
 
 from tpu_inference.core.disagg_utils import is_disagg_enabled
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
@@ -125,7 +124,7 @@ class CompilationManager:
             layer_name_to_kvcache_index,
             lora_metadata,
         ):
-            kv_caches, hidden_states, aux_hidden_states = self.runner.model_fn(
+            kv_caches, hidden_states, _ = self.runner.model_fn(
                 state, kv_caches, input_ids, attention_metadata, inputs_embeds,
                 layer_name_to_kvcache_index, lora_metadata)
             self.runner.kv_caches = kv_caches
@@ -261,16 +260,6 @@ class CompilationManager:
                 sharding=NamedSharding(self.runner.mesh,
                                        PartitionSpec(None, "model")),
                 only_equal_paddings=True,
-            )
-
-            self._precompile_select_from_array_helper(
-                name="select hidden states for eagle-3",
-                source_paddings=self.runner.num_tokens_paddings,
-                indices_paddings=[self.runner.max_num_reqs],
-                hidden_dim=hsize,
-                sharding=NamedSharding(self.runner.mesh,
-                                       PartitionSpec(None, None)),
-                check_should_skip_padding=False,
             )
 
     def _precompile_compute_logits(self) -> None:
@@ -438,12 +427,11 @@ class CompilationManager:
 
         num_kv_cache_groups = len(self.runner.kv_cache_config.kv_cache_groups)
         draft_kv_cache_group_id = num_kv_cache_groups - 1
-        block_tables = jnp.ones(
-            (self.runner.max_num_reqs,
-             cdiv(self.runner.max_model_len, self.runner.block_size)),
-            jnp.int32)
-        block_tables = self.runner.input_batch.block_table[
-            draft_kv_cache_group_id].get_device_tensor().reshape(-1)
+        block_tables_unreshaped = self.runner.input_batch.block_table[
+            draft_kv_cache_group_id].get_device_tensor()
+        block_tables = block_tables_unreshaped.reshape(-1)
+        block_tables_first_spec = jax.device_put(
+            block_tables, NamedSharding(self.runner.mesh, PartitionSpec()))
         block_tables_loop = jax.device_put(
             block_tables, NamedSharding(self.runner.mesh,
                                         PartitionSpec(None, )))
@@ -466,7 +454,6 @@ class CompilationManager:
                                             request_distribution)
 
         for num_reqs_padding in self.runner.num_reqs_paddings:
-
             for i in range(1, self.runner.drafter.num_speculative_tokens + 1):
                 draft_token_ids_list = [
                     self._create_dummy_tensor(
@@ -481,14 +468,30 @@ class CompilationManager:
                     num_reqs=num_reqs_padding,
                     draft_token_ids_list_length=len(draft_token_ids_list))
 
+        for num_logits in self.runner.num_logits_paddings:
+            hidden_states = self._create_dummy_tensor(
+                (num_logits, hidden_size), jnp.bfloat16)
+            self._run_compilation(
+                "eagle3_get_draft_token_ids_in_jit",
+                self.runner.drafter._get_draft_token_ids_in_jit,
+                hidden_states,
+                num_logits=num_logits,
+            )
+
         input_ids_loop = self._create_dummy_tensor(
             (self.runner.max_num_reqs, ), jnp.int32,
             NamedSharding(self.runner.mesh, PartitionSpec()))
         target_hidden_state_loop = self._create_dummy_tensor(
             (self.runner.max_num_reqs, hidden_size), dtype,
             NamedSharding(self.runner.mesh, PartitionSpec(None, None)))
+        new_seq_lens_cpu = np.ones((self.runner.max_num_reqs, ), jnp.int32)
+        next_token_ids = self._create_dummy_tensor(
+            (self.runner.max_num_reqs, ), jnp.int32)
+        new_query_start_loc_cpu = np.ones((self.runner.max_num_reqs + 1, ),
+                                          jnp.int32)
+        last_token_indices = self._create_dummy_tensor(
+            (self.runner.max_num_reqs, ), jnp.int32)
         for num_tokens in self.runner.num_tokens_paddings:
-            positions = self._create_dummy_tensor((num_tokens, ), jnp.int32)
             aux_hidden_states = [
                 self._create_dummy_tensor((num_tokens, hidden_size), dtype),
                 self._create_dummy_tensor((num_tokens, hidden_size), dtype),
@@ -501,7 +504,41 @@ class CompilationManager:
                 num_tokens=num_tokens,
             )
 
-            input_ids = self._create_dummy_tensor((num_tokens, ), jnp.int32)
+            positions = self._create_dummy_tensor((num_tokens, ), jnp.int32)
+            attention_metadata = AttentionMetadata(
+                input_positions=positions,
+                block_tables=block_tables_first_spec,
+                seq_lens=seq_lens,
+                query_start_loc=query_start_loc,
+                request_distribution=request_distribution,
+            )
+
+            def prepare_inputs_in_jit_wrapper(
+                token_indices_cpu,
+                new_query_start_loc_cpu,
+                new_seq_lens_cpu,
+                input_ids,
+                aux_hidden_states,
+                attention_metadata,
+                next_token_ids,
+                block_tables,
+            ):
+                target_hidden_states, input_ids, last_token_indices, _ = self.runner.drafter._prepare_inputs_in_jit(
+                    token_indices_cpu,
+                    new_query_start_loc_cpu,
+                    new_seq_lens_cpu,
+                    input_ids,
+                    aux_hidden_states,
+                    attention_metadata,
+                    next_token_ids,
+                    block_tables,
+                )
+                return target_hidden_states, input_ids, last_token_indices
+
+            token_indices_cpu = np.ones((num_tokens, ), dtype=np.int32)
+            input_ids = self._create_dummy_tensor(
+                (num_tokens, ), jnp.int32,
+                NamedSharding(self.runner.mesh, PartitionSpec()))
             aux_hidden_states = [
                 self._create_dummy_tensor(
                     (num_tokens, hidden_size), jnp.bfloat16,
@@ -516,17 +553,19 @@ class CompilationManager:
                     NamedSharding(self.runner.mesh, PartitionSpec(None,
                                                                   None))),
             ]
-
-            attention_metadata = AttentionMetadata(
-                input_positions=positions,
-                block_tables=block_tables,
-                seq_lens=seq_lens,
-                query_start_loc=query_start_loc,
-                request_distribution=request_distribution,
+            self._run_compilation(
+                "eagle3_prepare_inputs_in_jit",
+                prepare_inputs_in_jit_wrapper,
+                token_indices_cpu,
+                new_query_start_loc_cpu,
+                new_seq_lens_cpu,
+                input_ids,
+                aux_hidden_states,
+                attention_metadata,
+                next_token_ids,
+                block_tables_unreshaped,
+                num_tokens=num_tokens,
             )
-            target_hidden_states = self._create_dummy_tensor(
-                (num_tokens, hidden_size), dtype,
-                NamedSharding(self.runner.mesh, PartitionSpec(None, "model")))
 
             def draft_model_fn_wrapper(
                 state,
@@ -541,14 +580,34 @@ class CompilationManager:
                 self.runner.kv_caches = kv_caches
                 return hidden_states
 
+            target_hidden_states = self._create_dummy_tensor(
+                (num_tokens, hidden_size), dtype,
+                NamedSharding(self.runner.mesh, PartitionSpec(None, "model")))
             self._run_compilation(
-                "draft_model_fn",
+                "eagle3_draft_model_fn",
                 draft_model_fn_wrapper,
                 self.runner.drafter.state,
                 self.runner.kv_caches,
                 input_ids,
                 target_hidden_states,
                 attention_metadata,
+                num_tokens=num_tokens,
+            )
+
+            target_hidden_states = self._create_dummy_tensor(
+                (num_tokens, draft_hidden_size), dtype,
+                NamedSharding(self.runner.mesh, PartitionSpec(None, None)))
+            target_token_ids = self._create_dummy_tensor((num_tokens, ),
+                                                         jnp.int32)
+
+            self._run_compilation(
+                "eagle3_prepare_draft_inputs_in_jit",
+                self.runner.drafter._prepare_draft_inputs_in_jit,
+                target_hidden_states,
+                query_start_loc,
+                target_token_ids,
+                next_token_ids,
+                block_tables_unreshaped,
                 num_tokens=num_tokens,
             )
 
@@ -569,8 +628,33 @@ class CompilationManager:
                 num_tokens=num_tokens,
             )
 
-            target_hidden_states = self._create_dummy_tensor(
-                (num_tokens, draft_hidden_size), dtype)
+            hidden_states = self._create_dummy_tensor(
+                (num_tokens, hidden_size), jnp.bfloat16,
+                NamedSharding(self.runner.mesh, PartitionSpec(None, None)))
+            self._run_compilation(
+                "eagle3_select_draft_token_ids_in_jit",
+                self.runner.drafter._select_draft_token_ids_in_jit,
+                hidden_states,
+                last_token_indices,
+                num_tokens=num_tokens,
+            )
+
+            self._run_compilation(
+                "eagle3_select_and_stack_draft_token_ids_in_jit",
+                self.runner.drafter._select_and_stack_draft_token_ids_in_jit,
+                hidden_states,
+                last_token_indices,
+                num_tokens=num_tokens,
+            )
+
+            self._run_compilation(
+                "eagle3_select_positions_and_hidden_states_in_jit",
+                self.runner.drafter._select_positions_and_hidden_states_in_jit,
+                positions,
+                hidden_states,
+                last_token_indices,
+                num_tokens=num_tokens,
+            )
 
     def _precompile_structured_decoding(self) -> None:
         logger.info(
