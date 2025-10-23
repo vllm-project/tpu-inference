@@ -4,8 +4,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from tpu_inference.distributed.cache_util import CacheKey
 from tpu_inference.distributed.local_cpu_backend import LocalCPUBackend
-from tpu_inference.distributed.util import CacheKey
 
 
 # Helper to create a mock value with a specific size
