@@ -56,4 +56,4 @@ def get_side_channel_port() -> str:
 def get_node_id() -> int:
     # TODO(xiang): Is it possible to get this from a pre-defiend env?
     id = os.getenv("TPU_NODE_ID", 0)
-    return id
+    return int(id)

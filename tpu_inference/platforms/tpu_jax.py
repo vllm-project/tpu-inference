@@ -190,7 +190,7 @@ class TpuPlatform(Platform):
                 RayDistributedExecutor
             parallel_config.distributed_executor_backend = RayDistributedExecutor
             logger.info(
-                "Force using RayDistributedExecutor for JAX on single host.")
+                "Force using RayDistributedExecutor for JAX on multihost.")
         else:
             logger.warning(
                 f"Unknown TPU multihost backend: {multihost_backend}. "
