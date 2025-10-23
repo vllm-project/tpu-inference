@@ -16,6 +16,7 @@ from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
+from vllm.v1 import utils as vllm_utils
 from vllm.v1.core.kv_cache_utils import get_num_blocks, get_uniform_page_size
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
@@ -166,6 +167,7 @@ class TPUWorker(AbstractTpuWorker):
                     f"node_id={get_node_id()} | "
                     f"is_driver_worker={self.is_driver_worker} | "
                     f"hbm={utils.hbm_usage_gb(self.devices)}GiB")
+        vllm_utils.report_usage_stats(self.vllm_config)
 
     def determine_available_memory(self) -> int:
         gpu_memory_utilization = self.cache_config.gpu_memory_utilization
