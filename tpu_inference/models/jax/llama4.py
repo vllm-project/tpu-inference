@@ -9,6 +9,7 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from vllm.config import VllmConfig
+import torch
 
 from tpu_inference.layers.jax.attention.attention import AttentionMetadata
 from tpu_inference.layers.jax.attention.llama4_attention import Llama4Attention
@@ -93,9 +94,21 @@ class Llama4ForCausalLM(nnx.Module):
                                           1)
         self.rms_norm_eps = getattr(text_config, "rms_norm_eps", 1e-5)
 
-        self.rope_scaling = getattr(text_config, "rope_scaling", None)
-        if self.rope_scaling:
-            self.rope_scaling["scale_factor"] = self.rope_scaling.pop("factor")
+        self.use_qk_norm = getattr(text_config, "use_qk_norm", True)
+
+        self.rope_scaling = {}
+        rope_scaling = getattr(text_config, "rope_scaling", None)
+        if rope_scaling is None:
+            self.rope_scaling = rope_scaling
+        else:
+            self.rope_scaling["scale_factor"] = rope_scaling["factor"]
+            self.rope_scaling["low_freq_factor"] = rope_scaling[
+                "low_freq_factor"]
+            self.rope_scaling["high_freq_factor"] = rope_scaling[
+                "high_freq_factor"]
+            self.rope_scaling[
+                "original_max_position_embeddings"] = rope_scaling[
+                    "original_max_position_embeddings"]
 
         self.use_qk_norm = getattr(text_config, "use_qk_norm", True)
 
@@ -165,13 +178,13 @@ class Llama4ForCausalLM(nnx.Module):
                 head_dim=self.head_dim,
                 rope_theta=500000.0,
                 # https://huggingface.co/meta-llama/Llama-4-Scout-17B-16E-Instruct/blob/main/config.json
-                rope_scaling=self.rope_scaling,
+                rope_scaling = self.rope_scaling,
                 rngs=self.rng,
                 rope_input_ordering="interleaved",
                 temperature_tuning=True,
                 temperature_tuning_scale=0.1,
                 temperature_tuning_floor_scale=8192,
-                use_qk_norm=self.use_qk_norm,
+                use_qk_norm = self.use_qk_norm,
                 attention_chunk_size=None if use_attention_rope else 8192,
                 mesh=self.mesh,
                 random_init=force_random_weights,
@@ -358,6 +371,7 @@ class Llama4WeightLoader:
             "o_proj": (hidden_size, attn_heads, attn_head_dim),
         }
 
+        # ============================= ADD ================================
         # Set the mappings from loaded parameter keys to standardized names.
         EXPERT_MAPPINGS_FUSED = {
             "language_model.model.layers.*.feed_forward.experts.down_proj":
@@ -472,6 +486,12 @@ class Llama4WeightLoader:
 
             mapped_model_weight = get_param(model_params, mapped_name)
 
+            # ============================= ADD ================================
+            cast_type = mapped_model_weight.value.dtype
+            torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
+            loaded_weight = jnp.array(loaded_weight.view(torch_view_type).numpy()).view(cast_type)
+            # ============================= ADD ================================
+
             if mapped_model_weight.value.shape != loaded_weight.shape:
                 raise ValueError(
                     f"Loaded shape for {split_loaded_name}: {loaded_weight.shape} "
@@ -493,6 +513,26 @@ class Llama4WeightLoader:
         Returns the layer number (int) or None if no layer number is found.
         """
         match = re.search(r"layers\.(\d+)", loaded_key)
+        if match:
+            return int(match.group(1))
+        return None
+    
+    def _get_expect_num(self, loaded_key: str) -> Optional[int]:
+        """
+        Extracts the expect number from a HuggingFace weight key string.
+        Returns the expect number (int) or None if no expect number is found.
+        """
+        match = re.search(r"experts\.(\d+)\.", loaded_key)
+        if match:
+            return int(match.group(1))
+        return None
+
+    def _get_expert_num(self, loaded_key: str) -> Optional[int]:
+        """
+        Extracts the expect number from a HuggingFace weight key string.
+        Returns the expect number (int) or None if no expect number is found.
+        """
+        match = re.search(r"experts\.(\d+)\.", loaded_key)
         if match:
             return int(match.group(1))
         return None
@@ -566,6 +606,12 @@ class Llama4WeightLoader:
 
                 mapped_name = self.map_loaded_to_standardized_name(loaded_name)
                 model_weight = get_param(model_params, mapped_name)
+
+                # ============================= ADD ================================
+                cast_type = model_weight.value.dtype
+                torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
+                loaded_weight = jnp.array(loaded_weight.view(torch_view_type).numpy()).view(cast_type)
+                # ============================= ADD ================================
 
                 cast_type = model_weight.value.dtype
                 if not isinstance(loaded_weight, jax.Array):
