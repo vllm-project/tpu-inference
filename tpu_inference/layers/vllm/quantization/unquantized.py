@@ -132,6 +132,7 @@ class VllmUnquantizedLinearMethod(UnquantizedLinearMethod):
 
         outs = slice_sharded_tensor_for_concatenation(
             outs, self.jax_config.output_sizes, self.jax_config.n_shards)
+        # add a jax.scope to check if this line is run
         out = jnp.concatenate(outs, axis=-1)
         return torch_view(out)
 
