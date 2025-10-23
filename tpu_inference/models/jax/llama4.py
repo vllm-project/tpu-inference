@@ -85,7 +85,7 @@ class Llama4ForCausalLM(nnx.Module):
         self.num_shared_experts = getattr(text_config, "num_experts_per_tok",
                                           1)
         self.rms_norm_eps = getattr(text_config, "rms_norm_eps", 1e-5)
-            
+
         self.rope_scaling = getattr(text_config, "rope_scaling", None)
         if self.rope_scaling:
             self.rope_scaling["scale_factor"] = self.rope_scaling.pop("factor")
