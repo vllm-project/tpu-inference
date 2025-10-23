@@ -1131,6 +1131,7 @@ class TPUConnectorWorker:
                 )
 
             # 3. Pad the data to fill a full number of blocks.
+            # TODO(jcgu): do we need to pad when token_processor.chunk_size==lock_size
             num_tokens_to_load = final_kv_on_cpu[0].shape[
                 0] if final_kv_on_cpu else 0
             num_blocks_to_load = len(meta.local_block_ids)
@@ -1140,13 +1141,13 @@ class TPUConnectorWorker:
             pad_width = padded_token_len - num_tokens_to_load
             if pad_width > 0:
                 pad_value = jnp.array(0, dtype=self.dtype)
+                # pad dim_0 which is the #_of_tokens by pad_width
                 padding_config = [
                     (0, pad_width, 0)
                 ] + [(0, 0, 0)] * (len(final_kv_on_cpu[0].shape) - 1)
-                padded_kv_on_cpu = [
-                    jax.lax.pad(layer_cpu, pad_value, padding_config)
-                    for layer_cpu in final_kv_on_cpu
-                ]
+                padded_kv_on_cpu = jax.tree.map(
+                    lambda layer_cpu: jax.lax.pad(
+                        layer_cpu, pad_value, padding_config), final_kv_on_cpu)
                 jax.block_until_ready(padded_kv_on_cpu)
                 logger.info(
                     f"padded_kv_on_cpu[0]: {padded_kv_on_cpu[0].shape}, {padded_kv_on_cpu[0].sharding}"
