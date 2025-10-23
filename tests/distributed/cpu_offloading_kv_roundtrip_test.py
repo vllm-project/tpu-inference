@@ -211,6 +211,7 @@ class TestCpuOffloadingKVRoundTrip(jtu.JaxTestCase):
             assert len(
                 cached_value
             ) == num_layers, f"cache_value layer: {len(cached_value)} != {num_layers}"
+            assert cached_value[0].sharding.memory_kind == "pinned_host"
             retrieved_chunks.append(cached_value[0])  # Get first layer
 
         # Assemble on CPU and compare with original
