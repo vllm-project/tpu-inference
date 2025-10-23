@@ -20,8 +20,11 @@ P = PartitionSpec
 logger = init_logger(__name__)
 
 
-def shard_model_to_tpu(model: torch.nn.Module,
-                       mesh: Mesh) -> dict[str, torchax.torch.Tensor]:
+def shard_model_to_tpu(
+        model: torch.nn.Module,
+        mesh: Mesh,
+        initial_load_weight: bool,
+        initial_params_buffers=None) -> dict[str, torchax.torch.Tensor]:
     """
     Shard the model weights and move them to TPU.
 
@@ -36,19 +39,35 @@ def shard_model_to_tpu(model: torch.nn.Module,
         Dictionary of parameters and buffers that will be used as arguments of
         torch.func.functional_call
     """
+    # During load_model, the model and lora weight are already on TPU:
+    # jax_view(model.vllm_model.model.layers[0].self_attn.qkv_proj.base_layer.weight).platform() returns tpu.
+    # jax_view(model.vllm_model.model.layers[0].self_attn.qkv_proj.lora_a_stacked[0]).platform() also return tpu.
+    _shard_module_to_tpu(model, mesh, MODULE_TYPE_TO_SHARDING_FUNC)
 
-    with jax.default_device(jax.devices("cpu")[0]):
-        _shard_module_to_tpu(model, mesh)
+    params, buffers = _extract_all_params_buffers(model)
 
-        params, buffers = _extract_all_params_buffers(model)
+    # For other weight tensors, repliate them on all the TPU chips.
+    params, buffers = pytree.tree_map_only(
+        _tensor_is_in_cpu,
+        lambda tensor: _shard_tensor_to_tpu_replicated(tensor, mesh),
+        (params, buffers))
+    params_buffers = {**params, **buffers}
 
-        # For other weight tensors, repliate them on all the TPU chips.
-        params, buffers = pytree.tree_map_only(
-            _tensor_is_in_cpu,
-            lambda tensor: _shard_tensor_to_tpu_replicated(tensor, mesh),
-            (params, buffers))
+    return params_buffers
 
-        return {**params, **buffers}
+
+def shard_lora_to_tpu(
+        model: torch.nn.Module, mesh: Mesh,
+        initial_params_buffers) -> dict[str, torchax.torch.Tensor]:
+    updated_paths = _shard_module_to_tpu(model, mesh,
+                                         LORA_MODULE_TYPE_TO_SHARDING_FUNC)
+
+    params, buffers = _extract_all_params_buffers(model)
+    params_buffers = {**params, **buffers}
+    for path in updated_paths:
+        initial_params_buffers[path] = params_buffers[path]
+
+    return initial_params_buffers
 
 
 def _extract_all_params_buffers(model: torch.nn.Module):
@@ -56,11 +75,15 @@ def _extract_all_params_buffers(model: torch.nn.Module):
 
 
 def _tensor_is_in_cpu(tensor: torch.tensor) -> bool:
+    # xw32: There are many torch.nn.parameter.Parameter. e.g. https://paste.googleplex.com/4571608492670976
     # Check if a tensor haven't been converted to torchax tensor.
     if not isinstance(tensor, torchax.tensor.Tensor):
         return True
     # Check if torchax tensor is still in CPU.
-    return tensor.jax_device == jax.devices('cpu')[0]
+    if tensor.jax_device == jax.devices('cpu')[0]:
+        return True
+    else:
+        return False
 
 
 def _convert_to_torchax_and_shard(tensor: torch.Tensor,
@@ -116,11 +139,19 @@ def _shard_base_linear_lora_replicated(layer: BaseLinearLayerWithLoRA,
 # TODO: Add custom sharding logic for following lora layers
 def _shard_merged_column_parallel_linear_lora(
         layer: MergedColumnParallelLinearWithLoRA, mesh: Mesh) -> None:
+    assert layer.n_slices > 0, "layer.n_slices should be greater than 0"
+    # Only shard and move to TPU if we haven't done before.
+    if isinstance(
+            jax_view(layer.lora_a_stacked[0]).sharding,
+            jax.sharding.NamedSharding) and jax_view(
+                layer.lora_a_stacked[0]).platform() == 'tpu':
+        logger.debug(
+            "Nothing to do in _shard_merged_column_parallel_linear_lora.")
+        return
     # lora_a_stacked[i] has shape [max_loras, 1, max_lora_rank, in_features]
     sharded_lora_a_tpu = torch.nn.ParameterList()
     sharded_lora_b_tpu = torch.nn.ParameterList()
 
-    assert layer.n_slices > 0, "layer.n_slices should be greater than 0"
     # lora_b_stacked[i] has shape [max_loras, 1, out_features, max_lora_rank]
     lora_b_partition_spec = P(None, None, 'model', None)
     lora_b_sharding = NamedSharding(mesh, lora_b_partition_spec)
@@ -158,11 +189,24 @@ MODULE_TYPE_TO_SHARDING_FUNC = [
     (RowParallelLinearWithLoRA, _shard_row_parallel_linear_lora),
 ]
 
+LORA_MODULE_TYPE_TO_SHARDING_FUNC = [
+    # Shard LoRA layers
+    (MergedColumnParallelLinearWithLoRA,
+     _shard_merged_column_parallel_linear_lora),
+    (MergedQKVParallelLinearWithLoRA, _shard_merged_qkv_parallel_linear_lora),
+    (RowParallelLinearWithLoRA, _shard_row_parallel_linear_lora),
+]
 
-def _shard_module_to_tpu(model: torch.nn.Module, mesh: Mesh) -> None:
+
+def _shard_module_to_tpu(model: torch.nn.Module, mesh: Mesh,
+                         sharding_funcs) -> None:
+    updated_path = set()
     for path, module in model.named_modules():
-        for module_type, sharding_func in MODULE_TYPE_TO_SHARDING_FUNC:
+        for module_type, sharding_func in sharding_funcs:
             if type(module) is module_type:
                 logger.debug("shard %s with %s", path, sharding_func)
                 sharding_func(module, mesh)
+                updated_path.add(path)
                 break
+
+    return updated_path

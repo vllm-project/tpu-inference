@@ -121,7 +121,9 @@ class VllmModelWrapper:
         self.vllm_config.compilation_config.static_forward_context = static_forward_context
 
         self.model = _VllmRunner(vllm_model)
-        params_and_buffers = shard_model_to_tpu(self.model, self.mesh)
+        params_and_buffers = shard_model_to_tpu(self.model,
+                                                self.mesh,
+                                                initial_load_weight=True)
 
         # Returning to the jax land, so we need to wrap it into a JaxValue.
         return jax_view(params_and_buffers), lora_manager
