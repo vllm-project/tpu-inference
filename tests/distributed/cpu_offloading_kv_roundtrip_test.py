@@ -139,7 +139,7 @@ class TestCpuOffloadingKVRoundTrip(jtu.JaxTestCase):
             return None
 
         # 1. Setup
-        os.environ['TPU_KV_OFFLOADING_SWAP_OP_TYPE'] = swap_op_type
+        os.environ['TPU_OFFLOADING_SWAP_OP_TYPE'] = swap_op_type
         mesh = self.create_mesh((1, model_axis_size), ("data", "model"))
         if mesh is None:
             return None
