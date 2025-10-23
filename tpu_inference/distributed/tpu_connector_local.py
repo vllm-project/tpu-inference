@@ -108,8 +108,8 @@ from tpu_inference.logger import init_logger
 from tpu_inference.runner.kv_cache_manager import KVCacheManager
 from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
 
-from .cache_util import (CPU_OFFLOADING_SWAP_OP_TYPE, TokenProcessor,
-                         get_jitted_swap_fn)
+from .cache_util import (CPU_OFFLOADING_SWAP_OP_TYPE, JittedKVCacheSwapFn,
+                         TokenProcessor, get_jitted_kv_cache_swap_fn)
 from .local_cpu_backend import LocalCPUBackend
 
 EngineId = str
@@ -761,8 +761,8 @@ class TPUConnectorWorker:
         logger.info(
             f"(cpu offloading) swap operation type is {self.swap_op_type}")
 
-        self.swap_in_fn = None
-        self.swap_out_fn = None
+        self.swap_in_fn: JittedKVCacheSwapFn = None
+        self.swap_out_fn: JittedKVCacheSwapFn = None
 
         self.host = self.config.kv_ip
         self.kv_transfer_port = self.config.kv_port
@@ -818,7 +818,7 @@ class TPUConnectorWorker:
                 spec=jax.sharding.PartitionSpec(None, "model"),
                 memory_kind="pinned_host")
 
-            self.swap_in_fn, self.swap_out_fn = get_jitted_swap_fn(
+            self.swap_in_fn, self.swap_out_fn = get_jitted_kv_cache_swap_fn(
                 self.swap_op_type,
                 host_sharding=self.flatten_host_sharding,
                 device_sharding=self.flatten_device_sharding)
@@ -890,9 +890,7 @@ class TPUConnectorWorker:
                 f"extracted_blocks_tpu: {extracted_blocks_tpu[0].shape}, {extracted_blocks_tpu[0].sharding}"
             )
 
-            kv_caches_on_cpu = self.swap_out_fn(extracted_blocks_tpu,
-                                                self.flatten_device_sharding,
-                                                self.flatten_host_sharding)
+            kv_caches_on_cpu = self.swap_out_fn(extracted_blocks_tpu)
             # Block until the transfer is complete
             if kv_caches_on_cpu:
                 jax.block_until_ready(kv_caches_on_cpu)
@@ -1174,9 +1172,7 @@ class TPUConnectorWorker:
             )
 
             # 5. Transfer to TPU, applying the correct sharding.
-            loaded_kv_sharded_on_tpu = self.swap_in_fn(
-                padded_kv_on_cpu, self.flatten_host_sharding,
-                self.flatten_device_sharding)  #, "h2d")
+            loaded_kv_sharded_on_tpu = self.swap_in_fn(padded_kv_on_cpu)
             jax.block_until_ready(loaded_kv_sharded_on_tpu)
             logger.info(
                 f"loaded_kv_on_tpu[0]: {loaded_kv_sharded_on_tpu[0].shape}, {loaded_kv_sharded_on_tpu[0].sharding}"
