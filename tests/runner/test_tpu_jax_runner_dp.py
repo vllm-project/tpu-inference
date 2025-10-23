@@ -319,9 +319,10 @@ class TestTPUJaxRunnerDPInputsLightweight:
                                                        mock_runner_utils,
                                                        mock_named_sharding):
         """Test _prepare_inputs_dp with content verification for balanced distribution."""
+
         # Setup mocking with specific behavior for tokens vs requests
         def mock_get_padded_token_len(paddings_list, val):
-            # For tokens: 8 if val <= 3 else 16 
+            # For tokens: 8 if val <= 3 else 16
             # For requests: 4 if val <= 1 else 8
             if val <= 1:
                 return 4  # For request padding
@@ -329,6 +330,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
                 return 8  # For token padding
             else:
                 return 16
+
         mock_runner_utils.get_padded_token_len.side_effect = mock_get_padded_token_len
         mock_sampling_instance = MagicMock()
         mock_sampling_metadata.from_input_batch.return_value = mock_sampling_instance
@@ -393,7 +395,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
         # DP rank 0: cumsum([2]) = [2] at positions [1:2] → [0, 2, 1, 1, 1]
         expected_query_start[1] = 2  # req1 has 2 tokens
         expected_query_start[2:max_num_reqs_per_dp + 1] = 1
-        # DP rank 1: cumsum([3]) = [3] at positions [6:7] → [0, 3, 1, 1, 1] 
+        # DP rank 1: cumsum([3]) = [3] at positions [6:7] → [0, 3, 1, 1, 1]
         expected_query_start[max_num_reqs_per_dp + 2] = 3  # req2 has 3 tokens
         expected_query_start[max_num_reqs_per_dp + 3:] = 1
         assert np.array_equal(query_start_loc, expected_query_start)
@@ -402,8 +404,8 @@ class TestTPUJaxRunnerDPInputsLightweight:
         seq_lens = attention_metadata.seq_lens_cpu
         # Should be computed_tokens + scheduled_tokens for each request
         # DP rank 0: req1 at position 0, DP rank 1: req2 at position 4
-        expected_seq_lens = np.array(
-            [7, 0, 0, 0, 9, 0, 0, 0])  # req1: 5+2=7, req2: 6+3=9
+        expected_seq_lens = np.array([7, 0, 0, 0, 9, 0, 0,
+                                      0])  # req1: 5+2=7, req2: 6+3=9
         assert np.array_equal(seq_lens, expected_seq_lens)
 
         # 5. Verify request_distribution content
@@ -415,7 +417,8 @@ class TestTPUJaxRunnerDPInputsLightweight:
         assert len(logits_indices) == 8  # padded_num_reqs
         expected_logits = np.full(8, -1, dtype=np.int32)
         expected_logits[0] = 1  # req1 last token position (2-1)
-        expected_logits[4] = 2  # req2 last token position (3-1) at DP rank 1 offset (4*1)
+        expected_logits[
+            4] = 2  # req2 last token position (3-1) at DP rank 1 offset (4*1)
         assert np.array_equal(logits_indices, expected_logits)
 
         # 7. Verify logits_indices_selector
@@ -431,6 +434,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
             self, mock_sampling_metadata, mock_device_array, mock_runner_utils,
             mock_named_sharding):
         """Test _prepare_inputs_dp with detailed content verification for empty rank case."""
+
         # Setup mocking
         def mock_get_padded_token_len(paddings_list, val):
             if val <= 2:
@@ -439,6 +443,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
                 return 8  # For token padding
             else:
                 return 16
+
         mock_runner_utils.get_padded_token_len.side_effect = mock_get_padded_token_len
         mock_sampling_instance = MagicMock()
         mock_sampling_metadata.from_input_batch.return_value = mock_sampling_instance
@@ -530,7 +535,8 @@ class TestTPUJaxRunnerDPInputsLightweight:
                                       expected_distribution)
 
         # 6. Verify logits_indices
-        assert len(logits_indices) == 8  # padded_num_reqs (8 in this case, not 16)
+        assert len(
+            logits_indices) == 8  # padded_num_reqs (8 in this case, not 16)
         # Rank 0: req1 ends at pos 2, req2 ends at pos 4
         # Rank 1: empty, so -1 padding
         expected_logits = np.full(8, -1, dtype=np.int32)

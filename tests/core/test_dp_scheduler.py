@@ -136,8 +136,7 @@ class TestDPScheduler(unittest.TestCase):
         mock_request.request_id = "test_req_1"
 
         # Test allocation for new request
-        rank = scheduler._get_or_find_dp_rank(mock_request,
-                                              num_tokens=10)
+        rank = scheduler._get_or_find_dp_rank(mock_request, num_tokens=10)
 
         # Should assign rank 0 (first in round robin)
         self.assertEqual(rank, 0)
@@ -155,8 +154,7 @@ class TestDPScheduler(unittest.TestCase):
         scheduler.assigned_dp_rank["test_req_1"] = 2
 
         # Test allocation with existing request
-        rank = scheduler._get_or_find_dp_rank(mock_request,
-                                              num_tokens=10)
+        rank = scheduler._get_or_find_dp_rank(mock_request, num_tokens=10)
 
         # Should return existing rank
         self.assertEqual(rank, 2)

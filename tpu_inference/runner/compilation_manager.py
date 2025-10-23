@@ -252,7 +252,7 @@ class CompilationManager:
             indices_paddings=index_paddings,
             hidden_dim=hsize,
             sharding=NamedSharding(self.runner.mesh,
-                                   PartitionSpec(ShardingAxisName.MLP_DATA)),
+                                   PartitionSpec(ShardingAxisName.ATTN_DATA)),
         )
 
         if self.runner.speculative_config:
@@ -283,7 +283,7 @@ class CompilationManager:
             hidden_states = self._create_dummy_tensor(
                 (num_reqs, hsize), jnp.bfloat16,
                 NamedSharding(self.runner.mesh,
-                              PartitionSpec(ShardingAxisName.MLP_DATA)))
+                              PartitionSpec(ShardingAxisName.ATTN_DATA)))
             with self.runner.maybe_select_dummy_loras(
                     self.runner.lora_config,
                     np.array([num_reqs], dtype=np.int32)):
@@ -303,7 +303,7 @@ class CompilationManager:
         for num_reqs in self.runner.num_reqs_paddings:
             sharding = NamedSharding(
                 self.runner.mesh,
-                PartitionSpec(ShardingAxisName.MLP_DATA, "model"))
+                PartitionSpec(ShardingAxisName.ATTN_DATA, "model"))
             logits = self._create_dummy_tensor((num_reqs, hsize), jnp.bfloat16,
                                                sharding)
             for do_sampling in (True, False):
@@ -485,9 +485,7 @@ class CompilationManager:
 
         for num_logits in self.runner.num_logits_paddings:
             hidden_states = self._create_dummy_tensor(
-                (num_logits, hidden_size), jnp.bfloat16,
-                NamedSharding(self.runner.mesh,
-                              PartitionSpec(ShardingAxisName.MLP_DATA)))
+                (num_logits, hidden_size), jnp.bfloat16)
             self._run_compilation(
                 "eagle3_get_draft_token_ids",
                 self.runner.drafter._get_draft_token_ids,
