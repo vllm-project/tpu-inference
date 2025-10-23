@@ -68,8 +68,7 @@ class Llama4ForCausalLM(nnx.Module):
         self.num_local_experts: int = getattr(text_config, "num_local_experts",
                                               16)
         self.hidden_act: str = getattr(text_config, "hidden_act", "silu")
-        self.no_rope_layer_interval = getattr(text_config, "no_rope_layers",
-                                              [])
+        self.no_rope_layer_interval = 4
 
         # interleave_moe_layer_step has a layer step of 2 to interleave MoE and dense layers for Llama-4-Maverick-17B-128E-Instruct.
         # The default value is set to 1 for compatibility with Llama-4-Scout.
@@ -86,6 +85,12 @@ class Llama4ForCausalLM(nnx.Module):
         self.num_shared_experts = getattr(text_config, "num_experts_per_tok",
                                           1)
         self.rms_norm_eps = getattr(text_config, "rms_norm_eps", 1e-5)
+
+        self.rope_scaling = getattr(text_config, "rope_scaling", None)
+        if self.rope_scaling:
+            self.rope_scaling["scale_factor"] = self.rope_scaling.pop("factor")
+
+        self.use_qk_norm = getattr(text_config, "use_qk_norm", True)
 
         self.embedder = Embedder(vocab_size=self.vocab_size,
                                  hidden_size=self.hidden_size,
@@ -104,7 +109,7 @@ class Llama4ForCausalLM(nnx.Module):
                             self.interleave_moe_layer_step == 0
 
             # Llama-4-Scout config: It has "no_rope_layers": []
-            use_attention_rope = (i + 1) not in self.no_rope_layer_interval
+            use_attention_rope = (i + 1) % self.no_rope_layer_interval != 0
 
             router = Router(dtype=dtype,
                             hidden_size=self.hidden_size,
@@ -150,18 +155,13 @@ class Llama4ForCausalLM(nnx.Module):
                 head_dim=self.head_dim,
                 rope_theta=500000.0,
                 # https://huggingface.co/meta-llama/Llama-4-Scout-17B-16E-Instruct/blob/main/config.json
-                rope_scaling={
-                    "scale_factor": 16.0,
-                    "low_freq_factor": 1.0,
-                    "high_freq_factor": 1.0,
-                    "original_max_position_embeddings": 8192
-                },
+                rope_scaling=self.rope_scaling,
                 rngs=self.rng,
                 rope_input_ordering="interleaved",
                 temperature_tuning=True,
                 temperature_tuning_scale=0.1,
                 temperature_tuning_floor_scale=8192,
-                use_qk_norm=True,
+                use_qk_norm=self.use_qk_norm,
                 attention_chunk_size=None if use_attention_rope else 8192,
                 mesh=self.mesh,
                 random_init=force_random_weights,
