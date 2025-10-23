@@ -1132,9 +1132,9 @@ class TPUConnectorWorker:
             # now truncate to N-1 before padding and loading, to match the
             # allocation made by the scheduler.
             if meta.load_spec.is_full_prefix_hit:
-                final_kv_on_cpu = [
-                    layer_data[:-1] for layer_data in final_kv_on_cpu
-                ]
+                final_kv_on_cpu = jax.tree.map(
+                    lambda x: jax.lax.slice_in_dim(x, 0, x.shape[0] - 1),
+                    final_kv_on_cpu)
                 logger.info(
                     f"Request {meta.req_id}: is_full_prefix_hit = {meta.load_spec.is_full_prefix_hit}"
                     "Truncated fetched cache data by 1 token. New shape: "
