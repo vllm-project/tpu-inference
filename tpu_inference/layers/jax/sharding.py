@@ -21,7 +21,7 @@ class ShardingAxisName:
     MLP_TENSOR = ('model', 'expert', 'attn_dp')
     MOE_TENSOR = ('model', 'attn_dp')
     EXPERT = ('expert', 'model', 'attn_dp')
-    VOCAB = ('expert', 'attn_dp', 'model')
+    VOCAB = ('expert', 'model')
 
 
 @dataclass

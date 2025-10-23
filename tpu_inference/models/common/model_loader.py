@@ -228,7 +228,7 @@ def get_flax_model(
         return model(*args)
 
     logits_sharding = NamedSharding(
-        mesh, PartitionSpec(ShardingAxisName.MLP_DATA, "model"))
+        mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, "model"))
 
     @functools.partial(
         jax.jit,

@@ -6,7 +6,6 @@ from flax import nnx
 from jax.sharding import Mesh
 from transformers import LlamaConfig, modeling_flax_utils
 from vllm.config import VllmConfig
-from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 from tpu_inference import utils
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
@@ -329,10 +328,6 @@ class LlamaForCausalLM(nnx.Module):
         return kv_caches, x, aux_hidden_states
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        # DO_NOT_SUBMIT: debug only. b/454075281 
-        hidden_states = jax.lax.with_sharding_constraint(
-            hidden_states, NamedSharding(self.mesh, PartitionSpec(ShardingAxisName.MLP_DATA, None)))
-
         if self.vllm_config.model_config.hf_config.tie_word_embeddings:
             logits = jnp.dot(hidden_states, self.model.lm_head.value.T)
         else:
