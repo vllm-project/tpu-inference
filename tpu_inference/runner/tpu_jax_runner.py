@@ -468,7 +468,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     key=self.rng_params_for_sampling,
                 )
 
-            if tpu_sampling_metadata.logprobs or True:
+            if tpu_sampling_metadata.logprobs:
                 logprobs = self._compute_and_gather_logprobs(
                     logits, next_tokens, self.model_config.max_logprobs)
             else:
@@ -581,8 +581,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             mesh=self.mesh,
             in_specs=(PartitionSpec(ShardingAxisName.ATTN_DATA),
                       PartitionSpec(ShardingAxisName.ATTN_DATA)),
-            out_specs=PartitionSpec(ShardingAxisName.ATTN_DATA))(
-                array, indices_to_select)
+            out_specs=PartitionSpec(ShardingAxisName.ATTN_DATA)
+        )(array, indices_to_select)
 
         return ret
 
@@ -853,20 +853,29 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         logits_indices_cpu = logits_indices
         seq_lens_cpu = seq_lens
 
-        # Place tensors on device
-        (input_ids, ) = device_array(
+        (
+            input_ids,
+            positions,
+            block_tables,
+            query_start_loc,
+            seq_lens,
+            logits_indices,
+            request_distribution,
+            logits_indices
+        ) = device_array(
             self.mesh,
-            (input_ids, ),
-            sharding=self.data_parallel_mlp_sharding,
+            (
+                input_ids,
+                positions,
+                block_tables,
+                query_start_loc,
+                seq_lens,
+                logits_indices,
+                request_distribution,
+                logits_indices
+            ),
+            sharding=self.data_parallel_attn_sharding,
         )
-
-        (positions, block_tables, query_start_loc, seq_lens, logits_indices,
-         request_distribution, logits_indices) = device_array(
-             self.mesh,
-             (positions, block_tables, query_start_loc, seq_lens,
-              logits_indices, request_distribution, logits_indices),
-             sharding=self.data_parallel_attn_sharding,
-         )
 
         if self.lora_config is not None:
             self.lora_utils.set_active_loras(
