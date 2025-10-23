@@ -418,7 +418,6 @@ class CompilationManager:
                     )
 
     def _precompile_eagle3_helpers(self) -> None:
-        # TODO(ranlihao): Complete the precompilation of all the jitted helpers for eagle3.
         logger.info(
             "Compiling eagle3 jitted helpers with different input shapes.")
         hidden_size = self.runner.model_config.get_hidden_size()

@@ -131,7 +131,7 @@ class Eagle3Proposer:
         aux_hidden_states: tuple[jax.Array, ...],
         next_token_ids: jax.Array,
         num_rejected_tokens: Optional[jax.Array] = None,
-    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, AttentionMetadata]:
+    ) -> tuple[jax.Array, jax.Array, jax.Array, AttentionMetadata]:
         """Prepare drafter inputs based on target forward outputs.
 
         Mirrors the GPU reference logic but adapted to TPU/JAX types:
