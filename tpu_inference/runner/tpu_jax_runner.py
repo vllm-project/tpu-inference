@@ -423,6 +423,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)
+            # DO_NOT_SUBMIT: debug only. b/454075281 
+            hidden_states = jax.lax.with_sharding_constraint(
+                hidden_states, self.data_parallel_mlp_sharding)
+            
+            print("lora_metadata", lora_metadata)
             logits = self.compute_logits_fn(
                 self.state,
                 hidden_states,
@@ -579,9 +584,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         ret = jax.shard_map(
             select_local_fn,
             mesh=self.mesh,
-            in_specs=(PartitionSpec(ShardingAxisName.MLP_DATA),
-                      PartitionSpec(ShardingAxisName.MLP_DATA)),
-            out_specs=PartitionSpec(ShardingAxisName.MLP_DATA),
+            in_specs=(PartitionSpec(ShardingAxisName.ATTN_DATA),
+                      PartitionSpec(ShardingAxisName.ATTN_DATA)),
+            out_specs=PartitionSpec(ShardingAxisName.ATTN_DATA)
         )(array, indices_to_select)
 
         return ret
@@ -867,6 +872,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             seq_lens,
             logits_indices,
             request_distribution,
+            logits_indices
         ) = device_array(
             self.mesh,
             (
@@ -876,6 +882,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 seq_lens,
                 logits_indices,
                 request_distribution,
+                logits_indices
             ),
             sharding=self.data_parallel_attn_sharding,
         )
