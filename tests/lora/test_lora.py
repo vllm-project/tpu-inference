@@ -1,5 +1,6 @@
 # https://github.com/vllm-project/vllm/blob/ed10f3cea199a7a1f3532fbe367f5c5479a6cae9/tests/tpu/lora/test_lora.py
 import os
+import subprocess
 
 import pytest
 import vllm
@@ -16,17 +17,6 @@ from vllm.lora.request import LoRARequest
 # 100 training iterations with a training batch size of 100.
 
 
-@pytest.fixture(scope="function", autouse=True)
-def use_v1_only(monkeypatch: pytest.MonkeyPatch):
-    """
-    Since Multi-LoRA is only supported on the v1 TPU backend, set VLLM_USE_V1=1
-    for all tests in this file
-    """
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
-        yield
-
-
 def setup_vllm(num_loras: int, tp: int = 1) -> vllm.LLM:
     return vllm.LLM(model="Qwen/Qwen2.5-3B-Instruct",
                     max_model_len=256,
@@ -36,6 +26,20 @@ def setup_vllm(num_loras: int, tp: int = 1) -> vllm.LLM:
                     enable_lora=True,
                     max_loras=num_loras,
                     max_lora_rank=8)
+
+
+@pytest.fixture(autouse=True)
+def run_after_each_test():
+    # --- Setup code (runs before each test) ---
+    # print("\nSetting up...")
+    yield  # This is where the test runs
+    # --- Teardown code (runs after each test) ---
+    command = "lsof -t /dev/vfio/* | xargs kill"
+    results = subprocess.run(command,
+                             shell=True,
+                             capture_output=True,
+                             text=True)
+    print(f"Killing TPU resources: {results.stdout}, {results.stderr}")
 
 
 # For multi-chip test, we only use TP=2 because the base model Qwen/Qwen2.5-3B-Instruct has 2 kv heads and the current attention kernel requires it to be divisible by tp_size.
