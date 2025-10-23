@@ -423,11 +423,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)
-            # DO_NOT_SUBMIT: debug only. b/454075281 
-            hidden_states = jax.lax.with_sharding_constraint(
-                hidden_states, self.data_parallel_mlp_sharding)
-            
-            print("lora_metadata", lora_metadata)
             logits = self.compute_logits_fn(
                 self.state,
                 hidden_states,
@@ -473,7 +468,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     key=self.rng_params_for_sampling,
                 )
 
-            if tpu_sampling_metadata.logprobs:
+            if tpu_sampling_metadata.logprobs or True:
                 logprobs = self._compute_and_gather_logprobs(
                     logits, next_tokens, self.model_config.max_logprobs)
             else:
@@ -586,8 +581,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             mesh=self.mesh,
             in_specs=(PartitionSpec(ShardingAxisName.ATTN_DATA),
                       PartitionSpec(ShardingAxisName.ATTN_DATA)),
-            out_specs=PartitionSpec(ShardingAxisName.ATTN_DATA)
-        )(array, indices_to_select)
+            out_specs=PartitionSpec(ShardingAxisName.ATTN_DATA))(
+                array, indices_to_select)
 
         return ret
 
@@ -846,7 +841,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.input_batch,
             padded_num_reqs,
             sharding=NamedSharding(self.mesh,
-                                   PartitionSpec(ShardingAxisName.MLP_DATA)),
+                                   PartitionSpec(ShardingAxisName.ATTN_DATA)),
         )
         if self.uses_mrope:
             positions = mrope_positions
@@ -865,27 +860,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             sharding=self.data_parallel_mlp_sharding,
         )
 
-        (
-            positions,
-            block_tables,
-            query_start_loc,
-            seq_lens,
-            logits_indices,
-            request_distribution,
-            logits_indices
-        ) = device_array(
-            self.mesh,
-            (
-                positions,
-                block_tables,
-                query_start_loc,
-                seq_lens,
-                logits_indices,
-                request_distribution,
-                logits_indices
-            ),
-            sharding=self.data_parallel_attn_sharding,
-        )
+        (positions, block_tables, query_start_loc, seq_lens, logits_indices,
+         request_distribution, logits_indices) = device_array(
+             self.mesh,
+             (positions, block_tables, query_start_loc, seq_lens,
+              logits_indices, request_distribution, logits_indices),
+             sharding=self.data_parallel_attn_sharding,
+         )
 
         if self.lora_config is not None:
             self.lora_utils.set_active_loras(
