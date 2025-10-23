@@ -71,9 +71,9 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
 
     def _init_executor(self) -> None:
         self.forward_dag: Optional[ray.dag.CompiledDAG] = None
-        
+
         os.environ["VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE"] = "shm"
-        
+
         # Currently, this requires USE_RAY_SPMD_WORKER=True.
         self.use_ray_compiled_dag = True
         # If it is true, then we do not distinguish between the
@@ -261,7 +261,7 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
             item.created_rank: item.adjusted_rank
             for item in sorted_worker_metadata
         }
-        self.collective_rpc("adjust_rank", args=(rerank_mapping,))
+        self.collective_rpc("adjust_rank", args=(rerank_mapping, ))
 
         # Get the set of TPU IDs used on each node.
         worker_node_and_tpu_ids = []
@@ -318,7 +318,7 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
             all_args_to_update_environment_variables)
 
         self.collective_rpc("update_environment_variables",
-                          args=(self._get_env_vars_to_be_updated(),))
+                            args=(self._get_env_vars_to_be_updated(), ))
 
         distributed_init_method = get_distributed_init_method(
             driver_ip, get_open_port())
@@ -336,7 +336,7 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
                 or (rank % self.parallel_config.tensor_parallel_size == 0),
             )
             all_kwargs.append(kwargs)
-        self.collective_rpc("init_worker", args=(all_kwargs,))
+        self.collective_rpc("init_worker", args=(all_kwargs, ))
         self.collective_rpc("init_device")
         self.collective_rpc("load_model")
 
