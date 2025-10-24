@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+from vllm.config import ModelConfig
 from vllm.lora.request import LoRARequest
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import DraftTokenIds
@@ -27,9 +28,6 @@ def mock_vllm_config():
     This version builds the mock explicitly to avoid spec-related AttributeErrors.
     """
     # Create mocks for the nested config objects first
-    mock_model_conf = MagicMock()
-    mock_model_conf.trust_remote_code = False
-
     mock_cache_conf = MagicMock()
     mock_cache_conf.gpu_memory_utilization = 0.9
     mock_cache_conf.num_gpu_blocks = 0
@@ -43,7 +41,7 @@ def mock_vllm_config():
 
     # Create the main config mock and attach the others without a top-level spec
     config = MagicMock()
-    config.model_config = mock_model_conf
+    config.model_config = ModelConfig(model="Qwen/Qwen3-0.6B")
     config.cache_config = mock_cache_conf
     config.parallel_config = mock_parallel_conf
     config.additional_config = mock_additional_config
