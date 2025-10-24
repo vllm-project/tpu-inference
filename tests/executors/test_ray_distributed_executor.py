@@ -96,8 +96,8 @@ class TestTpuRayDistributedExecutor(unittest.TestCase):
         executor.uses_ray = True
         executor.vllm_config = self.vllm_config
         executor.parallel_config = self.vllm_config.parallel_config
-        executor._run_workers = MagicMock()
-        executor._run_workers.return_value = None
+        executor.collective_rpc = MagicMock()
+        executor.collective_rpc.return_value = None
 
         # --- Initialization ---
         executor._init_executor()
@@ -165,8 +165,8 @@ class TestTpuRayDistributedExecutor(unittest.TestCase):
         executor.parallel_config = self.vllm_config.parallel_config
         executor.vllm_config = self.vllm_config
         executor.parallel_config.ray_workers_use_nsight = False
-        executor._run_workers = MagicMock()
-        executor._run_workers.return_value = None
+        executor.collective_rpc = MagicMock()
+        executor.collective_rpc.return_value = None
 
         # --- Call method under test ---
         executor._init_workers_ray(mock_pg)
