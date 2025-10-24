@@ -12,8 +12,6 @@ from transformers import modeling_flax_utils
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig)
 from vllm.config import VllmConfig
-from vllm.model_executor.models.qwen2_5_vl import \
-    Qwen2_5_VLForConditionalGeneration as vllm_model_cls
 
 from tpu_inference import utils as utils
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
@@ -689,9 +687,8 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         )
         self.language_model = Qwen2ForCausalLM(vllm_config, rng_key, mesh)
 
-    @classmethod
     def get_mrope_input_positions(
-        cls,
+        self,
         input_tokens: list[int],
         hf_config,
         image_grid_thw,
@@ -701,18 +698,114 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         seq_len: int | None = None,
         audio_feature_lengths=None,
         use_audio_in_video: bool = False,
-    ):
-        return vllm_model_cls.get_mrope_input_positions(
-            input_tokens=input_tokens,
-            hf_config=hf_config,
-            image_grid_thw=image_grid_thw,
-            video_grid_thw=video_grid_thw,
-            second_per_grid_ts=second_per_grid_ts,
-            context_len=context_len,
-            seq_len=seq_len,
-            audio_feature_lengths=audio_feature_lengths,
-            use_audio_in_video=use_audio_in_video,
-        )
+    ) -> tuple[jax.Array, int]:
+        """Get mrope input positions and delta value."""
+
+        image_token_id = hf_config.image_token_id
+        video_token_id = hf_config.video_token_id
+        vision_start_token_id = hf_config.vision_start_token_id
+        spatial_merge_size = hf_config.vision_config.spatial_merge_size
+        tokens_per_second = getattr(hf_config.vision_config,
+                                    "tokens_per_second", 1.0)
+
+        input_tokens_tensor = np.array(input_tokens)
+        vision_start_indices = np.argwhere(
+            input_tokens_tensor == vision_start_token_id).squeeze(1)
+        vision_tokens = input_tokens_tensor[vision_start_indices + 1]
+        image_nums = np.sum(vision_tokens == image_token_id)
+        video_nums = np.sum(vision_tokens == video_token_id)
+        llm_pos_ids_list: list = []
+
+        st = 0
+        remain_images, remain_videos = image_nums, video_nums
+
+        image_index, video_index = 0, 0
+        for _ in range(image_nums + video_nums):
+            video_second_per_grid_t = 0.0
+            if remain_images > 0:
+                try:
+                    ed_image = input_tokens.index(image_token_id, st)
+                except ValueError:
+                    ed_image = len(input_tokens) + 1
+            else:
+                ed_image = len(input_tokens) + 1
+            if remain_videos > 0:
+                try:
+                    ed_video = input_tokens.index(video_token_id, st)
+                except ValueError:
+                    ed_video = len(input_tokens) + 1
+            else:
+                ed_video = len(input_tokens) + 1
+            if ed_image < ed_video:
+                t, h, w = (
+                    image_grid_thw[image_index][0],
+                    image_grid_thw[image_index][1],
+                    image_grid_thw[image_index][2],
+                )
+                image_index += 1
+                remain_images -= 1
+                ed = ed_image
+            else:
+                t, h, w = (
+                    video_grid_thw[video_index][0],
+                    video_grid_thw[video_index][1],
+                    video_grid_thw[video_index][2],
+                )
+                video_second_per_grid_t = 1.0
+                if second_per_grid_ts:
+                    video_second_per_grid_t = second_per_grid_ts[video_index]
+                video_index += 1
+                remain_videos -= 1
+                ed = ed_video
+
+            llm_grid_t, llm_grid_h, llm_grid_w = (
+                t,
+                h // spatial_merge_size,
+                w // spatial_merge_size,
+            )
+            text_len = ed - st
+
+            st_idx = llm_pos_ids_list[-1].max().item() + 1 if len(
+                llm_pos_ids_list) > 0 else 0
+            llm_pos_ids_list.append(
+                jnp.broadcast_to(
+                    jnp.arange(text_len, dtype=jnp.int32).reshape(1, -1),
+                    (3, text_len)) + st_idx)
+
+            t_index = ((jnp.broadcast_to(
+                jnp.arange(llm_grid_t, dtype=jnp.int32).reshape(-1, 1),
+                (llm_grid_t, llm_grid_h * llm_grid_w)) *
+                        video_second_per_grid_t * tokens_per_second).astype(
+                            jnp.int32).flatten())
+
+            h_index = (jnp.broadcast_to(
+                jnp.arange(llm_grid_h, dtype=jnp.int32).reshape(1, -1, 1),
+                (llm_grid_t, llm_grid_h, llm_grid_w)).flatten())
+            w_index = (jnp.broadcast_to(
+                jnp.arange(llm_grid_w, dtype=jnp.int32).reshape(1, 1, -1),
+                (llm_grid_t, llm_grid_h, llm_grid_w)).flatten())
+
+            llm_pos_ids_list.append(
+                jnp.stack([t_index, h_index, w_index]) + text_len + st_idx)
+            st = ed + llm_grid_t * llm_grid_h * llm_grid_w
+
+        if st < len(input_tokens):
+            st_idx = llm_pos_ids_list[-1].max().item() + 1 if len(
+                llm_pos_ids_list) > 0 else 0
+            text_len = len(input_tokens) - st
+
+            llm_pos_ids_list.append(
+                jnp.broadcast_to(
+                    jnp.arange(text_len, dtype=jnp.int32).reshape(1, -1),
+                    (3, text_len)) + st_idx)
+
+        llm_positions = jnp.concatenate(llm_pos_ids_list,
+                                        axis=1).reshape(3, -1)
+        mrope_position_delta = (llm_positions.max() + 1 -
+                                len(input_tokens)).item()
+        llm_positions = llm_positions[:, context_len:seq_len]
+
+        return llm_positions, mrope_position_delta
 
     def _validate_and_reshape_mm_tensor(self, mm_input: object,
                                         name: str) -> jax.Array:

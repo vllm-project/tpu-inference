@@ -16,6 +16,7 @@ from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
+from vllm.v1 import utils as vllm_utils
 from vllm.v1.core.kv_cache_utils import get_num_blocks, get_uniform_page_size
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
@@ -121,13 +122,28 @@ class TPUWorker(AbstractTpuWorker):
 
     def init_device(self):
         if not self.devices:
+            device_indexes = []
+            tp = self.parallel_config.tensor_parallel_size
             try:
                 device_indexes = self.vllm_config.additional_config[
                     "sharding"]["sharding_strategy"]["device_indexes"]
-                self.devices = [jax.devices()[i] for i in device_indexes]
             except KeyError:
-                tp = self.parallel_config.tensor_parallel_size
                 self.devices = jax.devices()[:tp]
+
+            # Enforcing the devices sequence to be consistent with the specified device indexes
+            if not self.devices:
+                all_devices = jax.devices()
+                device_dict = {device.id: device for device in all_devices}
+                self.devices = []
+                for device_index in device_indexes:
+                    device = device_dict[device_index]
+                    if device is None:
+                        raise KeyError(
+                            f"Device index {device_index} not found in "
+                            f"jax.devices() with IDs {list(device_dict.keys())}!"
+                        )
+                    self.devices.append(device)
+                self.devices = self.devices[:tp]
 
         # Initialize the vLLM distribution layer as a single chip environment,
         # we'll swap the model's parallel modules with TPU SPMD equivalents.
@@ -151,6 +167,7 @@ class TPUWorker(AbstractTpuWorker):
                     f"node_id={get_node_id()} | "
                     f"is_driver_worker={self.is_driver_worker} | "
                     f"hbm={utils.hbm_usage_gb(self.devices)}GiB")
+        vllm_utils.report_usage_stats(self.vllm_config)
 
     def determine_available_memory(self) -> int:
         gpu_memory_utilization = self.cache_config.gpu_memory_utilization

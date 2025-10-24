@@ -156,6 +156,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         except KeyError:
             sharding_strategy = {"tensor_parallelism": len(self.devices)}
 
+        try:
+            enforce_device_order = self.vllm_config.additional_config[
+                "sharding"]["sharding_strategy"]["device_indexes"] is not None
+
+        except KeyError:
+            enforce_device_order = False
+
+        logger.info(f"Device sequence enforced: {enforce_device_order}")
+
         if os.getenv("NEW_MODEL_DESIGN", False):
             self.mesh = build_mesh(self.devices, sharding_strategy)
         else:
@@ -171,9 +180,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             axis_names = ("data", "model")
             mesh_shape = (dp, tp)
 
-            self.mesh = make_optimized_mesh(mesh_shape,
-                                            axis_names,
-                                            devices=self.devices)
+            if enforce_device_order:
+                self.mesh = jax.make_mesh(mesh_shape,
+                                          axis_names,
+                                          devices=self.devices)
+            else:
+                self.mesh = make_optimized_mesh(mesh_shape,
+                                                axis_names,
+                                                devices=self.devices)
         logger.info(f"Init mesh | mesh={self.mesh}")
 
     def _init_phased_profiling(self) -> None:

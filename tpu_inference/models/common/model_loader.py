@@ -9,7 +9,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.ops.mappings import j2t_dtype
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
-from vllm.utils import supports_kw
+from vllm.utils.func_utils import supports_kw
 
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.quantization.quantization_utils import (
@@ -271,8 +271,8 @@ def get_flax_model(
                                                  graphdef)
 
     get_mrope_input_positions_fn = None if not hasattr(
-        model_class,
-        "get_mrope_input_positions") else model_class.get_mrope_input_positions
+        jit_model,
+        "get_mrope_input_positions") else jit_model.get_mrope_input_positions
 
     return model_fn, compute_logits_fn, combine_hidden_states_fn, get_multimodal_embeddings_fn, get_input_embeddings_fn, get_mrope_input_positions_fn, state, lora_manager, model
 
