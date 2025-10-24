@@ -142,8 +142,10 @@ class SpeculativeDecodingManager:
             last_token_indices=last_token_indices,
             target_hidden_states=target_hidden_states,
         )
-        result = draft_token_ids.tolist()
-        return result
+        draft_token_ids = np.array(draft_token_ids)
+        if draft_token_ids.ndim == 1:
+            draft_token_ids = np.expand_dims(draft_token_ids, axis=-1)
+        return draft_token_ids.tolist()
 
     def get_spec_decode_metadata(
         self,

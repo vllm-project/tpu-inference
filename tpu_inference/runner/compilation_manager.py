@@ -630,18 +630,18 @@ class CompilationManager:
                 NamedSharding(self.runner.mesh, PartitionSpec(None, None)))
 
             self._run_compilation(
-                "eagle3_select_and_stack_draft_token_ids_in_jit",
-                self.runner.drafter._select_and_stack_draft_token_ids_in_jit,
+                "eagle3_select_inputs_for_loop_in_jit",
+                self.runner.drafter._select_inputs_for_loop_in_jit,
+                positions,
+                hidden_states,
                 hidden_states,
                 last_token_indices,
                 num_tokens=num_tokens,
             )
 
             self._run_compilation(
-                "eagle3_select_positions_and_hidden_states_in_jit",
-                self.runner.drafter._select_inputs_for_loop_in_jit,
-                positions,
-                hidden_states,
+                "eagle3_select_draft_token_ids",
+                self.runner.drafter._select_draft_token_ids,
                 hidden_states,
                 last_token_indices,
                 num_tokens=num_tokens,

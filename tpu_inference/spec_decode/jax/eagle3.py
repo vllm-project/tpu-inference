@@ -284,6 +284,7 @@ class Eagle3Proposer:
 
         return target_hidden_states, input_ids, last_token_indices, block_tables
 
+    @functools.partial(jax.jit, static_argnums=(0, ))
     def _select_draft_token_ids(
         self,
         hidden_states: jax.Array,
@@ -291,16 +292,6 @@ class Eagle3Proposer:
     ) -> jax.Array:
         sample_hidden_states = hidden_states[last_token_indices]
         return self._get_draft_token_ids_in_jit(sample_hidden_states)
-
-    @functools.partial(jax.jit, static_argnums=(0, ))
-    def _select_and_stack_draft_token_ids_in_jit(
-        self,
-        hidden_states: jax.Array,
-        last_token_indices: jax.Array,
-    ) -> jax.Array:
-        draft_token_ids = self._select_draft_token_ids(hidden_states,
-                                                       last_token_indices)
-        return jnp.stack([draft_token_ids], axis=1)
 
     @functools.partial(jax.jit, static_argnums=(0, ))
     def _get_draft_token_ids_in_jit(self,
@@ -343,7 +334,7 @@ class Eagle3Proposer:
         )
 
         if self.num_speculative_tokens == 1:
-            return kv_caches, self._select_and_stack_draft_token_ids_in_jit(
+            return kv_caches, self._select_draft_token_ids(
                 hidden_states, last_token_indices)
 
         positions, hidden_states, draft_token_ids = self._select_inputs_for_loop_in_jit(
