@@ -61,10 +61,11 @@ class Eagle3Proposer:
         # Concat aux hidden states along feature dim.
         return jnp.concatenate(aux_hidden_states, axis=-1)
 
-    def _prepare_input_ids(self, query_start_loc: jax.Array,
-                           target_token_ids: jax.Array,
-                           next_token_ids: jax.Array,
-                           num_reqs: int) -> tuple[jnp.ndarray, jnp.ndarray]:
+    @functools.partial(jax.jit, static_argnums=(0, ))
+    def _prepare_input_ids(
+            self, query_start_loc: jax.Array, target_token_ids: jax.Array,
+            next_token_ids: jax.Array,
+            num_reqs: jax.Array) -> tuple[jnp.ndarray, jnp.ndarray]:
         """JIT-compiled helper for preparing the input IDs for the draft model."""
 
         last_token_indices = query_start_loc[1:] - 1
@@ -152,16 +153,16 @@ class Eagle3Proposer:
         draft_kv_cache_group_id = num_kv_cache_groups - 1
         block_tables = self.runner.input_batch.block_table[
             draft_kv_cache_group_id].get_device_tensor()
+        # Number of active requests in this step (un-padded count).
+        num_reqs = self.runner.input_batch.num_reqs
+
         if num_rejected_tokens is None:
             target_hidden_states, input_ids, last_token_indices, block_tables = self._prepare_draft_inputs_in_jit(
                 self._concate_hidden_states(aux_hidden_states),
                 attn_metadata.query_start_loc, input_ids, next_token_ids,
-                block_tables)
+                block_tables, jnp.asarray([num_reqs], dtype=jnp.int32))
             attn_metadata = replace(attn_metadata, block_tables=block_tables)
             return target_hidden_states, input_ids, last_token_indices, attn_metadata
-
-        # Number of active requests in this step (un-padded count).
-        num_reqs = self.runner.input_batch.num_reqs
 
         # Host copies from the metadata prepared by the runner.
         query_start_loc_cpu = attn_metadata.query_start_loc_cpu
@@ -217,16 +218,14 @@ class Eagle3Proposer:
         # Update seq_lens for active requests only: new_seq_lens = s - n.
         new_seq_lens_cpu = seq_lens_cpu - nrt_cpu
 
-        token_indices = jnp.asarray(token_indices_cpu, dtype=jnp.int32)
-        query_start_loc, seq_lens = device_array(self.mesh, (
-            new_query_start_loc_cpu,
-            new_seq_lens_cpu,
-        ))
+        query_start_loc, seq_lens, token_indices = device_array(
+            self.mesh,
+            (new_query_start_loc_cpu, new_seq_lens_cpu, token_indices_cpu))
 
-        return self._prepare_inputs_in_jit(token_indices, query_start_loc,
-                                           seq_lens, input_ids,
-                                           aux_hidden_states, attn_metadata,
-                                           next_token_ids, block_tables)
+        return self._prepare_inputs_in_jit(
+            token_indices, query_start_loc, seq_lens, input_ids,
+            aux_hidden_states, attn_metadata, next_token_ids, block_tables,
+            jnp.asarray([num_reqs], dtype=jnp.int32))
 
     @functools.partial(jax.jit, static_argnums=(0, ))
     def _prepare_inputs_in_jit(
@@ -239,6 +238,7 @@ class Eagle3Proposer:
         attn_metadata: AttentionMetadata,
         next_token_ids: jax.Array,
         block_tables: jax.Array,
+        num_reqs: jax.Array,
     ) -> tuple[jax.Array, jax.Array, jax.Array, AttentionMetadata]:
 
         # Select tokens and hidden states.
@@ -261,23 +261,26 @@ class Eagle3Proposer:
 
         target_hidden_states, input_ids, last_token_indices, block_tables = self._prepare_draft_inputs_in_jit(
             target_hidden_states, query_start_loc, target_token_ids,
-            next_token_ids, block_tables)
+            next_token_ids, block_tables, num_reqs)
 
         attn_metadata = replace(attn_metadata, block_tables=block_tables)
         return target_hidden_states, input_ids, last_token_indices, attn_metadata
 
     @functools.partial(jax.jit, static_argnums=(0, ))
     def _prepare_draft_inputs_in_jit(
-        self, target_hidden_states: jax.Array, query_start_loc: jax.Array,
-        target_token_ids: jax.Array, next_token_ids: jax.Array,
-        block_tables: jax.Array
+        self,
+        target_hidden_states: jax.Array,
+        query_start_loc: jax.Array,
+        target_token_ids: jax.Array,
+        next_token_ids: jax.Array,
+        block_tables: jax.Array,
+        num_reqs: jax.Array,
     ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
         target_hidden_states = self.combine_hidden_states_fn(
             self.state, target_hidden_states)
 
         input_ids, last_token_indices = self._prepare_input_ids(
-            query_start_loc, target_token_ids, next_token_ids,
-            self.runner.input_batch.num_reqs)
+            query_start_loc, target_token_ids, next_token_ids, num_reqs)
         # NOTE(pooyam): For now, we don't support multimodal.
 
         block_tables = block_tables.reshape(-1)

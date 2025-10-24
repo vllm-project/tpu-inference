@@ -520,15 +520,11 @@ class CompilationManager:
                 block_tables,
             ):
                 target_hidden_states, input_ids, last_token_indices, _ = self.runner.drafter._prepare_inputs_in_jit(
-                    token_indices_cpu,
-                    new_query_start_loc_cpu,
-                    new_seq_lens_cpu,
-                    input_ids,
-                    aux_hidden_states,
-                    attention_metadata,
-                    next_token_ids,
-                    block_tables,
-                )
+                    token_indices_cpu, new_query_start_loc_cpu,
+                    new_seq_lens_cpu, input_ids, aux_hidden_states,
+                    attention_metadata, next_token_ids, block_tables,
+                    jnp.asarray([self.runner.input_batch.num_reqs],
+                                dtype=jnp.int32))
                 return target_hidden_states, input_ids, last_token_indices
 
             token_indices_cpu = np.ones((num_tokens, ), dtype=np.int32)
@@ -605,6 +601,8 @@ class CompilationManager:
                 target_token_ids,
                 next_token_ids,
                 block_tables_unreshaped,
+                jnp.asarray([self.runner.input_batch.num_reqs],
+                            dtype=jnp.int32),
                 num_tokens=num_tokens,
             )
 
