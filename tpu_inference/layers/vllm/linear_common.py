@@ -92,20 +92,25 @@ def slice_sharded_tensor_for_concatenation(sharded_tensor: jax.Array,
         split_sizes: each individual tensor's size on the last dim.
         n_shards: num of shards.
     """
-    new_shape = sharded_tensor.shape[:-1] + (n_shards, -1)
+    # sharded_tensor[:,0:1280] on device0,sharded_tensor[:,1280,2560] on device1
+    new_shape = sharded_tensor.shape[:-1] + (n_shards, -1)  # (16, 2, -1)
     # New shape ensures each sharded_tensor[:, i] maps to a tensor in ith shards
-    sharded_tensor = sharded_tensor.reshape(new_shape)
+    new_sharded_tensor = sharded_tensor.reshape(new_shape)  # (16, 2, 1280)
+    # new_sharded_tensor[:,0:1,:] on device_0, new_sharded_tensor[:,1:2,:] on device_1
 
     split_tensors = []
     start_offset = 0
-    for split_size in split_sizes:
+    for split_size in split_sizes:  # [2048, 256, 256], n_shards=2
         assert split_size % n_shards == 0
         sz = split_size // n_shards  # size of this split tensor per shard
         end_offset = start_offset + sz
         # Because we are slicing over last dim, sharding dim remains intact.
         # Therefore, splitting happens locally.
-        split_tensor = sharded_tensor[..., start_offset:end_offset]
+
+        split_tensor = new_sharded_tensor[..., start_offset:end_offset]
+        # split_tensor[:,0:1,:] on device0, split_tensor[:,1:2,:] on device1.
         reshaped_split_tensor = split_tensor.reshape(new_shape[:-2] + (-1, ))
+        # reshaped_split_tensor[:,0:1024] on device0, reshaped_split_tensor[:,1024:2048] on device1.
         split_tensors.append(reshaped_split_tensor)
         start_offset = end_offset
 
