@@ -62,17 +62,8 @@ DEFAULT_LLAMA4_FP8_CONFIG = {
         "bfloat16",
         "rules": [
             {
-                "module_path": "layers.*.custom_module.kernel_gating_EDF",
-                "weight_qtype": "float8_e4m3fn",
-                "act_qtype": "float8_e4m3fn",
-            },
-            {
-                "module_path": "layers.*.custom_module.kernel_up_proj_EDF",
-                "weight_qtype": "float8_e4m3fn",
-                "act_qtype": "float8_e4m3fn",
-            },
-                        {
-                "module_path": "layers.*.custom_module.kernel_down_proj_EFD",
+                "module_path": "layers.*.custom_module",
+                "op_names": "einsum",
                 "weight_qtype": "float8_e4m3fn",
                 "act_qtype": "float8_e4m3fn",
             },
@@ -208,6 +199,7 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
     }
     model = qwix.quantize_model(model, qwix.PtqProvider(qwix_rules),
                                 **model_input)
+    print(f"model in quantize_model: {model}")
     return model
 
 
@@ -390,7 +382,7 @@ def get_default_qwix_quantization_config(
     # TODO (jacobplatin): remove this so that we can support various quantization types
     if model_type == "deepseek_v3" and quant_method == "fp8":
         return DEFAULT_DEEPSEEK_FP8_CONFIG
-    elif model_type == "llama4" and quant_method == "fp8":
+    elif model_type == "llama4" and quant_method == "compressed-tensors":
         return DEFAULT_LLAMA4_FP8_CONFIG
 
 
