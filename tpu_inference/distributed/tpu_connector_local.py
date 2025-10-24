@@ -109,7 +109,7 @@ from tpu_inference.runner.kv_cache_manager import KVCacheManager
 from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
 
 from .cache_util import (CPU_OFFLOADING_SWAP_OP_TYPE, JittedKVCacheSwapFn,
-                         TokenProcessor, get_jitted_kv_cache_swap_fn)
+                         TokenProcessor)
 from .local_cpu_backend import LocalCPUBackend
 
 EngineId = str
@@ -813,15 +813,36 @@ class TPUConnectorWorker:
                 mesh=self.device_sharding.mesh,
                 spec=jax.sharding.PartitionSpec(None, "model"),
                 memory_kind="device")
-            self.flatten_host_sharding = jax.sharding.NamedSharding(
-                mesh=self.device_sharding.mesh,
-                spec=jax.sharding.PartitionSpec(None, "model"),
-                memory_kind="pinned_host")
+            # self.flatten_host_sharding = jax.sharding.NamedSharding(
+            #     mesh=self.device_sharding.mesh,
+            #     spec=jax.sharding.PartitionSpec(None, "model"),
+            #     memory_kind="pinned_host")
 
-            self.swap_in_fn, self.swap_out_fn = get_jitted_kv_cache_swap_fn(
-                self.swap_op_type,
-                host_sharding=self.flatten_host_sharding,
-                device_sharding=self.flatten_device_sharding)
+            # self.swap_in_fn, self.swap_out_fn = get_jitted_kv_cache_swap_fn(
+            #     self.swap_op_type,
+            #     host_sharding=self.flatten_host_sharding,
+            #     device_sharding=self.flatten_device_sharding)
+
+            self.flatten_host_sharding = jax.devices("cpu")[0]
+
+            def _jax_swap_in(src_kv_caches):
+
+                def _jax_swap_in_(input_array):
+                    return jax.device_put(input_array, jax.devices("cpu")[0])
+
+                return jax.tree.map(_jax_swap_in_, src_kv_caches)
+
+            def _jax_swap_out(src_kv_caches):
+
+                def _jax_swap_out_(input_array):
+                    return jax.device_put(input_array,
+                                          self.flatten_device_sharding)
+
+                return jax.tree.map(_jax_swap_out_, src_kv_caches)
+
+            self.swap_in_fn = jax.jit(
+                _jax_swap_in, out_shardings=self.flatten_device_sharding)
+            self.swap_out_fn = jax.jit(_jax_swap_out)
 
             logger.info("KV Cache details registered in TPUConnectorWorker:")
             logger.info(f"  - Num layers: {self.num_layers}")
