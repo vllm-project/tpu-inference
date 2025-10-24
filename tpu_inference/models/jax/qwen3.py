@@ -1,8 +1,11 @@
+import re
 from typing import List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from flax import nnx
+from flax.typing import Shape
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from transformers import Qwen3Config, modeling_flax_utils
@@ -21,6 +24,122 @@ from tpu_inference.models.jax.utils.weight_utils import (get_default_maps,
 logger = init_logger(__name__)
 
 init_fn = nnx.initializers.uniform()
+
+
+def transform_einsum_to_matmul_2d(
+        einsum_str: str, lhs: jax.Array,
+        rhs: jax.Array) -> tuple[jax.Array, jax.Array]:
+    """
+  Transforms a two-operand einsum into shapes suitable for jnp.matmul,
+  producing 2D tensors when the effective batch size is 1.
+
+  The reshaped tensors will be:
+    - If the product of batch dimensions (B_prod) > 1:
+      LHS: (B_prod, M_prod, K_prod), RHS: (B_prod, K_prod, N_prod)
+      (For use with batched jnp.matmul)
+    - If the product of batch dimensions (B_prod) == 1:
+      LHS: (M_prod, K_prod), RHS: (K_prod, N_prod)
+      (For use with standard 2D jnp.matmul)
+
+  Args:
+    einsum_str: The einsum equation string (e.g., "td,dnh->tnh").
+    lhs: The left-hand side tensor.
+    rhs: The right-hand side tensor.
+
+  Returns:
+    A tuple containing:
+      - lhs_reshaped: LHS tensor reshaped for jnp.matmul.
+      - rhs_reshaped: RHS tensor reshaped for jnp.matmul.
+  """
+    parts = einsum_str.split('->')
+    if len(parts) == 2:
+        input_strs, output_str = parts
+        # Output dimensions are the alphabetic characters in the RHS
+        #output_dims = set(c for c in output_str if c.isalpha())
+    else:
+        raise ValueError(f"Invalid einsum string format: '{einsum_str}'")
+
+    input_parts = input_strs.split(',')
+    if len(input_parts) != 2:
+        raise ValueError(
+            f"transform_einsum_to_matmul requires exactly two operands. Got: '{einsum_str}'"
+        )
+    lhs_subscript, rhs_subscript = input_parts[0], input_parts[1]
+
+    def get_labels(s):
+        return set(re.findall(r'[a-zA-Z]|_\d+', s))
+
+    in1_labels = get_labels(lhs_subscript)
+    in2_labels = get_labels(rhs_subscript)
+    out_labels = get_labels(output_str)
+
+    # Categorize dimensions: Batch (shared & in output), Contracting (shared & not in output), Non-Contracting
+    batch_dims = sorted(list(in1_labels & in2_labels & out_labels))
+    contract_dims = sorted(list((in1_labels & in2_labels) - out_labels))
+    lhs_non_contract_dims = sorted(list(in1_labels - in2_labels))
+    rhs_non_contract_dims = sorted(list(in2_labels - in1_labels))
+
+    if not contract_dims:
+        print(
+            f"Warning: Einsum '{einsum_str}' has no contracting dimensions. Matmul transformation might not be the most direct representation."
+        )
+
+    # Map labels to axis indices in the original tensors
+    lhs_label_to_axis = {label: i for i, label in enumerate(lhs_subscript)}
+    rhs_label_to_axis = {label: i for i, label in enumerate(rhs_subscript)}
+
+    def get_group_shape(tensor, label_to_axis, dims):
+        return tuple(tensor.shape[label_to_axis[d]] for d in dims
+                     if d in label_to_axis)
+
+    batch_shape = get_group_shape(lhs, lhs_label_to_axis, batch_dims)
+    m_shape = get_group_shape(lhs, lhs_label_to_axis, lhs_non_contract_dims)
+    k_shape_lhs = get_group_shape(lhs, lhs_label_to_axis, contract_dims)
+    k_shape_rhs = get_group_shape(rhs, rhs_label_to_axis, contract_dims)
+    n_shape = get_group_shape(rhs, rhs_label_to_axis, rhs_non_contract_dims)
+    print("Printing b, m, k, k, n shapes:", batch_shape, m_shape, k_shape_lhs,
+          k_shape_rhs, n_shape)
+
+    b_prod = np.prod(batch_shape) if batch_shape else 1
+    m_prod = np.prod(m_shape) if m_shape else 1
+    k_prod = np.prod(k_shape_lhs) if k_shape_lhs else 1
+    n_prod = np.prod(n_shape) if n_shape else 1
+
+    if k_prod != (np.prod(k_shape_rhs) if k_shape_rhs else 1):
+        raise ValueError(
+            f"Contracting dimension sizes mismatch: {k_shape_lhs} vs {k_shape_rhs}"
+        )
+
+    # --- Permute and Reshape LHS ---
+    # Order: (Batch..., LHS_NonContract..., Contract...)
+    lhs_perm_dims = batch_dims + lhs_non_contract_dims + contract_dims
+    lhs_perm = [
+        lhs_label_to_axis[d] for d in lhs_perm_dims if d in lhs_label_to_axis
+    ]
+    lhs_permuted = jnp.transpose(lhs, lhs_perm)
+    lhs_target_shape = (b_prod, m_prod, k_prod)
+    lhs_reshaped = jnp.reshape(lhs_permuted, lhs_target_shape)
+
+    # --- Permute and Reshape RHS ---
+    # Order: (Batch..., Contract..., RHS_NonContract...)
+    rhs_perm_dims = batch_dims + contract_dims + rhs_non_contract_dims
+    rhs_perm = [
+        rhs_label_to_axis[d] for d in rhs_perm_dims if d in rhs_label_to_axis
+    ]
+    rhs_permuted = jnp.transpose(rhs, rhs_perm)
+    rhs_target_shape = (b_prod, k_prod, n_prod)
+    rhs_reshaped = jnp.reshape(rhs_permuted, rhs_target_shape)
+
+    # --- Adjust for 2D Matmul if B_prod == 1 ---
+    is_2d_matmul = (b_prod == 1)
+    if is_2d_matmul:
+        # Remove the singleton batch dimension
+        lhs_reshaped = jnp.squeeze(lhs_reshaped,
+                                   axis=0)  # Shape: (M_prod, K_prod)
+        rhs_reshaped = jnp.squeeze(rhs_reshaped,
+                                   axis=0)  # Shape: (K_prod, N_prod)
+
+    return lhs_reshaped, rhs_reshaped
 
 
 def get_param_path(target_param: nnx.Param,
@@ -155,10 +274,106 @@ class Qwen3QuantizedMLP(nnx.Module):
         return result
 
 
+class JaxEinsumLayer(nnx.Einsum):
+
+    def __init__(self,
+                 einsum_str: str,
+                 kernel_shape: Shape,
+                 bias_shape: Optional[Shape] = None,
+                 *,
+                 model: nnx.Module,
+                 **kwargs):
+        super().__init__(einsum_str, kernel_shape, bias_shape, **kwargs)
+        self.model = model
+        self.weight_sharding = P(self.kernel.sharding[0],
+                                 self.kernel.sharding[1])
+
+    def __call__(self,
+                 inputs: jax.Array,
+                 einsum_str: Optional[str] = None) -> jax.Array:
+        """Applies a linear transformation to the inputs along the last dimension.
+
+        Args:
+          inputs: The nd-array to be transformed.
+          einsum_str: a string to denote the einsum equation. The equation must
+            have exactly two operands, the lhs being the input passed in, and
+            the rhs being the learnable kernel. Exactly one of ``einsum_str``
+            in the constructor argument and call argument must be not None,
+            while the other must be None.
+
+        Returns:
+          The transformed input.
+        """
+        einsum_str = nnx.module.first_from(
+            einsum_str,
+            self.einsum_str,
+            error_msg="""No `einsum_str` argument was provided to Einsum
+            as either a __call__ argument, or class attribute.""",
+        )
+        einsum_str = einsum_str.replace(' ', '')
+        self._einsum_str_check(einsum_str)
+
+        kernel = self.kernel.value
+        bias = self.bias.value if self.bias is not None else None
+        #inputs, kernel, bias = self.promote_dtype(
+        #(
+        #inputs,
+        #self.kernel[...],
+        #self.bias[...] if self.bias is not None else self.bias,
+        #),
+        #dtype=self.dtype,
+        #)
+        # We use einsum_op_kwargs for BC compatibility with
+        # user custom self.einsum_op method which may not have
+        # preferred_element_type argument to avoid breaking
+        # existing code
+        einsum_op_kwargs = {}
+        #if self.preferred_element_type is not None:
+        #einsum_op_kwargs["preferred_element_type"] = self.preferred_element_type
+        #
+        y = self._quantized_einsum(einsum_str,
+                                   inputs,
+                                   kernel,
+                                   precision=self.precision,
+                                   **einsum_op_kwargs)
+
+        if bias is not None:
+            broadcasted_bias_shape = self._infer_broadcasted_bias_shape(
+                einsum_str, inputs, kernel)
+            y += jnp.reshape(bias, broadcasted_bias_shape)
+        return y
+
+    def _quantized_einsum(self, einsum_str, inputs, kernel, precision):
+        path = get_param_path(kernel, self.model)
+        print("Printing path:", path)
+        if path.endswith(".kernel"):
+            path = path.removesuffix(".kernel")
+        # Find the weight scale maching to the given kernel by path.
+        weight_scale = None
+        for scale_key, scale_value in self.model.quant_scales.items():
+            if path in scale_key:
+                weight_scale = scale_value
+                break
+        if weight_scale is None:
+            raise ValueError(f"weight scale was not set for {path}")
+        inputs, kernel = transform_einsum_to_matmul_2d(einsum_str, inputs,
+                                                       kernel)
+        kernel = jnp.transpose(kernel)
+        y = sharded_quantized_matmul(
+            inputs,
+            kernel,
+            weight_scale,
+            self.model.mesh,
+            self.weight_sharding,
+        )
+        print("Printing output shape after quantization:", y.shape)
+        return y
+
+
 class Qwen3Attention(nnx.Module):
 
     def __init__(self, config: Qwen3Config, dtype: jnp.dtype, rng: nnx.Rngs,
-                 mesh: Mesh, kv_cache_dtype: str):
+                 mesh: Mesh, kv_cache_dtype: str, model: nnx.Module):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
@@ -178,11 +393,13 @@ class Qwen3Attention(nnx.Module):
 
         self.mesh = mesh
 
-        self.q_proj = nnx.Einsum(
+        self.q_proj = JaxEinsumLayer(
             "TD,DNH->TNH",
             (self.hidden_size, self.num_heads, self.head_dim),
+            model=model,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
+            # P(None, "model", None) -> P("model", None, None) due to weigh transpose.
+            kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
             rngs=rng,
         )
         self.q_norm = nnx.RMSNorm(
@@ -192,11 +409,13 @@ class Qwen3Attention(nnx.Module):
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
         )
-        self.k_proj = nnx.Einsum(
+        self.k_proj = JaxEinsumLayer(
             "TD,DKH->TKH",
             (self.hidden_size, self.num_kv_heads, self.head_dim),
+            model=model,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
+            # P(None, "model", None) -> P("model", None, None) due to weigh transpose.
+            kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
             rngs=rng,
         )
         self.k_norm = nnx.RMSNorm(
@@ -206,18 +425,22 @@ class Qwen3Attention(nnx.Module):
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
         )
-        self.v_proj = nnx.Einsum(
+        self.v_proj = JaxEinsumLayer(
             "TD,DKH->TKH",
             (self.hidden_size, self.num_kv_heads, self.head_dim),
+            model=model,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
+            # P(None, "model", None) -> P("model", None, None) due to weigh transpose.
+            kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
             rngs=rng,
         )
-        self.o_proj = nnx.Einsum(
+        self.o_proj = JaxEinsumLayer(
             "TNH,NHD->TD",
             (self.num_heads, self.head_dim, self.hidden_size),
+            model=model,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
+            # P("model", None, None) -> P(None, "model", None) due to weigh transpose.
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             rngs=rng,
         )
 
@@ -294,7 +517,8 @@ class Qwen3DecoderLayer(Qwen2DecoderLayer):
                                         dtype=dtype,
                                         rng=rng,
                                         mesh=mesh,
-                                        kv_cache_dtype=kv_cache_dtype)
+                                        kv_cache_dtype=kv_cache_dtype,
+                                        model=model)
         self.post_attention_layernorm = nnx.RMSNorm(
             hidden_size,
             epsilon=rms_norm_eps,
