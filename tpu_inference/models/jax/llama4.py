@@ -585,6 +585,9 @@ class Llama4WeightLoader:
                 model_weight = get_param(model_params, mapped_name)
 
                 # ============================= ADD ================================
+                print(f"--- Inspecting: {mapped_name} ---")
+                print(f"Variable is: {model_weight}")
+                print(f"Type is: {type(model_weight)}")
                 cast_type = model_weight.value.dtype
                 torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
                 loaded_weight = jnp.array(loaded_weight.view(torch_view_type).numpy()).view(cast_type)
@@ -611,7 +614,6 @@ class Llama4WeightLoader:
                 if self.is_verbose:
                     print_param_info(model_weight, loaded_name)
 
-            logger.debug(f"expert_weights_buffer:{self.expert_weights_buffer}")
             with jax.default_device(jax.devices("cpu")[0]):
                 for buffer_key, expert_map in self.expert_weights_buffer.items():
                     sorted_exp_nums = sorted(expert_map.keys())
@@ -621,7 +623,7 @@ class Llama4WeightLoader:
 
                     model_weight = get_param(model_params, base_mapped_name)
 
-                    assert hasattr(model_weight, 'array'), f"Expected MoE weight '{base_mapped_name}' to be a quantized array (qarray)."
+                    assert hasattr(model_weight, 'array'), f"Expected MoE weight '{base_mapped_name}' to be a quantized array (qarray)"
 
                     # if model_weight.value.shape != aggregated_weight.shape:
                     #     raise ValueError(
