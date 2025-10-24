@@ -105,7 +105,8 @@ def slice_sharded_tensor_for_concatenation(sharded_tensor: jax.Array,
         # Because we are slicing over last dim, sharding dim remains intact.
         # Therefore, splitting happens locally.
         split_tensor = sharded_tensor[..., start_offset:end_offset]
-        split_tensors.append(split_tensor.reshape(new_shape[:-2] + (-1, )))
+        reshaped_split_tensor = split_tensor.reshape(new_shape[:-2] + (-1, ))
+        split_tensors.append(reshaped_split_tensor)
         start_offset = end_offset
 
     return split_tensors
