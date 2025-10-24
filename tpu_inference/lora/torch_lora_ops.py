@@ -4,7 +4,6 @@
 import jax
 import jax.numpy as jnp
 import torch
-import torch.nn.functional as F
 from torchax.interop import call_jax
 
 
@@ -87,17 +86,4 @@ def bgmv_expand_slice(
     """
     outputs = bgmv_torch(inputs, lora_b_weights, lora_indices_tensor)
 
-    outputs = F.pad(
-        outputs,
-        (
-            slice_offset,
-            output_tensor.shape[1] - (slice_offset + slice_size),
-            0,
-            0,
-        ),
-    )
-
-    if add_inputs:
-        return output_tensor + outputs
-    else:
-        return outputs
+    return outputs

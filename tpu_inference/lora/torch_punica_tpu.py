@@ -108,17 +108,18 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             output_slices (tuple[int, ...]): Every slice's size
             add_inputs (bool):  Defaults to True.
         """
-        y_orig = y
-        y = y.view(-1, y.shape[-1])
+        # y_orig = y
+        # y = y.view(-1, y.shape[-1])
         offset_left = 0
 
+        outs = []
         for slice_idx in range(len(lora_b_stacked)):
-            y = bgmv_expand_slice(x[slice_idx], lora_b_stacked[slice_idx], y,
-                                  self._get_token_lora_indices(x[slice_idx]),
-                                  offset_left, output_slices[slice_idx],
-                                  add_inputs)
-            offset_left += output_slices[slice_idx]
-        return y.view(y_orig.shape)
+            temp = bgmv_expand_slice(
+                x[slice_idx], lora_b_stacked[slice_idx], y[slice_idx],
+                self._get_token_lora_indices(x[slice_idx]), offset_left,
+                output_slices[slice_idx], add_inputs)
+            outs.append(temp)
+        return outs
 
     def add_lora_embedding(self,
                            y: torch.Tensor,
@@ -185,12 +186,15 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         buffer = self.add_shrink(
             buffer, x, lora_a_stacked, scale,
             **kwargs)  # (n_slices, num_tokens, max_lora_rank)
-        return self.add_expand(y,
+        outs = self.add_expand(y,
                                buffer,
                                lora_b_stacked,
                                output_slices,
                                add_inputs=True,
                                **kwargs)
+        outs2 = [yi + outsi for yi, outsi in zip(y, outs)]
+        concat_out = torch.concatenate(outs2, axis=-1)
+        return concat_out
 
     def add_lora_logits(self,
                         y: torch.Tensor,
