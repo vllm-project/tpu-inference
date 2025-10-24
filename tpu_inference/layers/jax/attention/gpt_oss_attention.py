@@ -9,8 +9,8 @@ from jax.experimental import shard_map
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
-from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
-    ragged_paged_attention
+from tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 import \
+    ragged_paged_attention_hd64
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.rope import GptOssRotaryEmbedding
@@ -162,7 +162,7 @@ class GptOssAttention(nnx.Module):
 
         def _ragged_paged_attention_wrapper(*args):
             # Pass the GPT-OSS specific parameters to the kernel
-            return ragged_paged_attention(
+            return ragged_paged_attention_hd64(
                 *args,
                 sm_scale=self.sm_scale,
                 sliding_window=md.sliding_window,
@@ -214,18 +214,18 @@ class GptOssAttention(nnx.Module):
             q_TNH, k_TKH = self.rope(q_TNH, k_TKH, md.input_positions)
 
         with jax.named_scope("attn_op"):
-            # Padding H dim of q,k,v to be the multiple of 128
-            multiple_of_128 = ((self.head_dim - 1) // 128 + 1) * 128
-            q_TNH = jnp.pad(q_TNH, ((0, 0), (0, 0),
-                                    (0, multiple_of_128 - self.head_dim)))
-            k_TKH = jnp.pad(k_TKH, ((0, 0), (0, 0),
-                                    (0, multiple_of_128 - self.head_dim)))
-            v_TKH = jnp.pad(v_TKH, ((0, 0), (0, 0),
-                                    (0, multiple_of_128 - self.head_dim)))
+            # # Padding H dim of q,k,v to be the multiple of 128
+            # multiple_of_128 = ((self.head_dim - 1) // 128 + 1) * 128
+            # q_TNH = jnp.pad(q_TNH, ((0, 0), (0, 0),
+            #                         (0, multiple_of_128 - self.head_dim)))
+            # k_TKH = jnp.pad(k_TKH, ((0, 0), (0, 0),
+            #                         (0, multiple_of_128 - self.head_dim)))
+            # v_TKH = jnp.pad(v_TKH, ((0, 0), (0, 0),
+            #                         (0, multiple_of_128 - self.head_dim)))
             new_kv_cache, attn_out_TNH = self.attention(
                 kv_cache, q_TNH, k_TKH, v_TKH, self.sinks_N.value, md,
                 self.mesh)
-            attn_out_TNH = attn_out_TNH[..., :self.head_dim]
+            # attn_out_TNH = attn_out_TNH[..., :self.head_dim]
 
         with jax.named_scope("o_proj"):
             output_TD = jnp.einsum("TNH,NHD->TD", attn_out_TNH,

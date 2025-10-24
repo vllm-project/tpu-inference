@@ -238,6 +238,7 @@ def _ragged_paged_attention_kernel(
     q_hbm_ref,  # [actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim]
     kv_hbm_ref,  # [max_num_tokens, num_kv_heads // kv_packing, kv_packing, actual_head_dim_x2]
     kv_cache_hbm_ref,  # [total_num_pages, page_size, num_kv_heads // kv_packing, kv_packing, actual_head_dim_x2]
+    attention_sink_ref,  # [actual_num_kv_heads, num_q_heads_per_kv_head, 128]
     # Output
     o_hbm_ref,  # [actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, actual_head_dim_x2]
     updated_kv_cache_hbm_ref,  # [total_num_pages, page_size, num_kv_heads // kv_packing, kv_packing, actual_head_dim_x2]
@@ -371,7 +372,15 @@ def _ragged_paged_attention_kernel(
             s = soft_cap * jnp.tanh(s / soft_cap)
         s += jnp.where(mask, mask_value, 0.0)
         s_rowmax = jnp.max(s, axis=1, keepdims=True)
-        m_prev = load_with_init(head_m_ref, -jnp.inf)
+
+        if attention_sink_ref is not None:
+            sinks = attention_sink_ref[kv_head_idx]
+            actual_bq_sz = q.shape[0] // num_q_heads_per_kv_head
+            m_prev_init = jnp.concat([sinks] * actual_bq_sz, axis=0)
+            m_prev = jnp.where(bkv_idx == 0, m_prev_init, head_m_ref[...])
+        else:
+            m_prev = load_with_init(head_m_ref, -jnp.inf)
+
         m_curr = jnp.maximum(m_prev, s_rowmax)
         head_m_ref[...] = m_curr
         p = jnp.exp(s - broadcast_minor(m_curr, s.shape))
@@ -382,7 +391,7 @@ def _ragged_paged_attention_kernel(
 
         p_rowsum = jnp.sum(p, axis=1, keepdims=True)
         exp_m_diff = jnp.exp(m_prev - m_curr)
-        l_prev = load_with_init(head_l_ref, 0.0)
+        l_prev = load_with_init(head_l_ref, 1.0)
         l_curr = exp_m_diff * l_prev + p_rowsum
         head_l_ref[...] = l_curr
         o_prev = load_with_init(head_acc_ref, 0.0)
@@ -1186,6 +1195,7 @@ def ragged_paged_attention_hd64(
     page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     distribution: jax.Array,  # i32[3]
+    attention_sink: jax.Array | None = None,  # f32[actual_num_q_heads]
     *,
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
@@ -1301,10 +1311,19 @@ def ragged_paged_attention_hd64(
         vmem_limit_bytes = DEFAULT_VMEM_LIMIT_BYTES
     grid = (distribution[2], )
 
+    if attention_sink is None:
+        attention_sink_in_specs = None
+    else:
+        attention_sink = attention_sink.reshape(
+            (-1, num_q_heads_per_kv_head, 1))
+        attention_sink = jnp.repeat(attention_sink, 128, -1)
+        attention_sink_in_specs = pl.BlockSpec(memory_space=pltpu.VMEM)
+
     in_specs = [
         pl.BlockSpec(memory_space=pltpu.HBM),
         pl.BlockSpec(memory_space=pltpu.HBM),
         pl.BlockSpec(memory_space=pltpu.HBM),
+        attention_sink_in_specs,
     ]
 
     out_specs = [
@@ -1403,7 +1422,8 @@ def ragged_paged_attention_hd64(
             name=scope_name,
         ))
 
-    output, updated_kv_cache = kernel(*scalar_prefetches, q, kv, kv_cache)
+    output, updated_kv_cache = kernel(*scalar_prefetches, q, kv, kv_cache,
+                                      attention_sink)
     return (
         prepare_outputs(output, actual_num_q_heads_per_kv_head,
                         actual_head_dim),
