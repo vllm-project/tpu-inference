@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING, Dict, List
 
 import jax
 import jax.numpy as jnp
+import vllm.envs as envs
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.ops.mappings import t2j_dtype
 from vllm.attention import Attention
@@ -375,9 +376,23 @@ class KVCacheManager:
         )
         sharding = NamedSharding(self.runner.mesh,
                                  PartitionSpec(None, "model"))
-        transferred_kv_cache = jax.device_put(kv_cache_slices, sharding)
-        for cache in transferred_kv_cache:
-            cache.block_until_ready()
+        if envs.VLLM_TPU_USING_PATHWAYS:
+            from pathwaysutils.experimental import \
+                reshard as experimental_reshard
+
+            def get_sharding(x):
+                return sharding
+
+            sharding_spec_pytree = jax.tree.map(get_sharding, kv_cache_slices)
+            transferred_kv_cache = experimental_reshard.reshard(
+                tuple(kv_cache_slices),
+                tuple(sharding_spec_pytree),
+                donate=False,
+            )
+        else:
+            transferred_kv_cache = jax.device_put(kv_cache_slices, sharding)
+
+        jax.block_until_ready(transferred_kv_cache)
         return transferred_kv_cache
 
     def insert_request_with_kv_cache(
