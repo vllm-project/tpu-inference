@@ -118,9 +118,14 @@ class MoE(nnx.Module):
         # jax.debug.print("metrics in moe.py = {value}", value=self.metrics.get('max_load_proportion', None))
         # if self.metrics is not None:
         if True:
-            expert_counts = jnp.unique_counts(indices_TX.flatten(), size=self.num_local_experts, fill_value=0)[1]
-            expert_max_proportion = jnp.max(expert_counts/jnp.sum(expert_counts))
+            expert_counts = jnp.bincount(indices_TX.flatten(), length=self.num_local_experts)
+            # jax.debug.print("expert_counts = {value}", value=expert_counts)
+            expert_max = jnp.max(expert_counts)
+            expert_argmax = jnp.argmax(expert_counts)
+            expert_max_proportion = expert_max / jnp.sum(expert_counts)
             if not isinstance(x_TD, ShapeDtypeStruct):
+                self.sow(nnx.Intermediate, 'max_load_count_index', expert_argmax)
+                self.sow(nnx.Intermediate, 'max_load_count', expert_max)
                 self.sow(nnx.Intermediate, 'max_load_proportion', expert_max_proportion)
             # self.metrics.value = {'max_load_proportion': expert_max_proportion}
         # self.sow('moe_load_metrics'] = metrics

@@ -410,23 +410,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # if True:
             # if metric:
             if True:
-                # from tpu_inference.layers.jax.moe.moe import MoEMetric
-                # new_state, _ = nnx.split(model)
-                # metrics_state = new_state.filter(MoEMetric)
-                # metrics_tree = jax.tree_map(lambda m: m.value, metrics_state)
-                # intermediates = nnx.pop(self.model, nnx.Intermediate)
                 metrics_cpu = to_python_types(jax.device_get(metrics))
-                # logger.warning(f"intermediate = {metrics_cpu}")
-                # metrics_cpu = jax.device_get(metrics_tre)
                 metrics_path = self.vllm_config.additional_config["metrics_path"]
-                if os.path.exists(metrics_path):
-                    with open(metrics_path) as f:
-                        metrics_json = json.load(f)
-                else:
-                    metrics_json = []
-                metrics_json.append(metrics_cpu.to_pure_dict())
-                with open(metrics_path, 'w') as f:
-                    json.dump(metrics_json, f)
+                with open(metrics_path, 'a') as f:
+                    json.dump(metrics_cpu.to_pure_dict(), f)
+                    f.write('\n')
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)
             logits = self.compute_logits_fn(
