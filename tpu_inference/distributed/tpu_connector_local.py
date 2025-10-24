@@ -813,6 +813,8 @@ class TPUConnectorWorker:
                 mesh=self.device_sharding.mesh,
                 spec=jax.sharding.PartitionSpec(None, "model"),
                 memory_kind="device")
+
+            # NOTE(jcgu): disable "pallas" swap op / NamedSharding due to core crash
             # self.flatten_host_sharding = jax.sharding.NamedSharding(
             #     mesh=self.device_sharding.mesh,
             #     spec=jax.sharding.PartitionSpec(None, "model"),
@@ -822,8 +824,6 @@ class TPUConnectorWorker:
             #     self.swap_op_type,
             #     host_sharding=self.flatten_host_sharding,
             #     device_sharding=self.flatten_device_sharding)
-
-            self.flatten_host_sharding = jax.devices("cpu")[0]
 
             def _jax_swap_in(src_kv_caches):
 
