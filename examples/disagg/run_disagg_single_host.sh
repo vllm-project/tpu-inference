@@ -35,7 +35,7 @@ mkdir -p $HOME/logs
 
 # Start prefill instances
 for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
-    PORT=$((8100 + i))
+    PORT=$((8400 + i))
     KV_PORT=$((7100 + i))
     SIDE_PORT=$((6100 + i))
 
@@ -61,7 +61,7 @@ done
 
 # Start decode instances
 for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
-    PORT=$((8200 + i))
+    PORT=$((9400 + i))
     KV_PORT=$((7200 + i))
     # Same as prefill SIDE_PORT
     SIDE_PORT=$((6100 + i))
