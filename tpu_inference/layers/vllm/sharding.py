@@ -24,11 +24,9 @@ def shard_model_to_tpu(model: torch.nn.Module,
                        mesh: Mesh) -> dict[str, torchax.torch.Tensor]:
     """
     Shard the model weights and move them to TPU.
-
     At the same time, also turn the weight tensors into torchax tensors so that
     jax code can interop with it and the overall program can be traced and
     compiled in XLA.
-
     Args:
         model: A PyTorch model whose weights are on CPU main memory.
         mesh: JAX mesh object for sharding.
@@ -49,6 +47,18 @@ def shard_model_to_tpu(model: torch.nn.Module,
             (params, buffers))
 
         return {**params, **buffers}
+
+
+def update_lora(model: torch.nn.Module,
+                initial_params_buffers) -> dict[str, torchax.torch.Tensor]:
+    params, buffers = _extract_all_params_buffers(model)
+    params_buffers = {**params, **buffers}
+    for k, v in params_buffers.items():
+        if 'lora_a_stacked' in k or 'lora_b_stacked' in k:
+            assert k in initial_params_buffers, f"{k} not in initial_params_buffers"
+            initial_params_buffers[k] = v
+
+    return initial_params_buffers
 
 
 def _extract_all_params_buffers(model: torch.nn.Module):
@@ -116,11 +126,11 @@ def _shard_base_linear_lora_replicated(layer: BaseLinearLayerWithLoRA,
 # TODO: Add custom sharding logic for following lora layers
 def _shard_merged_column_parallel_linear_lora(
         layer: MergedColumnParallelLinearWithLoRA, mesh: Mesh) -> None:
+    assert layer.n_slices > 0, "layer.n_slices should be greater than 0"
     # lora_a_stacked[i] has shape [max_loras, 1, max_lora_rank, in_features]
     sharded_lora_a_tpu = torch.nn.ParameterList()
     sharded_lora_b_tpu = torch.nn.ParameterList()
 
-    assert layer.n_slices > 0, "layer.n_slices should be greater than 0"
     # lora_b_stacked[i] has shape [max_loras, 1, out_features, max_lora_rank]
     lora_b_partition_spec = P(None, None, 'model', None)
     lora_b_sharding = NamedSharding(mesh, lora_b_partition_spec)
