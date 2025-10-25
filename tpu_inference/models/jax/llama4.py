@@ -648,10 +648,14 @@ class Llama4WeightLoader:
                         # expected_scale_dtype = model_weight.array.scale.value.dtype
                         # assert aggregated_weight.dtype == expected_scale_dtype, \
                         #     f"DType mismatch for scale '{loaded_name}'. Loaded dtype ({aggregated_weight.dtype}) != Expected dtype ({expected_scale_dtype})."
-                        
+
                         model_weight.array.scale.value = shard_put(aggregated_weight,
-                                                model_weight.array.qvalue.sharding,
+                                                model_weight.array.scale.sharding,
                                                 mesh=model_for_loading.mesh)
+                        
+                        # model_weight.array.scale.value = shard_put(aggregated_weight,
+                        #                         model_weight.array.qvalue.sharding,
+                        #                         mesh=model_for_loading.mesh)
                     
                     elif aggregated_weight.itemsize < 2: # check model weight elem nbits < 16
                         # assert hasattr(model_weight, 'array'), \
