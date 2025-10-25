@@ -79,7 +79,24 @@ DEFAULT_LLAMA4_FP8_CONFIG = {
         "bfloat16",
         "rules": [
             {
-                "module_path": "layers.*.custom_module",
+                "module_path": "layers.*.moe_ffw",
+                "op_names": "einsum",
+                "weight_qtype": "float8_e4m3fn",
+                "act_qtype": "float8_e4m3fn",
+            },
+        ],
+    }
+}
+
+DEFAULT_LLAMA4_FP8_CONFIG = {
+    "qwix": {
+        "use_abstract_model":
+        True,
+        "scale_dtype":
+        "bfloat16",
+        "rules": [
+            {
+                "module_path": "layers.*.moe_ffw",
                 "op_names": "einsum",
                 "weight_qtype": "float8_e4m3fn",
                 "act_qtype": "float8_e4m3fn",
@@ -216,7 +233,7 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
     }
     model = qwix.quantize_model(model, qwix.PtqProvider(qwix_rules),
                                 **model_input)
-    print(f"model in quantize_model: {model}")
+    # print(f"model in quantize_model: {model}")
     return model
 
 

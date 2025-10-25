@@ -608,9 +608,9 @@ class Llama4WeightLoader:
                 model_weight = get_param(model_params, mapped_name)
 
                 # ============================= ADD ================================
-                print(f"--- Inspecting: {mapped_name} ---")
-                print(f"Variable is: {model_weight}")
-                print(f"Type is: {type(model_weight)}")
+                # print(f"--- Inspecting: {mapped_name} ---")
+                # print(f"Variable is: {model_weight}")
+                # print(f"Type is: {type(model_weight)}")
                 cast_type = model_weight.value.dtype
                 torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
                 loaded_weight = jnp.array(loaded_weight.view(torch_view_type).numpy()).view(cast_type)
