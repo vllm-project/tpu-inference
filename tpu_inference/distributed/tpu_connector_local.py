@@ -802,11 +802,6 @@ class TPUConnectorWorker:
             self.shape = list(kv_layer.shape)
             self.dtype = kv_layer.dtype
             self.device_sharding = kv_layer.sharding
-            # TODO(jcgu): handle SingleDeviceSharding
-            self.host_sharding = jax.sharding.NamedSharding(
-                mesh=self.device_sharding.mesh,
-                spec=self.device_sharding.spec,
-                memory_kind="pinned_host")
 
             # NOTE(jcgu): needed when sliced-kv is [num_tokens, num_head, head_dim]
             self.flatten_device_sharding = jax.sharding.NamedSharding(
@@ -814,34 +809,25 @@ class TPUConnectorWorker:
                 spec=jax.sharding.PartitionSpec(None, "model"),
                 memory_kind="device")
 
-            # NOTE(jcgu): disable "pallas" swap op / NamedSharding due to core crash
-            # self.flatten_host_sharding = jax.sharding.NamedSharding(
-            #     mesh=self.device_sharding.mesh,
-            #     spec=jax.sharding.PartitionSpec(None, "model"),
-            #     memory_kind="pinned_host")
-
-            # self.swap_in_fn, self.swap_out_fn = get_jitted_kv_cache_swap_fn(
-            #     self.swap_op_type,
-            #     host_sharding=self.flatten_host_sharding,
-            #     device_sharding=self.flatten_device_sharding)
-
             def _jax_swap_in(src_kv_caches):
-
+                # input_array should exist on HBM
                 def _jax_swap_in_(input_array):
                     return jax.device_put(input_array, jax.devices("cpu")[0])
 
                 return jax.tree.map(_jax_swap_in_, src_kv_caches)
 
             def _jax_swap_out(src_kv_caches):
-
+                # input_array should exist on CPU
                 def _jax_swap_out_(input_array):
                     return jax.device_put(input_array,
                                           self.flatten_device_sharding)
 
                 return jax.tree.map(_jax_swap_out_, src_kv_caches)
 
+            # the output (on device) of swap_in should apply NamedSharding
             self.swap_in_fn = jax.jit(
                 _jax_swap_in, out_shardings=self.flatten_device_sharding)
+            # the output (on host) of swap_out should apply SingleDeviceSharding
             self.swap_out_fn = jax.jit(_jax_swap_out)
 
             logger.info("KV Cache details registered in TPUConnectorWorker:")
@@ -903,36 +889,36 @@ class TPUConnectorWorker:
             start_time = time.time()
             blocks_to_process = jnp.array(blocks_to_process)
             # gather and reshape blocks on TPU first: output_shape: [process_blocks * block_size, num_heads, 2, head_dim]
-            extracted_blocks_tpu = KVCacheManager._jitted_gather_kv_cache(
+            flat_kv_caches_tpu = KVCacheManager._jitted_gather_kv_cache(
                 self.runner.kv_caches, blocks_to_process)
 
-            jax.block_until_ready(extracted_blocks_tpu)
+            jax.block_until_ready(flat_kv_caches_tpu)
             logger.info(
-                f"extracted_blocks_tpu: {extracted_blocks_tpu[0].shape}, {extracted_blocks_tpu[0].sharding}"
+                f"extracted_blocks_tpu: {flat_kv_caches_tpu[0].shape}, {flat_kv_caches_tpu[0].sharding}"
             )
 
-            kv_caches_on_cpu = self.swap_out_fn(extracted_blocks_tpu)
+            flat_kv_caches_cpu = self.swap_out_fn(flat_kv_caches_tpu)
             # Block until the transfer is complete
-            if kv_caches_on_cpu:
-                jax.block_until_ready(kv_caches_on_cpu)
+            if flat_kv_caches_cpu:
+                jax.block_until_ready(flat_kv_caches_cpu)
 
             duration = time.time() - start_time
             logger.info(
                 f"Successfully saved {len(blocks_to_process)} blocks for "
                 f"request {req_id} to CPU in {duration:.4f} seconds.")
 
-            if kv_caches_on_cpu:
+            if flat_kv_caches_cpu:
                 logger.info(
-                    f"Shape of a single layer on CPU before reshape (num_blocks, block_size, ...): {kv_caches_on_cpu[0].shape}"
+                    f"Shape of a single layer on CPU before reshape (num_blocks, block_size, ...): {flat_kv_caches_cpu[0].shape}"
                 )
 
                 total_size_bytes = sum(layer.nbytes
-                                       for layer in kv_caches_on_cpu)
+                                       for layer in flat_kv_caches_cpu)
                 logger.info(
-                    f"Total size of kv_caches_on_cpu: {total_size_bytes / 1024**2:.2f} MB"
+                    f"Total size of flat_kv_caches_cpu: {total_size_bytes / 1024**2:.2f} MB"
                 )
                 logger.info(
-                    f"Shape of a single layer after reshape (total_tokens, ...): {kv_caches_on_cpu[0].shape}"
+                    f"Shape of a single layer after reshape (total_tokens, ...): {flat_kv_caches_cpu[0].shape}"
                 )
 
             post_transfer_start_time = time.time()
@@ -951,7 +937,7 @@ class TPUConnectorWorker:
                     relevant_keys.append((abs_start_idx, abs_end_idx, key))
 
             if relevant_keys:
-                # The flat_kv_caches_on_cpu array corresponds to the new tokens,
+                # The flat_kv_caches_cpu array corresponds to the new tokens,
                 # so its indexing is relative to the start of the new data.
                 for abs_start_idx, abs_end_idx, key in relevant_keys:
                     # Calculate indices relative to the start of our new data slice.
@@ -964,7 +950,7 @@ class TPUConnectorWorker:
                                              rel_start_idx,
                                              rel_end_idx,
                                              axis=0)
-                        for flat_layer_cache in kv_caches_on_cpu
+                        for flat_layer_cache in flat_kv_caches_cpu
                     ]
                     jax.block_until_ready(value_for_key)
                     self.cpu_backend.add(key, value_for_key)

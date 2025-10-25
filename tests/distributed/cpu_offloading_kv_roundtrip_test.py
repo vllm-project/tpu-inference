@@ -245,6 +245,7 @@ class TestCpuOffloadingKVRoundTrip(jtu.JaxTestCase):
         jax.block_until_ready(worker.runner.kv_caches)
 
         # 5. Verify TPU Reloaded Content
-        self.assertArraysEqual(
-            source_kv_cache[0][target_block_ids, ...],
-            worker.runner.kv_caches[0][target_block_ids, ...])
+        for i in range(num_layers):
+            self.assertArraysEqual(
+                source_kv_cache[i][target_block_ids, ...],
+                worker.runner.kv_caches[i][target_block_ids, ...])
