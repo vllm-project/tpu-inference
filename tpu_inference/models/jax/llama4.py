@@ -214,11 +214,14 @@ class Llama4ForCausalLM(nnx.Module):
             )
 
             block = SharedExpertsTransformerBlock(
-                custom_module=custom_module,
+                # custom_module=custom_module,
+                moe_ffw=custom_module if is_moe_layer else None,
+                dense_ffw=custom_module if not is_moe_layer else None,
+                shared_experts=shared_experts if is_moe_layer else None,
                 attn=attn,
                 pre_attention_norm=pre_attention_norm,
                 pre_mlp_norm=pre_mlp_norm,
-                shared_experts=shared_experts,
+                # shared_experts=shared_experts,
                 use_attention_rope=use_attention_rope)
             self.layers.append(block)
 
@@ -348,24 +351,24 @@ class Llama4WeightLoader:
         # Set the mappings from loaded parameter keys to standardized names.
         EXPERT_MAPPINGS_FUSED = {
             "language_model.model.layers.*.feed_forward.experts.down_proj":
-                "layers.*.custom_module.kernel_down_proj_EFD",
+                "layers.*.moe_ffw.kernel_down_proj_EFD",
             "language_model.model.layers.*.feed_forward.experts.gate_up_proj":
-                "layers.*.custom_module.kernel_up_proj_EDF",
+                "layers.*.moe_ffw.kernel_up_proj_EDF",
         }
 
         EXPERT_MAPPINGS_UNFUSED = {
             "language_model.model.layers.*.feed_forward.experts.*.down_proj.weight":
-                "layers.*.custom_module.kernel_down_proj_EFD",
+                "layers.*.moe_ffw.kernel_down_proj_EFD",
             "language_model.model.layers.*.feed_forward.experts.*.down_proj.weight_scale":
-                "layers.*.custom_module.kernel_down_proj_EFD",
+                "layers.*.moe_ffw.kernel_down_proj_EFD",
             "language_model.model.layers.*.feed_forward.experts.*.gate_proj.weight":
-                "layers.*.custom_module.kernel_gating_EDF",
+                "layers.*.moe_ffw.kernel_gating_EDF",
             "language_model.model.layers.*.feed_forward.experts.*.gate_proj.weight_scale":
-                "layers.*.custom_module.kernel_gating_EDF",
+                "layers.*.moe_ffw.kernel_gating_EDF",
             "language_model.model.layers.*.feed_forward.experts.*.up_proj.weight":
-                "layers.*.custom_module.kernel_up_proj_EDF",
+                "layers.*.moe_ffw.kernel_up_proj_EDF",
             "language_model.model.layers.*.feed_forward.experts.*.up_proj.weight_scale":
-                "layers.*.custom_module.kernel_up_proj_EDF",
+                "layers.*.moe_ffw.kernel_up_proj_EDF",
         }
 
         if self.quantization_config is None:
@@ -393,7 +396,7 @@ class Llama4WeightLoader:
             "language_model.model.layers.*.self_attn.o_proj.weight":
             "layers.*.attn.kernel_o_proj_NHD",
             "language_model.model.layers.*.feed_forward.router.weight":
-            "layers.*.custom_module.router.kernel_DE",
+            "layers.*.moe_ffw.router.kernel_DE",
             # shared experts
             "language_model.model.layers.*.feed_forward.shared_expert.down_proj.weight":
             "layers.*.shared_experts.kernel_down_proj_FD",
@@ -403,11 +406,11 @@ class Llama4WeightLoader:
             "layers.*.shared_experts.kernel_up_proj_DF",
             # dense layers
             "language_model.model.layers.*.feed_forward.down_proj.weight":
-            "layers.*.custom_module.kernel_down_proj_FD",
+            "layers.*.dense_ffw.kernel_down_proj_FD",
             "language_model.model.layers.*.feed_forward.up_proj.weight":
-            "layers.*.custom_module.kernel_up_proj_DF",
+            "layers.*.dense_ffw.kernel_up_proj_DF",
             "language_model.model.layers.*.feed_forward.gate_proj.weight":
-            "layers.*.custom_module.kernel_gating_DF",
+            "layers.*.dense_ffw.kernel_gating_DF",
         }
 
         self._loaded_to_standardized_keys.update(expert_mappings_to_use)
@@ -550,7 +553,14 @@ class Llama4WeightLoader:
                         # else:
                         #     cast_type = model_weight.value.dtype
 
-                        cast_type = model_weight.value.dtype
+                        # print(f"--- Inspecting: {mapped_name} ---")
+                        # print(f"Variable is: {model_weight}")
+                        # print(f"Type is: {type(model_weight)}")
+
+                        if is_scale:
+                            cast_type = model_weight.array.scale.value.dtype
+                        else:
+                            cast_type = model_weight.array.qvalue.value.dtype
                         torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
                         loaded_weight = jnp.array(loaded_weight.view(torch_view_type).numpy()).view(cast_type)
 
@@ -585,9 +595,9 @@ class Llama4WeightLoader:
                 model_weight = get_param(model_params, mapped_name)
 
                 # ============================= ADD ================================
-                print(f"--- Inspecting: {mapped_name} ---")
-                print(f"Variable is: {model_weight}")
-                print(f"Type is: {type(model_weight)}")
+                # print(f"--- Inspecting: {mapped_name} ---")
+                # print(f"Variable is: {model_weight}")
+                # print(f"Type is: {type(model_weight)}")
                 cast_type = model_weight.value.dtype
                 torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
                 loaded_weight = jnp.array(loaded_weight.view(torch_view_type).numpy()).view(cast_type)
