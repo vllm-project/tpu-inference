@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the LMCache project
 
+import functools
 import hashlib
 from dataclasses import dataclass
-from typing import Iterable, List, Literal, Optional, Tuple
+from typing import Callable, Iterable, List, Literal, Optional, Tuple
 
 import jax
 from vllm.config import get_current_vllm_config
@@ -103,31 +104,109 @@ def get_kv_connector_cache_layout():
     return None
 
 
-def swap_ops(
-    src_kv_cache: jax.Array,
-    out_sharding: Optional[jax.sharding.NamedSharding],
+SwapFn = Callable[
+    [
+        List[jax.Array],  # src_kv_caches
+        jax.sharding.NamedSharding,  # src_sharding
+        jax.sharding.NamedSharding,  # dst_sharding
+        Literal["h2d", "d2h"],  # direction
+    ],
+    List[jax.Array],  # return value
+]
+
+JittedKVCacheSwapFn = Callable[[List[jax.Array]], List[jax.Array]]
+
+
+# NOTE(jcgu): keep the same interface as the pallas one
+def jax_swap_kv_caches(
+    src_kv_caches: List[jax.Array],
+    src_sharding: jax.sharding.NamedSharding,
+    dst_sharding: jax.sharding.NamedSharding,
     direction: Literal["h2d", "d2h"],
-    op_type: CPU_OFFLOADING_SWAP_OP_TYPE,
-) -> jax.Array:
-    if op_type == "jax":
-        return jax_swap_kv_cache(src_kv_cache, out_sharding, direction)
-    return dma_kv_cache(src_kv_cache, out_sharding, direction)
+) -> List[jax.Array]:
+    """Swap in / out multi-layer kv_cache using jax device_put
+
+    Args:
+        src_kv_caches: [kv_cache of each layer]
+        src_sharding: kv_caches' original sharding
+        dst_sharding: kv_caches' target sharding (different memory_kind)
+        direction: h2d -> swap_in, d2h -> swap_out
+    Returns:
+        a list of jax.Array objects with the dst_sharding
+    """
+
+    def _jax_device_put(input_array):
+        return jax.device_put(input_array, dst_sharding)
+
+    return jax.tree.map(_jax_device_put, src_kv_caches)
 
 
-def jax_swap_kv_cache(
-    src_kv_cache: jax.Array,
-    out_sharding: Optional[jax.sharding.NamedSharding],
+def pallas_swap_kv_caches(
+    src_kv_caches: List[jax.Array],
+    src_sharding: jax.sharding.NamedSharding,
+    dst_sharding: jax.sharding.NamedSharding,
     direction: Literal["h2d", "d2h"],
-) -> jax.Array:
-    cpu_device = jax.devices("cpu")[0]
-    return jax.device_put(src_kv_cache,
-                          cpu_device if direction == "d2h" else out_sharding)
+) -> List[jax.Array]:
+    """Swap in / out multi-layer kv_cache using pallas dma kernel
+
+    Args:
+        src_kv_caches: [kv_cache of each layer]
+        src_sharding: kv_caches' original sharding
+        dst_sharding: kv_caches' target sharding (different memory_kind)
+        direction: h2d -> swap_in, d2h -> swap_out
+    Returns:
+        a list of jax.Array objects with the dst_sharding
+    """
+
+    def swap_in_fn(inputs, input_sharding, out_sharding):
+
+        def _swap_in(hbm_sharded_array):
+            return h2d_dma(hbm_sharded_array, input_sharding, out_sharding)
+
+        return jax.tree.map(_swap_in, inputs)
+
+    def swap_out_fn(inputs, input_sharding, out_sharding):
+
+        def _swap_out(hbm_sharded_array):
+            return d2h_dma(hbm_sharded_array, input_sharding, out_sharding)
+
+        return jax.tree.map(_swap_out, inputs)
+
+    if direction == "d2h":
+        return swap_out_fn(src_kv_caches, src_sharding, dst_sharding)
+    elif direction == "h2d":
+        return swap_in_fn(src_kv_caches, src_sharding, dst_sharding)
 
 
-def dma_kv_cache(
-    src_kv_cache: jax.Array,
-    out_sharding: jax.sharding.NamedSharding,
-    direction: CPU_OFFLOADING_SWAP_OP_TYPE,
-) -> jax.Array:
-    dma_fn = d2h_dma if direction == "d2h" else h2d_dma
-    return dma_fn(src_kv_cache, out_sharding)
+def get_jitted_kv_cache_swap_fn(
+    swap_op_type: CPU_OFFLOADING_SWAP_OP_TYPE,
+    host_sharding: jax.sharding.NamedSharding,
+    device_sharding: jax.sharding.NamedSharding
+) -> Tuple[JittedKVCacheSwapFn, JittedKVCacheSwapFn]:
+    """jit compile the swap_in and swap_out functions
+
+    Args:
+        swap_op_type : (str) pallas or jax
+        host_sharding:
+        device_sharding:
+
+    Returns:
+        A tuple containing the jitted swap-in and swap-out functions.
+    """
+    _swap_fn: SwapFn = pallas_swap_kv_caches if swap_op_type == "pallas" else jax_swap_kv_caches
+    # swap_in (host_sharding), swap_out (device_sharding)
+    swap_in_fn = functools.partial(jax.jit(
+        _swap_fn,
+        static_argnames=["src_sharding", "dst_sharding", "direction"],
+        out_shardings=device_sharding),
+                                   src_sharding=host_sharding,
+                                   dst_sharding=device_sharding,
+                                   direction="h2d")
+    swap_out_fn = functools.partial(jax.jit(
+        _swap_fn,
+        static_argnames=["src_sharding", "dst_sharding", "direction"],
+        out_shardings=host_sharding),
+                                    src_sharding=device_sharding,
+                                    dst_sharding=host_sharding,
+                                    direction="d2h")
+    return swap_in_fn, swap_out_fn

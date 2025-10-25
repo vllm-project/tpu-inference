@@ -22,20 +22,17 @@ def host_hbm_dma(x_ref, y_ref):
 # NOTE(jcgu): only support NamedSharding, does not support SingleDeviceSharding
 def d2h_dma(
     input_array: jax.Array,
+    input_sharding: jax.sharding.NamedSharding,
     out_sharding: jax.sharding.NamedSharding,
 ) -> jax.Array:
     """ DMA a device jax array to host memory.
     Args:
         input_array: input jax array on device hbm
+        input_sharding: input's device sharding
         out_sharding: output's host sharding
     Returns:
         jax array on host memory with the same sharding
     """
-    device_sharding = input_array.sharding
-    assert isinstance(device_sharding, jax.sharding.NamedSharding)
-    assert isinstance(out_sharding, jax.sharding.NamedSharding)
-    assert device_sharding.memory_kind == "device"
-    assert out_sharding.memory_kind == "pinned_host"
 
     @jax.jit
     def _d2h_dma_call(x):
@@ -52,9 +49,10 @@ def d2h_dma(
     d2h_dma_kernel = jax.jit(
         jax.shard_map(
             _d2h_dma_call,
-            mesh=device_sharding.mesh,
-            in_specs=device_sharding.spec,
+            mesh=input_sharding.mesh,
+            in_specs=input_sharding.spec,
             out_specs=out_sharding.spec,
+            check_vma=False,
         ),
         out_shardings=out_sharding,
     )
@@ -66,22 +64,17 @@ def d2h_dma(
 # NOTE(jcgu): only support NamedSharding, does not support SingleDeviceSharding
 def h2d_dma(
     input_array: jax.Array,
+    input_sharding: jax.sharding.NamedSharding,
     out_sharding: jax.sharding.NamedSharding,
 ) -> jax.Array:
     """ DMA a host jax array to device hbm.
     Args:
         input_array: input jax array on host memory
+        input_sharding: the host sharding for input
         out_sharding: the device sharding for output
     Returns:
         jax array on device hbm with the assigned sharding
     """
-
-    host_sharding = input_array.sharding
-
-    assert isinstance(host_sharding, jax.sharding.NamedSharding)
-    assert isinstance(out_sharding, jax.sharding.NamedSharding)
-    assert host_sharding.memory_kind == "pinned_host"
-    assert out_sharding.memory_kind == "device"
 
     @jax.jit
     def _h2d_dma_call(x):
@@ -98,11 +91,12 @@ def h2d_dma(
     h2d_dma_kernel = jax.jit(
         jax.shard_map(
             _h2d_dma_call,
-            mesh=host_sharding.mesh,
-            in_specs=host_sharding.spec,
+            mesh=input_sharding.mesh,
+            in_specs=input_sharding.spec,
             out_specs=out_sharding.spec,
             check_vma=False,
         ),
         out_shardings=out_sharding,
     )
+
     return h2d_dma_kernel(input_array)

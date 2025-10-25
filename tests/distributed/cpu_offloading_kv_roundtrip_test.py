@@ -139,7 +139,7 @@ class TestCpuOffloadingKVRoundTrip(jtu.JaxTestCase):
             return None
 
         # 1. Setup
-        os.environ['TPU_KV_OFFLOADING_SWAP_OP_TYPE'] = swap_op_type
+        os.environ['TPU_OFFLOADING_SWAP_OP_TYPE'] = swap_op_type
         mesh = self.create_mesh((1, model_axis_size), ("data", "model"))
         if mesh is None:
             return None
@@ -211,6 +211,8 @@ class TestCpuOffloadingKVRoundTrip(jtu.JaxTestCase):
             assert len(
                 cached_value
             ) == num_layers, f"cache_value layer: {len(cached_value)} != {num_layers}"
+            # NOTE(jcgu): comment out this assertion since we've reverted back to using SingleDeviceSharding
+            # assert cached_value[0].sharding.memory_kind == "pinned_host"
             retrieved_chunks.append(cached_value[0])  # Get first layer
 
         # Assemble on CPU and compare with original
@@ -243,5 +245,7 @@ class TestCpuOffloadingKVRoundTrip(jtu.JaxTestCase):
         jax.block_until_ready(worker.runner.kv_caches)
 
         # 5. Verify TPU Reloaded Content
-        self.assertArraysEqual(source_kv_cache[0][target_block_ids, ...],
-                               dest_kv_cache[0][target_block_ids, ...])
+        for i in range(num_layers):
+            self.assertArraysEqual(
+                source_kv_cache[i][target_block_ids, ...],
+                worker.runner.kv_caches[i][target_block_ids, ...])
