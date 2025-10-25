@@ -1,6 +1,6 @@
 # https://github.com/vllm-project/vllm/blob/ed10f3cea199a7a1f3532fbe367f5c5479a6cae9/tests/tpu/lora/test_lora.py
 import os
-import subprocess
+import time
 
 import pytest
 import vllm
@@ -26,30 +26,6 @@ def setup_vllm(num_loras: int, tp: int = 1) -> vllm.LLM:
                     enable_lora=True,
                     max_loras=num_loras,
                     max_lora_rank=8)
-
-
-@pytest.fixture(autouse=True)
-def run_after_each_test():
-    # --- Setup code (runs before each test) ---
-    # print("\nSetting up...")
-    command = "lsof -t /dev/vfio/* | xargs kill"
-    results = subprocess.run(command,
-                             shell=True,
-                             capture_output=True,
-                             text=True)
-    print(
-        f"Setting up: Killing TPU resources: {results.stdout}, {results.stderr}"
-    )
-    yield  # This is where the test runs
-    # --- Teardown code (runs after each test) ---
-    command = "lsof -t /dev/vfio/* | xargs kill"
-    results = subprocess.run(command,
-                             shell=True,
-                             capture_output=True,
-                             text=True)
-    print(
-        f"Tear down: Killing TPU resources: {results.stdout}, {results.stderr}"
-    )
 
 
 # For multi-chip test, we only use TP=2 because the base model Qwen/Qwen2.5-3B-Instruct has 2 kv heads and the current attention kernel requires it to be divisible by tp_size.
@@ -80,6 +56,9 @@ def test_single_lora(tp):
 
     assert answer.isdigit()
     assert int(answer) == 2
+
+    del llm
+    time.sleep(10)
 
 
 @pytest.mark.parametrize("tp", TP)
@@ -112,6 +91,9 @@ def test_lora_hotswapping(tp):
 
         assert answer.isdigit()
         assert int(answer) == i + 1, f"Expected {i + 1}, got {answer}"
+
+    del llm
+    time.sleep(10)
 
 
 @pytest.mark.parametrize("tp", TP)
@@ -146,3 +128,6 @@ def test_multi_lora(tp):
         assert int(
             output.strip()
             [0]) == i + 1, f"Expected {i + 1}, got {int(output.strip()[0])}"
+
+    del llm
+    time.sleep(10)
