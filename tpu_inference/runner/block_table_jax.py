@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from vllm.logger import init_logger
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
 

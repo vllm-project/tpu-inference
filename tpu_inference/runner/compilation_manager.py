@@ -192,7 +192,8 @@ class CompilationManager:
         source_paddings: List[int],
         indices_paddings: List[int],
         hidden_dim: int,
-        sharding: Optional[NamedSharding] = None,
+        input_sharding: Optional[NamedSharding] = None,
+        indices_sharding: Optional[NamedSharding] = None,
         only_equal_paddings: bool = False,
         check_should_skip_padding: bool = True,
     ) -> None:
@@ -225,9 +226,9 @@ class CompilationManager:
                     continue
 
                 input_tensor = self._create_dummy_tensor(
-                    (array_size, hidden_dim), jnp.bfloat16, sharding)
+                    (array_size, hidden_dim), jnp.bfloat16, input_sharding)
                 indices_to_select = self._create_dummy_tensor(
-                    (indices_count, ), jnp.int32, sharding)
+                    (indices_count, ), jnp.int32, indices_sharding)
 
                 self._run_compilation(
                     f"select_from_array [{name}]",
@@ -251,8 +252,10 @@ class CompilationManager:
             source_paddings=self.runner.num_tokens_paddings,
             indices_paddings=index_paddings,
             hidden_dim=hsize,
-            sharding=NamedSharding(self.runner.mesh,
-                                   PartitionSpec(ShardingAxisName.ATTN_DATA)),
+            input_sharding=NamedSharding(
+                self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA)),
+            indices_sharding=NamedSharding(
+                self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA)),
         )
 
         if self.runner.speculative_config:
@@ -262,16 +265,16 @@ class CompilationManager:
                 source_paddings=self.runner.num_logits_paddings,
                 indices_paddings=self.runner.num_reqs_paddings,
                 hidden_dim=vocab_size,
-                sharding=NamedSharding(self.runner.mesh,
-                                       PartitionSpec(None, "model")),
+                input_sharding=NamedSharding(self.runner.mesh,
+                                             PartitionSpec(None, "model")),
             )
             self._precompile_select_from_array_helper(
                 name="select target tokens for spec decoding",
                 source_paddings=self.runner.num_logits_paddings,
                 indices_paddings=self.runner.num_logits_paddings,
                 hidden_dim=vocab_size,
-                sharding=NamedSharding(self.runner.mesh,
-                                       PartitionSpec(None, "model")),
+                input_sharding=NamedSharding(self.runner.mesh,
+                                             PartitionSpec(None, "model")),
                 only_equal_paddings=True,
             )
 

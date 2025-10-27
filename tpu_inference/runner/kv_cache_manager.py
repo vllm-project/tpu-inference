@@ -1,6 +1,5 @@
 import functools
 import math
-import os
 from typing import TYPE_CHECKING, Dict, List
 
 import jax
