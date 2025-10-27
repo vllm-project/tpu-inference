@@ -65,7 +65,8 @@ class TPUWorker(AbstractTpuWorker):
         if impl != "vllm":  # vllm-pytorch implementation does not need this conversion
             # NOTE(wenlong): because sometimes mm needs to use torch for preprocessing
             # dtype can be converted to jnp.dtype in tpu_jax.py
-            if not jax.dtypes.issubdtype(vllm_config.model_config.dtype, jnp.generic):
+            if not jax.dtypes.issubdtype(vllm_config.model_config.dtype,
+                                         jnp.generic):
                 vllm_config.model_config.dtype = _DTYPE.get(
                     vllm_config.model_config.dtype, jnp.bfloat16)
 
