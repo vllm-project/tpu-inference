@@ -43,7 +43,7 @@ For this reason, we’ve provided a **[Recommended Models and Features](https://
 
 ## Get started
 
-Get started with vLLM on TPUs by following the [quickstart guide](https://docs.vllm.ai/projects/tpu/en/latest/getting_started/quickstart.html).
+Get started with vLLM on TPUs by following the [installation guide](https://docs.vllm.ai/projects/tpu/en/latest/getting_started/installation.html).
 
 Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn more.
 

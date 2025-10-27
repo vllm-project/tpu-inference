@@ -26,7 +26,7 @@ For this reason, we’ve provided a **[Recommended Models and Features](recommen
 
 ## Getting Started
 
-If you are new to vLLM on TPU, we recommend starting with the **[Quickstart](getting_started/quickstart.md)** guide. It will walk you through the process of setting up your environment and running your first model.
+If you are new to vLLM on TPU, we recommend starting with the **[Installation](getting_started/installation.md)** guide to set up your environment, and then following the **[Quickstart](getting_started/quickstart.md)** guide to run your first model.
 
 ## Developer Guides
 
