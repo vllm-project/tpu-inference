@@ -156,7 +156,7 @@ class GptOssAttention(nnx.Module):
             P(),  # page_indices_flat: Replicated
             P(),  # query_start_loc: Replicated
             P(),  # distribution: Replicated
-            P(('model')),  # sinks
+            #P(('model')),  # sinks
         )
         out_specs = (self.attn_o_tnh, kv_cache_spec)
 
@@ -184,7 +184,7 @@ class GptOssAttention(nnx.Module):
                 md.block_tables,
                 md.query_start_loc,
                 md.request_distribution,
-                sinks,
+                #sinks,
             )
         return kv_cache, output_TNH
 
