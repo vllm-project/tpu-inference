@@ -124,18 +124,18 @@ class ShardingConfigManager:
 
     @classmethod
     def validate(cls, vllm_config, sharding_strategy):
-        if vllm_config.speculative_config is not None:
-            total_dp_size = sharding_strategy.data_parallelism * sharding_strategy.attention_data_parallelism
-            raise ValueError(
-                f"Speculative decoding is not supported with data parallelism "
-                f"(DP size: {total_dp_size}). Please disable speculative decoding or "
-                f"set data parallelism to 1.")
-        if vllm_config.lora_config is not None:
-            total_dp_size = sharding_strategy.data_parallelism * sharding_strategy.attention_data_parallelism
-            raise ValueError(
-                f"LoRA is not supported with data parallelism "
-                f"(DP size: {total_dp_size}). Please disable LoRA or "
-                f"set data parallelism to 1.")
+        total_dp_size = sharding_strategy.data_parallelism * sharding_strategy.attention_data_parallelism
+        if total_dp_size > 1:
+            if vllm_config.speculative_config is not None:
+                raise ValueError(
+                    f"Speculative decoding is not supported with data parallelism "
+                    f"(DP size: {total_dp_size}). Please disable speculative decoding or "
+                    f"set data parallelism to 1.")
+            if vllm_config.lora_config is not None:
+                raise ValueError(
+                    f"LoRA is not supported with data parallelism "
+                    f"(DP size: {total_dp_size}). Please disable LoRA or "
+                    f"set data parallelism to 1.")
 
     @property
     def total_dp_size(self) -> int:
