@@ -649,8 +649,7 @@ class Llama4WeightLoader:
                 for buffer_key, expert_map in self.expert_weights_buffer.items(
                 ):
                     sorted_exp_nums = sorted(expert_map.keys())
-                    aggregated_weight = jnp.stack(
-                        [expert_map[k] for k in sorted_exp_nums], axis=0)
+                    aggregated_weight = jnp.stack([expert_map[k] for k in sorted_exp_nums], axis=0)
                     is_scale = buffer_key.endswith("_scale")
                     base_mapped_name = buffer_key.replace("_scale",
                                                           "").replace(
@@ -658,10 +657,14 @@ class Llama4WeightLoader:
 
                     model_weight = get_param(model_params, base_mapped_name)
 
-                    assert hasattr(
-                        model_weight, 'array'
-                    ), f"Expected MoE weight '{base_mapped_name}' to be a quantized array (qarray)"
+                    assert hasattr(model_weight, 'array'), f"Expected MoE weight '{base_mapped_name}' to be a quantized array (qarray)"
 
+                    # if model_weight.value.shape != aggregated_weight.shape:
+                    #     raise ValueError(
+                    #         f"[AGGREGATED] Loaded shape {aggregated_weight.shape} "
+                    #         f"does not match model shape for {loaded_name}: {model_weight.value.shape}!"
+                    #     )
+                    
                     if is_scale:
                         loaded_name = f"{base_mapped_name}.array.scale.value"
                         if model_weight.array.scale.value.shape != aggregated_weight.shape:
