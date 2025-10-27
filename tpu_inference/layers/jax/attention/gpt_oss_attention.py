@@ -52,7 +52,6 @@ class GptOssAttention(nnx.Module):
 
     def __post_init__(self, rngs: nnx.Rngs):
         """Initializes weights, biases, and RoPE module."""
-        #D, N, K, H = self.hidden_size, self.num_attention_heads, self.num_key_value_heads, self.head_dim
 
         self.sm_scale = 1.0 / (self.head_dim**0.5)
 
