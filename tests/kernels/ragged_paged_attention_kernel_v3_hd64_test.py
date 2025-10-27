@@ -5,8 +5,8 @@ from absl.testing import absltest, parameterized
 from jax._src import dtypes
 from jax._src import test_util as jtu
 
-from tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 import (
-    ragged_paged_attention_hd64, ref_ragged_paged_attention_hd64)
+from tpu_inference.kernels.ragged_paged_attention.v3.kernel import (
+    ragged_paged_attention, ref_ragged_paged_attention)
 from tpu_inference.kernels.ragged_paged_attention.v3.util import (
     align_to, cdiv, get_dtype_packing)
 
@@ -157,12 +157,12 @@ class RaggedPagedAttentionHeadDim64KernelTest(jtu.JaxTestCase):
             "v_scale": v_scale,
         }
 
-        expected, expected_kv_cache = ref_ragged_paged_attention_hd64(
+        expected, expected_kv_cache = ref_ragged_paged_attention(
             *args,
             **kwargs,
         )
 
-        output, updated_kv_cache = ragged_paged_attention_hd64(
+        output, updated_kv_cache = ragged_paged_attention(
             *args,
             **kwargs,
             num_kv_pages_per_block=num_kv_pages_per_block,
