@@ -10,7 +10,7 @@ RUN pip uninstall -y torch torch_xla torchvision
 
 # Install some basic utilities
 RUN apt-get update && apt-get install -y \
-    git lsof \
+    git \
     libopenblas-base libopenmpi-dev libomp-dev
 
 # Build vLLM
