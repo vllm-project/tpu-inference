@@ -11,6 +11,7 @@ from tpu_inference import utils
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.attention_interface import attention
 from tpu_inference.layers.jax.rope_interface import apply_rope
+from tpu_inference.layers.jax.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (get_default_maps,
                                                          load_hf_weights)
@@ -32,7 +33,8 @@ class Qwen2MLP(nnx.Module):
             intermediate_size,
             use_bias=False,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
+            kernel_init=nnx.with_partitioning(
+                init_fn, (None, ShardingAxisName.MLP_TENSOR)),
             rngs=rng,
         )
         self.up_proj = nnx.Linear(
@@ -40,7 +42,8 @@ class Qwen2MLP(nnx.Module):
             intermediate_size,
             use_bias=False,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
+            kernel_init=nnx.with_partitioning(
+                init_fn, (None, ShardingAxisName.MLP_TENSOR)),
             rngs=rng,
         )
         self.down_proj = nnx.Linear(
@@ -48,7 +51,8 @@ class Qwen2MLP(nnx.Module):
             hidden_size,
             use_bias=False,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
+            kernel_init=nnx.with_partitioning(
+                init_fn, (ShardingAxisName.MLP_TENSOR, None)),
             rngs=rng,
         )
         self.act_fn = modeling_flax_utils.ACT2FN[act]
