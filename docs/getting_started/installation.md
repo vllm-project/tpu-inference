@@ -4,9 +4,9 @@ This guide provides instructions for installing and running `tpu-inference`.
 
 There are three ways to install `tpu-inference`:
 
-1. **[Install with pip]**
-2. **[Run with Docker]**
-3. **[Install from source]**
+1. **[Install with pip](#install-using-pip)**
+2. **[Run with Docker](#run-with-docker)**
+3. **[Install from source](#install-from-source)**
 
 ## Install using pip
 
