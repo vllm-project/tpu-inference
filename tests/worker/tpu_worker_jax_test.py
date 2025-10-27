@@ -1,17 +1,18 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+from vllm.config import ModelConfig
 from vllm.lora.request import LoRARequest
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import DraftTokenIds
 
 # Import the abstract classes and interfaces for mocking
-from tpu_commons.di.abstracts import (AbstractKVCacheConfig,
-                                      AbstractLoRARequest,
-                                      AbstractSchedulerOutput)
-from tpu_commons.di.interfaces import HostInterface
+from tpu_inference.di.abstracts import (AbstractKVCacheConfig,
+                                        AbstractLoRARequest,
+                                        AbstractSchedulerOutput)
+from tpu_inference.di.interfaces import HostInterface
 # The class we are testing
-from tpu_commons.worker.tpu_worker_jax import TPUWorker
+from tpu_inference.worker.tpu_worker_jax import TPUWorker
 
 
 @pytest.fixture
@@ -27,9 +28,6 @@ def mock_vllm_config():
     This version builds the mock explicitly to avoid spec-related AttributeErrors.
     """
     # Create mocks for the nested config objects first
-    mock_model_conf = MagicMock()
-    mock_model_conf.trust_remote_code = False
-
     mock_cache_conf = MagicMock()
     mock_cache_conf.gpu_memory_utilization = 0.9
     mock_cache_conf.num_gpu_blocks = 0
@@ -43,7 +41,7 @@ def mock_vllm_config():
 
     # Create the main config mock and attach the others without a top-level spec
     config = MagicMock()
-    config.model_config = mock_model_conf
+    config.model_config = ModelConfig(model="Qwen/Qwen3-0.6B")
     config.cache_config = mock_cache_conf
     config.parallel_config = mock_parallel_conf
     config.additional_config = mock_additional_config
@@ -75,7 +73,7 @@ class TestTPUWorker:
         assert worker.profile_dir is None
         assert worker.devices == ['tpu:0']
 
-    @patch('tpu_commons.worker.tpu_worker_jax.envs')
+    @patch('tpu_inference.worker.tpu_worker_jax.envs')
     def test_init_with_profiler_on_rank_zero(self, mock_envs,
                                              mock_host_interface,
                                              mock_vllm_config):
@@ -88,7 +86,7 @@ class TestTPUWorker:
                            distributed_init_method="test_method")
         assert worker.profile_dir == "/tmp/profiles"
 
-    @patch('tpu_commons.worker.tpu_worker_jax.envs')
+    @patch('tpu_inference.worker.tpu_worker_jax.envs')
     def test_init_with_profiler_on_other_ranks(self, mock_envs,
                                                mock_host_interface,
                                                mock_vllm_config):
@@ -116,10 +114,11 @@ class TestTPUWorker:
         assert worker.cache_config.num_gpu_blocks == 2048
         assert worker.cache_config.num_cpu_blocks == 1024
 
-    @patch('tpu_commons.worker.tpu_worker_jax.TPUModelRunner')
-    @patch('tpu_commons.worker.tpu_worker_jax.utils')
-    @patch('tpu_commons.worker.tpu_worker_jax.jax')
-    @patch('tpu_commons.worker.tpu_worker_jax.ensure_kv_transfer_initialized')
+    @patch('tpu_inference.worker.tpu_worker_jax.TPUModelRunner')
+    @patch('tpu_inference.worker.tpu_worker_jax.utils')
+    @patch('tpu_inference.worker.tpu_worker_jax.jax')
+    @patch(
+        'tpu_inference.worker.tpu_worker_jax.ensure_kv_transfer_initialized')
     def test_init_device_with_provided_devices(
             self, mock_ensure_kv_transfer_initialized, mock_jax, mock_utils,
             mock_runner_cls, mock_host_interface, mock_vllm_config):
@@ -138,10 +137,11 @@ class TestTPUWorker:
         mock_runner_cls.assert_called_once_with(mock_vllm_config, mock_devices)
         assert isinstance(worker.model_runner, MagicMock)
 
-    @patch('tpu_commons.worker.tpu_worker_jax.TPUModelRunner')
-    @patch('tpu_commons.worker.tpu_worker_jax.utils')
-    @patch('tpu_commons.worker.tpu_worker_jax.jax')
-    @patch('tpu_commons.worker.tpu_worker_jax.ensure_kv_transfer_initialized')
+    @patch('tpu_inference.worker.tpu_worker_jax.TPUModelRunner')
+    @patch('tpu_inference.worker.tpu_worker_jax.utils')
+    @patch('tpu_inference.worker.tpu_worker_jax.jax')
+    @patch(
+        'tpu_inference.worker.tpu_worker_jax.ensure_kv_transfer_initialized')
     def test_init_device_autodetects_devices(
             self, mock_ensure_kv_transfer_initialized, mock_jax, mock_utils,
             mock_runner_cls, mock_host_interface, mock_vllm_config):
@@ -164,7 +164,7 @@ class TestTPUWorker:
         mock_runner_cls.assert_called_once_with(mock_vllm_config,
                                                 expected_devices)
 
-    @patch('tpu_commons.worker.tpu_worker_jax.utils')
+    @patch('tpu_inference.worker.tpu_worker_jax.utils')
     def test_determine_available_memory(self, mock_utils, mock_host_interface,
                                         mock_vllm_config):
         """Tests the available HBM memory calculation."""
@@ -183,9 +183,11 @@ class TestTPUWorker:
         available_mem = worker.determine_available_memory()
 
         mock_utils.hbm_usage_bytes.assert_called_once_with(mock_devices)
-        # Total free: (1000-100) + (1000-200) = 900 + 800 = 1700 GiB
-        # Taxed: 1700 * 0.9 = 1530 GiB
-        expected_mem = 1530 * 1024**3
+        # Total limit: 1000 + 1000 = 2000 GiB
+        # Total cap: 2000 * 0.9 = 1800 GiB
+        # Total used: 100 + 200 = 300 GiB
+        # Total free = 1800 - 300 = 1500 GiB
+        expected_mem = 1500 * 1024**3
         assert available_mem == expected_mem
 
     #
@@ -193,8 +195,8 @@ class TestTPUWorker:
     #
 
     @patch(
-        'tpu_commons.worker.tpu_worker_jax.adapt_scheduler_output_if_needed')
-    @patch('tpu_commons.worker.tpu_worker_jax.TPUModelRunner')
+        'tpu_inference.worker.tpu_worker_jax.adapt_scheduler_output_if_needed')
+    @patch('tpu_inference.worker.tpu_worker_jax.TPUModelRunner')
     def test_execute_model(self, mock_runner_cls, mock_adapter_fn,
                            mock_host_interface, mock_vllm_config):
         """Tests that the driver worker executes the model and returns the concrete vLLM output."""
@@ -227,8 +229,8 @@ class TestTPUWorker:
         assert result == mock_model_output
 
     @patch(
-        'tpu_commons.worker.tpu_worker_jax.adapt_scheduler_output_if_needed')
-    @patch('tpu_commons.worker.tpu_worker_jax.TPUModelRunner')
+        'tpu_inference.worker.tpu_worker_jax.adapt_scheduler_output_if_needed')
+    @patch('tpu_inference.worker.tpu_worker_jax.TPUModelRunner')
     def test_execute_model_non_driver_returns_none(self, mock_runner_cls,
                                                    mock_adapter_fn,
                                                    mock_host_interface,
@@ -270,7 +272,7 @@ class TestTPUWorker:
         worker.model_runner.take_draft_token_ids.assert_called_once()
         assert result == mock_draft_tokens
 
-    @patch('tpu_commons.worker.tpu_worker_jax.adapt_lora_request_if_needed')
+    @patch('tpu_inference.worker.tpu_worker_jax.adapt_lora_request_if_needed')
     def test_add_lora_not_implemented(self, mock_adapter_fn,
                                       mock_host_interface, mock_vllm_config):
         """Tests that add_lora raises NotImplementedError."""
@@ -291,7 +293,7 @@ class TestTPUWorker:
                 match="LoRA is not supported by the JAX worker yet."):
             worker.add_lora(mock_lora_request)
 
-    @patch('tpu_commons.worker.tpu_worker_jax.adapt_lora_request_if_needed')
+    @patch('tpu_inference.worker.tpu_worker_jax.adapt_lora_request_if_needed')
     def test_add_lora_not_implemented_lora_request(self, mock_adapter_fn,
                                                    mock_host_interface,
                                                    mock_vllm_config):
@@ -317,7 +319,7 @@ class TestTPUWorker:
     # --- Profiling and Health Check Tests ---
     #
 
-    @patch('tpu_commons.worker.tpu_worker_jax.jax')
+    @patch('tpu_inference.worker.tpu_worker_jax.jax')
     @patch.dict('os.environ', {"PYTHON_TRACER_LEVEL": "1"}, clear=True)
     def test_profile_start(self, mock_jax, mock_host_interface,
                            mock_vllm_config):
@@ -338,7 +340,7 @@ class TestTPUWorker:
         # Verify options from env var were used
         assert kwargs['profiler_options'].python_tracer_level == '1'
 
-    @patch('tpu_commons.worker.tpu_worker_jax.jax')
+    @patch('tpu_inference.worker.tpu_worker_jax.jax')
     def test_profile_stop(self, mock_jax, mock_host_interface,
                           mock_vllm_config):
         """Tests stopping the JAX profiler."""
@@ -390,7 +392,8 @@ class TestTPUWorker:
         mock_runner_method = getattr(worker.model_runner, runner_method_name)
         mock_runner_method.assert_called_once_with(*method_args)
 
-    @patch('tpu_commons.worker.tpu_worker_jax.adapt_kv_cache_config_if_needed')
+    @patch(
+        'tpu_inference.worker.tpu_worker_jax.adapt_kv_cache_config_if_needed')
     def test_initialize_from_config(self, mock_adapter_fn, mock_host_interface,
                                     mock_vllm_config):
         """Tests the special case pass-through for initialize_from_config."""
@@ -410,7 +413,8 @@ class TestTPUWorker:
         worker.model_runner.initialize_kv_cache.assert_called_once_with(
             "concrete_vllm_object")
 
-    @patch('tpu_commons.worker.tpu_worker_jax.adapt_kv_cache_config_if_needed')
+    @patch(
+        'tpu_inference.worker.tpu_worker_jax.adapt_kv_cache_config_if_needed')
     def test_initialize_from_config_kv_cache_config(self, mock_adapter_fn,
                                                     mock_host_interface,
                                                     mock_vllm_config):

@@ -6,17 +6,21 @@
 This module defines a framework for sampling benchmark requests from various
 datasets. Each dataset subclass of BenchmarkDataset must implement sample
 generation. Supported dataset types include:
-    - MMLMDataset
-    - MLPerfDataset
+  - MMLMDataset
+  - MLPerfDataset
+  - Random (synthetic)
+  - Sonnet
 """
 
 import logging
 import os
 import random
 from abc import ABC, abstractmethod
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Optional, Union
 
+import numpy as np
 import pandas as pd
 from transformers import PreTrainedTokenizerBase
 from vllm.lora.request import LoRARequest
@@ -38,9 +42,11 @@ class SampleRequest:
     prompt: Union[str, Any]
     prompt_len: int
     expected_output_len: int
-    multi_modal_data: Optional[Union[MultiModalDataDict, dict]] = None
+    multi_modal_data: Optional[Union[MultiModalDataDict, dict,
+                                     list[dict]]] = None
     lora_request: Optional[LoRARequest] = None
     completion: Optional[str] = None
+    request_id: Optional[str] = None
 
 
 # -----------------------------------------------------------------------------
@@ -100,8 +106,12 @@ class BenchmarkDataset(ABC):
             "load_data must be implemented in subclasses.")
 
     @abstractmethod
-    def sample(self, tokenizer: PreTrainedTokenizerBase,
-               num_requests: int) -> list[SampleRequest]:
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        request_id_prefix: str = "",
+    ) -> list[SampleRequest]:
         """
         Abstract method to generate sample requests from the dataset.
 
@@ -112,6 +122,7 @@ class BenchmarkDataset(ABC):
             tokenizer (PreTrainedTokenizerBase): The tokenizer to be used
              for processing the dataset's text.
             num_requests (int): The number of sample requests to generate.
+            request_id_prefix (str) The prefix of request_id.
 
         Returns:
             list[SampleRequest]: A list of sample requests generated from the
@@ -119,20 +130,29 @@ class BenchmarkDataset(ABC):
         """
         raise NotImplementedError("sample must be implemented in subclasses.")
 
-    def maybe_oversample_requests(self, requests: list[SampleRequest],
-                                  num_requests: int) -> None:
+    def maybe_oversample_requests(
+        self,
+        requests: list[SampleRequest],
+        num_requests: int,
+        request_id_prefix: str = "",
+    ) -> None:
         """
         Oversamples the list of requests if its size is less than the desired
         number.
 
         Args:
             requests (List[SampleRequest]): The current list of sampled
-            requests.  num_requests (int): The target number of requests.
+            requests.
+            num_requests (int): The target number of requests.
+            request_id_prefix (str) The prefix of the request ids.
         """
         if len(requests) < num_requests:
             random.seed(self.random_seed)
-            additional = random.choices(requests,
-                                        k=num_requests - len(requests))
+            additional = deepcopy(
+                random.choices(requests, k=num_requests - len(requests)))
+            for i in range(len(additional)):
+                req = additional[i]
+                req.request_id = request_id_prefix + str(len(requests) + i)
             requests.extend(additional)
             logger.info("Oversampled requests to reach %d total samples.",
                         num_requests)
@@ -371,4 +391,183 @@ class MLPerfDataset(BenchmarkDataset):
                     completion=completion,
                 ))
         self.maybe_oversample_requests(samples, num_requests)
+        return samples
+
+
+# -----------------------------------------------------------------------------
+# Random Dataset Implementation (Synthetic Data)
+# -----------------------------------------------------------------------------
+
+
+class RandomDataset(BenchmarkDataset):
+    # Default values copied from benchmark_serving.py for the random dataset.
+    DEFAULT_PREFIX_LEN = 0
+    DEFAULT_RANGE_RATIO = 0.0
+    DEFAULT_INPUT_LEN = 1024
+    DEFAULT_OUTPUT_LEN = 128
+
+    def __init__(
+        self,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        prefix_len: int = DEFAULT_PREFIX_LEN,
+        range_ratio: float = DEFAULT_RANGE_RATIO,
+        input_len: int = DEFAULT_INPUT_LEN,
+        output_len: int = DEFAULT_OUTPUT_LEN,
+        request_id_prefix: str = "",
+        **kwargs,
+    ) -> list[SampleRequest]:
+        # Enforce range_ratio < 1
+        assert range_ratio < 1.0, (
+            "random_range_ratio must be < 1.0 to ensure a valid sampling range"
+        )
+
+        vocab_size = tokenizer.vocab_size
+        num_special_tokens = tokenizer.num_special_tokens_to_add()
+        real_input_len = input_len - num_special_tokens
+
+        prefix_token_ids = (np.random.randint(
+            0, vocab_size, size=prefix_len).tolist() if prefix_len > 0 else [])
+
+        # New sampling logic: [X * (1 - b), X * (1 + b)]
+        input_low = int(real_input_len * (1 - range_ratio))
+        input_high = int(real_input_len * (1 + range_ratio))
+        output_low = int(output_len * (1 - range_ratio))
+        # Ensure the lower bound for output length is at least 1 to prevent
+        # sampling 0 tokens, which can cause request failures.
+        output_low = max(output_low, 1)
+        output_high = int(output_len * (1 + range_ratio))
+
+        # Add logging for debugging
+        logger.info("Sampling input_len from [%s, %s]", input_low, input_high)
+        logger.info("Sampling output_len from [%s, %s]", output_low,
+                    output_high)
+
+        input_lens = np.random.randint(input_low,
+                                       input_high + 1,
+                                       size=num_requests)
+        output_lens = np.random.randint(output_low,
+                                        output_high + 1,
+                                        size=num_requests)
+        offsets = np.random.randint(0, vocab_size, size=num_requests)
+
+        requests = []
+        for i in range(num_requests):
+            inner_seq = ((offsets[i] + i + np.arange(input_lens[i])) %
+                         vocab_size).tolist()
+            token_sequence = prefix_token_ids + inner_seq
+            prompt = tokenizer.decode(token_sequence)
+            # After decoding the prompt we have to encode and decode it again.
+            # This is done because in some cases N consecutive tokens
+            # give a string tokenized into != N number of tokens.
+            # For example for GPT2Tokenizer:
+            # [6880, 6881] -> ['Ġcalls', 'here'] ->
+            # [1650, 939, 486] -> ['Ġcall', 'sh', 'ere']
+            # To avoid uncontrolled change of the prompt length,
+            # the encoded sequence is truncated before being decoded again.
+            total_input_len = prefix_len + int(input_lens[i])
+            re_encoded_sequence = tokenizer.encode(
+                prompt, add_special_tokens=False)[:total_input_len]
+            prompt = tokenizer.decode(re_encoded_sequence)
+            total_input_len = len(re_encoded_sequence)
+            requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=total_input_len,
+                    expected_output_len=int(output_lens[i]),
+                    request_id=request_id_prefix + str(i),
+                ))
+
+        return requests
+
+
+# -----------------------------------------------------------------------------
+# Sonnet Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class SonnetDataset(BenchmarkDataset):
+    """
+    Simplified implementation of the Sonnet dataset.  Loads poem lines from a
+    text file and generates sample requests.  Default values here copied from
+    `benchmark_serving.py` for the sonnet dataset.
+    """
+
+    DEFAULT_PREFIX_LEN = 200
+    DEFAULT_INPUT_LEN = 550
+    DEFAULT_OUTPUT_LEN = 150
+
+    def __init__(
+        self,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.load_data()
+
+    def load_data(self) -> None:
+        if not self.dataset_path:
+            raise ValueError("dataset_path must be provided.")
+        with open(self.dataset_path, encoding="utf-8") as f:
+            self.data = f.readlines()
+
+    def sample(
+        self,
+        tokenizer,
+        num_requests: int,
+        prefix_len: int = DEFAULT_PREFIX_LEN,
+        input_len: int = DEFAULT_INPUT_LEN,
+        output_len: int = DEFAULT_OUTPUT_LEN,
+        return_prompt_formatted: bool = False,
+        request_id_prefix: str = "",
+        **kwargs,
+    ) -> list:
+        # Calculate average token length for a poem line.
+        tokenized_lines = [tokenizer(line).input_ids for line in self.data]
+        avg_len = sum(len(tokens)
+                      for tokens in tokenized_lines) / len(tokenized_lines)
+
+        # Build the base prompt.
+        base_prompt = "Pick as many lines as you can from these poem lines:\n"
+        base_msg = [{"role": "user", "content": base_prompt}]
+        base_fmt = tokenizer.apply_chat_template(base_msg,
+                                                 add_generation_prompt=True,
+                                                 tokenize=False)
+        base_offset = len(tokenizer(base_fmt).input_ids)
+        if input_len <= base_offset:
+            raise ValueError(
+                f"'input_len' must be higher than the base prompt length "
+                f"({base_offset}).")
+
+        # Determine how many poem lines to use.
+        num_input_lines = round((input_len - base_offset) / avg_len)
+        num_prefix_lines = max(round((prefix_len - base_offset) / avg_len), 0)
+        prefix_lines = self.data[:num_prefix_lines]
+
+        samples = []
+        ind = 0
+        while len(samples) < num_requests:
+            extra_lines = random.choices(self.data,
+                                         k=num_input_lines - num_prefix_lines)
+            prompt = f"{base_prompt}{''.join(prefix_lines + extra_lines)}"
+            msg = [{"role": "user", "content": prompt}]
+            prompt_formatted = tokenizer.apply_chat_template(
+                msg, add_generation_prompt=True, tokenize=False)
+            prompt_len = len(tokenizer(prompt_formatted).input_ids)
+
+            if prompt_len <= input_len:
+                samples.append(
+                    SampleRequest(
+                        prompt=prompt_formatted
+                        if return_prompt_formatted else prompt,
+                        prompt_len=prompt_len,
+                        expected_output_len=output_len,
+                        request_id=request_id_prefix + str(ind),
+                    ))
+                ind += 1
         return samples

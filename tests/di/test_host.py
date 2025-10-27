@@ -15,7 +15,7 @@ limitations under the License.
 """
 import pytest
 
-from tpu_commons.di.host import DIHost
+from tpu_inference.di.host import DIHost
 
 
 def test_register_and_resolve_no_dependencies():

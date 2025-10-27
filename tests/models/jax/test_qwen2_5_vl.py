@@ -15,7 +15,7 @@ from vllm.config import (CacheConfig, DeviceConfig, MultiModalConfig,
 
 # Import the module itself to allow patching
 # Corrected imports for the code under test
-from tpu_commons.models.jax.qwen2_5_vl import (
+from tpu_inference.models.jax.qwen2_5_vl import (
     AttentionMetadata, MultiModalEmbeddings, Qwen2_5_VisionAttention,
     Qwen2_5_VisionBlock, Qwen2_5_VisionMLP, Qwen2_5_VisionPatchEmbed,
     Qwen2_5_VisionPatchMerger, Qwen2_5_VisionRotaryEmbedding,
@@ -158,7 +158,7 @@ class TestQwen2_5_VisionMLP:
 
 class TestQwen2_5_VisionAttention:
 
-    @patch('tpu_commons.models.jax.qwen2_5_vl.sharded_flash_attention')
+    @patch('tpu_inference.models.jax.qwen2_5_vl.sharded_flash_attention')
     def test_forward_fullattn(self, mock_flash_attention: MagicMock,
                               mock_vllm_config: MockVllmConfig, rngs: nnx.Rngs,
                               mesh: Mesh, rng: PRNGKey):
@@ -174,13 +174,17 @@ class TestQwen2_5_VisionAttention:
         attn_module.flash_attention = mock_attn_fn
         x = jax.random.normal(rng, (T, B, D))
         rotary_pos_emb = jax.random.normal(rng, (T, attn_module.head_dim // 2))
+        cu_seqlens = jnp.array([0, 5])
 
-        y_full = attn_module(x, rotary_pos_emb, use_fullattn=True)
+        y_full = attn_module(x,
+                             rotary_pos_emb,
+                             cu_window_seqlens=cu_seqlens,
+                             use_fullattn=True)
         assert y_full.shape == (T, B, D)
         mock_attn_fn.assert_called_once()
         assert mock_attn_fn.call_args[0][3].q.shape == (1, 128)
 
-    @patch('tpu_commons.models.jax.qwen2_5_vl.sharded_flash_attention')
+    @patch('tpu_inference.models.jax.qwen2_5_vl.sharded_flash_attention')
     def test_forward_windowed(self, mock_flash_attention: MagicMock,
                               mock_vllm_config: MockVllmConfig, rngs: nnx.Rngs,
                               mesh: Mesh, rng: PRNGKey):
@@ -221,9 +225,9 @@ class TestQwen2_5_VisionAttention:
 
 class TestQwen2_5_VisionBlock:
 
-    @patch('tpu_commons.models.jax.qwen2_5_vl.Qwen2_5_VisionMLP',
+    @patch('tpu_inference.models.jax.qwen2_5_vl.Qwen2_5_VisionMLP',
            autospec=True)
-    @patch('tpu_commons.models.jax.qwen2_5_vl.Qwen2_5_VisionAttention',
+    @patch('tpu_inference.models.jax.qwen2_5_vl.Qwen2_5_VisionAttention',
            autospec=True)
     def test_forward(self, MockAttention: MagicMock, MockMLP: MagicMock,
                      mock_vllm_config: MockVllmConfig, rngs: nnx.Rngs,
@@ -380,8 +384,8 @@ class TestQwen2_5_VLForConditionalGeneration:
     @pytest.fixture
     def model(self, mock_vllm_config: MockVllmConfig, rng: PRNGKey,
               mesh: Mesh):
-        with patch('tpu_commons.models.jax.qwen2_5_vl.Qwen2_5_VisionTransformer', autospec=True) as MockVision, \
-             patch('tpu_commons.models.jax.qwen2_5_vl.Qwen2ForCausalLM', autospec=True) as MockLM:
+        with patch('tpu_inference.models.jax.qwen2_5_vl.Qwen2_5_VisionTransformer', autospec=True) as MockVision, \
+             patch('tpu_inference.models.jax.qwen2_5_vl.Qwen2ForCausalLM', autospec=True) as MockLM:
             mock_visual = MockVision.return_value
             mock_visual.dtype = mock_vllm_config.model_config.dtype
             mock_visual.config = mock_vllm_config.model_config.hf_config.vision_config
@@ -457,7 +461,7 @@ class TestQwen2_5_VLForConditionalGeneration:
                                                  image_grid_thw=grid_thw)
 
         tokens_per_image = (2 * 28 * 28) // (vc.spatial_merge_size**2)
-        mock_embeds = jnp.ones((tokens_per_image * 2, vc.out_hidden_size))
+        mock_embeds = jnp.ones((tokens_per_image, vc.out_hidden_size))
         model.visual.return_value = mock_embeds
 
         embeddings = model._process_image_input(image_input)
@@ -465,7 +469,7 @@ class TestQwen2_5_VLForConditionalGeneration:
         assert len(embeddings) == 2
         assert embeddings[0].shape == (tokens_per_image, vc.out_hidden_size)
         assert embeddings[1].shape == (tokens_per_image, vc.out_hidden_size)
-        model.visual.assert_called_once_with(pixel_values, grid_thw=grid_thw)
+        assert model.visual.call_count == 2
 
     def test_get_multimodal_embeddings(
             self, model: Qwen2_5_VLForConditionalGeneration):
@@ -489,7 +493,7 @@ class TestQwen2_5_VLForConditionalGeneration:
         mm_embeds_none = model.get_multimodal_embeddings(grid_thw)
         assert len(mm_embeds_none) == 0
 
-    @patch('tpu_commons.models.jax.qwen2_5_vl.merge_multimodal_embeddings')
+    @patch('tpu_inference.models.jax.qwen2_5_vl.merge_multimodal_embeddings')
     def test_get_input_embeddings(self, mock_merge_embeddings: MagicMock,
                                   model: Qwen2_5_VLForConditionalGeneration,
                                   rng: PRNGKey):
@@ -550,7 +554,7 @@ class TestQwen2_5_VLForConditionalGeneration:
         model.language_model.compute_logits.assert_called_once_with(
             hidden_states)
 
-    @patch('tpu_commons.models.jax.qwen2_5_vl.load_hf_weights')
+    @patch('tpu_inference.models.jax.qwen2_5_vl.load_hf_weights')
     def test_load_weights(self, mock_load_weights: MagicMock,
                           model: Qwen2_5_VLForConditionalGeneration,
                           mock_vllm_config: MockVllmConfig, rng: PRNGKey,
@@ -567,12 +571,12 @@ class TestQwen2_5_VLForConditionalGeneration:
         assert isinstance(model.rng, nnx.Rngs)
         assert model.language_model.rng is model.rng
 
-    @patch('tpu_commons.models.jax.qwen2_5_vl.load_hf_weights')
+    @patch('tpu_inference.models.jax.qwen2_5_vl.load_hf_weights')
     def test_load_weights_tied(self, mock_load_weights: MagicMock,
                                rng: PRNGKey, mesh: Mesh):
         mock_vllm_config_tied = MockVllmConfig(tie_word_embeddings=True)
-        with patch('tpu_commons.models.jax.qwen2_5_vl.Qwen2_5_VisionTransformer', autospec=True), \
-             patch('tpu_commons.models.jax.qwen2_5_vl.Qwen2ForCausalLM', autospec=True):
+        with patch('tpu_inference.models.jax.qwen2_5_vl.Qwen2_5_VisionTransformer', autospec=True), \
+             patch('tpu_inference.models.jax.qwen2_5_vl.Qwen2ForCausalLM', autospec=True):
             model = Qwen2_5_VLForConditionalGeneration(mock_vllm_config_tied,
                                                        rng, mesh)
 

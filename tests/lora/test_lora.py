@@ -1,4 +1,6 @@
 # https://github.com/vllm-project/vllm/blob/ed10f3cea199a7a1f3532fbe367f5c5479a6cae9/tests/tpu/lora/test_lora.py
+import os
+
 import pytest
 import vllm
 from vllm.lora.request import LoRARequest
@@ -25,23 +27,30 @@ def use_v1_only(monkeypatch: pytest.MonkeyPatch):
         yield
 
 
-def setup_vllm(num_loras: int) -> vllm.LLM:
+def setup_vllm(num_loras: int, tp: int = 1) -> vllm.LLM:
     return vllm.LLM(model="Qwen/Qwen2.5-3B-Instruct",
                     max_model_len=256,
+                    max_num_batched_tokens=64,
                     max_num_seqs=8,
+                    tensor_parallel_size=tp,
                     enable_lora=True,
                     max_loras=num_loras,
                     max_lora_rank=8)
 
 
-def test_single_lora():
+# For multi-chip test, we only use TP=2 because the base model Qwen/Qwen2.5-3B-Instruct has 2 kv heads and the current attention kernel requires it to be divisible by tp_size.
+TP = [2] if os.environ.get("USE_V6E8_QUEUE", False) else [1]
+
+
+@pytest.mark.parametrize("tp", TP)
+def test_single_lora(tp):
     """
     This test ensures we can run a single LoRA adapter on the TPU backend.
     We run "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_2_adapter" which
     will force Qwen2.5-3B-Instruct to claim 1+1=2.
     """
 
-    llm = setup_vllm(1)
+    llm = setup_vllm(1, tp)
 
     prompt = "What is 1+1? \n"
 
@@ -49,7 +58,7 @@ def test_single_lora():
         "lora_adapter_2", 2,
         "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_2_adapter")
     output = llm.generate(prompt,
-                          sampling_params=vllm.SamplingParams(max_tokens=256,
+                          sampling_params=vllm.SamplingParams(max_tokens=16,
                                                               temperature=0),
                           lora_request=lora_request)[0].outputs[0].text
 
@@ -59,7 +68,8 @@ def test_single_lora():
     assert int(answer) == 2
 
 
-def test_lora_hotswapping():
+@pytest.mark.parametrize("tp", TP)
+def test_lora_hotswapping(tp):
     """
     This test ensures we can run multiple LoRA adapters on the TPU backend, even
     if we only have space to store 1.
@@ -75,14 +85,14 @@ def test_lora_hotswapping():
         for i in range(1, 5)
     ]
 
-    llm = setup_vllm(1)
+    llm = setup_vllm(1, tp)
 
     prompt = "What is 1+1? \n"
 
     for i, req in enumerate(lora_requests):
         output = llm.generate(prompt,
                               sampling_params=vllm.SamplingParams(
-                                  max_tokens=256, temperature=0),
+                                  max_tokens=16, temperature=0),
                               lora_request=req)[0].outputs[0].text
         answer = output.strip()[0]
 
@@ -90,7 +100,8 @@ def test_lora_hotswapping():
         assert int(answer) == i + 1, f"Expected {i + 1}, got {answer}"
 
 
-def test_multi_lora():
+@pytest.mark.parametrize("tp", TP)
+def test_multi_lora(tp):
     """
     This test ensures we can run multiple LoRA adapters on the TPU backend, when
     we have enough space to store all of them.
@@ -105,14 +116,14 @@ def test_multi_lora():
         for i in range(1, 5)
     ]
 
-    llm = setup_vllm(4)
+    llm = setup_vllm(4, tp)
 
     prompt = "What is 1+1? \n"
 
     for i, req in enumerate(lora_requests):
         output = llm.generate(prompt,
                               sampling_params=vllm.SamplingParams(
-                                  max_tokens=256, temperature=0),
+                                  max_tokens=16, temperature=0),
                               lora_request=req)[0].outputs[0].text
 
         answer = output.strip()[0]

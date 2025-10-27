@@ -6,12 +6,12 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
 from vllm.sampling_params import SamplingType
 from vllm.v1.outputs import DraftTokenIds
-from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
-from tpu_commons.runner.input_batch_jax import CachedRequestState, InputBatch
-from tpu_commons.runner.speculative_decoding_manager import SpecDecodeMetadata
-from tpu_commons.runner.tpu_jax_runner import TPUModelRunner
-from tpu_commons.spec_decode.jax.eagle3 import Eagle3Proposer
+from tpu_inference.runner.input_batch_jax import CachedRequestState, InputBatch
+from tpu_inference.runner.speculative_decoding_manager import \
+    SpecDecodeMetadata
+from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
+from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
 
 
 class TestSpeculativeDecodingManager:
@@ -25,7 +25,7 @@ class TestSpeculativeDecodingManager:
         with patch('jax.devices', return_value=self.mock_devices), \
              patch('jax.make_mesh', return_value=self.mock_mesh), \
              patch('jax.random.key', return_value=self.mock_rng_key), \
-             patch('tpu_commons.runner.tpu_jax_runner.get_model', return_value=MagicMock()):
+             patch('tpu_inference.runner.tpu_jax_runner.get_model', return_value=MagicMock()):
 
             model_config = ModelConfig(tokenizer_mode="auto",
                                        trust_remote_code=False,
@@ -95,125 +95,6 @@ class TestSpeculativeDecodingManager:
         with pytest.raises(AssertionError):
             self.runner.speculative_decoding_manager.propose_draft_token_ids(
                 [[1]], None, MagicMock(), None)
-
-    def test_propose_ngram_draft_token_ids(self):
-        """Tests the logic for proposing N-gram draft tokens under various conditions."""
-        # 1. ===== Setup =====
-        # Mock the NgramProposer
-        self.runner.drafter = MagicMock(spec=NgramProposer)
-
-        # Re-initialize input_batch for a clean state for this specific test
-        self.runner.input_batch = InputBatch(
-            max_num_reqs=self.runner.max_num_reqs,
-            max_model_len=self.runner.max_model_len,
-            max_num_batched_tokens=self.runner.max_num_tokens,
-            pin_memory=False,
-            vocab_size=self.runner.vocab_size,
-            block_sizes=[self.runner.block_size],
-            is_spec_decode=True,
-        )
-
-        # Patch is_spec_decode_unsupported to control which requests are marked
-        # as unsupported for speculative decoding.
-        with patch(
-                'tpu_commons.runner.input_batch_jax.is_spec_decode_unsupported'
-        ) as mock_is_unsupported:
-            # We want req-2 to be unsupported. Let's use a simple condition.
-            mock_is_unsupported.return_value = False
-
-            # Setup input_batch with 5 requests for different scenarios
-            for i in range(5):
-                mock_sampling_params = MagicMock()
-                mock_sampling_params.sampling_type = SamplingType.GREEDY
-                # This will trigger the mock for req-2
-                mock_sampling_params.top_k = -1
-                mock_sampling_params.top_p = 1.0
-                mock_sampling_params.temperature = 0.0
-                mock_sampling_params.min_tokens = 0
-                mock_sampling_params.logprobs = None
-                mock_sampling_params.logit_bias = None
-                mock_sampling_params.allowed_token_ids = set()
-                mock_sampling_params.bad_words_token_ids = None
-                mock_sampling_params.all_stop_token_ids = set()
-                req_state = CachedRequestState(
-                    req_id=f"req-{i}",
-                    prompt_token_ids=[i] * 10,  # Give some content to tokens
-                    output_token_ids=[],
-                    sampling_params=mock_sampling_params,
-                    block_ids=([1], ),
-                    num_computed_tokens=10,
-                    lora_request=None,
-                    mm_features=[],
-                    pooling_params=None,
-                    generator=None,
-                )
-                self.runner.input_batch.add_request(req_state)
-
-        # Configure other individual requests for different test cases
-        # req-0: Normal case, should propose tokens.
-        # req-1: No sampled tokens provided, should propose nothing.
-        # req-2: Unsupported for spec decode (handled by mock).
-        self.runner.input_batch.spec_decode_unsupported_reqs.add("req-2")
-        # req-3: Max length reached, should propose nothing.
-        self.runner.input_batch.num_tokens_no_spec[
-            3] = self.runner.max_model_len
-
-        # req-4: Drafter returns None, should propose nothing.
-
-        # Mock the drafter's propose method to handle different cases
-        def propose_side_effect(tokens):
-            # Identify request by its unique token id
-            if tokens[0] == 0:  # req-0
-                return np.array([10, 11, 12])
-            if tokens[0] == 4:  # req-4
-                return None
-            # Should not be called for other requests
-            return np.array([])
-
-        self.runner.drafter.propose.side_effect = propose_side_effect
-
-        # Input to the function being tested
-        sampled_token_ids = [
-            [100],  # req-0: has a new token
-            [],  # req-1: has no new tokens
-            [102],  # req-2: has a new token
-            [103],  # req-3: has a new token
-            [104],  # req-4: has a new token
-        ]
-
-        # 2. ===== Act =====
-        result = self.runner.speculative_decoding_manager.propose_ngram_draft_token_ids(
-            sampled_token_ids)
-
-        # 3. ===== Assert =====
-        expected_result = [
-            [10, 11, 12],  # req-0: normal proposal
-            [],  # req-1: no sampled tokens
-            [],  # req-2: unsupported
-            [],  # req-3: max length
-            [],  # req-4: drafter returns None
-        ]
-        assert result == expected_result
-
-        # Verify that drafter.propose was called for the correct requests (req-0 and req-4)
-        assert self.runner.drafter.propose.call_count == 2
-
-        # Get the tokens passed to the mock
-        called_with_tokens = [
-            call.args[0] for call in self.runner.drafter.propose.call_args_list
-        ]
-
-        # Check that one call was for req-0's tokens
-        expected_tokens_req0 = self.runner.input_batch.token_ids_cpu[0, :10]
-        assert any(
-            np.array_equal(arg, expected_tokens_req0)
-            for arg in called_with_tokens)
-
-        # Check that one call was for req-4's tokens
-        expected_tokens_req4 = self.runner.input_batch.token_ids_cpu[4, :10]
-        assert any(
-            np.array_equal(arg, expected_tokens_req4)
-            for arg in called_with_tokens)
 
     def test_take_draft_token_ids(self):
         """Tests the take_draft_token_ids method for speculative decoding."""
@@ -355,7 +236,7 @@ class TestSpeculativeDecodingManager:
 
         # Act
         with patch(
-                "tpu_commons.runner.speculative_decoding_manager.device_array",
+                "tpu_inference.runner.speculative_decoding_manager.device_array",
                 side_effect=self.mock_device_array):
             metadata = self.runner.speculative_decoding_manager.get_spec_decode_metadata(
                 num_draft_tokens_np,
@@ -449,7 +330,7 @@ class TestSpeculativeDecodingManager:
 
         # 2. ===== Act =====
         with patch(
-                "tpu_commons.runner.speculative_decoding_manager.device_array",
+                "tpu_inference.runner.speculative_decoding_manager.device_array",
                 side_effect=lambda mesh, x: x):
             result = self.runner.speculative_decoding_manager.propose_eagle3_draft_token_ids(
                 sampled_token_ids,

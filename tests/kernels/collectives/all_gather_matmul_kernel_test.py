@@ -7,8 +7,8 @@ import jax.numpy as jnp
 from absl.testing import absltest, parameterized
 from jax._src import test_util as jtu
 
-from tpu_commons import utils
-from tpu_commons.kernels.collectives import all_gather_matmul
+from tpu_inference import utils
+from tpu_inference.kernels.collectives import all_gather_matmul
 
 jax.config.parse_flags_with_absl()
 

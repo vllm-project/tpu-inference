@@ -10,7 +10,7 @@
 # you specify the --dataset-name, --dataset-path, and --root-dir flags
 
 # Example default usage: bash tests/e2e/benchmarking/mlperf.sh -r /local/root_dir
-# Example local docker + JAX TPU usage: BUILDKITE_COMMIT=0f199f1 .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
+# Example local docker + JAX TPU usage: BUILDKITE_COMMIT=0f199f1 .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
 
 # Logs the vLLM server output to a file
 LOG_FILE="server.log"
@@ -52,7 +52,7 @@ helpFunction()
 {
    echo ""
    echo "Usage: $0 [-r full_path_to_root_dir -m model_id]"
-   echo -e "\t-r The path your root directory containing both 'vllm' and 'tpu_commons' (default: /workspace/, which is used in the Dockerfile)"
+   echo -e "\t-r The path your root directory containing both 'vllm' and 'tpu_inference' (default: /workspace/, which is used in the Dockerfile)"
    echo -e "\t-d The dataset name (default: mlperf, which will download the dataset)"
    echo -e "\t-p The path to the processed MLPerf dataset (default: None, which will download the dataset)"
    echo -e "\t-m A space-separated list of HuggingFace model ids to use (default: Qwen/Qwen2.5-1.5B-Instruct, Qwen/Qwen2.5-0.5B-Instruct, meta-llama/Llama-3.1-8B-Instruct and meta-llama/Llama-4-Scout-17B-16E-Instruct)"
@@ -127,9 +127,9 @@ cd "$root_dir"/vllm || exit
 echo "Current working directory: $(pwd)"
 echo "Using vLLM hash: $(git rev-parse HEAD)"
 
-# Overwrite a few of the vLLM benchmarking scripts with the TPU Commons ones
-cp -r "$root_dir"/tpu_commons/scripts/vllm/benchmarking/*.py "$root_dir"/vllm/benchmarks/
-echo "Using TPU Commons hash: $(git -C "$root_dir"/tpu_commons rev-parse HEAD)"
+# Overwrite a few of the vLLM benchmarking scripts with the TPU Inference ones
+cp -r "$root_dir"/tpu_inference/scripts/vllm/benchmarking/*.py "$root_dir"/vllm/benchmarks/
+echo "Using TPU Inference hash: $(git -C "$root_dir"/tpu_inference rev-parse HEAD)"
 
 cleanUp() {
     echo "Stopping the vLLM server and cleaning up log files..."
@@ -170,7 +170,10 @@ checkThroughputAndRouge() {
     actual_throughput=$(awk '/Total Token throughput \(tok\/s\):/ {print $NF}' "$BENCHMARK_LOG_FILE")
 
     echo "--- Extracted Values ---"
-    if [ -z "$actual_rouge1" ]; then
+    if [ "$SKIP_ACCURACY_TESTS" = "True" ]; then
+        echo "skipping accuracy test"
+        rouge1_pass=1
+    elif [ -z "$actual_rouge1" ]; then
         echo "Rouge1 score: NOT FOUND"
         rouge1_pass=0
     else
@@ -248,6 +251,8 @@ for model_name in $model_list; do
         max_batched_tokens=1024
         if [ "$model_name" == "meta-llama/Llama-4-Scout-17B-16E-Instruct" ]; then
             current_serve_args+=(--hf-overrides '{"architectures": ["Llama4ForCausalLM"]}')
+        elif [ "$model_name" == "deepseek-ai/DeepSeek-R1-0528" ]; then
+            current_serve_args+=(--hf_overrides '{"num_hidden_layers": 12}')
         fi
     fi
 

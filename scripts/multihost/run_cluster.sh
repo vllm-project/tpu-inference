@@ -35,7 +35,7 @@
 #       sudo docker exec -it node /bin/bash
 #
 # Then, you can execute uLLM commands on the Ray cluster as if it were a
-# single machine, e.g. python /workspace/tpu_commons/examples/offline_inference.py  --model=meta-llama/Llama-3.1-8B  --tensor_parallel_size=16  --task=generate  --max_model_len=1024
+# single machine, e.g. python /workspace/tpu_inference/examples/offline_inference.py  --model=meta-llama/Llama-3.1-8B  --tensor_parallel_size=16  --task=generate  --max_model_len=1024
 #
 # To stop the container, use:
 #       docker stop node

@@ -10,12 +10,13 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
 
-from tpu_commons.di.abstracts import (AbstractKVCacheConfig,
-                                      AbstractKVCacheSpec, AbstractLoRARequest,
-                                      AbstractModelRunnerOutput,
-                                      AbstractSchedulerOutput)
-from tpu_commons.di.interfaces import HostInterface
-from tpu_commons.worker.base import AbstractTpuWorker
+from tpu_inference.di.abstracts import (AbstractKVCacheConfig,
+                                        AbstractKVCacheSpec,
+                                        AbstractLoRARequest,
+                                        AbstractModelRunnerOutput,
+                                        AbstractSchedulerOutput)
+from tpu_inference.di.interfaces import HostInterface
+from tpu_inference.worker.base import AbstractTpuWorker
 
 # Mock the abstract types for isolated testing
 MockAbstractLoRARequest = MagicMock(spec=AbstractLoRARequest)

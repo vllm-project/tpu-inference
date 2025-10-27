@@ -10,7 +10,8 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh
 from vllm.config import ModelConfig
 
-from tpu_commons.models.jax.llama4 import Llama4ForCausalLM, Llama4WeightLoader
+from tpu_inference.models.jax.llama4 import (Llama4ForCausalLM,
+                                             Llama4WeightLoader)
 
 
 class MockParamLlama4:
@@ -55,6 +56,17 @@ class MockVllmConfig:
         }
 
         self.cache_config = MagicMock(cache_dtype="auto")
+
+        text_config_mock = MagicMock()
+        text_config_mock.interleave_moe_layer_step = 1
+        text_config_mock.num_attention_heads = 40
+        text_config_mock.num_key_value_heads = 8
+        text_config_mock.head_dim = 128
+
+        hf_config_mock = MagicMock()
+        hf_config_mock.text_config = text_config_mock
+
+        self.model_config.hf_config = hf_config_mock
 
 
 @pytest.fixture(scope="module")
@@ -118,7 +130,7 @@ class TestLlama4ForCausalLM:
 
             assert jnp.all(final_norm_scale == 1.0)
 
-    @patch("tpu_commons.models.jax.llama4.Llama4WeightLoader")
+    @patch("tpu_inference.models.jax.llama4.Llama4WeightLoader")
     def test_load_weights_called_correctly(self, mock_loader_cls, rng, mesh):
         """Tests that the weight loader is called correctly for checkpoint loading."""
         vllm_config = MockVllmConfig(model_name="llama4-scout",
@@ -148,6 +160,17 @@ class TestLlama4WeightLoader:
                                   attn_heads=40,
                                   num_key_value_heads=8,
                                   attn_head_dim=128)
+
+    @pytest.mark.parametrize("hf_key, expected_num", [
+        ("language_model.model.layers.15.self_attn.q_proj.weight", 15),
+        ("layers.0.feed_forward.router.weight", 0),
+        ("language_model.model.layers.99.norm.weight", 99),
+        ("language_model.model.norm.weight", None),
+        ("language_model.model.embed_tokens.weight", None),
+    ])
+    def test_get_layer_num(self, weight_loader, hf_key, expected_num):
+        """Tests the private _get_layer_num utility function."""
+        assert weight_loader._get_layer_num(hf_key) == expected_num
 
     @pytest.mark.parametrize("hf_key, expected", [
         ("language_model.model.layers.15.self_attn.q_proj.weight",
@@ -183,8 +206,8 @@ class TestLlama4WeightLoader:
         # Mock get_param to return a mock param with the target shape (vocab_size, hidden_size)
         mock_param = MockParamLlama4(shape=(128, 32))
 
-        with patch("tpu_commons.models.jax.llama4.get_param", return_value=mock_param), \
-            patch("tpu_commons.models.jax.llama4.shard_put", return_value=jnp.ones(mock_param.value.shape)) as mock_shard_put:
+        with patch("tpu_inference.models.jax.llama4.get_param", return_value=mock_param), \
+            patch("tpu_inference.models.jax.llama4.shard_put", return_value=jnp.ones(mock_param.value.shape)) as mock_shard_put:
 
             # This will now pass after the code fix
             weight_loader.load_weights(model)
@@ -223,8 +246,8 @@ class TestLlama4WeightLoader:
              dummy_weight),
         ]
 
-        with patch("tpu_commons.models.jax.llama4.get_param", return_value=mock_param), \
-            patch("tpu_commons.models.jax.llama4.shard_put", return_value=jnp.ones(mock_param.value.shape)) as mock_shard_put:
+        with patch("tpu_inference.models.jax.llama4.get_param", return_value=mock_param), \
+            patch("tpu_inference.models.jax.llama4.shard_put", return_value=jnp.ones(mock_param.value.shape)) as mock_shard_put:
 
             # Call _map_llama4_gate_up_proj directly
             weight_loader._map_llama4_gate_up_proj(

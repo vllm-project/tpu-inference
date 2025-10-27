@@ -5,8 +5,8 @@ import jax.numpy as jnp
 import pytest
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
-from tpu_commons.runner.kv_cache import (create_kv_caches,
-                                         get_kv_cache_shape_with_mesh)
+from tpu_inference.runner.kv_cache import (create_kv_caches,
+                                           get_kv_cache_shape_with_mesh)
 
 
 @pytest.fixture
@@ -32,9 +32,9 @@ def test_create_kv_caches(mesh: Mesh):
                                                   num_kv_heads, head_size,
                                                   expected_dtype)
 
-    with patch("tpu_commons.logger.init_logger",
+    with patch("tpu_inference.logger.init_logger",
                return_value=MagicMock()), patch(
-                   "tpu_commons.utils.hbm_usage_gb",
+                   "tpu_inference.utils.hbm_usage_gb",
                    return_value=[(0.0, 0.0), (0.0, 0.0)]):
         kv_caches = create_kv_caches(
             num_blocks=num_blocks,

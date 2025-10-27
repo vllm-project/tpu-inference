@@ -7,7 +7,7 @@ import vllm.envs as envs
 from vllm import LLM, EngineArgs
 from vllm.utils import FlexibleArgumentParser
 
-from tpu_commons.core import disagg_utils
+from tpu_inference.core import disagg_utils
 
 
 def create_parser():
@@ -114,7 +114,9 @@ if __name__ == "__main__":
     else:
         from unittest.mock import patch
 
-        from tpu_commons.core.core_tpu import DisaggEngineCoreProc
+        from tpu_inference.core.core_tpu import (DisaggEngineCore,
+                                                 DisaggEngineCoreProc)
 
-        with patch("vllm.v1.engine.core.EngineCoreProc", DisaggEngineCoreProc):
+        with patch("vllm.v1.engine.core.EngineCore", DisaggEngineCore), patch(
+                "vllm.v1.engine.core.EngineCoreProc", DisaggEngineCoreProc):
             main(args)

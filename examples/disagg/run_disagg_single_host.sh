@@ -35,7 +35,7 @@ mkdir -p $HOME/logs
 
 # Start prefill instances
 for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
-    PORT=$((8100 + i))
+    PORT=$((8400 + i))
     KV_PORT=$((7100 + i))
     SIDE_PORT=$((6100 + i))
 
@@ -51,7 +51,7 @@ for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
     --port $PORT \
     --gpu-memory-utilization 0.2 \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
-    --kv-transfer-config "{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_commons.distributed.tpu_connector\",\"kv_role\":\"kv_producer\"}" \
+    --kv-transfer-config "{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_producer\"}" \
     > $HOME/logs/prefill_$i.txt 2>&1 &
 
     PREFILL_HOSTS+=("localhost")
@@ -61,7 +61,7 @@ done
 
 # Start decode instances
 for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
-    PORT=$((8200 + i))
+    PORT=$((9400 + i))
     KV_PORT=$((7200 + i))
     # Same as prefill SIDE_PORT
     SIDE_PORT=$((6100 + i))
@@ -78,7 +78,7 @@ for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
     --port $PORT \
     --gpu-memory-utilization 0.2 \
     --tensor-parallel-size $DECODER_TP_SIZE \
-    --kv-transfer-config "{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_commons.distributed.tpu_connector\",\"kv_role\":\"kv_consumer\"}" \
+    --kv-transfer-config "{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_consumer\"}" \
     > $HOME/logs/decode_$i.txt 2>&1 &
 
     DECODE_HOSTS+=("localhost")
@@ -98,7 +98,7 @@ done
 
 
 # Start proxy server
-python $HOME/tpu_commons/examples/disagg/toy_proxy_server.py \
+python $HOME/tpu-inference/examples/disagg/toy_proxy_server.py \
 --host localhost \
 --port 7080 \
 --prefiller-hosts ${PREFILL_HOSTS[@]} \

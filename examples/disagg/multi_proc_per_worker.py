@@ -93,7 +93,7 @@ def get_kv_shape(mesh: Mesh, per_shard: bool = False) -> tuple[int, ...]:
         shard_size = mesh.shape["model"]
         num_kv_heads = num_kv_heads // shard_size
 
-    import tpu_commons.kernels.ragged_paged_attention.v3.kernel as rpa
+    import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
     shape = rpa.get_kv_cache_shape(num_blocks, block_size, num_kv_heads,
                                    head_dim, jnp.bfloat16)
     return shape

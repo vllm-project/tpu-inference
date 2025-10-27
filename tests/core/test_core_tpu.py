@@ -8,19 +8,21 @@ from vllm.v1.engine import EngineCoreRequest, EngineCoreRequestType
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request
 
-from tpu_commons.core.adapters import (VllmConfigAdapter, VllmEngineAdapter,
-                                       VllmRequestAdapter)
-from tpu_commons.core.core_tpu import DisaggEngineCoreProc, _DisaggOrchestrator
-from tpu_commons.interfaces.config import IConfig
-from tpu_commons.interfaces.engine import IEngineCore
+from tpu_inference.core.adapters import (VllmConfigAdapter, VllmEngineAdapter,
+                                         VllmRequestAdapter)
+from tpu_inference.core.core_tpu import (DisaggEngineCore,
+                                         DisaggEngineCoreProc,
+                                         _DisaggOrchestrator)
+from tpu_inference.interfaces.config import IConfig
+from tpu_inference.interfaces.engine import IEngineCore
 
 
-class TestDisaggEngineCoreProc(unittest.TestCase):
+class TestDisaggEngineCore(unittest.TestCase):
 
     def setUp(self):
         # Patch disagg_utils to control slice configuration.
         self.mock_disagg_utils_patcher = patch(
-            'tpu_commons.core.core_tpu.disagg_utils')
+            'tpu_inference.core.core_tpu.disagg_utils')
         self.mock_disagg_utils = self.mock_disagg_utils_patcher.start()
         self.mock_disagg_utils.get_prefill_slices.return_value = (
             4, )  # One prefill engine
@@ -30,19 +32,117 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
 
         # Patch the orchestrator to test the adapter in isolation
         self.mock_orchestrator_patcher = patch(
-            'tpu_commons.core.core_tpu._DisaggOrchestrator')
+            'tpu_inference.core.core_tpu._DisaggOrchestrator')
         self.mock_orchestrator = self.mock_orchestrator_patcher.start()
         self.addCleanup(self.mock_orchestrator_patcher.stop)
 
         # Patch vLLMEngineCore to avoid its complex initialization.
         self.mock_engine_core_patcher = patch(
-            'tpu_commons.core.core_tpu.vLLMEngineCore')
+            'tpu_inference.core.core_tpu.vLLMEngineCore')
+        self.mock_vLLMEngineCore = self.mock_engine_core_patcher.start()
+        self.addCleanup(self.mock_engine_core_patcher.stop)
+
+        # Mock jax.devices
+        self.mock_jax_devices_patcher = patch('jax.devices',
+                                              return_value=[MagicMock()] * 8)
+        self.mock_jax_devices = self.mock_jax_devices_patcher.start()
+        self.addCleanup(self.mock_jax_devices_patcher.stop)
+
+        # VLLM Config
+        self.mock_vllm_config = MagicMock(spec=VllmConfig)
+        self.mock_vllm_config.parallel_config = MagicMock(spec=ParallelConfig)
+        self.mock_vllm_config.device_config = MagicMock()
+        self.mock_vllm_config.cache_config = MagicMock()
+        self.mock_vllm_config.cache_config.prefix_caching_hash_algo = "builtin"
+        self.mock_vllm_config.cache_config.block_size = 5
+        self.mock_vllm_config.__post_init__ = MagicMock()
+
+    def test_initialization(self):
+        """Tests that the adapter initializes the orchestrator correctly."""
+        engine = DisaggEngineCore(
+            vllm_config=self.mock_vllm_config,
+            executor_class=MagicMock(spec=Executor),
+            log_stats=False,
+        )
+
+        self.mock_orchestrator.assert_called_once()
+        args, kwargs = self.mock_orchestrator.call_args
+        self.assertIsInstance(kwargs['config'], VllmConfigAdapter)
+        self.assertEqual(kwargs['config'].vllm_config, self.mock_vllm_config)
+        self.assertEqual(kwargs['output_queue'], engine.output_queue)
+        self.assertEqual(len(kwargs['prefill_engines']), 1)
+        self.assertIsInstance(kwargs['prefill_engines'][0], VllmEngineAdapter)
+        self.assertEqual(len(kwargs['decode_engines']), 1)
+        self.assertIsInstance(kwargs['decode_engines'][0], VllmEngineAdapter)
+        self.assertEqual(kwargs['prefill_slice_sizes'], (4, ))
+        self.assertEqual(kwargs['decode_slice_sizes'], (2, ))
+
+    def test_add_request(self):
+        """Tests that the adapter correctly delegates add_request to the orchestrator."""
+        engine = DisaggEngineCore(
+            vllm_config=self.mock_vllm_config,
+            executor_class=MagicMock(spec=Executor),
+            log_stats=False,
+        )
+
+        mock_request = MagicMock(spec=Request)
+        mock_request.request_id = "test_req"
+        mock_request.pooling_params = None
+        mock_request.kv_transfer_params = None
+
+        engine.add_request(mock_request)
+
+        self.mock_orchestrator.return_value.add_request.assert_called_once()
+        # Get the argument passed to add_request
+        passed_request_adapter = self.mock_orchestrator.return_value.add_request.call_args[
+            0][0]
+
+        # Assert it's the correct type and wraps the correct underlying request
+        self.assertIsInstance(passed_request_adapter, VllmRequestAdapter)
+        self.assertIsInstance(passed_request_adapter.vllm_request, Request)
+        self.assertEqual(passed_request_adapter.request_id, "test_req")
+
+    def test_shutdown(self):
+        """Tests that the adapter correctly delegates shutdown to the orchestrator."""
+        engine = DisaggEngineCore(
+            vllm_config=self.mock_vllm_config,
+            executor_class=MagicMock(spec=Executor),
+            log_stats=False,
+        )
+
+        engine.shutdown()
+
+        self.mock_orchestrator.return_value.shutdown.assert_called_once()
+
+
+class TestDisaggEngineCoreProc(unittest.TestCase):
+
+    def setUp(self):
+        # Patch disagg_utils to control slice configuration.
+        self.mock_disagg_utils_patcher = patch(
+            'tpu_inference.core.core_tpu.disagg_utils')
+        self.mock_disagg_utils = self.mock_disagg_utils_patcher.start()
+        self.mock_disagg_utils.get_prefill_slices.return_value = (
+            4, )  # One prefill engine
+        self.mock_disagg_utils.get_decode_slices.return_value = (
+            2, )  # One decode engine
+        self.addCleanup(self.mock_disagg_utils_patcher.stop)
+
+        # Patch the orchestrator to test the adapter in isolation
+        self.mock_orchestrator_patcher = patch(
+            'tpu_inference.core.core_tpu._DisaggOrchestrator')
+        self.mock_orchestrator = self.mock_orchestrator_patcher.start()
+        self.addCleanup(self.mock_orchestrator_patcher.stop)
+
+        # Patch vLLMEngineCore to avoid its complex initialization.
+        self.mock_engine_core_patcher = patch(
+            'tpu_inference.core.core_tpu.vLLMEngineCore')
         self.mock_vLLMEngineCore = self.mock_engine_core_patcher.start()
         self.addCleanup(self.mock_engine_core_patcher.stop)
 
         # Patch the ZMQ handshake to isolate the test.
         self.mock_handshake_patcher = patch(
-            'tpu_commons.core.core_tpu.DisaggEngineCoreProc._perform_handshake'
+            'tpu_inference.core.core_tpu.DisaggEngineCoreProc._perform_handshake'
         )
         self.mock_handshake = self.mock_handshake_patcher.start()
         self.mock_handshake.return_value.__enter__.return_value = MagicMock(
@@ -240,8 +340,8 @@ class TestDisaggOrchestrator(unittest.TestCase):
         self.mock_decode_engine.model_executor = MagicMock()
 
         # Patch threads to avoid them running in the background.
-        self.jet_thread_patcher = patch("tpu_commons.core.core_tpu.JetThread",
-                                        MagicMock)
+        self.jet_thread_patcher = patch(
+            "tpu_inference.core.core_tpu.JetThread", MagicMock)
         self.mock_jet_thread = self.jet_thread_patcher.start()
         self.addCleanup(self.jet_thread_patcher.stop)
 
