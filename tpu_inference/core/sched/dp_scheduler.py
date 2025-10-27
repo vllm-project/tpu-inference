@@ -185,14 +185,14 @@ class DPScheduler(Scheduler):
                         self.scheduler.assigned_dp_rank.pop(req_id)
                     return None
 
-                # Assign rank and update budgets
-                self.scheduler._assign_rank_and_update_budget(
-                    request, dp_rank, num_new_tokens)
-
                 # Allocate slots from the assigned DP rank's KV cache manager
                 new_blocks = self.scheduler.dp_kv_cache_managers[
                     dp_rank].allocate_slots(request, num_new_tokens, *args,
                                             **kwargs)
+                if new_blocks is not None:
+                    self.scheduler._assign_rank_and_update_budget(
+                        request, dp_rank, num_new_tokens)
+
                 return new_blocks
 
             def get_computed_blocks(
@@ -494,6 +494,12 @@ class DPScheduler(Scheduler):
             f"DP rank request budgets (cap {self.max_reqs_per_dp_rank}): {self.request_budget}"
         )
         logger.debug(f"Total assigned requests: {len(self.assigned_dp_rank)}")
+        free_blocks = {}
+        for dp_rank in range(self.dp_size):
+            free_blocks[dp_rank] = self.dp_kv_cache_managers[
+                dp_rank].block_pool.get_num_free_blocks()
+        logger.debug(f"Free blocks per DP rank: {free_blocks}")
+        logger.debug(f"Scheduler stats: {self.make_stats()}")
 
 
 def update_vllm_config_for_dp_scheduler(vllm_config: Any) -> None:

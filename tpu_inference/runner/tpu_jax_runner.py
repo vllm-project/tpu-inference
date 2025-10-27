@@ -581,8 +581,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             mesh=self.mesh,
             in_specs=(PartitionSpec(ShardingAxisName.ATTN_DATA),
                       PartitionSpec(ShardingAxisName.ATTN_DATA)),
-            out_specs=PartitionSpec(ShardingAxisName.ATTN_DATA)
-        )(array, indices_to_select)
+            out_specs=PartitionSpec(ShardingAxisName.ATTN_DATA))(
+                array, indices_to_select)
 
         return ret
 
@@ -853,29 +853,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         logits_indices_cpu = logits_indices
         seq_lens_cpu = seq_lens
 
-        (
-            input_ids,
-            positions,
-            block_tables,
-            query_start_loc,
-            seq_lens,
-            logits_indices,
-            request_distribution,
-            logits_indices
-        ) = device_array(
-            self.mesh,
-            (
-                input_ids,
-                positions,
-                block_tables,
-                query_start_loc,
-                seq_lens,
-                logits_indices,
-                request_distribution,
-                logits_indices
-            ),
-            sharding=self.data_parallel_attn_sharding,
-        )
+        (input_ids, positions, block_tables, query_start_loc, seq_lens,
+         logits_indices, request_distribution, logits_indices) = device_array(
+             self.mesh,
+             (input_ids, positions, block_tables, query_start_loc, seq_lens,
+              logits_indices, request_distribution, logits_indices),
+             sharding=self.data_parallel_attn_sharding,
+         )
 
         if self.lora_config is not None:
             self.lora_utils.set_active_loras(
