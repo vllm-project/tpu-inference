@@ -85,6 +85,7 @@ Worker Side Execution:
     KV data from TPU to CPU and update the CPU backend. It then waits for all
     submitted save tasks for the current step to complete.
 """
+import copy
 import os
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -634,7 +635,7 @@ class TPUConnectorScheduler():
             tracker = RequestTracker(
                 req_id=req_id,
                 prompt_len=len(request.prompt_token_ids),
-                block_ids=request.block_ids[0],
+                block_ids=copy.deepcpoy(request.block_ids[0]),
                 token_ids=tokens_for_tracker,
                 num_external_hits=num_external_hits,
                 # The high-water mark for saved tokens starts after the cached prefix.
