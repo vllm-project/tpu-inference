@@ -140,6 +140,7 @@ class LoadSpec:
     num_matched_tokens: int
     can_load: bool = False
     is_full_prefix_hit: bool = False
+    skip_leading_tokens: int = 0
 
 
 @dataclass
@@ -453,7 +454,9 @@ class TPUConnectorScheduler():
         if num_to_load > 0 or is_full_prefix_hit:
             self.load_specs[request.request_id] = LoadSpec(
                 num_matched_tokens=num_matched_tokens,
-                is_full_prefix_hit=is_full_prefix_hit)
+                is_full_prefix_hit=is_full_prefix_hit,
+                skip_leading_tokens=num_computed_tokens,
+            )
         return num_to_load, False
 
     def update_state_after_alloc(self, request: "Request",
@@ -1076,45 +1079,59 @@ class TPUConnectorWorker:
 
             request_load_start_time = time.time()
             logger.info("TPUConnectorWorker: Starting KV cache load process.")
-            # The number of tokens to fetch from the backend is the true number
-            # of matched tokens stored in the spec.
-            tokens_to_fetch = meta.token_ids[:meta.load_spec.
-                                             num_matched_tokens]
+            num_tokens_to_load_delta = (meta.load_spec.num_matched_tokens -
+                                        meta.load_spec.skip_leading_tokens)
+
+            if num_tokens_to_load_delta <= 0 and not meta.load_spec.is_full_prefix_hit:
+                logger.info(
+                    f"Request {meta.req_id}: No new tokens to load. Skipping.")
+                continue
 
             logger.info(
                 f"Processing KV load for request {meta.req_id}: "
-                f"Fetching {len(tokens_to_fetch)} tokens from cache for "
+                f"Total matched: {meta.load_spec.num_matched_tokens}, "
+                f"Already computed: {meta.load_spec.skip_leading_tokens}. "
+                f"Fetching delta of {num_tokens_to_load_delta} tokens from cache for "
                 f"{len(meta.local_block_ids)} blocks.")
 
-            # 1. Generate keys and fetch data chunks from the CPU backend.
-            # We use tokens_to_fetch to generate the correct keys that exist
-            # in the backend.
+            # 1. Generate keys for the entire matched prefix to find the right
+            # chunks in the backend.
             keys_generator = self.token_processor.process_tokens(
-                tokens_to_fetch)
-            keys = list(keys_generator)
+                meta.token_ids[:meta.load_spec.num_matched_tokens])
 
-            if not keys:
-                logger.warning(
-                    f"Could not generate any keys for loading request {meta.req_id}. Aborting load."
-                )
-                continue
-
-            # 2. Assemble the per-layer data on the CPU.
+            # 2. Assemble the per-layer data for the delta tokens on the CPU.
             # We create a list of lists, where the outer list represents layers
             # and the inner lists will hold the data chunks for that layer.
-            assembled_kv_on_cpu = []
-            for _ in range(self.num_layers):
-                assembled_kv_on_cpu.append([])
+            assembled_kv_on_cpu = [[] for _ in range(self.num_layers)]
 
-            # Fetch all chunks for all layers from the backend.
-            for start_idx, end_idx, key in keys:
+            # Fetch and slice chunks from the backend.
+            for start_idx, end_idx, key in keys_generator:
+                # This chunk is entirely before the delta, so we can skip it.
+                if end_idx <= meta.load_spec.skip_leading_tokens:
+                    continue
+
+                # This chunk is entirely after the delta.
+                if start_idx >= meta.load_spec.num_matched_tokens:
+                    continue
+
                 cached_value = self.cpu_backend.get(key)
                 if cached_value:
-                    for i in range(self.num_layers):
-                        assembled_kv_on_cpu[i].append(cached_value[i])
+                    # Calculate the precise slice needed from this specific chunk.
+                    # rel_start is the index within this chunk where the delta tokens begin.
+                    rel_start = max(
+                        0, meta.load_spec.skip_leading_tokens - start_idx)
+                    rel_end = min(
+                        end_idx, meta.load_spec.num_matched_tokens) - start_idx
+
+                    if rel_start < rel_end:
+                        for i in range(self.num_layers):
+                            # Slice the jax array fetched from the backend.
+                            sliced_chunk = jax.lax.slice_in_dim(
+                                cached_value[i], rel_start, rel_end, axis=0)
+                            assembled_kv_on_cpu[i].append(sliced_chunk)
                 else:
                     logger.error(
-                        f"Cache key {key.chunk_hash} not found in CPU backend for request {meta.req_id}. Inconsistent state!"
+                        f"Cache key {key.chunk_hash} not found in CPU backend for request {meta.req_id}. Inconsistent state detected."
                     )
                     return
 
@@ -1148,52 +1165,135 @@ class TPUConnectorWorker:
                     f"{final_kv_on_cpu[0].shape if final_kv_on_cpu else 'N/A'}"
                 )
 
-            # 3. Pad the data to fill a full number of blocks.
-            # TODO(jcgu): do we need to pad when token_processor.chunk_size==lock_size
-            num_tokens_to_load = final_kv_on_cpu[0].shape[
-                0] if final_kv_on_cpu else 0
-            num_blocks_to_load = len(meta.local_block_ids)
-            padded_token_len = num_blocks_to_load * self.block_size
+            # 3. Split the delta load into two parts:
+            #    a) The data that fills the last partially-filled block.
+            #    b) The data that fills new, completely empty blocks.
+            fetched_delta_token_count = (final_kv_on_cpu[0].shape[0]
+                                         if final_kv_on_cpu else 0)
+            logger.info(f"Request {meta.req_id}: fetched_delta_token_count = "
+                        f"{fetched_delta_token_count}")
+            if fetched_delta_token_count == 0:
+                continue
 
-            padded_kv_on_cpu = []
-            pad_width = padded_token_len - num_tokens_to_load
-            if pad_width > 0:
-                pad_value = jnp.array(0, dtype=self.dtype)
-                # pad dim_0 which is the #_of_tokens by pad_width
-                padding_config = [
-                    (0, pad_width, 0)
-                ] + [(0, 0, 0)] * (len(final_kv_on_cpu[0].shape) - 1)
-                padded_kv_on_cpu = jax.tree.map(
-                    lambda layer_cpu: jax.lax.pad(
-                        layer_cpu, pad_value, padding_config), final_kv_on_cpu)
-                jax.block_until_ready(padded_kv_on_cpu)
+            skip_tokens = meta.load_spec.skip_leading_tokens
+            start_block_idx = skip_tokens // self.block_size
+            start_offset_in_block = skip_tokens % self.block_size
+            logger.info(
+                f"Request {meta.req_id}: start_block_idx={start_block_idx}, "
+                f"start_offset_in_block={start_offset_in_block}, skip_tokens={skip_tokens}"
+            )
+
+            # Part 1: Handle the first, partial block if it exists (if start_offset_in_block > 0).
+            partial_num_tokens_in_first_block = 0
+            if start_offset_in_block > 0:
+                # This is the block on TPU that is partially filled with `skip_tokens`.
+                dest_block_id = meta.local_block_ids[start_block_idx]
+                # Calculate how many tokens from our new delta can fit into the remaining
+                # space of this partially filled block without overflowing.
+                num_tokens_to_fill_block = self.block_size - start_offset_in_block
+                # This is the actual number of delta tokens that will go into this first block.
+                partial_num_tokens_in_first_block = min(
+                    fetched_delta_token_count, num_tokens_to_fill_block)
                 logger.info(
-                    f"padded_kv_on_cpu[0]: {padded_kv_on_cpu[0].shape}, {padded_kv_on_cpu[0].sharding}"
+                    f"Request {meta.req_id}, case partial block load: dest_block_id={dest_block_id}, "
+                    f"start_offset_in_block={start_offset_in_block}, "
+                    f"partial_num_tokens_in_first_block={partial_num_tokens_in_first_block}"
                 )
-            else:
-                padded_kv_on_cpu = final_kv_on_cpu
+                # Extract the corresponding slice of data from our assembled CPU delta.
+                data_for_first_block = jax.tree.map(
+                    lambda x: jax.lax.slice_in_dim(
+                        x, 0, partial_num_tokens_in_first_block, axis=0),
+                    final_kv_on_cpu,
+                )
+                jax.block_until_ready(data_for_first_block)
 
-            jax.block_until_ready(padded_kv_on_cpu)
-            logger.info(
-                f"Request {meta.req_id}: Reshaped data for transfer to TPU. Shape for one layer: {padded_kv_on_cpu[0].shape}."
-            )
+                # JIT-compile a function to perform a precise, offset-based update within a single block.
+                # This is to avoid overwriting existing, valid KV cache data
+                # that was already computed by vLLM in the prefix of this block.
+                @jax.jit
+                def _jitted_update_slice_in_block(kv_caches, block_id, offset,
+                                                  data_slice):
+                    for i in range(self.num_layers):
+                        block_to_update = kv_caches[i][block_id]
+                        updated_block = jax.lax.dynamic_update_slice(
+                            block_to_update, data_slice[i], (offset, 0, 0, 0))
+                        kv_caches[i] = kv_caches[i].at[block_id].set(
+                            updated_block)
+                    return kv_caches
 
-            # 5. Transfer to TPU, applying the correct sharding.
-            loaded_kv_sharded_on_tpu = self.swap_in_fn(padded_kv_on_cpu)
-            jax.block_until_ready(loaded_kv_sharded_on_tpu)
-            logger.info(
-                f"loaded_kv_on_tpu[0]: {loaded_kv_sharded_on_tpu[0].shape}, {loaded_kv_sharded_on_tpu[0].sharding}"
-            )
+                # Transfer the small slice to TPU and update the cache precisely.
+                data_on_tpu = self.swap_in_fn(data_for_first_block)
+                jax.block_until_ready(data_on_tpu)
+                self.runner.kv_caches = _jitted_update_slice_in_block(
+                    self.runner.kv_caches, dest_block_id,
+                    start_offset_in_block, data_on_tpu)
+                jax.block_until_ready(self.runner.kv_caches)
+                logger.info(
+                    f"Request {meta.req_id}: Updated {partial_num_tokens_in_first_block} tokens "
+                    f"in destination block {dest_block_id} at offset {start_offset_in_block}."
+                )
 
-            # 6. Update the runner's KV cache with the correctly sharded data.
-            destination_blocks = meta.local_block_ids
-            self.runner.kv_caches = KVCacheManager._jitted_insert_kv_cache(
-                self.block_size, self.runner.kv_caches,
-                loaded_kv_sharded_on_tpu, jnp.array(destination_blocks))
-            jax.block_until_ready(self.runner.kv_caches)
-            logger.info(
-                f"Successfully loaded {len(destination_blocks)} blocks into TPU KV cache for request {meta.req_id}"
-            )
+            # Part 2: Handle the remaining full blocks.
+            remaining_tokens = fetched_delta_token_count - partial_num_tokens_in_first_block
+            if remaining_tokens > 0:
+                # The rest of the data goes into new, empty blocks.
+                # If start_offset_in_block is 0, it means the load is block-aligned
+                # and the first block is also a 'full block' to be loaded. So we start
+                # from start_block_idx. Otherwise, the first block was partially filled
+                # and handled in Part 1, so we start from the next block (start_block_idx + 1).
+                if start_offset_in_block > 0:
+                    destination_blocks = meta.local_block_ids[start_block_idx +
+                                                              1:]
+                else:
+                    destination_blocks = meta.local_block_ids[start_block_idx:]
+
+                # Pad the remaining data to be a multiple of block_size.
+                # TODO(jcgu): do we need to pad when token_processor.chunk_size==block_size
+                num_blocks_for_rest = (remaining_tokens + self.block_size -
+                                       1) // self.block_size
+                padded_len = num_blocks_for_rest * self.block_size
+                pad_after = padded_len - remaining_tokens
+                logger.info(
+                    f"Request {meta.req_id}, case full block load: Preparing to load remaining_tokens={remaining_tokens} "
+                    f"into {len(destination_blocks)} full blocks, pad_after={pad_after} tokens, padded_len={padded_len}."
+                )
+                data_for_full_blocks = jax.tree.map(
+                    lambda x: jax.lax.slice_in_dim(
+                        x,
+                        partial_num_tokens_in_first_block,
+                        x.shape[0],
+                        axis=0),
+                    final_kv_on_cpu,
+                )
+                jax.block_until_ready(data_for_full_blocks)
+                # padding_config: A list of tuples, one for each dimension of the KV cache.
+                # Each tuple is (pad_before, pad_after, pad_interior).
+                # The first dimension (tokens) is padded with `pad_after` zeros.
+                # Other dimensions (heads, head_dim) are not padded.
+                padding_config = [
+                    (0, pad_after, 0)
+                ] + [(0, 0, 0)] * (len(data_for_full_blocks[0].shape) - 1)
+                padded_data = jax.tree.map(
+                    lambda layer_cpu: jax.lax.pad(
+                        layer_cpu, jnp.array(0, dtype=self.dtype),
+                        padding_config),
+                    data_for_full_blocks,
+                )
+                jax.block_until_ready(padded_data)
+
+                # Transfer and insert the full blocks to staging buffer in TPU.
+                loaded_kv_sharded_on_tpu = self.swap_in_fn(padded_data)
+                jax.block_until_ready(loaded_kv_sharded_on_tpu)
+                self.runner.kv_caches = KVCacheManager._jitted_insert_kv_cache(
+                    self.block_size,
+                    self.runner.kv_caches,
+                    loaded_kv_sharded_on_tpu,
+                    jnp.array(destination_blocks),
+                )
+                jax.block_until_ready(self.runner.kv_caches)
+                logger.info(
+                    f"Request {meta.req_id}: Loaded {remaining_tokens} tokens into "
+                    f"{len(destination_blocks)} new blocks.")
 
             request_load_duration = time.time() - request_load_start_time
             load_times.append(request_load_duration)
