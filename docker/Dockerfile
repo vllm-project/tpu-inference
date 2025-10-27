@@ -27,7 +27,7 @@ RUN python3 -m pip install --no-cache-dir \
     pytest-asyncio \
     git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d#egg=lm-eval[api] \
     pytest-cov \
-    tblib \
+    tblib
 
 # Install tpu_inference
 WORKDIR /workspace/tpu_inference
