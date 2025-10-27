@@ -201,11 +201,12 @@ class MMLUDataset(BenchmarkDataset):
     https://github.com/AI-Hypercomputer/JetStream/blob/bbfb5bd/benchmarks/benchmark_serving.py#L327.
     """
 
-    def __init__(self, num_shots: int, mmlu_method: str, **kwargs) -> None:
+    def __init__(self, num_shots: int, mmlu_method: str, use_chat_template: bool, **kwargs) -> None:
         super().__init__(**kwargs)
         self.mmlu_method = mmlu_method
         self.num_shots = num_shots
         self.load_data()
+        self.use_chat_template = use_chat_template
 
     def load_mmlu_dataset_csv(self,
                               dataset_path: str) -> tuple[Any, dict[str, str]]:
@@ -238,17 +239,17 @@ class MMLUDataset(BenchmarkDataset):
 
         output = ""
         for _, row in data.iterrows():
-            output += (f"Question: {row['question']}\n"
+            output += (f"\nQuestion: {row['question']}\n"
                        f"Choices:\n"
                        f"(A) {row['A']}\n"
                        f"(B) {row['B']}\n"
                        f"(C) {row['C']}\n"
                        f"(D) {row['D']}\n")
 
-            output += "\nCorrect answer:"
+            output += "\nPlease think carefully and give the answer. "
 
             if mmlu_method == "HELM":
-                output += f"({row['answer']})\n\n"
+                output += f"**Answer: ({row['answer']})** <|endoftext|>\n"
             elif mmlu_method == "Harness":
                 content = row[row["answer"].upper()]
                 output += f"({row['answer']}) {content}\n\n"
@@ -295,6 +296,29 @@ class MMLUDataset(BenchmarkDataset):
         for prompt, completion in self.data:
             if len(samples) >= num_requests:
                 break
+
+            if self.use_chat_template:
+                messages = [
+                    {
+                        "role": "system",
+                        "content": "Reasoning effort: high"
+                    },
+                    {
+                        "role": "user", 
+                        "content": prompt
+                    }
+                ]
+
+                try:
+                    prompt = tokenizer.apply_chat_template(
+                        messages,
+                        tokenize=False,
+                        add_generation_prompt=True
+                    )
+                except Exception as e:
+                    logger.error(f"Could not apply chat template: {e}. "
+                                "Falling back to raw prompt. "
+                                "This will likely fail for fine-tuned models")
 
             prompt_ids = tokenizer(prompt).input_ids
             completion_ids = tokenizer(completion).input_ids
