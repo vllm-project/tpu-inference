@@ -81,7 +81,8 @@ IFS=',' read -r -a WORKER_SSH_IPS <<< "$WORKER_SSH_IP_STRING"
 ALL_SSH_IPS=("${HEAD_SSH_IP}" "${WORKER_SSH_IPS[@]}")
 
 if [ -z "${SSH_USER}" ]; then
-    read -pr "Enter the SSH username for all hosts: " SSH_USER
+    printf "Enter the SSH username for all hosts: "
+    read -r SSH_USER
 fi
 
 # --- STEP 1: Pre-Deployment Cleanup ---
@@ -96,7 +97,8 @@ fi
 
 # --- STEP 2: Distribute the script ---
 echo "📦 Distributing '${SCRIPT_PATH}' to all hosts..."
-REMOTE_SCRIPT_DIR="$HOME/tpu-inference/scripts/multihost"
+REMOTE_HOME_DIR="~"
+REMOTE_SCRIPT_DIR="${REMOTE_HOME_DIR}/tpu-inference/scripts/multihost"
 REMOTE_SCRIPT_PATH="${REMOTE_SCRIPT_DIR}/run_cluster.sh"
 SSH_OPTIONS="-o StrictHostKeyChecking=no -o BatchMode=yes"
 
