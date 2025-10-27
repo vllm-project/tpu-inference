@@ -4,7 +4,7 @@ upload_pipeline() {
     buildkite-agent pipeline upload .buildkite/build.yml
     buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
     # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
-    buildkite-agent pipeline upload .buildkite/main.yml
+    # buildkite-agent pipeline upload .buildkite/main.yml
 }
 
 echo "--- Starting Buildkite Bootstrap ---"
