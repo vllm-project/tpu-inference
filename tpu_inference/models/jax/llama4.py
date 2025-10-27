@@ -127,8 +127,8 @@ class Llama4ForCausalLM(nnx.Module):
                             activation_ffw_td=('data', None),
                             ed_sharding=(None, 'expert'),
                             random_init=force_random_weights)
-
-            custom_module = MoE(
+            
+            moe_ffw = MoE(
                 dtype=dtype,
                 num_local_experts=self.num_local_experts,
                 apply_expert_weight_before_computation=True,
@@ -142,7 +142,9 @@ class Llama4ForCausalLM(nnx.Module):
                 edf_sharding=('expert', None, 'model'),
                 efd_sharding=('expert', 'model', None),
                 random_init=force_random_weights
-            ) if is_moe_layer else DenseFFW(
+            )
+
+            dense_ffw = DenseFFW(
                 dtype=dtype,
                 hidden_act=self.hidden_act,
                 hidden_size=self.hidden_size,
@@ -151,7 +153,33 @@ class Llama4ForCausalLM(nnx.Module):
                 rngs=self.rng,
                 df_sharding=(None, 'model'),
                 fd_sharding=('model', None),
-                activation_ffw_td=('data', None))
+                activation_ffw_td=('data', None)
+            )
+
+            # custom_module = MoE(
+            #     dtype=dtype,
+            #     num_local_experts=self.num_local_experts,
+            #     apply_expert_weight_before_computation=True,
+            #     hidden_size=self.hidden_size,
+            #     intermediate_size_moe=self.intermediate_size_moe,
+            #     hidden_act=self.hidden_act,
+            #     router=router,
+            #     rngs=self.rng,
+            #     activation_ffw_td=('data', None),
+            #     activation_ffw_ted=('data', 'expert', None),
+            #     edf_sharding=('expert', None, 'model'),
+            #     efd_sharding=('expert', 'model', None),
+            #     random_init=force_random_weights
+            # ) if is_moe_layer else DenseFFW(
+            #     dtype=dtype,
+            #     hidden_act=self.hidden_act,
+            #     hidden_size=self.hidden_size,
+            #     intermediate_size=self.intermediate_size_mlp,
+            #     random_init=force_random_weights,
+            #     rngs=self.rng,
+            #     df_sharding=(None, 'model'),
+            #     fd_sharding=('model', None),
+            #     activation_ffw_td=('data', None))
 
             attn = Llama4Attention(
                 hidden_size=self.hidden_size,
@@ -193,7 +221,7 @@ class Llama4ForCausalLM(nnx.Module):
                 random_init=force_random_weights,
                 df_sharding=(None, 'model'),
                 fd_sharding=('model', None),
-                activation_ffw_td=('data', None)) if is_moe_layer else None
+                activation_ffw_td=('data', None))
 
             pre_attention_norm = RMSNorm(
                 dims=self.hidden_size,
@@ -215,8 +243,8 @@ class Llama4ForCausalLM(nnx.Module):
 
             block = SharedExpertsTransformerBlock(
                 # custom_module=custom_module,
-                moe_ffw=custom_module if is_moe_layer else None,
-                dense_ffw=custom_module if not is_moe_layer else None,
+                moe_ffw=moe_ffw if is_moe_layer else None,
+                dense_ffw=dense_ffw if not is_moe_layer else None,
                 shared_experts=shared_experts if is_moe_layer else None,
                 attn=attn,
                 pre_attention_norm=pre_attention_norm,
@@ -324,6 +352,26 @@ class Llama4WeightLoader:
         # ============================= ADD ================================
 
         self.expert_prefix = "shared_expert."
+
+        # transpose_mappings_to_use = {
+        #     f"{self.expert_prefix}down_proj": (1, 0),
+        #     f"{self.expert_prefix}gate_proj": (1, 0),
+        #     f"{self.expert_prefix}up_proj": (1, 0),
+        # }
+
+        # if self.quantization_config is not None and self.expert_prefix is None:
+        #     transpose_mappings_to_use.update({
+        #         "down_proj": (1, 0),
+        #         "gate_proj": (1, 0),
+        #         "up_proj": (1, 0),
+        #     })
+
+        transpose_mappings_to_quantization = {
+            "down_proj": (1, 0),
+            "gate_proj": (1, 0),
+            "up_proj": (1, 0),
+        }
+
         self._transpose_map = {
             "q_proj": (2, 0, 1),
             "k_proj": (2, 0, 1),
@@ -338,6 +386,9 @@ class Llama4WeightLoader:
             "o_proj": (1, 2, 0),
             "lm_head": (1, 0),
         }
+
+        if self.quantization_config and self.expert_prefix:
+            self._transpose_map.update(transpose_mappings_to_quantization)
 
         self._weight_shape_map = {
             "q_proj": (attn_heads, attn_head_dim, hidden_size),
@@ -564,20 +615,22 @@ class Llama4WeightLoader:
                         torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
                         loaded_weight = jnp.array(loaded_weight.view(torch_view_type).numpy()).view(cast_type)
 
-                        if not loaded_name.endswith(".bias"):
-                            loaded_weight = reshape_params(loaded_name, loaded_weight,
-                                                            self._weight_shape_map)
-                            # Transpose MoE weights (like down_proj) here
-                            loaded_weight = transpose_params(loaded_name,
-                                                                loaded_weight,
-                                                                self._transpose_map)
+                        # print('before transpose:', loaded_name, loaded_weight.shape)
+
+                        # print('self._transpose_map', self._transpose_map)
+                        # Transpose MoE weights (like down_proj) here
+
+                        loaded_weight = transpose_params(loaded_name,
+                                                    loaded_weight,
+                                                    self._transpose_map)
+                        # print('after transpose:', loaded_name, loaded_weight.shape)
                             
                         buffer_key = f"{mapped_name}_{'scale' if is_scale else 'qvalue'}"
 
                         if buffer_key not in self.expert_weights_buffer:
                             self.expert_weights_buffer[buffer_key] = {}
                         self.expert_weights_buffer[buffer_key][expert_num] = loaded_weight
-                        logger.debug(f"Buffered single expert {expert_num} for {buffer_key}: {loaded_weight.shape}")
+                        # print(f"Buffered single expert {expert_num} for {buffer_key}: {loaded_weight.shape}")
                         continue
 
                 if layer_num is not None:
@@ -628,6 +681,7 @@ class Llama4WeightLoader:
                 for buffer_key, expert_map in self.expert_weights_buffer.items():
                     sorted_exp_nums = sorted(expert_map.keys())
                     aggregated_weight = jnp.stack([expert_map[k] for k in sorted_exp_nums], axis=0)
+                    # print(buffer_key, aggregated_weight.shape)
                     is_scale = buffer_key.endswith("_scale")
                     base_mapped_name = buffer_key.replace("_scale", "").replace("_qvalue", "")
 
@@ -635,37 +689,45 @@ class Llama4WeightLoader:
 
                     assert hasattr(model_weight, 'array'), f"Expected MoE weight '{base_mapped_name}' to be a quantized array (qarray)"
 
-                    # if model_weight.value.shape != aggregated_weight.shape:
+                    # if model_weight != aggregated_weight.shape:
                     #     raise ValueError(
-                    #         f"[AGGREGATED] Loaded shape {aggregated_weight.shape} "
-                    #         f"does not match model shape for {loaded_name}: {model_weight.value.shape}!"
+                    #         f"[AGGREGATED] Loaded shape for {expert_map}: {aggregated_weight.shape} "
+                    #         f"does not match model shape for {loaded_name}: {model_weight}!"
                     #     )
+
+                    # edf_sharding=('expert', None, 'model'),
+                    # efd_sharding=('expert', 'model', None),
                     
                     if is_scale:
-                        # assert model_weight is a qarray 
-                        # assert hasattr(model_weight, 'array'), \
-                        #     f"Expected model_weight for scale '{loaded_name}' to be a quantized array (qarray), but it lacks an 'array' attribute."
-                        # expected_scale_dtype = model_weight.array.scale.value.dtype
-                        # assert aggregated_weight.dtype == expected_scale_dtype, \
-                        #     f"DType mismatch for scale '{loaded_name}'. Loaded dtype ({aggregated_weight.dtype}) != Expected dtype ({expected_scale_dtype})."
-
-                        model_weight.array.scale.value = shard_put(aggregated_weight,
-                                                model_weight.array.scale.sharding,
-                                                mesh=model_for_loading.mesh)
+                        loaded_name = f"{base_mapped_name}.array.scale.value"
+                        if model_weight.array.scale.value.shape != aggregated_weight.shape:
+                            raise ValueError(
+                                f"[AGGREGATED] Loaded shape for {buffer_key}: {aggregated_weight.shape}"
+                                f"does not match model shape for {loaded_name}: {model_weight.array.scale.value.shape}!"
+                            )
                         
-                        # model_weight.array.scale.value = shard_put(aggregated_weight,
-                        #                         model_weight.array.qvalue.sharding,
-                        #                         mesh=model_for_loading.mesh)
+                        # print(f"[AGGREGATED] Loaded shape for {buffer_key}: {aggregated_weight.shape}")
+                        # print(f"Match model shape for {loaded_name}: {model_weight.array.scale.value.shape}!")
+                        if buffer_key.endswith("kernel_down_proj_EFD_scale"):
+                            # model_weight.array.scale.sharding[-1] = None
+                            correct_sharding_names = ('expert', None, 'model')
+                            model_weight.array.scale.value = shard_put(aggregated_weight,
+                                                correct_sharding_names,
+                                                mesh=model_for_loading.mesh)
+                            # print('model_weight.array.scale.sharding: ', model_weight.array.scale.sharding)
+                        else:
+                            model_weight.array.scale.value = shard_put(aggregated_weight,
+                                                    model_weight.array.scale.sharding,
+                                                    mesh=model_for_loading.mesh)
                     
                     elif aggregated_weight.itemsize < 2: # check model weight elem nbits < 16
-                        # assert hasattr(model_weight, 'array'), \
-                        #     f"Expected model_weight for quantized weight '{loaded_name}' to be a quantized array (qarray), but it lacks an 'array' attribute."
-                        # expected_qvalue_dtype = model_weight.array.qvalue.value.dtype
-                        # assert aggregated_weight.dtype == expected_qvalue_dtype, \
-                        #     f"DType mismatch for quantized weight '{loaded_name}'. Loaded dtype ({aggregated_weight.dtype}) != Expected dtype ({expected_qvalue_dtype})."
-                        # assert aggregated_weight.shape == model_weight.array.qvalue.value.shape, \
-                        #     f"Shape mismatch for quantized weight '{loaded_name}'. Loaded shape ({aggregated_weight.shape}) != Expected shape ({model_weight.array.qvalue.value.shape})."
-                        
+                        loaded_name = f"{base_mapped_name}.array.qvalue.value"
+                        if model_weight.array.qvalue.value.shape != aggregated_weight.shape:
+                            raise ValueError(
+                                f"[AGGREGATED] Loaded shape for {buffer_key}: {aggregated_weight.shape}"
+                                f"does not match model shape for {loaded_name}: {model_weight.array.qvalue.value.shape}!"
+                            )
+                                                
                         model_weight.array.qvalue.value = shard_put(aggregated_weight,
                                                 model_weight.array.qvalue.sharding,
                                                 mesh=model_for_loading.mesh)
