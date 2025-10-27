@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 import vllm.envs as envs
 from jax.sharding import NamedSharding, PartitionSpec
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 
 from tpu_inference.core.disagg_utils import is_disagg_enabled
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
