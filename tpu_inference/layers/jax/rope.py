@@ -1,6 +1,6 @@
 import math
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Tuple
 
 import jax
 from flax import nnx
@@ -170,3 +170,98 @@ def _yarn_linear_ramp_mask(min, max, dim):
     linear_func = (jnp.arange(dim, dtype=jnp.float32) - min) / (max - min)
     ramp_func = jnp.clip(linear_func, 0, 1)
     return ramp_func
+
+
+@dataclass(kw_only=True)
+class GptOssRotaryEmbedding(nnx.Module):
+    """
+    JAX implementation of the Rotary Positional Embedding with YaRN scaling.
+    """
+    head_dim: int
+    rope_theta: float
+    dtype: jnp.dtype
+    initial_context_length: int = 4096
+    rope_scaling_factor: float = 1.0
+    rope_ntk_alpha: float = 1.0
+    rope_ntk_beta: float = 32.0
+
+    def _compute_concentration_and_inv_freq(self) -> Tuple[float, jax.Array]:
+        """
+        Computes the inverse frequencies and concentration factor for YaRN.
+        See YaRN paper: https://arxiv.org/abs/2309.00071
+        """
+        freq = self.rope_theta**(
+            jnp.arange(0, self.head_dim, 2, dtype=jnp.float32) / self.head_dim)
+
+        if self.rope_scaling_factor > 1.0:
+            concentration = 0.1 * jnp.log(self.rope_scaling_factor) + 1.0
+
+            d_half = self.head_dim / 2
+            # NTK by parts
+            low = (d_half * jnp.log(self.initial_context_length /
+                                    (self.rope_ntk_beta * 2 * jnp.pi)) /
+                   jnp.log(self.rope_theta))
+            high = (d_half * jnp.log(self.initial_context_length /
+                                     (self.rope_ntk_alpha * 2 * jnp.pi)) /
+                    jnp.log(self.rope_theta))
+
+            interpolation = 1.0 / (self.rope_scaling_factor * freq)
+            extrapolation = 1.0 / freq
+
+            ramp = (jnp.arange(d_half, dtype=jnp.float32) - low) / (high - low)
+            mask = 1 - jnp.clip(ramp, 0, 1)
+
+            inv_freq = interpolation * (1 - mask) + extrapolation * mask
+        else:
+            concentration = 1.0
+            inv_freq = 1.0 / freq
+
+        return concentration, inv_freq
+
+    def _compute_cos_sin(self,
+                         positions: jax.Array) -> Tuple[jax.Array, jax.Array]:
+        """Computes cosine and sine embeddings for given positions."""
+        concentration, inv_freq_H = self._compute_concentration_and_inv_freq()
+
+        # freqs: (T, H/2)
+        freqs = jnp.einsum("T,H->TH",
+                           positions.astype(jnp.float32),
+                           inv_freq_H,
+                           precision=jax.lax.Precision.HIGHEST)
+
+        cos = jnp.cos(freqs) * concentration
+        sin = jnp.sin(freqs) * concentration
+        return cos, sin
+
+    def __call__(self, query_TNH: jax.Array, key_TNH: jax.Array,
+                 positions: jax.Array) -> Tuple[jax.Array, jax.Array]:
+        """
+        Applies rotary embeddings to query and key tensors.
+        Args:
+            query_TNH: Query tensor with shape (num_tokens, num_heads, head_dim)
+            key_TNH: Key tensor with shape (num_tokens, num_kv_heads, head_dim)
+            positions: A 1D array of token positions.
+        """
+        # cos, sin: (T, H/2)
+        cos_TH, sin_TH = self._compute_cos_sin(positions)
+
+        # Reshape for broadcasting: (T, 1, H/2)
+        cos_T1H = cos_TH[:, None, :]
+        sin_T1H = sin_TH[:, None, :]
+
+        def _apply_rotation(x_TNH: jax.Array) -> jax.Array:
+            # Split the last dimension
+            first_half, second_half = jnp.split(x_TNH, 2, axis=-1)
+
+            # Apply rotation
+            rotated_x = jnp.concatenate([
+                first_half * cos_T1H - second_half * sin_T1H,
+                second_half * cos_T1H + first_half * sin_T1H
+            ],
+                                        axis=-1)
+            return rotated_x.astype(self.dtype)
+
+        rotated_query = _apply_rotation(query_TNH)
+        rotated_key = _apply_rotation(key_TNH)
+
+        return rotated_query, rotated_key
