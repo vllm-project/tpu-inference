@@ -35,6 +35,7 @@ def ref_ragged_paged_attention_hd64(
     page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     distribution: jax.Array,  # i32[3]
+    attention_sink: jax.Array | None = None,  # f32[actual_num_q_heads]
     *,
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
@@ -55,6 +56,7 @@ def ref_ragged_paged_attention_hd64(
         page_indices,
         cu_q_lens,
         distribution,
+        attention_sink,
         sm_scale=sm_scale,
         sliding_window=sliding_window,
         soft_cap=soft_cap,
@@ -143,7 +145,19 @@ def ref_ragged_paged_attention_hd64(
         if soft_cap is not None:
             attn = soft_cap * jnp.tanh(attn / soft_cap)
         attn = jnp.where(mask, mask_value, attn)
-        attn = jax.nn.softmax(attn, axis=-1).astype(kv.dtype)
+
+        if attention_sink is not None:
+            reshaped_attention_sink = attention_sink.reshape(
+                actual_num_q_heads, 1, 1)
+            reshaped_attention_sink = jnp.repeat(reshaped_attention_sink,
+                                                 q_len,
+                                                 axis=1)
+            attn = jnp.concat([reshaped_attention_sink, attn], axis=2)
+            attn = jax.nn.softmax(attn, axis=-1).astype(kv.dtype)
+            attn = attn[..., 1:]
+        else:
+            attn = jax.nn.softmax(attn, axis=-1).astype(kv.dtype)
+
         out = jnp.einsum("hqk,khd->qhd", attn, kv).astype(queries.dtype)
         if v_scale is not None:
             out *= v_scale
@@ -238,6 +252,7 @@ def _ragged_paged_attention_kernel(
     q_hbm_ref,  # [actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim]
     kv_hbm_ref,  # [max_num_tokens, num_kv_heads // kv_packing, kv_packing, actual_head_dim_x2]
     kv_cache_hbm_ref,  # [total_num_pages, page_size, num_kv_heads // kv_packing, kv_packing, actual_head_dim_x2]
+    attention_sink_ref,  # [actual_num_kv_heads, num_q_heads_per_kv_head, 128]
     # Output
     o_hbm_ref,  # [actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, actual_head_dim_x2]
     updated_kv_cache_hbm_ref,  # [total_num_pages, page_size, num_kv_heads // kv_packing, kv_packing, actual_head_dim_x2]
@@ -371,7 +386,15 @@ def _ragged_paged_attention_kernel(
             s = soft_cap * jnp.tanh(s / soft_cap)
         s += jnp.where(mask, mask_value, 0.0)
         s_rowmax = jnp.max(s, axis=1, keepdims=True)
-        m_prev = load_with_init(head_m_ref, -jnp.inf)
+
+        if attention_sink_ref is not None:
+            sinks = attention_sink_ref[kv_head_idx]
+            actual_bq_sz = q.shape[0] // num_q_heads_per_kv_head
+            m_prev_init = jnp.concat([sinks] * actual_bq_sz, axis=0)
+            m_prev = jnp.where(bkv_idx == 0, m_prev_init, head_m_ref[...])
+        else:
+            m_prev = load_with_init(head_m_ref, -jnp.inf)
+
         m_curr = jnp.maximum(m_prev, s_rowmax)
         head_m_ref[...] = m_curr
         p = jnp.exp(s - broadcast_minor(m_curr, s.shape))
@@ -382,7 +405,7 @@ def _ragged_paged_attention_kernel(
 
         p_rowsum = jnp.sum(p, axis=1, keepdims=True)
         exp_m_diff = jnp.exp(m_prev - m_curr)
-        l_prev = load_with_init(head_l_ref, 0.0)
+        l_prev = load_with_init(head_l_ref, 1.0)
         l_curr = exp_m_diff * l_prev + p_rowsum
         head_l_ref[...] = l_curr
         o_prev = load_with_init(head_acc_ref, 0.0)
@@ -946,6 +969,7 @@ def dynamic_validate_inputs(
     page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     distribution: jax.Array,  # i32[3]
+    attention_sink: jax.Array | None = None,  # f32[actual_num_q_heads]
     *,
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
@@ -973,6 +997,7 @@ def dynamic_validate_inputs(
         page_indices,
         cu_q_lens,
         distribution,
+        attention_sink,
         sm_scale=sm_scale,
         sliding_window=sliding_window,
         soft_cap=soft_cap,
@@ -1036,6 +1061,7 @@ def static_validate_inputs(
     page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     distribution: jax.Array,  # i32[3]
+    attention_sink: jax.Array | None = None,  # f32[actual_num_q_heads]
     *,
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
@@ -1068,6 +1094,15 @@ def static_validate_inputs(
         raise ValueError(
             f"Expected {q.shape[2]=} to be equal to {k.shape[2]=} and {v.shape[2]=}"
         )
+    if attention_sink is not None:
+        if attention_sink.shape[0] != q.shape[1]:
+            raise ValueError(
+                f"Expected {attention_sink.shape[0]=} to be equal to"
+                f" {q.shape[1]=} (num_q_heads).")
+        if attention_sink.dtype != jnp.float32:
+            raise ValueError(
+                f"Expected {attention_sink.dtype=} to be equal to {jnp.float32=}."
+            )
 
     actual_head_dim = q.shape[2]
     if actual_head_dim != 64:
@@ -1186,6 +1221,7 @@ def ragged_paged_attention_hd64(
     page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     distribution: jax.Array,  # i32[3]
+    attention_sink: jax.Array | None = None,  # f32[actual_num_q_heads]
     *,
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
@@ -1208,35 +1244,36 @@ def ragged_paged_attention_hd64(
     prefill and decode.
 
     Args:
-      queries: concatenated all sequences' queries.
-      keys: concatenated all sequences' keys (quantized).
-      values: concatenated all sequences' values (quantized).
-      kv_cache: paged KV cache with TPU-friendly shape.
-      kv_lens: padded kv lengths. Only the first num_seqs values are valid.
-      page_indices: flattened page indices look-up table by (seq_id, page_id).
-      cu_q_lens: the cumulative sum of the effective query lengths. Similar to
+        queries: concatenated all sequences' queries.
+        keys: concatenated all sequences' keys (quantized).
+        values: concatenated all sequences' values (quantized).
+        kv_cache: paged KV cache with TPU-friendly shape.
+        kv_lens: padded kv lengths. Only the first num_seqs values are valid.
+        page_indices: flattened page indices look-up table by (seq_id, page_id).
+        cu_q_lens: the cumulative sum of the effective query lengths. Similar to
         kv_lens, only the first num_seqs+1 values are valid.
-      distribution: (i, j, k) represents that sequences[0:i] are decode-only,
+        distribution: (i, j, k) represents that sequences[0:i] are decode-only,
         sequences[i:j] are chunked-prefill-only, and sequences[j:k] are mixed. The
         k is also the total number of sequences.
-      actual_head_dim: the actual head size of the attention. Here we assume k and
+        attention_sink: optional attention sink for each q head.
+        actual_head_dim: the actual head size of the attention. Here we assume k and
         v have the same actual head size.
-      sm_scale: the softmax scale which will be applied to the Q@K^T.
-      sliding_window: the sliding window size for the attention.
-      soft_cap: the logit soft cap for the attention.
-      mask_value: mask value for causal mask.
-      k_scale: the scale for the key cache.
-      v_scale: the scale for the value cache.
-      num_kv_pages_per_block: number of kv pages to be processed in one flash
+        sm_scale: the softmax scale which will be applied to the Q@K^T.
+        sliding_window: the sliding window size for the attention.
+        soft_cap: the logit soft cap for the attention.
+        mask_value: mask value for causal mask.
+        k_scale: the scale for the key cache.
+        v_scale: the scale for the value cache.
+        num_kv_pages_per_block: number of kv pages to be processed in one flash
         attention block in the pallas kernel.
-      num_queries_per_block: number of kv pages to be processed in one flash
+        num_queries_per_block: number of kv pages to be processed in one flash
         attention block in the pallas kernel.
-      vmem_limit_bytes: the vmem limit for the pallas kernel.
-      debug_mode: if true, RPA does not issue any DMAs or run flash attention but
+        vmem_limit_bytes: the vmem limit for the pallas kernel.
+        debug_mode: if true, RPA does not issue any DMAs or run flash attention but
         print debug info. Need to compile with `--xla_tpu_enable_log_recorder`.
 
     Returns:
-      The output of the attention.
+        The output of the attention.
     """
     q, k, v = queries, keys, values
     static_validate_inputs(
@@ -1248,6 +1285,7 @@ def ragged_paged_attention_hd64(
         page_indices,
         cu_q_lens,
         distribution,
+        attention_sink,
         sm_scale=sm_scale,
         sliding_window=sliding_window,
         soft_cap=soft_cap,
@@ -1301,10 +1339,19 @@ def ragged_paged_attention_hd64(
         vmem_limit_bytes = DEFAULT_VMEM_LIMIT_BYTES
     grid = (distribution[2], )
 
+    if attention_sink is None:
+        attention_sink_in_specs = None
+    else:
+        attention_sink = attention_sink.reshape(
+            (-1, num_q_heads_per_kv_head, 1))
+        attention_sink = jnp.repeat(attention_sink, 128, -1)
+        attention_sink_in_specs = pl.BlockSpec(memory_space=pltpu.VMEM)
+
     in_specs = [
         pl.BlockSpec(memory_space=pltpu.HBM),
         pl.BlockSpec(memory_space=pltpu.HBM),
         pl.BlockSpec(memory_space=pltpu.HBM),
+        attention_sink_in_specs,
     ]
 
     out_specs = [
@@ -1403,7 +1450,8 @@ def ragged_paged_attention_hd64(
             name=scope_name,
         ))
 
-    output, updated_kv_cache = kernel(*scalar_prefetches, q, kv, kv_cache)
+    output, updated_kv_cache = kernel(*scalar_prefetches, q, kv, kv_cache,
+                                      attention_sink)
     return (
         prepare_outputs(output, actual_num_q_heads_per_kv_head,
                         actual_head_dim),
