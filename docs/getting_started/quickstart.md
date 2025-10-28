@@ -57,7 +57,7 @@ curl http://localhost:8000/v1/completions \
 
 ## Next steps:
 
-Check out complete end to end examples [recipes here](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM)
+Check out complete, end-to-end example recipes in the [tpu-recipes repository](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM)
 
 ## For further reading
 
