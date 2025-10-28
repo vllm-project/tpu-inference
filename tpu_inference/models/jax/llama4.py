@@ -604,10 +604,8 @@ class Llama4WeightLoader:
                     logger.debug(
                         f"Converting PyTorch tensor {loaded_name} to JAX {cast_type}"
                     )
-                    torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
-                    loaded_weight = jnp.array(
-                        loaded_weight.view(torch_view_type).numpy()).view(
-                            cast_type)
+                    loaded_weight = self._convert_torch_to_jax_with_view(
+                        cast_type)
 
                 cast_type = model_weight.value.dtype
                 if not isinstance(loaded_weight, jax.Array):
