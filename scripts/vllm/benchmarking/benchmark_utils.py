@@ -105,10 +105,11 @@ def postprocess_text_mmlu(preds: List[str],
         # TODO: This parser handles output regardless of whether a chat template is enabled.
         # Currently, the chat-template parsing rules are based on the gpt-oss format.
         # We will need to add rules for other models, as their output formats may differ.
-        
+
         # To match 'assistantfinal' block.
-        final_block_match = re.search(r"assistant.*final(.*)", output, re.IGNORECASE | re.DOTALL)
-        
+        final_block_match = re.search(r"assistant.*final(.*)", output,
+                                      re.IGNORECASE | re.DOTALL)
+
         if final_block_match:
             final_block = final_block_match.group(1)
 
@@ -117,13 +118,12 @@ def postprocess_text_mmlu(preds: List[str],
             match = re.search(re_str, final_block, re.DOTALL)
             if match:
                 return match.group(1).upper()
-                
+
             # To match: choice/answer ... (A)
             re_str = r"(?:choice|answer)[^\(]*\s*\(?([A-D])\s*\)?"
             match = re.search(re_str, final_block, re.IGNORECASE | re.DOTALL)
             if match:
                 return match.group(1).upper()
-
 
         # To match ... so/thus answer ... option/choice A
         re_str_fallback = r"(?:thus|so)\s+answer.*(?:option|choice).*\s*\(?([A-D])\s*\)?"

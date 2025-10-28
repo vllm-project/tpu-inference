@@ -201,7 +201,8 @@ class MMLUDataset(BenchmarkDataset):
     https://github.com/AI-Hypercomputer/JetStream/blob/bbfb5bd/benchmarks/benchmark_serving.py#L327.
     """
 
-    def __init__(self, num_shots: int, mmlu_method: str, use_chat_template: bool, **kwargs) -> None:
+    def __init__(self, num_shots: int, mmlu_method: str,
+                 use_chat_template: bool, **kwargs) -> None:
         super().__init__(**kwargs)
         self.mmlu_method = mmlu_method
         self.num_shots = num_shots
@@ -304,27 +305,21 @@ class MMLUDataset(BenchmarkDataset):
                 break
 
             if self.use_chat_template:
-                messages = [
-                    {
-                        "role": "system",
-                        "content": "Reasoning effort: high"
-                    },
-                    {
-                        "role": "user", 
-                        "content": prompt
-                    }
-                ]
+                messages = [{
+                    "role": "system",
+                    "content": "Reasoning effort: high"
+                }, {
+                    "role": "user",
+                    "content": prompt
+                }]
 
                 try:
                     prompt = tokenizer.apply_chat_template(
-                        messages,
-                        tokenize=False,
-                        add_generation_prompt=True
-                    )
+                        messages, tokenize=False, add_generation_prompt=True)
                 except Exception as e:
                     logger.error(f"Could not apply chat template: {e}. "
-                                "Falling back to raw prompt. "
-                                "This will likely fail for fine-tuned models")
+                                 "Falling back to raw prompt. "
+                                 "This will likely fail for fine-tuned models")
 
             prompt_ids = tokenizer(prompt).input_ids
             completion_ids = tokenizer(completion).input_ids

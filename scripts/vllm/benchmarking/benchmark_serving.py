@@ -869,7 +869,7 @@ if __name__ == "__main__":
         choices=["HELM", "Harness", ""],
         help="mmlu method/format to generate shots",
     )
-    mmlu_group.add_argument(    
+    mmlu_group.add_argument(
         "--mmlu-use-chat-template",
         action="store_true",
         help="Whether to format MMLU prompts using the tokenizer's chat template.",
