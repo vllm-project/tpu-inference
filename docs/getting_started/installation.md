@@ -24,8 +24,6 @@ There are three ways to install `tpu-inference`:
     source vllm_env/bin/activate
     ```
 
-    Note: You don’t need to clone the `vllm` and `tpu-inference` repos to execute any of the commands in this guide
-
 3. Use the following command to install vllm-tpu using `pip`
 
     ```shell

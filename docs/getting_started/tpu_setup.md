@@ -9,12 +9,16 @@ integrated circuits (ASICs) used to accelerate machine learning workloads. TPUs
 are available in different versions each with different hardware specifications.
 For more information about TPUs, see [TPU System Architecture](https://cloud.google.com/tpu/docs/system-architecture-tpu-vm).
 
-For more information on the TPU versions supported with vLLM, see:
+The following TPU versions are compatible with `tpu-inference`:
 
+### Recommended
 - [TPU v6e](https://cloud.google.com/tpu/docs/v6e)
 - [TPU v5e](https://cloud.google.com/tpu/docs/v5e)
+
+### Experimental
 - [TPU v5p](https://cloud.google.com/tpu/docs/v5p)
 - [TPU v4](https://cloud.google.com/tpu/docs/v4)
+- [TPU v3](https://cloud.google.com/tpu/docs/v3)
 
 These TPU versions allow you to configure the physical arrangements of the TPU
 chips. This can improve throughput and networking performance. For more
