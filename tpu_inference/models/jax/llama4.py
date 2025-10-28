@@ -419,7 +419,7 @@ class Llama4WeightLoader:
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
         # Find the corresponding model key using the HF key
         if "layer" in loaded_key:
-            layer_num = re.search(r"layers\.(\d+)", loaded_key).group(1)
+            layer_num = self._get_layer_num(loaded_key)
             layer_key = re.sub(r"layers\.\d+", "layers.*", loaded_key)
 
             expert_match = re.search(r"experts\.(\d+)", layer_key)
@@ -442,10 +442,9 @@ class Llama4WeightLoader:
         """HF's gate_up_proj is a fused tensor of gate and up projections. It needs to be split."""
 
         cast_type = jnp.dtype(jnp.bfloat16)
+        # loaded_weight is a jax.Array when framework="flax", otherwise it's bfloat16
         if not isinstance(loaded_weight, jax.Array):
-            torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
-            loaded_weight = jnp.array(
-                loaded_weight.view(torch_view_type).numpy()).view(cast_type)
+            loaded_weight = self._convert_torch_to_jax_with_view(cast_type)
 
         split_weights = jnp.split(loaded_weight, 2, axis=-1)
         layer_num = self._get_layer_num(loaded_name)
@@ -500,6 +499,17 @@ class Llama4WeightLoader:
             return int(match.group(1))
         return None
 
+    def _convert_torch_to_jax_with_view(self,
+                                        cast_type: jnp.dtype) -> jax.Array:
+        """
+        Converts a PyTorch tensor to a JAX array by reinterpreting its
+        bit representation using a dtype view map.
+        """
+        torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
+        loaded_weight = jnp.array(
+            loaded_weight.view(torch_view_type).numpy()).view(cast_type)
+        return loaded_weight
+
     def load_weights(self, model_for_loading: nnx.Module):
         model_params = nnx.state(model_for_loading)
 
@@ -508,6 +518,7 @@ class Llama4WeightLoader:
                 is_moe_layer = False
                 layer_num = self._get_layer_num(loaded_name)
                 expert_num = self._get_expect_num(loaded_name)
+                # Quantized (FP8) checkpoints unstack the expert weights, while unquantized (BF16) checkpoints keep them stacked.
                 is_unfused_expert = self.quantization_config is not None and expert_num is not None
                 is_scale = loaded_name.endswith(".weight_scale")
 
@@ -521,12 +532,9 @@ class Llama4WeightLoader:
                             cast_type = model_weight.array.scale.value.dtype
                         else:
                             cast_type = model_weight.array.qvalue.value.dtype
-                        torch_view_type = DTYPE_VIEW_MAP.get(
-                            jnp.dtype(cast_type))
-                        loaded_weight = jnp.array(
-                            loaded_weight.view(torch_view_type).numpy()).view(
-                                cast_type)
 
+                        loaded_weight = self._convert_torch_to_jax_with_view(
+                            cast_type)
                         loaded_weight = transpose_params(
                             loaded_name, loaded_weight, self._transpose_map)
 
@@ -556,10 +564,8 @@ class Llama4WeightLoader:
                     logger.debug(
                         f"Converting PyTorch tensor {loaded_name} to JAX {cast_type}"
                     )
-                    torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
-                    loaded_weight = jnp.array(
-                        loaded_weight.view(torch_view_type).numpy()).view(
-                            cast_type)
+                    loaded_weight = self._convert_torch_to_jax_with_view(
+                        cast_type)
 
                 if not loaded_name.endswith(".bias"):
                     loaded_weight = reshape_params(loaded_name, loaded_weight,
