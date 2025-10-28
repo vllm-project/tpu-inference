@@ -36,6 +36,7 @@ class RaggedPagedAttentionHeadDim64KernelTest(jtu.JaxTestCase):
         q_scale: float | None = None,
         k_scale: float | None = None,
         v_scale: float | None = None,
+        use_attention_sink: bool = False,
     ):
         assert head_dim == 64
         rng = np.random.default_rng(1234)
@@ -68,6 +69,9 @@ class RaggedPagedAttentionHeadDim64KernelTest(jtu.JaxTestCase):
                        kv_dtype)
         v = gen_random((max_num_batched_tokens, num_kv_heads, head_dim),
                        kv_dtype)
+        attention_sink = gen_random(
+            (num_q_heads), jnp.float32) * 10**2 if use_attention_sink else None
+
         page_cnt = 0
         page_indices_list = []
         kv_pages_list = []
@@ -147,6 +151,7 @@ class RaggedPagedAttentionHeadDim64KernelTest(jtu.JaxTestCase):
             page_indices,
             cu_q_lens,
             distribution,
+            attention_sink,
         )
 
         kwargs = {
@@ -427,6 +432,37 @@ class RaggedPagedAttentionHeadDim64KernelTest(jtu.JaxTestCase):
             dtype,
             num_pages,
             sliding_window=sliding_window,
+        )
+
+    @parameterized.product(
+        sliding_window=[5, 128],
+        num_heads=[(4, 4), (8, 4), (64, 8)],
+    )
+    def test_ragged_paged_attention_sliding_window_with_attention_sink_hd64(
+        self,
+        sliding_window: int | None,
+        num_heads: tuple[int, int],
+    ):
+        num_seqs = 5
+        dtype = jnp.float32
+        rng = np.random.default_rng(1234)
+        q_lens = rng.integers(1, 100, num_seqs)
+        kv_lens = q_lens + rng.integers(0, 50, num_seqs)
+        seq_lens = list(zip(q_lens.tolist(), kv_lens.tolist()))
+        head_dim = 64
+        page_size = 16
+        num_pages = 1000
+
+        self._test_ragged_paged_attention_hd64(
+            seq_lens,
+            num_heads,
+            head_dim,
+            page_size,
+            dtype,
+            dtype,
+            num_pages,
+            sliding_window=sliding_window,
+            use_attention_sink=True,
         )
 
     @parameterized.product(soft_cap=[None, 50.0], )
