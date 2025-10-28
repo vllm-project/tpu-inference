@@ -32,7 +32,7 @@ There are three ways to install `tpu-inference`:
 
 ## Run with Docker
 
-1. Include the `--privileged`, `--net=host`, and `--shm-size=150gb` options to enable TPU interaction and shared memory.
+Include the `--privileged`, `--net=host`, and `--shm-size=150gb` options to enable TPU interaction and shared memory.
 
     ```shell
     export DOCKER_URI=vllm/vllm-tpu:latest
