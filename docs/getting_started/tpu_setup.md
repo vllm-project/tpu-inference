@@ -32,7 +32,7 @@ information see:
 ## Quota and Pricing
 
 In order for you to use Cloud TPUs you need to have TPU quota granted to your
-Google Cloud Platform project. For more information, see [TPU quota](https://cloud.google.com/tpu/docs/quota#tpu_quota).
+Google Cloud project. For more information, see [TPU quota](https://cloud.google.com/tpu/docs/quota#tpu_quota).
 
 For TPU pricing information, see [Cloud TPU pricing](https://cloud.google.com/tpu/pricing).
 
