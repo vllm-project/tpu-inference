@@ -15,8 +15,6 @@ cleanup() {
 # Cleanup will be executed regardless of success or failure.
 trap cleanup EXIT
 
-source /etc/environment
-
 if [ -z "${BUILDKITE_COMMIT:-}" ]; then
   echo "ERROR: BUILDKITE_COMMIT environment variable is not set." >&2
   echo "This script expects BUILDKITE_COMMIT to tag the Docker image." >&2
