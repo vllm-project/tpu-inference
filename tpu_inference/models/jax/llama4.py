@@ -213,14 +213,12 @@ class Llama4ForCausalLM(nnx.Module):
             )
 
             block = SharedExpertsTransformerBlock(
-                # custom_module=custom_module,
                 moe_ffw=moe_ffw if is_moe_layer else None,
                 dense_ffw=dense_ffw if not is_moe_layer else None,
                 shared_experts=shared_experts if is_moe_layer else None,
                 attn=attn,
                 pre_attention_norm=pre_attention_norm,
                 pre_mlp_norm=pre_mlp_norm,
-                # shared_experts=shared_experts,
                 use_attention_rope=use_attention_rope)
             self.layers.append(block)
 
