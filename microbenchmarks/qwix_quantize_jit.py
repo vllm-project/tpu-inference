@@ -12,9 +12,9 @@ NUM_WARMUP = 5
 # Input Sizes: M: (1, 64K), N: (128, 64K)
 INPUT_SIZES = [2**x for x in range(17)]
 OUTPUT_SIZES = [2**x for x in range(7, 17)]
+# TODO: (jnp.float8_e4m3fn, jnp.float4_e2m1fn)]
 UNQUANT_TO_QUANT_DTYPES = [(jnp.bfloat16, jnp.float8_e4m3fn),
-                           (jnp.bfloat16, jnp.float4_e2m1fn),
-                           (jnp.float8_e4m3fn, jnp.float4_e2m1fn)]
+                           (jnp.bfloat16, jnp.float4_e2m1fn)]
 
 INPUT_OUTPUT_SIZES_LIST = list(product(INPUT_SIZES, OUTPUT_SIZES))
 
@@ -32,9 +32,6 @@ def dequantize_fn(quantized_x):
 
 for tensor_shape in INPUT_OUTPUT_SIZES_LIST:
     for unquant_dtype, quant_dtype in UNQUANT_TO_QUANT_DTYPES:
-        print(
-            f"--- Benchmarking shape: {tensor_shape}, unquant dtype: {unquant_dtype}, quant dtype: {quant_dtype} ---"
-        )
         key = jax.random.PRNGKey(0)
         x = jax.random.normal(key, tensor_shape, dtype=unquant_dtype)
 
@@ -49,9 +46,9 @@ for tensor_shape in INPUT_OUTPUT_SIZES_LIST:
         # Real quantization benchmark phase
         quantize_times = []
         for _ in range(NUM_ITERS):
-            start_time = time.perf_counter()
+            start_time = time.perf_counter_ns()
             quantized_x = quantize_fn(x, quant_dtype)
-            end_time = time.perf_counter()
+            end_time = time.perf_counter_ns()
             quantize_times.append(end_time - start_time)
 
         # Convert list to numpy array for easier stats, and get the average
@@ -60,13 +57,13 @@ for tensor_shape in INPUT_OUTPUT_SIZES_LIST:
         # Benchmark Dequantization
         dequantize_times = []
         for _ in range(NUM_ITERS):
-            start_time = time.perf_counter()
+            start_time = time.perf_counter_ns()
             dequantize_fn(quantized_x).block_until_ready()
-            end_time = time.perf_counter()
+            end_time = time.perf_counter_ns()
             dequantize_times.append(end_time - start_time)
 
         dequantize_avg_time = jnp.mean(jnp.array(dequantize_times))
 
         print(
-            f"RESULTS: quantize time: {quantize_avg_time:.6f} s, dequantize time: {dequantize_avg_time:.6f} s\n"
+            f"Results for array of shape {tensor_shape}, unquant dtype: {unquant_dtype.__name__}, quant dtype: {quant_dtype.__name__} quantize (channelwise axis = 0) time: {quantize_avg_time/1000:.6f} us, dequantize time: {dequantize_avg_time/1000:.6f} us"
         )
