@@ -55,9 +55,12 @@ curl http://localhost:8000/v1/completions \
     }'
 ```
 
+## Next steps:
+
+Check out complete end to end examples [recipes here](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM)
+
 ## For further reading
 
-* [Documentation](https://github.com/vllm-project/tpu-inference/tree/main/docs)
 * [Examples](https://github.com/vllm-project/tpu-inference/tree/main/examples)
 * [Recipes](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM)
 * [GKE serving with vLLM TPU](https://cloud.google.com/kubernetes-engine/docs/tutorials/serve-vllm-tpu)

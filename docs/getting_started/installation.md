@@ -63,8 +63,8 @@ For debugging or development purposes, you can install `tpu-inference` from sour
 1. Set up a Python virtual environment:
 
     ```shell
-    python3.12 -m venv vllm_source_env --symlinks
-    source vllm_source_env/bin/activate
+    python3.12 -m venv vllm_env --symlinks
+    source vllm_env/bin/activate
     ```
 
 1. Install `vllm` from source, targeting the TPU device:

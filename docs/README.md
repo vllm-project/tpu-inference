@@ -29,6 +29,7 @@ For this reason, we’ve provided a **[Recommended Models and Features](recommen
 If you are new to vLLM on TPU, we recommend starting with the **[Quickstart](getting_started/quickstart.md)** guide. It will walk you through the process of setting up your environment and running your first model. For more detailed installation instructions, you can refer to the **[Installation](getting_started/installation.md)** guide.
 
 **Compatible TPU Generations**
+
 - Recommended: v5e, v6e
 - Experimental: v3, v4, v5p
 
