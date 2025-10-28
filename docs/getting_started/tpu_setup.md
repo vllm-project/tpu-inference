@@ -76,7 +76,7 @@ gcloud compute tpus tpu-vm ssh TPU_NAME --project PROJECT_ID --zone ZONE
 ```
 
 !!! note
-    When configuring `RUNTIME_VERSION` ("TPU software version") on GCP, ensure it matches the TPU generation you've selected by referencing the [TPU VM images] compatibility matrix. Using an incompatible version may prevent vLLM from running correctly.
+    When configuring `RUNTIME_VERSION` ("TPU software version") for your TPU, ensure it matches the TPU generation you've selected by referencing the [TPU VM images] compatibility matrix. Using an incompatible version may prevent vLLM from running correctly.
 
 [TPU versions]: https://cloud.google.com/tpu/docs/runtimes
 [TPU VM images]: https://cloud.google.com/tpu/docs/runtimes
