@@ -604,7 +604,72 @@ class Llama4WeightLoader:
                     logger.debug(
                         f"Converting PyTorch tensor {loaded_name} to JAX {cast_type}"
                     )
-                    loaded_weight = self._convert_torch_to_jax_with_view(loaded_weight, cast_type)
+                    loaded_weight = self._convert_torch_to_jax_with_view(
+                        loaded_weight, cast_type)
+
+                cast_type = model_weight.value.dtype
+                if not isinstance(loaded_weight, jax.Array):
+                    logger.debug(
+                        f"Converting PyTorch tensor {loaded_name} to JAX {cast_type}"
+                    )
+                    loaded_weight = convert_torch_to_jax_with_view(
+                        loaded_weight, cast_type)
+
+                cast_type = model_weight.value.dtype
+                if not isinstance(loaded_weight, jax.Array):
+                    logger.debug(
+                        f"Converting PyTorch tensor {loaded_name} to JAX {cast_type}"
+                    )
+                    loaded_weight = convert_torch_to_jax_with_view(
+                        loaded_weight, cast_type)
+
+                cast_type = model_weight.value.dtype
+                if not isinstance(loaded_weight, jax.Array):
+                    logger.debug(
+                        f"Converting PyTorch tensor {loaded_name} to JAX {cast_type}"
+                    )
+                    loaded_weight = convert_torch_to_jax_with_view(
+                        loaded_weight, cast_type)
+
+                cast_type = model_weight.value.dtype
+                if not isinstance(loaded_weight, jax.Array):
+                    logger.debug(
+                        f"Converting PyTorch tensor {loaded_name} to JAX {cast_type}"
+                    )
+                    loaded_weight = convert_torch_to_jax_with_view(
+                        loaded_weight, cast_type)
+
+                cast_type = model_weight.value.dtype
+                if not isinstance(loaded_weight, jax.Array):
+                    logger.debug(
+                        f"Converting PyTorch tensor {loaded_name} to JAX {cast_type}"
+                    )
+                    loaded_weight = convert_torch_to_jax_with_view(
+                        loaded_weight, cast_type)
+
+                cast_type = model_weight.value.dtype
+                if not isinstance(loaded_weight, jax.Array):
+                    logger.debug(
+                        f"Converting PyTorch tensor {loaded_name} to JAX {cast_type}"
+                    )
+                    loaded_weight = convert_torch_to_jax_with_view(
+                        loaded_weight, cast_type)
+
+                cast_type = model_weight.value.dtype
+                if not isinstance(loaded_weight, jax.Array):
+                    logger.debug(
+                        f"Converting PyTorch tensor {loaded_name} to JAX {cast_type}"
+                    )
+                    loaded_weight = convert_torch_to_jax_with_view(
+                        loaded_weight, cast_type)
+
+                cast_type = model_weight.value.dtype
+                if not isinstance(loaded_weight, jax.Array):
+                    logger.debug(
+                        f"Converting PyTorch tensor {loaded_name} to JAX {cast_type}"
+                    )
+                    loaded_weight = convert_torch_to_jax_with_view(
+                        loaded_weight, cast_type)
 
                 cast_type = model_weight.value.dtype
                 if not isinstance(loaded_weight, jax.Array):
