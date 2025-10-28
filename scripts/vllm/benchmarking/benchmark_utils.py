@@ -102,10 +102,9 @@ def postprocess_text_mmlu(preds: List[str],
     choices = ["A", "B", "C", "D", None]
 
     def _parse_answer(output):
-        """
-        Parses the MMLU answer from a gpt-oss model's raw output.
-        Prioritizes the 'assistantfinal' block.
-        """
+        # TODO: This parser handles output regardless of whether a chat template is enabled.
+        # Currently, the chat-template parsing rules are based on the gpt-oss format.
+        # We will need to add rules for other models, as their output formats may differ.
         
         # To match 'assistantfinal' block.
         final_block_match = re.search(r"assistant.*final(.*)", output, re.IGNORECASE | re.DOTALL)
