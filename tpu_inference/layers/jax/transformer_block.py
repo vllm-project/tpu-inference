@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any, Tuple, Optional, Union
+from typing import Any, Optional, Tuple, Union
 
 # Flax and JAX sharding imports
 import jax
@@ -20,7 +20,6 @@ class TransformerBlock(nnx.Module):
     """
     pre_attention_norm: nnx.Module
     pre_mlp_norm: nnx.Module
-    # custom_module: nnx.Module
     custom_module: Optional[Union[DenseFFW, MoE]] = None
     attn: nnx.Module
     use_attention_rope: bool = True
@@ -52,7 +51,6 @@ class SharedExpertsTransformerBlock(TransformerBlock):
     moe_ffw: Optional[MoE] = None
     dense_ffw: Optional[DenseFFW] = None
     shared_experts: Optional[DenseFFW] = None
-    # shared_experts: nnx.Module
 
     def __call__(self, x_TD, is_prefill, kv_cache, attention_metadata):
         # Attn Block
@@ -71,7 +69,8 @@ class SharedExpertsTransformerBlock(TransformerBlock):
             if isinstance(self.custom_module, MoE):
                 logits_TD = self.custom_module(normed_ffw_input_TD)
                 # Add the shared expert outputs to the MoE outputs.
-                shared_expert_output_TD = self.shared_experts(normed_ffw_input_TD)
+                shared_expert_output_TD = self.shared_experts(
+                    normed_ffw_input_TD)
                 logits_TD += shared_expert_output_TD
             elif isinstance(self.custom_module, DenseFFW):
                 logits_TD = self.custom_module(normed_ffw_input_TD)
@@ -81,19 +80,25 @@ class SharedExpertsTransformerBlock(TransformerBlock):
         else:
             if self.moe_ffw is not None:
                 if self.shared_experts is None:
-                    raise ValueError("MoE layer (moe_ffw is set) but shared_experts is None!")
+                    raise ValueError(
+                        "MoE layer (moe_ffw is set) but shared_experts is None!"
+                    )
                 moe_output_TD = self.moe_ffw(normed_ffw_input_TD)
-                shared_expert_output_TD = self.shared_experts(normed_ffw_input_TD)
+                shared_expert_output_TD = self.shared_experts(
+                    normed_ffw_input_TD)
                 logits_TD = moe_output_TD + shared_expert_output_TD
 
             elif self.dense_ffw is not None:
                 if self.shared_experts is not None:
-                    raise ValueError("Dense FFW layer (dense_ffw is set) but shared_experts is not None!")
+                    raise ValueError(
+                        "Dense FFW layer (dense_ffw is set) but shared_experts is not None!"
+                    )
                 logits_TD = self.dense_ffw(normed_ffw_input_TD)
 
             else:
-                raise ValueError("Neither moe_ffw nor dense_ffw attribute is set for this SharedExpertsTransformerBlock!")
-        
+                raise ValueError(
+                    "Neither moe_ffw nor dense_ffw attribute is set for this SharedExpertsTransformerBlock!"
+                )
 
         logits_TD += ffw_residual_TD
         return new_cache, logits_TD
