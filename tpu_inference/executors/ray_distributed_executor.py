@@ -6,11 +6,11 @@ import vllm.envs as envs
 from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
-from vllm.executor.ray_distributed_executor import RayWorkerMetaData
-from vllm.executor.ray_utils import RayWorkerWrapper, _wait_until_pg_ready
+from vllm.v1.executor.ray_executor import RayWorkerMetaData
+from vllm.v1.executor.ray_utils import RayWorkerWrapper, _wait_until_pg_ready
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
-from vllm.utils import get_distributed_init_method, get_ip, get_open_port
+from vllm.utils.network_utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.v1.executor.ray_distributed_executor import \
     RayDistributedExecutor as RayDistributedExecutorV1
 
@@ -26,8 +26,8 @@ except ImportError:
 import asyncio
 from collections import defaultdict
 
-import msgspec
-from vllm.executor.msgspec_utils import encode_hook
+# import msgspec
+# from vllm.executor.msgspec_utils import encode_hook
 from vllm.v1.outputs import SamplerOutput
 
 from tpu_inference.distributed.utils import set_node_kv_ip_port
@@ -63,13 +63,13 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         # which optimizes the control plane overhead.
         # Run vLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
         # Currently, this requires USE_RAY_SPMD_WORKER=True.
-        self.use_ray_compiled_dag = envs.VLLM_USE_RAY_COMPILED_DAG
+        # self.use_ray_compiled_dag = envs.VLLM_USE_RAY_COMPILED_DAG  # jax var
         # If the env var is set, then we do not distinguish between the
         # "driver worker" vs other workers. Also, the rank 0 worker will
         # be executed in a remote Ray worker. Currently this requires
         # USE_RAY_COMPILED_DAG=True.
-        self.use_ray_spmd_worker = envs.VLLM_USE_RAY_SPMD_WORKER
-
+        # self.use_ray_spmd_worker = envs.VLLM_USE_RAY_SPMD_WORKER    #jax var
+        self.use_ray_spmd_worker = True
         assert self.uses_ray
         self._initialize_ray_cluster()
         placement_group = self.parallel_config.placement_group
@@ -82,9 +82,9 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         # Create the parallel GPU workers.
         self._init_workers_ray(placement_group)
 
-        self.input_encoder = msgspec.msgpack.Encoder(enc_hook=encode_hook)
-        self.output_decoder = msgspec.msgpack.Decoder(
-            Optional[List[SamplerOutput]])
+        # self.input_encoder = msgspec.msgpack.Encoder(enc_hook=encode_hook)
+        # self.output_decoder = msgspec.msgpack.Decoder(
+        #     Optional[List[SamplerOutput]])
         self.use_v1 = envs.VLLM_USE_V1
 
         self.pp_locks: Optional[List[asyncio.Lock]] = None
@@ -95,7 +95,7 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         self.kv_output_aggregator = KVOutputAggregator(
             self.parallel_config.world_size)
         if self.has_connector:
-            ip_port = self._run_workers("get_node_kv_ip_port")
+            ip_port = self.collective_rpc("get_node_kv_ip_port")
             for item in ip_port:
                 set_node_kv_ip_port(item)
 
@@ -127,10 +127,19 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         #     device_str:
         #     node['Resources'][device_str]
         # } for node in ray.nodes()]
+        # TODO: add assert, make sure we have enough nodes.
+        chips = sorted([node['Resources'][device_str] for node in ray.nodes()], reverse=True)
+        logger.info(f'{chips=}')
+        
+        tp_size = self.parallel_config.tensor_parallel_size
+        pp_size = self.parallel_config.pipeline_parallel_size
+        assert len(chips) >= pp_size and all(chips[i] >= tp_size for i in range(pp_size)), \
+            f"Not enough TPU nodes for the requested parallelism: TP={tp_size}, PP={pp_size}"
+        
         placement_group_specs: List[Dict[str, float]] = [{
             device_str:
-            self.parallel_config.tensor_parallel_size
-        } for i in range(self.parallel_config.pipeline_parallel_size)]
+            tp_size
+        } for _ in range(pp_size)]
 
         # vLLM engine is also a worker to execute model with an accelerator,
         # so it requires to have the device in a current node. Check if
@@ -146,6 +155,7 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
                 f"available in a node {current_node_id=} {current_ip=}.")
         # This way, at least bundle is required to be created in a current
         # node.
+        logger.info(f'{placement_group_specs=}')
         placement_group_specs[0][f"node:{current_ip}"] = 0.001
         logger.info(
             f"RayDistributedExecutor | placement_group_specs={placement_group_specs}"
@@ -154,7 +164,8 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         # By default, Ray packs resources as much as possible.
         current_placement_group = ray.util.placement_group(
             placement_group_specs, strategy="PACK")
-        _wait_until_pg_ready(current_placement_group)
+        logger.info(f'{current_placement_group=}')
+        # _wait_until_pg_ready(current_placement_group)
 
         assert current_placement_group is not None
         # Set the placement group in the parallel config
@@ -197,6 +208,7 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         driver_ip = get_ip()
         num_tpu_per_worker = placement_group.bundle_specs[0].get(
             current_platform.ray_device_key, 0)
+        logger.info(f'ray _init_workers_ray: {num_tpu_per_worker=}, {len(bundle_indices)=}')
         for rank, bundle_id in enumerate(bundle_indices):
             scheduling_strategy = PlacementGroupSchedulingStrategy(
                 placement_group=placement_group,
@@ -256,7 +268,8 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
             item.created_rank: item.adjusted_rank
             for item in sorted_worker_metadata
         }
-        self._run_workers("adjust_rank", rerank_mapping)
+        # self.collective_rpc("adjust_rank", rerank_mapping)
+        self.collective_rpc("adjust_rank", args=(rerank_mapping,))
 
         # Get the set of TPU IDs used on each node.
         worker_node_and_tpu_ids = []
@@ -264,7 +277,7 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
             worker_node_and_tpu_ids.append(
                 ray.get(worker.get_node_and_gpu_ids.remote()) \
             ) # type: ignore
-
+        logger.info(f'{worker_node_and_tpu_ids=}')
         node_workers = defaultdict(list)  # node id -> list of worker ranks
         node_tpus = defaultdict(list)  # node id -> list of tpu ids
 
@@ -312,16 +325,22 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         self._env_vars_for_all_workers = (
             all_args_to_update_environment_variables)
 
-        self._run_workers("update_environment_variables",
-                          self._get_env_vars_to_be_updated())
+        self.collective_rpc("update_environment_variables",
+                          args=(self._get_env_vars_to_be_updated(),))
 
         distributed_init_method = get_distributed_init_method(
             driver_ip, get_open_port())
 
         # Initialize the actual workers inside worker wrapper.
+        # debug
+        for rank, metadata in enumerate(sorted_worker_metadata):
+            logger.info(f'{rank=}, ip={metadata.ip}')
         all_kwargs = []
         for rank, (node_id, _) in enumerate(worker_node_and_tpu_ids):
             local_rank = node_workers[node_id].index(rank)
+            ip = sorted_worker_metadata[rank].ip
+            prev_ip = sorted_worker_metadata[rank - 1].ip if rank > 0 else ""
+            logger.info(f'worker kwargs: {rank=}, {ip=}, {prev_ip=}')
             kwargs = dict(
                 vllm_config=self.vllm_config,
                 local_rank=local_rank,
@@ -329,31 +348,33 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
                 distributed_init_method=distributed_init_method,
                 is_driver_worker=(not self.parallel_config)
                 or (rank % self.parallel_config.tensor_parallel_size == 0),
-                ip=sorted_worker_metadata[rank].ip,
-                prev_worker_ip=sorted_worker_metadata[rank - 1].ip
-                if rank > 0 else "",
+                ip=ip,
+                prev_worker_ip=prev_ip,
             )
             all_kwargs.append(kwargs)
-        self._run_workers("init_worker", all_kwargs)
+        self.collective_rpc("init_worker", args=(all_kwargs,))
 
-        self._run_workers("init_device")
+        self.collective_rpc("init_device")
 
-        self._run_workers("initialize_pp_transfer_connect")
+        self.collective_rpc("initialize_pp_transfer_connect")
 
-        self._run_workers("load_model",
-                          max_concurrent_workers=self.parallel_config.
-                          max_parallel_loading_workers)
+        # self.collective_rpc("load_model",
+        #                   max_concurrent_workers=self.parallel_config.
+        #                   max_parallel_loading_workers)
+        self.collective_rpc("load_model")
 
         if self.use_ray_spmd_worker:
+            # for pp_rank in range(self.parallel_config.pipeline_parallel_size):
+            #     self.pp_tp_workers.append([])
+            #     for tp_rank in range(
+            #             int(self.parallel_config.tensor_parallel_size //
+            #                 num_tpu_per_worker)):
+            #         # PP=2, TP=4
+            #         # pp_tp_workers = [[0, 1, 2, 3], [4, 5, 6, 7]]
+            #         rank = (pp_rank * self.parallel_config.tensor_parallel_size
+            #                 ) + tp_rank 
+            #         assert len(self.pp_tp_workers[pp_rank]) == tp_rank
+            #         assert pp_rank < len(self.pp_tp_workers)
+            #         self.pp_tp_workers[pp_rank].append(self.workers[rank])
             for pp_rank in range(self.parallel_config.pipeline_parallel_size):
-                self.pp_tp_workers.append([])
-                for tp_rank in range(
-                        int(self.parallel_config.tensor_parallel_size //
-                            num_tpu_per_worker)):
-                    # PP=2, TP=4
-                    # pp_tp_workers = [[0, 1, 2, 3], [4, 5, 6, 7]]
-                    rank = (pp_rank * self.parallel_config.tensor_parallel_size
-                            ) + tp_rank
-                    assert len(self.pp_tp_workers[pp_rank]) == tp_rank
-                    assert pp_rank < len(self.pp_tp_workers)
-                    self.pp_tp_workers[pp_rank].append(self.workers[rank])
+                self.pp_tp_workers.append([self.workers[pp_rank]])
