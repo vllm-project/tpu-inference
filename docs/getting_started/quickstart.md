@@ -41,18 +41,19 @@ After installing `vllm-tpu`, you can start the API server.
    ```
 
 3. **Send a Request:**
-   Once the server is running, you can send it a request using `curl`:
 
-   ```shell
-   curl http://localhost:8000/v1/completions \
-       -H "Content-Type: application/json" \
-       -d '{
-           "model": "meta-llama/Llama-3.1-8B",
-            "prompt": "Hello, my name is",
-            "max_tokens": 20,
-            "temperature": 0.7
-        }'
-    ```
+Once the server is running, you can send it a request using `curl`:
+
+```shell
+curl http://localhost:8000/v1/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "meta-llama/Llama-3.1-8B",
+        "prompt": "Hello, my name is",
+        "max_tokens": 20,
+        "temperature": 0.7
+    }'
+```
 
 ## For further reading
 
