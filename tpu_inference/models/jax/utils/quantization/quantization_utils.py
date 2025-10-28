@@ -71,6 +71,7 @@ DEFAULT_LLAMA4_FP8_CONFIG = {
     }
 }
 
+
 def parse_qwix_config_to_rules(
         qwix_config: List[dict]) -> List[qwix.QuantizationRule]:
     """
@@ -317,25 +318,28 @@ def apply_qwix_quantization(
                kv_cache_dtype=kv_cache_dtype)
 
         return model_or_model_fn
-    
+
     hf_config = vllm_config.model_config.hf_config
-    if hasattr(hf_config, "text_config") and hasattr(hf_config.text_config, "num_hidden_layers"):
+    if hasattr(hf_config, "text_config") and hasattr(hf_config.text_config,
+                                                     "num_hidden_layers"):
         num_hidden_layers = hf_config.text_config.num_hidden_layers
-        logger.info(f"Using num_hidden_layers from hf_config.text_config: {num_hidden_layers}")
+        logger.info(
+            f"Using num_hidden_layers from hf_config.text_config: {num_hidden_layers}"
+        )
     elif hasattr(hf_config, "num_hidden_layers"):
         num_hidden_layers = hf_config.num_hidden_layers
-        logger.info(f"Using num_hidden_layers directly from hf_config: {num_hidden_layers}")
+        logger.info(
+            f"Using num_hidden_layers directly from hf_config: {num_hidden_layers}"
+        )
     else:
-        raise AttributeError("Could not find 'num_hidden_layers' in hf_config or hf_config.text_config.")
+        raise AttributeError(
+            "Could not find 'num_hidden_layers' in hf_config or hf_config.text_config."
+        )
 
     qwix_quantize_fn_for_eval = functools.partial(
         qwix_quantize_nnx_model,
         qwix_config=qwix_config,
         mesh=mesh,
-        # num_hidden_layers=vllm_config.model_config.hf_config.num_hidden_layers if hasattr(
-        #     vllm_config.model_config.hf_config.text_config, "num_hidden_layers") else hasattr(
-        #     vllm_config.model_config.hf_config, "num_hidden_layers"),
-        # num_hidden_layers=vllm_config.model_config.hf_config.text_config.num_hidden_layers, # ADD
         num_hidden_layers=num_hidden_layers,
         kv_cache_block_size=block_size,
         kv_cache_num_kv_heads=num_kv_heads,
