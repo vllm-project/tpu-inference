@@ -146,25 +146,12 @@ def _substitute_placeholder_token(
         f"Shape mismatch: input_ids and index arrays must have identical shapes due to precompilation assumptions. " \
         f"Got: {input_ids.shape=}, {token_in_tpu_cur_input_indices.shape=}, {token_in_tpu_pre_next_tokens_indices.shape=}"
 
-    def updated_input_ids_array(i: int,
-                                current_input_ids: jax.Array) -> jax.Array:
-        """
-        Iteratively updates the input_ids for all placeholders.
-å
-        Args:
-            i: The current loop index.
-            current_input_ids: The loop carry state (the input_ids being modified).
-
-        Returns:
-            The updated input_ids array.
-        """
-        update_idx = token_in_tpu_cur_input_indices[i]
-        value_idx = token_in_tpu_pre_next_tokens_indices[i]
-        new_token_value = next_tokens[value_idx]
-        return current_input_ids.at[update_idx].set(new_token_value)
-
-    return jax.lax.fori_loop(0, placeholder_num, updated_input_ids_array,
-                             input_ids)
+    # updates the input_ids for all placeholders.
+    mask = jnp.arange(input_ids.shape[0]) < placeholder_num
+    new_token_values = next_tokens[token_in_tpu_pre_next_tokens_indices]
+    original_values = input_ids[token_in_tpu_cur_input_indices]
+    update_values = jnp.where(mask, new_token_values, original_values)
+    return input_ids.at[token_in_tpu_cur_input_indices].set(update_values)
 
 
 class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
@@ -940,9 +927,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             assert self._pre_async_results is not None
             idx_pad_len = len(input_ids) - len(token_in_tpu_cur_input_indices)
             padded_token_in_tpu_cur_input_indices = np.pad(
-                token_in_tpu_cur_input_indices, (0, idx_pad_len))
+                token_in_tpu_cur_input_indices, (0, idx_pad_len),
+                mode='constant',
+                constant_values=-1)
             padded_token_in_tpu_pre_next_tokens_indices = np.pad(
-                token_in_tpu_pre_next_tokens_indices, (0, idx_pad_len))
+                token_in_tpu_pre_next_tokens_indices, (0, idx_pad_len),
+                mode='constant',
+                constant_values=-1)
             with self.maybe_forbid_compile:
                 input_ids = self._substitute_placeholder_token_fn(
                     input_ids, padded_token_in_tpu_cur_input_indices,
