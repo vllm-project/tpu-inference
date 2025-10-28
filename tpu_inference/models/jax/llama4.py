@@ -372,11 +372,6 @@ class Llama4WeightLoader:
             "layers.*.moe_ffw.kernel_up_proj_EDF",
         }
 
-        if self.quantization_config is None:
-            expert_mappings_to_use = EXPERT_MAPPINGS_FUSED
-        else:
-            expert_mappings_to_use = EXPERT_MAPPINGS_UNFUSED
-
         self._loaded_to_standardized_keys = {
             "language_model.model.embed_tokens.weight":
             "embedder.input_embedding_table_VD",
@@ -414,7 +409,10 @@ class Llama4WeightLoader:
             "layers.*.dense_ffw.kernel_gating_DF",
         }
 
-        self._loaded_to_standardized_keys.update(expert_mappings_to_use)
+        if self.quantization_config is None:
+            self._loaded_to_standardized_keys.update(EXPERT_MAPPINGS_FUSED)
+        else:
+            self._loaded_to_standardized_keys.update(EXPERT_MAPPINGS_UNFUSED)
 
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
         # Find the corresponding model key using the HF key
@@ -499,7 +497,7 @@ class Llama4WeightLoader:
             return int(match.group(1))
         return None
 
-    def _convert_torch_to_jax_with_view(self,
+    def _convert_torch_to_jax_with_view(self, loaded_weight: torch.Tensor,
                                         cast_type: jnp.dtype) -> jax.Array:
         """
         Converts a PyTorch tensor to a JAX array by reinterpreting its
