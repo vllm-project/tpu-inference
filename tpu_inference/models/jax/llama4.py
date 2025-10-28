@@ -9,7 +9,6 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from vllm.config import VllmConfig
-import torch
 
 from tpu_inference.layers.jax.attention.attention import AttentionMetadata
 from tpu_inference.layers.jax.attention.llama4_attention import Llama4Attention
@@ -509,7 +508,7 @@ class Llama4WeightLoader:
         if match:
             return int(match.group(1))
         return None
-    
+
     def _get_expect_num(self, loaded_key: str) -> Optional[int]:
         """
         Extracts the expect number from a HuggingFace weight key string.
@@ -601,8 +600,14 @@ class Llama4WeightLoader:
                 model_weight = get_param(model_params, mapped_name)
 
                 cast_type = model_weight.value.dtype
-                torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
-                loaded_weight = jnp.array(loaded_weight.view(torch_view_type).numpy()).view(cast_type)
+                if not isinstance(loaded_weight, jax.Array):
+                    logger.debug(
+                        f"Converting PyTorch tensor {loaded_name} to JAX {cast_type}"
+                    )
+                    torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
+                    loaded_weight = jnp.array(
+                        loaded_weight.view(torch_view_type).numpy()).view(
+                            cast_type)
 
                 cast_type = model_weight.value.dtype
                 if not isinstance(loaded_weight, jax.Array):
@@ -610,6 +615,22 @@ class Llama4WeightLoader:
                         f"Converting PyTorch tensor {loaded_name} to JAX {cast_type}"
                     )
                     loaded_weight = convert_torch_to_jax_with_view(
+                        loaded_weight, cast_type)
+
+                cast_type = model_weight.value.dtype
+                if not isinstance(loaded_weight, jax.Array):
+                    logger.debug(
+                        f"Converting PyTorch tensor {loaded_name} to JAX {cast_type}"
+                    )
+                    loaded_weight = convert_torch_to_jax_with_view(
+                        loaded_weight, cast_type)
+
+                cast_type = model_weight.value.dtype
+                if not isinstance(loaded_weight, jax.Array):
+                    logger.debug(
+                        f"Converting PyTorch tensor {loaded_name} to JAX {cast_type}"
+                    )
+                    loaded_weight = self._convert_torch_to_jax_with_view(
                         loaded_weight, cast_type)
 
                 cast_type = model_weight.value.dtype
@@ -645,7 +666,8 @@ class Llama4WeightLoader:
                 for buffer_key, expert_map in self.expert_weights_buffer.items(
                 ):
                     sorted_exp_nums = sorted(expert_map.keys())
-                    aggregated_weight = jnp.stack([expert_map[k] for k in sorted_exp_nums], axis=0)
+                    aggregated_weight = jnp.stack(
+                        [expert_map[k] for k in sorted_exp_nums], axis=0)
                     is_scale = buffer_key.endswith("_scale")
                     base_mapped_name = buffer_key.replace("_scale",
                                                           "").replace(

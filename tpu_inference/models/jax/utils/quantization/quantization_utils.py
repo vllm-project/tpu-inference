@@ -105,6 +105,41 @@ DEFAULT_LLAMA4_FP8_CONFIG = {
     }
 }
 
+DEFAULT_LLAMA4_FP8_CONFIG = {
+    "qwix": {
+        "use_abstract_model":
+        True,
+        "scale_dtype":
+        "bfloat16",
+        "rules": [
+            {
+                "module_path": "layers.*.moe_ffw",
+                "op_names": "einsum",
+                "weight_qtype": "float8_e4m3fn",
+                "act_qtype": "float8_e4m3fn",
+            },
+        ],
+    }
+}
+
+DEFAULT_LLAMA4_FP8_CONFIG = {
+    "qwix": {
+        "use_abstract_model":
+        True,
+        "scale_dtype":
+        "bfloat16",
+        "rules": [
+            {
+                "module_path": "layers.*.moe_ffw",
+                "op_names": "einsum",
+                "weight_qtype": "float8_e4m3fn",
+                "act_qtype": "float8_e4m3fn",
+            },
+        ],
+    }
+}
+
+
 def parse_qwix_config_to_rules(
         qwix_config: List[dict]) -> List[qwix.QuantizationRule]:
     """
