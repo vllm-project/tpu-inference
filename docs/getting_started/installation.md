@@ -34,14 +34,14 @@ There are three ways to install `tpu-inference`:
 
 Include the `--privileged`, `--net=host`, and `--shm-size=150gb` options to enable TPU interaction and shared memory.
 
-    ```shell
-    export DOCKER_URI=vllm/vllm-tpu:latest
-    sudo docker run -it --rm --name $USER-vllm --privileged --net=host \
-        -v /dev/shm:/dev/shm \
-        --shm-size 150gb \
-        -p 8000:8000 \
-        --entrypoint /bin/bash ${DOCKER_URI}
-    ```
+```shell
+export DOCKER_URI=vllm/vllm-tpu:latest
+sudo docker run -it --rm --name $USER-vllm --privileged --net=host \
+    -v /dev/shm:/dev/shm \
+    --shm-size 150gb \
+    -p 8000:8000 \
+    --entrypoint /bin/bash ${DOCKER_URI}
+```
 
 ## Install from source
 
@@ -53,21 +53,21 @@ For debugging or development purposes, you can install `tpu-inference` from sour
     sudo apt-get update && sudo apt-get install -y libopenblas-base libopenmpi-dev libomp-dev
     ```
 
-2. Clone the `vllm` and `tpu-inference` repositories:
+1. Clone the `vllm` and `tpu-inference` repositories:
 
     ```shell
     git clone https://github.com/vllm-project/vllm.git
     git clone https://github.com/vllm-project/tpu-inference.git
     ```
 
-3. Set up a Python virtual environment:
+1. Set up a Python virtual environment:
 
     ```shell
     python3.12 -m venv vllm_source_env --symlinks
     source vllm_source_env/bin/activate
     ```
 
-4. Install `vllm` from source, targeting the TPU device:
+1. Install `vllm` from source, targeting the TPU device:
 
     ```shell
     cd vllm
@@ -76,7 +76,7 @@ For debugging or development purposes, you can install `tpu-inference` from sour
     cd ..
     ```
 
-5. Install `tpu-inference` from source:
+1. Install `tpu-inference` from source:
 
     ```shell
     cd tpu-inference
