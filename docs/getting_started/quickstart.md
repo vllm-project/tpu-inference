@@ -27,7 +27,7 @@ To install vLLM TPU, you can either install using `pip` (see section [Install us
     cd ~/work-dir
     ```
 
-2. Set up a Python virtual environment:
+1. Set up a Python virtual environment:
 
     ```shell
     python3.12 -m venv vllm_env --symlinks
@@ -36,17 +36,17 @@ To install vLLM TPU, you can either install using `pip` (see section [Install us
 
     Note: You don’t need to clone the `vllm` and `tpu-inference` repos to execute any of the commands in this guide
 
-3. Use the following command to install vllm-tpu using `pip`
+1. Use the following command to install vllm-tpu using `pip`
 
     ```shell
     pip install vllm-tpu
     ```
 
-4. Get access to the ["meta-llama/Llama-3.1-8B" model](https://huggingface.co/meta-llama/Llama-3.1-8B) on Hugging Face. This is the model used in the following example, but you can use any supported model.
+1. Get access to the ["meta-llama/Llama-3.1-8B" model](https://huggingface.co/meta-llama/Llama-3.1-8B) on Hugging Face. This is the model used in the following example, but you can use any supported model.
 
-5. Generate a new [Hugging Face token](https://huggingface.co/docs/hub/security-tokens) if you don\'t already have one:
+1. Generate a new [Hugging Face token](https://huggingface.co/docs/hub/security-tokens) if you don't already have one:
 
-    1. Go to **Your Profile > Settings > Access Tokens**.
+    1. Go to **Your Profile \> Settings \> Access Tokens**.
     2. Select **Create new token**.
     3. Specify a name of your choice and a role with at least **Read** permissions.
     4. Select **Generate a token**.
@@ -58,16 +58,16 @@ To install vLLM TPU, you can either install using `pip` (see section [Install us
         huggingface-cli login --token $TOKEN
         ```
 
-6. Launch the vLLM server:
+1. Launch the vLLM server:
 
-    The following command downloads the model weights from [Hugging Face Model Hub](https://huggingface.co/docs/hub/en/models-the-hub) to the TPU VM\'s `/tmp` directory, pre-compiles a range of input shapes, and writes the model compilation to `~/.cache/vllm/xla_cache`.
+    The following command downloads the model weights from [Hugging Face Model Hub](https://huggingface.co/docs/hub/en/models-the-hub) to the TPU VM's `/tmp` directory, pre-compiles a range of input shapes, and writes the model compilation to `~/.cache/vllm/xla_cache`.
 
     ```shell
     cd ~/work-dir
     vllm serve "meta-llama/Llama-3.1-8B" --download_dir /tmp --disable-log-requests --tensor_parallel_size=1 --max-model-len=2048 &> serve.log &
     ```
 
-7. Run the vLLM benchmarking script:
+1. Run the vLLM benchmarking script:
 
     ```shell
     export MODEL="meta-llama/Llama-3.1-8B"
@@ -95,7 +95,7 @@ To install vLLM TPU, you can either install using `pip` (see section [Install us
         --entrypoint /bin/bash ${DOCKER_URI}
     ```
 
-2. Start the vLLM OpenAI API server (inside the container):
+1. Start the vLLM OpenAI API server (inside the container):
 
     ```shell
     export HF_HOME=/dev/shm/vllm
@@ -114,9 +114,9 @@ To install vLLM TPU, you can either install using `pip` (see section [Install us
 
     Note: Adjust `--model` if you’re using a different model and `--tensor-parallel-size` if you want to use a different number of tensor parallel replicas.
 
-3. Send a client request from your host to the vllm server hosted locally.
+1. Send a client request from your host to the vllm server hosted locally.
 
-    First, let\'s try to get inside the running docker:
+    First, let's try to get inside the running docker:
 
     ```shell
     sudo docker exec -it $USER-vllm bash
@@ -127,8 +127,7 @@ To install vLLM TPU, you can either install using `pip` (see section [Install us
     ```shell
     curl http://localhost:8000/v1/completions \
         -H "Content-Type: application/json" \
-        -d
-        '{
+        -d '{
             "model": "meta-llama/Llama-3.1-8B",
             "prompt": "Hello, my name is",
             "max_tokens": 20,
