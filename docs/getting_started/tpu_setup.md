@@ -47,7 +47,7 @@ API (preferred). This section shows how to create TPUs using the queued resource
 
 ### Provision a Cloud TPU with the queued resource API
 
-Create a TPU v5e with 4 TPU chips:
+Use the following command to provision a Cloud TPU. Replace the parameters in all caps with your own values.
 
 ```bash
 gcloud alpha compute tpus queued-resources create QUEUED_RESOURCE_ID \
