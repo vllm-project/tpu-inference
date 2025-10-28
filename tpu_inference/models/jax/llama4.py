@@ -371,7 +371,6 @@ class Llama4WeightLoader:
             "o_proj": (hidden_size, attn_heads, attn_head_dim),
         }
 
-        # ============================= ADD ================================
         # Set the mappings from loaded parameter keys to standardized names.
         EXPERT_MAPPINGS_FUSED = {
             "language_model.model.layers.*.feed_forward.experts.down_proj":
@@ -485,12 +484,6 @@ class Llama4WeightLoader:
                                  mapped_name)
 
             mapped_model_weight = get_param(model_params, mapped_name)
-
-            # ============================= ADD ================================
-            cast_type = mapped_model_weight.value.dtype
-            torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
-            loaded_weight = jnp.array(loaded_weight.view(torch_view_type).numpy()).view(cast_type)
-            # ============================= ADD ================================
 
             if mapped_model_weight.value.shape != loaded_weight.shape:
                 raise ValueError(
@@ -607,14 +600,17 @@ class Llama4WeightLoader:
                 mapped_name = self.map_loaded_to_standardized_name(loaded_name)
                 model_weight = get_param(model_params, mapped_name)
 
-                # ============================= ADD ================================
-                # print(f"--- Inspecting: {mapped_name} ---")
-                # print(f"Variable is: {model_weight}")
-                # print(f"Type is: {type(model_weight)}")
                 cast_type = model_weight.value.dtype
                 torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
                 loaded_weight = jnp.array(loaded_weight.view(torch_view_type).numpy()).view(cast_type)
-                # ============================= ADD ================================
+
+                cast_type = model_weight.value.dtype
+                if not isinstance(loaded_weight, jax.Array):
+                    logger.debug(
+                        f"Converting PyTorch tensor {loaded_name} to JAX {cast_type}"
+                    )
+                    loaded_weight = convert_torch_to_jax_with_view(
+                        loaded_weight, cast_type)
 
                 cast_type = model_weight.value.dtype
                 if not isinstance(loaded_weight, jax.Array):
@@ -705,6 +701,9 @@ class Llama4WeightLoader:
                     logger.debug(
                         f"Aggregated and loaded {loaded_name}: {aggregated_weight.shape}"
                     )
+
+                    if self.is_verbose:
+                        print_param_info(model_weight, loaded_name)
 
                     if self.is_verbose:
                         print_param_info(model_weight, loaded_name)
