@@ -138,6 +138,12 @@ def postprocess_text_mmlu(preds: List[str],
         if match:
             return match.group(1).upper()
 
+        # To match: (A)
+        re_str_fallback = r"\s*\(([A-D])\)?\s*\w*"
+        match = re.search(re_str_fallback, output, re.IGNORECASE)
+        if match:
+            return match.group(1).upper()
+
         return None
 
     preds = [choices.index(_parse_answer(pred.strip())) for pred in preds]

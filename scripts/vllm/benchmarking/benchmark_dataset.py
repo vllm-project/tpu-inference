@@ -205,8 +205,8 @@ class MMLUDataset(BenchmarkDataset):
         super().__init__(**kwargs)
         self.mmlu_method = mmlu_method
         self.num_shots = num_shots
-        self.load_data()
         self.use_chat_template = use_chat_template
+        self.load_data()
 
     def load_mmlu_dataset_csv(self,
                               dataset_path: str) -> tuple[Any, dict[str, str]]:
@@ -245,14 +245,20 @@ class MMLUDataset(BenchmarkDataset):
                        f"(B) {row['B']}\n"
                        f"(C) {row['C']}\n"
                        f"(D) {row['D']}\n")
-
-            output += "\nPlease think carefully and give the answer. "
-
-            if mmlu_method == "HELM":
-                output += f"**Answer: ({row['answer']})** <|endoftext|>\n"
-            elif mmlu_method == "Harness":
-                content = row[row["answer"].upper()]
-                output += f"({row['answer']}) {content}\n\n"
+            if self.use_chat_template:
+                output += "\nPlease think carefully and give the answer. "
+                if mmlu_method == "HELM":
+                    output += f"**Answer: ({row['answer']})** <|endoftext|>\n"
+                elif mmlu_method == "Harness":
+                    content = row[row["answer"].upper()]
+                    output += f"**Answer: ({row['answer']}) {content}\n\n"
+            else:
+                output += "\nCorrect answer:"
+                if mmlu_method == "HELM":
+                    output += f"({row['answer']})\n\n"
+                elif mmlu_method == "Harness":
+                    content = row[row["answer"].upper()]
+                    output += f"({row['answer']}) {content}\n\n"
 
         return output
 
