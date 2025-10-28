@@ -66,7 +66,7 @@ gcloud alpha compute tpus queued-resources create QUEUED_RESOURCE_ID \
 | PROJECT_ID         | Your Google Cloud project                                                                                                                                                                                |
 | ZONE               | The GCP zone where you want to create your Cloud TPU. The value you use depends on the version of TPUs you are using. For more information, see [TPU regions and zones]                                  |
 | ACCELERATOR_TYPE   |  Specify the TPU version, for example `v5litepod-4` specifies a v5e TPU with 4 cores, `v6e-1` specifies a v6e TPU with 1 core. For more information, see [TPU versions]. |
-| RUNTIME_VERSION    | The TPU VM runtime version to use. For example, use `v2-alpha-tpuv6e` for a VM loaded with one or more v6e TPU(s).                                              |
+| RUNTIME_VERSION    | The TPU VM runtime version to use. For example, use `v2-alpha-tpuv6e` for a VM loaded with one or more v6e TPU(s).  For more information, see [TPU software versions](https://docs.cloud.google.com/tpu/docs/runtimes)                                          |
 | SERVICE_ACCOUNT    | The email address for your service account. You can find it in the IAM Cloud Console under *Service Accounts*. For example: `tpu-service-account@<your_project_ID>.iam.gserviceaccount.com`              |
 
 Connect to your TPU VM using SSH:
