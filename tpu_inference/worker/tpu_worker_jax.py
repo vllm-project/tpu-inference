@@ -241,7 +241,9 @@ class TPUWorker(AbstractTpuWorker):
     def profile(self, is_start: bool = True):
         if is_start:
             options = jax.profiler.ProfileOptions()
+            # default: https://docs.jax.dev/en/latest/profiling.html#general-options
             options.python_tracer_level = os.getenv("PYTHON_TRACER_LEVEL", 0)
+            options.host_tracer_level = os.getenv("HOST_TRACER_LEVEL", 1)
             jax.profiler.start_trace(self.profile_dir,
                                      profiler_options=options)
         else:
