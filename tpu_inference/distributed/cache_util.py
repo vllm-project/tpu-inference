@@ -114,7 +114,7 @@ SwapFn = Callable[
     List[jax.Array],  # return value
 ]
 
-JittedKVCacheSwapFn = Callable[[List[jax.Array]], List[jax.Array]]
+KVCacheSwapFn = Callable[[List[jax.Array]], List[jax.Array]]
 
 
 # NOTE(jcgu): keep the same interface as the pallas one
@@ -160,8 +160,8 @@ def pallas_swap_kv_caches(
 
     def swap_in_fn(inputs, input_sharding, out_sharding):
 
-        def _swap_in(hbm_sharded_array):
-            return h2d_dma(hbm_sharded_array, input_sharding, out_sharding)
+        def _swap_in(host_sharded_array):
+            return h2d_dma(host_sharded_array, input_sharding, out_sharding)
 
         return jax.tree.map(_swap_in, inputs)
 
@@ -178,12 +178,13 @@ def pallas_swap_kv_caches(
         return swap_in_fn(src_kv_caches, src_sharding, dst_sharding)
 
 
-def get_jitted_kv_cache_swap_fn(
+def get_kv_cache_swap_fn(
     swap_op_type: CPU_OFFLOADING_SWAP_OP_TYPE,
     host_sharding: jax.sharding.NamedSharding,
-    device_sharding: jax.sharding.NamedSharding
-) -> Tuple[JittedKVCacheSwapFn, JittedKVCacheSwapFn]:
-    """jit compile the swap_in and swap_out functions
+    device_sharding: jax.sharding.NamedSharding,
+    jitted: bool = False,
+) -> Tuple[KVCacheSwapFn, KVCacheSwapFn]:
+    """get the right swap_in and swap_out functions
 
     Args:
         swap_op_type : (str) pallas or jax
@@ -194,18 +195,26 @@ def get_jitted_kv_cache_swap_fn(
         A tuple containing the jitted swap-in and swap-out functions.
     """
     _swap_fn: SwapFn = pallas_swap_kv_caches if swap_op_type == "pallas" else jax_swap_kv_caches
-    # swap_in (host_sharding), swap_out (device_sharding)
-    swap_in_fn = functools.partial(jax.jit(
-        _swap_fn,
-        static_argnames=["src_sharding", "dst_sharding", "direction"],
-        out_shardings=device_sharding),
+    if jitted:
+        _swap_in_fn = jax.jit(
+            _swap_fn,
+            static_argnames=["src_sharding", "dst_sharding", "direction"],
+            out_shardings=device_sharding)
+        _swap_out_fn = jax.jit(
+            _swap_fn,
+            static_argnames=["src_sharding", "dst_sharding", "direction"],
+            out_shardings=host_sharding)
+    else:
+        _swap_in_fn = _swap_fn
+        _swap_out_fn = _swap_fn
+
+    # swap_in (h2d)
+    swap_in_fn = functools.partial(_swap_in_fn,
                                    src_sharding=host_sharding,
                                    dst_sharding=device_sharding,
                                    direction="h2d")
-    swap_out_fn = functools.partial(jax.jit(
-        _swap_fn,
-        static_argnames=["src_sharding", "dst_sharding", "direction"],
-        out_shardings=host_sharding),
+    # swap_out (d2h)
+    swap_out_fn = functools.partial(_swap_out_fn,
                                     src_sharding=device_sharding,
                                     dst_sharding=host_sharding,
                                     direction="d2h")
