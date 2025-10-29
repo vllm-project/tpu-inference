@@ -1,7 +1,7 @@
 import math
 from functools import partial
-from typing import (Callable, List, Literal, NamedTuple, Optional, TypedDict,
-                    Union)
+from typing import (Any, Callable, List, Literal, NamedTuple, Optional,
+                    TypedDict, Union)
 
 import jax
 import jax.numpy as jnp
@@ -1067,3 +1067,39 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
                         model=self,
                         metadata_map=metadata_map,
                         mesh=self.mesh)
+
+    def precompile_vision_encoder_and_merger(
+        self,
+        input_embeddings_fn: Callable,
+        model_state: Any,
+        run_compilation_fn: Callable,
+        create_dummy_tensor_fn: Callable,
+        num_tokens_paddings: list[int],
+    ) -> None:
+        image_shapes = []
+        if (warmup_config := self.vllm_config.additional_config.get(
+                "vision_warmup_config")):
+            image_shapes = warmup_config.get("image_shapes")
+
+        vc = self.vllm_config.model_config.hf_config.vision_config
+        for input_hw in image_shapes:
+            if not isinstance(input_hw, list) or len(input_hw) != 2:
+                logger.warning(f"Skipping invalid shape {input_hw}.")
+                continue
+            h_input, w_input = input_hw
+            t, h, w = 1, h_input // vc.patch_size, w_input // vc.patch_size
+            grid_thw = (t, h, w)
+            num_patches = t * h * w
+            patch_input_dim = vc.in_channels * vc.temporal_patch_size * vc.patch_size * vc.patch_size
+
+            dummy_pixel_values = jnp.ones(
+                (num_patches, patch_input_dim),
+                self.vllm_config.model_config.dtype,
+            )
+            dummy_grid_thw = grid_thw
+
+            run_compilation_fn("single_image_encoder",
+                               self.get_single_image_embedding,
+                               dummy_pixel_values,
+                               dummy_grid_thw,
+                               image_shape=input_hw)

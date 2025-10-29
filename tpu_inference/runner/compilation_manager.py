@@ -74,6 +74,13 @@ class CompilationManager:
         with self.runner.maybe_setup_dummy_loras(self.runner.lora_config):
             self._precompile_backbone_text_only()
             if self.runner.is_multimodal_model:
+                self.runner.precompile_vision_encoder_and_merger_fn(
+                    self.runner.get_input_embeddings_fn,
+                    self.runner.state,
+                    self._run_compilation,
+                    self._create_dummy_tensor,
+                    self.runner.num_tokens_paddings,
+                )
                 self._precompile_backbone_with_inputs_embeds()
             self._precompile_select_from_array()
             self._precompile_compute_logits()

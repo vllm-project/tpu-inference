@@ -260,6 +260,9 @@ def get_flax_model(
         model = nnx.merge(graphdef, state)
         return model.combine_hidden_states(hidden_states)
 
+    model = nnx.merge(graphdef, state)
+    precompile_vision_encoder_and_merger_fn = getattr(
+        model, "precompile_vision_encoder_and_merger", None)
     model_fn = functools.partial(run_model, graphdef)
     compute_logits_fn = functools.partial(run_compute_logits, graphdef)
     get_multimodal_embeddings_fn = functools.partial(
@@ -274,7 +277,7 @@ def get_flax_model(
         jit_model,
         "get_mrope_input_positions") else jit_model.get_mrope_input_positions
 
-    return model_fn, compute_logits_fn, combine_hidden_states_fn, get_multimodal_embeddings_fn, get_input_embeddings_fn, get_mrope_input_positions_fn, state, lora_manager, model
+    return model_fn, compute_logits_fn, combine_hidden_states_fn, precompile_vision_encoder_and_merger_fn, get_multimodal_embeddings_fn, get_input_embeddings_fn, get_mrope_input_positions_fn, state, lora_manager, model
 
 
 def get_vllm_model(
