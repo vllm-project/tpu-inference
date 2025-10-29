@@ -984,7 +984,7 @@ class TPUConnectorWorker:
             return
 
         # logger.info("TPUConnectorWorker: Entering wait_for_save")
-        metadata = self.connector._connector_metadata
+        metadata = self.connector._get_connector_metadata()
         if not isinstance(metadata, TPUConnectorMetadata):
             logger.info(
                 "wait_for_save:not an instances of TPUConnectorMetadata")
