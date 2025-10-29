@@ -308,7 +308,7 @@ class TPUConnectorScheduler():
             num_external_tokens (int): the number of tokens that will be
                 loaded from the external KV cache.
         """
-        if self.is_producer:
+        if self.is_producer or not request.kv_transfer_params:
             return
 
         params = request.kv_transfer_params
