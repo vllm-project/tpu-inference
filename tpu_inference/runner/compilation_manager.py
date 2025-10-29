@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import vllm.envs as envs
-from jax.sharding import NamedSharding, PartitionSpec
+from jax.sharding import NamedSharding, PartitionSpec, SingleDeviceSharding
 
 from tpu_inference.core.disagg_utils import is_disagg_enabled
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
@@ -37,9 +37,14 @@ class CompilationManager:
     def _create_dummy_tensor(self,
                              shape: Tuple[int, ...],
                              dtype: Any,
-                             sharding: Optional[NamedSharding] = None) -> Any:
+                             sharding: Optional[NamedSharding] = None,
+                             use_single_device_sharding: bool = False) -> Any:
         """Helper to create dummy tensors for precompilation."""
         tensor = jnp.ones(shape, dtype=dtype)
+        if use_single_device_sharding:
+            device = self.runner.mesh.devices.flat[0]
+            single_sharding = SingleDeviceSharding(device)
+            return jax.device_put(tensor, single_sharding)
         if sharding:
             return device_array(self.runner.mesh, tensor, sharding=sharding)
         return device_array(self.runner.mesh, tensor)
