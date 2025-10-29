@@ -35,6 +35,12 @@ If you are new to vLLM on TPU, we recommend starting with the **[Quickstart](get
 
 *Check out a few v6e recipes [in the tpu-recipes repository](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM)!*
 
+**Compatible TPU Generations**
+- Recommended: v5e, v6e
+- Experimental: v3, v4, v5p
+
+*Check out a few v6e recipes [here](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM)!*
+
 ## Developer Guides
 
 If you are interested in contributing to the project or want to learn more about the internals, check out our developer guides:
