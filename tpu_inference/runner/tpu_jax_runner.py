@@ -377,7 +377,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # Run the multimodal encoder if any.
             # We have the modality embeds at this time.
             self.mm_manager.execute_mm_encoder(scheduler_output)
-            mm_embeds = self.mm_manager.gather_mm_embeddings(scheduler_output)
+            mm_embeds = self.mm_manager.gather_mm_embeddings(
+                scheduler_output, input_ids.shape[0])
         else:
             mm_embeds = []
 
@@ -730,8 +731,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.is_multimodal_model:
             inputs_embeds = self.get_input_embeddings_fn(
                 self.state,
-                input_ids=input_ids,
-                multimodal_embeddings=mm_embeds,
+                input_ids,
+                mm_embeds,
             )
             return None, inputs_embeds
         else:

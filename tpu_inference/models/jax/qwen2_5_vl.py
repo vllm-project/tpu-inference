@@ -959,14 +959,13 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
 
     def get_input_embeddings(
             self, input_ids: jax.Array,
-            multimodal_embeddings: Optional[MultiModalEmbeddings]
-    ) -> jax.Array:
+            multimodal_embeddings: Optional[jax.Array]) -> jax.Array:
 
         inputs_embeds = self.language_model.model.embed(input_ids)
 
 
         if multimodal_embeddings is not None \
-            and len(multimodal_embeddings) != 0:
+            and multimodal_embeddings.shape[0] != 0:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings,
                 [self.config.image_token_id, self.config.video_token_id])
