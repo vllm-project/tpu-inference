@@ -17,7 +17,7 @@ modeling_flax_utils = FlaxUtils()
 class GptOssRouter(Router):
     """Router module for Mixture-of-Experts (MoE) layers.
 
-    This module determines which experts each token should be routed to based on the input.
+    This module determines which experts each token should be routed.
 
     """
     e_sharding: Sharding = ()
@@ -97,12 +97,6 @@ class GptOssMoE(nnx.Module):
 
         weights_TX, indices_TX = self.router(x_TD)
 
-        one_hot_mask_TXE = jax.nn.one_hot(indices_TX,
-                                          num_classes=self.num_local_experts,
-                                          dtype=self.dtype)
-        combined_weights_TE = jnp.sum(one_hot_mask_TXE * weights_TX[..., None],
-                                      axis=1)
-
         # First MLP layer (up-projection)
         with jax.named_scope("MLP #1"):
             up_proj_TEF2 = jnp.einsum('TD,EDF -> TEF', x_TD,
@@ -121,8 +115,12 @@ class GptOssMoE(nnx.Module):
 
         # Weighted sum of expert outputs
         with jax.named_scope("sum"):
-            output_TD = jnp.einsum('TED,TE -> TD', down_proj_TED,
-                                   combined_weights_TE)
+            indices_for_gather = indices_TX[..., None]
+            gathered_down_proj_TED = jnp.take_along_axis(down_proj_TED,
+                                                         indices_for_gather,
+                                                         axis=1)
+            output_TD = jnp.einsum('TXD,TX -> TD', gathered_down_proj_TED,
+                                   weights_TX)
 
         return output_TD.astype(self.dtype)
 
