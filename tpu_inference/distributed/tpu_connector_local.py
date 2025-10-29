@@ -85,6 +85,7 @@ Worker Side Execution:
     KV data from TPU to CPU and update the CPU backend. It then waits for all
     submitted save tasks for the current step to complete.
 """
+import copy
 import os
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -108,8 +109,8 @@ from tpu_inference.logger import init_logger
 from tpu_inference.runner.kv_cache_manager import KVCacheManager
 from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
 
-from .cache_util import (CPU_OFFLOADING_SWAP_OP_TYPE, JittedKVCacheSwapFn,
-                         TokenProcessor)
+from .cache_util import (CPU_OFFLOADING_SWAP_OP_TYPE, KVCacheSwapFn,
+                         TokenProcessor, get_kv_cache_swap_fn)
 from .local_cpu_backend import LocalCPUBackend
 
 EngineId = str
@@ -634,7 +635,7 @@ class TPUConnectorScheduler():
             tracker = RequestTracker(
                 req_id=req_id,
                 prompt_len=len(request.prompt_token_ids),
-                block_ids=request.block_ids[0],
+                block_ids=copy.deepcopy(request.block_ids[0]),
                 token_ids=tokens_for_tracker,
                 num_external_hits=num_external_hits,
                 # The high-water mark for saved tokens starts after the cached prefix.
@@ -764,8 +765,8 @@ class TPUConnectorWorker:
         logger.info(
             f"(cpu offloading) swap operation type is {self.swap_op_type}")
 
-        self.swap_in_fn: JittedKVCacheSwapFn = None
-        self.swap_out_fn: JittedKVCacheSwapFn = None
+        self.swap_in_fn: KVCacheSwapFn = None
+        self.swap_out_fn: KVCacheSwapFn = None
 
         self.host = self.config.kv_ip
         self.kv_transfer_port = self.config.kv_port
@@ -812,26 +813,36 @@ class TPUConnectorWorker:
                 spec=jax.sharding.PartitionSpec(None, "model"),
                 memory_kind="device")
 
-            def _jax_swap_in(src_kv_caches):
-                # input_array should exist on HBM
-                def _jax_swap_in_(input_array):
-                    return jax.device_put(input_array, jax.devices("cpu")[0])
+            self.flatten_host_sharding = jax.sharding.NamedSharding(
+                mesh=self.device_sharding.mesh,
+                spec=jax.sharding.PartitionSpec(None, "model"),
+                memory_kind="pinned_host")
 
-                return jax.tree.map(_jax_swap_in_, src_kv_caches)
+            self.swap_in_fn, self.swap_out_fn = get_kv_cache_swap_fn(
+                self.swap_op_type,
+                host_sharding=self.flatten_host_sharding,
+                device_sharding=self.flatten_device_sharding)
 
-            def _jax_swap_out(src_kv_caches):
-                # input_array should exist on CPU
-                def _jax_swap_out_(input_array):
-                    return jax.device_put(input_array,
-                                          self.flatten_device_sharding)
+            # def _jax_swap_in(src_kv_caches):
+            #     # input_array should exist on HBM
+            #     def _jax_swap_in_(input_array):
+            #         return jax.device_put(input_array, jax.devices("cpu")[0])
 
-                return jax.tree.map(_jax_swap_out_, src_kv_caches)
+            #     return jax.tree.map(_jax_swap_in_, src_kv_caches)
 
-            # the output (on device) of swap_in should apply NamedSharding
-            self.swap_in_fn = jax.jit(
-                _jax_swap_in, out_shardings=self.flatten_device_sharding)
-            # the output (on host) of swap_out should apply SingleDeviceSharding
-            self.swap_out_fn = jax.jit(_jax_swap_out)
+            # def _jax_swap_out(src_kv_caches):
+            #     # input_array should exist on CPU
+            #     def _jax_swap_out_(input_array):
+            #         return jax.device_put(input_array,
+            #                               self.flatten_device_sharding)
+
+            #     return jax.tree.map(_jax_swap_out_, src_kv_caches)
+
+            # # the output (on device) of swap_in should apply NamedSharding
+            # self.swap_in_fn = jax.jit(
+            #     _jax_swap_in, out_shardings=self.flatten_device_sharding)
+            # # the output (on host) of swap_out should apply SingleDeviceSharding
+            # self.swap_out_fn = jax.jit(_jax_swap_out)
 
             logger.info("KV Cache details registered in TPUConnectorWorker:")
             logger.info(f"  - Num layers: {self.num_layers}")
@@ -983,7 +994,7 @@ class TPUConnectorWorker:
             return
 
         # logger.info("TPUConnectorWorker: Entering wait_for_save")
-        metadata = self.connector._connector_metadata
+        metadata = self.connector._get_connector_metadata()
         if not isinstance(metadata, TPUConnectorMetadata):
             logger.info(
                 "wait_for_save:not an instances of TPUConnectorMetadata")
@@ -1135,41 +1146,46 @@ class TPUConnectorWorker:
                     )
                     return
 
+            # swap-in
+            # output: [[(partial) kv_chunks * num_chunks] * num_layer]
+            raw_chunked_kv_on_tpu = self.swap_in_fn(assembled_kv_on_cpu)
+
             # Concatenate all chunks for each layer into a single, contiguous array.
-            final_kv_on_cpu = [
-                jnp.concatenate(layer_chunks, axis=0)
-                for layer_chunks in assembled_kv_on_cpu
+            layered_kv_on_tpu = [
+                jax.lax.concatenate(layer_chunks, dimension=0)
+                for layer_chunks in raw_chunked_kv_on_tpu
             ]
 
-            if not final_kv_on_cpu:
+            if not layered_kv_on_tpu:
                 logger.warning(
-                    f"No cache data found in CPU backend for request {meta.req_id}"
+                    f"No cache data found in TPU backend for request {meta.req_id}"
                 )
                 continue
 
-            jax.block_until_ready(final_kv_on_cpu)
+            jax.block_until_ready(layered_kv_on_tpu)
             logger.info(
-                f"Request {meta.req_id}: Assembled CPU data for one layer has shape {final_kv_on_cpu[0].shape}."
+                f"Request {meta.req_id}: Assembled TPU data for one layer has shape {layered_kv_on_tpu[0].shape}."
             )
 
             # If the full prefix hit state for a given request is active, we fetched N tokens but must
             # now truncate to N-1 before padding and loading, to match the
             # allocation made by the scheduler.
+            # TODO(jcgu): rm
             if meta.load_spec.is_full_prefix_hit:
-                final_kv_on_cpu = jax.tree.map(
+                layered_kv_on_tpu = jax.tree.map(
                     lambda x: jax.lax.slice_in_dim(x, 0, x.shape[0] - 1),
-                    final_kv_on_cpu)
+                    layered_kv_on_tpu)
                 logger.info(
                     f"Request {meta.req_id}: is_full_prefix_hit = {meta.load_spec.is_full_prefix_hit}"
                     "Truncated fetched cache data by 1 token. New shape: "
-                    f"{final_kv_on_cpu[0].shape if final_kv_on_cpu else 'N/A'}"
+                    f"{layered_kv_on_tpu[0].shape if layered_kv_on_tpu else 'N/A'}"
                 )
 
             # 3. Split the delta load into two parts:
             #    a) The data that fills the last partially-filled block.
             #    b) The data that fills new, completely empty blocks.
-            fetched_delta_token_count = (final_kv_on_cpu[0].shape[0]
-                                         if final_kv_on_cpu else 0)
+            fetched_delta_token_count = (layered_kv_on_tpu[0].shape[0]
+                                         if layered_kv_on_tpu else 0)
             logger.info(f"Request {meta.req_id}: fetched_delta_token_count = "
                         f"{fetched_delta_token_count}")
             if fetched_delta_token_count == 0:
@@ -1199,11 +1215,11 @@ class TPUConnectorWorker:
                     f"start_offset_in_block={start_offset_in_block}, "
                     f"partial_num_tokens_in_first_block={partial_num_tokens_in_first_block}"
                 )
-                # Extract the corresponding slice of data from our assembled CPU delta.
+                # Extract the corresponding slice of data from our assembled TPU delta.
                 data_for_first_block = jax.tree.map(
                     lambda x: jax.lax.slice_in_dim(
                         x, 0, partial_num_tokens_in_first_block, axis=0),
-                    final_kv_on_cpu,
+                    layered_kv_on_tpu,
                 )
                 jax.block_until_ready(data_for_first_block)
 
@@ -1222,11 +1238,11 @@ class TPUConnectorWorker:
                     return kv_caches
 
                 # Transfer the small slice to TPU and update the cache precisely.
-                data_on_tpu = self.swap_in_fn(data_for_first_block)
-                jax.block_until_ready(data_on_tpu)
+                # data_on_tpu = self.swap_in_fn(data_for_first_block)
+                # jax.block_until_ready(data_on_tpu)
                 self.runner.kv_caches = _jitted_update_slice_in_block(
                     self.runner.kv_caches, dest_block_id,
-                    start_offset_in_block, data_on_tpu)
+                    start_offset_in_block, data_for_first_block)
                 jax.block_until_ready(self.runner.kv_caches)
                 logger.info(
                     f"Request {meta.req_id}: Updated {partial_num_tokens_in_first_block} tokens "
@@ -1263,13 +1279,14 @@ class TPUConnectorWorker:
                         partial_num_tokens_in_first_block,
                         x.shape[0],
                         axis=0),
-                    final_kv_on_cpu,
+                    layered_kv_on_tpu,
                 )
                 jax.block_until_ready(data_for_full_blocks)
                 # padding_config: A list of tuples, one for each dimension of the KV cache.
                 # Each tuple is (pad_before, pad_after, pad_interior).
                 # The first dimension (tokens) is padded with `pad_after` zeros.
                 # Other dimensions (heads, head_dim) are not padded.
+                # TODO(jcgu): rm
                 padding_config = [
                     (0, pad_after, 0)
                 ] + [(0, 0, 0)] * (len(data_for_full_blocks[0].shape) - 1)
@@ -1282,12 +1299,12 @@ class TPUConnectorWorker:
                 jax.block_until_ready(padded_data)
 
                 # Transfer and insert the full blocks to staging buffer in TPU.
-                loaded_kv_sharded_on_tpu = self.swap_in_fn(padded_data)
-                jax.block_until_ready(loaded_kv_sharded_on_tpu)
+                # loaded_kv_sharded_on_tpu = self.swap_in_fn(padded_data)
+                # jax.block_until_ready(loaded_kv_sharded_on_tpu)
                 self.runner.kv_caches = KVCacheManager._jitted_insert_kv_cache(
                     self.block_size,
                     self.runner.kv_caches,
-                    loaded_kv_sharded_on_tpu,
+                    padded_data,
                     jnp.array(destination_blocks),
                 )
                 jax.block_until_ready(self.runner.kv_caches)
