@@ -1264,17 +1264,19 @@ class TPUConnectorWorker:
                 # Each tuple is (pad_before, pad_after, pad_interior).
                 # The first dimension (tokens) is padded with `pad_after` zeros.
                 # Other dimensions (heads, head_dim) are not padded.
-                # TODO(jcgu): rm
-                padding_config = [
-                    (0, pad_after, 0)
-                ] + [(0, 0, 0)] * (len(data_for_full_blocks[0].shape) - 1)
-                padded_data = jax.tree.map(
-                    lambda layer_cpu: jax.lax.pad(
-                        layer_cpu, jnp.array(0, dtype=self.dtype),
-                        padding_config),
-                    data_for_full_blocks,
-                )
-                jax.block_until_ready(padded_data)
+                if pad_after > 0:
+                    padding_config = [
+                        (0, pad_after, 0)
+                    ] + [(0, 0, 0)] * (len(data_for_full_blocks[0].shape) - 1)
+                    padded_data = jax.tree.map(
+                        lambda layer_cpu: jax.lax.pad(
+                            layer_cpu, jnp.array(0, dtype=self.dtype),
+                            padding_config),
+                        data_for_full_blocks,
+                    )
+                    jax.block_until_ready(padded_data)
+                else:
+                    padded_data = data_for_full_blocks
 
                 self.runner.kv_caches = KVCacheManager._jitted_insert_kv_cache(
                     self.block_size,
