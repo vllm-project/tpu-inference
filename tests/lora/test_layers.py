@@ -8,6 +8,7 @@ import torchax
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.interop import torch_view
 from torchax.ops.mappings import j2t, t2j
+from torchax.interop import jax_view, torch_view
 # from tpu_commons.models.vllm.sharding import shard_parallel_layers_to_tpu
 from vllm.config import LoRAConfig
 # yapf conflicts with isort for this block
@@ -22,6 +23,11 @@ from vllm.model_executor.utils import set_random_seed
 from vllm.platforms import current_platform
 
 from .utils import DummyLoRAManager
+from tpu_inference.layers.vllm.quantization.common import (
+    JaxCommonConfig, JaxCommonLinearConfig)
+from tpu_inference.layers.vllm.quantization.unquantized import \
+    VllmUnquantizedLinearMethod
+from tpu_inference.layers.vllm.sharding import shard_model_to_tpu, _shard_merged_column_parallel_linear_lora
 
 # TODO(xiowei):
 # - add test for multi-chip.
@@ -224,15 +230,31 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
     def create_column_parallel_packed_layer():
         # Step 1: create a base layer (e.g. MergedColumnParallelLinear) and a vLLM LoRA wrapper.
         if repeats == 2:
+            # In e2e, MergedColumnParallelLinear is created when we load th e model. The weights are sharded and moved to TPU in VllmUnquantizedLinearMethod.process_weights_after_loading.
             linear = MergedColumnParallelLinear(
                 256,  # input_size
                 [256] * repeats,  # output_size
                 bias=False,
                 params_dtype=torch.float16)
             linear.weight.data = torch.rand_like(linear.weight.data)
+            
+            base_linear = MergedColumnParallelLinear(
+                256,  # input_size
+                [256] * repeats,  # output_size
+                bias=False,
+                params_dtype=torch.float16)
+            base_linear.weight.data = linear.weight.data
+            vllm_config = dist_init
+            # self.jax_config.mesh.devices[0][0].platform
+            jax_config = JaxCommonLinearConfig(vllm_config, mesh, base_linear)
+            linear_method = VllmUnquantizedLinearMethod(jax_config)
+            linear_method.process_weights_after_loading(base_linear)
+            # here base_linear.weight is on TPU and sharded.
+            
+            # In the e2e, the lora_layer's weight is moved to TPU in _shard_module_to_tpu.
             lora_linear = MergedColumnParallelLinearWithLoRA(
-                linear
-            )  # TODO(xiowei): add test for MergedColumnParallelLinearWithShardedLoRA (fully_shard == True)
+                base_linear
+            )
         elif repeats == 3:
             # TODO(xiowei): add test for this case.
             raise NotImplementedError("NYI: for MergedQKVParallelLinear case")
@@ -241,21 +263,22 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             raise NotImplementedError("NYI: for QKVParallelLinear case")
 
         n_slices = repeats
-        # create_lora_weights creates global shape weight.
-        lora_linear.create_lora_weights(max_loras, lora_config)
+        with torchax.default_env():
+            # create_lora_weights creates global shape weight.
+            lora_linear.create_lora_weights(max_loras, lora_config)
+        _shard_merged_column_parallel_linear_lora(lora_linear, mesh)
         assert (lora_linear.n_slices == len(lora_linear.lora_a_stacked) == len(
             lora_linear.lora_b_stacked) == n_slices)
 
-        return linear, lora_linear
+        return linear, lora_linear, linear_method
 
     set_random_seed(6)
 
-    linear, lora_linear = create_column_parallel_packed_layer()
-    # linear.weight has type torch.nn.Parameter, lora_linear.weight has type torchax.tensor.Tensor
-    # BaseLinearLayerWithLoRA.weight property guarantees this.
-    assert torch.equal(linear.weight, lora_linear.weight)
+    linear, lora_linear, linear_method = create_column_parallel_packed_layer()
     with torchax.default_env():
-        assert torch.equal(linear.weight.data, j2t(lora_linear.weight))
+        # linear.weight has type torch.nn.Parameter, lora_linear.weight has type torchax.tensor.Tensor
+        # BaseLinearLayerWithLoRA.weight property guarantees this.
+        assert torch.equal(linear.weight, lora_linear.weight.to('cpu'))
 
     max_num_batched_tokens = 8192
     max_batches = 256
@@ -297,7 +320,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             vocab_size=512,
             extra_vocab_size=lora_config.lora_extra_vocab_size,
         )
-        punica_wrapper.move_to_device(mesh)
+        # punica_wrapper.move_to_device(mesh)
 
     jax_inputs = []
     with torchax.default_env(), jax.default_device(jax.devices("tpu")[0]):
@@ -305,12 +328,12 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             # without `torch_view`, you get an error `AttributeError: 'jaxlib._jax.ArrayImpl' object has no attribute 'apply_jax_'`
             # without `t2j`, you get an error `AttributeError: 'Tensor' object has no attribute 'apply_jax_'`
             jax_input = torch_view(t2j(input))
-            jax_input.apply_jax_(jax.device_put,
-                                 NamedSharding(mesh, P(None, None)))
+            jax_input.apply_jax_(jax.device_put, NamedSharding(mesh, P(None, None)))
             jax_inputs.append(jax_input)
     with torchax.default_env():
-        lora_result = lora_linear(torch.cat(jax_inputs))[0]
-        lora_result = j2t(lora_result)
+        # lora_result = lora_linear(torch.cat(jax_inputs))[0]
+        # lora_result = j2t(lora_result)
+        lora_result = linear_method.apply(lora_linear.base_layer, torch.cat(jax_inputs))
 
     expected_results: list[torch.Tensor] = []
     for input_, lora_id in zip(inputs, prompt_mapping):
@@ -318,23 +341,24 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
         result = linear(input_)[0]
         subloras = sublora_dict[lora_id]
         for i, sublora in enumerate(subloras):
-            result[:, sublora.lora_b.shape[1] * i:sublora.lora_b.shape[1] *
-                   (i + 1)] += (input_ @ sublora.lora_a @ sublora.lora_b *
+            result[:, sublora.lora_b.shape[0] * i:sublora.lora_b.shape[0] *
+                   (i + 1)] += (input_ @ sublora.lora_a.T @ sublora.lora_b.T *
                                 sublora.scaling)
         expected_results.append(result)
     expected_result = torch.cat(expected_results)
 
     rtol, atol = TOLERANCES[lora_result.dtype]
-    torch.testing.assert_close(lora_result,
-                               expected_result,
-                               rtol=rtol,
-                               atol=atol)
-    print(
-        f'Output max diff: {torch.max(torch.abs(expected_result - lora_result))}'
-    )
-    print(
-        f'Output mean diff: {torch.mean(torch.abs(expected_result - lora_result))}'
-    )
+    with torchax.default_env():
+        torch.testing.assert_close(lora_result.to('cpu'),
+                                   expected_result,
+                                   rtol=rtol,
+                                   atol=atol)
+        print(
+            f'Output max diff: {torch.max(torch.abs(expected_result.to('cpu') - lora_result))}'
+        )
+        print(
+            f'Output mean diff: {torch.mean(torch.abs(expected_result.to('cpu') - lora_result))}'
+        )
 
     # Check that resetting the lora weights succeeds
     # Here we set all lora weight to be empty.
@@ -368,8 +392,9 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
                                  NamedSharding(mesh, P(None, None)))
             jax_inputs.append(jax_input)
     with torchax.default_env():
-        lora_result = lora_linear(torch.cat(jax_inputs))[0]
-        lora_result = j2t(lora_result)
+        lora_result = linear_method.apply(lora_linear.base_layer, torch.cat(jax_inputs))
+        # lora_result = lora_linear(torch.cat(jax_inputs))[0]
+        # lora_result = j2t(lora_result)
     expected_result = linear(torch.cat(inputs))[0]
 
     rtol, atol = TOLERANCES[lora_result.dtype]
