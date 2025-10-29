@@ -251,6 +251,8 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             base_linear.quant_method=linear_method
             linear_method.process_weights_after_loading(base_linear)
             # here base_linear.weight is on TPU and sharded.
+            assert jax_view(base_linear.weight).platform() == 'tpu', 'base_linear.weight should have been moved to TPU.'
+            assert not isinstance(jax_view(base_linear.weight).sharding, jax.sharding.SingleDeviceSharding), 'base_linear.weight should have been sharded.'
             
             # In the e2e, the lora_layer's weight is moved to TPU in _shard_module_to_tpu.
             lora_linear = MergedColumnParallelLinearWithLoRA(
@@ -270,6 +272,13 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             # create_lora_weights creates global shape weight.
             lora_linear.create_lora_weights(max_loras, lora_config)
         _shard_merged_column_parallel_linear_lora(lora_linear, mesh)
+        # TODO: assert the lora_a_stacked is on TPU and sharded.
+        assert jax_view(lora_linear.lora_a_stacked[0]).platform() == 'tpu', 'lora_a_stacked should have been moved to TPU.'
+        assert not isinstance(jax_view(lora_linear.lora_a_stacked[0]).sharding, jax.sharding.SingleDeviceSharding), 'lora_a_stacked should have been sharded.'
+        assert jax_view(lora_linear.lora_b_stacked[0]).platform() == 'tpu', 'lora_b_stacked should have been moved to TPU.'
+        assert not isinstance(jax_view(lora_linear.lora_b_stacked[0]).sharding, jax.sharding.SingleDeviceSharding), 'lora_b_stacked should have been sharded.'
+
+        # TODO: assert the lora_b_stacked is on TPU and sharded.
         assert (lora_linear.n_slices == len(lora_linear.lora_a_stacked) == len(
             lora_linear.lora_b_stacked) == n_slices)
 
@@ -324,7 +333,8 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             vocab_size=512,
             extra_vocab_size=lora_config.lora_extra_vocab_size,
         )
-        # punica_wrapper.move_to_device(mesh)
+        assert jax_view(punica_wrapper._lora_indices_per_batch).platform() == 'tpu', 'punica_wrapper._lora_indices_per_batch should have been moved to TPU.'
+        assert isinstance(jax_view(punica_wrapper._lora_indices_per_batch).sharding, jax.sharding.SingleDeviceSharding), 'punica_wrapper._lora_indices_per_batch should have been moved to TPU.'
 
     jax_inputs = []
     with torchax.default_env(), jax.default_device(jax.devices("tpu")[0]):
