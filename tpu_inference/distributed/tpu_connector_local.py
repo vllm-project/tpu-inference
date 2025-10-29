@@ -823,27 +823,6 @@ class TPUConnectorWorker:
                 host_sharding=self.flatten_host_sharding,
                 device_sharding=self.flatten_device_sharding)
 
-            # def _jax_swap_in(src_kv_caches):
-            #     # input_array should exist on HBM
-            #     def _jax_swap_in_(input_array):
-            #         return jax.device_put(input_array, jax.devices("cpu")[0])
-
-            #     return jax.tree.map(_jax_swap_in_, src_kv_caches)
-
-            # def _jax_swap_out(src_kv_caches):
-            #     # input_array should exist on CPU
-            #     def _jax_swap_out_(input_array):
-            #         return jax.device_put(input_array,
-            #                               self.flatten_device_sharding)
-
-            #     return jax.tree.map(_jax_swap_out_, src_kv_caches)
-
-            # # the output (on device) of swap_in should apply NamedSharding
-            # self.swap_in_fn = jax.jit(
-            #     _jax_swap_in, out_shardings=self.flatten_device_sharding)
-            # # the output (on host) of swap_out should apply SingleDeviceSharding
-            # self.swap_out_fn = jax.jit(_jax_swap_out)
-
             logger.info("KV Cache details registered in TPUConnectorWorker:")
             logger.info(f"  - Num layers: {self.num_layers}")
             logger.info(f"  - Shape per layer: {self.shape}")
@@ -1201,6 +1180,7 @@ class TPUConnectorWorker:
 
             # Part 1: Handle the first, partial block if it exists (if start_offset_in_block > 0).
             partial_num_tokens_in_first_block = 0
+            # NOTE: when chunk_size is dividable by block_size, we will not run into the following branch
             if start_offset_in_block > 0:
                 # This is the block on TPU that is partially filled with `skip_tokens`.
                 dest_block_id = meta.local_block_ids[start_block_idx]
@@ -1237,9 +1217,6 @@ class TPUConnectorWorker:
                             updated_block)
                     return kv_caches
 
-                # Transfer the small slice to TPU and update the cache precisely.
-                # data_on_tpu = self.swap_in_fn(data_for_first_block)
-                # jax.block_until_ready(data_on_tpu)
                 self.runner.kv_caches = _jitted_update_slice_in_block(
                     self.runner.kv_caches, dest_block_id,
                     start_offset_in_block, data_for_first_block)
@@ -1273,6 +1250,7 @@ class TPUConnectorWorker:
                     f"Request {meta.req_id}, case full block load: Preparing to load remaining_tokens={remaining_tokens} "
                     f"into {len(destination_blocks)} full blocks, pad_after={pad_after} tokens, padded_len={padded_len}."
                 )
+                # TODO(jcgu): skip it when no partial tokens
                 data_for_full_blocks = jax.tree.map(
                     lambda x: jax.lax.slice_in_dim(
                         x,
@@ -1298,9 +1276,6 @@ class TPUConnectorWorker:
                 )
                 jax.block_until_ready(padded_data)
 
-                # Transfer and insert the full blocks to staging buffer in TPU.
-                # loaded_kv_sharded_on_tpu = self.swap_in_fn(padded_data)
-                # jax.block_until_ready(loaded_kv_sharded_on_tpu)
                 self.runner.kv_caches = KVCacheManager._jitted_insert_kv_cache(
                     self.block_size,
                     self.runner.kv_caches,

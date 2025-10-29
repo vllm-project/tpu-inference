@@ -182,7 +182,7 @@ def get_kv_cache_swap_fn(
     swap_op_type: CPU_OFFLOADING_SWAP_OP_TYPE,
     host_sharding: jax.sharding.NamedSharding,
     device_sharding: jax.sharding.NamedSharding,
-    jitted: bool = False,
+    jitted: bool = True,
 ) -> Tuple[KVCacheSwapFn, KVCacheSwapFn]:
     """get the right swap_in and swap_out functions
 
