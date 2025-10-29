@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any, Optional, Tuple, Union
+from typing import Any, Optional, Tuple
 
 # Flax and JAX sharding imports
 import jax
@@ -20,7 +20,7 @@ class TransformerBlock(nnx.Module):
     """
     pre_attention_norm: nnx.Module
     pre_mlp_norm: nnx.Module
-    custom_module: Optional[Union[DenseFFW, MoE]] = None
+    custom_module: Optional[nnx.Module] = None
     attn: nnx.Module
     use_attention_rope: bool = True
     quant: Any | None = None
