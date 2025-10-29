@@ -248,6 +248,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             # self.jax_config.mesh.devices[0][0].platform
             jax_config = JaxCommonLinearConfig(vllm_config, mesh, base_linear)
             linear_method = VllmUnquantizedLinearMethod(jax_config)
+            base_linear.quant_method=linear_method
             linear_method.process_weights_after_loading(base_linear)
             # here base_linear.weight is on TPU and sharded.
             
@@ -263,6 +264,8 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             raise NotImplementedError("NYI: for QKVParallelLinear case")
 
         n_slices = repeats
+        #TODO(xw): check if we can enable torchax globally.
+        # TODO(xw): check if we can calculate both actual and expected output using torchax.
         with torchax.default_env():
             # create_lora_weights creates global shape weight.
             lora_linear.create_lora_weights(max_loras, lora_config)
@@ -282,10 +285,11 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
 
     max_num_batched_tokens = 8192
     max_batches = 256
-    punica_wrapper = get_punica_wrapper(max_num_batched_tokens,
-                                        max_batches,
-                                        device,
-                                        max_loras=max_loras)
+    with torchax.default_env():
+        punica_wrapper = get_punica_wrapper(max_num_batched_tokens,
+                                            max_batches,
+                                            'jax',
+                                            max_loras=max_loras)
     assert check_punica_wrapper(punica_wrapper)
     lora_linear.set_mapping(punica_wrapper)
 
@@ -333,7 +337,8 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
     with torchax.default_env():
         # lora_result = lora_linear(torch.cat(jax_inputs))[0]
         # lora_result = j2t(lora_result)
-        lora_result = linear_method.apply(lora_linear.base_layer, torch.cat(jax_inputs))
+        # lora_result = linear_method.apply(lora_linear.base_layer, torch.cat(jax_inputs))
+        lora_result = lora_linear(torch.cat(jax_inputs))[0]
 
     expected_results: list[torch.Tensor] = []
     for input_, lora_id in zip(inputs, prompt_mapping):
@@ -348,17 +353,18 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
     expected_result = torch.cat(expected_results)
 
     rtol, atol = TOLERANCES[lora_result.dtype]
-    # with torchax.default_env():
-    #     torch.testing.assert_close(lora_result.to('cpu'),
-    #                                expected_result,
-    #                                rtol=rtol,
-    #                                atol=atol)
-    #     print(
-    #         f'Output max diff: {torch.max(torch.abs(expected_result.to('cpu') - lora_result))}'
-    #     )
-    #     print(
-    #         f'Output mean diff: {torch.mean(torch.abs(expected_result.to('cpu') - lora_result))}'
-    #     )
+    with torchax.default_env():
+        lora_result_cpu = lora_result.to('cpu')
+        torch.testing.assert_close(lora_result_cpu,
+                                   expected_result,
+                                   rtol=rtol,
+                                   atol=atol)
+        print(
+            f'Output max diff: {torch.max(torch.abs(expected_result - lora_result_cpu))}'
+        )
+        print(
+            f'Output mean diff: {torch.mean(torch.abs(expected_result - lora_result_cpu))}'
+        )
 
     # Check that resetting the lora weights succeeds
     # Here we set all lora weight to be empty.

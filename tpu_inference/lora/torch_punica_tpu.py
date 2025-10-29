@@ -23,6 +23,8 @@ class PunicaWrapperTPU(PunicaWrapperBase):
     PunicaWrapperTPU is designed to manage and provide metadata for the punica
     kernel. The main function is to maintain the state information for
     Multi-LoRA, and to provide the interface for the pytorch punica ops.
+
+    It is created by get_punica_wrapper when we load_lora_model->create_lora_manager. Device is TPU.
     """
 
     def __init__(self, max_num_batched_tokens: int, max_batches: int,
