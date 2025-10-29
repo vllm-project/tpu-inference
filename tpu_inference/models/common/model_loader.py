@@ -277,7 +277,14 @@ def get_flax_model(
         jit_model,
         "get_mrope_input_positions") else jit_model.get_mrope_input_positions
 
-    return model_fn, compute_logits_fn, combine_hidden_states_fn, precompile_vision_encoder_and_merger_fn, get_multimodal_embeddings_fn, get_input_embeddings_fn, get_mrope_input_positions_fn, state, lora_manager, model
+    multimodal_fns = {
+        "precompile_fn": precompile_vision_encoder_and_merger_fn,
+        "get_multimodal_embeddings_fn": get_multimodal_embeddings_fn,
+        "get_input_embeddings_fn": get_input_embeddings_fn,
+        "get_mrope_input_positions_fn": get_mrope_input_positions_fn,
+    }
+
+    return model_fn, compute_logits_fn, combine_hidden_states_fn, multimodal_fns, state, lora_manager, model
 
 
 def get_vllm_model(
@@ -298,7 +305,7 @@ def get_vllm_model(
     compute_logits_fn = model.jit_compute_logits_func()
     # the model needs to be returned because lora weights are neither torch.nn.parameter nor torch.nn.buffer. After we load the lora weights and set it to the torch.nn.Module, we can shard it and move it to TPU.
     combine_hidden_states_fn = None
-    return jit_model, compute_logits_fn, combine_hidden_states_fn, None, None, None, None, params, lora_manager, model
+    return jit_model, compute_logits_fn, combine_hidden_states_fn, None, params, lora_manager, model
 
 
 def get_model(

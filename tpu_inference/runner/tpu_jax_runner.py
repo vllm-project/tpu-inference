@@ -304,11 +304,21 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                             dtype=np.int64)
 
     def load_model(self):
-        self.model_fn, self.compute_logits_fn, self.combine_hidden_states_fn, self.precompile_vision_encoder_and_merger_fn, self.get_multimodal_embeddings_fn, self.get_input_embeddings_fn, self.get_mrope_input_positions_fn, self.state, self.lora_manager, self.model = get_model(
+        self.model_fn, self.compute_logits_fn, self.combine_hidden_states_fn, multimodal_fns, self.state, self.lora_manager, self.model = get_model(
             self.vllm_config,
             self.rng_key,
             self.mesh,
         )
+
+        multimodal_fns = multimodal_fns or {}
+        self.precompile_vision_encoder_and_merger_fn = multimodal_fns.get(
+            "precompile_fn", None)
+        self.get_multimodal_embeddings_fn = multimodal_fns.get(
+            "get_multimodal_embeddings_fn", None)
+        self.get_input_embeddings_fn = multimodal_fns.get(
+            "get_input_embeddings_fn", None)
+        self.get_mrope_input_positions_fn = multimodal_fns.get(
+            "get_mrope_input_positions_fn", None)
 
         if self.drafter is not None:
             logger.info("Loading drafter model...")
