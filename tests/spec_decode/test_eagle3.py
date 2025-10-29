@@ -86,7 +86,7 @@ def test_prepare_inputs():
     proposer.state = None  # Mock state
     proposer.runner.input_batch.block_table = [mock.MagicMock()]
     # Mock the block table return value (2D array)
-    (proposer.runner.input_batch.block_table[0].get_device_tensor.return_value
+    (proposer.runner.input_batch.block_table[0].get_cpu_tensor.return_value
      ) = jnp.zeros((num_reqs, max_num_blocks_per_req), dtype=jnp.int32)
 
     # --- Setup sequence data ---
@@ -289,6 +289,8 @@ def test_propose(method, num_speculative_tokens):
         target_hidden_states,
     )
 
+    if draft_token_ids.ndim == 1:
+        draft_token_ids = jnp.expand_dims(draft_token_ids, axis=-1)
     # Assertions
     assert draft_token_ids.shape == (batch_size, num_speculative_tokens)
 
