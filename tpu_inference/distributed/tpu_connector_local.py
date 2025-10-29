@@ -943,9 +943,17 @@ class TPUConnectorWorker:
                 # The flat_kv_caches_cpu array corresponds to the new tokens,
                 # so its indexing is relative to the start of the new data.
                 for abs_start_idx, abs_end_idx, key in relevant_keys:
+                    logger.info(
+                        f"Request {req_id}: Processing relevant key: "
+                        f"abs_start_idx={abs_start_idx}, abs_end_idx={abs_end_idx}, "
+                        f"chunk_hash={key.chunk_hash}")
                     # Calculate indices relative to the start of our new data slice.
                     rel_start_idx = abs_start_idx - save_spec.skip_leading_tokens
                     rel_end_idx = abs_end_idx - save_spec.skip_leading_tokens
+                    logger.info(
+                        f"Request {req_id}: Relative indices for slicing: "
+                        f"rel_start_idx={rel_start_idx}, rel_end_idx={rel_end_idx}"
+                    )
 
                     # Slice the data and add to the backend.
                     value_for_key = [
