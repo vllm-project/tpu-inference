@@ -85,6 +85,7 @@ Worker Side Execution:
     KV data from TPU to CPU and update the CPU backend. It then waits for all
     submitted save tasks for the current step to complete.
 """
+import copy
 import os
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -109,7 +110,7 @@ from tpu_inference.runner.kv_cache_manager import KVCacheManager
 from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
 
 from .cache_util import (CPU_OFFLOADING_SWAP_OP_TYPE, JittedKVCacheSwapFn,
-                         TokenProcessor)
+                         TokenProcessor, get_jitted_kv_cache_swap_fn)
 from .local_cpu_backend import LocalCPUBackend
 
 EngineId = str
@@ -306,6 +307,9 @@ class RequestTracker:
 
     def update(self, new_block_ids: list[int], new_token_ids: list[int]):
         """Appends new block IDs and token IDs to the tracker."""
+        logger.info(
+            f"---RequestTracker-before update: {self.req_id}, {self.block_ids}, {new_block_ids}, {new_token_ids}"
+        )
         if new_block_ids is None:
             new_block_ids = []
         elif len(new_block_ids) == 0:
@@ -324,6 +328,9 @@ class RequestTracker:
         # is 1 (excluding chunked prefill), the request is in decode phase.
         if len(new_token_ids) == 1:
             self.is_decode_phase = True
+        logger.info(
+            f"---RequestTracker-after update: {self.req_id}, {self.block_ids}, {new_block_ids}, {new_token_ids}"
+        )
 
 
 @dataclass
@@ -516,6 +523,7 @@ class TPUConnectorScheduler():
                     f"is_finished={is_finished}, "
                     f"total_tokens={num_total_tokens}, "
                     f"saved_tokens={tracker.save_watermark}, "
+                    f"block_ids={tracker.block_ids}, "
                     f"has_new={has_new_tokens}, "
                     f"is_decode={tracker.is_decode_phase}, "
                     f"should_save={should_save}")
@@ -631,7 +639,7 @@ class TPUConnectorScheduler():
             tracker = RequestTracker(
                 req_id=req_id,
                 prompt_len=len(request.prompt_token_ids),
-                block_ids=request.block_ids[0],
+                block_ids=copy.deepcopy(request.block_ids[0]),
                 token_ids=tokens_for_tracker,
                 num_external_hits=num_external_hits,
                 # The high-water mark for saved tokens starts after the cached prefix.
@@ -703,13 +711,17 @@ class TPUConnectorScheduler():
             logger.info(
                 f"    - Slicing prompt -> len(new_token_ids): {len(new_token_ids)}"
             )
-            logger.info(f"    - New blocks allocated: {len(new_blocks)}")
+            logger.info(
+                f"    - New blocks allocated: {len(new_blocks) if isinstance(new_blocks, list) else len(new_blocks[0])}, ({new_blocks})"
+            )
 
             # Update the tracker with the incremental data.
             tracker.update(new_blocks, new_token_ids)
-            logger.info(f"    - Updated tracker for {req_id}: "
-                        f"total_tokens={len(tracker.token_ids)}, "
-                        f"total_blocks={len(tracker.block_ids)}")
+            logger.info(
+                f"    - Updated tracker for {req_id}: "
+                f"total_tokens={len(tracker.token_ids)}, "
+                f"total_blocks={len(tracker.block_ids)} {tracker.block_ids}, "
+                f"new_blocks={new_blocks}, {type(new_blocks)}")
 
             # Immediately prepare metadata for this updated request. This will
             # typically be a save operation for the new tokens.
@@ -719,7 +731,8 @@ class TPUConnectorScheduler():
             if req_meta:
                 logger.info(
                     f"    - Creating metadata for cached req: {req_id} "
-                    f"(has_save={req_meta.save_spec is not None})")
+                    f"(has_save={req_meta.save_spec is not None}, "
+                    f"local_block_ids={req_meta.local_block_ids})")
                 metadata.requests_meta.append(req_meta)
 
         if metadata.requests_meta:
@@ -815,34 +828,15 @@ class TPUConnectorWorker:
                 memory_kind="device")
 
             # NOTE(jcgu): disable "pallas" swap op / NamedSharding due to core crash
-            # self.flatten_host_sharding = jax.sharding.NamedSharding(
-            #     mesh=self.device_sharding.mesh,
-            #     spec=jax.sharding.PartitionSpec(None, "model"),
-            #     memory_kind="pinned_host")
+            self.flatten_host_sharding = jax.sharding.NamedSharding(
+                mesh=self.device_sharding.mesh,
+                spec=jax.sharding.PartitionSpec(None, "model"),
+                memory_kind="pinned_host")
 
-            # self.swap_in_fn, self.swap_out_fn = get_jitted_kv_cache_swap_fn(
-            #     self.swap_op_type,
-            #     host_sharding=self.flatten_host_sharding,
-            #     device_sharding=self.flatten_device_sharding)
-
-            def _jax_swap_in(src_kv_caches):
-
-                def _jax_swap_in_(input_array):
-                    return jax.device_put(input_array, jax.devices("cpu")[0])
-
-                return jax.tree.map(_jax_swap_in_, src_kv_caches)
-
-            def _jax_swap_out(src_kv_caches):
-
-                def _jax_swap_out_(input_array):
-                    return jax.device_put(input_array,
-                                          self.flatten_device_sharding)
-
-                return jax.tree.map(_jax_swap_out_, src_kv_caches)
-
-            self.swap_in_fn = jax.jit(
-                _jax_swap_in, out_shardings=self.flatten_device_sharding)
-            self.swap_out_fn = jax.jit(_jax_swap_out)
+            self.swap_in_fn, self.swap_out_fn = get_jitted_kv_cache_swap_fn(
+                self.swap_op_type,
+                host_sharding=self.flatten_host_sharding,
+                device_sharding=self.flatten_device_sharding)
 
             logger.info("KV Cache details registered in TPUConnectorWorker:")
             logger.info(f"  - Num layers: {self.num_layers}")
@@ -994,7 +988,7 @@ class TPUConnectorWorker:
             return
 
         # logger.info("TPUConnectorWorker: Entering wait_for_save")
-        metadata = self.connector._connector_metadata
+        metadata = self.connector._get_connector_metadata()
         if not isinstance(metadata, TPUConnectorMetadata):
             logger.info(
                 "wait_for_save:not an instances of TPUConnectorMetadata")
@@ -1023,7 +1017,9 @@ class TPUConnectorWorker:
                     continue
 
                 # If there are tokens to save, submit the task to the thread pool.
-                logger.info(f"Submitting save task for request {meta.req_id}")
+                logger.info(
+                    f"Submitting save task for request {meta.req_id}; local_block_ids: {meta.local_block_ids}"
+                )
                 future = self.save_executor.submit(self._save_blocks_to_cpu,
                                                    meta.req_id,
                                                    meta.local_block_ids,
@@ -1132,78 +1128,85 @@ class TPUConnectorWorker:
                     )
                     return
 
+            # [[chunk * num_chunks] * num_layers]
+            assembled_kv_on_tpu = self.swap_in_fn(assembled_kv_on_cpu)
+            jax.block_until_ready(assembled_kv_on_tpu)
+
             # Concatenate all chunks for each layer into a single, contiguous array.
-            final_kv_on_cpu = [
-                jnp.concatenate(layer_chunks, axis=0)
-                for layer_chunks in assembled_kv_on_cpu
+            layer_kv_on_tpu = [
+                jax.lax.concatenate(layer_chunks, dimension=0)
+                for layer_chunks in assembled_kv_on_tpu
             ]
 
-            if not final_kv_on_cpu:
+            if not layer_kv_on_tpu:
                 logger.warning(
                     f"No cache data found in CPU backend for request {meta.req_id}"
                 )
                 continue
 
-            jax.block_until_ready(final_kv_on_cpu)
+            jax.block_until_ready(layer_kv_on_tpu)
             logger.info(
-                f"Request {meta.req_id}: Assembled CPU data for one layer has shape {final_kv_on_cpu[0].shape}."
+                f"Request {meta.req_id}: Assembled CPU data for one layer has shape {layer_kv_on_tpu[0].shape}."
             )
 
             # If the full prefix hit state for a given request is active, we fetched N tokens but must
             # now truncate to N-1 before padding and loading, to match the
             # allocation made by the scheduler.
+            # TODO(jcgu): do we need to slice-out the last token?
+            #  should we just need to let vllm-scheduler know about it,
+            #  but bring all the data back to TPU?
             if meta.load_spec.is_full_prefix_hit:
-                final_kv_on_cpu = jax.tree.map(
+                layer_kv_on_tpu = jax.tree.map(
                     lambda x: jax.lax.slice_in_dim(x, 0, x.shape[0] - 1),
-                    final_kv_on_cpu)
+                    layer_kv_on_tpu)
                 logger.info(
                     f"Request {meta.req_id}: is_full_prefix_hit = {meta.load_spec.is_full_prefix_hit}"
                     "Truncated fetched cache data by 1 token. New shape: "
-                    f"{final_kv_on_cpu[0].shape if final_kv_on_cpu else 'N/A'}"
+                    f"{layer_kv_on_tpu[0].shape if layer_kv_on_tpu else 'N/A'}"
                 )
 
             # 3. Pad the data to fill a full number of blocks.
             # TODO(jcgu): do we need to pad when token_processor.chunk_size==lock_size
-            num_tokens_to_load = final_kv_on_cpu[0].shape[
-                0] if final_kv_on_cpu else 0
+            num_tokens_to_load = layer_kv_on_tpu[0].shape[
+                0] if layer_kv_on_tpu else 0
             num_blocks_to_load = len(meta.local_block_ids)
             padded_token_len = num_blocks_to_load * self.block_size
 
-            padded_kv_on_cpu = []
+            padded_kv_on_tpu = []
             pad_width = padded_token_len - num_tokens_to_load
             if pad_width > 0:
                 pad_value = jnp.array(0, dtype=self.dtype)
                 # pad dim_0 which is the #_of_tokens by pad_width
                 padding_config = [
                     (0, pad_width, 0)
-                ] + [(0, 0, 0)] * (len(final_kv_on_cpu[0].shape) - 1)
-                padded_kv_on_cpu = jax.tree.map(
+                ] + [(0, 0, 0)] * (len(layer_kv_on_tpu[0].shape) - 1)
+                padded_kv_on_tpu = jax.tree.map(
                     lambda layer_cpu: jax.lax.pad(
-                        layer_cpu, pad_value, padding_config), final_kv_on_cpu)
-                jax.block_until_ready(padded_kv_on_cpu)
+                        layer_cpu, pad_value, padding_config), layer_kv_on_tpu)
+                jax.block_until_ready(padded_kv_on_tpu)
                 logger.info(
-                    f"padded_kv_on_cpu[0]: {padded_kv_on_cpu[0].shape}, {padded_kv_on_cpu[0].sharding}"
+                    f"padded_kv_on_cpu[0]: {padded_kv_on_tpu[0].shape}, {padded_kv_on_tpu[0].sharding}"
                 )
             else:
-                padded_kv_on_cpu = final_kv_on_cpu
+                padded_kv_on_tpu = layer_kv_on_tpu
 
-            jax.block_until_ready(padded_kv_on_cpu)
+            jax.block_until_ready(padded_kv_on_tpu)
             logger.info(
-                f"Request {meta.req_id}: Reshaped data for transfer to TPU. Shape for one layer: {padded_kv_on_cpu[0].shape}."
+                f"Request {meta.req_id}: Reshaped data for transfer to TPU. Shape for one layer: {padded_kv_on_tpu[0].shape}."
             )
 
             # 5. Transfer to TPU, applying the correct sharding.
-            loaded_kv_sharded_on_tpu = self.swap_in_fn(padded_kv_on_cpu)
-            jax.block_until_ready(loaded_kv_sharded_on_tpu)
-            logger.info(
-                f"loaded_kv_on_tpu[0]: {loaded_kv_sharded_on_tpu[0].shape}, {loaded_kv_sharded_on_tpu[0].sharding}"
-            )
+            # loaded_kv_sharded_on_tpu = self.swap_in_fn(padded_kv_on_cpu)
+            # jax.block_until_ready(loaded_kv_sharded_on_tpu)
+            # logger.info(
+            #     f"loaded_kv_on_tpu[0]: {loaded_kv_sharded_on_tpu[0].shape}, {loaded_kv_sharded_on_tpu[0].sharding}"
+            # )
 
             # 6. Update the runner's KV cache with the correctly sharded data.
             destination_blocks = meta.local_block_ids
             self.runner.kv_caches = KVCacheManager._jitted_insert_kv_cache(
-                self.block_size, self.runner.kv_caches,
-                loaded_kv_sharded_on_tpu, jnp.array(destination_blocks))
+                self.block_size, self.runner.kv_caches, padded_kv_on_tpu,
+                jnp.array(destination_blocks))
             jax.block_until_ready(self.runner.kv_caches)
             logger.info(
                 f"Successfully loaded {len(destination_blocks)} blocks into TPU KV cache for request {meta.req_id}"
