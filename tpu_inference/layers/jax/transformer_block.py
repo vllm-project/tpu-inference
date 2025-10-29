@@ -52,8 +52,13 @@ class SharedExpertsTransformerBlock(TransformerBlock):
     Users can provide the FFW layer in two ways:
     1.  Pass the module (either `MoE` or `DenseFFW`) to the `custom_module`
         attribute.
-    2.  pecifically specify the `moe_ffw` or `dense_ffw` attributes
+    2.  Sspecify the `moe_ffw` or `dense_ffw` attributes
         (e.g., for passing quantized modules).
+    
+    Attributes:
+        moe_ffw: Optional MoE layer.
+        dense_ffw: Optional DFF layer.
+        shared_experts: Optional shared experts module, used if MoE is enabled.
 
     If an `MoE` layer is used (from either path), its output is summed
     with the `shared_experts` module.
