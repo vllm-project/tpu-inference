@@ -283,11 +283,13 @@ def get_vllm_model(
     mesh: Mesh,
 ):
     from tpu_inference.models.vllm.vllm_model_wrapper import VllmModelWrapper
-
+    from torchax.tensor import Environment
+    torchax_env = Environment()
     model = VllmModelWrapper(
         vllm_config=vllm_config,
         rng=rng,
         mesh=mesh,
+        torchax_env=torchax_env,
     )
     params, lora_manager = model.load_weights()
 

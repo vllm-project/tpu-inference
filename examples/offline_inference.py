@@ -14,8 +14,10 @@ def create_parser():
     parser = FlexibleArgumentParser()
     # Add engine args
     EngineArgs.add_cli_args(parser)
-    parser.set_defaults(model="meta-llama/Llama-3.2-1B-Instruct")
+    parser.set_defaults(model="meta-llama/Llama-3.1-8B-Instruct")
     parser.set_defaults(max_model_len=1024)
+    parser.set_defaults(pipeline_parallel_size=1)
+    parser.set_defaults(tensor_parallel_size=4)
 
     # Add sampling params
     sampling_group = parser.add_argument_group("Sampling parameters")
@@ -46,6 +48,7 @@ def main(args: dict):
         sampling_params.top_p = top_p
     if top_k is not None:
         sampling_params.top_k = top_k
+    sampling_params.temperature = 0
 
     # Generate texts from the prompts. The output is a list of RequestOutput
     # objects that contain the prompt, generated text, and other information.

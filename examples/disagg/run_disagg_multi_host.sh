@@ -6,7 +6,7 @@ set -e
 
 echo "--- DEBUG: The HOME variable is set to: $HOME ---"
 
-CONTAINERS=$(docker ps -a --filter "name=node*" -q)
+CONTAINERS=$(docker ps -a --filter "name=node-main*" -q)
 if [ -n "$CONTAINERS" ]; then
   docker stop $CONTAINERS
   docker rm -f $CONTAINERS
@@ -18,13 +18,14 @@ fi
 # tpu-inference/tpu_inference/executors/ray_distributed_executor.py
 
 docker image prune -f
-docker build -f docker/Dockerfile -t ullm:test .
-DOCKER_IMAGE="ullm:test"
+docker build -f docker/Dockerfile -t ullm:1030 .
+DOCKER_IMAGE="ullm:1030"
 
 HOST_HF_HOME="/mnt/disks/data/hf-docker"
 NUM_HOSTS_PER_INSTANCE=4
 COMMON_SIDE_PORT=8900
-MODEL="Qwen/Qwen3-0.6B"
+MODEL="meta-llama/Llama-3.1-8B-Instruct"
+HOME="/mnt/disks/persist/"
 
 ######## Prefill hosts setup ########
 
@@ -56,7 +57,7 @@ for ((i=0; i<NUM_HOSTS_PER_INSTANCE; i++)); do
         --privileged \
         --network host \
         --shm-size 16G \
-        --name "node-${i}" \
+        --name "node-main-${i}" \
         \
         -e TPU_MULTIHOST_BACKEND="ray" \
         -e TPU_NODE_ID="${i}" \
@@ -64,6 +65,7 @@ for ((i=0; i<NUM_HOSTS_PER_INSTANCE; i++)); do
         -e TPU_SIDE_CHANNEL_PORT="${SIDE_PORT}" \
         -e RAY_DEDUP_LOGS="0" \
         -e SKIP_JAX_PRECOMPILE="1" \
+        -e MODEL_IMPL_TYPE="vllm" \
         \
         -e TPU_CHIPS_PER_PROCESS_BOUNDS="1,1,1" \
         -e TPU_PROCESS_BOUNDS="2,2,1" \
@@ -77,12 +79,14 @@ for ((i=0; i<NUM_HOSTS_PER_INSTANCE; i++)); do
         -v $HOME/test:/root/test \
         -v $HOME/logs:/root/logs \
         -v $HOME/vllm:/workspace/vllm \
-        -v $HOME/tpu-inference:/workspace/tpu_inference \
+        -v $HOME/tpu_inference:/workspace/tpu_inference \
         --entrypoint /bin/bash \
         "${DOCKER_IMAGE}" -c "${DOCKER_CMD}"
     sleep 2
     set +x
 done
+
+exit 0
 
 # Start vllm on host-0
 

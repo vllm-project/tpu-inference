@@ -14,6 +14,7 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import TORCH_DTYPE_TO_JAX
+from torchax.tensor import Environment
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.lora.layers import BaseLayerWithLoRA
@@ -71,11 +72,14 @@ class VllmModelWrapper:
     rng: PRNGKey
     mesh: Mesh
     model: _VllmRunner
+    torchax_env: Environment
 
-    def __init__(self, vllm_config: VllmConfig, rng: PRNGKey, mesh: Mesh):
+
+    def __init__(self, vllm_config: VllmConfig, rng: PRNGKey, mesh: Mesh, torchax_env: Environment):
         self.vllm_config = vllm_config
         self.rng = rng
         self.mesh = mesh
+        self.torchax_env = torchax_env
 
         self.vllm_config.quant_config = get_tpu_quantization_config(
             self.vllm_config, self.mesh)
@@ -110,7 +114,8 @@ class VllmModelWrapper:
         lora_manager = None
         if vllm_config_for_load.lora_config is not None:
             # Replace layers in the model with LoRA layers.
-            with torchax.default_env():
+            # with torchax.default_env():
+            with self.torchax_env:
                 # Argument "device" in load_lora_model is used to set the device
                 # used in punica wrapper.
                 lora_manager, vllm_model = load_lora_model(
@@ -119,9 +124,10 @@ class VllmModelWrapper:
 
         static_forward_context = vllm_config_for_load.compilation_config.static_forward_context
         self.vllm_config.compilation_config.static_forward_context = static_forward_context
-
-        self.model = _VllmRunner(vllm_model)
-        params_and_buffers = shard_model_to_tpu(self.model, self.mesh)
+        
+        with self.mesh, self.torchax_env:
+            self.model = _VllmRunner(vllm_model)
+            params_and_buffers = shard_model_to_tpu(self.model, self.mesh)
 
         # Returning to the jax land, so we need to wrap it into a JaxValue.
         return jax_view(params_and_buffers), lora_manager
@@ -151,7 +157,7 @@ class VllmModelWrapper:
         ) -> Tuple[List[jax.Array], jax.Array]:
             layer_name_to_kvcache_index = dict(layer_name_to_kvcache_index)
             lora_metadata = torch_view(lora_metadata)
-            with torchax.default_env(), set_vllm_model_wrapper_context(
+            with self.torchax_env, set_vllm_model_wrapper_context(
                     kv_caches=kv_caches,
                     mesh=self.mesh,
                     layer_name_to_kvcache_index=layer_name_to_kvcache_index
@@ -197,7 +203,7 @@ class VllmModelWrapper:
             lora_metadata,
         ) -> jax.Array:
             lora_metadata = torch_view(lora_metadata)
-            with torchax.default_env(), set_vllm_model_wrapper_context(
+            with self.torchax_env, set_vllm_model_wrapper_context(
                     kv_caches=None, mesh=self.mesh):
                 original_lora_metadata = replace_lora_metadata(
                     self.model, lora_metadata, self.vllm_config.lora_config)
@@ -247,11 +253,11 @@ def replace_set_lora(model):
         lora_b: torch.Tensor,
         embeddings_tensor: Optional[torch.Tensor],
     ):
-        with torchax.default_env():
+        with self.torchax_env:
             self._original_set_lora(index, lora_a, lora_b, embeddings_tensor)
 
     def _tpu_reset_lora(self, index: int):
-        with torchax.default_env():
+        with self.torchax_env:
             self._original_reset_lora(index)
 
     for _, module in model.named_modules():
