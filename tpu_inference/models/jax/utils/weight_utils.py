@@ -12,8 +12,10 @@ from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import torch
 from flax import nnx
+from flax.typing import Shape
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from safetensors import safe_open
@@ -47,6 +49,158 @@ def print_param_info(param: nnx.Param, name: str):
     logger.warning(
         f"Shape of {name} on a single device: {param.value.addressable_shards[0].data.shape}"
     )
+
+
+def parse_einsum_subscripts(einsum_str: str) -> dict[str, list[str]]:
+    """Parses the einsum string to identify and categorize labels."""
+    einsum_str = einsum_str.replace(' ', '')
+    parts = einsum_str.split('->')
+    if len(parts) != 2:
+        raise ValueError(f"Invalid einsum string format: '{einsum_str}'")
+    input_strs, output_str = parts
+
+    input_parts = input_strs.split(',')
+    if len(input_parts) != 2:
+        raise ValueError(
+            f"Einsum string must have exactly two operands. Got: '{einsum_str}'"
+        )
+    lhs_subscript, rhs_subscript = input_parts[0], input_parts[1]
+
+    lhs_labels = list(lhs_subscript)
+    rhs_labels = list(rhs_subscript)
+    out_labels = list(output_str)
+
+    in1_set = set(lhs_labels)
+    in2_set = set(rhs_labels)
+    out_set = set(out_labels)
+
+    if not out_set.issubset(in1_set | in2_set):
+        raise ValueError(
+            f"Output labels {out_set - (in1_set | in2_set)} not found in inputs"
+        )
+    if len(out_labels) != len(out_set):
+        raise ValueError(f"Output labels must be unique. Got: '{output_str}'")
+
+    # Categorize dimensions
+    batch_dims = sorted(list(in1_set & in2_set & out_set))
+    contract_dims = sorted(list((in1_set & in2_set) - out_set))
+    # Labels appearing only in LHS (form the M dimension)
+    lhs_non_contract_dims = sorted(list(in1_set - in2_set))
+    # Labels appearing only in RHS (form the N dimension)
+    rhs_non_contract_dims = sorted(list(in2_set - in1_set))
+
+    # Output labels must be the union of batch and non-contracting dimensions
+    expected_out_set = set(batch_dims + lhs_non_contract_dims +
+                           rhs_non_contract_dims)
+    if out_set != expected_out_set:
+        raise ValueError(
+            f"Output labels set {out_set} do not match the expected set {expected_out_set}"
+        )
+
+    return {
+        "lhs_labels": lhs_labels,
+        "rhs_labels": rhs_labels,
+        "out_labels": out_labels,
+        "batch_dims": batch_dims,
+        "contract_dims": contract_dims,
+        "lhs_non_contract_dims": lhs_non_contract_dims,
+        "rhs_non_contract_dims": rhs_non_contract_dims,
+    }
+
+
+def prepare_rhs_transform(einsum_str: str, rhs_shape: Shape) -> dict[str, any]:
+    """
+    Parses einsum string and RHS shape to get information for RHS transformation.
+    Call this at PREPROCESSING time.
+    """
+    subscripts = parse_einsum_subscripts(einsum_str)
+    rhs_labels = subscripts["rhs_labels"]
+    batch_dims = subscripts["batch_dims"]
+    contract_dims = subscripts["contract_dims"]
+    rhs_non_contract_dims = subscripts["rhs_non_contract_dims"]
+
+    if len(rhs_labels) != len(rhs_shape):
+        raise ValueError(
+            f"RHS subscript '{''.join(rhs_labels)}' length {len(rhs_labels)} mismatch with shape {rhs_shape}"
+        )
+
+    rhs_label_to_axis = {label: i for i, label in enumerate(rhs_labels)}
+
+    def get_shape_for_dims(shape: Shape, label_to_axis: dict[str, int],
+                           dims: list[str]) -> tuple[int, ...]:
+        return tuple(shape[label_to_axis[d]] for d in dims)
+
+    batch_shape_tuple = get_shape_for_dims(rhs_shape, rhs_label_to_axis,
+                                           batch_dims)
+    k_shape_tuple = get_shape_for_dims(rhs_shape, rhs_label_to_axis,
+                                       contract_dims)
+    n_shape_tuple = get_shape_for_dims(rhs_shape, rhs_label_to_axis,
+                                       rhs_non_contract_dims)
+
+    b_prod = np.prod(batch_shape_tuple) if batch_shape_tuple else 1
+    k_prod = np.prod(k_shape_tuple) if k_shape_tuple else 1
+    n_prod = np.prod(n_shape_tuple) if n_shape_tuple else 1
+
+    # RHS perm: Batch, Contract, Non-Contract for (B, K, N) matmul
+    rhs_perm_labels = batch_dims + contract_dims + rhs_non_contract_dims
+    rhs_perm = [rhs_label_to_axis[d] for d in rhs_perm_labels]
+    is_2d_matmul = b_prod == 1
+
+    # Check if reshape is needed for RHS
+    num_batch_dims = len(batch_dims)
+    num_contract_dims = len(contract_dims)
+    num_rhs_non_contract_dims = len(rhs_non_contract_dims)
+
+    needs_rhs_reshape = True
+    if is_2d_matmul:
+        if num_batch_dims == 0 and num_contract_dims <= 1 and num_rhs_non_contract_dims <= 1:
+            needs_rhs_reshape = False
+    else:  # 3D matmul
+        if num_batch_dims <= 1 and num_contract_dims <= 1 and num_rhs_non_contract_dims <= 1:
+            needs_rhs_reshape = False
+
+    return {
+        "subscripts": subscripts,
+        "rhs_perm": rhs_perm,
+        "b_prod": b_prod,
+        "k_prod": k_prod,
+        "n_prod": n_prod,
+        "is_2d_matmul": is_2d_matmul,
+        "batch_shape_tuple": batch_shape_tuple,
+        "k_shape_tuple": k_shape_tuple,
+        "n_shape_tuple": n_shape_tuple,
+        "needs_rhs_reshape": needs_rhs_reshape,
+    }
+
+
+def transform_rhs_for_matmul(rhs: jax.Array,
+                             rhs_parsed_info: dict[str, any]) -> jax.Array:
+    """
+    Transforms the RHS einsum operand using info from prepare_rhs_transform.
+    RHS -> (B, K, N) or (K, N)
+    """
+    rhs_perm = rhs_parsed_info["rhs_perm"]
+    needs_transpose = rhs_perm != list(range(len(rhs.shape)))
+
+    if needs_transpose:
+        rhs_transformed = jnp.transpose(rhs, rhs_perm)
+    else:
+        rhs_transformed = rhs
+
+    if rhs_parsed_info["needs_rhs_reshape"]:
+        b_prod = rhs_parsed_info["b_prod"]
+        k_prod = rhs_parsed_info["k_prod"]
+        n_prod = rhs_parsed_info["n_prod"]
+        is_2d_matmul = rhs_parsed_info["is_2d_matmul"]
+
+        target_shape = (b_prod, k_prod, n_prod)
+        rhs_transformed = jnp.reshape(rhs_transformed, target_shape)
+
+        if is_2d_matmul:
+            rhs_transformed = jnp.squeeze(rhs_transformed, axis=0)
+    # else: shape is already (K, N) or (B, K, N)
+
+    return rhs_transformed
 
 
 def transpose_params(param_key: str, param_tensor: jax.Array, transpose_map):
@@ -263,6 +417,7 @@ def _load_hf_weights_on_thread(vllm_config,
                                metadata_map: MetadataMap,
                                mesh: Mesh,
                                weights_file: str,
+                               model: nnx.Module,
                                filter_regex: str | None = None,
                                keep_original_dtype_keys_regex: list[str]
                                | None = None,
@@ -412,6 +567,30 @@ def _load_hf_weights_on_thread(vllm_config,
         # Transpose the MLP weight shape as the quantized matmul will take it as (n_output_feature, n_input_feature).
         if "mlp" in hf_key:
             hf_weight = jnp.transpose(hf_weight)
+        if "self_attn.q_proj" in hf_key:
+            rhs_parsed_info = prepare_rhs_transform(
+                model.model.layers[0].self_attn.q_proj.einsum_str,
+                hf_weight.shape)
+            hf_weight = jnp.transpose(
+                transform_rhs_for_matmul(hf_weight, rhs_parsed_info))
+        elif "self_attn.v_proj" in hf_key:
+            rhs_parsed_info = prepare_rhs_transform(
+                model.model.layers[0].self_attn.v_proj.einsum_str,
+                hf_weight.shape)
+            hf_weight = jnp.transpose(
+                transform_rhs_for_matmul(hf_weight, rhs_parsed_info))
+        elif "self_attn.o_proj" in hf_key:
+            rhs_parsed_info = prepare_rhs_transform(
+                model.model.layers[0].self_attn.o_proj.einsum_str,
+                hf_weight.shape)
+            hf_weight = jnp.transpose(
+                transform_rhs_for_matmul(hf_weight, rhs_parsed_info))
+        elif "self_attn.k_proj" in hf_key:
+            rhs_parsed_info = prepare_rhs_transform(
+                model.model.layers[0].self_attn.k_proj.einsum_str,
+                hf_weight.shape)
+            hf_weight = jnp.transpose(
+                transform_rhs_for_matmul(hf_weight, rhs_parsed_info))
         model_weight.value = shard(hf_weight, spec)
 
 
@@ -447,6 +626,7 @@ def load_hf_weights(vllm_config,
                 metadata_map,
                 mesh,
                 weights_file,
+                model=model,
                 filter_regex=filter_regex,
                 keep_original_dtype_keys_regex=keep_original_dtype_keys_regex,
                 quant_scales=quant_scales) for weights_file in weights_files
