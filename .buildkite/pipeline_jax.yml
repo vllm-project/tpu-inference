@@ -159,6 +159,15 @@ steps:
          .buildkite/scripts/run_in_docker.sh \
            bash -c 'MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py'
 
+   - label: "E2E tests for async scheduler"
+     key: test_14
+     soft_fail: true
+     agents:
+       queue: tpu_v6e_queue
+     commands:
+       - |
+         .buildkite/scripts/run_in_docker.sh \
+           python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_async_scheduler.py
 
   # -----------------------------------------------------------------
   # NOTIFICATION STEP
@@ -179,6 +188,7 @@ steps:
        - test_11
        - test_12
        - test_13
+       - test_14
      agents:
        queue: tpu_v6e_queue
      commands:
