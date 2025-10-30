@@ -98,5 +98,6 @@ class MoEKernelTest(jtu.JaxTestCase):
         expected = ref_moe(a, w1, w2, gating_output, top_k)
         self.assertAllClose(expected, actual, atol=2e-2, rtol=2e-2)
 
+
 if __name__ == "__main__":
     absltest.main(testLoader=jtu.JaxTestLoader())
