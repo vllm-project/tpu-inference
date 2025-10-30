@@ -124,6 +124,7 @@ class MoE(nnx.Module):
             expert_argmax = jnp.argmax(expert_counts)
             expert_max_proportion = expert_max / jnp.sum(expert_counts)
             if not isinstance(x_TD, ShapeDtypeStruct):
+                self.sow(nnx.Intermediate, 'raw_counts', expert_counts)
                 self.sow(nnx.Intermediate, 'max_load_count_index', expert_argmax)
                 self.sow(nnx.Intermediate, 'max_load_count', expert_max)
                 self.sow(nnx.Intermediate, 'max_load_proportion', expert_max_proportion)
