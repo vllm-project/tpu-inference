@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import vllm.envs as envs
-from jax.sharding import NamedSharding, PartitionSpec, SingleDeviceSharding
+from jax.sharding import NamedSharding, PartitionSpec
 
 from tpu_inference.core.disagg_utils import is_disagg_enabled
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
@@ -37,14 +37,9 @@ class CompilationManager:
     def _create_dummy_tensor(self,
                              shape: Tuple[int, ...],
                              dtype: Any,
-                             sharding: Optional[NamedSharding] = None,
-                             use_single_device_sharding: bool = False) -> Any:
+                             sharding: Optional[NamedSharding] = None) -> Any:
         """Helper to create dummy tensors for precompilation."""
         tensor = jnp.ones(shape, dtype=dtype)
-        if use_single_device_sharding:
-            device = self.runner.mesh.devices.flat[0]
-            single_sharding = SingleDeviceSharding(device)
-            return jax.device_put(tensor, single_sharding)
         if sharding:
             return device_array(self.runner.mesh, tensor, sharding=sharding)
         return device_array(self.runner.mesh, tensor)
@@ -96,11 +91,11 @@ class CompilationManager:
         for num_tokens in self.runner.num_tokens_paddings:
             hidden_size = self.runner.vllm_config.model_config.get_hidden_size(
             )
-
+            sharding = NamedSharding(self.runner.mesh, PartitionSpec())
             dummy_multimodal_embeddings = self._create_dummy_tensor(
                 (num_tokens, hidden_size),
                 self.runner.vllm_config.model_config.dtype,
-                use_single_device_sharding=True)
+                sharding=sharding)
             dummy_input_ids = self._create_dummy_tensor((num_tokens, ),
                                                         jnp.int32)
 
