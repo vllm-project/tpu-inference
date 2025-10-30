@@ -133,7 +133,7 @@ class PersistentBatchManager:
             req_ids_to_add.append(req_id)
 
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
-            if self.uses_mrope:
+            if self.uses_mrope and get_mrope_input_positions_fn is not None:
                 image_grid_thw = []
                 video_grid_thw = []
                 second_per_grid_ts = []
