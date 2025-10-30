@@ -311,8 +311,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         )
 
         multimodal_fns = multimodal_fns or {}
-        self.precompile_vision_encoder_and_merger_fn = multimodal_fns.get(
-            "precompile_fn", None)
+        self.precompile_vision_encoder_fn = multimodal_fns.get(
+            "precompile_vision_encoder_fn", None)
         self.get_multimodal_embeddings_fn = multimodal_fns.get(
             "get_multimodal_embeddings_fn", None)
         self.get_input_embeddings_fn = multimodal_fns.get(

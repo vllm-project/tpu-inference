@@ -1,7 +1,7 @@
 import math
 from functools import partial
-from typing import (Any, Callable, List, Literal, NamedTuple, Optional,
-                    TypedDict, Union)
+from typing import (Callable, List, Literal, NamedTuple, Optional, TypedDict,
+                    Union)
 
 import jax
 import jax.numpy as jnp
@@ -1067,13 +1067,9 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
                         metadata_map=metadata_map,
                         mesh=self.mesh)
 
-    def precompile_vision_encoder_and_merger(
+    def precompile_vision_encoder(
         self,
-        input_embeddings_fn: Callable,
-        model_state: Any,
         run_compilation_fn: Callable,
-        create_dummy_tensor_fn: Callable,
-        num_tokens_paddings: list[int],
     ) -> None:
         image_shapes = []
         if (warmup_config := self.vllm_config.additional_config.get(
@@ -1102,30 +1098,3 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
                                dummy_pixel_values,
                                dummy_grid_thw,
                                image_shape=input_hw)
-
-        for num_tokens in num_tokens_paddings:
-            hidden_size = self.vllm_config.model_config.get_hidden_size()
-
-            dummy_multimodal_embeddings = create_dummy_tensor_fn(
-                (num_tokens, hidden_size),
-                self.vllm_config.model_config.dtype,
-                use_single_device_sharding=True)
-            dummy_input_ids = create_dummy_tensor_fn((num_tokens, ), jnp.int32)
-
-            run_compilation_fn(
-                "input_embeddings_merger",
-                input_embeddings_fn,
-                model_state,
-                dummy_input_ids,
-                dummy_multimodal_embeddings,
-                num_tokens=num_tokens,
-            )
-
-            run_compilation_fn(
-                "input_embeddings_merger_text_only",
-                input_embeddings_fn,
-                model_state,
-                dummy_input_ids,
-                None,
-                num_tokens=num_tokens,
-            )
