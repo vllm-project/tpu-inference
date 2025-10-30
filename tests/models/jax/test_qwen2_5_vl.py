@@ -16,12 +16,11 @@ from vllm.config import (CacheConfig, DeviceConfig, MultiModalConfig,
 # Import the module itself to allow patching
 # Corrected imports for the code under test
 from tpu_inference.models.jax.qwen2_5_vl import (
-    AttentionMetadata, MultiModalEmbeddings, Qwen2_5_VisionAttention,
-    Qwen2_5_VisionBlock, Qwen2_5_VisionMLP, Qwen2_5_VisionPatchEmbed,
-    Qwen2_5_VisionPatchMerger, Qwen2_5_VisionRotaryEmbedding,
-    Qwen2_5_VisionTransformer, Qwen2_5_VLForConditionalGeneration,
-    Qwen2_5_VLImagePixelInputs, SegmentIds, apply_rotary_pos_emb_vision,
-    generate_window_segment_ids)
+    AttentionMetadata, Qwen2_5_VisionAttention, Qwen2_5_VisionBlock,
+    Qwen2_5_VisionMLP, Qwen2_5_VisionPatchEmbed, Qwen2_5_VisionPatchMerger,
+    Qwen2_5_VisionRotaryEmbedding, Qwen2_5_VisionTransformer,
+    Qwen2_5_VLForConditionalGeneration, Qwen2_5_VLImagePixelInputs, SegmentIds,
+    apply_rotary_pos_emb_vision, generate_window_segment_ids)
 
 
 # --- Configuration Mocking ---
@@ -508,12 +507,12 @@ class TestQwen2_5_VLForConditionalGeneration:
         np.testing.assert_array_equal(embeds, mock_text_embeds)
         mock_merge_embeddings.assert_not_called()
 
-        embeds_empty_mm = model.get_input_embeddings(input_ids, tuple())
+        empty_mm = jnp.ones((0, model.config.hidden_size), )
+        embeds_empty_mm = model.get_input_embeddings(input_ids, empty_mm)
         np.testing.assert_array_equal(embeds_empty_mm, mock_text_embeds)
         mock_merge_embeddings.assert_not_called()
 
-        mm_embeds: MultiModalEmbeddings = (jnp.ones(
-            (5, model.config.hidden_size)), )
+        mm_embeds = jnp.ones((5, model.config.hidden_size))
         mock_merged = jnp.ones((1, 15, model.config.hidden_size))
         mock_merge_embeddings.return_value = mock_merged
 

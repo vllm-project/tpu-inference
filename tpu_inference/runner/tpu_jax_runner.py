@@ -381,11 +381,21 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                             dtype=np.int64)
 
     def load_model(self):
-        self.model_fn, self.compute_logits_fn, self.combine_hidden_states_fn, self.get_multimodal_embeddings_fn, self.get_input_embeddings_fn, self.get_mrope_input_positions_fn, self.state, self.lora_manager, self.model = get_model(
+        self.model_fn, self.compute_logits_fn, self.combine_hidden_states_fn, multimodal_fns, self.state, self.lora_manager, self.model = get_model(
             self.vllm_config,
             self.rng_key,
             self.mesh,
         )
+
+        multimodal_fns = multimodal_fns or {}
+        self.precompile_vision_encoder_fn = multimodal_fns.get(
+            "precompile_vision_encoder_fn", None)
+        self.get_multimodal_embeddings_fn = multimodal_fns.get(
+            "get_multimodal_embeddings_fn", None)
+        self.get_input_embeddings_fn = multimodal_fns.get(
+            "get_input_embeddings_fn", None)
+        self.get_mrope_input_positions_fn = multimodal_fns.get(
+            "get_mrope_input_positions_fn", None)
 
         if self.drafter is not None:
             logger.info("Loading drafter model...")
@@ -529,7 +539,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # Run the multimodal encoder if any.
             # We have the modality embeds at this time.
             self.mm_manager.execute_mm_encoder(scheduler_output)
-            mm_embeds = self.mm_manager.gather_mm_embeddings(scheduler_output)
+            mm_embeds = self.mm_manager.gather_mm_embeddings(
+                scheduler_output, input_ids.shape[0])
         else:
             mm_embeds = []
 
@@ -970,8 +981,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.is_multimodal_model:
             inputs_embeds = self.get_input_embeddings_fn(
                 self.state,
-                input_ids=input_ids,
-                multimodal_embeddings=mm_embeds,
+                input_ids,
+                mm_embeds,
             )
             return None, inputs_embeds
         else:

@@ -74,6 +74,9 @@ class CompilationManager:
         with self.runner.maybe_setup_dummy_loras(self.runner.lora_config):
             self._precompile_backbone_text_only()
             if self.runner.is_multimodal_model:
+                self.runner.precompile_vision_encoder_fn(
+                    self._run_compilation, )
+                self._precompile_input_embeddings_merger()
                 self._precompile_backbone_with_inputs_embeds()
             if self.runner.scheduler_config.async_scheduling:
                 self._precompile_substitute_placeholder_token()
@@ -85,6 +88,36 @@ class CompilationManager:
             self._precompile_structured_decoding()
             if self.runner.speculative_config:
                 self._precompile_speculative_decoding()
+
+    def _precompile_input_embeddings_merger(self) -> None:
+        for num_tokens in self.runner.num_tokens_paddings:
+            hidden_size = self.runner.vllm_config.model_config.get_hidden_size(
+            )
+            sharding = NamedSharding(self.runner.mesh, PartitionSpec())
+            dummy_multimodal_embeddings = self._create_dummy_tensor(
+                (num_tokens, hidden_size),
+                self.runner.vllm_config.model_config.dtype,
+                sharding=sharding)
+            dummy_input_ids = self._create_dummy_tensor((num_tokens, ),
+                                                        jnp.int32)
+
+            self._run_compilation(
+                "input_embeddings_merger",
+                self.runner.get_input_embeddings_fn,
+                self.runner.state,
+                dummy_input_ids,
+                dummy_multimodal_embeddings,
+                num_tokens=num_tokens,
+            )
+
+            self._run_compilation(
+                "input_embeddings_merger_text_only",
+                self.runner.get_input_embeddings_fn,
+                self.runner.state,
+                dummy_input_ids,
+                None,
+                num_tokens=num_tokens,
+            )
 
     def _precompile_backbone_helper(self, name, *, input_ids, positions,
                                     inputs_embeds) -> None:
