@@ -158,6 +158,7 @@ steps:
        queue: tpu_v6e_queue
      commands:
        - |
+<<<<<<< HEAD
          if [[ "$$NIGHTLY" == "1" ]]; then
            .buildkite/scripts/run_in_docker.sh \
              bash -c 'MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py && \
@@ -166,6 +167,12 @@ steps:
            echo "Skipping: NIGHTLY environment variable not set"
            exit 0
          fi
+=======
+         .buildkite/scripts/run_in_docker.sh \
+           bash -c 'MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py && \
+           python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_bgmv.py && \
+           python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_layers.py'
+>>>>>>> c17bacea (add multi-chip test case)
 
    - label: "E2E MLPerf tests for JAX + vLLM models on multiple chips"
      key: test_11
@@ -213,6 +220,7 @@ steps:
        queue: tpu_v6e_8_queue
      commands:
        - |
+<<<<<<< HEAD
          if [[ "$$NIGHTLY" == "1" ]]; then
            .buildkite/scripts/run_in_docker.sh \
              bash -c 'MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py'
@@ -220,6 +228,11 @@ steps:
            echo "Skipping: NIGHTLY environment variable not set"
            exit 0
          fi
+=======
+         .buildkite/scripts/run_in_docker.sh \
+           bash -c 'MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py && \
+                    python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_layers.py'
+>>>>>>> c17bacea (add multi-chip test case)
 
    - label: "E2E data parallelism test"
      key: test_14
