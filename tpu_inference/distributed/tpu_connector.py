@@ -469,10 +469,13 @@ class TPUConnectorWorker:
 
     def __del__(self):
         if self.is_producer:
-            self.pull_notify_listener_t.join(timeout=0)
+            if hasattr(self, "pull_notify_listener_t"):
+                self.pull_notify_listener_t.join(timeout=0)
         else:
-            self.pull_executor.shutdown(wait=False)
-        self.zmq_cxt.destroy(linger=0)
+            if hasattr(self, "pull_executor"):
+                self.pull_executor.shutdown(wait=False)
+        if hasattr(self, "zmq_cxt"):
+            self.zmq_cxt.destroy(linger=0)
 
     def register_runner(self, runner: TPUModelRunner):
         self.runner = runner
