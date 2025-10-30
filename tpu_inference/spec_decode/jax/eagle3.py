@@ -142,8 +142,8 @@ class Eagle3Proposer:
         attn_metadata: AttentionMetadata,
         input_ids: jax.Array,
         aux_hidden_states: tuple[jax.Array, ...],
-        next_token_ids: jax.Array,
-        num_rejected_tokens: Optional[jax.Array] = None,
+        next_token_ids: np.array,
+        num_rejected_tokens: Optional[np.array] = None,
     ) -> tuple[jax.Array, jax.Array, jax.Array, AttentionMetadata]:
         """Prepare drafter inputs based on target forward outputs.
 
@@ -169,8 +169,9 @@ class Eagle3Proposer:
         num_reqs = self.runner.input_batch.num_reqs
 
         if num_rejected_tokens is None:
-            num_reqs = device_array(self.mesh,
-                                    np.asarray([num_reqs], dtype=jnp.int32))
+            num_reqs, next_token_ids = device_array(
+                self.mesh,
+                (np.asarray([num_reqs], dtype=jnp.int32), next_token_ids))
             # block_tables = device_array(self.mesh, block_tables)
             attn_metadata = replace(attn_metadata,
                                     block_tables=device_array(
@@ -185,10 +186,6 @@ class Eagle3Proposer:
         seq_lens_cpu = attn_metadata.seq_lens_cpu
         assert query_start_loc_cpu is not None and seq_lens_cpu is not None
 
-        # Rejection-aware path: compute new per-request lengths and token indices.
-        # Convert to host numpy for efficient prefix-sum and repeat ops.
-        nrt_cpu = jax.device_get(num_rejected_tokens).astype("int32")
-
         # query_len_per_req = [q1, q2, ...]
         query_len_per_req = (query_start_loc_cpu[1:] -
                              query_start_loc_cpu[:-1])
@@ -197,7 +194,7 @@ class Eagle3Proposer:
         # For padded requests, the query length should be 0.
         query_len_per_req[num_reqs:] = 1
         # num_tokens_per_req = [q1 - n1, q2 - n2, ...]
-        num_tokens_per_req = (query_len_per_req - nrt_cpu)
+        num_tokens_per_req = (query_len_per_req - num_rejected_tokens)
         assert (num_tokens_per_req
                 >= 0).all(), ("num_tokens_per_req must be non-negative")
 
@@ -232,12 +229,13 @@ class Eagle3Proposer:
                                    "constant",
                                    constant_values=0)
         # Update seq_lens for active requests only: new_seq_lens = s - n.
-        new_seq_lens_cpu = seq_lens_cpu - nrt_cpu
+        new_seq_lens_cpu = seq_lens_cpu - num_rejected_tokens
 
-        query_start_loc, seq_lens, token_indices, num_reqs, block_tables = device_array(
+        query_start_loc, seq_lens, token_indices, num_reqs, block_tables, next_token_ids = device_array(
             self.mesh,
             (new_query_start_loc_cpu, new_seq_lens_cpu, token_indices_cpu,
-             np.asarray([num_reqs], dtype=jnp.int32), block_tables))
+             np.asarray([num_reqs],
+                        dtype=jnp.int32), block_tables, next_token_ids))
 
         attn_metadata = replace(attn_metadata, block_tables=block_tables)
         return self._filter_token_and_prepare_initial_inputs(
