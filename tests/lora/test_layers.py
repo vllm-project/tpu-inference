@@ -231,15 +231,15 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
         if repeats == 2:
             # In e2e, MergedColumnParallelLinear is created when we load the model. The base_layer weights are sharded and moved to TPU in VllmUnquantizedLinearMethod.process_weights_after_loading.
             linear = MergedColumnParallelLinear(
-                256,  # input_size
-                [256] * repeats,  # output_size
+                64,  # input_size
+                [64] * repeats,  # output_size
                 bias=False,
                 params_dtype=torch.float16)
             linear.weight.data = torch.rand_like(linear.weight.data)
             
             base_linear = MergedColumnParallelLinear(
-                256,  # input_size
-                [256] * repeats,  # output_size
+                64,  # input_size
+                [64] * repeats,  # output_size
                 bias=False,
                 params_dtype=torch.float16)
             base_linear.weight.data = linear.weight.data
@@ -303,13 +303,13 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
         repeats=repeats,
     )
 
-    # inputs: list[torch.Tensor] of size num_inputs. inputs[i] corresponds to a request which has several token of shape=[num_tokens, 256].
+    # inputs: list[torch.Tensor] of size num_inputs. inputs[i] corresponds to a request which has several token of shape=[num_tokens, 64].
     # index_mapping: list[int]
     # prompt_mapping: list[int]
     inputs, index_mapping, prompt_mapping = create_random_inputs(
         active_lora_ids=list(lora_dict.keys()),
         num_inputs=32,
-        input_size=(1, 256),
+        input_size=(1, 64),
         input_range=(0, 1),
         input_type=torch.float16,
         device='cpu')
@@ -372,7 +372,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
     inputs, index_mapping, prompt_mapping = create_random_inputs(
         active_lora_ids=[0],  # different from the above create_random_inputs
         num_inputs=32,
-        input_size=(1, 256),
+        input_size=(1, 64),
         input_range=(0, 1),
         input_type=torch.float16,
         device='cpu')

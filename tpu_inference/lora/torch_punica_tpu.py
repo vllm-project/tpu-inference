@@ -8,6 +8,8 @@ import torch
 import torch.nn.functional as F
 import torchax
 from vllm.lora.punica_wrapper.utils import convert_mapping
+from torchax.interop import jax_view, torch_view
+
 
 if TYPE_CHECKING:
     # avoid circuit import
@@ -283,7 +285,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             self.batch_size = 1
             self._lora_indices_per_batch[:self.
                                          batch_size] = token_lora_tensor[:self.
-                                                                         batch_size]
+                                                                         batch_size].torch()
 
     def _pad_prompt_mapping(
             self, prompt_mapping: tuple[int, ...]) -> tuple[int, ...]:
