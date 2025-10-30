@@ -59,7 +59,7 @@ class TestKVCacheManager:
                 cache_config=cache_config,
                 scheduler_config=scheduler_config,
                 parallel_config=parallel_config,
-                observability_config=None,
+                observability_config={},
                 additional_config={},
             )
 
