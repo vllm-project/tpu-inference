@@ -120,6 +120,19 @@ def prepare_rhs_transform(einsum_str: str, rhs_shape: Shape) -> dict[str, any]:
     rhs_perm = [rhs_label_to_axis[d] for d in rhs_perm_labels]
     is_2d_matmul = b_prod == 1
 
+    # Check if reshape is needed for RHS
+    num_batch_dims = len(batch_dims)
+    num_contract_dims = len(contract_dims)
+    num_rhs_non_contract_dims = len(rhs_non_contract_dims)
+
+    needs_rhs_reshape = True
+    if is_2d_matmul:
+        if num_batch_dims == 0 and num_contract_dims <= 1 and num_rhs_non_contract_dims <= 1:
+            needs_rhs_reshape = False
+    else:  # 3D matmul
+        if num_batch_dims <= 1 and num_contract_dims <= 1 and num_rhs_non_contract_dims <= 1:
+            needs_rhs_reshape = False
+
     return {
         "subscripts": subscripts,
         "rhs_perm": rhs_perm,
@@ -130,6 +143,7 @@ def prepare_rhs_transform(einsum_str: str, rhs_shape: Shape) -> dict[str, any]:
         "batch_shape_tuple": batch_shape_tuple,
         "k_shape_tuple": k_shape_tuple,
         "n_shape_tuple": n_shape_tuple,
+        "needs_rhs_reshape": needs_rhs_reshape,
     }
 
 
@@ -147,6 +161,7 @@ def prepare_lhs_and_output_transform(
     contract_dims = subscripts["contract_dims"]
     lhs_non_contract_dims = subscripts["lhs_non_contract_dims"]
     rhs_non_contract_dims = subscripts["rhs_non_contract_dims"]
+    is_2d_matmul = rhs_parsed_info["is_2d_matmul"]
 
     if len(lhs_labels) != len(lhs_shape):
         raise ValueError(
@@ -181,6 +196,19 @@ def prepare_lhs_and_output_transform(
     lhs_perm_labels = batch_dims + lhs_non_contract_dims + contract_dims
     lhs_perm = [lhs_label_to_axis[d] for d in lhs_perm_labels]
 
+    # Check if reshape is needed for LHS
+    num_batch_dims = len(batch_dims)
+    num_contract_dims = len(contract_dims)
+    num_lhs_non_contract_dims = len(lhs_non_contract_dims)
+
+    needs_lhs_reshape = True
+    if is_2d_matmul:
+        if num_batch_dims == 0 and num_lhs_non_contract_dims <= 1 and num_contract_dims <= 1:
+            needs_lhs_reshape = False
+    else:  # 3D matmul
+        if num_batch_dims <= 1 and num_lhs_non_contract_dims <= 1 and num_contract_dims <= 1:
+            needs_lhs_reshape = False
+
     # Info for output transformation
     n_shape_tuple = rhs_parsed_info["n_shape_tuple"]
     batch_shape_tuple = rhs_parsed_info["batch_shape_tuple"]
@@ -203,6 +231,13 @@ def prepare_lhs_and_output_transform(
     }
     output_perm = [source_indices[label] for label in out_labels]
 
+    # Check for output transformations
+    num_rhs_non_contract_dims = len(rhs_non_contract_dims)
+    needs_output_unflatten = not (num_batch_dims <= 1 and \
+                                 num_lhs_non_contract_dims <= 1 and \
+                                 num_rhs_non_contract_dims <= 1)
+    needs_output_transpose = output_perm != list(range(len(output_perm)))
+
     # Combine all necessary info for runtime transformations
     full_parsed_info = rhs_parsed_info.copy()
     full_parsed_info.update({
@@ -212,30 +247,11 @@ def prepare_lhs_and_output_transform(
         "final_output_shape_tuple": final_output_shape_tuple,
         "output_perm": output_perm,
         "m_shape_tuple": m_shape_tuple,
+        "needs_lhs_reshape": needs_lhs_reshape,
+        "needs_output_unflatten": needs_output_unflatten,
+        "needs_output_transpose": needs_output_transpose,
     })
     return full_parsed_info
-
-
-def transform_rhs_for_matmul(rhs: jax.Array,
-                             rhs_parsed_info: dict[str, any]) -> jax.Array:
-    """
-    Transforms the RHS einsum operand using info from prepare_rhs_transform.
-    RHS -> (B, K, N) or (K, N)
-    """
-    b_prod = rhs_parsed_info["b_prod"]
-    k_prod = rhs_parsed_info["k_prod"]
-    n_prod = rhs_parsed_info["n_prod"]
-    is_2d_matmul = rhs_parsed_info["is_2d_matmul"]
-    rhs_perm = rhs_parsed_info["rhs_perm"]
-
-    rhs_permuted = jnp.transpose(rhs, rhs_perm)
-    target_shape = (b_prod, k_prod, n_prod)
-    rhs_reshaped = jnp.reshape(rhs_permuted, target_shape)
-
-    if is_2d_matmul:
-        rhs_reshaped = jnp.squeeze(rhs_reshaped, axis=0)
-
-    return rhs_reshaped
 
 
 def transform_lhs_for_matmul(lhs: jax.Array,
@@ -244,20 +260,28 @@ def transform_lhs_for_matmul(lhs: jax.Array,
     Transforms the LHS einsum operand using info from prepare_lhs_and_output_transform.
     LHS -> (B, M, K) or (M, K)
     """
-    b_prod = parsed_info["b_prod"]
-    m_prod = parsed_info["m_prod"]
-    k_prod = parsed_info["k_prod"]
-    is_2d_matmul = parsed_info["is_2d_matmul"]
     lhs_perm = parsed_info["lhs_perm"]
+    needs_transpose = lhs_perm != list(range(len(lhs.shape)))
 
-    lhs_permuted = jnp.transpose(lhs, lhs_perm)
-    target_shape = (b_prod, m_prod, k_prod)
-    lhs_reshaped = jnp.reshape(lhs_permuted, target_shape)
+    if needs_transpose:
+        lhs_transformed = jnp.transpose(lhs, lhs_perm)
+    else:
+        lhs_transformed = lhs
 
-    if is_2d_matmul:
-        lhs_reshaped = jnp.squeeze(lhs_reshaped, axis=0)
+    if parsed_info["needs_lhs_reshape"]:
+        b_prod = parsed_info["b_prod"]
+        m_prod = parsed_info["m_prod"]
+        k_prod = parsed_info["k_prod"]
+        is_2d_matmul = parsed_info["is_2d_matmul"]
 
-    return lhs_reshaped
+        target_shape = (b_prod, m_prod, k_prod)
+        lhs_transformed = jnp.reshape(lhs_transformed, target_shape)
+
+        if is_2d_matmul:
+            lhs_transformed = jnp.squeeze(lhs_transformed, axis=0)
+    # else: shape is already (M, K) or (B, M, K)
+
+    return lhs_transformed
 
 
 def transform_matmul_output_to_einsum(
@@ -267,26 +291,30 @@ def transform_matmul_output_to_einsum(
     expected einsum output shape using info from prepare_lhs_and_output_transform.
     matmul_output is expected to be (B, M, N) or (M, N).
     """
-    b_prod = parsed_info["b_prod"]
-    m_prod = parsed_info["m_prod"]
-    n_prod = parsed_info["n_prod"]
     is_2d_matmul = parsed_info["is_2d_matmul"]
+    needs_output_unflatten = parsed_info["needs_output_unflatten"]
+    needs_output_transpose = parsed_info["needs_output_transpose"]
 
-    expected_matmul_shape = (m_prod,
-                             n_prod) if is_2d_matmul else (b_prod, m_prod,
-                                                           n_prod)
-    if matmul_output.shape != expected_matmul_shape:
-        raise ValueError(
-            f"Unexpected matmul_output shape: {matmul_output.shape}, expected {expected_matmul_shape}"
-        )
+    current_out = matmul_output
 
-    m_out = jnp.expand_dims(matmul_output,
-                            axis=0) if is_2d_matmul else matmul_output
+    if needs_output_unflatten:
+        # If it was a 2D matmul, add a leading dim of size 1 to make its rank
+        # compatible with the unflattening operation which expects a batch dimension.
+        if is_2d_matmul:
+            current_out = jnp.expand_dims(current_out, axis=0)
 
-    unflatten_shape = parsed_info["matmul_out_shape_unflattend"]
-    reshaped_out = jnp.reshape(m_out, unflatten_shape)
+        unflatten_shape = parsed_info["matmul_out_shape_unflattend"]
+        reshaped_out = jnp.reshape(current_out, unflatten_shape)
+    else:
+        # No unflattening needed. The tensor shape is either (M, N) or (B, M, N).
+        # The expand_dims is not added if unflattening is not required.
+        reshaped_out = current_out
 
-    final_out = jnp.transpose(reshaped_out, parsed_info["output_perm"])
+    if needs_output_transpose:
+        # This permutation is on the unflattened dimensions
+        final_out = jnp.transpose(reshaped_out, parsed_info["output_perm"])
+    else:
+        final_out = reshaped_out
 
     if final_out.shape != parsed_info["final_output_shape_tuple"]:
         raise ValueError(
@@ -498,10 +526,6 @@ class JaxEinsumLayer(nnx.Einsum):
             y += jnp.reshape(bias, broadcasted_bias_shape)
         return y
 
-    def transform_weights(self):
-        self.kernel.value = jnp.transpose(
-            transform_rhs_for_matmul(self.kernel.value, self.rhs_parsed_info))
-
     def _quantized_einsum(self, einsum_str, inputs, kernel, precision):
         path = get_param_path(kernel, self.model)
         if path.endswith(".kernel"):
@@ -558,7 +582,7 @@ class Qwen3Attention(nnx.Module):
             model=model,
             param_dtype=dtype,
             # P(None, "model", None) -> P("model", None, None) due to weigh transpose.
-            kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
+            kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
         )
         self.q_norm = nnx.RMSNorm(
@@ -574,7 +598,7 @@ class Qwen3Attention(nnx.Module):
             model=model,
             param_dtype=dtype,
             # P(None, "model", None) -> P("model", None, None) due to weigh transpose.
-            kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
+            kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
         )
         self.k_norm = nnx.RMSNorm(
@@ -590,7 +614,7 @@ class Qwen3Attention(nnx.Module):
             model=model,
             param_dtype=dtype,
             # P(None, "model", None) -> P("model", None, None) due to weigh transpose.
-            kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
+            kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
         )
         self.o_proj = JaxEinsumLayer(
@@ -599,7 +623,7 @@ class Qwen3Attention(nnx.Module):
             model=model,
             param_dtype=dtype,
             # P("model", None, None) -> P(None, "model", None) due to weigh transpose.
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
             rngs=rng,
         )
 
@@ -825,5 +849,3 @@ class Qwen3ForCausalLM(nnx.Module):
                         model=self,
                         metadata_map=metadata_map,
                         mesh=self.mesh)
-        for layer in self.model.layers:
-            layer.self_attn.preprocess_weights()
