@@ -9,8 +9,6 @@ set -euo pipefail
 cleanup() {
   echo "--- Cleanup Docker Image ---"
   docker rmi -f "${IMAGE_TAG}"
-  echo "--- Running Cleanup for Job ${BUILDKITE_JOB_ID} ---"
-  docker image prune -a -f --filter "label=buildkite-job-id=${BUILDKITE_JOB_ID}"
 }
 # Cleanup will be executed regardless of success or failure.
 trap cleanup EXIT
@@ -28,9 +26,9 @@ if [ -z "${BUILDKITE_JOB_ID:-}" ]; then
 fi
 
 export TAG_FILE_NAME="vllm_image_tag"
-export PROJECT_ID="cienet-cmcs"
-export LOCATION="us-central1"
-export REPO_NAME="vllm-tpu"
+export PROJECT_ID="cloud-ullm-inference-ci-cd"
+export LOCATION="asia-south1"
+export REPO_NAME="tpu-inference-ci-docker"
 export IMAGE_NAME="vllm-tpu"
 export IMAGE_TAG="${LOCATION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:${BUILDKITE_BUILD_NUMBER}-${BUILDKITE_COMMIT:0:8}"
 
@@ -39,7 +37,6 @@ gcloud auth configure-docker ${LOCATION}-docker.pkg.dev -q
 
 echo "--- Build Docker Image ---"
 docker build \
-    --label "buildkite-job-id=${BUILDKITE_JOB_ID}" \
     --no-cache -f docker/Dockerfile -t "${IMAGE_TAG}" .
 
 echo "--- Push Docker Image to Artifact Registry ---"
