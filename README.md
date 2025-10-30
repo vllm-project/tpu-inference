@@ -39,11 +39,11 @@ vLLM TPU is now powered by `tpu-inference`, an expressive and powerful new hardw
 
 Although vLLM TPU’s new unified backend makes out-of-the-box high performance serving possible with any model supported in vLLM, the reality is that we're still in the process of implementing a few core components.
 
-For this reason, we’ve provided a **[Recommended Models and Features](https://docs.vllm.ai/projects/tpu/en/latest/recommended_models_features.html)** page detailing the models and features that are validated through unit, integration, and performance testing.
+For this reason, we’ve provided a **[Recommended Models and Features](https://docs.vllm.ai/projects/tpu/en/latest/recommended_models_features/)** page detailing the models and features that are validated through unit, integration, and performance testing.
 
 ## Get started
 
-Get started with vLLM on TPUs by following the [quickstart guide](https://docs.vllm.ai/projects/tpu/en/latest/getting_started/quickstart.html).
+Get started with vLLM on TPUs by following the [quickstart guide](https://docs.vllm.ai/projects/tpu/en/latest/getting_started/quickstart/).
 
 Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn more.
 
