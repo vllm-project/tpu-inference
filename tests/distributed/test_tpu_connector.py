@@ -1,4 +1,3 @@
-
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -218,15 +217,13 @@ class TestTPUConnectorScheduler(unittest.TestCase):
     def test_request_finished_consumer(self):
         """Tests request_finished is a no-op for consumers."""
         self.scheduler.is_producer = False
-        delay_free, params = self.scheduler.request_finished(
-            MagicMock(), [])
+        delay_free, params = self.scheduler.request_finished(MagicMock(), [])
         self.assertFalse(delay_free)
         self.assertIsNone(params)
 
     @patch("tpu_inference.distributed.tpu_connector.get_uuid",
            return_value=456)
-    def test_request_finished_producer_finished_by_length(
-            self, mock_get_uuid):
+    def test_request_finished_producer_finished_by_length(self, mock_get_uuid):
         """Tests producer logic when a request finishes normally."""
         self.scheduler.is_producer = True
         mock_request = MagicMock()
@@ -316,8 +313,7 @@ class TestTPUConnectorWorker(unittest.TestCase):
                 'tpu_inference.distributed.tpu_connector.select_from_kv_caches'
             ),
             "scatter_kv_slices":
-            patch(
-                'tpu_inference.distributed.tpu_connector.scatter_kv_slices'),
+            patch('tpu_inference.distributed.tpu_connector.scatter_kv_slices'),
             "time":
             patch('tpu_inference.distributed.tpu_connector.time'),
             "make_zmq_path":
