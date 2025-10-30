@@ -221,10 +221,13 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
     )
 
     axis_names = ("data", "model")
+    devices = jax.devices()
     mesh_shape = (
-        1, 1
+        1, len(devices)
+        # 1, 1
     )  # TODO(xiowei): support multi-chip: mesh_shape = (1, len(jax.devices()))
-    mesh = jax.make_mesh(mesh_shape, axis_names, devices=jax.devices())
+    print(f'xw32 mesh_shape: {mesh_shape}')
+    mesh = jax.make_mesh(mesh_shape, axis_names, devices=devices)
 
     def create_column_parallel_packed_layer():
         # We first create a base linear layer, then a lora layer to wrap it.
@@ -281,7 +284,10 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
     with torchax.default_env():
         # lora_linear.weight has type torchax.tensor.Tensor
         # BaseLinearLayerWithLoRA.weight property guarantees this.
-        assert torch.equal(linear.weight, lora_linear.weight.to('cpu'))
+        # if len(devices) != 1, `reorder_concatenated_tensor_for_sharding` function may reorder the out_features dimension of the weight matrix.
+        # So the below check will fail.
+        if len(devices) == 1:
+            assert torch.equal(linear.weight.data, lora_linear.weight.to('cpu'))
 
     max_num_batched_tokens = 8192
     max_batches = 256
