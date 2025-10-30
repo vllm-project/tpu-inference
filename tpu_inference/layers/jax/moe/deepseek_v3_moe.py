@@ -19,7 +19,7 @@ from tpu_inference.models.jax.utils.quantization.quantization_utils import (
     manually_quantize_qwix_activation, manually_quantize_qwix_weight)
 
 modeling_flax_utils = FlaxUtils()
-
+jax.config.update("jax_ragged_dot_use_ragged_dot_instruction", True),
 
 @dataclass
 class DeepSeekV3Router(nnx.Module):
@@ -329,8 +329,9 @@ class SparseMoE(MoE):
         with jax.named_scope("unpermute"):
             unsorted_tokens_tD = self._sort_activations(
                 processed_tokens, jnp.argsort(sort_indices))
+            D = unsorted_tokens_tD.shape[-1]
             reshaped_tokens_TXD = unsorted_tokens_tD.reshape(
-                -1, self.num_experts_per_tok, self.hidden_size)
+                -1, self.num_experts_per_tok, D)
         with jax.named_scope("combine_weights"):
             output_TD = jnp.einsum(
                 "TXD,TX -> TD",
@@ -394,10 +395,10 @@ class SparseMoE(MoE):
 
         # TODO: update to 'expert' after we enable expert parallelism, currently experts are sharded along model axis
         # or we sould derive it from the model init
-        expert_shard_id = jax.lax.axis_index(self.expert_axis_name)
-        local_expert_size = self.num_local_experts // self.num_expert_parallelism
 
         if self.num_expert_parallelism > 1:
+            expert_shard_id = jax.lax.axis_index(self.expert_axis_name)
+            local_expert_size = self.num_local_experts // self.num_expert_parallelism
             if self.is_batch_sharded_by_expert:
                 # When token sharded in devices
                 # In this path, we assume the data(tokens) are fully sharded on expert, namely data_axis_name == expert_axis_name
