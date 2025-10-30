@@ -75,6 +75,8 @@ class CompilationManager:
             self._precompile_backbone_text_only()
             if self.runner.is_multimodal_model:
                 self._precompile_backbone_with_inputs_embeds()
+            if self.runner.scheduler_config.async_scheduling:
+                self._precompile_substitute_placeholder_token()
             self._precompile_select_from_array()
             self._precompile_compute_logits()
             self._precompile_disagg_utils()
@@ -147,6 +149,41 @@ class CompilationManager:
                 lora_metadata,
                 num_tokens=num_tokens,
             )
+
+    def _precompile_substitute_placeholder_token(self) -> None:
+        """Precompiles the token substitution function for all expected input shapes.
+
+        It iterates through all potential padded token lengths
+        (`num_tokens_paddings`) and request batch sizes (`num_reqs_paddings`)
+        that the scheduler is expected to handle, ensuring a compiled version
+        is ready for each combination.
+        """
+
+        for num_tokens in self.runner.num_tokens_paddings:
+            padded_token_in_tpu_cur_input_indices = np.zeros((num_tokens, ),
+                                                             dtype=np.int32)
+            padded_token_in_tpu_pre_next_tokens_indices = np.zeros(
+                (num_tokens, ), dtype=jnp.int32)
+            for num_reqs in self.runner.num_reqs_paddings:
+                input_ids = self._create_dummy_tensor((num_tokens, ),
+                                                      jnp.int32)
+                # Need align to the sampling output
+                next_tokens = self._create_dummy_tensor(
+                    (num_reqs, ),
+                    jnp.int32,
+                    sharding=NamedSharding(self.runner.mesh, PartitionSpec()))
+                placeholder_num = 1
+                self._run_compilation(
+                    "_substitute_placeholder_token_fn",
+                    self.runner._substitute_placeholder_token_fn,
+                    input_ids,
+                    padded_token_in_tpu_cur_input_indices,
+                    padded_token_in_tpu_pre_next_tokens_indices,
+                    next_tokens,
+                    placeholder_num,
+                    num_tokens=num_tokens,
+                    num_reqs=num_reqs,
+                )
 
     def _precompile_backbone_text_only(self) -> None:
         for num_tokens in self.runner.num_tokens_paddings:
