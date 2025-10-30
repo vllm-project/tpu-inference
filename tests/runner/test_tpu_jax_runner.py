@@ -48,7 +48,7 @@ class TestTPUJaxRunner:
                 scheduler_config=scheduler_config,
                 parallel_config=parallel_config,
                 speculative_config=speculative_config,
-                observability_config=None,
+                observability_config={},
                 additional_config={},
             )
 
@@ -140,7 +140,7 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
                 scheduler_config=scheduler_config,
                 parallel_config=parallel_config,
                 speculative_config=None,
-                observability_config=None,
+                observability_config={},
                 additional_config={},
             )
 

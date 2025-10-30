@@ -54,7 +54,7 @@ class TestSpeculativeDecodingManager:
                 scheduler_config=scheduler_config,
                 parallel_config=parallel_config,
                 speculative_config=speculative_config,
-                observability_config=None,
+                observability_config={},
                 additional_config={},
             )
 
