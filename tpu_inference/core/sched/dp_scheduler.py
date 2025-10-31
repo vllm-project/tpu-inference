@@ -143,7 +143,6 @@ class DPScheduler(SchedulerInterface):
         self.assigned_dp_rank[request.request_id] = rank
         self.schedulers[rank].add_request(request)
 
-    # @time_function
     def schedule(self) -> DPSchedulerOutput:
         """
         Main scheduling method that coordinates all DP rank schedulers.
@@ -164,7 +163,7 @@ class DPScheduler(SchedulerInterface):
             output = scheduler.schedule()
             rank_outputs.append(output)
 
-        # Cache scheduler outputs to use in `update_from_output``
+        # Cache scheduler outputs to use in `update_from_output`
         self.cached_schedulers_output = rank_outputs
 
         # Return combined scheduler outputs
