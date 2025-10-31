@@ -2,8 +2,6 @@ steps:
   # -----------------------------------------------------------------
   # TEST STEPS - Calling wrapper
   # -----------------------------------------------------------------
-   - wait: ~
-     depends_on: build_docker_image
 
    - label: "E2E MLPerf tests for JAX models"
      key: test_0
