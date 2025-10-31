@@ -1154,20 +1154,6 @@ class TPUConnectorWorker:
                 f"Request {meta.req_id}: Assembled TPU data for one layer has shape {layered_kv_on_tpu[0].shape}."
             )
 
-            # If the full prefix hit state for a given request is active, we fetched N tokens but must
-            # now truncate to N-1 before padding and loading, to match the
-            # allocation made by the scheduler.
-            # TODO(jcgu): rm
-            if meta.load_spec.is_full_prefix_hit:
-                layered_kv_on_tpu = jax.tree.map(
-                    lambda x: jax.lax.slice_in_dim(x, 0, x.shape[0] - 1),
-                    layered_kv_on_tpu)
-                logger.info(
-                    f"Request {meta.req_id}: is_full_prefix_hit = {meta.load_spec.is_full_prefix_hit}"
-                    "Truncated fetched cache data by 1 token. New shape: "
-                    f"{layered_kv_on_tpu[0].shape if layered_kv_on_tpu else 'N/A'}"
-                )
-
             # 3. Split the delta load into two parts:
             #    a) The data that fills the last partially-filled block.
             #    b) The data that fills new, completely empty blocks.
@@ -1242,11 +1228,16 @@ class TPUConnectorWorker:
                 # and the first block is also a 'full block' to be loaded. So we start
                 # from start_block_idx. Otherwise, the first block was partially filled
                 # and handled in Part 1, so we start from the next block (start_block_idx + 1).
-                if start_offset_in_block > 0:
-                    destination_blocks = meta.local_block_ids[start_block_idx +
-                                                              1:]
-                else:
-                    destination_blocks = meta.local_block_ids[start_block_idx:]
+                # if start_offset_in_block > 0:
+                #     destination_full_blocks = meta.local_block_ids[start_block_idx +
+                #                                               1:]
+                # else:
+                #     destination_full_blocks = meta.local_block_ids[start_block_idx:]
+
+                full_block_start_idx = (skip_tokens + self.block_size -
+                                        1) // self.block_size
+                destination_full_blocks = meta.local_block_ids[
+                    full_block_start_idx:]
 
                 # Pad the remaining data to be a multiple of block_size.
                 # TODO(jcgu): do we need to pad when token_processor.chunk_size==block_size
@@ -1256,7 +1247,7 @@ class TPUConnectorWorker:
                 pad_after = padded_len - remaining_tokens
                 logger.info(
                     f"Request {meta.req_id}, case full block load: Preparing to load remaining_tokens={remaining_tokens} "
-                    f"into {len(destination_blocks)} full blocks, pad_after={pad_after} tokens, padded_len={padded_len}."
+                    f"into {len(destination_full_blocks)} full blocks, pad_after={pad_after} tokens, padded_len={padded_len}."
                 )
                 # TODO(jcgu): skip it when no partial tokens
                 data_for_full_blocks = jax.tree.map(
@@ -1290,12 +1281,12 @@ class TPUConnectorWorker:
                     self.block_size,
                     self.runner.kv_caches,
                     padded_data,
-                    jnp.array(destination_blocks),
+                    jnp.array(destination_full_blocks),
                 )
                 jax.block_until_ready(self.runner.kv_caches)
                 logger.info(
                     f"Request {meta.req_id}: Loaded {remaining_tokens} tokens into "
-                    f"{len(destination_blocks)} new blocks.")
+                    f"{len(destination_full_blocks)} new blocks.")
 
             request_load_duration = time.time() - request_load_start_time
             load_times.append(request_load_duration)
