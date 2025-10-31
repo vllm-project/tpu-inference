@@ -87,7 +87,8 @@ else
 fi
 DOCKER_HF_HOME="/tmp/hf_home"
 
-export LOCATION="asia-south1"
+# export LOCATION="asia-south1"
+export LOCATION="us-central1"
 gcloud auth configure-docker ${LOCATION}-docker.pkg.dev -q
 TAG_FILE_NAME="vllm_image_tag"
 buildkite-agent artifact download $TAG_FILE_NAME .

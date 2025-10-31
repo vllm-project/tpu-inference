@@ -26,9 +26,12 @@ if [ -z "${BUILDKITE_JOB_ID:-}" ]; then
 fi
 
 export TAG_FILE_NAME="vllm_image_tag"
-export PROJECT_ID="cloud-ullm-inference-ci-cd"
-export LOCATION="asia-south1"
-export REPO_NAME="tpu-inference-ci-docker"
+# export PROJECT_ID="cloud-ullm-inference-ci-cd"
+# export LOCATION="asia-south1"
+# export REPO_NAME="tpu-inference-ci-docker"
+export PROJECT_ID="cienet-cmcs"
+export LOCATION="us-central1"
+export REPO_NAME="vllm-tpu"
 export IMAGE_NAME="vllm-tpu"
 export IMAGE_TAG="${LOCATION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:${BUILDKITE_BUILD_NUMBER}-${BUILDKITE_COMMIT:0:8}"
 
