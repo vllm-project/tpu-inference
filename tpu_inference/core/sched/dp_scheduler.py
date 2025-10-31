@@ -136,18 +136,12 @@ class DPScheduler(SchedulerInterface):
         2. Assign the request to that rank
         3. Add the request to the rank's scheduler
         """
-        if request.request_id in self.assigned_dp_rank:
-            raise ValueError(
-                f"Request {request.request_id} already assigned to rank {self.assigned_dp_rank[request.request_id]}"
-            )
-            # Request already assigned, add to existing rank
-            rank = self.assigned_dp_rank[request.request_id]
-            logger.debug(
-                f"Adding request {request.request_id} to existing rank {rank}")
-        else:
-            rank = self._find_best_rank_for_request(request)
-            self.assigned_dp_rank[request.request_id] = rank
-            self.schedulers[rank].add_request(request)
+        assert request.request_id not in self.assigned_dp_rank, (
+            f"Request {request.request_id} already "
+            f"assigned to rank {self.assigned_dp_rank[request.request_id]})")
+        rank = self._find_best_rank_for_request(request)
+        self.assigned_dp_rank[request.request_id] = rank
+        self.schedulers[rank].add_request(request)
 
     # @time_function
     def schedule(self) -> DPSchedulerOutput:
