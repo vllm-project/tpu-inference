@@ -1,7 +1,0 @@
-steps:
-   - label: "Build Docker Image"
-     key: build_docker_image
-     agents:
-       queue: tpu_v6e_queue
-     commands:
-       - .buildkite/scripts/build_docker.sh

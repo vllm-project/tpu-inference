@@ -2,9 +2,6 @@ x-run-condition: &run-on-nightly-or-tag
   if: build.env("NIGHTLY") == "1" || build.tag =~ /^v?[0-9]+(\.[a-zA-Z0-9]+)*([a-zA-Z]+[0-9]*)?$/
 
 steps:
-   - wait: ~
-     depends_on: build_docker_image
-
    - label: "Upload Tests for Models & Features"
      <<: *run-on-nightly-or-tag
      agents:

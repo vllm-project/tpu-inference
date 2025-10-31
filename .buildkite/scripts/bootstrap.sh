@@ -20,11 +20,17 @@ else
   echo "Code files changed. Proceeding with pipeline upload."
 fi
 
+build_docker() {
+  echo "--- Starting Build Docker Image ---"
+  .buildkite/scripts/build_docker.sh
+  echo "--- Build Docker Image Finished ---"
+}
+
 upload_pipeline() {
-    buildkite-agent pipeline upload .buildkite/build.yml
-    buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
-    # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
-    buildkite-agent pipeline upload .buildkite/main.yml
+  build_docker
+  buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
+  # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
+  buildkite-agent pipeline upload .buildkite/main.yml
 }
 
 echo "--- Starting Buildkite Bootstrap ---"
