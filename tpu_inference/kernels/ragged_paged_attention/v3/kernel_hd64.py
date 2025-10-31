@@ -895,6 +895,7 @@ def prepare_inputs(
     Array,  # [max_num_tokens, actual_num_kv_heads, actual_head_dim],
         v: jax.
     Array,  # [max_num_tokens, actual_num_kv_heads, actual_head_dim],
+        attention_sink: jax.Array | None = None,  # f32[actual_num_q_heads],
 ):
     max_num_tokens, actual_num_q_heads, actual_head_dim = q.shape
     actual_num_kv_heads = k.shape[1]
@@ -930,7 +931,13 @@ def prepare_inputs(
         .swapaxes(0, 1))
     # TODO(kyuyeunk, chengjiyao): Add kv quantization here.
     kv = merge_kv(k, v)
-    return q, kv
+
+    if attention_sink is not None:
+        attention_sink = attention_sink.reshape(
+            (-1, num_q_heads_per_kv_head, 1))
+        attention_sink = jnp.repeat(attention_sink, 128, -1)
+
+    return q, kv, attention_sink
 
 
 def prepare_outputs(
@@ -1304,7 +1311,7 @@ def ragged_paged_attention_hd64(
     actual_num_kv_heads = k.shape[1]
 
     actual_num_q_heads_per_kv_head = actual_num_q_heads // actual_num_kv_heads
-    q, kv = prepare_inputs(q, k, v)
+    q, kv, attention_sink = prepare_inputs(q, k, v, attention_sink)
     (
         _,
         max_num_tokens,
@@ -1339,19 +1346,12 @@ def ragged_paged_attention_hd64(
         vmem_limit_bytes = DEFAULT_VMEM_LIMIT_BYTES
     grid = (distribution[2], )
 
-    if attention_sink is None:
-        attention_sink_in_specs = None
-    else:
-        attention_sink = attention_sink.reshape(
-            (-1, num_q_heads_per_kv_head, 1))
-        attention_sink = jnp.repeat(attention_sink, 128, -1)
-        attention_sink_in_specs = pl.BlockSpec(memory_space=pltpu.VMEM)
-
     in_specs = [
         pl.BlockSpec(memory_space=pltpu.HBM),
         pl.BlockSpec(memory_space=pltpu.HBM),
         pl.BlockSpec(memory_space=pltpu.HBM),
-        attention_sink_in_specs,
+        None if attention_sink is None else pl.BlockSpec(
+            memory_space=pltpu.VMEM)
     ]
 
     out_specs = [
