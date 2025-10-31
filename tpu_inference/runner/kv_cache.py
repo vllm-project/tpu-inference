@@ -20,7 +20,7 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh, total_num_pages: int,
                                  actual_head_dim: int, kv_dtype: any):
     """Gets the KV cache shape based on the mesh configuration."""
 
-    model_cnt = mesh.shape["model"]
+    model_cnt = mesh.shape["model"] * mesh.shape["expert"]
     assert actual_num_kv_heads % model_cnt == 0
     shape = list(
         rpa.get_kv_cache_shape(total_num_pages, page_size,
@@ -66,7 +66,7 @@ def create_kv_caches(
                                                num_kv_heads, head_size,
                                                cache_dtype)
 
-    sharding = NamedSharding(mesh, PartitionSpec(None, None, "model"))
+    sharding = NamedSharding(mesh, PartitionSpec(None, None, ('model', 'expert')))
 
     def _allocate() -> jax.Array:
         return jnp.empty(
