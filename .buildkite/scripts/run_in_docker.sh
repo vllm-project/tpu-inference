@@ -28,11 +28,14 @@ cleanup() {
     # Remove any found containers
     if [ -n "$total_containers" ]; then
       echo "Removing leftover containers using vllm-tpu image(s)..."
+      echo "containers: $total_containers"
       for container_id in $total_containers; do
         echo "try removing $container_id..."
         docker rm -f "$container_id" || true
       done
     fi
+
+    docker ps -a
 
     echo "Removing old vllm-tpu image..."
     docker rmi -f "$IMAGE_TAG" || true
