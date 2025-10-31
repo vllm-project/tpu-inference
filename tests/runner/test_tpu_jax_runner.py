@@ -64,7 +64,7 @@ class TestTPUJaxRunner:
         """Tests _get_input_ids_embeds for both multimodal and text-only models."""
         # 1. ===== Setup =====
         dummy_input_ids = jnp.array([1, 2, 3])
-        dummy_mm_embeds = [jnp.ones((10, 128))]
+        dummy_mm_embeds = jnp.ones((10, 128))
         dummy_final_embeds = jnp.ones((3, 128))
 
         # Mock the embedding function
@@ -83,9 +83,7 @@ class TestTPUJaxRunner:
         np.testing.assert_array_equal(np.asarray(inputs_embeds_res),
                                       np.asarray(dummy_final_embeds))
         self.mock_get_input_embed_fn.assert_called_once_with(
-            self.runner.state,
-            input_ids=dummy_input_ids,
-            multimodal_embeddings=dummy_mm_embeds)
+            self.runner.state, dummy_input_ids, dummy_mm_embeds)
 
         # 3. ===== Act & Assert (Text-only) =====
         self.mock_get_input_embed_fn.reset_mock()
@@ -149,13 +147,17 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
             self.runner.load_model()
 
     def _model_get_model(self):
+        mock_multimodal_fns = {
+            "precompile_vision_encoder_fn": None,
+            "get_multimodal_embeddings_fn": None,
+            "get_input_embeddings_fn": None,
+            "get_mrope_input_positions_fn": None
+        }
         return (
             MagicMock(),  # TPUModelRunner.model_fn
             MagicMock(),  # TPUModelRunner.compute_logits_fn
             MagicMock(),  # TPUModelRunner.combine_hidden_states_fn
-            None,  # TPUModelRunner.get_multimodal_embeddings_fn
-            None,  # TPUModelRunner.get_input_embeddings_fn
-            None,  # TPUModelRunner.get_mrope_input_positions_fn
+            mock_multimodal_fns,  # TPUModelRunner.multimodal_fns
             MagicMock(),  # TPUModelRunner.state (model params)
             None,  # TPUModelRunner.lora_manager
             None,  # TPUModelRunner.model
@@ -172,6 +174,6 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
 
         self.runner.get_input_embeddings_fn = MagicMock()
         dummy_input_ids = jnp.array([1, 2, 3])
-        dummy_mm_embeds = [jnp.ones((10, 128))]
+        dummy_mm_embeds = jnp.ones((10, 128))
         _ = self.runner._get_input_ids_embeds(dummy_input_ids, dummy_mm_embeds)
         self.runner.get_input_embeddings_fn.assert_not_called()
