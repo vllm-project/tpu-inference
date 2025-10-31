@@ -8,7 +8,6 @@ import torchax
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
-# from tpu_commons.models.vllm.sharding import shard_parallel_layers_to_tpu
 from vllm.config import LoRAConfig
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -27,9 +26,6 @@ from tpu_inference.layers.vllm.quantization.unquantized import \
 from tpu_inference.layers.vllm.sharding import _shard_module_to_tpu
 
 from .utils import DummyLoRAManager
-
-# TODO(xiowei):
-# - add test for multi-chip.
 
 P = PartitionSpec
 
@@ -204,26 +200,20 @@ def create_random_inputs(
 @torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 9])
 @pytest.mark.parametrize("repeats", [2])
-@pytest.mark.parametrize("fully_shard", [False])
 @pytest.mark.parametrize("stage", [True, False])
-def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
-                                stage) -> None:
+def test_column_parallel_packed(dist_init, num_loras, repeats, stage) -> None:
     max_loras = 9
     max_lora_rank = 8
     lora_config = LoRAConfig(
         max_loras=max_loras,
         max_lora_rank=max_lora_rank,
-        fully_sharded_loras=fully_shard,
+        fully_sharded_loras=False,
         lora_dtype=torch.float16,
     )
 
     axis_names = ("data", "model")
     devices = jax.devices()
-    mesh_shape = (
-        1, len(devices)
-        # 1, 1
-    )  # TODO(xiowei): support multi-chip: mesh_shape = (1, len(jax.devices()))
-    print(f'xw32 mesh_shape: {mesh_shape}')
+    mesh_shape = (1, len(devices))
     mesh = jax.make_mesh(mesh_shape, axis_names, devices=devices)
 
     def create_column_parallel_packed_layer():
@@ -264,7 +254,6 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             raise NotImplementedError("NYI: for QKVParallelLinear case")
 
         with torchax.default_env():
-            # create_lora_weights creates global shape lora weight.
             lora_linear.create_lora_weights(max_loras, lora_config)
         # In the e2e, the lora_layer's weight is moved to TPU in _shard_module_to_tpu.
         _shard_module_to_tpu(lora_linear, mesh)
