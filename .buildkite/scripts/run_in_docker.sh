@@ -87,8 +87,6 @@ else
 fi
 DOCKER_HF_HOME="/tmp/hf_home"
 
-# (TODO): Consider creating a remote registry to cache and share between agents.
-# Subsequent builds on the same host should be cached.
 export LOCATION="asia-south1"
 gcloud auth configure-docker ${LOCATION}-docker.pkg.dev -q
 TAG_FILE_NAME="vllm_image_tag"
