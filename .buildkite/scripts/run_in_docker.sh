@@ -94,6 +94,8 @@ gcloud auth configure-docker ${LOCATION}-docker.pkg.dev -q
 TAG_FILE_NAME="vllm_image_tag"
 buildkite-agent artifact download $TAG_FILE_NAME .
 IMAGE_TAG=$(cat $TAG_FILE_NAME)
+# Clean tag file
+rm $TAG_FILE_NAME
 export IMAGE_TAG
 
 if [ -z "$IMAGE_TAG" ]; then

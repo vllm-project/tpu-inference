@@ -45,3 +45,5 @@ docker push "${IMAGE_TAG}"
 # Upload image tag to buildkite artifact
 echo "${IMAGE_TAG}" > $TAG_FILE_NAME
 buildkite-agent artifact upload $TAG_FILE_NAME
+# Clean tag file
+rm $TAG_FILE_NAME
