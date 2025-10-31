@@ -22,23 +22,21 @@ cleanup() {
     # Loop through each image ID and find any containers (running or not) using it.
     for img_id in $old_images; do
       echo "find $img_id..."
-      total_containers="$total_containers $(docker ps -a -q --filter "ancestor=$IMAGE_TAG")"
+      total_containers="$total_containers $(docker ps -a -q --filter "ancestor=$img_id")"
     done
 
     # Remove any found containers
     if [ -n "$total_containers" ]; then
       echo "Removing leftover containers using vllm-tpu image(s)..."
-      echo "containers: $total_containers"
-      for container_id in $total_containers; do
-        echo "try removing $container_id..."
-        docker rm -f "$container_id" || true
-      done
+      echo "$total_containers" | xargs -n1 | sort -u | xargs -r docker rm -f
     fi
 
     docker ps -a
 
     echo "Removing old vllm-tpu image..."
     docker rmi -f "$IMAGE_TAG" || true
+    echo "Pruning old Docker build cache..."
+    docker builder prune -f
     echo "Cleanup complete."
   else
     echo "No vllm-tpu images found to clean up."
