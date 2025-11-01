@@ -1,3 +1,4 @@
+import numpy as np
 import jax
 import jax.numpy as jnp
 from absl.testing import absltest
@@ -59,7 +60,7 @@ class MoEKernelTest(jtu.JaxTestCase):
                 (-1 if x.coords[0] % 2 else 1) * x.coords[1],
             ),
         )
-        self.mesh = Mesh(devices=self.mesh_devices, axis_names=("model", ))
+        self.mesh = Mesh(np.array(self.mesh_devices).reshape(1, -1), axis_names=("data", "model"))
 
     def test_basic(self):
         dtype = jnp.bfloat16
