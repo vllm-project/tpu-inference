@@ -10,6 +10,9 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from vllm.config import VllmConfig
+from tpu_inference.models.jax.utils.quantization.mxfp4_utils import (
+    dequant_mxfp4_to_bf16,
+)
 
 from tpu_inference.layers.jax.attention.gpt_oss_attention import (
     AttentionMetadata, GptOssAttention)
@@ -189,6 +192,7 @@ class GptOss(nnx.Module):
             "transpose_reshape": lambda w, shape: w.T.reshape(shape),
             "reshape": lambda b, shape: b.reshape(shape),
             "transpose": lambda w, _: w.T,
+            "swap_last2": lambda w, _: w.swapaxes(-1, -2),
         }
 
         mappings = {
@@ -246,11 +250,11 @@ class GptOss(nnx.Module):
             "model.layers.*.mlp.router.bias":
             ("layers.*.custom_module.router.bias_E", None, None),
             "model.layers.*.mlp.experts.gate_up_proj":
-            ("layers.*.custom_module.mlp1_weight_EDF2", None, None),
+            ("layers.*.custom_module.mlp1_weight_EDF2", transforms["swap_last2"], None),
             "model.layers.*.mlp.experts.gate_up_proj_bias":
             ("layers.*.custom_module.mlp1_bias_EF2", None, None),
             "model.layers.*.mlp.experts.down_proj":
-            ("layers.*.custom_module.mlp2_weight_EFD", None, None),
+            ("layers.*.custom_module.mlp2_weight_EFD", transforms["swap_last2"], None),
             "model.layers.*.mlp.experts.down_proj_bias":
             ("layers.*.custom_module.mlp2_bias_ED", None, None),
         }
@@ -264,8 +268,44 @@ class GptOss(nnx.Module):
             framework="pt",
             download_dir=self.vllm_config.load_config.download_dir)
 
+        # Single pass: build a unified pool. Combine MXFP4 expert blocks/scales
+        # into a dequantized bf16 tensor as soon as both are seen.
+        pool: dict[str, torch.Tensor] = {}
+        pending_experts: dict[str, dict[str, torch.Tensor]] = {}
+        for loaded_name, loaded_weight in names_and_weights_generator:
+            if loaded_name.endswith("_blocks") or loaded_name.endswith("_scales"):
+                base = loaded_name[:-7]
+                entry = pending_experts.setdefault(base, {})
+                if loaded_name.endswith("_blocks"):
+                    entry["blocks"] = loaded_weight
+                else:
+                    entry["scales"] = loaded_weight
+
+                # If we have both parts, dequantize now and place into the main pool
+                if "blocks" in entry and "scales" in entry:
+                    hf_pattern = re.sub(r"layers\.(\d+)", "layers.*", base)
+                    if hf_pattern not in mappings:
+                        logger.warning(f"No mapping found for expert tensor: {base}. Skipping.")
+                    else:
+                        deq = dequant_mxfp4_to_bf16(entry["blocks"], entry["scales"])  # torch.bfloat16
+                        pool[base] = deq
+                    # Remove from pending to free memory
+                    pending_experts.pop(base, None)
+            else:
+                pool[loaded_name] = loaded_weight
+
+        # Enforce completeness of expert bundles
+        if pending_experts:
+            details = []
+            for base, entry in pending_experts.items():
+                missing = [k for k in ("blocks", "scales") if k not in entry]
+                details.append(f"{base} (missing: {', '.join(missing) if missing else 'unknown'})")
+            raise RuntimeError(
+                "Incomplete MXFP4 expert bundle(s) encountered: " + ", ".join(details)
+            )
+
         with jax.default_device(jax.devices("cpu")[0]):
-            for loaded_name, loaded_weight in names_and_weights_generator:
+            for loaded_name, loaded_weight in pool.items():
                 hf_pattern = re.sub(r"layers\.(\d+)", "layers.*", loaded_name)
                 if hf_pattern not in mappings:
                     logger.warning(
