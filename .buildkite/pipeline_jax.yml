@@ -96,29 +96,35 @@ steps:
    - label: "JAX unit tests - kernels"
      key: test_8
      soft_fail: true
-     if: |
-       [[ "$$NIGHTLY" == "1" ]] || git diff --name-only HEAD~1 | grep -qE '^(tpu_inference/kernels|tests/kernels|requirements\.txt)'
      agents:
        queue: tpu_v6e_queue
      commands:
        - |
-         .buildkite/scripts/run_in_docker.sh \
-           python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels \
-           --ignore=/workspace/tpu_inference/tests/kernels/ragged_paged_attention_kernel_v2_test.py \
-           --ignore=/workspace/tpu_inference/tests/kernels/ragged_kv_cache_update_v2_test.py \
-           --ignore=/workspace/tpu_inference/tests/kernels/collectives
+         if [[ "$$NIGHTLY" == "1" ]] || git diff --name-only HEAD~1 | grep -qE '^(tpu_inference/kernels|tests/kernels|requirements\.txt)'; then
+           .buildkite/scripts/run_in_docker.sh \
+             python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels \
+             --ignore=/workspace/tpu_inference/tests/kernels/ragged_paged_attention_kernel_v2_test.py \
+             --ignore=/workspace/tpu_inference/tests/kernels/ragged_kv_cache_update_v2_test.py \
+             --ignore=/workspace/tpu_inference/tests/kernels/collectives
+         else
+           echo "Skipping: no changes detected in kernels, tests/kernels, or requirements.txt"
+           exit 0
+         fi
 
    - label: "JAX unit tests - collective kernels"
      key: test_9
      soft_fail: true
-     if: |
-       [[ "$$NIGHTLY" == "1" ]] || git diff --name-only HEAD~1 | grep -qE '^(tpu_inference/kernels/collectives|tests/kernels/collectives|requirements\.txt)'
      agents:
        queue: tpu_v6e_8_queue
      commands:
        - |
-         .buildkite/scripts/run_in_docker.sh \
-           python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels/collectives
+         if [[ "$$NIGHTLY" == "1" ]] || git diff --name-only HEAD~1 | grep -qE '^(tpu_inference/kernels/collectives|tests/kernels/collectives|requirements\.txt)'; then
+           .buildkite/scripts/run_in_docker.sh \
+             python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels/collectives
+         else
+           echo "Skipping: no changes detected in kernels/collectives, tests/kernels/collectives, or requirements.txt"
+           exit 0
+         fi
 
    - label: "lora tests for JAX + vLLM models single chip"
      key: test_10
