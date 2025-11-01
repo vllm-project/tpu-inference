@@ -32,6 +32,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
 
     from tpu_inference.models.jax.deepseek_v3 import DeepSeekV3
     from tpu_inference.models.jax.gpt_oss import GptOss
+    from tpu_inference.models.jax.llama3 import LlamaForCausalLM
     from tpu_inference.models.jax.llama4 import Llama4ForCausalLM
     from tpu_inference.models.jax.llama_eagle3 import EagleLlama3ForCausalLM
     from tpu_inference.models.jax.phi3 import Phi3ForCausalLM
@@ -39,12 +40,6 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     from tpu_inference.models.jax.qwen2_5_vl import \
         Qwen2_5_VLForConditionalGeneration
     from tpu_inference.models.jax.qwen3 import Qwen3ForCausalLM
-
-    if os.getenv("NEW_MODEL_DESIGN", False):
-        from tpu_inference.experimental.llama3_jax_stashed import \
-            LlamaForCausalLM
-    else:
-        from tpu_inference.models.jax.llama3 import LlamaForCausalLM
     _MODEL_REGISTRY["Llama4ForCausalLM"] = Llama4ForCausalLM
     _MODEL_REGISTRY["DeepseekV3ForCausalLM"] = DeepSeekV3
     _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
