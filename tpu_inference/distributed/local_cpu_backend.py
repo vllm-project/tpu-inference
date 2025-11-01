@@ -143,9 +143,14 @@ class LocalCPUBackend:
             return True
         return False
 
-    def unpin_keys(self, keys: List[CacheKey]):
+    def unpin_keys(self, keys: List[CacheKey]) -> int:
         """Unpins a list of keys, making them eligible for eviction again."""
+        unpinned_count = 0
+        found_count = 0
         for key in keys:
             if key in self.pinned_keys:
+                found_count += 1
                 self.pinned_keys.remove(key)
+                unpinned_count += 1
                 logger.info(f"Unpinned key. Hash: {key.chunk_hash}")
+        return unpinned_count, found_count

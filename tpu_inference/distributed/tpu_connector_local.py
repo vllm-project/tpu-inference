@@ -90,7 +90,7 @@ import os
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional, get_args
+from typing import TYPE_CHECKING, Any, Literal, Optional, get_args
 
 import jax
 import jax.numpy as jnp
@@ -124,15 +124,25 @@ REQUIRED_KV_CACHE_LAYOUT = "NHD"
 # default swap op type
 DEFAULT_HOST_HBM_SWAP_OP_TYPE = "jax"
 
+PARTIAL_BLOCK_SAVE_BEHAVIOR = Literal["drop", "pad", "dynamic"]
+PARTIAL_BLOCK_DROP_UPPER_LIMIT = 127
+PARTIAL_BLOCK_PAD_LOWER_LIMIT = 128
+
 
 @dataclass
 class SaveSpec:
     """A confirmed work order for the worker to save KV data."""
     skip_leading_tokens: int
+    # final save for the (newly) finished request
     is_final_save: bool = False
     # A direct signal to the worker to skip the data transfer but still
     # process the completion signal if is_final_save is True.
     skip_save: bool = False
+    # when the last block is partially used, its length may be
+    # adjusted (drop, pad) to be alined with block_size.
+    # this attribute keep track of the number of adjusted tokens
+    # (- for drop, and + for pad, 0 for exact)
+    tail_tokens_adjustment: int = 0
 
 
 @dataclass
@@ -322,10 +332,20 @@ class RequestTracker:
         self.block_ids.extend(new_block_ids)
         self.token_ids.extend(new_token_ids)
 
+        # NOTE(jcgu): is it always true? will MTP affect this judegment?
         # When a request is scheduled again, and the number of new tokens
         # is 1 (excluding chunked prefill), the request is in decode phase.
         if len(new_token_ids) == 1:
             self.is_decode_phase = True
+
+    def __repr__(self) -> str:
+        output_str = "    - RequestTracker: " + \
+                        f"req_id={self.req_id}, " + \
+                        f"prompt_len={self.prompt_len}, " + \
+                        f"num_tokens={len(self.token_ids)}, " + \
+                        f"num_blocks={len(self.block_ids)}, " + \
+                        f"save_watermark={self.save_watermark}"
+        return output_str
 
 
 @dataclass
@@ -385,12 +405,34 @@ class TPUConnectorScheduler():
         Checks for external KV cache hit against the local CPU backend.
         """
         prompt_token_ids = request.prompt_token_ids
-        logger.info(f"Request {request.request_id}: Checking for cache hit. "
-                    f"Prompt length: {len(prompt_token_ids)}, "
-                    f"Already computed tokens: {num_computed_tokens}.")
+
+        # TODO(jcgu): how about use request.num_tokens
+        num_prompt_tokens = len(prompt_token_ids)
+        num_full_blocks = num_prompt_tokens // self.block_size
+        full_blocks_num_tokens = num_full_blocks * self.block_size
+
+        # adjust prompt token / len based on pre-configed save behavior
+        # when the last block of request's token is partially used,
+        # in order to keep all the saved kv be aligned with block_size,
+        # we may
+        #  1. drop the partial block
+        #  2. pad the partial block to be a full block
+        #  3. keep the partial block
+        partial_block_save_behavior: PARTIAL_BLOCK_SAVE_BEHAVIOR = "drop"
+        # default is drop the partial block
+        adjusted_num_prompt_tokens = full_blocks_num_tokens
+        adjusted_prompt_token_ids = prompt_token_ids[:
+                                                     adjusted_num_prompt_tokens]
+        logger.info(
+            f"Request {request.request_id}: Checking for cache hit. "
+            f"Prompt length: {len(prompt_token_ids)}, "
+            f"Already computed tokens: {num_computed_tokens}. "
+            f"Given partial_block_save_behavior: {partial_block_save_behavior}, "
+            f" the adjusted prompt length is {adjusted_num_prompt_tokens}")
 
         # Generate keys for the incoming request's tokens
-        request_keys = self.token_processor.process_tokens(prompt_token_ids)
+        request_keys = self.token_processor.process_tokens(
+            adjusted_prompt_token_ids)
 
         num_matched_tokens = 0
         # The generator needs to be consumed to count.
@@ -410,7 +452,7 @@ class TPUConnectorScheduler():
                 break
 
         logger.info(
-            f"Request {request.request_id}: Found {num_matched_tokens} matched tokens in CPU backend."
+            f"Request {request.request_id}: Found {num_matched_tokens} (out of {len(prompt_token_ids)} prompt tokens) matched tokens in CPU backend."
         )
 
         is_full_prefix_hit = (num_matched_tokens > 0
@@ -490,7 +532,28 @@ class TPUConnectorScheduler():
         """
         save_spec = None
         num_total_tokens = len(tracker.token_ids)
-        has_new_tokens = num_total_tokens > tracker.save_watermark
+
+        num_full_blocks = num_total_tokens // self.block_size
+        full_blocks_num_tokens = num_full_blocks * self.block_size
+        last_partial_block_num_tokens = num_total_tokens - full_blocks_num_tokens
+
+        # adjust prompt token / len based on pre-configed save behavior
+        # when the last block of request's token is partially used,
+        # in order to keep all the saved kv be aligned with block_size,
+        # we may
+        #  1. drop the partial block
+        #  2. pad the partial block to be a full block
+        #  3. keep the partial block  (not support)
+        partial_block_save_behavior: PARTIAL_BLOCK_SAVE_BEHAVIOR = "drop"
+        # default is drop the partial block
+        adjusted_num_total_tokens = full_blocks_num_tokens
+        token_len_adjustment = -1 * last_partial_block_num_tokens
+
+        adjusted_num_blocks = (adjusted_num_total_tokens + self.block_size -
+                               1) // self.block_size
+        assert adjusted_num_blocks <= len(tracker.block_ids)
+
+        has_new_tokens = adjusted_num_total_tokens > tracker.save_watermark
         # Determine if a save is needed for this step
         should_save = False
         if is_finished:
@@ -513,16 +576,20 @@ class TPUConnectorScheduler():
                 logger.info(
                     f"in decode phase, next_block_boundary: {next_block_boundary}, "
                 )
+                # NOTE(jcgu): for decode, we do not drop or pad, just wait for
                 if num_total_tokens >= next_block_boundary:
                     should_save = True
 
-        logger.info(f"    - Preparing meta for req: {tracker.req_id}, "
-                    f"is_finished={is_finished}, "
-                    f"total_tokens={num_total_tokens}, "
-                    f"saved_tokens={tracker.save_watermark}, "
-                    f"has_new={has_new_tokens}, "
-                    f"is_decode={tracker.is_decode_phase}, "
-                    f"should_save={should_save}")
+        logger.info(
+            f"    - Preparing meta for req (save): {tracker.req_id}, "
+            f"is_finished={is_finished}, "
+            f"total_tokens={num_total_tokens}, "
+            f"partial_block_save_behavior={partial_block_save_behavior}, "
+            f"adjusted_num_total_tokens={adjusted_num_total_tokens}, "
+            f"saved_tokens={tracker.save_watermark}, "
+            f"has_new={has_new_tokens}, "
+            f"is_decode={tracker.is_decode_phase}, "
+            f"should_save={should_save}")
 
         # A SaveSpec is always prepared for a finished request to signal completion,
         # even if we don't save the underlying KV data. This is to ensure the TPUConnectorWorker
@@ -534,10 +601,11 @@ class TPUConnectorScheduler():
                 skip_leading_tokens=tracker.save_watermark,
                 is_final_save=is_finished,
                 skip_save=False,
+                tail_tokens_adjustment=token_len_adjustment,
             )
             if has_new_tokens:
                 last_known_watermark = tracker.save_watermark
-                tracker.save_watermark = num_total_tokens
+                tracker.save_watermark = adjusted_num_total_tokens
                 logger.info(
                     f"      -> Old watermark {last_known_watermark}, new save_watermark count: {tracker.save_watermark}"
                 )
@@ -632,6 +700,7 @@ class TPUConnectorScheduler():
 
             # Create and store the tracker, which will maintain the request's
             # state for its entire lifetime.
+            # TODO(jcgu): do we need to update save_watermark
             tracker = RequestTracker(
                 req_id=req_id,
                 prompt_len=len(request.prompt_token_ids),
@@ -643,11 +712,8 @@ class TPUConnectorScheduler():
             )
             self._request_trackers[req_id] = tracker
             logger.info(
-                f"    - Created tracker for {req_id} with initial state: "
-                f"prompt_len={tracker.prompt_len}, "
-                f"num_tokens={len(tracker.token_ids)}, "
-                f"num_blocks={len(tracker.block_ids)}, "
-                f"save_watermark={tracker.save_watermark}")
+                f"    - Created tracker for {req_id} with initial state: {tracker}"
+            )
 
             # Immediately prepare metadata for this new request. This could include
             # both a load operation (for the cached part) and a save operation
@@ -780,6 +846,7 @@ class TPUConnectorWorker:
         self.token_processor = TokenProcessor(model_name=model_name,
                                               chunk_size=self.block_size)
 
+        self.cpu_chunk_size = self.block_size
         # Thread pool for asynchronous TPU->CPU copies
         self.save_executor = ThreadPoolExecutor(max_workers=4,
                                                 thread_name_prefix="tpu_saver")
@@ -847,32 +914,44 @@ class TPUConnectorWorker:
                          "KV caches not registered.")
             return req_id
 
-        num_tokens_to_save = len(
-            full_token_ids) - save_spec.skip_leading_tokens
+        num_total_tokens = len(full_token_ids)
+        assert (num_total_tokens +
+                save_spec.tail_tokens_adjustment) % self.block_size == 0
+        # adjust (drop, pad) the total tokens for processing + saving
+        adjusted_num_total_tokens = min(
+            num_total_tokens,
+            num_total_tokens + save_spec.tail_tokens_adjustment)
+        num_tokens_to_save = adjusted_num_total_tokens - save_spec.skip_leading_tokens
+
         if num_tokens_to_save <= 0 and not save_spec.is_final_save:
             logger.info(f"Request {req_id}: No new tokens to save.")
             return req_id
 
-        tokens_to_process = full_token_ids[save_spec.skip_leading_tokens:]
+        process_token_ids = full_token_ids[:adjusted_num_total_tokens]
+        tokens_to_save = process_token_ids[save_spec.skip_leading_tokens:]
 
         # Calculate the block slice.
         start_block_idx = save_spec.skip_leading_tokens // self.block_size
-        blocks_to_process = full_block_ids[start_block_idx:]
+        end_block_idx = (num_total_tokens + save_spec.tail_tokens_adjustment +
+                         self.block_size - 1) // self.block_size
+        blocks_to_save = full_block_ids[start_block_idx:end_block_idx]
 
-        logger.info(f"Request {req_id} save details: "
-                    f"full_block_ids len={len(full_block_ids)}, "
-                    f"skip_leading_tokens={save_spec.skip_leading_tokens}, "
-                    f"num_tokens_to_save={num_tokens_to_save}, "
-                    f"start_block_idx={start_block_idx}, "
-                    f"blocks_to_process len={len(blocks_to_process)}")
+        logger.info(
+            f"Request {req_id} save details: "
+            f"full_block_ids len={len(full_block_ids)}, "
+            f"skip_leading_tokens={save_spec.skip_leading_tokens}, "
+            f"num_tokens_to_save={num_tokens_to_save}, "
+            f"tail_tokens_adjustment={save_spec.tail_tokens_adjustment}, "
+            f"start_block_idx={start_block_idx}, "
+            f"blocks_to_save len={len(blocks_to_save)}")
 
-        if not blocks_to_process and tokens_to_process:
+        if not blocks_to_save and tokens_to_save:
             logger.warning(
                 f"Request {req_id}: Tokens to save but no corresponding blocks found."
             )
             return req_id
 
-        if not tokens_to_process:
+        if not tokens_to_save:
             logger.info(
                 f"Request {req_id}: No new tokens to save, but processing as final save."
             )
@@ -880,10 +959,10 @@ class TPUConnectorWorker:
 
         try:
             start_time = time.time()
-            blocks_to_process = jnp.array(blocks_to_process)
+            blocks_to_save = jnp.array(blocks_to_save)
             # gather and reshape blocks on TPU first: output_shape: [process_blocks * block_size, num_heads, 2, head_dim]
             flat_kv_caches_tpu = KVCacheManager._jitted_gather_kv_cache(
-                self.runner.kv_caches, blocks_to_process)
+                self.runner.kv_caches, blocks_to_save)
 
             jax.block_until_ready(flat_kv_caches_tpu)
             logger.info(
@@ -896,9 +975,8 @@ class TPUConnectorWorker:
                 jax.block_until_ready(flat_kv_caches_cpu)
 
             duration = time.time() - start_time
-            logger.info(
-                f"Successfully saved {len(blocks_to_process)} blocks for "
-                f"request {req_id} to CPU in {duration:.4f} seconds.")
+            logger.info(f"Successfully saved {len(blocks_to_save)} blocks for "
+                        f"request {req_id} to CPU in {duration:.4f} seconds.")
 
             if flat_kv_caches_cpu:
                 logger.info(
@@ -920,8 +998,21 @@ class TPUConnectorWorker:
             # tokens that is about to be captured in the cache are correctly mapped. These keys will be recreated
             # during get_finished() to unpin the correct keys.
             all_keys_generator = self.token_processor.process_tokens(
-                full_token_ids)
+                process_token_ids)
             all_keys = list(all_keys_generator)
+
+            total_tokens_to_save = len(blocks_to_save) * self.block_size
+            num_full_chunks = total_tokens_to_save // self.cpu_chunk_size
+            split_size_list = [self.cpu_chunk_size] * num_full_chunks
+            last_chunk_size = total_tokens_to_save % self.cpu_chunk_size
+            if last_chunk_size > 0:
+                split_size_list.append(last_chunk_size)
+            num_chunks = len(split_size_list)
+            chunks_on_cpu = [
+                jax.lax.split(flat_layer_cache, split_size_list, axis=0)
+                for flat_layer_cache in flat_kv_caches_cpu
+            ]
+            jax.block_until_ready(chunks_on_cpu)
 
             # Filter for keys that correspond to the new data we are saving.
             relevant_keys = []
@@ -930,31 +1021,47 @@ class TPUConnectorWorker:
                     relevant_keys.append((abs_start_idx, abs_end_idx, key))
 
             if relevant_keys:
-                # The flat_kv_caches_cpu array corresponds to the new tokens,
-                # so its indexing is relative to the start of the new data.
-                for abs_start_idx, abs_end_idx, key in relevant_keys:
+                assert len(
+                    relevant_keys
+                ) == num_chunks, f"{len(relevant_keys)} != {num_chunks}"
+                for i in range(num_chunks):
+                    abs_start_idx, abs_end_idx, key = relevant_keys[i]
+                    cur_chunk_cross_layers = [
+                        chunks_on_cpu[j][i] for j in range(self.num_layers)
+                    ]
+                    self.cpu_backend.add(key, cur_chunk_cross_layers)
                     logger.info(
-                        f"Request {req_id}: Processing relevant key: "
+                        f"Request {req_id}: Saving to CPU chunk: "
                         f"abs_start_idx={abs_start_idx}, abs_end_idx={abs_end_idx}, "
-                        f"chunk_hash={key.chunk_hash}")
-                    # Calculate indices relative to the start of our new data slice.
-                    rel_start_idx = abs_start_idx - save_spec.skip_leading_tokens
-                    rel_end_idx = abs_end_idx - save_spec.skip_leading_tokens
-                    logger.info(
-                        f"Request {req_id}: Relative indices for slicing: "
-                        f"rel_start_idx={rel_start_idx}, rel_end_idx={rel_end_idx}"
+                        f"chunk_hash={key.chunk_hash}, "
+                        f" local_chunk_idx={i}, chunk_size={split_size_list[i]}"
                     )
 
-                    # Slice the data and add to the backend.
-                    value_for_key = [
-                        jax.lax.slice_in_dim(flat_layer_cache,
-                                             rel_start_idx,
-                                             rel_end_idx,
-                                             axis=0)
-                        for flat_layer_cache in flat_kv_caches_cpu
-                    ]
-                    jax.block_until_ready(value_for_key)
-                    self.cpu_backend.add(key, value_for_key)
+                # # The flat_kv_caches_cpu array corresponds to the new tokens,
+                # # so its indexing is relative to the start of the new data.
+                # for abs_start_idx, abs_end_idx, key in relevant_keys:
+                #     logger.info(
+                #         f"Request {req_id}: Processing relevant key: "
+                #         f"abs_start_idx={abs_start_idx}, abs_end_idx={abs_end_idx}, "
+                #         f"chunk_hash={key.chunk_hash}")
+                #     # Calculate indices relative to the start of our new data slice.
+                #     rel_start_idx = abs_start_idx - save_spec.skip_leading_tokens
+                #     rel_end_idx = abs_end_idx - save_spec.skip_leading_tokens
+                #     logger.info(
+                #         f"Request {req_id}: Relative indices for slicing: "
+                #         f"rel_start_idx={rel_start_idx}, rel_end_idx={rel_end_idx}"
+                #     )
+
+                #     # Slice the data and add to the backend.
+                #     value_for_key = [
+                #         jax.lax.slice_in_dim(flat_layer_cache,
+                #                              rel_start_idx,
+                #                              rel_end_idx,
+                #                              axis=0)
+                #         for flat_layer_cache in flat_kv_caches_cpu
+                #     ]
+                #     jax.block_until_ready(value_for_key)
+                #     self.cpu_backend.add(key, value_for_key)
 
                 logger.info(
                     f"Request {req_id}: Added {len(relevant_keys)} keys to CPU backend."
@@ -1006,6 +1113,7 @@ class TPUConnectorWorker:
                             f"Request {meta.req_id}: Final save is a no-op. Marking as finished."
                         )
                         self.finished_save_reqs.add(meta.req_id)
+                        # TODO(jcgu): only keep the saved tokens
                         self._tokens_to_unpin[meta.req_id] = meta.token_ids
                     continue
 
@@ -1092,6 +1200,9 @@ class TPUConnectorWorker:
                 f"Fetching delta of {num_tokens_to_load_delta} tokens from cache for "
                 f"{len(meta.local_block_ids)} blocks.")
 
+            assert num_tokens_to_load_delta % self.block_size == 0, f"{num_tokens_to_load_delta} % {self.block_size} != 0"
+            assert meta.load_spec.skip_leading_tokens % self.block_size == 0, f"{meta.load_spec.skip_leading_tokens} % {self.block_size} != 0"
+
             # 1. Generate keys for the entire matched prefix to find the right
             # chunks in the backend.
             keys_generator = self.token_processor.process_tokens(
@@ -1101,6 +1212,16 @@ class TPUConnectorWorker:
             # We create a list of lists, where the outer list represents layers
             # and the inner lists will hold the data chunks for that layer.
             assembled_kv_on_cpu = [[] for _ in range(self.num_layers)]
+
+            num_blocks_to_load = num_tokens_to_load_delta // self.block_size
+            num_chunks_to_load = (num_tokens_to_load_delta +
+                                  self.cpu_chunk_size -
+                                  1) // self.cpu_chunk_size
+
+            block_start_idx = (meta.load_spec.skip_leading_tokens +
+                               self.block_size - 1) // self.block_size
+            destination_blocks = meta.local_block_ids[block_start_idx:(
+                block_start_idx + num_blocks_to_load)]
 
             # Fetch and slice chunks from the backend.
             for start_idx, end_idx, key in keys_generator:
@@ -1116,22 +1237,26 @@ class TPUConnectorWorker:
                 if cached_value:
                     # Calculate the precise slice needed from this specific chunk.
                     # rel_start is the index within this chunk where the delta tokens begin.
-                    rel_start = max(
-                        0, meta.load_spec.skip_leading_tokens - start_idx)
-                    rel_end = min(
-                        end_idx, meta.load_spec.num_matched_tokens) - start_idx
-
-                    if rel_start < rel_end:
+                    if start_idx < meta.load_spec.skip_leading_tokens:
+                        rel_start = meta.load_spec.skip_leading_tokens - start_idx
+                        rel_end = end_idx - meta.load_spec.skip_leading_tokens
                         for i in range(self.num_layers):
                             # Slice the jax array fetched from the backend.
                             sliced_chunk = jax.lax.slice_in_dim(
                                 cached_value[i], rel_start, rel_end, axis=0)
                             assembled_kv_on_cpu[i].append(sliced_chunk)
+                    else:
+                        for i in range(self.num_layers):
+                            assembled_kv_on_cpu[i].append(cached_value[i])
                 else:
                     logger.error(
                         f"Cache key {key.chunk_hash} not found in CPU backend for request {meta.req_id}. Inconsistent state detected."
                     )
                     return
+
+            assert len(
+                assembled_kv_on_cpu[0]
+            ) == num_chunks_to_load, f"{len(assembled_kv_on_cpu[0])} != {num_chunks_to_load}"
 
             # swap-in
             # output: [[(partial) kv_chunks * num_chunks] * num_layer]
@@ -1142,6 +1267,9 @@ class TPUConnectorWorker:
                 jax.lax.concatenate(layer_chunks, dimension=0)
                 for layer_chunks in raw_chunked_kv_on_tpu
             ]
+
+            assert layered_kv_on_tpu[0].shape[
+                0] == num_blocks_to_load * self.block_size, f"{layered_kv_on_tpu[0].shape[0]} != {num_blocks_to_load * self.block_size}"
 
             if not layered_kv_on_tpu:
                 logger.warning(
@@ -1154,146 +1282,18 @@ class TPUConnectorWorker:
                 f"Request {meta.req_id}: Assembled TPU data for one layer has shape {layered_kv_on_tpu[0].shape}."
             )
 
-            # 3. Split the delta load into two parts:
-            #    a) The data that fills the last partially-filled block.
-            #    b) The data that fills new, completely empty blocks.
-            fetched_delta_token_count = (layered_kv_on_tpu[0].shape[0]
-                                         if layered_kv_on_tpu else 0)
-            logger.info(f"Request {meta.req_id}: fetched_delta_token_count = "
-                        f"{fetched_delta_token_count}")
-            if fetched_delta_token_count == 0:
-                continue
-
-            skip_tokens = meta.load_spec.skip_leading_tokens
-            start_block_idx = skip_tokens // self.block_size
-            start_offset_in_block = skip_tokens % self.block_size
-            logger.info(
-                f"Request {meta.req_id}: start_block_idx={start_block_idx}, "
-                f"start_offset_in_block={start_offset_in_block}, skip_tokens={skip_tokens}"
+            self.runner.kv_caches = KVCacheManager._jitted_insert_kv_cache(
+                self.block_size,
+                self.runner.kv_caches,
+                layered_kv_on_tpu,
+                jnp.array(destination_blocks),
             )
-
-            # Part 1: Handle the first, partial block if it exists (if start_offset_in_block > 0).
-            partial_num_tokens_in_first_block = 0
-            # NOTE: when chunk_size is dividable by block_size, we will not run into the following branch
-            if start_offset_in_block > 0:
-                # This is the block on TPU that is partially filled with `skip_tokens`.
-                dest_block_id = meta.local_block_ids[start_block_idx]
-                # Calculate how many tokens from our new delta can fit into the remaining
-                # space of this partially filled block without overflowing.
-                num_tokens_to_fill_block = self.block_size - start_offset_in_block
-                # This is the actual number of delta tokens that will go into this first block.
-                partial_num_tokens_in_first_block = min(
-                    fetched_delta_token_count, num_tokens_to_fill_block)
-                logger.info(
-                    f"Request {meta.req_id}, case partial block load: dest_block_id={dest_block_id}, "
-                    f"start_offset_in_block={start_offset_in_block}, "
-                    f"partial_num_tokens_in_first_block={partial_num_tokens_in_first_block}"
-                )
-                # Extract the corresponding slice of data from our assembled TPU delta.
-                data_for_first_block = jax.tree.map(
-                    lambda x: jax.lax.slice_in_dim(
-                        x, 0, partial_num_tokens_in_first_block, axis=0),
-                    layered_kv_on_tpu,
-                )
-                jax.block_until_ready(data_for_first_block)
-
-                # JIT-compile a function to perform a precise, offset-based update within a single block.
-                # This is to avoid overwriting existing, valid KV cache data
-                # that was already computed by vLLM in the prefix of this block.
-                @jax.jit
-                def _jitted_update_slice_in_block(kv_caches, block_id, offset,
-                                                  data_slice):
-                    for i in range(self.num_layers):
-                        block_to_update = kv_caches[i][block_id]
-                        updated_block = jax.lax.dynamic_update_slice(
-                            block_to_update, data_slice[i], (offset, 0, 0, 0))
-                        kv_caches[i] = kv_caches[i].at[block_id].set(
-                            updated_block)
-                    return kv_caches
-
-                self.runner.kv_caches = _jitted_update_slice_in_block(
-                    self.runner.kv_caches, dest_block_id,
-                    start_offset_in_block, data_for_first_block)
-                jax.block_until_ready(self.runner.kv_caches)
-                logger.info(
-                    f"Request {meta.req_id}: Updated {partial_num_tokens_in_first_block} tokens "
-                    f"in destination block {dest_block_id} at offset {start_offset_in_block}."
-                )
-
-            # Part 2: Handle the remaining full blocks.
-            remaining_tokens = fetched_delta_token_count - partial_num_tokens_in_first_block
-            if remaining_tokens > 0:
-                # The rest of the data goes into new, empty blocks.
-                # If start_offset_in_block is 0, it means the load is block-aligned
-                # and the first block is also a 'full block' to be loaded. So we start
-                # from start_block_idx. Otherwise, the first block was partially filled
-                # and handled in Part 1, so we start from the next block (start_block_idx + 1).
-                # if start_offset_in_block > 0:
-                #     destination_full_blocks = meta.local_block_ids[start_block_idx +
-                #                                               1:]
-                # else:
-                #     destination_full_blocks = meta.local_block_ids[start_block_idx:]
-
-                full_block_start_idx = (skip_tokens + self.block_size -
-                                        1) // self.block_size
-                destination_full_blocks = meta.local_block_ids[
-                    full_block_start_idx:]
-
-                # Pad the remaining data to be a multiple of block_size.
-                # TODO(jcgu): do we need to pad when token_processor.chunk_size==block_size
-                num_blocks_for_rest = (remaining_tokens + self.block_size -
-                                       1) // self.block_size
-                padded_len = num_blocks_for_rest * self.block_size
-                pad_after = padded_len - remaining_tokens
-                logger.info(
-                    f"Request {meta.req_id}, case full block load: Preparing to load remaining_tokens={remaining_tokens} "
-                    f"into {len(destination_full_blocks)} full blocks, pad_after={pad_after} tokens, padded_len={padded_len}."
-                )
-                # TODO(jcgu): skip it when no partial tokens
-                data_for_full_blocks = jax.tree.map(
-                    lambda x: jax.lax.slice_in_dim(
-                        x,
-                        partial_num_tokens_in_first_block,
-                        x.shape[0],
-                        axis=0),
-                    layered_kv_on_tpu,
-                )
-                jax.block_until_ready(data_for_full_blocks)
-                # padding_config: A list of tuples, one for each dimension of the KV cache.
-                # Each tuple is (pad_before, pad_after, pad_interior).
-                # The first dimension (tokens) is padded with `pad_after` zeros.
-                # Other dimensions (heads, head_dim) are not padded.
-                if pad_after > 0:
-                    padding_config = [
-                        (0, pad_after, 0)
-                    ] + [(0, 0, 0)] * (len(data_for_full_blocks[0].shape) - 1)
-                    padded_data = jax.tree.map(
-                        lambda layer_cpu: jax.lax.pad(
-                            layer_cpu, jnp.array(0, dtype=self.dtype),
-                            padding_config),
-                        data_for_full_blocks,
-                    )
-                    jax.block_until_ready(padded_data)
-                else:
-                    padded_data = data_for_full_blocks
-
-                self.runner.kv_caches = KVCacheManager._jitted_insert_kv_cache(
-                    self.block_size,
-                    self.runner.kv_caches,
-                    padded_data,
-                    jnp.array(destination_full_blocks),
-                )
-                jax.block_until_ready(self.runner.kv_caches)
-                logger.info(
-                    f"Request {meta.req_id}: Loaded {remaining_tokens} tokens into "
-                    f"{len(destination_full_blocks)} new blocks.")
-
-            request_load_duration = time.time() - request_load_start_time
-            load_times.append(request_load_duration)
+            jax.block_until_ready(self.runner.kv_caches)
             logger.info(
-                f"Request {meta.req_id}: KV cache load completed in {request_load_duration:.4f} seconds."
-            )
+                f"Request {meta.req_id}: Loaded {num_tokens_to_load_delta} tokens into "
+                f"{len(destination_blocks)} new blocks.")
 
+            load_times.append(time.time() - request_load_start_time)
         if load_times:
             aggregate_load_time = sum(load_times)
             logger.info(
@@ -1341,8 +1341,11 @@ class TPUConnectorWorker:
                 )
 
         if keys_to_unpin:
-            self.cpu_backend.unpin_keys(keys_to_unpin)
-            logger.info(f"Unpinned a total of {len(keys_to_unpin)} keys.")
+            unpinned_count, found_count = self.cpu_backend.unpin_keys(
+                keys_to_unpin)
+            logger.info(
+                f"Unpinned {unpinned_count} out of {found_count} existing keys (Request to unpin {len(keys_to_unpin)} keys)."
+            )
 
         self.finished_save_reqs = set()
 
