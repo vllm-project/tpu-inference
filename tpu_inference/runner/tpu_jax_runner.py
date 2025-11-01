@@ -133,6 +133,13 @@ def _substitute_placeholder_token(
         next_tokens: jax.Array, placeholder_num: int):
     """Substitute placeholder tokens from TPU for async scheduler
 
+    Padding for parallelisation of the substitute_placeholder_token_fn
+    [1, 3] => [1, 3, 0, 2, 4, 5, 6, 7, 8]
+    The reason for such a special padding instead of padding with -1 is:
+    An edge case when the end index needs to be updated and padding is required.
+    If we pad the array with -1, the _substitute_placeholder_token_fn will repeatedly update the end element with the original value
+    Although such a scenario is unlikely to happen in vLLM, it is best to eliminate any potential risks.
+
     Args:
         input_ids: possible input_ids size
         token_in_tpu_cur_input_indices: replace holder idx in input_ids. Length the same to input_ids.
@@ -937,10 +944,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 token_in_tpu_cur_input_indices) > 0:
             assert self._pre_async_results is not None
             idx_pad_len = len(input_ids) - len(token_in_tpu_cur_input_indices)
-            padded_token_in_tpu_cur_input_indices = np.pad(
-                token_in_tpu_cur_input_indices, (0, idx_pad_len),
-                mode='constant',
-                constant_values=-1)
+
+            # Pad according to the instructions written inside self._substitute_placeholder_token_fn
+            full_range = np.arange(0, len(input_ids))
+            missing_values = np.setdiff1d(full_range,
+                                          token_in_tpu_cur_input_indices)
+            padded_token_in_tpu_cur_input_indices = np.concatenate(
+                (token_in_tpu_cur_input_indices, missing_values))
+
             padded_token_in_tpu_pre_next_tokens_indices = np.pad(
                 token_in_tpu_pre_next_tokens_indices, (0, idx_pad_len),
                 mode='constant',
