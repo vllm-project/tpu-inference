@@ -13,6 +13,7 @@ steps:
    - label: "E2E MLPerf tests for JAX models with quantization"
      key: test_1
      soft_fail: true
+     if: build.env("NIGHTLY") == "1"
      env:
        QUANTIZATION: "True"
      agents:
@@ -23,6 +24,7 @@ steps:
    - label: "E2E MLPerf tests for JAX new models"
      key: test_2
      soft_fail: true
+     if: build.env("NIGHTLY") == "1"
      env:
        NEW_MODEL_DESIGN: "True"
      agents:
@@ -43,6 +45,7 @@ steps:
    - label: "E2E MLperf tests for Llama4 models"
      key: test_4
      soft_fail: true
+     if: build.env("NIGHTLY") == "1"
      env:
        NEW_MODEL_DESIGN: "True"
        USE_V6E8_QUEUE: "True"
@@ -55,6 +58,7 @@ steps:
    - label: "E2E multi modality test"
      key: test_5
      soft_fail: true
+     if: build.env("NIGHTLY") == "1"
      agents:
        queue: tpu_v6e_queue
      commands:
@@ -66,6 +70,7 @@ steps:
    - label: "E2E speculative decoding test"
      key: test_6
      soft_fail: true
+     if: build.env("NIGHTLY") == "1"
      agents:
        queue: tpu_v6e_queue
      commands:
@@ -91,6 +96,8 @@ steps:
    - label: "JAX unit tests - kernels"
      key: test_8
      soft_fail: true
+     if: |
+       [[ "$$NIGHTLY" == "1" ]] || git diff --name-only HEAD~1 | grep -qE '^(tpu_inference/kernels|tests/kernels|requirements\.txt)'
      agents:
        queue: tpu_v6e_queue
      commands:
@@ -104,6 +111,8 @@ steps:
    - label: "JAX unit tests - collective kernels"
      key: test_9
      soft_fail: true
+     if: |
+       [[ "$$NIGHTLY" == "1" ]] || git diff --name-only HEAD~1 | grep -qE '^(tpu_inference/kernels/collectives|tests/kernels/collectives|requirements\.txt)'
      agents:
        queue: tpu_v6e_8_queue
      commands:
@@ -114,6 +123,7 @@ steps:
    - label: "lora tests for JAX + vLLM models single chip"
      key: test_10
      soft_fail: true
+     if: build.env("NIGHTLY") == "1"
      agents:
        queue: tpu_v6e_queue
      commands:
@@ -125,6 +135,7 @@ steps:
    - label: "E2E MLPerf tests for JAX + vLLM models on multiple chips"
      key: test_11
      soft_fail: true
+     if: build.env("NIGHTLY") == "1"
      env:
        MODEL_IMPL_TYPE: "vllm"
      agents:
@@ -135,6 +146,7 @@ steps:
    - label: "E2E MLperf tests for DeepSeek-R1 (no accuracy, 12-decoder layers only)"
      key: test_12
      soft_fail: true
+     if: build.env("NIGHTLY") == "1"
      env:
        NEW_MODEL_DESIGN: "True"
        USE_V6E8_QUEUE: "True"
@@ -149,6 +161,7 @@ steps:
    - label: "lora tests for JAX + vLLM models multi chips"
      key: test_13
      soft_fail: true
+     if: build.env("NIGHTLY") == "1"
      env:
        USE_V6E8_QUEUE: "True"
        VLLM_LOG_LEVEL: "INFO"
