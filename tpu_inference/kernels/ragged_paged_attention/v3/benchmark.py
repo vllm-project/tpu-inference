@@ -37,14 +37,6 @@ input_length = [1024, 4096, 65536]  # 131072
 context_length = [4096, 16384, 65536]  # 131072
 kv_dtypes = ['bfloat16', 'float8_e4m3fn']
 
-head_dim_options = [128]
-num_kv_heads_per_card_options = [2]
-num_q_heads_per_card_options = [4]
-batch_sizes = [256, 512]
-input_length = [1024]
-context_length = [4096]
-kv_dtypes = ['bfloat16', 'float8_e4m3fn']
-
 for head_dim in head_dim_options:
     for num_kv_heads in num_kv_heads_per_card_options:
         for num_q_heads in num_q_heads_per_card_options:
