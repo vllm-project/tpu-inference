@@ -2820,6 +2820,8 @@ TUNED_BLOCK_SIZES = {
                     2048: (8, 128),
                     4096: (16, 128),
                     8192: (16, 32),
+                    16384: (64, 128),
+                    65536: (64, 128),
                 },
                 'q_head-16_kv_head-1_head-256': {
                     256: (1, 32),
@@ -4027,6 +4029,9 @@ TUNED_BLOCK_SIZES = {
 }
 
 
+
+
+
 def get_tuned_block_sizes(
     q_dtype,
     kv_dtype,
@@ -4063,12 +4068,15 @@ def get_tuned_block_sizes(
     )
     device, page_size, dtypes, head_dims, max_model_len = keys
 
-    try:
-        bkv_p, bq = TUNED_BLOCK_SIZES[device][page_size][dtypes][head_dims][
-            max_model_len]
-    except KeyError:
-        logger.warning_once(
-            'Couldn`t find tuned sizes for the RPA v3 kernel with %s', keys)
+    # try:
+    bkv_p, bq = TUNED_BLOCK_SIZES[device][page_size][dtypes][head_dims][
+        max_model_len]
+    # except KeyError:
+    #     raise KeyError(
+
+    #     )
+    #     logger.warning_once(
+    #         'Couldn`t find tuned sizes for the RPA v3 kernel with %s', keys)
 
     return (min(pages_per_seq, bkv_p), min(max_num_tokens, bq))
 

@@ -14,7 +14,7 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
 from tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes import \
-    get_tuned_block_sizes, get_lookup_keys
+    get_tuned_block_sizes
 from tpu_inference.kernels.ragged_paged_attention.v3.util import (
     align_to, cdiv, get_dtype_bitwidth, get_dtype_packing)
 
@@ -437,7 +437,7 @@ def _ragged_paged_attention_kernel_loop(
     page_indices_offset = seq_idx * pages_per_seq + kv_p_start
 
     # Make sure the current bkv buffer is safe to overwrite.
-    # wait_update_kv_cache(bkv_sem_idx)
+    wait_update_kv_cache(bkv_sem_idx)
 
     debug_print(
         "[RPA debug]"
@@ -624,21 +624,21 @@ def _ragged_paged_attention_kernel_loop(
     def _():
       _send_bo(old_seq_idx, old_bo_idx, bo_sem_idx, wait=True)
 
-  # def start_update_kv_cache(seq_idx, bkv_sem_idx, offset, update_sz):
-  #   bkv_update_ids_ref[bkv_sem_idx] = seq_idx
-  #   bkv_update_ids_ref[bkv_sem_idx + 2] = offset
-  #   bkv_update_ids_ref[bkv_sem_idx + 4] = update_sz
-  #   _update_kv_cache(seq_idx, bkv_sem_idx, offset, update_sz)
+  def start_update_kv_cache(seq_idx, bkv_sem_idx, offset, update_sz):
+    bkv_update_ids_ref[bkv_sem_idx] = seq_idx
+    bkv_update_ids_ref[bkv_sem_idx + 2] = offset
+    bkv_update_ids_ref[bkv_sem_idx + 4] = update_sz
+    _update_kv_cache(seq_idx, bkv_sem_idx, offset, update_sz)
 
-  # def wait_update_kv_cache(bkv_sem_idx):
-  #   update_sz = bkv_update_ids_ref[bkv_sem_idx + 4]
+  def wait_update_kv_cache(bkv_sem_idx):
+    update_sz = bkv_update_ids_ref[bkv_sem_idx + 4]
 
-    # @pl.when(update_sz > 0)
-    # def _():
-      # seq_idx = bkv_update_ids_ref[bkv_sem_idx]
-      # offset = bkv_update_ids_ref[bkv_sem_idx + 2]
-      # bkv_update_ids_ref[bkv_sem_idx + 4] = 0
-      # _update_kv_cache(seq_idx, bkv_sem_idx, offset, update_sz, wait=True)
+    @pl.when(update_sz > 0)
+    def _():
+      seq_idx = bkv_update_ids_ref[bkv_sem_idx]
+      offset = bkv_update_ids_ref[bkv_sem_idx + 2]
+      bkv_update_ids_ref[bkv_sem_idx + 4] = 0
+      _update_kv_cache(seq_idx, bkv_sem_idx, offset, update_sz, wait=True)
 
   def load_bq(bq_sem_idx, kv_head_idx, *, actual_bq_sz=bq_sz):
     q_ref = (
@@ -822,9 +822,9 @@ def _ragged_paged_attention_kernel_loop(
 
         # Start updating bkv to kv cache if applicable.
         # Only needed in last bq loop.
-        # @pl.when(jnp.logical_and(update_sz > 0, bq_idx == num_bq - 1))
-        # def update_cur_bkv_to_cache():
-        #   start_update_kv_cache(seq_idx, bkv_sem_idx, offset, update_sz)
+        @pl.when(jnp.logical_and(update_sz > 0, bq_idx == num_bq - 1))
+        def update_cur_bkv_to_cache():
+          start_update_kv_cache(seq_idx, bkv_sem_idx, offset, update_sz)
 
         debug_print("[RPA debug] -----------flash attention-----------")
         debug_print("[RPA debug] seq_idx={}", seq_idx)
@@ -936,7 +936,7 @@ def _ragged_paged_attention_kernel_loop(
   def epilogue():
     for i in range(2):
       wait_send_bo(i)
-      # wait_update_kv_cache(i)
+      wait_update_kv_cache(i)
 
   ### ------- Kernel end ------- ###
 
@@ -1377,7 +1377,6 @@ def ragged_paged_attention(
   actual_head_dim = q.shape[2]
   actual_num_kv_heads = k.shape[1]
 
-
   actual_num_q_heads_per_kv_head = actual_num_q_heads // actual_num_kv_heads
   q, kv = prepare_inputs(q, k, v)
   (
@@ -1396,34 +1395,17 @@ def ragged_paged_attention(
 
   bkv_p = num_kv_pages_per_block
   bq_sz = num_queries_per_block
-
   if bq_sz is None or bkv_p is None:
-    try:
-      bkv_p, bq_sz = get_tuned_block_sizes(
-          q.dtype,
-          kv_cache.dtype,
-          actual_num_q_heads,
-          actual_num_kv_heads,
-          head_dim,
-          page_size,
-          max_num_tokens,
-          pages_per_seq,
-      )
-    except KeyError as e:
-      with open("missing_keys.txt", "a") as f:
-        keys = get_lookup_keys(
-            page_size,
-            q.dtype,
-            kv_cache.dtype,
-            actual_num_q_heads,
-            actual_num_kv_heads,
-            head_dim,
-            page_size * pages_per_seq,
-        )
-        device, page_size, dtypes, head_dims, max_model_len = keys
-        data = f"{device},{page_size},{dtypes},{head_dims},{max_model_len}"
-        f.write(str(data) + '\n')
-      raise e
+    bkv_p, bq_sz = get_tuned_block_sizes(
+        q.dtype,
+        kv_cache.dtype,
+        actual_num_q_heads,
+        actual_num_kv_heads,
+        head_dim,
+        page_size,
+        max_num_tokens,
+        pages_per_seq,
+    )
   bkv_sz = bkv_p * page_size
   if vmem_limit_bytes is None:
     # TODO (jevinjiang/jacobplatin): change this to use
