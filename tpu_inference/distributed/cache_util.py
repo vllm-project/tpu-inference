@@ -22,6 +22,12 @@ logger = init_logger(__name__)
 CPU_OFFLOADING_SWAP_OP_TYPE = Literal["jax", "pallas"]
 
 
+# celling div function
+def cdiv(a: int, b: int):
+    assert b != 0
+    return (a + b - 1) // b
+
+
 @dataclass(order=True)
 class CacheKey:
     """
@@ -219,3 +225,38 @@ def get_kv_cache_swap_fn(
                                     dst_sharding=host_sharding,
                                     direction="d2h")
     return swap_in_fn, swap_out_fn
+
+
+@functools.partial(
+    jax.jit,
+    static_argnames=("block_size"),
+    donate_argnames=(
+        "kv_caches",
+        "kv_cache_slices",
+    ),
+)
+def jitted_insert_kv_cache_slices(
+    block_size,
+    kv_caches: List[jax.Array],
+    kv_cache_slices: List[List[jax.Array]],
+    block_numbers: jax.Array,
+) -> List[jax.Array]:
+    """
+    JIT-compiled function to insert KV cache slices into the physical
+    cache for all layers at once. This fuses reshape, and scatter
+    operations into a single efficient kernel.
+    """
+
+    def _update_layer(cache, slices):
+        """The function to apply to each layer's cache and slices."""
+        # new_shape = (1, block_size, *slices[0].shape[1:])
+        for (i, block_idx) in enumerate(block_numbers):
+            # reshaped_block = slices[i].reshape(new_shape)
+            reshaped_block = jax.lax.expand_dims(slices[i], dimensions=(0, ))
+            cache = jax.lax.dynamic_update_slice_in_dim(cache,
+                                                        reshaped_block,
+                                                        block_idx,
+                                                        axis=0)
+        return cache
+
+    return jax.tree.map(_update_layer, kv_caches, kv_cache_slices)

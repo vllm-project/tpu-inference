@@ -16,6 +16,7 @@ GB = 1024**3
 DEFAULT_CPU_CACHE_SIZE_BYTES = 1 * GB
 
 
+# TODO(jcgu): creating independent cpu backends since scheduler & worker could be in different processes.
 class LocalCPUBackend:
     """
     A singleton in-memory CPU backend for storing KV cache keys and values.
