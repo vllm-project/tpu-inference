@@ -132,7 +132,6 @@ DEFAULT_HOST_HBM_SWAP_OP_TYPE = "jax"
 # 2. pad: pad to a full block
 # 3. dynamic: keep the partial block as is.
 PARTIAL_BLOCK_SAVE_BEHAVIOR = Literal["drop", "pad", "dynamic"]
-PARTIAL_BLOCK_PAD_LOWER_LIMIT = 128
 
 
 @dataclass
@@ -408,7 +407,6 @@ class TPUConnectorScheduler():
         assert self.partial_block_save_behavior in get_args(
             PARTIAL_BLOCK_SAVE_BEHAVIOR
         ), f"{self.partial_block_save_behavior} not in {get_args(PARTIAL_BLOCK_SAVE_BEHAVIOR)}"
-        PARTIAL_BLOCK_PAD_LOWER_LIMIT
         self.partial_block_dynamic_pad_lower_limit = \
             int(os.getenv("TPU_OFFLOAD_PARTIAL_BLOCK_DYNAMIC_PAD_LOWER_LIMIT", "0"))
         if self.partial_block_save_behavior == "dynamic":
