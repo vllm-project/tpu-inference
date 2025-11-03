@@ -15,7 +15,7 @@ repos:
   rev: v0.1.6
   hooks:
   - id: detect-missing-init
-    args: ['--create', "--track", "--python-folders", "tests,somefolder,otherfolder"]
+    args: ['--create', "--track", "--python-folders", "."]
 - repo: https://github.com/PyCQA/isort
   rev: 6.0.1
   hooks:
