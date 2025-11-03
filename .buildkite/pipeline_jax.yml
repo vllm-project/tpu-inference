@@ -177,6 +177,16 @@ steps:
        - |
          .buildkite/scripts/run_in_docker.sh \
            bash -c 'MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py'
+   - label: "E2E async scheduler test"
+     key: test_14
+     soft_fail: true
+     if: build.env("NIGHTLY") == "1"
+     agents:
+       queue: tpu_v6e_queue
+     commands:
+       - |
+         .buildkite/scripts/run_in_docker.sh \
+           bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_async_scheduler.py'
 
 
   # -----------------------------------------------------------------
@@ -198,9 +208,10 @@ steps:
        - test_11
        - test_12
        - test_13
+       - test_14
      agents:
        queue: tpu_v6e_queue
      commands:
        - |
          .buildkite/scripts/check_results.sh \
-           "TPU JAX Tests Failed" test_0 test_1 test_2 test_3 test_4 test_5 test_6 test_7 test_8 test_9 test_10 test_11 test_12 test_13
+           "TPU JAX Tests Failed" test_0 test_1 test_2 test_3 test_4 test_5 test_6 test_7 test_8 test_9 test_10 test_11 test_12 test_13 test_14
