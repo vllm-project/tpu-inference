@@ -32,12 +32,7 @@ from tpu_inference.core import disagg_executor, disagg_utils
 # ======================================================================================
 # Imports for _DisaggOrchestrator (decoupled from vLLM)
 # ======================================================================================
-from tpu_inference.interfaces.config import IConfig
-from tpu_inference.interfaces.engine import IEngineCore
-from tpu_inference.interfaces.request import IRequest
 from tpu_inference.runner.utils import LatencyTracker
-
-from .adapters import VllmConfigAdapter, VllmEngineAdapter, VllmRequestAdapter
 
 # This file contains two classes:
 # 1. _DisaggOrchestrator: The clean, decoupled core orchestration logic.
@@ -75,10 +70,10 @@ class _DisaggOrchestrator:
 
     def __init__(
         self,
-        config: IConfig,
+        config: VllmConfig,
         output_queue: queue.Queue,
-        prefill_engines: list[IEngineCore],
-        decode_engines: list[IEngineCore],
+        prefill_engines: list[vLLMEngineCore],
+        decode_engines: list[vLLMEngineCore],
         prefill_slice_sizes: tuple[int, ...],
         decode_slice_sizes: tuple[int, ...],
     ):
@@ -88,7 +83,7 @@ class _DisaggOrchestrator:
         self._decode_engines = decode_engines
 
         # Keep track of active requests.
-        self._requests: dict[str, IRequest] = {}
+        self._requests: dict[str, Request] = {}
 
         # Hack device config to pass in the subslice of TPUs.
         slice_sizes = list(prefill_slice_sizes)
@@ -156,7 +151,7 @@ class _DisaggOrchestrator:
         for t in self._all_threads:
             t.start()
 
-    def add_request(self, request: IRequest):
+    def add_request(self, request: Request):
         """
         Adds a new request to the orchestrator.
 
@@ -164,15 +159,12 @@ class _DisaggOrchestrator:
         internal state tracking and hands it off to the first stage of the
         processing pipeline (the prefill scheduler).
         """
-        # Hand off the request to the prefill scheduler to be batched for
-        # execution. Note: We are calling add_request on our IScheduler
-        # interface. The VllmSchedulerAdapter will handle unwrapping the
-        # IRequest before passing it to the real vllm scheduler.
+        # Hand off the request to the prefill scheduler to be batched for execution.
         self._prefill_engines[0].scheduler.add_request(request)
 
         # Add to internal state for tracking by other threads.
-        # The key is the request_id, the value is the adapted request object.
-        self._requests[request.vllm_request.request_id] = request
+        # The key is the request_id, the value is the request object.
+        self._requests[request.request_id] = request
 
     def _prefill(self, idx: int):
         prefill_engine = self._prefill_engines[idx]
@@ -212,7 +204,7 @@ class _DisaggOrchestrator:
 
                 for req_id, idx in model_output.req_id_to_index.items():
                     if len(model_output.sampled_token_ids[idx]) > 0:
-                        request = self._requests[req_id].vllm_request
+                        request = self._requests[req_id]
                         logger.debug(
                             f"request block_hashes at prefill: {request.block_hashes}"
                         )
@@ -320,7 +312,7 @@ class _DisaggOrchestrator:
 
                 # Insert the request to the decoder.
                 req_id = prefill_output["req_id"]
-                vllm_request = self._requests[req_id].vllm_request
+                vllm_request = self._requests[req_id]
                 # Caching num_computed_tokens. The tokens in kv manager allocate blocks
                 # is computed as num_computed_tokens + num_new_tokens, so without caching
                 # the token number would double.
@@ -500,14 +492,10 @@ class DisaggEngineCore(vLLMEngineCore):
 
         self.mm_receiver_cache = None
         self._orchestrator = _DisaggOrchestrator(
-            config=VllmConfigAdapter(vllm_config),
+            config=vllm_config,
             output_queue=self.output_queue,
-            prefill_engines=[
-                VllmEngineAdapter(e) for e in self._prefill_engines
-            ],
-            decode_engines=[
-                VllmEngineAdapter(e) for e in self._decode_engines
-            ],
+            prefill_engines=self._prefill_engines,
+            decode_engines=self._decode_engines,
             prefill_slice_sizes=prefill_slice_sizes,
             decode_slice_sizes=decode_slice_sizes,
         )
@@ -537,7 +525,7 @@ class DisaggEngineCore(vLLMEngineCore):
             logger.warning("Got kv_transfer_params, but no KVConnector found. "
                            "Disabling KVTransfer for this request.")
 
-        self._orchestrator.add_request(VllmRequestAdapter(request))
+        self._orchestrator.add_request(request)
 
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
         client_idx, output = self.output_queue.get()
@@ -701,14 +689,10 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
 
         self.mm_receiver_cache = None
         self._orchestrator = _DisaggOrchestrator(
-            config=VllmConfigAdapter(vllm_config),
+            config=vllm_config,
             output_queue=self.output_queue,
-            prefill_engines=[
-                VllmEngineAdapter(e) for e in self._prefill_engines
-            ],
-            decode_engines=[
-                VllmEngineAdapter(e) for e in self._decode_engines
-            ],
+            prefill_engines=self._prefill_engines,
+            decode_engines=self._decode_engines,
             prefill_slice_sizes=prefill_slice_sizes,
             decode_slice_sizes=decode_slice_sizes,
         )
@@ -728,7 +712,7 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
                 raise ValueError(f"Unsupported task: {pooling_params.task!r} "
                                  f"Supported tasks: {supported_pooling_tasks}")
 
-        self._orchestrator.add_request(VllmRequestAdapter(request))
+        self._orchestrator.add_request(request)
 
     def _handle_client_request(self, request_type: EngineCoreRequestType,
                                request: Any) -> None:

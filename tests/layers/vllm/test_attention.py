@@ -30,9 +30,7 @@ NUM_HEADS = 8
 # Number of attention heads (Key/Value) - for Grouped-Query Attention
 NUM_KV_HEADS = 4
 # Dimension of each attention head
-HEAD_DIM = 64
-# Padded head dimension
-PADDED_HEAD_DIM = 64
+HEAD_DIM = 128
 # Total number of blocks in the KV cache
 NUM_BLOCKS = 32
 # Number of tokens per block

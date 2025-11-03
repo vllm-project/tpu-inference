@@ -77,7 +77,8 @@ from jax.sharding import Mesh
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
-from vllm.utils import make_zmq_path, make_zmq_socket, round_down
+from vllm.utils.math_utils import round_down
+from vllm.utils.network_utils import make_zmq_path, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
 
@@ -253,7 +254,8 @@ class TPUConnectorScheduler():
         self.kv_ip = get_kv_ips()
         self.kv_port = get_kv_ports()
         logger.info(
-            f"Scheduler --> kv_ip={self.kv_ip} | kv_port={self.kv_port}")
+            f"TPUConnectorScheduler --> kv_ip={self.kv_ip} | kv_port={self.kv_port}"
+        )
 
     def get_num_new_matched_tokens(
         self,
@@ -306,7 +308,7 @@ class TPUConnectorScheduler():
             num_external_tokens (int): the number of tokens that will be
                 loaded from the external KV cache.
         """
-        if self.is_producer:
+        if self.is_producer or not request.kv_transfer_params:
             return
 
         params = request.kv_transfer_params
@@ -398,7 +400,6 @@ class TPUConnectorScheduler():
 
         # If prompt < block_size, no transfer so free blocks immediately.
         delay_free_blocks = len(computed_block_ids) > 0
-
         if delay_free_blocks:
             uuid = get_uuid()
             expiration_time = time.perf_counter() + P2P_WAIT_PULL_TIMEOUT
@@ -410,8 +411,9 @@ class TPUConnectorScheduler():
                                       remote_block_ids=computed_block_ids,
                                       remote_host=self.kv_ip,
                                       remote_port=self.kv_port)
-            logger.info(f"Scheduler ---->  reqs_to_send={self.reqs_to_send} | "
-                        f"kv_transfer_params={kv_transfer_params}")
+            logger.info(
+                f"TPUConnector Scheduler ---->  generated reqs_to_send={self.reqs_to_send} | "
+                f"kv_transfer_params={kv_transfer_params}")
         else:
             kv_transfer_params = {}
 
@@ -460,17 +462,20 @@ class TPUConnectorWorker:
             self.pull_conns: dict[str, Any] = {}
             self.notif_sockets: dict[str, zmq.Socket] = {}
 
-        logger.info(f"Worker {self.node_id} --> init | "
+        logger.info(f"TPUConnector Worker {self.node_id} --> init | "
                     f"ip={self.host_ip} | "
                     f"kv_transfer_port={self.kv_transfer_port} | "
                     f"side_channel_port={self.side_channel_port}")
 
     def __del__(self):
         if self.is_producer:
-            self.pull_notify_listener_t.join(timeout=0)
+            if hasattr(self, "pull_notify_listener_t"):
+                self.pull_notify_listener_t.join(timeout=0)
         else:
-            self.pull_executor.shutdown(wait=False)
-        self.zmq_cxt.destroy(linger=0)
+            if hasattr(self, "pull_executor"):
+                self.pull_executor.shutdown(wait=False)
+        if hasattr(self, "zmq_cxt"):
+            self.zmq_cxt.destroy(linger=0)
 
     def register_runner(self, runner: TPUModelRunner):
         self.runner = runner
@@ -498,7 +503,7 @@ class TPUConnectorWorker:
             use_raw_buffers=False,
         )
         logger.info(
-            f"Worker {self.node_id} --> kv transfer | addr={self.kv_transfer_server.address()}"
+            f"TPUConnector Worker {self.node_id} --> kv transfer | addr={self.kv_transfer_server.address()}"
         )
 
     def _pull_notify_listener(self, ready_event: threading.Event):
@@ -509,13 +514,15 @@ class TPUConnectorWorker:
                                bind=True)
         ready_event.set()
         logger.info(
-            f"Worker {self.node_id} --> zmq listener | sock_path={sock_path}")
+            f"TPUConnector Worker {self.node_id} --> zmq listener | sock_path={sock_path}"
+        )
 
         while True:
             client_id, req_id_bytes = sock.recv_multipart()
             req_id = req_id_bytes.decode('utf-8')
             logger.info(
-                f"Worker {self.node_id} --> zmq recieve | req_id={req_id}")
+                f"TPUConnector Worker {self.node_id} --> zmq recieve | req_id={req_id}"
+            )
             if req_id in self.reqs_wait_pull:
                 # Set the expiration time of this request to -1, mark to be done
                 self.reqs_wait_pull[req_id][1] = -1
@@ -535,14 +542,16 @@ class TPUConnectorWorker:
         reqs = metadata.reqs_to_send
         if reqs:
             assert self.is_producer
-            logger.info(f"Worker {self.node_id} -->  reqs_to_send={reqs}")
+            logger.info(
+                f"TPUConnector Worker {self.node_id} -->  reqs_to_send={reqs}")
         for req_id, req_meta in reqs.items():
             self._prepare_kv_and_wait(req_id, req_meta)
 
         reqs = metadata.reqs_to_load
         if reqs:
             assert not self.is_producer
-            logger.info(f"Worker {self.node_id} -->  reqs_to_load={reqs}")
+            logger.info(
+                f"TPUConnector Worker {self.node_id} -->  reqs_to_load={reqs}")
         for req_id, req_meta in reqs.items():
             if req_meta.remote_block_ids is not None:
                 # The request requires to pull KV from P, build the connection and pull
@@ -570,7 +579,12 @@ class TPUConnectorWorker:
         self.kv_transfer_server.await_pull(req_meta.uuid, kv)
 
     def _maybe_build_kv_connection(self, req_meta: LoadMeta) -> Any:
-        remote_addr = f"{req_meta.remote_host}:{req_meta.remote_port}"
+        if isinstance(req_meta.remote_host, list):
+            assert len(req_meta.remote_host) == len(req_meta.remote_port)
+            remote_addr = f"{req_meta.remote_host[self.node_id]}:{req_meta.remote_port[self.node_id]}"
+        else:
+            remote_addr = f"{req_meta.remote_host}:{req_meta.remote_port}"
+
         if remote_addr in self.pull_conns:
             conn = self.pull_conns[remote_addr]
         else:
@@ -608,8 +622,11 @@ class TPUConnectorWorker:
         ] * self.num_layers
 
     def _maybe_build_notif_socket(self, req_meta: LoadMeta) -> zmq.Socket:
-        sock_path = make_zmq_path("tcp", req_meta.remote_host,
-                                  self.side_channel_port)
+        remote_host = req_meta.remote_host
+        if isinstance(req_meta.remote_host, list):
+            remote_host = req_meta.remote_host[self.node_id]
+
+        sock_path = make_zmq_path("tcp", remote_host, self.side_channel_port)
         if sock_path in self.notif_sockets:
             sock = self.notif_sockets[sock_path]
         else:

@@ -295,7 +295,7 @@ for model_name in $model_list; do
         --dataset-name "$dataset_name" \
         --dataset-path "$dataset_path" \
         --num-prompts "$num_prompts" \
-        --run_eval 2>&1 | tee -a "$BENCHMARK_LOG_FILE"
+        --run-eval 2>&1 | tee -a "$BENCHMARK_LOG_FILE"
 
         # TODO (jacobplatin): probably want to add an option to skip this in the future
         if [ "$dataset_name" == "mlperf" ]; then

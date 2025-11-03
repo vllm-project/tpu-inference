@@ -54,7 +54,7 @@ class TestSpeculativeDecodingManager:
                 scheduler_config=scheduler_config,
                 parallel_config=parallel_config,
                 speculative_config=speculative_config,
-                observability_config=None,
+                observability_config={},
                 additional_config={},
             )
 
@@ -302,14 +302,15 @@ class TestSpeculativeDecodingManager:
         # Mock drafter methods
         mock_attn_metadata = MagicMock()
         mock_target_token_ids = MagicMock()
+        mock_last_token_indices = MagicMock()
         mock_target_hidden_states = MagicMock()
         self.runner.drafter.prepare_inputs.return_value = (
-            mock_attn_metadata,
-            mock_target_token_ids,
             mock_target_hidden_states,
+            mock_target_token_ids,
+            mock_last_token_indices,
+            mock_attn_metadata,
         )
-        mock_draft_token_ids = MagicMock()
-        mock_draft_token_ids.tolist.return_value = [[10, 11], [20, 21]]
+        mock_draft_token_ids = [[10, 11], [20, 21]]
         self.runner.drafter.propose.return_value = (
             self.runner.kv_caches,
             mock_draft_token_ids,
