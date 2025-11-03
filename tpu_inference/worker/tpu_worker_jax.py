@@ -18,7 +18,7 @@ from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
 from vllm.v1 import utils as vllm_utils
 from vllm.v1.core.kv_cache_utils import get_num_blocks, get_uniform_page_size
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 
@@ -200,10 +200,15 @@ class TPUWorker:
         output = self.model_runner.execute_model(scheduler_output)
 
         # With a connector, the scheduler expects output from all workers
+        # TODO(mrjunwan): Figure out if this is ok after https://github.com/vllm-project/vllm/pull/26866
         if has_kv_transfer_group():
             return output
 
         return output if self.is_driver_worker else None
+
+    def sample_tokens(self,
+                      grammar_output: GrammarOutput) -> ModelRunnerOutput:
+        return self.model_runner.sample_tokens(grammar_output)
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         return self.model_runner.take_draft_token_ids()
