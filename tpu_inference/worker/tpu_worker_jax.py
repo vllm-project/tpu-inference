@@ -91,9 +91,6 @@ class TPUWorker:
                 # For TPU, we can only have 1 active profiler session for 1 profiler
                 # server. So we only profile on rank0.
                 self.profile_dir = envs.VLLM_TORCH_PROFILER_DIR
-                # DO_NOT_SUBMIT: tmp hack to upload profile to gs bucket. will revert.
-                self.profile_dir = os.environ.get("VLLM_TORCH_PROFILER_DIR")
-
                 logger.info("Profiling enabled. Traces will be saved to: %s",
                             self.profile_dir)
 

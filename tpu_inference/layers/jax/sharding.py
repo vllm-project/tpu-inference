@@ -91,7 +91,7 @@ class ShardingConfigManager:
         expert_parallelism = additional_config.get("expert_parallelism", 1)
         sequence_parallelism = additional_config.get("sequence_parallelism", 1)
 
-        # Replicate attention layer with num_kv_heads < TP
+        # Replicate attention layer when num_kv_heads < TP
         enable_dp_attention = additional_config.get("enable_dp_attention",
                                                     False)
         if enable_dp_attention:

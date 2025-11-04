@@ -102,14 +102,14 @@ class TestTPUJaxRunnerDPInputsLightweight:
 
     def test_prepare_inputs_dp_error_conditions(self):
         """Test error handling in DP input preparation."""
-        # Test with zero scheduled tokens
+        # Test with zero scheduled tokens - should fail assertion: total_num_scheduled_tokens > 0
         scheduler_output = self._create_mock_scheduler_output({}, {})
         scheduler_output.total_num_scheduled_tokens = 0
 
         with pytest.raises(AssertionError):
             self.runner._prepare_inputs_dp(scheduler_output)
 
-        # Test with zero requests
+        # Test with zero requests - should fail assertion: num_reqs > 0
         self.runner.input_batch.num_reqs = 0
         scheduler_output = self._create_mock_scheduler_output({"req1": 5},
                                                               {"req1": 0})
