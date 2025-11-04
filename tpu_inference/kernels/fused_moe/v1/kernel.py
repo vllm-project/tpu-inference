@@ -858,12 +858,9 @@ def fused_ep_moe(
     ep_axis_name: str = 'model',
 ):
     # Assert all other axes have length of 1
-    for axis_name, axis_size in mesh.shape.items():
-        if axis_name != ep_axis_name:
-            assert axis_size == 1, (
-                f"Kernel requires all axes except '{ep_axis_name}' to have size 1, "
-                f"but axis '{axis_name}' has size {axis_size}. "
-                f"Mesh shape: {dict(mesh.shape)}")
+    assert len(mesh.shape) == 2, "Expect 2D mesh in tpu-inference"
+    assert 'data' in mesh.shape and mesh.shape['data'] == 1, \
+        "Expect data axis size of 1 in tpu-inference"
 
     ep_size = mesh.shape[ep_axis_name]
     num_devices = ep_size
