@@ -1,12 +1,15 @@
 import copy
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+import torch
 from vllm.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.core.sched.interface import SchedulerInterface
-from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.core.sched.output import (CachedRequestData, GrammarOutput,
+                                       SchedulerOutput)
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -64,15 +67,20 @@ class DPScheduler(SchedulerInterface):
         self.block_size = block_size
         self.log_stats = log_stats
         self.connector = None
+        self.structured_output_manager = structured_output_manager
 
         # DP state
         self.dp_size = vllm_config.sharding_config.total_dp_size
         self.assigned_dp_rank: Dict[str, int] = {}  # req_id -> dp_rank
-
+        self.cached_schedulers_output = deque()
         self._create_per_rank_configs(kv_cache_config)
+
+        # The original scheduler class could be Scheduler or AsyncScheduler
+        original_scheduler_cls = resolve_obj_by_qualname(
+            vllm_config.scheduler_config._original_scheduler_cls)
         self.schedulers: List[Scheduler] = []
         for rank in range(self.dp_size):
-            scheduler = Scheduler(
+            scheduler = original_scheduler_cls(
                 vllm_config=self.vllm_config,
                 kv_cache_config=self.per_rank_kv_cache_configs[rank],
                 structured_output_manager=structured_output_manager,
@@ -164,7 +172,7 @@ class DPScheduler(SchedulerInterface):
             rank_outputs.append(output)
 
         # Cache scheduler outputs to use in `update_from_output`
-        self.cached_schedulers_output = rank_outputs
+        self.cached_schedulers_output.append(rank_outputs)
 
         # Return combined scheduler outputs
         combined_output = self._combine_scheduler_outputs(rank_outputs)
@@ -211,18 +219,6 @@ class DPScheduler(SchedulerInterface):
         # Combine other fields (take from first non-empty or use defaults)
         num_common_prefix_blocks = rank_outputs[
             0].num_common_prefix_blocks if rank_outputs else []
-        structured_output_request_ids = []
-        grammar_bitmask = None
-
-        for output in rank_outputs:
-            if output.structured_output_request_ids:
-                structured_output_request_ids.extend(
-                    output.structured_output_request_ids)
-            if output.grammar_bitmask is not None:
-                # For now, just use the first non-None bitmask
-                # TODO(wenxindongwork): Properly combine bitmasks if needed
-                if grammar_bitmask is None:
-                    grammar_bitmask = output.grammar_bitmask
 
         # Create DP rank assignment mapping for scheduled requests
         assigned_dp_rank = {}
@@ -238,10 +234,7 @@ class DPScheduler(SchedulerInterface):
             scheduled_encoder_inputs=combined_encoder_inputs,
             num_common_prefix_blocks=num_common_prefix_blocks,
             finished_req_ids=combined_finished_req_ids,
-            free_encoder_mm_hashes=set(
-            ),  # TODO(wenxindongwork): Combine from all schedulers
-            structured_output_request_ids=structured_output_request_ids,
-            grammar_bitmask=grammar_bitmask,
+            free_encoder_mm_hashes=set(),
             assigned_dp_rank=assigned_dp_rank,
         )
 
@@ -249,9 +242,9 @@ class DPScheduler(SchedulerInterface):
             self, rank_outputs: List[SchedulerOutput]) -> CachedRequestData:
         """Combine cached request data from all DP rank schedulers."""
         combined_req_ids = []
-        combined_resumed_from_preemption = []
+        combined_resumed_req_ids = []
         combined_new_token_ids = []
-        combined_resumed_req_token_ids = []
+        combined_all_token_ids = []
         combined_new_block_ids = []
         combined_num_computed_tokens = []
         combined_num_output_tokens = []
@@ -260,11 +253,9 @@ class DPScheduler(SchedulerInterface):
             cached_data = output.scheduled_cached_reqs
 
             combined_req_ids.extend(cached_data.req_ids)
-            combined_resumed_from_preemption.extend(
-                cached_data.resumed_from_preemption)
+            combined_resumed_req_ids.extend(cached_data.resumed_req_ids)
             combined_new_token_ids.extend(cached_data.new_token_ids)
-            combined_resumed_req_token_ids.extend(
-                cached_data.resumed_req_token_ids)
+            combined_all_token_ids.extend(cached_data.all_token_ids)
             combined_new_block_ids.extend(cached_data.new_block_ids)
             combined_num_computed_tokens.extend(
                 cached_data.num_computed_tokens)
@@ -272,13 +263,55 @@ class DPScheduler(SchedulerInterface):
 
         return CachedRequestData(
             req_ids=combined_req_ids,
-            resumed_from_preemption=combined_resumed_from_preemption,
+            resumed_req_ids=combined_resumed_req_ids,
             new_token_ids=combined_new_token_ids,
-            resumed_req_token_ids=combined_resumed_req_token_ids,
+            all_token_ids=combined_all_token_ids,
             new_block_ids=combined_new_block_ids,
             num_computed_tokens=combined_num_computed_tokens,
             num_output_tokens=combined_num_output_tokens,
         )
+
+    def get_grammar_bitmask(
+        self,
+        scheduler_output: DPSchedulerOutput,
+    ) -> GrammarOutput | None:
+        """
+        Generate grammar bitmask for structured output requests across all DP ranks.
+
+        This method calls get_grammar_bitmask on each underlying scheduler and
+        combines their outputs, similar to how other operations are handled.
+        """
+        # Use the most recent cached outputs from the schedule() call
+        if not self.cached_schedulers_output:
+            return None
+
+        rank_scheduler_outputs = self.cached_schedulers_output[
+            -1]  # Get the most recent
+
+        combined_structured_output_request_ids = []
+        combined_bitmasks = []
+
+        # Get grammar bitmask from each DP rank scheduler
+        for rank, scheduler in enumerate(self.schedulers):
+            rank_output = rank_scheduler_outputs[rank]
+            grammar_output = scheduler.get_grammar_bitmask(rank_output)
+
+            if grammar_output is not None:
+                combined_structured_output_request_ids.extend(
+                    grammar_output.structured_output_request_ids)
+                combined_bitmasks.append(grammar_output.grammar_bitmask)
+
+        if not combined_structured_output_request_ids:
+            return None
+
+        # Combine bitmasks - concatenate along the batch dimension
+        if len(combined_bitmasks) == 1:
+            combined_bitmask = combined_bitmasks[0]
+        else:
+            combined_bitmask = torch.cat(combined_bitmasks, dim=0)
+
+        return GrammarOutput(combined_structured_output_request_ids,
+                             combined_bitmask)
 
     def update_from_output(
         self, scheduler_output: DPSchedulerOutput,
@@ -293,8 +326,7 @@ class DPScheduler(SchedulerInterface):
         # Group model runner outputs by DP rank
         rank_model_outputs = self._split_model_output_by_rank(
             model_runner_output)
-        rank_scheduler_outputs = self.cached_schedulers_output
-
+        rank_scheduler_outputs = self.cached_schedulers_output.popleft()
         # Update each scheduler with its portion of the output
         combined_engine_outputs = defaultdict(list)
         for rank, scheduler in enumerate(self.schedulers):
@@ -486,6 +518,7 @@ def update_vllm_config_for_dp_scheduler(vllm_config: Any) -> None:
     dp_size = vllm_config.sharding_config.total_dp_size
 
     if dp_size > 1:
+        vllm_config.scheduler_config._original_scheduler_cls = vllm_config.scheduler_config.scheduler_cls
         vllm_config.scheduler_config.scheduler_cls = DPScheduler
         logger.info(f"DP size ({dp_size}) >= 2, using DPScheduler")
     else:
