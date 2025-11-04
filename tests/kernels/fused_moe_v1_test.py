@@ -60,7 +60,8 @@ class MoEKernelTest(jtu.JaxTestCase):
                 (-1 if x.coords[0] % 2 else 1) * x.coords[1],
             ),
         )
-        self.mesh = Mesh(np.array(self.mesh_devices).reshape(1, -1), axis_names=("data", "model"))
+        self.mesh = Mesh(np.array(self.mesh_devices).reshape(1, -1),
+                         axis_names=("data", "model"))
 
     def test_basic(self):
         dtype = jnp.bfloat16
