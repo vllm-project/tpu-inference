@@ -71,9 +71,9 @@ class TestSharding(unittest.TestCase):
         generate_rules = sharding_cfg.generate_rules
 
         self.assertEqual(generate_rules.ffw_weight_df,
-                         (None, ("model", "expert", "attn_dp")))
+                         (None, ("attn_dp", "model", "expert")))
         self.assertEqual(generate_rules.moe_router_de,
-                         (None, ("expert", 'model', 'attn_dp')))
+                         (None, ("attn_dp", 'expert', 'model')))
         self.assertEqual(generate_rules.attn_q_weight_dnh,
                          (None, "model", None))
 
