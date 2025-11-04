@@ -22,9 +22,10 @@ def get_tpu_quantization_config(vllm_config: VllmConfig,
         "compressed-tensors": VllmCompressedTensorsConfig,
         "awq": VllmAWQConfig,
     }
-
     if model_config.quantization not in method_to_config:
-        raise NotImplementedError
+        raise NotImplementedError(
+            f"{model_config.quantization} quantization method not supported."
+            f" Supported methods are {method_to_config.keys()}")
     quant_config = method_to_config[model_config.quantization]
     assert issubclass(quant_config, JaxCommonConfig)
     quant_config.set_configs(vllm_config, mesh)
