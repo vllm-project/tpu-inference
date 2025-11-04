@@ -103,8 +103,6 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
 
         # KV connector setup
         self.has_connector = self.vllm_config.kv_transfer_config is not None
-        self.kv_output_aggregator = KVOutputAggregator(
-            self.parallel_config.world_size)
         if self.has_connector:
             ip_port = self.collective_rpc("get_node_kv_ip_port")
             for item in ip_port:
@@ -229,7 +227,7 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         for each, ip in zip(worker_metadata, worker_ips):
             each.ip = ip
 
-        logger.debug("workers: %s", worker_metadata)
+        logger.debug(f"Initialized worker_metadata: {worker_metadata}")
 
         ip_counts: Dict[str, int] = {}
         for ip in worker_ips:
@@ -256,6 +254,8 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         start_rank = 0
         for i, item in enumerate(sorted_worker_metadata):
             item.adjusted_rank = i + start_rank
+        logger.info(f"Initialized sorted worker_metadata: {sorted_worker_metadata}")
+        
         self.workers = [item.worker for item in sorted_worker_metadata]
         rerank_mapping = {
             item.created_rank: item.adjusted_rank
