@@ -15,7 +15,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 
 from tpu_inference.distributed.local_cpu_backend import LocalCPUBackend
-from tpu_inference.distributed.tpu_connector_local import SaveSpec
+from tpu_inference.distributed.tpu_connector_local import LoadSpec, SaveSpec
 from tpu_inference.distributed.tpu_connector_local import \
     TPUConnector as CPUOffloadingConnector
 from tpu_inference.distributed.tpu_connector_local import (
@@ -77,6 +77,18 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
             self.skipTest("Cannot create mesh. Must be run on a TPU node.")
             return
 
+        # Define cache properties
+        self.cache_shape = (
+            self.num_blocks,
+            self.block_size,
+            self.num_heads,
+            2,
+            self.head_size,
+        )
+        self.cache_dtype = jnp.bfloat16
+        partition_spec = PartitionSpec(None, None, "model")
+        self.device_sharding = NamedSharding(self.mesh, partition_spec)
+
     def tearDown(self):
         super().tearDown()
         cc.reset_cache()
@@ -106,23 +118,11 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
         worker = connector.connector_worker
         assert worker is not None
 
-        # Define cache properties
-        cache_shape = (
-            self.num_blocks,
-            self.block_size,
-            self.num_heads,
-            2,
-            self.head_size,
-        )
-        cache_dtype = jnp.bfloat16
-        partition_spec = PartitionSpec(None, None, "model")
-        device_sharding = NamedSharding(self.mesh, partition_spec)
-
-        @functools.partial(jax.jit, out_shardings=device_sharding)
+        @functools.partial(jax.jit, out_shardings=self.device_sharding)
         def create_on_device(key):
             return jax.random.uniform(key,
-                                      shape=cache_shape,
-                                      dtype=cache_dtype)
+                                      shape=self.cache_shape,
+                                      dtype=self.cache_dtype)
 
         source_kv_cache = [
             create_on_device(jax.random.key(i)) for i in range(self.num_layers)
@@ -582,3 +582,269 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
         )
         logger.info(
             "Test test_tpu_connector_multi_step_save completed successfully.")
+
+    @parameterized.named_parameters(
+        dict(
+            testcase_name="_full_load_jax",
+            swap_op_type="jax",
+            num_matched_blocks=4,
+            num_computed_blocks=0,
+        ),
+        dict(
+            testcase_name="_delta_load_jax",
+            swap_op_type="jax",
+            num_matched_blocks=4,
+            num_computed_blocks=1,
+        ),
+        dict(
+            testcase_name="_delta_load_pallas",
+            swap_op_type="pallas",
+            num_matched_blocks=4,
+            num_computed_blocks=1,
+        ),
+        dict(
+            testcase_name="_no_load_jax",
+            swap_op_type="jax",
+            num_matched_blocks=1,
+            num_computed_blocks=1,
+        ),
+    )
+    def test_tpu_connector_load(
+        self,
+        swap_op_type: str,
+        num_matched_blocks: int,
+        num_computed_blocks: int = 0,
+    ):
+        """
+        Tests that the TPUConnectorWorker correctly loads only the delta of
+        the KV cache when a prefix is already computed by vLLM.
+
+        This test simulates a scenario where vLLM has already computed a certain
+        number of tokens (prefix) and the TPUConnectorWorker needs to load
+        only the remaining "delta" of the KV cache from the CPU backend.
+
+        Steps:
+        1.  Setup:
+            - Create a device mesh and sharding configurations.
+            - Instantiate a TPUConnector with a worker role.
+            - Create mock source (ground truth) and destination KV caches on the TPU.
+            - Register a mock TPUModelRunner with the worker.
+
+        2.  Populate CPU Cache:
+            - Simulate a save operation to the CPU backend for the "matched" prefix.
+            - This represents the KV cache state on the CPU that corresponds to
+            the tokens already processed by vLLM.
+
+        3.  Prepare and Execute Delta Load:
+            - Calculate the number of tokens to load (the delta).
+            - Construct the necessary metadata (`TPUConnectorMetadata`) and `LoadSpec`
+            to trigger a delta load operation, skipping the already computed tokens.
+            - Bind this metadata to the connector and call the worker's `start_load_kv`
+            method to perform the host-to-device (h2d) load for the delta tokens.
+
+        4.  Verification:
+            - If no tokens were expected to be loaded, assert that the destination
+            KV cache remains zero.
+            - Otherwise, extract the expected delta data from the source KV cache
+            and the actually loaded data from the destination KV cache.
+            - Compare these two sets of data to ensure the loaded delta is correct.
+            - Assert that the parts of the destination cache that should not have
+            been touched remain zero.
+        """
+        num_matched_tokens = num_matched_blocks * self.block_size
+        num_computed_tokens = num_computed_blocks * self.block_size
+        if num_matched_blocks > self.num_blocks:
+            self.skipTest(
+                f"num_matched_blocks {num_matched_blocks} > vllm_config.num_blocks {self.num_blocks}"
+            )
+        if num_computed_blocks > num_matched_blocks:
+            self.skipTest(
+                f"num_computed_blocks {num_computed_blocks} > num_matched_blocks {num_matched_blocks}"
+            )
+
+        logger.info(
+            f"Starting test_tpu_connector_load with num_computed_tokens={num_computed_tokens}, num_matched_tokens={num_matched_tokens}, swap_op_type={swap_op_type}."
+        )
+        # 1. Setup
+        connector = self._create_connector(swap_op_type)
+        worker = connector.connector_worker
+        # Ground truth cache on TPU
+        src_kv_cache = worker.runner.kv_caches
+        # Destination cache on TPU, should be modified by the load operation
+        dst_kv_cache = [
+            jax.device_put(jnp.zeros(self.cache_shape, dtype=self.cache_dtype),
+                           self.device_sharding)
+            for _ in range(self.num_layers)
+        ]
+        jax.block_until_ready(dst_kv_cache)
+
+        req_id = "save_req"
+        matched_token_ids = list(range(num_matched_tokens))
+        total_blocks = list(range(self.num_blocks))
+        local_block_ids = sorted(
+            random.sample(total_blocks, num_matched_blocks))
+
+        # 2. Populate CPU Cache
+        # Save the part of the source cache that represents the "matched" prefix
+        if num_matched_tokens > 0:
+            logger.info(
+                f"Populating CPU cache with {num_matched_tokens} matched tokens."
+            )
+
+            src_blocks_to_save = local_block_ids[
+                num_computed_blocks:num_matched_blocks]
+            save_spec = SaveSpec(
+                num_skip_leading_tokens=num_computed_tokens,
+                num_total_tokens=num_matched_tokens,
+                is_final_save=False,
+                skip_save=False,
+                src_blocks=src_blocks_to_save,
+            )
+            req_meta = TPUReqMeta(
+                req_id=req_id,
+                token_ids=matched_token_ids,
+                local_block_ids=local_block_ids,
+                save_spec=save_spec,
+            )
+            connector_metadata = TPUConnectorMetadata(requests_meta=[req_meta])
+            connector.bind_connector_metadata(connector_metadata)
+            worker.wait_for_save()
+            logger.info(
+                f"Simulated save operation to CPU for {num_matched_tokens} tokens."
+            )
+        else:
+            logger.info("No matched tokens, skipping CPU cache population.")
+
+        # 3. Prepare and Execute Delta Load
+        worker.runner.kv_caches = dst_kv_cache
+        num_tokens_to_load = max(0, num_matched_tokens - num_computed_tokens)
+        # `num_tokens_to_load` cannot be negative. If `num_computed_tokens`
+        # is greater than or equal to `num_matched_tokens`, it means all
+        # relevant tokens are already on the TPU, and no new tokens need
+        # to be loaded from the CPU backend. In such cases, the value should
+        # be clamped to 0.
+        logger.info(
+            f"Calculated num_tokens_to_load: {num_tokens_to_load} (num_matched_tokens={num_matched_tokens} - num_computed_tokens={num_computed_tokens})"
+        )
+        if num_tokens_to_load > 0:
+            dst_blocks = local_block_ids[
+                num_computed_blocks:num_matched_blocks]
+            load_spec = LoadSpec(
+                num_matched_tokens=num_matched_tokens,
+                dst_blocks=dst_blocks,
+                is_full_prefix_hit=False,
+                can_load=True,
+                num_skip_leading_tokens=num_computed_tokens,
+            )
+
+            logger.info(f"LoadSpec created: {load_spec}")
+            # The worker needs the full token list to generate keys correctly
+            req_meta = TPUReqMeta(
+                req_id="load_req",
+                token_ids=matched_token_ids,
+                local_block_ids=local_block_ids,
+                load_spec=load_spec,
+            )
+            connector_metadata = TPUConnectorMetadata(requests_meta=[req_meta])
+            connector.bind_connector_metadata(connector_metadata)
+            logger.info("Connector metadata bound, calling start_load_kv.")
+            worker.start_load_kv(fwd_ctx=None)
+            jax.block_until_ready(worker.runner.kv_caches)
+            logger.info("start_load_kv completed and blocked until ready.")
+            # we will donate the original kv_cache ref
+            dst_kv_cache = worker.runner.kv_caches
+
+        # worker.runner.kv_caches = src_kv_cache
+
+        # 4. Verification
+        logger.info("Starting verification phase.")
+
+        if num_tokens_to_load <= 0:
+            logger.info(
+                "num_tokens_to_load is 0 or less, asserting nothing was loaded."
+            )
+            # Assert that the entire destination cache remains untouched (all zeros).
+            for i in range(self.num_layers):
+                self.assertArraysEqual(
+                    dst_kv_cache[i],
+                    jnp.zeros(self.cache_shape, dtype=self.cache_dtype),
+                )
+            logger.info("Assertion passed: Destination KV cache is all zeros.")
+            return
+
+        # Helper to flatten and extract a token range from a cache given a block map
+        def get_token_slice(kv_cache, start_token, num_tokens, block_map):
+            if num_tokens <= 0:
+                return jnp.empty((0, *kv_cache.shape[2:]),
+                                 dtype=kv_cache.dtype)
+            start_block_logical = start_token // self.block_size
+            start_offset = start_token % self.block_size
+            end_token = start_token + num_tokens
+            end_block_logical = (end_token + self.block_size -
+                                 1) // self.block_size
+
+            if end_block_logical > len(block_map):
+                raise ValueError(
+                    f"Not enough blocks in block_map to satisfy token range. "
+                    f"Need {end_block_logical} blocks, but map has {len(block_map)}."
+                )
+
+            physical_blocks_to_gather = [
+                block_map[i]
+                for i in range(start_block_logical, end_block_logical)
+            ]
+
+            flat_cache = kv_cache[physical_blocks_to_gather,
+                                  ...].reshape(-1, *kv_cache.shape[2:])
+            return flat_cache[start_offset:start_offset + num_tokens, ...]
+
+        # Get the ground truth data from the source cache
+        expected_data_from_source_tpu = [
+            get_token_slice(
+                src_kv_cache[i],
+                start_token=num_computed_tokens,
+                num_tokens=num_tokens_to_load,
+                block_map=local_block_ids,
+            ) for i in range(self.num_layers)
+        ]
+        logger.info(
+            f"Extracted expected data from source cache. Shape of first layer: {expected_data_from_source_tpu[0].shape}"
+        )
+
+        # Get the data that was actually loaded into the destination cache
+        loaded_data_on_dest_tpu = [
+            get_token_slice(
+                dst_kv_cache[i],
+                start_token=num_computed_tokens,
+                num_tokens=num_tokens_to_load,
+                block_map=local_block_ids,
+            ) for i in range(self.num_layers)
+        ]
+        logger.info(
+            f"Extracted loaded data from destination cache. Shape of first layer: {loaded_data_on_dest_tpu[0].shape}"
+        )
+
+        # Assert that the loaded delta is correct. This works for no-load cases too.
+        for i in range(self.num_layers):
+            self.assertArraysEqual(np.array(expected_data_from_source_tpu[i]),
+                                   np.array(loaded_data_on_dest_tpu[i]))
+        logger.info("Assertion passed: Loaded delta matches expected data.")
+
+        # Assert that blocks not in local_block_ids are still zero
+        untouched_blocks = sorted(
+            list(set(range(self.num_blocks)) - set(local_block_ids)))
+        logger.info(
+            f"Asserting that {len(untouched_blocks)} untouched blocks are still zero."
+        )
+        if untouched_blocks:
+            for i in range(self.num_layers):
+                zero_slice = worker.runner.kv_caches[i][untouched_blocks, ...]
+                self.assertTrue(jnp.all(zero_slice == 0))
+                expected_zeros = jnp.zeros(
+                    (len(untouched_blocks), *self.cache_shape[1:]),
+                    dtype=self.cache_dtype)
+                self.assertArraysEqual(np.array(zero_slice),
+                                       np.array(expected_zeros))
+        logger.info("Assertion passed: Untouched blocks are zero.")
+        logger.info(
+            "Test test_tpu_connector_delta_load completed successfully.")

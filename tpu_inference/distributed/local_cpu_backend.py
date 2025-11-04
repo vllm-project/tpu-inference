@@ -4,7 +4,7 @@
 import os
 import sys
 from collections import OrderedDict
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 
 from tpu_inference.logger import init_logger
 
@@ -144,7 +144,7 @@ class LocalCPUBackend:
             return True
         return False
 
-    def unpin_keys(self, keys: List[CacheKey]) -> int:
+    def unpin_keys(self, keys: List[CacheKey]) -> Tuple[int, int]:
         """Unpins a list of keys, making them eligible for eviction again."""
         unpinned_count = 0
         found_count = 0
