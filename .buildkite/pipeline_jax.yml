@@ -101,15 +101,6 @@ steps:
            exit 0
          fi
 
-   - label: "E2E data paralellism test"
-     key: test_6
-     soft_fail: true
-     agents:
-       queue: tpu_v6e_8_queue
-     commands:
-       - |
-         .buildkite/scripts/run_in_docker.sh \
-           bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_data_parallel.py'
 
    - label: "JAX unit tests"
      key: test_7
@@ -230,6 +221,15 @@ steps:
            exit 0
          fi
 
+   - label: "E2E data paralellism test"
+     key: test_14
+     soft_fail: true
+     agents:
+       queue: tpu_v6e_8_queue
+     commands:
+       - |
+         .buildkite/scripts/run_in_docker.sh \
+           bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_data_parallel.py'
 
   # -----------------------------------------------------------------
   # NOTIFICATION STEP
@@ -250,6 +250,7 @@ steps:
        - test_11
        - test_12
        - test_13
+       - test_14
      agents:
        queue: cpu
      commands:
