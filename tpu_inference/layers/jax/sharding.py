@@ -112,7 +112,6 @@ class ShardingConfigManager:
             tensor_parallelism = tensor_parallelism // attn_dp
         else:
             attn_dp = 1
-
         sharding_strategy = ShardingStrategy(
             tensor_parallelism=tensor_parallelism,
             data_parallelism=data_parallelism,
