@@ -16,7 +16,7 @@ steps:
       CI_STAGE: "UnitTest"
       CI_TARGET: meta-llama/Llama-3.1-8B-Instruct
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh meta-llama_Llama-3_1-8B-Instruct_UnitTest
@@ -41,7 +41,7 @@ steps:
       CI_TARGET: meta-llama/Llama-3.1-8B-Instruct
       CI_STAGE: "IntegrationTest"
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh meta-llama_Llama-3_1-8B-Instruct_IntegrationTest
@@ -72,7 +72,7 @@ steps:
       CI_TARGET: meta-llama/Llama-3.1-8B-Instruct
       CI_STAGE: "Benchmark"
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh meta-llama_Llama-3_1-8B-Instruct_Benchmark

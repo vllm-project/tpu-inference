@@ -26,7 +26,7 @@ if [ "${ANY_FAILED}" = "true" ] ; then
     steps:
     - label: "${FAILURE_LABEL}"
         agents:
-        queue: tpu_v6_queue
+        queue: cpu
         command: echo "${FAILURE_LABEL}"
 YAML
     exit 1

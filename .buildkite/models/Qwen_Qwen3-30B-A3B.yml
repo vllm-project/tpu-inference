@@ -16,7 +16,7 @@ steps:
       CI_STAGE: "UnitTest"
       CI_TARGET: Qwen/Qwen3-30B-A3B
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh Qwen_Qwen3-30B-A3B_UnitTest
@@ -41,7 +41,7 @@ steps:
       CI_TARGET: Qwen/Qwen3-30B-A3B
       CI_STAGE: "IntegrationTest"
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh Qwen_Qwen3-30B-A3B_IntegrationTest
@@ -72,7 +72,7 @@ steps:
       CI_TARGET: Qwen/Qwen3-30B-A3B
       CI_STAGE: "Benchmark"
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh Qwen_Qwen3-30B-A3B_Benchmark

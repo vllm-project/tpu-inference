@@ -14,7 +14,7 @@ steps:
       CI_STAGE: "UnitTest"
       CI_TARGET: {MODEL_NAME}
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh {SANITIZED_MODEL_NAME}_UnitTest
@@ -39,7 +39,7 @@ steps:
       CI_TARGET: {MODEL_NAME}
       CI_STAGE: "IntegrationTest"
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh {SANITIZED_MODEL_NAME}_IntegrationTest

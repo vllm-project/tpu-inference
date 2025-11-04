@@ -134,5 +134,5 @@ steps:
        - tpu_test_12
        - tpu_test_13
      agents:
-       queue: tpu_v6e_queue
+       queue: cpu
      commands: "bash .buildkite/scripts/check_results.sh 'TPU V1 Tests Failed' tpu_test_0 tpu_test_1 tpu_test_2 tpu_test_3 tpu_test_4 tpu_test_5 tpu_test_6 tpu_test_7 tpu_test_8 tpu_test_9 tpu_test_10 tpu_test_11 tpu_test_12 tpu_test_13"
