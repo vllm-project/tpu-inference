@@ -3,6 +3,7 @@ import math
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, List, Optional
 
+import jax.numpy as jnp
 import numpy as np
 from jax.sharding import Mesh
 
@@ -96,9 +97,12 @@ class ShardingConfigManager:
                                                     False)
         if enable_dp_attention:
             num_kv_heads = vllm_config.model_config.get_total_num_kv_heads()
+
             kv_dtype = utils.get_jax_dtype_from_str_dtype(
-                vllm_config.cache_config.cache_dtype)
-            packing = 4 // np.dtype(kv_dtype).itemsize
+                vllm_config.cache_config.cache_dtype) or jnp.bfloat16
+            packing = 4 // jnp.dtype(kv_dtype).itemsize
+            print("kv_dtype", kv_dtype, "packing", packing, "num_kv_heads",
+                  num_kv_heads)
             # When num_kv_heads * 2 / packing < TP, tensor parallelism would
             # duplicate KV heads across devices, wasting kv cache memory.
             # Use attention DP instead to reduce per-device num_kv_heads and
