@@ -449,7 +449,6 @@ class TPUConnectorScheduler():
             logger.info(
                 f"  Processing chunk {start_idx}-{end_idx} with hash {key.chunk_hash}"
             )
-            # TODO(jcgu): where did we add the keys for the very first time?
             if self.cpu_backend.contains(key, pin_on_hit=True):
                 num_matched_tokens = end_idx
                 logger.info(
@@ -562,7 +561,7 @@ class TPUConnectorScheduler():
                     all_blocks), f"{total_matched_blocks} > {len(all_blocks)}"
                 dst_blocks = all_blocks[
                     skip_leading_blocks:total_matched_blocks]
-                self.load_specs[request.request_id].dst_blocks = dst_blocks
+                load_spec.dst_blocks = dst_blocks
                 load_spec.can_load = True
                 logger.info(
                     f"Request {request.request_id} ({len(dst_blocks)} dst_blocks) is ready to load."
@@ -634,7 +633,28 @@ class TPUConnectorScheduler():
         save_spec = None
         if should_save:
             # get src block_ids for save
-            # TODO(jcgu): explain why need to recompute
+            # NOTE(jcgu): recompute skip_leading_blocks
+            # if tracker.save_watermark has partial tokens in the last block
+            # and we saved (i.e., pad) the entire block to cpu_backend, now we
+            # want to save the kv of the new tokens in that block; because of
+            # the new tokens in that block's token sequence, the block will
+            # have a new key (hash value) in cpu_backend, so we should treat
+            # the block as a new cache and save the entire block.
+            # Example:
+            # we have saved:
+            # blocks:     [------b0------] [------b1------]
+            # tokens:     [t0, t1, t2, t3] [t4, t5,]
+            # hash keys:  [key0, key1]
+            #
+            # Now, we have 2 new tokens in the sequence
+            # blocks:     [------b0------] [------b1------]
+            # tokens:     [t0, t1, t2, t3] [t4, t5, t6, t7]
+            # hash keys:  [key0, key1, key1_2]
+            # In cpu-backend, since b0's token-sequence has been changed, it
+            # will have a new key.
+            #
+            # if we always drop the partial-filled block when saving, then there
+            # will no such an issue.
             num_skip_leading_blocks = tracker.save_watermark // self.block_size
             num_skip_leading_tokens = num_skip_leading_blocks * self.block_size
             src_block_ids = tracker.block_ids[
@@ -748,7 +768,7 @@ class TPUConnectorScheduler():
 
             # Create and store the tracker, which will maintain the request's
             # state for its entire lifetime.
-            # TODO(jcgu): do we need check if the request_id exist or not.
+            assert req_id not in self._request_trackers, f"Request {req_id} already has a tracker."
             tracker = RequestTracker(
                 req_id=req_id,
                 prompt_len=len(request.prompt_token_ids),
@@ -1005,9 +1025,9 @@ class TPUConnectorWorker:
         first_src_block = blocks_to_save[0]
         last_src_block = blocks_to_save[-1]
         try:
-            first_idx_in_full = full_block_ids.index(first_src_block)
-            last_idx_in_full = full_block_ids.index(last_src_block)
-            if not (last_idx_in_full - first_idx_in_full + 1
+            first_block_idx_in_full = full_block_ids.index(first_src_block)
+            last_block_idx_in_full = full_block_ids.index(last_src_block)
+            if not (last_block_idx_in_full - first_block_idx_in_full + 1
                     == len(blocks_to_save)):
                 raise ValueError(
                     f"Request({req_id}): blocks_to_save {blocks_to_save} does not exist in full_block_ids {full_block_ids}"
@@ -1020,7 +1040,7 @@ class TPUConnectorWorker:
         try:
             start_time = time.time()
             blocks_to_save = jnp.array(blocks_to_save)
-            # gather and reshape blocks on TPU first: output_shape: [process_blocks * block_size, num_heads, 2, head_dim]
+            # gather and reshape blocks on TPU first: output_shape: [blocks_to_save * block_size, num_heads, 2, head_dim]
             flat_kv_caches_tpu = KVCacheManager._jitted_gather_kv_cache(
                 self.runner.kv_caches, blocks_to_save)
 
@@ -1240,10 +1260,11 @@ class TPUConnectorWorker:
             first_dst_block = dst_blocks[0]
             last_dst_block = dst_blocks[-1]
             try:
-                first_idx_in_local = meta.local_block_ids.index(
+                first_block_idx_in_local = meta.local_block_ids.index(
                     first_dst_block)
-                last_idx_in_local = meta.local_block_ids.index(last_dst_block)
-                if not (last_idx_in_local - first_idx_in_local + 1
+                last_block_idx_in_local = meta.local_block_ids.index(
+                    last_dst_block)
+                if not (last_block_idx_in_local - first_block_idx_in_local + 1
                         == len(dst_blocks)):
                     raise ValueError(
                         f"Request({meta.req_id}): dst_blocks {dst_blocks} does not exist in local_block_ids {meta.local_block_ids}"
@@ -1283,7 +1304,7 @@ class TPUConnectorWorker:
                     # Calculate the precise slice needed from this specific chunk.
                     # rel_start is the index within this chunk where the delta tokens begin.
                     if start_idx < num_skip_leading_tokens:
-                        assert False, "This line should not be reached when cpu_chunk_size == block_size"
+                        assert False, "start_idx {start_idx} should not be less than num_skip_leading_tokens {num_skip_leading_tokens}, when cpu_chunk_size == block_size"
                         rel_start = num_skip_leading_tokens - start_idx
                         rel_end = end_idx - num_skip_leading_tokens
                         for i in range(self.num_layers):
