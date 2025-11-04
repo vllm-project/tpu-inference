@@ -12,6 +12,7 @@ from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE
 from vllm.utils.network_utils import (get_distributed_init_method, get_ip,
                                       get_open_port)
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.executor.ray_distributed_executor import \
     RayDistributedExecutor as RayDistributedExecutorV1
 from vllm.v1.executor.ray_executor import RayWorkerMetaData
@@ -99,6 +100,8 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         self.use_v1 = envs.VLLM_USE_V1
 
         self.pp_locks: Optional[List[asyncio.Lock]] = None
+
+        self.scheduler_output: SchedulerOutput | None = None
 
         # KV connector setup
         self.has_connector = self.vllm_config.kv_transfer_config is not None
@@ -353,3 +356,8 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
                     assert len(self.pp_tp_workers[pp_rank]) == tp_rank
                     assert pp_rank < len(self.pp_tp_workers)
                     self.pp_tp_workers[pp_rank].append(self.workers[rank])
+
+    # Ray executor do not need handshake metadata
+    # as we pass the kv_parameters through proxy server
+    def get_kv_connector_handshake_metadata(self) -> None:
+        pass
