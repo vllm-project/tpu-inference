@@ -1,6 +1,6 @@
-import numpy as np
 import jax
 import jax.numpy as jnp
+import numpy as np
 from absl.testing import absltest
 from jax._src import test_util as jtu
 from jax.sharding import Mesh
