@@ -2,7 +2,7 @@
 
 import os
 import tempfile
-from typing import Callable, Dict, Optional, Tuple, Union
+from typing import Callable, Dict, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -18,24 +18,16 @@ from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
 from vllm.v1 import utils as vllm_utils
 from vllm.v1.core.kv_cache_utils import get_num_blocks, get_uniform_page_size
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 
 from tpu_inference import utils
-from tpu_inference.di.abstracts import (AbstractKVCacheConfig,
-                                        AbstractLoRARequest,
-                                        AbstractSchedulerOutput)
-from tpu_inference.di.interfaces import HostInterface
 from tpu_inference.distributed.utils import (get_host_ip, get_kv_transfer_port,
                                              get_node_id)
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.kv_cache import get_rpa_page_size_bytes
 from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
-from tpu_inference.worker._temporary_vllm_compat import (
-    adapt_kv_cache_config_if_needed, adapt_lora_request_if_needed,
-    adapt_scheduler_output_if_needed)
-from tpu_inference.worker.base import AbstractTpuWorker
 
 logger = init_logger(__name__)
 
@@ -46,7 +38,7 @@ _DTYPE: dict[str, jnp.dtype] = {
 }
 
 
-class TPUWorker(AbstractTpuWorker):
+class TPUWorker:
 
     def __init__(self,
                  vllm_config: VllmConfig,
@@ -54,10 +46,7 @@ class TPUWorker(AbstractTpuWorker):
                  rank: int,
                  distributed_init_method: str,
                  is_driver_worker: bool = False,
-                 devices=None,
-                 host_interface: Optional[HostInterface] = None):
-        super().__init__(host_interface)
-
+                 devices=None):
         # If we use vLLM's model implementation in PyTorch, we should set it
         # with torch version of the dtype.
         impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
@@ -201,47 +190,42 @@ class TPUWorker(AbstractTpuWorker):
 
     def execute_model(
         self,
-        scheduler_output: Union[AbstractSchedulerOutput, SchedulerOutput],
+        scheduler_output: SchedulerOutput,
     ) -> Optional[ModelRunnerOutput]:
         # NOTE: This method intentionally returns a concrete vLLM type, which
         # violates the pure abstract contract of the base class. This is a
         # deliberate, temporary compromise for the same reasons outlined in
         # the `get_kv_cache_spec` method.
 
-        # Adapt the input if necessary (temporary compatibility layer)
-        adapted_scheduler_output = adapt_scheduler_output_if_needed(
-            scheduler_output)
-
-        # Unwrap the adapter to get the concrete vLLM object
-        vllm_scheduler_output = adapted_scheduler_output.vllm_scheduler_output
-        output = self.model_runner.execute_model(vllm_scheduler_output)
+        output = self.model_runner.execute_model(scheduler_output)
 
         # With a connector, the scheduler expects output from all workers
+        # TODO(mrjunwan): Figure out if this is ok after https://github.com/vllm-project/vllm/pull/26866
         if has_kv_transfer_group():
             return output
 
         return output if self.is_driver_worker else None
+
+    def sample_tokens(self,
+                      grammar_output: GrammarOutput) -> ModelRunnerOutput:
+        return self.model_runner.sample_tokens(grammar_output)
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         return self.model_runner.take_draft_token_ids()
 
     def add_lora(
         self,
-        lora_request: Union[AbstractLoRARequest, LoRARequest],
+        lora_request: LoRARequest,
     ) -> bool:
-        # Adapt the input if necessary (temporary compatibility layer)
-        adapted_lora_request = adapt_lora_request_if_needed(lora_request)
-
-        # Unwrap the adapter to get the concrete vLLM object
-        vllm_lora_request = adapted_lora_request.vllm_lora_request  # noqa: F841
-
         raise NotImplementedError(
             "LoRA is not supported by the JAX worker yet.")
 
     def profile(self, is_start: bool = True):
         if is_start:
             options = jax.profiler.ProfileOptions()
+            # default: https://docs.jax.dev/en/latest/profiling.html#general-options
             options.python_tracer_level = os.getenv("PYTHON_TRACER_LEVEL", 0)
+            options.host_tracer_level = os.getenv("HOST_TRACER_LEVEL", 1)
             jax.profiler.start_trace(self.profile_dir,
                                      profiler_options=options)
         else:
@@ -307,13 +291,10 @@ class TPUWorker(AbstractTpuWorker):
 
     def initialize_from_config(
         self,
-        kv_cache_config: Union[AbstractKVCacheConfig, KVCacheConfig],
+        kv_cache_config: KVCacheConfig,
     ) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
-        adapted_kv_cache_config = adapt_kv_cache_config_if_needed(
-            kv_cache_config)
-        vllm_kv_cache_config = adapted_kv_cache_config.vllm_kv_cache_config
-        self.model_runner.initialize_kv_cache(vllm_kv_cache_config)
+        self.model_runner.initialize_kv_cache(kv_cache_config)
 
     def get_node_kv_ip_port(self) -> tuple[int, str, int]:
         node_id = get_node_id()

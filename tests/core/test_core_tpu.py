@@ -8,13 +8,9 @@ from vllm.v1.engine import EngineCoreRequest, EngineCoreRequestType
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request
 
-from tpu_inference.core.adapters import (VllmConfigAdapter, VllmEngineAdapter,
-                                         VllmRequestAdapter)
 from tpu_inference.core.core_tpu import (DisaggEngineCore,
                                          DisaggEngineCoreProc,
                                          _DisaggOrchestrator)
-from tpu_inference.interfaces.config import IConfig
-from tpu_inference.interfaces.engine import IEngineCore
 
 
 class TestDisaggEngineCore(unittest.TestCase):
@@ -67,13 +63,11 @@ class TestDisaggEngineCore(unittest.TestCase):
 
         self.mock_orchestrator.assert_called_once()
         args, kwargs = self.mock_orchestrator.call_args
-        self.assertIsInstance(kwargs['config'], VllmConfigAdapter)
-        self.assertEqual(kwargs['config'].vllm_config, self.mock_vllm_config)
+        self.assertIsInstance(kwargs['config'], VllmConfig)
+        self.assertEqual(kwargs['config'], self.mock_vllm_config)
         self.assertEqual(kwargs['output_queue'], engine.output_queue)
         self.assertEqual(len(kwargs['prefill_engines']), 1)
-        self.assertIsInstance(kwargs['prefill_engines'][0], VllmEngineAdapter)
         self.assertEqual(len(kwargs['decode_engines']), 1)
-        self.assertIsInstance(kwargs['decode_engines'][0], VllmEngineAdapter)
         self.assertEqual(kwargs['prefill_slice_sizes'], (4, ))
         self.assertEqual(kwargs['decode_slice_sizes'], (2, ))
 
@@ -94,13 +88,12 @@ class TestDisaggEngineCore(unittest.TestCase):
 
         self.mock_orchestrator.return_value.add_request.assert_called_once()
         # Get the argument passed to add_request
-        passed_request_adapter = self.mock_orchestrator.return_value.add_request.call_args[
+        passed_request = self.mock_orchestrator.return_value.add_request.call_args[
             0][0]
 
-        # Assert it's the correct type and wraps the correct underlying request
-        self.assertIsInstance(passed_request_adapter, VllmRequestAdapter)
-        self.assertIsInstance(passed_request_adapter.vllm_request, Request)
-        self.assertEqual(passed_request_adapter.request_id, "test_req")
+        # Assert it's the correct type (the Request directly)
+        self.assertIsInstance(passed_request, Request)
+        self.assertEqual(passed_request.request_id, "test_req")
 
     def test_shutdown(self):
         """Tests that the adapter correctly delegates shutdown to the orchestrator."""
@@ -204,13 +197,11 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
 
         self.mock_orchestrator.assert_called_once()
         args, kwargs = self.mock_orchestrator.call_args
-        self.assertIsInstance(kwargs['config'], VllmConfigAdapter)
-        self.assertEqual(kwargs['config'].vllm_config, self.mock_vllm_config)
+        self.assertIsInstance(kwargs['config'], VllmConfig)
+        self.assertEqual(kwargs['config'], self.mock_vllm_config)
         self.assertEqual(kwargs['output_queue'], proc.output_queue)
         self.assertEqual(len(kwargs['prefill_engines']), 1)
-        self.assertIsInstance(kwargs['prefill_engines'][0], VllmEngineAdapter)
         self.assertEqual(len(kwargs['decode_engines']), 1)
-        self.assertIsInstance(kwargs['decode_engines'][0], VllmEngineAdapter)
         self.assertEqual(kwargs['prefill_slice_sizes'], (4, ))
         self.assertEqual(kwargs['decode_slice_sizes'], (2, ))
 
@@ -239,13 +230,12 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
 
         self.mock_orchestrator.return_value.add_request.assert_called_once()
         # Get the argument passed to add_request
-        passed_request_adapter = self.mock_orchestrator.return_value.add_request.call_args[
+        passed_request = self.mock_orchestrator.return_value.add_request.call_args[
             0][0]
 
-        # Assert it's the correct type and wraps the correct underlying request
-        self.assertIsInstance(passed_request_adapter, VllmRequestAdapter)
-        self.assertIsInstance(passed_request_adapter.vllm_request, Request)
-        self.assertEqual(passed_request_adapter.request_id, "test_req")
+        # Assert it's the correct type (the Request directly)
+        self.assertIsInstance(passed_request, Request)
+        self.assertEqual(passed_request.request_id, "test_req")
 
     def test_shutdown(self):
         """Tests that the adapter correctly delegates shutdown to the orchestrator."""
@@ -321,15 +311,15 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
 class TestDisaggOrchestrator(unittest.TestCase):
 
     def setUp(self):
-        self.mock_config = MagicMock(spec=IConfig)
+        self.mock_config = MagicMock(spec=VllmConfig)
         self.mock_config.scheduler_config = MagicMock()
         self.mock_config.scheduler_config.max_num_seqs = 16
         self.mock_config.cache_config = MagicMock()
         self.mock_config.cache_config.block_size = 5
 
         self.mock_output_queue = MagicMock()
-        self.mock_prefill_engine = MagicMock(spec=IEngineCore)
-        self.mock_decode_engine = MagicMock(spec=IEngineCore)
+        self.mock_prefill_engine = MagicMock()
+        self.mock_decode_engine = MagicMock()
 
         # The orchestrator accesses the scheduler on the engine.
         self.mock_prefill_engine.scheduler = MagicMock()
@@ -374,7 +364,7 @@ class TestDisaggOrchestrator(unittest.TestCase):
             decode_slice_sizes=(2, ),
         )
         mock_request = MagicMock()
-        mock_request.vllm_request.request_id = "test_req"
+        mock_request.request_id = "test_req"
 
         orchestrator.add_request(mock_request)
 
@@ -469,7 +459,7 @@ class TestDisaggOrchestrator(unittest.TestCase):
 
         # Mock request
         mock_request = MagicMock()
-        mock_request.vllm_request.num_computed_tokens = 10
+        mock_request.num_computed_tokens = 10
         orchestrator._requests["test_req"] = mock_request
 
         # Mock scheduler and model runner states for the loop condition

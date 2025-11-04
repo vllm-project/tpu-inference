@@ -51,6 +51,11 @@ repos:
     rev: v0.10.0.1
     hooks:
     -   id: shellcheck
+- repo: https://github.com/lk16/detect-missing-init
+  rev: v0.1.6
+  hooks:
+  - id: detect-missing-init
+    args: ['--create', "--track", "--python-folders", "tpu_inference"]
 - repo: local
   hooks:
   - id: signoff-commit

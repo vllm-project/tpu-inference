@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /workspace/vllm
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 RUN git clone $VLLM_REPO /workspace/vllm
-RUN pip install -r requirements/tpu.txt
+RUN pip install -r requirements/tpu.txt --retries 3
 RUN VLLM_TARGET_DEVICE="tpu" pip install -e .
 
 # Install test dependencies
@@ -27,17 +27,16 @@ RUN python3 -m pip install --no-cache-dir \
     pytest-asyncio \
     git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d#egg=lm-eval[api] \
     pytest-cov \
-    tblib \
-    numba
+    tblib
 
 # Install tpu_inference
 WORKDIR /workspace/tpu_inference
 # Install requirements first and cache so we don't need to re-install on code change.
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+RUN pip install -r requirements.txt --retries 3
 COPY requirements_benchmarking.txt .
 # These are needed for the E2E benchmarking tests (i.e. tests/e2e/benchmarking/mlperf.sh)
-RUN pip install -r requirements_benchmarking.txt
+RUN pip install -r requirements_benchmarking.txt --retries 3
 COPY . .
 RUN pip install -e .
 

@@ -18,7 +18,13 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
+       - |
+         if [[ "$$NIGHTLY" == "1" ]]; then
+           .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
+         else
+           echo "Skipping: NIGHTLY environment variable not set"
+           exit 0
+         fi
 
    - label: "E2E MLPerf tests for JAX new models"
      key: test_2
@@ -28,7 +34,13 @@ steps:
      agents:
        queue: tpu_v6e_queue
      commands:
-       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
+       - |
+         if [[ "$$NIGHTLY" == "1" ]]; then
+           .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
+         else
+           echo "Skipping: NIGHTLY environment variable not set"
+           exit 0
+         fi
 
    - label: "E2E MLPerf tests for JAX + vLLM models on single chip"
      key: test_3
@@ -49,7 +61,13 @@ steps:
      agents:
        queue: tpu_v6e_8_queue
      commands:
-       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
+       - |
+         if [[ "$$NIGHTLY" == "1" ]]; then
+           .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
+         else
+           echo "Skipping: NIGHTLY environment variable not set"
+           exit 0
+         fi
 
 
    - label: "E2E multi modality test"
@@ -59,9 +77,14 @@ steps:
        queue: tpu_v6e_queue
      commands:
        - |
-         .buildkite/scripts/run_in_docker.sh \
-           bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_multi_modal_inference.py && \
-            bash /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench.sh'
+         if [[ "$$NIGHTLY" == "1" ]]; then
+           .buildkite/scripts/run_in_docker.sh \
+             bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_multi_modal_inference.py && \
+              bash /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench.sh'
+         else
+           echo "Skipping: NIGHTLY environment variable not set"
+           exit 0
+         fi
 
    - label: "E2E speculative decoding test"
      key: test_6
@@ -70,8 +93,13 @@ steps:
        queue: tpu_v6e_queue
      commands:
        - |
-         .buildkite/scripts/run_in_docker.sh \
-           bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py'
+         if [[ "$$NIGHTLY" == "1" ]]; then
+           .buildkite/scripts/run_in_docker.sh \
+             bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py'
+         else
+           echo "Skipping: NIGHTLY environment variable not set"
+           exit 0
+         fi
 
    - label: "JAX unit tests"
      key: test_7
@@ -95,11 +123,16 @@ steps:
        queue: tpu_v6e_queue
      commands:
        - |
-         .buildkite/scripts/run_in_docker.sh \
-           python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels \
-           --ignore=/workspace/tpu_inference/tests/kernels/ragged_paged_attention_kernel_v2_test.py \
-           --ignore=/workspace/tpu_inference/tests/kernels/ragged_kv_cache_update_v2_test.py \
-           --ignore=/workspace/tpu_inference/tests/kernels/collectives
+         if [[ "$$NIGHTLY" == "1" ]] || git diff --name-only HEAD~1 | grep -qE '^(tpu_inference/kernels|tests/kernels|requirements\.txt)'; then
+           .buildkite/scripts/run_in_docker.sh \
+             python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels \
+             --ignore=/workspace/tpu_inference/tests/kernels/ragged_paged_attention_kernel_v2_test.py \
+             --ignore=/workspace/tpu_inference/tests/kernels/ragged_kv_cache_update_v2_test.py \
+             --ignore=/workspace/tpu_inference/tests/kernels/collectives
+         else
+           echo "Skipping: no changes detected in kernels, tests/kernels, or requirements.txt"
+           exit 0
+         fi
 
    - label: "JAX unit tests - collective kernels"
      key: test_9
@@ -108,8 +141,13 @@ steps:
        queue: tpu_v6e_8_queue
      commands:
        - |
-         .buildkite/scripts/run_in_docker.sh \
-           python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels/collectives
+         if [[ "$$NIGHTLY" == "1" ]] || git diff --name-only HEAD~1 | grep -qE '^(tpu_inference/kernels/collectives|tests/kernels/collectives|requirements\.txt)'; then
+           .buildkite/scripts/run_in_docker.sh \
+             python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels/collectives
+         else
+           echo "Skipping: no changes detected in kernels/collectives, tests/kernels/collectives, or requirements.txt"
+           exit 0
+         fi
 
    - label: "lora tests for JAX + vLLM models single chip"
      key: test_10
@@ -118,8 +156,14 @@ steps:
        queue: tpu_v6e_queue
      commands:
        - |
-         .buildkite/scripts/run_in_docker.sh \
-           bash -c 'MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py'
+         if [[ "$$NIGHTLY" == "1" ]]; then
+           .buildkite/scripts/run_in_docker.sh \
+             bash -c 'MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py && \
+             python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_bgmv.py'
+         else
+           echo "Skipping: NIGHTLY environment variable not set"
+           exit 0
+         fi
 
    - label: "E2E MLPerf tests for JAX + vLLM models on multiple chips"
      key: test_11
@@ -129,7 +173,13 @@ steps:
      agents:
        queue: tpu_v6e_8_queue
      commands:
-       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
+       - |
+         if [[ "$$NIGHTLY" == "1" ]]; then
+           .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
+         else
+           echo "Skipping: NIGHTLY environment variable not set"
+           exit 0
+         fi
 
    - label: "E2E MLperf tests for DeepSeek-R1 (no accuracy, 12-decoder layers only)"
      key: test_12
@@ -143,7 +193,13 @@ steps:
      agents:
        queue: tpu_v6e_8_queue
      commands:
-       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh -m deepseek-ai/DeepSeek-R1-0528
+       - |
+         if [[ "$$NIGHTLY" == "1" ]]; then
+           .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh -m deepseek-ai/DeepSeek-R1-0528
+         else
+           echo "Skipping: NIGHTLY environment variable not set"
+           exit 0
+         fi
 
    - label: "lora tests for JAX + vLLM models multi chips"
      key: test_13
@@ -155,8 +211,13 @@ steps:
        queue: tpu_v6e_8_queue
      commands:
        - |
-         .buildkite/scripts/run_in_docker.sh \
-           bash -c 'MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py -k multi_lora'
+         if [[ "$$NIGHTLY" == "1" ]]; then
+           .buildkite/scripts/run_in_docker.sh \
+             bash -c 'MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py'
+         else
+           echo "Skipping: NIGHTLY environment variable not set"
+           exit 0
+         fi
 
 
   # -----------------------------------------------------------------

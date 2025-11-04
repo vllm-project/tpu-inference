@@ -77,7 +77,7 @@ from jax.sharding import Mesh
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
-from vllm.utils import round_down
+from vllm.utils.math_utils import round_down
 from vllm.utils.network_utils import make_zmq_path, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
@@ -308,7 +308,7 @@ class TPUConnectorScheduler():
             num_external_tokens (int): the number of tokens that will be
                 loaded from the external KV cache.
         """
-        if self.is_producer:
+        if self.is_producer or not request.kv_transfer_params:
             return
 
         params = request.kv_transfer_params
@@ -469,10 +469,13 @@ class TPUConnectorWorker:
 
     def __del__(self):
         if self.is_producer:
-            self.pull_notify_listener_t.join(timeout=0)
+            if hasattr(self, "pull_notify_listener_t"):
+                self.pull_notify_listener_t.join(timeout=0)
         else:
-            self.pull_executor.shutdown(wait=False)
-        self.zmq_cxt.destroy(linger=0)
+            if hasattr(self, "pull_executor"):
+                self.pull_executor.shutdown(wait=False)
+        if hasattr(self, "zmq_cxt"):
+            self.zmq_cxt.destroy(linger=0)
 
     def register_runner(self, runner: TPUModelRunner):
         self.runner = runner

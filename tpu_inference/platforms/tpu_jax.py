@@ -45,14 +45,13 @@ class TpuPlatform(Platform):
     simple_compile_backend: str = "openxla"
 
     supported_quantization: list[str] = [
-        "tpu_int8", "compressed-tensors", "awq", "fp8"
+        "tpu_int8", "compressed-tensors", "awq", "fp8", "mxfp4"
     ]
 
     additional_env_vars: list[str] = [
         "JAX_RANDOM_WEIGHTS", "PHASED_PROFILING_DIR",
         "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS",
-        "TPU_MULTIHOST_BACKEND", "VLLM_MLA_DISABLE", "NEW_MODEL_DESIGN",
-        "TPU_BACKEND_TYPE"
+        "TPU_MULTIHOST_BACKEND", "VLLM_MLA_DISABLE", "TPU_BACKEND_TYPE"
     ]
 
     @classmethod

@@ -1413,7 +1413,7 @@ def ragged_paged_attention(
     #   del num_kv_pages_per_block
     #   del num_queries_per_block
     if is_pure_decode:
-        bq_sz, bkv_p, bq_csz, bkv_cp = 16, 8, 8, 8
+        bq_sz, bkv_p, bq_csz, bkv_cp = 1, 16, 1, 16
     else:
         bq_sz, bkv_p, bq_csz, bkv_cp = get_fixed_fetch_and_compute_block_sizes(
             q.dtype,

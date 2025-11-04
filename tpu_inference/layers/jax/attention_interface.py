@@ -343,6 +343,11 @@ def attention(
     md = attention_metadata
 
     # (T, N, H)
+    # jax.debug.print("mdseq_lens: {x}", x=md.seq_lens)
+    # jax.debug.print("mdblock_tables: {x}", x=md.block_tables.shape)
+    # jax.debug.print("mdquery_start_loc: {x}", x=md.query_start_loc)
+    # jax.debug.print("mdrequest_distribution: {x}", x=md.request_distribution)
+
     output, kv_cache = sharded_ragged_paged_attention(
         head_dim_original**-0.5, mesh, attention_chunk_size, q_scale, k_scale,
         v_scale, is_pure_decode)(
