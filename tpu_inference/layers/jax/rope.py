@@ -1,10 +1,11 @@
 import math
 from dataclasses import dataclass, field
-from typing import Optional, Tuple
 
 import jax
 from flax import nnx
 from jax import numpy as jnp
+from jax.experimental.layout import Layout, with_layout_constraint
+from jax.sharding import NamedSharding, PartitionSpec
 
 
 @dataclass(kw_only=True)
@@ -16,7 +17,7 @@ class RotaryEmbedding(nnx.Module):
     rope_theta: float
     original_max_position_embeddings: int
     dtype: jnp.dtype
-    sin_cos_cache: Optional[jax.Array] = field(init=False, default=None)
+    sin_cos_cache: jax.Array | None = field(init=False, default=None)
 
     def initialize_cache(self):
         """Computes and caches the sin/cos embeddings."""
@@ -72,7 +73,7 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
     mscale_value: float = 1
     mscale_all_dim: float = 0
 
-    def initialize_cache(self):
+    def initialize_cache(self, mesh: jax.sharding.Mesh):
         """Computes and caches the sin/cos embeddings."""
         # The second condition is for the Qwix case, where we need to call `initialize_cache` on
         # the abstract model.  Thus, when we go to call `initialize_cache` on the concrete model,
@@ -81,9 +82,11 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         if self.sin_cos_cache is not None and not isinstance(
                 self.sin_cos_cache, jax.ShapeDtypeStruct):
             return
-        self.mscale = _yarn_get_mscale(
+        mscale_val = _yarn_get_mscale(
             self.scaling_factor, self.mscale_value) / _yarn_get_mscale(
                 self.scaling_factor, self.mscale_all_dim)
+        replicated_sharding = NamedSharding(mesh, PartitionSpec())
+        self.mscale = jax.device_put(mscale_val, replicated_sharding)
         self.sin_cos_cache = self._compute_sin_cos()
 
     def _compute_inv_freq(self):
@@ -103,6 +106,7 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
             1 - inv_freq_mask) + inv_freq_extrapolation * inv_freq_mask
         return inv_freq
 
+    @jax.jit
     def _compute_sin_cos(self):
         inv_freq_H = self._compute_inv_freq()
         t = jnp.arange(self.original_max_position_embeddings *
@@ -111,12 +115,20 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         freqs = jnp.einsum("...T,k->...Tk", t, inv_freq_H)
         sin, cos = jnp.sin(freqs) * self.mscale, jnp.cos(freqs) * self.mscale
         cache = jnp.concatenate((cos, sin), axis=-1)
-        return cache
+        H = cache.shape[1]
+        target_dim = ((H - 1) // 128 + 1) * 128
+        padding_amount = target_dim - self.rotary_dim
+        pad_width = ((0, 0), (0, padding_amount))
+        cache_padded = jnp.pad(cache, pad_width, mode='constant')
+        desired_layout = Layout(major_to_minor=(1, 0))
+        cache_padded = with_layout_constraint(cache_padded, desired_layout)
+        return cache_padded
 
     def apply_rope(self, positions: jax.Array, x_TNH: jax.Array):
         assert x_TNH.ndim == 3
         assert self.sin_cos_cache is not None, "RoPE cache not initialized."
-        cos_sin_TH = self.sin_cos_cache[positions]
+        cos_sin_padded = self.sin_cos_cache[positions]
+        cos_sin_TH = cos_sin_padded[:, :self.rotary_dim]
         # cos, sin: (T, H/2)
         cos_TH, sin_TH = jnp.split(cos_sin_TH, 2, axis=-1)
         assert sin_TH.ndim == 2 and cos_TH.ndim == 2
@@ -185,7 +197,7 @@ class GptOssRotaryEmbedding(nnx.Module):
     rope_ntk_alpha: float = 1.0
     rope_ntk_beta: float = 32.0
 
-    def _compute_concentration_and_inv_freq(self) -> Tuple[float, jax.Array]:
+    def _compute_concentration_and_inv_freq(self) -> tuple[float, jax.Array]:
         """
         Computes the inverse frequencies and concentration factor for YaRN.
         See YaRN paper: https://arxiv.org/abs/2309.00071
@@ -219,7 +231,7 @@ class GptOssRotaryEmbedding(nnx.Module):
         return concentration, inv_freq
 
     def _compute_cos_sin(self,
-                         positions: jax.Array) -> Tuple[jax.Array, jax.Array]:
+                         positions: jax.Array) -> tuple[jax.Array, jax.Array]:
         """Computes cosine and sine embeddings for given positions."""
         concentration, inv_freq_H = self._compute_concentration_and_inv_freq()
 
@@ -234,7 +246,7 @@ class GptOssRotaryEmbedding(nnx.Module):
         return cos, sin
 
     def __call__(self, query_TNH: jax.Array, key_TNH: jax.Array,
-                 positions: jax.Array) -> Tuple[jax.Array, jax.Array]:
+                 positions: jax.Array) -> tuple[jax.Array, jax.Array]:
         """
         Applies rotary embeddings to query and key tensors.
         Args:
