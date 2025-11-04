@@ -349,7 +349,9 @@ class TPUConnectorScheduler():
                 remote_host=params["remote_host"],
                 remote_port=params["remote_port"],
             )
-        logger.info(f"TPUConnector Scheduler update_state_after_alloc -->  reqs_to_load={self.reqs_to_load}")
+        logger.info(
+            f"TPUConnector Scheduler update_state_after_alloc -->  reqs_to_load={self.reqs_to_load}"
+        )
 
     def build_connector_meta(self) -> TPUConnectorMetadata:
         """

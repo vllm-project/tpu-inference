@@ -6,7 +6,6 @@ import ray
 import vllm.envs as envs
 from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.multimodal.inputs import MultiModalKwargs
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
@@ -254,8 +253,9 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         start_rank = 0
         for i, item in enumerate(sorted_worker_metadata):
             item.adjusted_rank = i + start_rank
-        logger.info(f"Initialized sorted worker_metadata: {sorted_worker_metadata}")
-        
+        logger.info(
+            f"Initialized sorted worker_metadata: {sorted_worker_metadata}")
+
         self.workers = [item.worker for item in sorted_worker_metadata]
         rerank_mapping = {
             item.created_rank: item.adjusted_rank
