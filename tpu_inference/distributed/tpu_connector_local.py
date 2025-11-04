@@ -635,13 +635,13 @@ class TPUConnectorScheduler():
         if should_save:
             # get src block_ids for save
             # TODO(jcgu): explain why need to recompute
-            num_skipping_leading_blocks = tracker.save_watermark // self.block_size
-            num_skipping_leading_tokens = num_skipping_leading_blocks * self.block_size
+            num_skip_leading_blocks = tracker.save_watermark // self.block_size
+            num_skip_leading_tokens = num_skip_leading_blocks * self.block_size
             src_block_ids = tracker.block_ids[
-                num_skipping_leading_blocks:adjusted_num_total_blocks]
+                num_skip_leading_blocks:adjusted_num_total_blocks]
             # This is a real save operation.
             save_spec = SaveSpec(
-                num_skip_leading_tokens=num_skipping_leading_tokens,
+                num_skip_leading_tokens=num_skip_leading_tokens,
                 num_total_tokens=adjusted_num_total_tokens,
                 is_final_save=is_finished,
                 skip_save=False,
@@ -968,11 +968,9 @@ class TPUConnectorWorker:
             return req_id
 
         blocks_to_save = save_spec.src_blocks
-        num_blocks_to_save = len(blocks_to_save)
         num_total_tokens = save_spec.num_total_tokens
         num_skip_leading_tokens = save_spec.num_skip_leading_tokens
 
-        assert num_blocks_to_save > 0, " no blocks to save"
         assert num_total_tokens <= len(
             full_token_ids), f"{num_total_tokens} > {len(full_token_ids)}"
 
@@ -981,26 +979,8 @@ class TPUConnectorWorker:
             logger.info(f"Request {req_id}: No new tokens to save.")
             return req_id
 
-        # Verify if blocks_to_save is a contiguous subarray of full_block_ids
-        first_src_block = blocks_to_save[0]
-        last_src_block = blocks_to_save[-1]
-        try:
-            first_idx_in_full = full_block_ids.index(first_src_block)
-            last_idx_in_full = full_block_ids.index(last_src_block)
-            if not (last_idx_in_full - first_idx_in_full + 1
-                    == len(blocks_to_save)):
-                raise ValueError(
-                    f"Request({req_id}): blocks_to_save {blocks_to_save} does not exist in full_block_ids {full_block_ids}"
-                )
-        except ValueError:
-            raise ValueError(
-                f"Request({req_id}): blocks_to_save {blocks_to_save} contains blocks not present in local_block_ids {full_block_ids}"
-            )
-
         process_token_ids = full_token_ids[:num_total_tokens]
         tokens_to_save = process_token_ids[num_skip_leading_tokens:]
-
-        # Calculate the block slice.
 
         logger.info(f"Request {req_id} save details: "
                     f"full_block_ids len={len(full_block_ids)}, "
@@ -1020,6 +1000,22 @@ class TPUConnectorWorker:
                 f"Request {req_id}: No new tokens to save, but processing as final save."
             )
             return req_id
+
+        # Verify if blocks_to_save is a contiguous subarray of full_block_ids
+        first_src_block = blocks_to_save[0]
+        last_src_block = blocks_to_save[-1]
+        try:
+            first_idx_in_full = full_block_ids.index(first_src_block)
+            last_idx_in_full = full_block_ids.index(last_src_block)
+            if not (last_idx_in_full - first_idx_in_full + 1
+                    == len(blocks_to_save)):
+                raise ValueError(
+                    f"Request({req_id}): blocks_to_save {blocks_to_save} does not exist in full_block_ids {full_block_ids}"
+                )
+        except ValueError:
+            raise ValueError(
+                f"Request({req_id}): blocks_to_save {blocks_to_save} contains blocks not present in local_block_ids {full_block_ids}"
+            )
 
         try:
             start_time = time.time()
@@ -1100,32 +1096,6 @@ class TPUConnectorWorker:
                         f"chunk_hash={key.chunk_hash}, "
                         f" local_chunk_idx={i}, chunk_size={split_size_list[i]}"
                     )
-
-                # # The flat_kv_caches_cpu array corresponds to the new tokens,
-                # # so its indexing is relative to the start of the new data.
-                # for abs_start_idx, abs_end_idx, key in relevant_keys:
-                #     logger.info(
-                #         f"Request {req_id}: Processing relevant key: "
-                #         f"abs_start_idx={abs_start_idx}, abs_end_idx={abs_end_idx}, "
-                #         f"chunk_hash={key.chunk_hash}")
-                #     # Calculate indices relative to the start of our new data slice.
-                #     rel_start_idx = abs_start_idx - save_spec.skip_leading_tokens
-                #     rel_end_idx = abs_end_idx - save_spec.skip_leading_tokens
-                #     logger.info(
-                #         f"Request {req_id}: Relative indices for slicing: "
-                #         f"rel_start_idx={rel_start_idx}, rel_end_idx={rel_end_idx}"
-                #     )
-
-                #     # Slice the data and add to the backend.
-                #     value_for_key = [
-                #         jax.lax.slice_in_dim(flat_layer_cache,
-                #                              rel_start_idx,
-                #                              rel_end_idx,
-                #                              axis=0)
-                #         for flat_layer_cache in flat_kv_caches_cpu
-                #     ]
-                #     jax.block_until_ready(value_for_key)
-                #     self.cpu_backend.add(key, value_for_key)
 
                 logger.info(
                     f"Request {req_id}: Added {len(relevant_keys)} keys to CPU backend."
