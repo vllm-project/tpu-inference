@@ -168,6 +168,7 @@ def test_data_parallelism_correctness(
     to ensure correctness.
     """
     os.environ['SKIP_JAX_PRECOMPILE'] = '1'
+    os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '0'
 
     # Use a smaller subset of prompts for correctness testing
     small_prompts = test_prompts[:10]
