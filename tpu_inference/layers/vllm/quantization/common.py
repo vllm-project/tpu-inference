@@ -51,7 +51,6 @@ class JaxCommonLinearConfig:
                 self.weight_sharding = P(ShardingAxisName.MLP_TENSOR, None)
 
             if self.enable_sequence_parallelism:
-                # TODO(wenxindongwork): should sequence be sharded on the attn_dp axis as well?
                 self.input_sharding = P(ShardingAxisName.MLP_TENSOR, None)
 
             if isinstance(layer, MergedColumnParallelLinear) or isinstance(
