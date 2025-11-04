@@ -445,12 +445,12 @@ class TPUConnectorScheduler():
         num_matched_tokens = 0
         # The generator needs to be consumed to count.
         keys = list(request_keys)
-        for start_idx, end_idx, key in keys:
+        for start_token_idx, end_token_idx, key in keys:
             logger.info(
-                f"  Processing chunk {start_idx}-{end_idx} with hash {key.chunk_hash}"
+                f"  Processing chunk {start_token_idx}-{end_token_idx} with hash {key.chunk_hash}"
             )
             if self.cpu_backend.contains(key, pin_on_hit=True):
-                num_matched_tokens = end_idx
+                num_matched_tokens = end_token_idx
                 logger.info(
                     f"  -> HIT. Total matched tokens so far: {num_matched_tokens}"
                 )
@@ -503,7 +503,7 @@ class TPUConnectorScheduler():
         self._external_cache_hits[request.request_id] = num_matched_tokens
 
         if num_to_load > 0 or is_full_prefix_hit:
-            # NOTE(jcgu): put dst_blocks later when blocks are allocated.
+            # NOTE(jcgu): fill real dst_blocks later when blocks get allocated.
             self.load_specs[request.request_id] = LoadSpec(
                 num_matched_tokens=num_matched_tokens,
                 dst_blocks=[],
@@ -644,12 +644,13 @@ class TPUConnectorScheduler():
             # we have saved:
             # blocks:     [------b0------] [------b1------]
             # tokens:     [t0, t1, t2, t3] [t4, t5,]
-            # hash keys:  [key0, key1]
+            # cpu-backend:{key0: b0, key1:b1(2 tokens, padded)}
             #
             # Now, we have 2 new tokens in the sequence
             # blocks:     [------b0------] [------b1------]
             # tokens:     [t0, t1, t2, t3] [t4, t5, t6, t7]
-            # hash keys:  [key0, key1, key1_2]
+            # cpu-backend:{key0: b0, key1:b1(2 tokens, padded),
+            #              key1_2: b1_2(4 tokens)}
             # In cpu-backend, since b0's token-sequence has been changed, it
             # will have a new key.
             #
@@ -849,11 +850,6 @@ class TPUConnectorScheduler():
                         f"total_tokens={len(tracker.token_ids)}, "
                         f"total_blocks={len(tracker.block_ids)}")
 
-            # NOTE(jcgu): why only save op here?
-            if req_id in self.load_specs:
-                logger.warning(f"   - Find a cached request({req_id}) also "
-                               f" have load spec {self.load_specs[req_id]}")
-
             # Immediately prepare metadata for this updated request. This will
             # typically be a save operation for the new tokens.
             req_meta = self._prepare_req_meta(tracker,
@@ -990,6 +986,7 @@ class TPUConnectorWorker:
         blocks_to_save = save_spec.src_blocks
         num_total_tokens = save_spec.num_total_tokens
         num_skip_leading_tokens = save_spec.num_skip_leading_tokens
+        num_blocks_to_save = len(blocks_to_save)
 
         assert num_total_tokens <= len(
             full_token_ids), f"{num_total_tokens} > {len(full_token_ids)}"
@@ -1081,13 +1078,8 @@ class TPUConnectorWorker:
                 process_token_ids)
             all_keys = list(all_keys_generator)
 
-            total_tokens_to_save = len(blocks_to_save) * self.block_size
-            num_full_chunks = total_tokens_to_save // self.cpu_chunk_size
-            split_size_list = [self.cpu_chunk_size] * num_full_chunks
-            last_chunk_size = total_tokens_to_save % self.cpu_chunk_size
-            if last_chunk_size > 0:
-                split_size_list.append(last_chunk_size)
-            num_chunks = len(split_size_list)
+            # NOTE(jcgu): we keep cpu_chunk_size == block_size
+            split_size_list = [self.cpu_chunk_size] * num_blocks_to_save
             chunks_on_cpu = [
                 jax.lax.split(flat_layer_cache, split_size_list, axis=0)
                 for flat_layer_cache in flat_kv_caches_cpu
@@ -1096,23 +1088,25 @@ class TPUConnectorWorker:
 
             # Filter for keys that correspond to the new data we are saving.
             relevant_keys = []
-            for abs_start_idx, abs_end_idx, key in all_keys:
-                if abs_start_idx >= num_skip_leading_tokens:
-                    relevant_keys.append((abs_start_idx, abs_end_idx, key))
+            for abs_start_token_idx, abs_end_token_idx, key in all_keys:
+                if abs_start_token_idx >= num_skip_leading_tokens:
+                    relevant_keys.append(
+                        (abs_start_token_idx, abs_end_token_idx, key))
 
             if relevant_keys:
                 assert len(
                     relevant_keys
-                ) == num_chunks, f"{len(relevant_keys)} != {num_chunks}"
-                for i in range(num_chunks):
-                    abs_start_idx, abs_end_idx, key = relevant_keys[i]
+                ) == num_blocks_to_save, f"{len(relevant_keys)} != {num_blocks_to_save}"
+                for i in range(num_blocks_to_save):
+                    abs_start_token_idx, abs_end_token_idx, key = relevant_keys[
+                        i]
                     cur_chunk_cross_layers = [
                         chunks_on_cpu[j][i] for j in range(self.num_layers)
                     ]
                     self.cpu_backend.add(key, cur_chunk_cross_layers)
                     logger.info(
                         f"Request {req_id}: Saving to CPU chunk: "
-                        f"abs_start_idx={abs_start_idx}, abs_end_idx={abs_end_idx}, "
+                        f"abs_start_token_idx={abs_start_token_idx}, abs_end_token_idx={abs_end_token_idx}, "
                         f"chunk_hash={key.chunk_hash}, "
                         f" local_chunk_idx={i}, chunk_size={split_size_list[i]}"
                     )
@@ -1167,7 +1161,6 @@ class TPUConnectorWorker:
                             f"Request {meta.req_id}: Final save is a no-op. Marking as finished."
                         )
                         self.finished_save_reqs.add(meta.req_id)
-                        # NOTE(jcgu): only keep the saved tokens
                         self._tokens_to_unpin[
                             meta.req_id] = meta.token_ids[:meta.save_spec.
                                                           num_total_tokens]
@@ -1291,28 +1284,31 @@ class TPUConnectorWorker:
             # and the inner lists will hold the data chunks for that layer.
             assembled_kv_on_cpu = [[] for _ in range(self.num_layers)]
             # Fetch and slice chunks from the backend.
-            for start_idx, end_idx, key in keys_generator:
+            for start_token_idx, end_token_idx, key in keys_generator:
                 # This chunk is entirely before the delta, so we can skip it.
-                if end_idx <= num_skip_leading_tokens:
+                if end_token_idx <= num_skip_leading_tokens:
                     continue
                 # This chunk is entirely after the delta.
-                if start_idx >= num_matched_tokens:
+                if start_token_idx >= num_matched_tokens:
                     continue
 
                 cached_value = self.cpu_backend.get(key)
                 if cached_value:
                     # Calculate the precise slice needed from this specific chunk.
-                    # rel_start is the index within this chunk where the delta tokens begin.
-                    if start_idx < num_skip_leading_tokens:
-                        assert False, "start_idx {start_idx} should not be less than num_skip_leading_tokens {num_skip_leading_tokens}, when cpu_chunk_size == block_size"
-                        rel_start = num_skip_leading_tokens - start_idx
-                        rel_end = end_idx - num_skip_leading_tokens
+                    # rel_start_token_idx is the index within this chunk where the delta tokens begin.
+                    if start_token_idx < num_skip_leading_tokens:
+                        assert False, f"start_token_idx {start_token_idx} should not be less than num_skip_leading_tokens {num_skip_leading_tokens}, when cpu_chunk_size == block_size"
+                        rel_start_token_idx = num_skip_leading_tokens - start_token_idx
+                        rel_end_token_idx = end_token_idx - num_skip_leading_tokens
                         for i in range(self.num_layers):
                             # NOTE(jcgu): if only one block to load (and it's a padded block),
-                            # then rel_end will not be inaccurate (< block_size).
+                            # then rel_end_token_idx will not be inaccurate (< block_size).
                             # Slice the jax array fetched from the backend.
                             sliced_chunk = jax.lax.slice_in_dim(
-                                cached_value[i], rel_start, rel_end, axis=0)
+                                cached_value[i],
+                                rel_start_token_idx,
+                                rel_end_token_idx,
+                                axis=0)
                             assembled_kv_on_cpu[i].append(sliced_chunk)
                     else:
                         for i in range(self.num_layers):
@@ -1324,7 +1320,7 @@ class TPUConnectorWorker:
                     return
 
             # swap-in
-            # output: [[kv_chunks * num_chunks] * num_layer]
+            # output: [[cpu_chunk_size * num_chunks] * num_layer]
             raw_chunked_kv_on_tpu = self.swap_in_fn(assembled_kv_on_cpu)
             jax.block_until_ready(raw_chunked_kv_on_tpu)
 
