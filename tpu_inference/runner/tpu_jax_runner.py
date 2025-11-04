@@ -4,7 +4,6 @@ import os
 import random
 from contextlib import nullcontext
 from dataclasses import dataclass
-from time import time
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 import jax
@@ -810,11 +809,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             return async_model_runner_output
 
         if spec_decode_metadata is None:
-            start_time = time()
             next_tokens = np.asarray(jax.device_get(next_tokens))
-            logger.info(
-                f"output device to host transfer time: {time() - start_time:.3f}s"
-            )
             # Map tokens back to the pre-dp shuffling order
             if logits_indices_selector is not None:
                 next_tokens = next_tokens[logits_indices_selector]
@@ -1181,7 +1176,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         logits_indices_cpu = logits_indices
         seq_lens_cpu = seq_lens
 
-        start_time = time()
         (input_ids, positions, block_tables, query_start_loc, seq_lens,
          logits_indices, request_distribution, logits_indices) = device_array(
              self.mesh,
@@ -1189,7 +1183,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
               logits_indices, request_distribution, logits_indices),
              sharding=self.data_parallel_attn_sharding,
          )
-        # logger.info("input data transfer to device time: {:.3f} sec".format(time() - start_time))
         # Async scheduling: substitute placeholder tokens for DP
         if self.scheduler_config.async_scheduling and self._pre_async_results is not None:
             # Collect all token indices that need substitution across all DP ranks
