@@ -195,6 +195,7 @@ class Llama4ForCausalLM(nnx.Module):
                 rngs=self.rng,
                 with_scale=True,
                 dtype=dtype,
+                activation_ffw_td = ('data', None),
             )
 
             pre_mlp_norm = RMSNorm(
@@ -204,6 +205,7 @@ class Llama4ForCausalLM(nnx.Module):
                 with_scale=True,
                 dtype=dtype,
                 random_init=force_random_weights,
+                activation_ffw_td = ('data', None),
             )
 
             block = SharedExpertsTransformerBlock(
