@@ -43,9 +43,9 @@ class Attention(nnx.Module):
     mesh: Mesh
     kv_cache_dtype: str
 
-    dnh_sharding: Sharding = (ShardingAxisName.ATTN_DATA)
-    dkh_sharding: Sharding = (ShardingAxisName.ATTN_DATA)
-    nhd_sharding: Sharding = (ShardingAxisName.ATTN_DATA)
+    dnh_sharding: Sharding = ()
+    dkh_sharding: Sharding = ()
+    nhd_sharding: Sharding = ()
 
     activation_q_td: Sharding = (ShardingAxisName.ATTN_DATA)
     query_tnh: P = P(ShardingAxisName.ATTN_DATA)
