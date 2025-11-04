@@ -8,6 +8,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from vllm.lora.request import LoRARequest
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
 from vllm.utils.collection_utils import swap_dict_values
 from vllm.v1.core.sched.output import NewRequestData
@@ -131,6 +132,7 @@ class InputBatch:
         self.req_output_token_ids: list[Optional[list[int]]] = []
 
         self.request_distribution: list[int] = [0, 0, 0]
+        self.pooling_params: dict[str, PoolingParams] = {}
 
     @property
     def req_ids(self) -> list[str]:
@@ -197,6 +199,9 @@ class InputBatch:
         if sampling_params.min_tokens:
             self.min_tokens[req_index] = (sampling_params.min_tokens,
                                           sampling_params.all_stop_token_ids)
+
+        if request.pooling_params is not None:
+            self.pooling_params[req_id] = request.pooling_params
 
         # NOTE(woosuk): self.generators should not include the requests that
         # do not have their own generator.
@@ -272,6 +277,7 @@ class InputBatch:
             # False means we don't fill with -inf.
             self.allowed_token_ids_mask_cpu[req_index].fill_(False)
         self.bad_words_token_ids.pop(req_index, None)
+        self.pooling_params.pop(req_id, None)
         return req_index
 
     def swap_states(self, i1: int, i2: int) -> None:
@@ -410,6 +416,19 @@ class InputBatch:
     @property
     def max_num_logprobs(self) -> Optional[int]:
         return max(self.num_logprobs.values()) if self.num_logprobs else None
+
+    def get_pooling_params(self) -> list[PoolingParams]:
+        if not self.pooling_params:
+            return []
+
+        if len(self.pooling_params) != self.num_reqs:
+            missing = set(self.req_ids) - set(self.pooling_params)
+            raise ValueError(
+                "Pooling params are missing for requests: "
+                f"{sorted(missing)}"
+            )
+
+        return [self.pooling_params[req_id] for req_id in self.req_ids]
 
     def make_lora_inputs(
         self, num_scheduled_tokens: np.ndarray

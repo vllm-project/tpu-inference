@@ -46,6 +46,11 @@ from tpu_inference.layers.jax.sample.sampling import (compute_logprobs,
                                                       gather_logprobs, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
+from tpu_inference.layers.jax.pool.pooling_metadata import (
+    SUPPORTED_POOLING_TASKS,
+    TPUSupportedPoolingMetadata,
+)
+from tpu_inference.layers.jax.sharding import build_mesh
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.model_loader import get_model
 from tpu_inference.models.jax.utils.weight_utils import (
@@ -248,6 +253,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.uses_mrope, self.model_config)
         self.lora_utils = LoraUtils(self)
 
+        self.is_pooling_model = False
         cache_config = self.cache_config
         if cache_config.cache_dtype == "auto":
             model_dtype = self.dtype
@@ -490,6 +496,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         )
 
         multimodal_fns = multimodal_fns or {}
+        self.is_pooling_model = hasttr(self.model, "pooler") 
         self.precompile_vision_encoder_fn = multimodal_fns.get(
             "precompile_vision_encoder_fn", None)
         self.get_multimodal_embeddings_fn = multimodal_fns.get(
@@ -684,6 +691,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 #     "Should not schedule a request that does nothing!")
             return DUMMY_METADATA, EMPTY_MODEL_RUNNER_OUTPUT
 
+<<<<<<< HEAD:tpu_inference/runner/tpu_runner.py
         # TODO(pooyam): I guess we can remove returning sampling_metadata in `_prepare_inputs` after https://github.com/njhill/vllm/commit/b7433ca1a47732394b1bdea4099d98389515954b
         (
             input_ids,
@@ -693,6 +701,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             spec_decode_metadata,
             logits_indices_selector,
         ) = self._prepare_inputs(scheduler_output)
+=======
+        (
+            input_ids,
+            attn_metadata,
+            sampling_metadata,
+            pooling_metadata,
+            logits_indices,
+            spec_decode_metadata,
+        ) = self._prepare_inputs(scheduler_output)
+
+>>>>>>> 8a07e5ea (merge main):tpu_inference/runner/tpu_jax_runner.py
 
         # multi-modal support
         if self.is_multimodal_model:
@@ -736,6 +755,59 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                      tuple(self.layer_name_to_kvcache_index.items()),
                      lora_metadata,
                  )
+
+            if self.is_pooling_model:
+                assert pooling_metadata is not None
+                pooling_result = pool(self.model.pooler, hidden_states, pooling_metadata )
+
+                num_reqs = self.input_batch.num_reqs
+                req_ids = cast(list[str], self.input_batch.req_ids[:num_reqs])
+                prompt_logprobs_dict = {req_id: None for req_id in req_ids}
+                prompt_lens = np.asarray(
+                    jax.device_get(pooling_metadata.prompt_lens)
+                )[:num_reqs]
+                seq_lens_cpu = self.seq_lens_cpu[:num_reqs]
+
+                task_id = pooling_metadata.primary_task_id
+                pooler_output: list[torch.Tensor | None] = []
+
+                if task_id == SUPPORTED_POOLING_TASKS["embed"]:
+                    embeddings = np.asarray(
+                        jax.device_get(pooling_result.embeddings)
+                    )[:num_reqs]
+                    dimensions = np.asarray(
+                        jax.device_get(pooling_metadata.dimensions)
+                    )[:num_reqs]
+
+                    for idx in range(num_reqs):
+                        if seq_lens_cpu[idx] != prompt_lens[idx]:
+                            pooler_output.append(None)
+                            continue
+
+                        embedding = embeddings[idx]
+                        dim_override = int(dimensions[idx])
+                        if dim_override > 0:
+                            embedding = embedding[:dim_override]
+                        embedding_np = embedding.astype(np.float32, copy=False)
+                        pooler_output.append(
+                            torch.tensor(embedding_np, dtype=torch.float32)
+                        )
+
+                else: 
+                    raise NotImplementedError(
+                        f"Unsupported pooling task id: {task_id}"
+                    )
+
+                model_runner_output = ModelRunnerOutput(
+                    req_ids=req_ids,
+                    req_id_to_index=self.input_batch.req_id_to_index,
+                    sampled_token_ids=[],
+                    logprobs=None,
+                    prompt_logprobs_dict=prompt_logprobs_dict,
+                    pooler_output=pooler_output,
+                    kv_connector_output=kv_connector_output,
+                )
+                return attn_metadata, model_runner_output
 
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)
@@ -1399,6 +1471,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
+        pooling_metadata = None
 
         # Get the number of scheduled tokens for each request.
         num_scheduled_tokens_per_req = []
@@ -1435,6 +1508,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # For each scheduled token, what is its position in corresponding req.
         arange = np.concatenate(
             [self.arange_cpu[:n] for n in num_scheduled_tokens_per_req])
+
+        if self.is_pooling_model:
+            pooling_metadata = TPUSupportedPoolingMetadata.from_input_batch(
+                self.mesh,
+                self.input_batch,
+                padded_num_reqs,
+            )
 
         # Get positions.
         positions_np = self.positions_cpu[:total_num_scheduled_tokens]
@@ -1556,9 +1636,21 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # This is for making these cpu buffers hidden during tracing
         attention_metadata.query_start_loc_cpu = query_start_loc_cpu
         attention_metadata.seq_lens_cpu = seq_lens_cpu
+<<<<<<< HEAD:tpu_inference/runner/tpu_runner.py
         logits_indices_selector = None
         return (input_ids, attention_metadata, sampling_metadata,
                 logits_indices, spec_decode_metadata, logits_indices_selector)
+=======
+
+        return (
+            input_ids,
+            attention_metadata,
+            sampling_metadata,
+            pooling_metadata,
+            logits_indices,
+            spec_decode_metadata,
+        )
+>>>>>>> 8a07e5ea (merge main):tpu_inference/runner/tpu_jax_runner.py
 
     def _get_input_ids_embeds(self, input_ids: jax.Array,
                               mm_embeds: list[jax.Array]):
