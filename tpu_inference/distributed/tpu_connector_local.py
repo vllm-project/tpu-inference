@@ -154,7 +154,6 @@ class LoadSpec:
     num_matched_tokens: int
     dst_blocks: list[int]
     can_load: bool = False
-    is_full_prefix_hit: bool = False
     num_skip_leading_tokens: int = 0
 
 
@@ -182,7 +181,6 @@ class TPUReqMeta:
             load_info += (
                 f", num_matched_tokens={self.load_spec.num_matched_tokens}, "
                 f"can_load={self.load_spec.can_load}, "
-                f"is_full_prefix_hit={self.load_spec.is_full_prefix_hit}, "
                 f"num_skip_leading_tokens={self.load_spec.num_skip_leading_tokens}, "
                 f"dst_blocks={self.load_spec.dst_blocks}")
         save_info = f"save_spec_exists={self.save_spec is not None}"
@@ -476,12 +474,11 @@ class TPUConnectorScheduler():
             # https://github.com/vllm-project/vllm/blob/b8b302cde434df8c9289a2b465406b47ebab1c2d/vllm/v1/core/sched/scheduler.py#L438 assetion.
             # By reporting N-1, we ensure the scheduler allocates resources
             # for and schedules the computation of the "last" token of the
-            # prompt. The worker-side logic (`start_load_kv`) is aware of this
-            # state via `is_full_prefix_hit` flag in the load_spec.
-            # It will load the true N tokens from the cache but only copy the first N-1 tokens'
-            # worth of KV data to the TPU, fitting perfectly into the allocation.
-            # The model then "re-computes" the final prompt token, and from there,
-            # the request can seamlessly transition to the decoding phase.
+            # prompt. The worker (`start_load_kv`) still load the KV of N
+            # matched tokens, but the final token'KV will not be used, but be
+            # "re-computed" in the following forward pass (the loaded data in
+            # the slot gets override.) And from there, the request can
+            # seamlessly transition to the decoding phase.
             num_matched_for_scheduler = num_matched_tokens - 1
             logger.info(
                 f"Request {request.request_id}: Full prompt hit. Reporting {num_matched_for_scheduler} matched tokens. Actual hit from backend is {num_matched_tokens} tokens"
@@ -502,12 +499,11 @@ class TPUConnectorScheduler():
 
         self._external_cache_hits[request.request_id] = num_matched_tokens
 
-        if num_to_load > 0 or is_full_prefix_hit:
+        if num_matched_tokens > num_computed_tokens:
             # NOTE(jcgu): fill real dst_blocks later when blocks get allocated.
             self.load_specs[request.request_id] = LoadSpec(
                 num_matched_tokens=num_matched_tokens,
                 dst_blocks=[],
-                is_full_prefix_hit=is_full_prefix_hit,
                 num_skip_leading_tokens=num_computed_tokens,
             )
         return num_to_load, False
@@ -651,7 +647,7 @@ class TPUConnectorScheduler():
             # tokens:     [t0, t1, t2, t3] [t4, t5, t6, t7]
             # cpu-backend:{key0: b0, key1:b1(2 tokens, padded),
             #              key1_2: b1_2(4 tokens)}
-            # In cpu-backend, since b0's token-sequence has been changed, it
+            # In cpu-backend, since b1's token-sequence has been changed, it
             # will have a new key.
             #
             # if we always drop the partial-filled block when saving, then there

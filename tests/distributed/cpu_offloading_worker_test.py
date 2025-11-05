@@ -735,7 +735,6 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
             load_spec = LoadSpec(
                 num_matched_tokens=num_matched_tokens,
                 dst_blocks=dst_blocks,
-                is_full_prefix_hit=False,
                 can_load=True,
                 num_skip_leading_tokens=num_computed_tokens,
             )
