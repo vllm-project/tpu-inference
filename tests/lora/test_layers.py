@@ -197,6 +197,24 @@ def create_random_inputs(
     return inputs, index_mapping, prompt_mapping
 
 
+def _create_linear_and_lora_wrapper(linear, base_linear, lora_cls, vllm_config,
+                                    mesh):
+    base_linear.weight.data = linear.weight.data
+    jax_config = JaxCommonLinearConfig(vllm_config, mesh, base_linear)
+    linear_method = VllmUnquantizedLinearMethod(jax_config)
+    base_linear.quant_method = linear_method
+    linear_method.process_weights_after_loading(
+        base_linear)  # here base_linear.weight is moved to TPU and sharded.
+    assert jax_view(base_linear.weight).platform(
+    ) == 'tpu', 'base_linear.weight should have been moved to TPU.'
+    assert not isinstance(
+        jax_view(base_linear.weight).sharding, jax.sharding.
+        SingleDeviceSharding), 'base_linear.weight should have been sharded.'
+
+    lora_linear = lora_cls(base_linear)
+    return lora_linear
+
+
 @torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 9])
 @pytest.mark.parametrize("repeats", [2])
@@ -219,37 +237,44 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, stage) -> None:
     def create_column_parallel_packed_layer():
         # We first create a base linear layer, then a lora layer to wrap it.
         if repeats == 2:
+
+            def _create_merged_column_linear():
+                return MergedColumnParallelLinear(
+                    64,  # input_size
+                    [64] * repeats,  # output_size
+                    bias=False,
+                    params_dtype=torch.float16)
+
             # In e2e, MergedColumnParallelLinear is created when we load the model. The base_layer weights are sharded and moved to TPU in VllmUnquantizedLinearMethod.process_weights_after_loading.
-            linear = MergedColumnParallelLinear(
-                64,  # input_size
-                [64] * repeats,  # output_size
-                bias=False,
-                params_dtype=torch.float16)
+            linear = _create_merged_column_linear()
             linear.weight.data = torch.rand_like(linear.weight.data)
 
-            base_linear = MergedColumnParallelLinear(
-                64,  # input_size
-                [64] * repeats,  # output_size
-                bias=False,
-                params_dtype=torch.float16)
-            base_linear.weight.data = linear.weight.data
-            vllm_config = dist_init
-            jax_config = JaxCommonLinearConfig(vllm_config, mesh, base_linear)
-            linear_method = VllmUnquantizedLinearMethod(jax_config)
-            base_linear.quant_method = linear_method
-            linear_method.process_weights_after_loading(
-                base_linear
-            )  # here base_linear.weight is moved to TPU and sharded.
-            assert jax_view(base_linear.weight).platform(
-            ) == 'tpu', 'base_linear.weight should have been moved to TPU.'
-            assert not isinstance(
-                jax_view(base_linear.weight).sharding,
-                jax.sharding.SingleDeviceSharding
-            ), 'base_linear.weight should have been sharded.'
+            base_linear = _create_merged_column_linear()
+            # base_linear.weight.data = linear.weight.data
+            # vllm_config = dist_init
+            # jax_config = JaxCommonLinearConfig(vllm_config, mesh, base_linear)
+            # linear_method = VllmUnquantizedLinearMethod(jax_config)
+            # base_linear.quant_method = linear_method
+            # linear_method.process_weights_after_loading(
+            #     base_linear
+            # )  # here base_linear.weight is moved to TPU and sharded.
+            # assert jax_view(base_linear.weight).platform(
+            # ) == 'tpu', 'base_linear.weight should have been moved to TPU.'
+            # assert not isinstance(
+            #     jax_view(base_linear.weight).sharding,
+            #     jax.sharding.SingleDeviceSharding
+            # ), 'base_linear.weight should have been sharded.'
 
-            lora_linear = MergedColumnParallelLinearWithLoRA(base_linear)
+            # lora_linear = MergedColumnParallelLinearWithLoRA(base_linear)
+            lora_linear = _create_linear_and_lora_wrapper(
+                linear,
+                base_linear,
+                MergedColumnParallelLinearWithLoRA,
+                vllm_config=dist_init,
+                mesh=mesh)
         elif repeats == 3:
             raise NotImplementedError("NYI: for MergedQKVParallelLinear case")
+
         else:
             raise NotImplementedError("NYI: for QKVParallelLinear case")
 
