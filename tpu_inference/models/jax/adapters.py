@@ -1,7 +1,9 @@
 import typing as tp
 
+import torch
 import jax
 from flax import nnx
+from flax.typing import PRNGKey
 from jax.sharding import Mesh
 
 from tpu_inference.layers.jax.pool.pooler import Pooler
@@ -84,3 +86,31 @@ def as_embedding_model(cls: _T) -> _T:
         "ForEmbedding",
     )
     return ModelForEmbedding  # type: ignore[return-value]
+
+
+
+def init_pooler_from_vllm_model(
+        vllm_model: torch.nn.Module,
+        vllm_config: VllmConfig,
+        rng_key: PRNGKey, 
+        mesh: Mesh,
+):
+    class DummyModule:
+        def __init__(self, vllm_config, rng_key, mesh):
+            pass
+
+    for suffix in _GENERATE_SUFFIXES:
+        if suffix in vllm_model.__class__.__name__:
+            return None
+
+    if "ForEmbedding" in vllm_model.__class__.__name__:
+        EmbedModel = as_embedding_model(DummyModule)
+
+        embed_model = EmbedModel(vllm_config=vllm_config, rng_key=rng_key, mesh=mesh,)
+        embed_model._init_pooler(vllm_config)
+        return embed_model.pooler 
+    else:
+        raise NotImplementedError(
+            f"Pooling initialization for {vllm_model.__class__.__name__} is not implemented."
+        )
+

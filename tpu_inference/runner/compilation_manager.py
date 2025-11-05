@@ -21,6 +21,7 @@ from tpu_inference.layers.jax.sample.sampling_metadata import (
 )
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import device_array
+from torchax.ops.mappings import t2j_dtype
 
 if TYPE_CHECKING:
     from tpu_inference.runner.tpu_runner import TPUModelRunner
@@ -114,31 +115,17 @@ class CompilationManager:
 
         for num_tokens in self.runner.num_tokens_paddings:
             hidden_states = self._create_dummy_tensor(
-                (num_tokens, hidden_size), dtype, sharding=hidden_sharding)
+                (num_tokens, hidden_size), t2j_dtype(dtype), sharding=hidden_sharding)
 
             for num_reqs in self.runner.num_reqs_paddings:
                 if num_reqs == 0 or num_reqs > num_tokens:
                     continue
 
-                prompt_lens = np.ones(num_reqs, dtype=np.int32)
-                first_token_indices = np.arange(num_reqs, dtype=np.int32)
-                last_token_indices = first_token_indices.copy()
-                normalize = np.ones(num_reqs, dtype=np.int8)
+                prompt_lens = self._create_dummy_tensor(num_reqs, dtype = jnp.int32) 
+                first_token_indices = self._create_dummy_tensor(num_reqs, dtype = jnp.int32) 
+                last_token_indices = self._create_dummy_tensor(num_reqs, dtype = jnp.int32) 
+                normalize = self._create_dummy_tensor(num_reqs, dtype = jnp.int32) 
 
-                (
-                    prompt_lens,
-                    normalize,
-                    first_token_indices,
-                    last_token_indices,
-                ) = device_array(
-                    self.runner.mesh,
-                    (
-                        prompt_lens,
-                        normalize,
-                        first_token_indices,
-                        last_token_indices,
-                    ),
-                )
 
                 pooling_metadata = TPUSupportedPoolingMetadata(
                     prompt_lens=prompt_lens,
