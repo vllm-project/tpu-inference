@@ -6,7 +6,6 @@ import jax
 import jax.numpy as jnp
 import torch
 
-from tpu_inference import utils as common_utils
 from jax.experimental.layout import Format, Layout
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torch.nn.parameter import Parameter
