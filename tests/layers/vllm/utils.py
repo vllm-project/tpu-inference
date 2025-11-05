@@ -3,9 +3,9 @@ import torch
 
 
 def get_spmd_mesh(num_devices: int = 1):
-    axis_names = ("data", "model")
+    axis_names = ("data", "attn_dp", "expert", "model")
     devices = sorted(jax.devices(), key=lambda d: d.id)[0:num_devices]
-    mesh_shape = (1, len(devices))
+    mesh_shape = (1, 1, 1, len(devices))
     return jax.make_mesh(mesh_shape, axis_names, devices=devices)
 
 
