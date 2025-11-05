@@ -11,7 +11,6 @@ from tpu_inference import utils
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.attention_interface import attention
 from tpu_inference.layers.jax.rope_interface import apply_rope
-from tpu_inference.layers.jax.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.qwen2 import Qwen2DecoderLayer
 from tpu_inference.models.jax.qwen2 import Qwen2MLP as Qwen3MLP
@@ -39,7 +38,7 @@ class Qwen3Attention(nnx.Module):
                                          self.hidden_size // self.num_heads)
         self.head_dim = utils.get_padded_head_dim(self.head_dim_original)
 
-        sharding_size = mesh.shape["model"] * mesh.shape["attn_dp"]
+        sharding_size = mesh.shape["model"]
         self.num_heads = utils.get_padded_num_heads(self.num_heads,
                                                     sharding_size)
         self.num_kv_heads = utils.get_padded_num_heads(self.num_kv_heads,
@@ -51,8 +50,7 @@ class Qwen3Attention(nnx.Module):
             "TD,DNH->TNH",
             (self.hidden_size, self.num_heads, self.head_dim),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(
-                init_fn, (None, ShardingAxisName.ATTN_HEAD, None)),
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             rngs=rng,
         )
         self.q_norm = nnx.RMSNorm(
@@ -66,8 +64,7 @@ class Qwen3Attention(nnx.Module):
             "TD,DKH->TKH",
             (self.hidden_size, self.num_kv_heads, self.head_dim),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(
-                init_fn, (None, ShardingAxisName.ATTN_HEAD, None)),
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             rngs=rng,
         )
         self.k_norm = nnx.RMSNorm(
@@ -81,16 +78,14 @@ class Qwen3Attention(nnx.Module):
             "TD,DKH->TKH",
             (self.hidden_size, self.num_kv_heads, self.head_dim),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(
-                init_fn, (None, ShardingAxisName.ATTN_HEAD, None)),
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             rngs=rng,
         )
         self.o_proj = nnx.Einsum(
             "TNH,NHD->TD",
             (self.num_heads, self.head_dim, self.hidden_size),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(
-                init_fn, (ShardingAxisName.ATTN_HEAD, None, None)),
+            kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
             rngs=rng,
         )
 
@@ -197,8 +192,7 @@ class Qwen3Model(Qwen2Model):
             num_embeddings=vocab_size,
             features=hidden_size,
             param_dtype=dtype,
-            embedding_init=nnx.with_partitioning(
-                init_fn, (ShardingAxisName.VOCAB, None)),
+            embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
         )
         self.layers = [
@@ -223,7 +217,7 @@ class Qwen3Model(Qwen2Model):
         else:
             self.lm_head = nnx.Param(
                 init_fn(rng.params(), (hidden_size, vocab_size), dtype),
-                sharding=(None, ShardingAxisName.VOCAB),
+                sharding=(None, "model"),
             )
 
 
