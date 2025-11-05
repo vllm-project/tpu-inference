@@ -1,5 +1,6 @@
 from unittest.mock import MagicMock, patch
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
@@ -20,13 +21,16 @@ class TestMultiModalManager:
     def setup_method(self):
         # Mock JAX dependencies
         self.mock_devices = [MagicMock(coords=i) for i in range(4)]
-        self.mock_mesh = MagicMock()
+        device_array = np.array(jax.devices()[:4]).reshape(1, 1, 1, 4)
+        self.mock_mesh = jax.make_mesh(device_array.shape,
+                                       ('data', 'attn_dp', 'expert', 'model'))
         self.mock_rng_key = MagicMock()
 
         with patch('jax.devices', return_value=self.mock_devices), \
              patch('jax.make_mesh', return_value=self.mock_mesh), \
              patch('jax.random.key', return_value=self.mock_rng_key), \
-             patch('tpu_inference.runner.tpu_jax_runner.get_model', return_value=MagicMock()):
+             patch('tpu_inference.runner.tpu_jax_runner.get_model', return_value=MagicMock()), \
+             patch('tpu_inference.runner.tpu_jax_runner.make_optimized_mesh', return_value=self.mock_mesh):
 
             model_config = ModelConfig(tokenizer_mode="auto",
                                        trust_remote_code=False,
