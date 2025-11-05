@@ -84,7 +84,7 @@ class TPUWorker:
                                 if isinstance(device, jaxlib._jax.Device))
         self.ip = ip
         self.prev_worker_ip = prev_worker_ip
-        self.world_size = self.parallel_config.pipeline_parallel_size
+        self.pp_world_size = self.parallel_config.pipeline_parallel_size
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
@@ -97,14 +97,19 @@ class TPUWorker:
         # TPU Worker is initialized. The profiler server needs to start after
         # MP runtime is initialized.
         self.profile_dir = None
-        if envs.VLLM_TORCH_PROFILER_DIR and self.rank < 1:
+        if envs.VLLM_TORCH_PROFILER_DIR and self.rank < 1 and self.pp_world_size == 1:
             if not self.devices or 0 in self.device_ranks:
                 # For TPU, we can only have 1 active profiler session for 1 profiler
                 # server. So we only profile on rank0.
                 self.profile_dir = envs.VLLM_TORCH_PROFILER_DIR
                 logger.info("Profiling enabled. Traces will be saved to: %s",
                             self.profile_dir)
-
+        
+        # For PP, we use MPMD so we want to profile every worker.
+        if self.pp_world_size > 1 and envs.VLLM_TORCH_PROFILER_DIR:
+            self.profile_dir = os.path.join(envs.VLLM_TORCH_PROFILER_DIR, f"rank_{self.rank}")
+            os.makedirs(self.profile_dir, exist_ok=True)
+        
         use_jax_profiler_server = os.getenv("USE_JAX_PROFILER_SERVER", False)
         # Only one instance of profiler is allowed
         if use_jax_profiler_server and self.rank < 1:
@@ -124,6 +129,27 @@ class TPUWorker:
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
     def init_device(self):
+
+        # set tpu visible devices for Jax runtime in single host PP.
+        multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "").lower()
+        if multihost_backend != "ray" and self.parallel_config.pipeline_parallel_size > 1:
+            # Note: a v6e8 TPU vm can only be subsliced into 2 slices with
+            # each with 4 TPU chips each. 
+            # Or subsliced into 8 slices with 1 chip each.
+            # Replace with your own topology.
+            # os.environ["TPU_PROCESS_BOUNDS"] = "1,1,1"
+            # os.environ["TPU_CHIPS_PER_PROCESS_BOUNDS"] = f"1,4,1"
+            # os.environ["TPU_VISIBLE_CHIPS"] = "0,1,2,3" if self.rank == 0 else "4,5,6,7"
+            pp_world_size = self.parallel_config.pipeline_parallel_size
+            os.environ["TPU_PROCESS_BOUNDS"] = f"1,{pp_world_size},1"
+            os.environ["TPU_CHIPS_PER_PROCESS_BOUNDS"] = "1,1,1"
+            os.environ["TPU_VISIBLE_CHIPS"] = f"{self.rank}"
+            tpu_ports = [5000 + i for i in range(pp_world_size)]
+            os.environ["TPU_PROCESS_ADDRESSES"] = ",".join([f"localhost:{port}" for port in tpu_ports])
+            os.environ["TPU_PROCESS_PORT"] = f"{tpu_ports[self.rank]}"
+            os.environ["CLOUD_TPU_TASK_ID"] = f"{self.rank}"
+        
+        logger.info(f'[debug] tpu worker tp={self.parallel_config.tensor_parallel_size}')
         if not self.devices:
             sharding_config: ShardingConfigManager = self.vllm_config.sharding_config
             device_indexes = sharding_config.device_indexes
@@ -170,7 +196,7 @@ class TPUWorker:
         ensure_kv_transfer_initialized(self.vllm_config)
         self.model_runner = TPUModelRunner(self.vllm_config, self.devices,
                                            self.rank, self.rank == 0,
-                                           self.rank == self.world_size - 1)
+                                           self.rank == self.pp_world_size - 1)
         logger.info(f"Init worker | "
                     f"rank={self.rank} | "
                     f"node_id={get_node_id()} | "
@@ -246,9 +272,10 @@ class TPUWorker:
             uuid = self.model_runner.get_uuid_for_jax_transfer(
                 scheduler_output, self.rank, self.step_counter)
             get_pp_group().send_tensor_dict(uuid, output.tensors)
-            logger.info(
-                f'[debug] tpu_worker{self.rank}, {self.step_counter=} finish sending intermediate tensors, shape={output.tensors["hidden_states"].shape}'
-            )
+            if self.rank == 0:
+                logger.info(
+                    f'[debug] (only log rank0) tpu_worker{self.rank}, {self.step_counter=} finish sending intermediate tensors, shape={output.tensors["hidden_states"].shape}'
+                )
             self.step_counter += 1
             return None
         else:
