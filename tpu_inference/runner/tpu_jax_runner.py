@@ -1030,6 +1030,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 token_in_tpu_pre_next_tokens_indices, (0, idx_pad_len),
                 mode='constant',
                 constant_values=-1)
+            (padded_token_in_tpu_cur_input_indices,
+             padded_token_in_tpu_pre_next_tokens_indices) = device_array(
+                 self.mesh, (padded_token_in_tpu_cur_input_indices,
+                             padded_token_in_tpu_pre_next_tokens_indices))
             with self.maybe_forbid_compile:
                 input_ids = self._substitute_placeholder_token_fn(
                     input_ids, padded_token_in_tpu_cur_input_indices,
