@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import torch
 from typing import TYPE_CHECKING, Optional, Tuple, Union, cast
 
 import jax.numpy as jnp
@@ -28,10 +29,12 @@ else:
 
 logger = init_logger(__name__)
 
-_DTYPE: dict[str, jnp.dtype] = {
+_DTYPE: dict[str | torch.dtype, jnp.dtype] = {
+    torch.bfloat16: jnp.bfloat16,
     "bfloat16": jnp.bfloat16,
     "float": jnp.float32,
     "float32": jnp.float32,
+    torch.float32: jnp.float32,
 }
 
 
@@ -145,14 +148,8 @@ class TpuPlatform(Platform):
         # For mm model preprocessors, it may need the output dtype to be torch.
         # In order to avoid a PR to vLLM, we postpone the dtype checking during tpu_worker initialization
         if not vllm_config.scheduler_config.is_multimodal_model or impl == "vllm":
-            if not isinstance(vllm_config.model_config.dtype, str):
-                logger.warning(
-                    "The model dtype is not properly set for JAX backend. "
-                    "Overwriting it to jnp.bfloat16")
-                vllm_config.model_config.dtype = jnp.bfloat16
-            else:
-                vllm_config.model_config.dtype = _DTYPE.get(
-                    vllm_config.model_config.dtype, jnp.bfloat16)
+            vllm_config.model_config.dtype = _DTYPE.get(
+                vllm_config.model_config.dtype, jnp.bfloat16)
 
         if impl == "vllm":
             vllm_config.model_config.dtype = j2t_dtype(
