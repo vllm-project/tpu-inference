@@ -505,7 +505,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.is_pooling_model:
             self.pooler = self.model.pooler
 
-        print(f"DEBUGPRINT[96]: tpu_jax_runner.py:396: self.is_pooling_model={self.is_pooling_model}")
         self.precompile_vision_encoder_fn = multimodal_fns.get(
             "precompile_vision_encoder_fn", None)
         self.get_multimodal_embeddings_fn = multimodal_fns.get(
@@ -530,7 +529,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         if self.is_pooling_model:
-            return ("embed", )
+            return self.pooler.get_supported_tasks() 
         return ("generate", )
 
     def get_kv_cache_spec(self):
@@ -778,7 +777,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     jax.device_get(pooling_metadata.prompt_lens)
                 )[:num_reqs]
                 seq_lens_cpu = self.seq_lens_cpu[:num_reqs]
-
 
 
                 pooler_output = []

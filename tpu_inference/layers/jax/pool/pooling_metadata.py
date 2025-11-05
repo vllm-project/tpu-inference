@@ -19,23 +19,21 @@ SUPPORTED_POOLING_TASKS = {"embed"}
 
 def build_pooling_cursor(
     num_scheduled_tokens: list[int],
-    padded_num_seqs: int,
-    prompt_lens: jax.Array,
+    padded_num_reqs: int,
 ):
-    assert len(prompt_lens) == len(num_scheduled_tokens)
 
     n_seq = len(num_scheduled_tokens)
-    num_scheduled_tokens_padded = jnp.zeros(padded_num_seqs)
-    num_scheduled_tokens_padded = num_scheduled_tokens_padded.at[:n_seq].set(
+    padded_num_scheduled_tokens = jnp.zeros(padded_num_reqs)
+    padded_num_scheduled_tokens = padded_num_scheduled_tokens.at[:n_seq].set(
         jnp.asarray(num_scheduled_tokens, dtype=jnp.int32)
     )
-    cumsum = jnp.cumsum(num_scheduled_tokens_padded, dtype = jnp.int64)
+    cumsum = jnp.cumsum(padded_num_scheduled_tokens, dtype = jnp.int64)
     first_token_indices = jnp.concatenate((jnp.asarray((0,)), cumsum[:-1]))
-    last_token_indices = (first_token_indices + num_scheduled_tokens_padded - 1).astype(jnp.int64)
+    last_token_indices = (first_token_indices + padded_num_scheduled_tokens - 1).astype(jnp.int64)
     last_token_indices = jnp.where(
-        num_scheduled_tokens_padded > 0, last_token_indices, first_token_indices
+        padded_num_scheduled_tokens > 0, last_token_indices, first_token_indices
     )
-    return first_token_indices, last_token_indices
+    return first_token_indices, last_token_indices, padded_num_scheduled_tokens
 
 
 @functools.partial(
@@ -44,11 +42,9 @@ def build_pooling_cursor(
         "prompt_lens",
         "first_token_indices",
         "last_token_indices",
-        "normalize",
-        "num_reqs",
-        "padded_num_reqs",
+        "num_scheduled_tokens", 
     ),
-    meta_fields=("task",),
+    meta_fields = (),
 )
 @dataclass
 class TPUSupportedPoolingMetadata:
@@ -57,64 +53,42 @@ class TPUSupportedPoolingMetadata:
     prompt_lens: jax.Array
     first_token_indices: jax.Array
     last_token_indices: jax.Array
-    normalize: jax.Array
-    num_reqs: int
-    padded_num_reqs: int
-    task: str
+    num_scheduled_tokens: jax.Array
 
     @classmethod
     def from_input_batch(
         cls,
         mesh: Mesh,
         input_batch: InputBatch,
-        num_scheduled_tokens: list[int],
+        padded_num_scheduled_tokens: list[int],
         padded_num_reqs: int,
     ) -> TPUSupportedPoolingMetadata:
         pooling_params_list = input_batch.get_pooling_params()
 
         num_reqs = input_batch.num_reqs
         assert len(pooling_params_list) == num_reqs
+        assert len(input_batch.num_prompt_tokens[:num_reqs]) == len(padded_num_scheduled_tokens)
 
-        padded_prompt_lens_np = np.zeros(padded_num_reqs, dtype=np.int32)
-        padded_prompt_lens_np[:num_reqs] = input_batch.num_prompt_tokens[:num_reqs]
+        padded_prompt_lens= jnp.zeros(padded_num_reqs, dtype=np.int32)
+        padded_prompt_lens= padded_prompt_lens.at[:num_reqs].set(input_batch.num_prompt_tokens[:num_reqs])
 
-        normalize = np.full(padded_num_reqs, -1, dtype=np.int8)
-
-        # Instead of shutting down the whole program, we should just ignore it and make it return 'embed' by default,
-        # but provide a warning.
-        for idx, params in enumerate(pooling_params_list):
-            if params.normalize is True:
-                normalize[idx] = 1
-            elif params.normalize is False:
-                normalize[idx] = 0
-
-            if (task := params.task) not in SUPPORTED_POOLING_TASKS:
-                logger.warning(
-                    f"Unsupported pooling task '{task}'. Supported tasks: {sorted(SUPPORTED_POOLING_TASKS)}. Defaulting to 'embed'."
-                )
-
-        # maybe in the future if we need to support multiple tasks in one batch, we need to make sure each batch has only one task
-        # if not task_values:
-        #     raise ValueError("Pooling metadata requires at least one request")
-        # if any(task != task_values[0] for task in task_values):
-        #     raise ValueError("Mixed pooling tasks within the same batch are not supported yet")
-
-        task = "embed"
-        first_token_indices, last_token_indices = build_pooling_cursor(
-            num_scheduled_tokens, padded_num_reqs, padded_prompt_lens_np[:num_reqs]
+        first_token_indices, last_token_indices, padded_num_scheduled_tokens = build_pooling_cursor(
+            padded_num_scheduled_tokens, padded_num_reqs
         )
 
-        prompt_lens, normalize, first_token_indices, last_token_indices = device_array(
+        prompt_lens, first_token_indices, last_token_indices, num_scheduled_tokens = device_array(
             mesh,
-            (padded_prompt_lens_np, normalize, first_token_indices, last_token_indices),
+            (padded_prompt_lens, first_token_indices, last_token_indices, padded_num_scheduled_tokens),
         )
 
+        #everything in pooling_metadata is padded.
         return cls(
             prompt_lens=prompt_lens,
             first_token_indices=first_token_indices,
             last_token_indices=last_token_indices,
-            normalize=normalize,
-            task=task,
-            num_reqs=num_reqs,
-            padded_num_reqs=padded_num_reqs,
+            num_scheduled_tokens = num_scheduled_tokens,
         )
+
+
+def is_partial_prefill(pooling_metadata: TPUSupportedPoolingMetadata):
+    return not jnp.all(pooling_metadata.prompt_lens == pooling_metadata.num_scheduled_tokens)

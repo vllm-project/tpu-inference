@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from tpu_inference.layers.jax.pool.pooling_metadata import TPUSupportedPoolingMetadata
+from tpu_inference.layers.jax.pool.pooling_metadata import TPUSupportedPoolingMetadata, is_partial_prefill
 
 from vllm.config.pooler import PoolerConfig
 
@@ -212,7 +212,7 @@ class EmbeddingPooler(Pooler):
         return self.head(pooled, pooling_metadata)
 
     def get_supported_tasks(self) -> set[str]:
-        return {"embed"}
+        return ("embed",)
 
 
 def normalize(embeddings: jax.Array) -> jax.Array:

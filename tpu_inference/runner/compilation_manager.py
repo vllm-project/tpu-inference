@@ -121,20 +121,18 @@ class CompilationManager:
                 if num_reqs == 0 or num_reqs > num_tokens:
                     continue
 
+                # can we just use (one array here)
                 prompt_lens = self._create_dummy_tensor(num_reqs, dtype = jnp.int32) 
                 first_token_indices = self._create_dummy_tensor(num_reqs, dtype = jnp.int32) 
                 last_token_indices = self._create_dummy_tensor(num_reqs, dtype = jnp.int32) 
-                normalize = self._create_dummy_tensor(num_reqs, dtype = jnp.int32) 
+                num_scheduled_tokens = self._create_dummy_tensor(num_reqs, dtype = jnp.int32) 
 
 
                 pooling_metadata = TPUSupportedPoolingMetadata(
                     prompt_lens=prompt_lens,
                     first_token_indices=first_token_indices,
                     last_token_indices=last_token_indices,
-                    normalize=normalize,
-                    num_reqs=num_reqs,
-                    padded_num_reqs=num_reqs,
-                    task="embed",
+                    num_scheduled_tokens = num_scheduled_tokens,
                 )
 
                 self._run_compilation(
