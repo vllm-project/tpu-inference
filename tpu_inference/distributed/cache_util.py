@@ -22,6 +22,12 @@ logger = init_logger(__name__)
 CPU_OFFLOADING_SWAP_OP_TYPE = Literal["jax", "pallas"]
 
 
+# celling div function
+def cdiv(a: int, b: int):
+    assert b != 0
+    return (a + b - 1) // b
+
+
 @dataclass(order=True)
 class CacheKey:
     """
@@ -114,7 +120,7 @@ SwapFn = Callable[
     List[jax.Array],  # return value
 ]
 
-JittedKVCacheSwapFn = Callable[[List[jax.Array]], List[jax.Array]]
+KVCacheSwapFn = Callable[[List[jax.Array]], List[jax.Array]]
 
 
 # NOTE(jcgu): keep the same interface as the pallas one
@@ -160,8 +166,8 @@ def pallas_swap_kv_caches(
 
     def swap_in_fn(inputs, input_sharding, out_sharding):
 
-        def _swap_in(hbm_sharded_array):
-            return h2d_dma(hbm_sharded_array, input_sharding, out_sharding)
+        def _swap_in(host_sharded_array):
+            return h2d_dma(host_sharded_array, input_sharding, out_sharding)
 
         return jax.tree.map(_swap_in, inputs)
 
@@ -178,12 +184,13 @@ def pallas_swap_kv_caches(
         return swap_in_fn(src_kv_caches, src_sharding, dst_sharding)
 
 
-def get_jitted_kv_cache_swap_fn(
+def get_kv_cache_swap_fn(
     swap_op_type: CPU_OFFLOADING_SWAP_OP_TYPE,
     host_sharding: jax.sharding.NamedSharding,
-    device_sharding: jax.sharding.NamedSharding
-) -> Tuple[JittedKVCacheSwapFn, JittedKVCacheSwapFn]:
-    """jit compile the swap_in and swap_out functions
+    device_sharding: jax.sharding.NamedSharding,
+    jitted: bool = True,
+) -> Tuple[KVCacheSwapFn, KVCacheSwapFn]:
+    """get the right swap_in and swap_out functions
 
     Args:
         swap_op_type : (str) pallas or jax
@@ -194,19 +201,62 @@ def get_jitted_kv_cache_swap_fn(
         A tuple containing the jitted swap-in and swap-out functions.
     """
     _swap_fn: SwapFn = pallas_swap_kv_caches if swap_op_type == "pallas" else jax_swap_kv_caches
-    # swap_in (host_sharding), swap_out (device_sharding)
-    swap_in_fn = functools.partial(jax.jit(
-        _swap_fn,
-        static_argnames=["src_sharding", "dst_sharding", "direction"],
-        out_shardings=device_sharding),
+    if jitted:
+        _swap_in_fn = jax.jit(
+            _swap_fn,
+            static_argnames=["src_sharding", "dst_sharding", "direction"],
+            out_shardings=device_sharding)
+        _swap_out_fn = jax.jit(
+            _swap_fn,
+            static_argnames=["src_sharding", "dst_sharding", "direction"],
+            out_shardings=host_sharding)
+    else:
+        _swap_in_fn = _swap_fn
+        _swap_out_fn = _swap_fn
+
+    # swap_in (h2d)
+    swap_in_fn = functools.partial(_swap_in_fn,
                                    src_sharding=host_sharding,
                                    dst_sharding=device_sharding,
                                    direction="h2d")
-    swap_out_fn = functools.partial(jax.jit(
-        _swap_fn,
-        static_argnames=["src_sharding", "dst_sharding", "direction"],
-        out_shardings=host_sharding),
+    # swap_out (d2h)
+    swap_out_fn = functools.partial(_swap_out_fn,
                                     src_sharding=device_sharding,
                                     dst_sharding=host_sharding,
                                     direction="d2h")
     return swap_in_fn, swap_out_fn
+
+
+@functools.partial(
+    jax.jit,
+    static_argnames=("block_size"),
+    donate_argnames=(
+        "kv_caches",
+        "kv_cache_slices",
+    ),
+)
+def jitted_insert_kv_cache_slices(
+    block_size,
+    kv_caches: List[jax.Array],
+    kv_cache_slices: List[List[jax.Array]],
+    block_numbers: jax.Array,
+) -> List[jax.Array]:
+    """
+    JIT-compiled function to insert KV cache slices into the physical
+    cache for all layers at once. This fuses reshape, and scatter
+    operations into a single efficient kernel.
+    """
+
+    def _update_layer(cache, slices):
+        """The function to apply to each layer's cache and slices."""
+        # new_shape = (1, block_size, *slices[0].shape[1:])
+        for (i, block_idx) in enumerate(block_numbers):
+            # reshaped_block = slices[i].reshape(new_shape)
+            reshaped_block = jax.lax.expand_dims(slices[i], dimensions=(0, ))
+            cache = jax.lax.dynamic_update_slice_in_dim(cache,
+                                                        reshaped_block,
+                                                        block_idx,
+                                                        axis=0)
+        return cache
+
+    return jax.tree.map(_update_layer, kv_caches, kv_cache_slices)

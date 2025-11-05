@@ -4,7 +4,7 @@
 import os
 import sys
 from collections import OrderedDict
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 
 from tpu_inference.logger import init_logger
 
@@ -16,6 +16,7 @@ GB = 1024**3
 DEFAULT_CPU_CACHE_SIZE_BYTES = 1 * GB
 
 
+# TODO(jcgu): creating independent cpu backends since scheduler & worker could be in different processes.
 class LocalCPUBackend:
     """
     A singleton in-memory CPU backend for storing KV cache keys and values.
@@ -143,9 +144,14 @@ class LocalCPUBackend:
             return True
         return False
 
-    def unpin_keys(self, keys: List[CacheKey]):
+    def unpin_keys(self, keys: List[CacheKey]) -> Tuple[int, int]:
         """Unpins a list of keys, making them eligible for eviction again."""
+        unpinned_count = 0
+        found_count = 0
         for key in keys:
             if key in self.pinned_keys:
+                found_count += 1
                 self.pinned_keys.remove(key)
+                unpinned_count += 1
                 logger.info(f"Unpinned key. Hash: {key.chunk_hash}")
+        return unpinned_count, found_count

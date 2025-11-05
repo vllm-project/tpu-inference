@@ -51,7 +51,7 @@ def test_kv_cache_cpu_offloading_accuracy(
 ):
     with monkeypatch.context():
         os.environ['SKIP_JAX_PRECOMPILE'] = '1'
-        os.environ['TPU_OFFLOADING_SWAP_OP_TYPE'] = "pallas"
+        os.environ['TPU_OFFLOAD_SWAP_OP_TYPE'] = "pallas"
         llm = LLM(model="meta-llama/Llama-3.2-3B",
                   max_model_len=1024,
                   tensor_parallel_size=8,
