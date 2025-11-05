@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 import torch
 from jax.sharding import Mesh
@@ -39,9 +40,10 @@ class MockModelB:
 @pytest.fixture(scope="module")
 def mesh() -> Mesh:
     """Provides a JAX device mesh for sharding."""
-    devices = jax.devices()
+    devices = np.array(jax.devices()[:1])
+    devices = devices.reshape((1, 1, -1))
     # Pass the 1D list of devices directly. Its ndim will match len(axis_names).
-    return Mesh(devices, axis_names=("model", ))
+    return Mesh(devices, axis_names=("data", "attn_dp", "model"))
 
 
 @pytest.fixture
