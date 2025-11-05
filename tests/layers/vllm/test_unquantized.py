@@ -584,6 +584,16 @@ def test_fused_moe_use_kernel(use_ep, mesh, num_tokens, intermediate_size,
         vllm_fused_moe.quant_method.use_kernel = True
         vllm_fused_moe.quant_method.process_weights_after_loading(
             vllm_fused_moe)
+        vllm_fused_moe.quant_method.block_size = {
+            "bt": 32,
+            "bf": 512,
+            "bd1": 512,
+            "bd2": 512,
+            "btc": 32,
+            "bfc": 256,
+            "bd1c": 256,
+            "bd2c": 256,
+        }
         jax_output = vllm_fused_moe(jax_a, score)
         jax_output = j2t(jax_output.to(torch.float32)).to(dtype)
 

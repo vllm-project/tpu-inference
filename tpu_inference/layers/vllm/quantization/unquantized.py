@@ -1,9 +1,12 @@
 import functools
+import os
 from typing import Any, Callable, Optional, Union
 
 import jax
 import jax.numpy as jnp
 import torch
+
+from tpu_inference import utils as common_utils
 from jax.experimental.layout import Format, Layout
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torch.nn.parameter import Parameter
@@ -161,12 +164,22 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def __init__(self,
                  moe: FusedMoEConfig,
                  mesh: Mesh,
-                 use_kernel: bool = False,
                  ep_axis_name: str = 'model'):
         super().__init__(moe)
         self.mesh = mesh
-        self.use_kernel = use_kernel
+        self.use_kernel = os.getenv("USE_MOE_EP_KERNEL", "0")
         self.ep_axis_name = ep_axis_name
+        # TODO: Use autotune table once we have it.
+        self.block_size = {
+            "bt": 16,
+            "bf": 384,
+            "bd1": 512,
+            "bd2": 512,
+            "btc": 16,
+            "bfc": 384,
+            "bd1c": 256,
+            "bd2c": 256,
+        }
 
     def select_gemm_impl(
         self,
@@ -197,14 +210,14 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             # Reshape and transpose w13_weight to (num_experts, 2, hidden_size, intermediate_size)
             w13_reshaped = w13_weight.reshape(num_experts, 2,
                                               intermediate_size, hidden_size)
-            w1_weight = jnp.transpose(w13_reshaped, (0, 1, 3, 2))
+            w13_weight = jnp.transpose(w13_reshaped, (0, 1, 3, 2))
 
             # Transpose w2_weight to (num_experts, intermediate_size, hidden_size)
             w2_weight_transposed = jnp.transpose(w2_weight, (0, 2, 1))
 
             # Apply EP sharding
-            w1_weight = jax.device_put(
-                w1_weight,
+            w13_weight = jax.device_put(
+                w13_weight,
                 Format(Layout((0, 1, 2, 3)),
                        NamedSharding(self.mesh, P("model", None, None, None))))
             w2_weight_transposed = jax.device_put(
@@ -212,8 +225,8 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 Format(Layout((0, 1, 2)),
                        NamedSharding(self.mesh, P("model", None, None))))
 
-            layer.w1_weight = Parameter(torch_view(w1_weight),
-                                        requires_grad=False)
+            layer.w13_weight = Parameter(torch_view(w13_weight),
+                                         requires_grad=False)
             layer.w2_weight = Parameter(torch_view(w2_weight_transposed),
                                         requires_grad=False)
         else:
@@ -281,27 +294,15 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 "Only softmax is supported for scoring_func")
 
         if self.use_kernel and layer.use_ep:
-            # TODO: Use autotune table once we have it.
-            block_size = {
-                "bt": 32,
-                "bf": 512,
-                "bd1": 512,
-                "bd2": 512,
-                "btc": 32,
-                "bfc": 256,
-                "bd1c": 256,
-                "bd2c": 256,
-            }
             output = fused_ep_moe(
                 mesh=self.mesh,
                 tokens=jax_view(x),
-                w1=jax_view(layer.w1_weight),
+                w1=jax_view(layer.w13_weight),
                 w2=jax_view(layer.w2_weight),
                 gating_output=jax_view(router_logits),
                 top_k=top_k,
-                ep_axis_name=self.
-                ep_axis_name,  # Must match mesh axis name for expert parallelism
-                **block_size,
+                ep_axis_name=self.ep_axis_name,
+                **self.block_size,
             )
         else:
             # Use the original implementation
