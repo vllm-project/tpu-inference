@@ -198,7 +198,7 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         if self.use_kernel and layer.use_ep:
             # Kernel expects:
-            # w1: (num_experts, 2, hidden_size, intermediate_size)
+            # w13: (num_experts, 2, hidden_size, intermediate_size)
             # w2: (num_experts, intermediate_size, hidden_size)
             # Current format:
             # w13_weight: (num_experts, 2*intermediate_size, hidden_size)

@@ -187,8 +187,8 @@ def _fused_ep_moe_kernel(
         barrier_sem = pltpu.get_barrier_semaphore()
         pltpu.semaphore_signal(
             barrier_sem,
-            device_id=right_id,
-            device_id_type=pltpu.DeviceIdType.LOGICAL,
+            device_id=(0, right_id),
+            device_id_type=pltpu.DeviceIdType.MESH,
         )
         pltpu.semaphore_wait(barrier_sem, 1)
 
