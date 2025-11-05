@@ -197,6 +197,11 @@ class CompilationManager:
                                                              dtype=np.int32)
             padded_token_in_tpu_pre_next_tokens_indices = np.zeros(
                 (num_tokens, ), dtype=jnp.int32)
+            (padded_token_in_tpu_cur_input_indices,
+             padded_token_in_tpu_pre_next_tokens_indices) = device_array(
+                 self.runner.mesh,
+                 (padded_token_in_tpu_cur_input_indices,
+                  padded_token_in_tpu_pre_next_tokens_indices))
             for num_reqs in self.runner.num_reqs_paddings:
                 input_ids = self._create_dummy_tensor((num_tokens, ),
                                                       jnp.int32)
