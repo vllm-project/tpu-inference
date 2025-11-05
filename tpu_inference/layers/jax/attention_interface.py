@@ -30,13 +30,22 @@ def sharded_flash_attention(
         mesh: Mesh,
         causal: bool = True,
         sm_scale: Optional[float] = None) -> Callable[..., Any]:
+    # in_specs = (
+    #     P("data", "model", None, None),  # q
+    #     P("data", "model", None, None),  # k
+    #     P("data", "model", None, None),  # v
+    #     P(),  # segment_ids
+    # )
+    # out_specs = P("data", "model", None, None)
+    #TODO: UNCOMMENT THE PREVIOUS AND GET RID OF THE BELOW IN_SPECS AND OUT_SPECS
     in_specs = (
-        P("data", "model", None, None),  # q
-        P("data", "model", None, None),  # k
-        P("data", "model", None, None),  # v
-        P(),  # segment_ids
+        P(None, None, None, None),  # q: [B, N, T, H]. We only shard B ("data").
+        P(None, None, None, None),  # k: [B, N, T, H]. We only shard B ("data").
+        P(None, None, None, None),  # v: [B, N, T, H]. We only shard B ("data").
+        P(),  # segment_ids: Replicated
     )
-    out_specs = P("data", "model", None, None)
+    # The output is also sharded along B ("data")
+    out_specs = P(None, None, None, None)
 
     def _flash_attention(q, k, v, segment_ids):
         return flash_attention(q,

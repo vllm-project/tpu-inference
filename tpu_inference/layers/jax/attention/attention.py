@@ -185,6 +185,8 @@ class Attention(nnx.Module):
         q_scale: float | None = None,
         k_scale: float | None = None,
         v_scale: float | None = None,
+        num_kv_pages_per_block: int | None = None, #TODO: REMOVE THESE AFTER TESTING VISION ENCODER
+        num_queries_per_block: int | None = None,
     ) -> Tuple[KVCache, jax.Array]:
         """Performs scaled dot-product attention and updates the KV cache.
 
@@ -213,19 +215,20 @@ class Attention(nnx.Module):
                   `(seq, num_q_heads, head_dim)`.
         """
         md = attention_metadata
+        KV_CACHE_REPLICATED_SPEC = P(None, None, None, None, None) # Rank 5
         kv_cache_spec = P(None, None, "model")
         in_specs = (
             self.query_tnh,  # q
             self.keyvalue_skh,  # k
             self.keyvalue_skh,  # v
-            kv_cache_spec,  # kv_cache
+            KV_CACHE_REPLICATED_SPEC, #kv_cache_spec,  # kv_cache
             P(),  # md.seq_lens: Replicated
             P(),  # page_indices_flat: Replicated
             P(),  # query_start_loc: Replicated
             P(),  # distribution: Replicated
         )
 
-        out_specs = (self.attn_o_tnh, kv_cache_spec)
+        out_specs = (self.attn_o_tnh, KV_CACHE_REPLICATED_SPEC) #kv_cache_spec)
 
         def _ragged_paged_attention(*args):
             return ragged_paged_attention(
@@ -235,6 +238,8 @@ class Attention(nnx.Module):
                 q_scale=q_scale,
                 k_scale=k_scale,
                 v_scale=v_scale,
+                num_kv_pages_per_block=num_kv_pages_per_block, #TODO: REMOVE THESE AFTER TESTING VISION ENCODER
+                num_queries_per_block=num_queries_per_block,
             )
 
         output_TNH, kv_cache = jax.jit(

@@ -123,41 +123,46 @@ def apply_rope(
         print("This is the shape of cos after squeeze: ", cos.shape)
         print("This is the shape of sin after squeeze: ", sin.shape)
 
+        #TODO: REMOVE THIS SWAP
+        temp_cos = cos
+        cos = sin
+        sin = temp_cos
+
         # ----------------------------------------------------
         # The Problem: This reshapes to (S, 1, D_rot)
-        # cos = cos[:, jnp.newaxis, :]
-        # sin = sin[:, jnp.newaxis, :]
+        cos = cos[:, jnp.newaxis, :]
+        sin = sin[:, jnp.newaxis, :]
         # ----------------------------------------------------
 
         # Apply rotation (Standard split logic)
         inputs_real = inputs[..., :head_dim // 2]
         inputs_imag = inputs[..., head_dim // 2:head_dim]
 
-        # --- FIX: Reshape to correctly broadcast over the flattened input ---
-        # The input is (Total_Tokens, Num_Heads, Half_Head_Dim) -> (9232, 16, 44)
-        # We need the RoPE factors to match: (Total_Tokens, 1, Half_Head_Dim)
+        # # --- FIX: Reshape to correctly broadcast over the flattened input ---
+        # # The input is (Total_Tokens, Num_Heads, Half_Head_Dim) -> (9232, 16, 44)
+        # # We need the RoPE factors to match: (Total_Tokens, 1, Half_Head_Dim)
 
-        # 1. Tile the positional frequencies (S, D_rot) by the Batch Size (B=16)
-        #    to match the (B*S) = 9232 dimension.
-        batch_size = inputs_real.shape[0] // cos.shape[0]  # 9232 // 577 = 16
+        # # 1. Tile the positional frequencies (S, D_rot) by the Batch Size (B=16)
+        # #    to match the (B*S) = 9232 dimension.
+        # batch_size = inputs_real.shape[0] // cos.shape[0]  # 9232 // 577 = 16
 
-        cos_tiled = jnp.tile(
-            cos, (batch_size, 1))  # Shape (B*S, D_rot) -> (9232, 44)
-        sin_tiled = jnp.tile(
-            sin, (batch_size, 1))  # Shape (B*S, D_rot) -> (9232, 44)
+        # cos_tiled = jnp.tile(
+        #     cos, (batch_size, 1))  # Shape (B*S, D_rot) -> (9232, 44)
+        # sin_tiled = jnp.tile(
+        #     sin, (batch_size, 1))  # Shape (B*S, D_rot) -> (9232, 44)
 
-        # 2. Add the Num_Heads dimension (H=16) for broadcasting
-        # The target shape for cos/sin is (B*S, 1, D_rot) -> (9232, 1, 44)
-        cos = cos_tiled[:, jnp.newaxis, :]  # Shape (9232, 1, 44)
-        sin = sin_tiled[:, jnp.newaxis, :]  # Shape (9232, 1, 44)
+        # # 2. Add the Num_Heads dimension (H=16) for broadcasting
+        # # The target shape for cos/sin is (B*S, 1, D_rot) -> (9232, 1, 44)
+        # cos = cos_tiled[:, jnp.newaxis, :]  # Shape (9232, 1, 44)
+        # sin = sin_tiled[:, jnp.newaxis, :]  # Shape (9232, 1, 44)
         # -------------------------------------------------------------------
 
         print("This is the shape of input: ", inputs.shape)
         print("This is the shape of positions: ", positions.shape)
         print("This is the shape of inputs_real: ", inputs_real.shape)
-        print("This is the shape of cos after slice: ", cos.shape)
+        print("This is the shape of cos after broadcast: ", cos.shape)
         print("This is the shape of inputs_imag: ", inputs_imag.shape)
-        print("This is the shape of sin after slice: ", sin.shape)
+        print("This is the shape of sin after broadcast: ", sin.shape)
 
         outputs_real = inputs_real * cos - inputs_imag * sin
         outputs_imag = inputs_real * sin + inputs_imag * cos

@@ -1,14 +1,17 @@
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
+from typing import NamedTuple, Any, Optional
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from jax.sharding import Sharding
+from jax.sharding import Sharding, Mesh, PartitionSpec as P
 
 from tpu_inference import utils
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.jax.attention_interface import sharded_flash_attention
 from tpu_inference.layers.jax.attention.attention import Attention, KVCache
 from tpu_inference.layers.jax.rope_interface import apply_rope
+from tpu_inference.layers.jax.base import create_param
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
@@ -45,7 +48,8 @@ class Llama4Attention(Attention):
                  is_prefill,
                  kv_cache: KVCache,
                  attention_metadata: AttentionMetadata,
-                 use_attention_rope: bool = True):
+                 use_attention_rope: bool = True,
+                 **kwargs):
         """Performs the forward pass of the attention module.
 
         This method computes the attention output by projecting the input `x`
@@ -155,10 +159,10 @@ class Llama4Attention(Attention):
             #DUMMY_INT = jnp.zeros((1, ), dtype=jnp.int32)
 
             # 1. Pad Q, K, V from 88 to 128 to satisfy the kernel's static shape alignment
-            q_TNH = jnp.pad(q_TNH, [(0, 0), (0, 0), (0, PAD_WIDTH)],
+            q_TNH = jnp.pad(q_TNH, [(0, 0), (0, 0), (0,0), (0, PAD_WIDTH)],
                             mode='constant',
                             constant_values=0)
-            k_SKH = jnp.pad(k_SKH, [(0, 0), (0, 0), (0, PAD_WIDTH)],
+            k_SKH = jnp.pad(k_SKH, [(0, 0), (0, 0), (0, 0), (0, PAD_WIDTH)],
                             mode='constant',
                             constant_values=0)
             v_SKH = jnp.pad(v_SKH, [(0, 0), (0, 0), (0, PAD_WIDTH)],
@@ -226,6 +230,7 @@ class Llama4Attention(Attention):
                 q_scale=q_scale,
                 k_scale=k_scale,
                 v_scale=v_scale,
+                **kwargs
             )
         # The outputs_TNH variable is the core attention output, but before the final projection.
         # This is the "Attention Output (before projection)" from your last log.
@@ -263,3 +268,204 @@ class Llama4Attention(Attention):
                       self.temperature_tuning_floor_scale) + 1.0) *
                        self.temperature_tuning_scale + 1.0)
         return input_arr_TNH * attn_scales[:, None, None]
+
+
+class SegmentIds(NamedTuple):
+    """SegmentIds for Q and KV sequences.
+
+  SegmentIds are used to generate segment mask, which prevents attention between
+  different segments in the input sequence. Each array is a list of ids
+  (integers).
+  Only the token with the same id can attend to each other.
+
+  Attributes:
+    q: segment ids along the Q sequence.
+    kv: segment ids along the KV sequence.
+  """
+
+    q: jax.Array  # [batch_size, q_seq_len]
+    kv: jax.Array  # [batch_size, kv_seq_len]
+
+@dataclass(kw_only=True)
+class Llama4VisionAttention(nnx.Module): # <--- Inherits from nnx.Module
+    hidden_size: int
+    num_attention_heads: int
+    num_key_value_heads: int
+    head_dim: int
+    rope_theta: float
+    rope_scaling: Optional[dict[str, Any]]
+    dtype: jnp.dtype
+    mesh: Mesh
+    use_qk_norm: bool
+    temperature_tuning: bool
+    temperature_tuning_floor_scale: float
+    temperature_tuning_scale: float
+    activation_attention_td: Sharding
+    activation_attention_out_td: Sharding
+    is_causal: bool = True
+    
+    # 1. ADD: The required InitVar for nnx initialization (used in the constructor)
+    rngs: InitVar[nnx.Rngs] 
+    
+    # 2. ADD: The structural attributes needed for sharding and RoPE
+    dnh_sharding: Sharding = ()
+    dkh_sharding: Sharding = ()
+    nhd_sharding: Sharding = ()
+    activation_q_td: Sharding = ()
+    query_tnh: P = P()
+    keyvalue_skh: P = P()
+    rope_input_ordering: str = "interleaved" # Vision config default
+    
+    # 3. ADD: Placeholder for scales (used in inject_weights, even if unused internally)
+    _q_scale: float = 1.0
+    _k_scale: float = 1.0
+    _v_scale: float = 1.0
+    
+    # 4. ADD: The required __post_init__ to process rngs and create params
+    def __post_init__(self, rngs: nnx.Rngs):
+        """Initializes the weight kernels for Q, K, V, and O projections."""
+        N = self.num_attention_heads
+        K = self.num_key_value_heads
+        D = self.hidden_size
+        H = self.head_dim
+        random_init = False # Weights are loaded from PyTorch
+
+        self.kernel_q_proj_DNH = create_param(rngs, (D, N, H),
+                                              self.dnh_sharding,
+                                              self.dtype,
+                                              random_init=random_init)
+        self.kernel_k_proj_DKH = create_param(rngs, (D, K, H),
+                                              self.dkh_sharding,
+                                              self.dtype,
+                                              random_init=random_init)
+        self.kernel_v_proj_DKH = create_param(rngs, (D, K, H),
+                                              self.dkh_sharding,
+                                              self.dtype,
+                                              random_init=random_init)
+        self.kernel_o_proj_NHD = create_param(rngs, (N, H, D),
+                                              self.nhd_sharding,
+                                              self.dtype,
+                                              random_init=random_init)
+    def __call__(self,
+                 x, # This is the hidden state (S, D) or (B*T, D)
+                 is_prefill,
+                 kv_cache: KVCache,
+                 attention_metadata: AttentionMetadata,
+                 use_attention_rope: bool = True,
+                 **kwargs):
+        
+        md = attention_metadata
+        x = jnp.asarray(x, self.dtype)
+        x_SD = nnx.with_sharding_constraint(x, self.activation_attention_td)
+        x_q_TD = nnx.with_sharding_constraint(x, self.activation_q_td)
+        rope_scaling = self.rope_scaling
+        rope_theta = self.rope_theta
+        H = self.head_dim
+        l2_norm = L2Norm()
+        
+        # 1. Input Projection and RoPE Application (Output is Rank 3: [S, N/K, H])
+        # [ ... q_proj, k_proj, v_proj blocks omitted for brevity, they produce q_TNH, k_SKH, v_SKH ... ]
+        # NOTE: Your existing code for Q, K, V projection and RoPE/L2Norm application must be kept here.
+        # It results in: q_TNH, k_SKH, v_SKH (all padded to H=128)
+        
+        # --- START: RETAINED QKV PROJECTION LOGIC ---
+
+        with jax.named_scope("q_proj"):
+            q_TNH = jnp.einsum('TD,DNH -> TNH', x_q_TD, self.kernel_q_proj_DNH.value)
+            if use_attention_rope:
+                q_TNH = apply_rope(q_TNH, md.input_positions, H, rope_theta,
+                                   rope_scaling, self.rope_input_ordering)
+                if self.use_qk_norm:
+                    q_TNH = l2_norm(q_TNH)
+            q_TNH = nnx.with_sharding_constraint(q_TNH, self.query_tnh)
+
+        with jax.named_scope("k_proj"):
+            k_SKH = jnp.einsum('SD,DKH -> SKH', x_SD, self.kernel_k_proj_DKH.value)
+            if use_attention_rope:
+                k_SKH = apply_rope(k_SKH, md.input_positions, H, rope_theta,
+                                   rope_scaling, self.rope_input_ordering)
+                if self.use_qk_norm:
+                    k_SKH = l2_norm(k_SKH)
+            k_SKH = nnx.with_sharding_constraint(k_SKH, self.keyvalue_skh)
+
+        with jax.named_scope("v_proj"):
+            v_SKH = jnp.einsum('SD,DKH -> SKH', x_SD, self.kernel_v_proj_DKH.value)
+            v_SKH = nnx.with_sharding_constraint(v_SKH, self.keyvalue_skh)
+        
+        # --- Flash Attention Migration Logic (Starts here, no change needed) ---
+        
+        #needed to slice these. Had an extra dimension replicated
+        q_TNH = q_TNH[:, 0, :, :] 
+        k_SKH = k_SKH[:, 0, :, :] 
+
+        # *** DEBUG ADDITION (keep for sanity check) ***
+        jax.debug.print("DEBUG: q_TNH shape AFTER slice: {}", q_TNH.shape)
+        jax.debug.print("DEBUG: q_TNH rank AFTER slice: {}", q_TNH.ndim)
+        # **********************************************
+
+        # Check Q_TNH shape is now (T, N, H)
+        T_attn, N, H = q_TNH.shape
+        B = 1 # Batch size is 1 for the Vision Encoder (fixed)
+        
+        # Target block size for sequence dimension padding
+        BLOCK_SIZE = 128
+        pad_len = (BLOCK_SIZE - (T_attn % BLOCK_SIZE)) % BLOCK_SIZE
+
+        # 2. Reshape to Flash Attention Input Format: [B, N, T, H]
+        # a. Add Batch Axis and apply padding for the Sequence (T) dimension
+
+        # Q Tensor (q_TNH is currently [T, N, H])
+        q_TNH = jnp.pad(q_TNH, [(0, pad_len), (0, 0), (0, 0)], mode='constant', constant_values=0)
+        q_TNH = jnp.expand_dims(q_TNH, axis=0) # [1, T_padded, N, H]
+
+        # K Tensor (k_SKH is currently [T, K, H])
+        k_SKH = jnp.pad(k_SKH, [(0, pad_len), (0, 0), (0, 0)], mode='constant', constant_values=0)
+        k_SKH = jnp.expand_dims(k_SKH, axis=0) # [1, T_padded, K, H]
+
+        # V Tensor (v_SKH is currently [T, K, H])
+        v_SKH = jnp.pad(v_SKH, [(0, pad_len), (0, 0), (0, 0)], mode='constant', constant_values=0)
+        v_SKH = jnp.expand_dims(v_SKH, axis=0) # [1, T_padded, K, H]
+
+        # Update T_attn to the padded length
+        T_padded = T_attn + pad_len 
+
+        # b. Transpose T and N axes: [1, N, T_padded, H]
+        q_BNTH = jnp.transpose(q_TNH, (0, 2, 1, 3))
+        k_BKTH = jnp.transpose(k_SKH, (0, 2, 1, 3))
+        v_BKTH = jnp.transpose(v_SKH, (0, 2, 1, 3))
+        
+        # 3. Generate Segment Ids (Simplified for Vision Encoder)
+        segment_ids_q = jnp.full((B, T_padded), 0, dtype=jnp.int32)
+        segment_ids = SegmentIds(q=segment_ids_q, kv=segment_ids_q)
+
+        with jax.named_scope("flash_attn_op"):
+            # Execute Flash Attention kernel
+            outputs_BNTH = sharded_flash_attention(
+                mesh=self.mesh,
+                causal=False, 
+                sm_scale=1.0, #self.head_dim**-0.5,
+            )(q_BNTH, k_BKTH, v_BKTH, segment_ids)
+            
+            new_kv_cache = kv_cache
+            
+        # 4. Reverse Transpose and Reshape for Output Projection (NEW FIX 2)
+        
+        # a. Reverse Transpose: [B, N, T_padded, H] -> [T_padded, B, N, H]
+        outputs_TBH = jnp.transpose(outputs_BNTH, (2, 0, 1, 3)) 
+
+        # *** UNPAD/CROP: Remove the padded elements ***
+        outputs_TBH = outputs_TBH[:T_attn, ...]
+
+        # b. Squeeze the Batch=1 dimension to get TNH
+        outputs_TNH = jnp.squeeze(outputs_TBH, axis=1) # [T, N, H]
+
+        # 5. Output Projection (o_proj)
+        with jax.named_scope("o_proj"):
+            # Standard Llama/Attention einsum: [T, N, H] * [N, H, D] -> [T, D]
+            o_TD = jnp.einsum('TNH,NHD -> TD', outputs_TNH,
+                              self.kernel_o_proj_NHD.value)
+            o_TD = nnx.with_sharding_constraint(
+                o_TD, self.activation_attention_out_td)
+
+        # We return the attention output in the 2D format expected by the outer layer loop
+        return new_kv_cache, o_TD
