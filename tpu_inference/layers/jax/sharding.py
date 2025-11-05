@@ -1,6 +1,7 @@
 import json
 import math
 from dataclasses import asdict, dataclass
+import os
 from typing import TYPE_CHECKING, List, Optional
 
 import jax.numpy as jnp
@@ -13,7 +14,8 @@ if TYPE_CHECKING:
     from vllm.v1.configs.vllm_config import VllmConfig
 
 
-class ShardingAxisName:
+class ShardingAxisNameBase:
+    """Base class for sharding axis names."""
     SEQUENCE = ('data', 'attn_dp')
     ATTN_DATA = ('data', 'attn_dp')
     MLP_DATA = 'data'
@@ -23,6 +25,30 @@ class ShardingAxisName:
     MOE_TENSOR = ('attn_dp', 'model')
     EXPERT = ('attn_dp', 'expert', 'model')
     VOCAB = ('expert', 'model')
+
+class ShardingAxisName2D:
+    """Sharding axis names for 2D data parallelism scenarios. 
+    NOTE(wenxindongwork): This is used for now because the MoE kernel
+    expects a 2D mesh. 
+    """
+    SEQUENCE = ('data')
+    ATTN_DATA = ('data')
+    MLP_DATA = 'data'
+    ATTN_HEAD = 'model'
+    ATTN_TENSOR = None
+    MLP_TENSOR = ('model')
+    MOE_TENSOR = ('model')
+    EXPERT = ('model')
+    VOCAB = ('model')
+
+try:
+    _use_base_sharding = os.getenv("NEW_MODEL_DESIGN", False)
+    if _use_base_sharding:
+        ShardingAxisName = ShardingAxisNameBase  
+    else:
+        ShardingAxisName = ShardingAxisName2D  
+except Exception:
+    ShardingAxisName = ShardingAxisName2D  
 
 
 @dataclass
@@ -142,6 +168,10 @@ class ShardingConfigManager:
                     f"LoRA is not supported with data parallelism "
                     f"(DP size: {total_dp_size}). Please disable LoRA or "
                     f"set data parallelism to 1.")
+            if not os.environ.get("NEW_MODEL_DESIGN", False):
+                raise ValueError(
+                    f"Must run DP with NEW_MODEL_DESIGN enabled. Please set the "
+                    f"NEW_MODEL_DESIGN=True.")
 
     @property
     def total_dp_size(self) -> int:

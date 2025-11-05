@@ -251,10 +251,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self._substitute_placeholder_token_fn = _substitute_placeholder_token
         self.execute_model_state: ExecuteModelState | None = None
 
-        self.data_parallel_mlp_sharding = NamedSharding(
-            self.mesh, PartitionSpec(ShardingAxisName.MLP_DATA))
-        self.data_parallel_attn_sharding = NamedSharding(
-            self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
+
 
     def _init_random(self):
         if self.model_config.seed is None:
@@ -267,7 +264,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         sharding_strategy: ShardingConfigManager = self.vllm_config.sharding_config
         # NOTE(wenxindongwork): The new MoE kernel expects a 2D mesh, so we default
         # to a 2D mesh for now, and we may change this in the future.
-        if os.getenv("NEW_MODEL_DESIGN", False) or self.dp_size > 1:
+        if os.getenv("NEW_MODEL_DESIGN", False):
             axis_names = ("data", "attn_dp", "expert", "model")
             mesh_shape = (sharding_strategy.model_dp_size,
                           sharding_strategy.attn_dp_size,
@@ -984,6 +981,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         assert num_reqs > 0
 
         dp_size = self.dp_size
+        data_parallel_attn_sharding = NamedSharding(
+            self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
 
         (req_ids_dp, req_indices_dp, num_scheduled_tokens_per_dp_rank,
          scheduled_tokens_per_dp_rank, num_req_per_dp_rank,
@@ -1176,8 +1175,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.mesh,
             self.input_batch,
             padded_num_reqs,
-            sharding=NamedSharding(self.mesh,
-                                   PartitionSpec(ShardingAxisName.ATTN_DATA)),
+            sharding=data_parallel_attn_sharding,
         )
         if self.uses_mrope:
             positions = mrope_positions
@@ -1194,7 +1192,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
              self.mesh,
              (input_ids, positions, block_tables, query_start_loc, seq_lens,
               logits_indices, request_distribution, logits_indices),
-             sharding=self.data_parallel_attn_sharding,
+             sharding=data_parallel_attn_sharding,
          )
         # Async scheduling: substitute placeholder tokens for DP
         if self.scheduler_config.async_scheduling and self._pre_async_results is not None:
