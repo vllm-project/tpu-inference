@@ -114,7 +114,7 @@ class TPUWorker:
         if not self.devices:
             sharding_config: ShardingConfigManager = self.vllm_config.sharding_config
             device_indexes = sharding_config.device_indexes
-            if device_indexes is not None:
+            if not device_indexes:
                 # Enforcing the devices sequence to be consistent with the specified device indexes
                 self.devices = [jax.devices()[i] for i in device_indexes]
                 all_devices = jax.devices()
