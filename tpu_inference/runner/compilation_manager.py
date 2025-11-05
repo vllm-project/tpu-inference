@@ -115,7 +115,7 @@ class CompilationManager:
 
         for num_tokens in self.runner.num_tokens_paddings:
             hidden_states = self._create_dummy_tensor(
-                (num_tokens, hidden_size), t2j_dtype(dtype), sharding=hidden_sharding)
+                (num_tokens, hidden_size), jnp.bfloat16, sharding=hidden_sharding)
 
             for num_reqs in self.runner.num_reqs_paddings:
                 if num_reqs == 0 or num_reqs > num_tokens:
