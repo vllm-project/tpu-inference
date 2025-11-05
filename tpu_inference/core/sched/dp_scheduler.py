@@ -520,6 +520,3 @@ def update_vllm_config_for_dp_scheduler(vllm_config: Any) -> None:
     if dp_size > 1:
         vllm_config.scheduler_config._original_scheduler_cls = vllm_config.scheduler_config.scheduler_cls
         vllm_config.scheduler_config.scheduler_cls = DPScheduler
-        logger.info(f"DP size ({dp_size}) >= 2, using DPScheduler")
-    else:
-        logger.info(f"DP size ({dp_size}) < 2, using default Scheduler")
