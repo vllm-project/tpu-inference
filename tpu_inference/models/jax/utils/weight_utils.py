@@ -316,6 +316,9 @@ def _load_hf_weights_on_thread(vllm_config,
         if hf_key.endswith(".weight"):
             hf_key = hf_key.removesuffix(".weight")
 
+        if not hf_key.startswith('models.'):
+            hf_key = 'model.' + hf_key
+
         # Find the corresponding model key using the HF key
         if "layers" in hf_key:
             layer_num = re.search(r"layers\.(\d+)", hf_key).group(1)

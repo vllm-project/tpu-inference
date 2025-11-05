@@ -9,14 +9,9 @@ from tpu_inference.layers.jax.pool.pooling_metadata import TPUSupportedPoolingMe
 from vllm.config.pooler import PoolerConfig
 
 
-@jax.tree_util.register_dataclass
-@dataclass
-class PoolingResult:
-    """Outputs produced by pooling kernels."""
-
-    num_reqs: int
-    pooler_output: jax.Array  # [padded_num_reqs, dim]
-    # or [padded_num_reqs, padded_max_num_batchec_token_per_req, dim] for allpool
+# [padded_num_reqs, dim]
+# or [padded_num_reqs, padded_max_num_batchec_token_per_req, dim] for allpool
+PoolerOutput = jax.Array
 
 
 class PoolingType(enum.Enum):
@@ -139,7 +134,7 @@ class PoolerHead(nnx.Module):
         token_embeddings: jax.Array,
         token_mask: jax.Array,
         pooling_metadata: TPUSupportedPoolingMetadata,
-    ) -> PoolingResult:
+    ) -> PoolerOutput:
         raise NotImplementedError
 
 
@@ -152,7 +147,7 @@ class EmbeddingPoolerHead(PoolerHead):
         self,
         pooled: jax.Array,
         pooling_metadata: TPUSupportedPoolingMetadata,
-    ) -> PoolingResult:
+    ) -> PoolerOutput:
 
         # In the torch version, this part should handle other computations related to pooling_params, such as
         # normalization and truncating the embedding dimensions (for matryoshka models).
@@ -166,10 +161,7 @@ class EmbeddingPoolerHead(PoolerHead):
         if self.default_normalize:
             pooled = normalize(pooled)
 
-        return PoolingResult(
-            num_reqs=pooling_metadata.num_reqs,
-            pooler_output=pooled,
-        )
+        return pooled
 
 
 class Pooler(nnx.Module):
@@ -187,7 +179,7 @@ class Pooler(nnx.Module):
         self,
         hidden_states: jax.Array,
         pooling_metadata: TPUSupportedPoolingMetadata,
-    ) -> PoolingResult:
+    ) -> PoolerOutput:
         raise NotImplementedError
 
     def get_supported_tasks(self) -> set[str]:
@@ -213,7 +205,9 @@ class EmbeddingPooler(Pooler):
         self,
         hidden_states: jax.Array,
         pooling_metadata: TPUSupportedPoolingMetadata,
-    ) -> PoolingResult:
+    ) -> PoolerOutput:
+        hidden_states = hidden_states.astype(jnp.float32)
+        # the output mus be of type torch.tensor, but we cannot convert numpy to torch if the dtype is bf16
         pooled = self.pooling(hidden_states, pooling_metadata)
         return self.head(pooled, pooling_metadata)
 

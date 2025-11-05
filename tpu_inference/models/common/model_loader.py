@@ -281,7 +281,7 @@ def get_flax_model(
         run_get_multimodal_embeddings, graphdef)
     get_input_embeddings_fn = functools.partial(run_get_input_embeddings,
                                                 graphdef)
-    lora_manager, model = None, None
+    lora_manager, _ = None, None
     combine_hidden_states_fn = functools.partial(combine_hidden_states,
                                                  graphdef)
 

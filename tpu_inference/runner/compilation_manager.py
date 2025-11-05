@@ -11,9 +11,14 @@ from jax.sharding import NamedSharding, PartitionSpec
 from tpu_inference.core.disagg_utils import is_disagg_enabled
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.jax.pool.pooling import pool
+from tpu_inference.layers.jax.pool.pooling_metadata import (
+    TPUSupportedPoolingMetadata,
+)
 from tpu_inference.layers.jax.sample.sampling import sample
-from tpu_inference.layers.jax.sample.sampling_metadata import \
-    TPUSupportedSamplingMetadata
+from tpu_inference.layers.jax.sample.sampling_metadata import (
+    TPUSupportedSamplingMetadata,
+)
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import device_array
 
@@ -79,6 +84,9 @@ class CompilationManager:
                     self._run_compilation, )
                 self._precompile_input_embeddings_merger()
                 self._precompile_backbone_with_inputs_embeds()
+            if self.runner.is_pooling_model:
+                self._precompile_pooling()
+                return
             if self.runner.scheduler_config.async_scheduling:
                 self._precompile_substitute_placeholder_token()
             self._precompile_select_from_array()
@@ -89,6 +97,68 @@ class CompilationManager:
             self._precompile_structured_decoding()
             if self.runner.speculative_config:
                 self._precompile_speculative_decoding()
+
+    def _precompile_pooling(self) -> None:
+        pooler = getattr(self.runner, "pooler", None)
+        if pooler is None:
+            logger.warning(
+                "Pooling precompile skipped because model has no pooler attribute.")
+            return
+
+        logger.info("Precompile pooling kernels for pooling models.")
+
+        hidden_size = self.runner.model_config.get_hidden_size()
+        dtype = self.runner.model_config.dtype
+        hidden_sharding = NamedSharding(
+            self.runner.mesh, PartitionSpec(None, None))
+
+        for num_tokens in self.runner.num_tokens_paddings:
+            hidden_states = self._create_dummy_tensor(
+                (num_tokens, hidden_size), dtype, sharding=hidden_sharding)
+
+            for num_reqs in self.runner.num_reqs_paddings:
+                if num_reqs == 0 or num_reqs > num_tokens:
+                    continue
+
+                prompt_lens = np.ones(num_reqs, dtype=np.int32)
+                first_token_indices = np.arange(num_reqs, dtype=np.int32)
+                last_token_indices = first_token_indices.copy()
+                normalize = np.ones(num_reqs, dtype=np.int8)
+
+                (
+                    prompt_lens,
+                    normalize,
+                    first_token_indices,
+                    last_token_indices,
+                ) = device_array(
+                    self.runner.mesh,
+                    (
+                        prompt_lens,
+                        normalize,
+                        first_token_indices,
+                        last_token_indices,
+                    ),
+                )
+
+                pooling_metadata = TPUSupportedPoolingMetadata(
+                    prompt_lens=prompt_lens,
+                    first_token_indices=first_token_indices,
+                    last_token_indices=last_token_indices,
+                    normalize=normalize,
+                    num_reqs=num_reqs,
+                    padded_num_reqs=num_reqs,
+                    task="embed",
+                )
+
+                self._run_compilation(
+                    "pool",
+                    pool,
+                    hidden_states,
+                    pooling_metadata,
+                    pooler,
+                    num_tokens=num_tokens,
+                    num_reqs=num_reqs,
+                )
 
     def _precompile_input_embeddings_merger(self) -> None:
         for num_tokens in self.runner.num_tokens_paddings:

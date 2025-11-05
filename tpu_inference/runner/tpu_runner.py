@@ -46,6 +46,7 @@ from tpu_inference.layers.jax.sample.sampling import (compute_logprobs,
                                                       gather_logprobs, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
+from tpu_inference.layers.jax.pool.pooling import pool
 from tpu_inference.layers.jax.pool.pooling_metadata import (
     SUPPORTED_POOLING_TASKS,
     TPUSupportedPoolingMetadata,
@@ -235,6 +236,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         ) if envs.VLLM_XLA_CHECK_RECOMPILATION else nullcontext()
         self.dp_size = self.vllm_config.sharding_config.total_dp_size
 
+        self.is_pooling_model = self.model_config.runner_type == "pooling"
+        self.pooler = None
+
         self._init_random()
         self._init_mesh()
         self._init_phased_profiling()
@@ -253,7 +257,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.uses_mrope, self.model_config)
         self.lora_utils = LoraUtils(self)
 
-        self.is_pooling_model = False
+
         cache_config = self.cache_config
         if cache_config.cache_dtype == "auto":
             model_dtype = self.dtype
@@ -424,6 +428,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             pin_memory=False,
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[self.block_size],
+            is_pooling_model = self.is_pooling_model,
             is_spec_decode=bool(self.vllm_config.speculative_config),
         )
 
@@ -496,7 +501,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         )
 
         multimodal_fns = multimodal_fns or {}
-        self.is_pooling_model = hasttr(self.model, "pooler") 
+
+        if self.is_pooling_model:
+            self.pooler = self.model.pooler
+
+        print(f"DEBUGPRINT[96]: tpu_jax_runner.py:396: self.is_pooling_model={self.is_pooling_model}")
         self.precompile_vision_encoder_fn = multimodal_fns.get(
             "precompile_vision_encoder_fn", None)
         self.get_multimodal_embeddings_fn = multimodal_fns.get(
@@ -520,6 +529,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     f"hbm={common_utils.hbm_usage_gb(self.devices)}GiB")
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+        if self.is_pooling_model:
+            return ("embed", )
         return ("generate", )
 
     def get_kv_cache_spec(self):
@@ -758,52 +769,29 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             if self.is_pooling_model:
                 assert pooling_metadata is not None
-                pooling_result = pool(self.model.pooler, hidden_states, pooling_metadata )
-
                 num_reqs = self.input_batch.num_reqs
                 req_ids = cast(list[str], self.input_batch.req_ids[:num_reqs])
-                prompt_logprobs_dict = {req_id: None for req_id in req_ids}
+
+                raw_pooler_output = pool(hidden_states, pooling_metadata, self.pooler)
+                raw_pooler_output = np.asarray(jax.device_get(raw_pooler_output))[:num_reqs]
                 prompt_lens = np.asarray(
                     jax.device_get(pooling_metadata.prompt_lens)
                 )[:num_reqs]
                 seq_lens_cpu = self.seq_lens_cpu[:num_reqs]
 
-                task_id = pooling_metadata.primary_task_id
-                pooler_output: list[torch.Tensor | None] = []
 
-                if task_id == SUPPORTED_POOLING_TASKS["embed"]:
-                    embeddings = np.asarray(
-                        jax.device_get(pooling_result.embeddings)
-                    )[:num_reqs]
-                    dimensions = np.asarray(
-                        jax.device_get(pooling_metadata.dimensions)
-                    )[:num_reqs]
 
-                    for idx in range(num_reqs):
-                        if seq_lens_cpu[idx] != prompt_lens[idx]:
-                            pooler_output.append(None)
-                            continue
-
-                        embedding = embeddings[idx]
-                        dim_override = int(dimensions[idx])
-                        if dim_override > 0:
-                            embedding = embedding[:dim_override]
-                        embedding_np = embedding.astype(np.float32, copy=False)
-                        pooler_output.append(
-                            torch.tensor(embedding_np, dtype=torch.float32)
-                        )
-
-                else: 
-                    raise NotImplementedError(
-                        f"Unsupported pooling task id: {task_id}"
-                    )
+                pooler_output = []
+                for raw_output, seq_len, prompt_len in zip(raw_pooler_output, seq_lens_cpu, prompt_lens):
+                    output = raw_output if seq_len == prompt_len else None
+                    pooler_output.append(torch.from_numpy(raw_output))
 
                 model_runner_output = ModelRunnerOutput(
                     req_ids=req_ids,
                     req_id_to_index=self.input_batch.req_id_to_index,
                     sampled_token_ids=[],
                     logprobs=None,
-                    prompt_logprobs_dict=prompt_logprobs_dict,
+                    prompt_logprobs_dict={},
                     pooler_output=pooler_output,
                     kv_connector_output=kv_connector_output,
                 )
@@ -1513,6 +1501,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             pooling_metadata = TPUSupportedPoolingMetadata.from_input_batch(
                 self.mesh,
                 self.input_batch,
+                num_scheduled_tokens_per_req,
                 padded_num_reqs,
             )
 

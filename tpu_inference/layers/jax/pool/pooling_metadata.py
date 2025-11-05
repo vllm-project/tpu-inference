@@ -25,15 +25,15 @@ def build_pooling_cursor(
     assert len(prompt_lens) == len(num_scheduled_tokens)
 
     n_seq = len(num_scheduled_tokens)
-    num_sched_tokens_padded = jnp.zeros(padded_num_seqs)
-    num_sched_tokens_padded = num_sched_tokens_padded.at[:n_seq].set(
-        jnp.asarary(num_scheduled_tokens, dtype=jnp.int32)
+    num_scheduled_tokens_padded = jnp.zeros(padded_num_seqs)
+    num_scheduled_tokens_padded = num_scheduled_tokens_padded.at[:n_seq].set(
+        jnp.asarray(num_scheduled_tokens, dtype=jnp.int32)
     )
-    cumsum = jnp.cumsum(num_scheduled_tokens)
-    first_token_indices = jnp.concatenate((jnp.asarray(0), cumsum[:-1]))
-    last_token_indices = first_token_indices + num_sched_tokens_padded - 1
+    cumsum = jnp.cumsum(num_scheduled_tokens_padded, dtype = jnp.int64)
+    first_token_indices = jnp.concatenate((jnp.asarray((0,)), cumsum[:-1]))
+    last_token_indices = (first_token_indices + num_scheduled_tokens_padded - 1).astype(jnp.int64)
     last_token_indices = jnp.where(
-        num_sched_tokens_padded > 0, last_token_indices, first_token_indices
+        num_scheduled_tokens_padded > 0, last_token_indices, first_token_indices
     )
     return first_token_indices, last_token_indices
 
@@ -42,11 +42,13 @@ def build_pooling_cursor(
     jax.tree_util.register_dataclass,
     data_fields=(
         "prompt_lens",
+        "first_token_indices",
+        "last_token_indices",
         "normalize",
         "num_reqs",
         "padded_num_reqs",
     ),
-    meta_fields=("task_id",),
+    meta_fields=("task",),
 )
 @dataclass
 class TPUSupportedPoolingMetadata:

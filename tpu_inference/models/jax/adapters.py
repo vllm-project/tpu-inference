@@ -4,12 +4,8 @@ import jax
 from flax import nnx
 from jax.sharding import Mesh
 
-from vllm.config import VllmConfig
-from vllm.model_executor.models.interfaces_base import (
-    VllmModelForPooling,
-    is_pooling_model,
-)
 from tpu_inference.layers.jax.pool.pooler import Pooler
+from vllm.config import VllmConfig
 
 _T = tp.TypeVar("_T", bound=type[nnx.Module])
 
@@ -17,6 +13,15 @@ _GENERATE_SUFFIXES = (
     "ForCausalLM",
     "ForConditionalGeneration",
 )
+
+class PoolingMixin:
+    """
+    same as VllmModelForPooling 
+    """
+    is_pooling_model: tp.ClassVar[tp.Literal[True]] = True
+
+    default_pooling_type: tp.ClassVar[str] = "LAST"
+    pooler: Pooler
 
 
 def _get_pooling_model_name(orig_model_name: str, pooling_suffix: str) -> str:
@@ -27,7 +32,7 @@ def _get_pooling_model_name(orig_model_name: str, pooling_suffix: str) -> str:
 
 
 def _create_pooling_model_cls(orig_cls: _T) -> _T:
-    class ModelForPooling(orig_cls, VllmModelForPooling): 
+    class ModelForPooling(orig_cls, PoolingMixin): 
         is_pooling_model = True
 
         def __init__(
