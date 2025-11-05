@@ -7,6 +7,7 @@ import jax.numpy as jnp
 from jax import lax
 from jax._src import dtypes
 from jax.experimental import pallas as pl
+from jax.experimental import shard_map
 from jax.experimental.pallas import tpu as pltpu
 
 P = jax.sharding.PartitionSpec
@@ -144,7 +145,7 @@ def _fused_ep_moe_kernel(
         a2a_acc_sem,
         *,
         top_k: int,
-        ep_name: str,
+        ep_axis_name: str,
         # Kernel tuning params.
         bt: int,  # Block size of local_num_tokens.
         bf: int,  # Block size of intermediate_size.
@@ -155,8 +156,8 @@ def _fused_ep_moe_kernel(
         bd1c: int,  # Compute size of block hidden_size.
         bd2c: int,  # Compute size of block hidden_size.
 ):
-    my_id = lax.axis_index(ep_name)
-    num_devices = lax.axis_size(ep_name)
+    my_id = lax.axis_index(ep_axis_name)
+    num_devices = lax.axis_size(ep_axis_name)
     local_num_tokens = tokens_hbm.shape[0]
     local_num_experts, intermediate_size, hidden_size = w2_hbm.shape
     # num_experts = local_num_experts * num_devices
@@ -186,8 +187,8 @@ def _fused_ep_moe_kernel(
         barrier_sem = pltpu.get_barrier_semaphore()
         pltpu.semaphore_signal(
             barrier_sem,
-            device_id=right_id,
-            device_id_type=pltpu.DeviceIdType.LOGICAL,
+            device_id=(0, right_id),
+            device_id_type=pltpu.DeviceIdType.MESH,
         )
         pltpu.semaphore_wait(barrier_sem, 1)
 
@@ -276,7 +277,7 @@ def _fused_ep_moe_kernel(
                     dst_ref=d2e_count_vmem.at[row_id],
                     send_sem=send_sem,
                     recv_sem=recv_sem,
-                    device_id=(right_id, ),
+                    device_id=(0, right_id),
                     device_id_type=pltpu.DeviceIdType.MESH,
                 ).wait()
                 row_id = (row_id + num_devices - 1) % num_devices
@@ -358,7 +359,10 @@ def _fused_ep_moe_kernel(
                                              pl.ds(start, remote_sz)],
                     send_sem=send_sems.at[e_sem_id],
                     recv_sem=recv_sems.at[e_sem_id],
-                    device_id=(recv_id, ),
+                    device_id=(
+                        0,
+                        recv_id,
+                    ),
                 ).start()
         a2a_s_sends_x2_smem[e_sem_id] = send_sz
 
@@ -402,7 +406,7 @@ def _fused_ep_moe_kernel(
                 dst_ref=a2a_g_hbm.at[my_e_id, pl.ds(0, remote_sz)],
                 send_sem=send_sems.at[e_sem_id],
                 recv_sem=a2a_gather_sem,
-                device_id=(recv_id, ),
+                device_id=(0, recv_id),
             ).start()
             start += sz
 
@@ -831,6 +835,7 @@ def _fused_ep_moe_kernel(
         "bfc",
         "bd1c",
         "bd2c",
+        "ep_axis_name",
     ],
 )
 def fused_ep_moe(
@@ -850,12 +855,14 @@ def fused_ep_moe(
     bfc: int,
     bd1c: int,
     bd2c: int,
+    ep_axis_name: str = 'model',
 ):
-    if len(mesh.axis_names) != 1:
-        raise ValueError("Mesh must have only one axis")
+    # Assert all other axes have length of 1
+    assert len(mesh.shape) == 2, "Expect 2D mesh in tpu-inference"
+    assert 'data' in mesh.shape and mesh.shape['data'] == 1, \
+        "Expect data axis size of 1 in tpu-inference"
 
-    ep_name = mesh.axis_names[0]
-    ep_size = mesh.axis_sizes[0]
+    ep_size = mesh.shape[ep_axis_name]
     num_devices = ep_size
 
     num_tokens, actual_hidden_size = tokens.shape
@@ -907,7 +914,7 @@ def fused_ep_moe(
             functools.partial(
                 _fused_ep_moe_kernel,
                 top_k=top_k,
-                ep_name=ep_name,
+                ep_axis_name=ep_axis_name,
                 bt=bt,
                 bf=bf,
                 bd1=bd1,
@@ -999,11 +1006,13 @@ def fused_ep_moe(
         ))
 
     @jax.jit
-    @jax.shard_map(
+    @functools.partial(
+        shard_map.shard_map,
         mesh=mesh,
-        in_specs=(P(ep_name), P(ep_name), P(ep_name), P(ep_name), P()),
-        out_specs=P(ep_name),
-        check_vma=False,
+        in_specs=(P(ep_axis_name), P(ep_axis_name), P(ep_axis_name),
+                  P(ep_axis_name), P()),
+        out_specs=P(ep_axis_name),
+        check_rep=False,
     )
     def kernel(tokens, w1, w2, gating_output, a2a_g_hbm_scratch):
         return fused_moe(
