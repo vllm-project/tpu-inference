@@ -14,7 +14,6 @@ if TYPE_CHECKING:
     TPU_MULTIHOST_BACKEND: str = ""
     PREFILL_SLICES: str = ""
     DECODE_SLICES: str = ""
-    SKIP_JAX_PRECOMPILE: bool = False
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     MODEL_IMPL_TYPE: str = "auto"
     NEW_MODEL_DESIGN: bool = False
@@ -120,9 +119,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Slice configuration for disaggregated decode workers
     "DECODE_SLICES":
     lambda: os.getenv("DECODE_SLICES", ""),
-    # Skip JAX precompilation step during initialization
-    "SKIP_JAX_PRECOMPILE":
-    env_bool("SKIP_JAX_PRECOMPILE", default=False),
     # Check for XLA recompilation during execution
     "VLLM_XLA_CHECK_RECOMPILATION":
     env_bool("VLLM_XLA_CHECK_RECOMPILATION", default=False),

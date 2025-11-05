@@ -69,7 +69,7 @@ class CompilationManager:
         logger.info("Compilation finished in %.2f [secs].", end - start)
 
     def capture_model(self) -> None:
-        if envs.SKIP_JAX_PRECOMPILE or self.runner.model_config.enforce_eager:
+        if self.runner.model_config.enforce_eager:
             return
         logger.info("Precompile all the subgraphs with possible input shapes.")
 

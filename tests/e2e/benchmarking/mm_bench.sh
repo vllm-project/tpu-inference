@@ -96,11 +96,12 @@ run_benchmark() {
 
     echo "Spinning up the vLLM server...$extra_flags"
     # shellcheck disable=SC2086
-    (SKIP_JAX_PRECOMPILE=1 VLLM_XLA_CHECK_RECOMPILATION=0 vllm serve "$model_name" \
+    (VLLM_XLA_CHECK_RECOMPILATION=0 vllm serve "$model_name" \
         --max-model-len "$max_model_len" \
         --max-num-seqs "$max_num_seqs" \
         --disable-log-requests \
         --max-num-batched-tokens "$max_batched_tokens" \
+        --enforce-eager \
         $extra_flags \
         2>&1 | tee -a "$LOG_FILE") &
 
