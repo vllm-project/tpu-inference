@@ -14,7 +14,7 @@ steps:
       CI_TARGET: "JAX-Path Qxix Quantization"
       CI_STAGE: "CorrectnessTest"
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh JAX-Path_Qxix_Quantization_CorrectnessTest
@@ -36,7 +36,7 @@ steps:
       CI_TARGET: "JAX-Path Qxix Quantization"
       CI_STAGE: "PerformanceTest"
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh JAX-Path_Qxix_Quantization_PerformanceTest

@@ -48,7 +48,7 @@ for folder_path in $TARGET_FOLDERS; do
 - label: "Upload: ${yml_file}"
   command: "buildkite-agent pipeline upload ${yml_file}"
   agents:
-    queue: tpu_v6e_queue
+    queue: cpu
 EOF
 )
 

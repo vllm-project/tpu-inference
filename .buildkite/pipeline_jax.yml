@@ -240,7 +240,7 @@ steps:
        - test_12
        - test_13
      agents:
-       queue: tpu_v6e_queue
+       queue: cpu
      commands:
        - |
          .buildkite/scripts/check_results.sh \

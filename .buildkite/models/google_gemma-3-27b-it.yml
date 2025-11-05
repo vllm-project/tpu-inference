@@ -16,7 +16,7 @@ steps:
       CI_STAGE: "UnitTest"
       CI_TARGET: google/gemma-3-27b-it
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh google_gemma-3-27b-it_UnitTest
@@ -41,7 +41,7 @@ steps:
       CI_TARGET: google/gemma-3-27b-it
       CI_STAGE: "IntegrationTest"
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh google_gemma-3-27b-it_IntegrationTest
@@ -72,7 +72,7 @@ steps:
       CI_TARGET: google/gemma-3-27b-it
       CI_STAGE: "Benchmark"
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh google_gemma-3-27b-it_Benchmark
