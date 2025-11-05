@@ -41,9 +41,9 @@ class MockModelB:
 def mesh() -> Mesh:
     """Provides a JAX device mesh for sharding."""
     devices = np.array(jax.devices()[:1])
-    devices = devices.reshape((1, 1, -1))
+    devices = devices.reshape((1, 1, 1, -1))
     # Pass the 1D list of devices directly. Its ndim will match len(axis_names).
-    return Mesh(devices, axis_names=("data", "attn_dp", "model"))
+    return Mesh(devices, axis_names=("data", "attn_dp", "expert", "model"))
 
 
 @pytest.fixture
