@@ -265,10 +265,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
     def _init_mesh(self) -> None:
         sharding_strategy: ShardingConfigManager = self.vllm_config.sharding_config
-        axis_names = ("data", "attn_dp", "expert", "model")
-        mesh_shape = (sharding_strategy.model_dp_size,
-                      sharding_strategy.attn_dp_size,
-                      sharding_strategy.expert_size, sharding_strategy.tp_size)
+        # NOTE(wenxindongwork): The new MoE kernel expects a 2D mesh, so we default
+        # to a 2D mesh for now, and we may change this in the future.
+        if os.getenv("NEW_MODEL_DESIGN", False) or self.dp_size > 1:
+            axis_names = ("data", "attn_dp", "expert", "model")
+            mesh_shape = (sharding_strategy.model_dp_size,
+                          sharding_strategy.attn_dp_size,
+                          sharding_strategy.expert_size,
+                          sharding_strategy.tp_size)
+
+        else:
+            axis_names = ("data", "model")
+            mesh_shape = (sharding_strategy.model_dp_size,
+                          sharding_strategy.tp_size)
 
         enforce_device_order = self.vllm_config.sharding_config.device_indexes is not None
         if enforce_device_order:
