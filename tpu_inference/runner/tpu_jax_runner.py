@@ -612,9 +612,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             logits_indices_selector,
         ) = self._prepare_inputs(scheduler_output)
 
-        logger.debug(f"input_ids {input_ids.shape}")
-        logger.debug(f"logits_indices {logits_indices.shape}")
-
         # multi-modal support
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.

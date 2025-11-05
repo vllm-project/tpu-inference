@@ -309,12 +309,6 @@ def jax_fused_moe_func(
         "The kernel requires num_tokens * topk to be a multiple of "
         f"16 but got {num_tokens}*{topk}={num_tokens*topk}")
 
-    hidden_states = jax.lax.with_sharding_constraint(
-        hidden_states, NamedSharding(mesh, P(None)))
-
-    gating_output = jax.lax.with_sharding_constraint(
-        gating_output, NamedSharding(mesh, P(None)))
-
     hidden_states = hidden_states.reshape(num_tokens, hidden_size)
     gating_output = gating_output.reshape(num_tokens, global_num_experts)
 
