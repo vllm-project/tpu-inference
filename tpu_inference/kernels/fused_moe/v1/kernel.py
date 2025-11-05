@@ -15,6 +15,19 @@ P = jax.sharding.PartitionSpec
 cdiv = pl.cdiv
 
 
+def convert_1d_to_mesh_shape(id, mesh_shape=(1, 4, 2)):
+    remain = id
+    new_id = []
+
+    for axis_size in reversed(mesh_shape):
+        new_id.append(remain % axis_size)
+        remain //= axis_size
+    new_id = tuple(reversed(new_id))
+
+    print(f"kky {id=} {new_id=} {mesh_shape=}")
+    return new_id
+
+
 def align_to(x, a):
     return cdiv(x, a) * a
 
@@ -187,7 +200,7 @@ def _fused_ep_moe_kernel(
         barrier_sem = pltpu.get_barrier_semaphore()
         pltpu.semaphore_signal(
             barrier_sem,
-            device_id=(0, right_id),
+            device_id=convert_1d_to_mesh_shape(right_id),
             device_id_type=pltpu.DeviceIdType.MESH,
         )
         pltpu.semaphore_wait(barrier_sem, 1)
@@ -277,7 +290,7 @@ def _fused_ep_moe_kernel(
                     dst_ref=d2e_count_vmem.at[row_id],
                     send_sem=send_sem,
                     recv_sem=recv_sem,
-                    device_id=(0, right_id),
+                    device_id=convert_1d_to_mesh_shape(right_id),
                     device_id_type=pltpu.DeviceIdType.MESH,
                 ).wait()
                 row_id = (row_id + num_devices - 1) % num_devices
@@ -359,10 +372,7 @@ def _fused_ep_moe_kernel(
                                              pl.ds(start, remote_sz)],
                     send_sem=send_sems.at[e_sem_id],
                     recv_sem=recv_sems.at[e_sem_id],
-                    device_id=(
-                        0,
-                        recv_id,
-                    ),
+                    device_id=convert_1d_to_mesh_shape(recv_id),
                 ).start()
         a2a_s_sends_x2_smem[e_sem_id] = send_sz
 
@@ -406,7 +416,7 @@ def _fused_ep_moe_kernel(
                 dst_ref=a2a_g_hbm.at[my_e_id, pl.ds(0, remote_sz)],
                 send_sem=send_sems.at[e_sem_id],
                 recv_sem=a2a_gather_sem,
-                device_id=(0, recv_id),
+                device_id=convert_1d_to_mesh_shape(recv_id),
             ).start()
             start += sz
 
@@ -858,11 +868,18 @@ def fused_ep_moe(
     ep_axis_name: str = 'model',
 ):
     # Assert all other axes have length of 1
-    assert len(mesh.shape) == 2, "Expect 2D mesh in tpu-inference"
+    # assert len(mesh.shape) == 2, "Expect 2D mesh in tpu-inference"
     assert 'data' in mesh.shape and mesh.shape['data'] == 1, \
         "Expect data axis size of 1 in tpu-inference"
 
-    ep_size = mesh.shape[ep_axis_name]
+    if isinstance(ep_axis_name, tuple):
+        ep_size = 1
+        for axis in ep_axis_name:
+            ep_size *= mesh.shape[axis]
+    else:
+        ep_size = mesh.shape[ep_axis_name]
+    print(f'kky {ep_size=} {mesh=}')
+
     num_devices = ep_size
 
     num_tokens, actual_hidden_size = tokens.shape
