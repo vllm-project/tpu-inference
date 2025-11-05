@@ -125,7 +125,8 @@ class Llama4ForCausalLM(nnx.Module):
                             router_act="sigmoid",
                             rngs=self.rng,
                             activation_ffw_td=('data', None),
-                            ed_sharding=(None, 'expert'),
+                            # ed_sharding=(None, 'expert'),
+                            ed_sharding=('model', 'expert'),
                             random_init=force_random_weights)
 
             moe_ffw = MoE(dtype=dtype,
@@ -138,8 +139,10 @@ class Llama4ForCausalLM(nnx.Module):
                           rngs=self.rng,
                           activation_ffw_td=('data', None),
                           activation_ffw_ted=('data', 'expert', None),
-                          edf_sharding=('expert', None, 'model'),
-                          efd_sharding=('expert', 'model', None),
+                        #   edf_sharding=('expert', None, 'model'),
+                        #   efd_sharding=('expert', 'model', None),
+                          edf_sharding=('model', None, None),
+                          efd_sharding=('model', None, None),
                           random_init=force_random_weights)
 
             dense_ffw = DenseFFW(dtype=dtype,
@@ -171,8 +174,10 @@ class Llama4ForCausalLM(nnx.Module):
                 attention_chunk_size=None if use_attention_rope else 8192,
                 mesh=self.mesh,
                 random_init=force_random_weights,
-                activation_attention_td=('data', 'model'),
-                activation_q_td=('data', 'model'),
+                # activation_attention_td=('data', 'model'),
+                activation_attention_td=('data', None),
+                # activation_q_td=('data', 'model'),
+                activation_q_td=('data', None),
                 query_tnh=P('data', 'model', None),
                 keyvalue_skh=P('data', 'model', None),
                 activation_attention_out_td=('data', 'model'),
@@ -201,6 +206,7 @@ class Llama4ForCausalLM(nnx.Module):
                 rngs=self.rng,
                 with_scale=True,
                 dtype=dtype,
+                activation_ffw_td = ('data', None),
             )
 
             pre_mlp_norm = RMSNorm(
@@ -210,6 +216,7 @@ class Llama4ForCausalLM(nnx.Module):
                 with_scale=True,
                 dtype=dtype,
                 random_init=force_random_weights,
+                activation_ffw_td = ('data', None),
             )
 
             block = SharedExpertsTransformerBlock(
@@ -284,7 +291,7 @@ class Llama4ForCausalLM(nnx.Module):
             kv_cache = kv_caches[i]
             new_kv_cache, x_TD = block(x_TD, is_prefill, kv_cache,
                                        attention_metadata)
-            jax.block_until_ready(x_TD)
+            # jax.block_until_ready(x_TD)
             kv_caches[i] = new_kv_cache
 
         final_activation_TD = self.final_norm(x_TD)
@@ -612,14 +619,18 @@ class Llama4WeightLoader:
                                 f"does not match model shape for {loaded_name}: {model_weight.array.scale.value.shape}!"
                             )
 
-                        if buffer_key.endswith("kernel_down_proj_EFD_scale"):
-                            correct_sharding_names = ('expert', None, 'model')
-                            model_weight.array.scale.value = shard_put(
-                                aggregated_weight,
-                                correct_sharding_names,
-                                mesh=model_for_loading.mesh)
-                        else:
-                            model_weight.array.scale.value = shard_put(
+                        # if buffer_key.endswith("kernel_down_proj_EFD_scale"):
+                        #     correct_sharding_names = ('expert', None, 'model')
+                        #     model_weight.array.scale.value = shard_put(
+                        #         aggregated_weight,
+                        #         correct_sharding_names,
+                        #         mesh=model_for_loading.mesh)
+                        # else:
+                        #     model_weight.array.scale.value = shard_put(
+                        #         aggregated_weight,
+                        #         model_weight.array.scale.sharding,
+                        #         mesh=model_for_loading.mesh)
+                        model_weight.array.scale.value = shard_put(
                                 aggregated_weight,
                                 model_weight.array.scale.sharding,
                                 mesh=model_for_loading.mesh)
