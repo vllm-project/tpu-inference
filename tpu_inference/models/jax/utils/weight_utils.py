@@ -179,28 +179,14 @@ def transform_rhs_for_matmul(rhs: jax.Array,
     Transforms the RHS einsum operand using info from prepare_rhs_transform.
     RHS -> (B, K, N) or (K, N)
     """
-    rhs_perm = rhs_parsed_info["rhs_perm"]
-    needs_transpose = rhs_perm != list(range(len(rhs.shape)))
-
-    if needs_transpose:
-        rhs_transformed = jnp.transpose(rhs, rhs_perm)
-    else:
-        rhs_transformed = rhs
-
     if rhs_parsed_info["needs_rhs_reshape"]:
-        b_prod = rhs_parsed_info["b_prod"]
         k_prod = rhs_parsed_info["k_prod"]
         n_prod = rhs_parsed_info["n_prod"]
-        is_2d_matmul = rhs_parsed_info["is_2d_matmul"]
 
-        target_shape = (b_prod, k_prod, n_prod)
-        rhs_transformed = jnp.reshape(rhs_transformed, target_shape)
+        target_shape = (k_prod, n_prod)
+        rhs = jnp.reshape(rhs, target_shape)
 
-        if is_2d_matmul:
-            rhs_transformed = jnp.squeeze(rhs_transformed, axis=0)
-    # else: shape is already (K, N) or (B, K, N)
-
-    return rhs_transformed
+    return rhs
 
 
 def transpose_params(param_key: str, param_tensor: jax.Array, transpose_map):
