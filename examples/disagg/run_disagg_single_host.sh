@@ -45,13 +45,13 @@ for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
     \
     TPU_KV_TRANSFER_PORT=$KV_PORT \
     TPU_SIDE_CHANNEL_PORT=$SIDE_PORT \
-    SKIP_JAX_PRECOMPILE=1 \
     \
     vllm serve $MODEL \
     --port $PORT \
     --gpu-memory-utilization 0.2 \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
     --kv-transfer-config "{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_producer\"}" \
+    --enforce-eager \
     > $HOME/logs/prefill_$i.txt 2>&1 &
 
     PREFILL_HOSTS+=("localhost")
@@ -72,13 +72,13 @@ for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
     \
     TPU_KV_TRANSFER_PORT=$KV_PORT \
     TPU_SIDE_CHANNEL_PORT=$SIDE_PORT \
-    SKIP_JAX_PRECOMPILE=1 \
     \
     vllm serve $MODEL \
     --port $PORT \
     --gpu-memory-utilization 0.2 \
     --tensor-parallel-size $DECODER_TP_SIZE \
     --kv-transfer-config "{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_consumer\"}" \
+    --enforce-eager \
     > $HOME/logs/decode_$i.txt 2>&1 &
 
     DECODE_HOSTS+=("localhost")
