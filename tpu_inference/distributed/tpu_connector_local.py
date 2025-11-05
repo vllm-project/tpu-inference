@@ -1038,11 +1038,15 @@ class TPUConnectorWorker:
                 self.runner.kv_caches, blocks_to_save)
 
             jax.block_until_ready(flat_kv_caches_tpu)
+            flat_kv_caches_tpu_copy = flat_kv_caches_tpu
             logger.info(
                 f"extracted_blocks_tpu: {flat_kv_caches_tpu[0].shape}, {flat_kv_caches_tpu[0].sharding}"
             )
 
             flat_kv_caches_cpu = self.swap_out_fn(flat_kv_caches_tpu)
+            logger.info(
+                f"---debug----: flat_kv_caches_tpu_copy: {flat_kv_caches_tpu_copy[0].shape}, {flat_kv_caches_tpu_copy[0].sharding}"
+            )
             # Block until the transfer is complete
             if flat_kv_caches_cpu:
                 jax.block_until_ready(flat_kv_caches_cpu)
