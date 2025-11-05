@@ -893,7 +893,7 @@ class TPUConnectorWorker:
 
         self.runner: Optional[TPUModelRunner] = None
         self.mesh: Optional[Mesh] = None
-        self.swap_op_type = os.getenv("TPU_OFFLOADING_SWAP_OP_TYPE",
+        self.swap_op_type = os.getenv("TPU_OFFLOAD_SWAP_OP_TYPE",
                                       default=DEFAULT_HOST_HBM_SWAP_OP_TYPE)
         assert self.swap_op_type in get_args(CPU_OFFLOADING_SWAP_OP_TYPE)
         # TODO(jcgu): check libtpu compatibility for pallas dma kernel

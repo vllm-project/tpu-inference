@@ -112,7 +112,7 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
         LocalCPUBackend._instance = None
         LocalCPUBackend._initialized = False
 
-        os.environ["TPU_OFFLOADING_SWAP_OP_TYPE"] = swap_op_type
+        os.environ["TPU_OFFLOAD_SWAP_OP_TYPE"] = swap_op_type
         connector = CPUOffloadingConnector(self.vllm_config,
                                            KVConnectorRole.WORKER)
         worker = connector.connector_worker
@@ -187,7 +187,6 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
             # Get the saved data for the specific token from the chunk
             offset_in_chunk = token_idx - chunk_info["start_idx"]
 
-            # logger.info(f"token_idx: {token_idx}, logical_block_idx: {logical_block_idx}, block_offset: {block_offset}, physical_block_id: {physical_block_id}, offset_in_chunk: {offset_in_chunk}")
             assert offset_in_chunk == block_offset, f"{offset_in_chunk} != {block_offset}"
             for layer_idx in range(num_layers):
                 original_token_data = source_kv_cache[layer_idx][
@@ -200,7 +199,7 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
 
     @parameterized.named_parameters(
         dict(
-            testcase_name="_prefill_no_skip_save_2_drop",
+            testcase_name="_prefill_no_skip_save_2_drop_jax",
             num_skip_leading_tokens=0,
             num_tokens_to_save=_DEFAULT_BLOCK_SIZE * 2,
             num_total_tokens=_DEFAULT_BLOCK_SIZE * 2 + 10,
@@ -214,8 +213,12 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
             num_blocks_to_save=2,
             swap_op_type="pallas",
         ),
+        # NOTE(jcgu): mimic the scenario of padding the last partial
+        # block when the preferred saving behavior is pad / dynamic:
+        # add 10 extra tokens (after 2 full blocks) as the partial
+        # block and assign 3 blocks to save.
         dict(
-            testcase_name="_prefill_no_skip_save_2_pad",
+            testcase_name="_prefill_no_skip_save_2_pad_jax",
             num_skip_leading_tokens=0,
             num_tokens_to_save=_DEFAULT_BLOCK_SIZE * 2 + 10,
             num_total_tokens=_DEFAULT_BLOCK_SIZE * 2 + 10,
