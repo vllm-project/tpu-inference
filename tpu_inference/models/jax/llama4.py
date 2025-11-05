@@ -118,7 +118,8 @@ class Llama4ForCausalLM(nnx.Module):
                             router_act="sigmoid",
                             rngs=self.rng,
                             activation_ffw_td=('data', None),
-                            ed_sharding=(None, 'expert'),
+                            # ed_sharding=(None, 'expert'),
+                            ed_sharding=('model', None),
                             random_init=force_random_weights)
 
             custom_module = MoE(
@@ -132,8 +133,10 @@ class Llama4ForCausalLM(nnx.Module):
                 rngs=self.rng,
                 activation_ffw_td=('data', None),
                 activation_ffw_ted=('data', 'expert', None),
-                edf_sharding=('expert', None, 'model'),
-                efd_sharding=('expert', 'model', None),
+                # edf_sharding=('expert', None, 'model'),
+                # efd_sharding=('expert', 'model', None),
+                edf_sharding=('model', None, None),
+                efd_sharding=('model', None, None),
                 random_init=force_random_weights
             ) if is_moe_layer else DenseFFW(
                 dtype=dtype,
@@ -165,8 +168,10 @@ class Llama4ForCausalLM(nnx.Module):
                 attention_chunk_size=None if use_attention_rope else 8192,
                 mesh=self.mesh,
                 random_init=force_random_weights,
-                activation_attention_td=('data', 'model'),
-                activation_q_td=('data', 'model'),
+                # activation_attention_td=('data', 'model'),
+                activation_attention_td = ('data', None),
+                # activation_q_td=('data', 'model'),
+                activation_q_td=('data', None),
                 query_tnh=P('data', 'model', None),
                 keyvalue_skh=P('data', 'model', None),
                 activation_attention_out_td=('data', 'model'),
