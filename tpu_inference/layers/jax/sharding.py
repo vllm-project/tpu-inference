@@ -31,7 +31,7 @@ class ShardingAxisName2D:
     """Sharding axis names for 2D data parallelism scenarios.
     NOTE(wenxindongwork): The new MoE kernel expects a 2D mesh for now.
     We should use ShardingAxisNameBase once the new MoE kernel supports
-    more general mesh shapes.
+    more general mesh shapes. For now, this is the default sharding axes.
     """
     SEQUENCE = 'data'
     ATTN_DATA = 'data'
@@ -83,16 +83,16 @@ class ShardingConfigManager:
     Usage:
         sharding_config = ShardingConfigManager.from_vllm_config(vllm_config)
         tp_size = sharding_config.tp_size
+
+    During initialization, we set `vllm_config.sharding_config` to
+    `ShardingConfigManager.from_vllm_config(vllm_config)`, so you can access
+    `vllm_config.sharding_config.tp_size` directly.
     """
 
     def __init__(self,
                  sharding_strategy: ShardingStrategy,
                  device_indexes: Optional[List] = None):
-        """
-        Args:
-            sharding_strategy: The parsed ShardingStrategy object.
-            device_indexes: Optional list of device indexes to use.
-        """
+
         self.sharding_strategy: ShardingStrategy = sharding_strategy
         self.device_indexes: Optional[List[int]] = device_indexes
         self._total_devices: int = int(
@@ -103,37 +103,28 @@ class ShardingConfigManager:
     @classmethod
     def from_vllm_config(cls,
                          vllm_config: 'VllmConfig') -> 'ShardingConfigManager':
-        """Create a ShardingConfigManager from a VllmConfig object.
 
-        Args:
-            vllm_config: The vLLM configuration object.
-
-        Returns:
-            A configured ShardingConfigManager instance.
-        """
-        additional_config = vllm_config.additional_config.get(
+        sharding_strategy = vllm_config.additional_config.get(
             "sharding", {}).get("sharding_strategy", {})
-        device_indexes = additional_config.get("device_indexes", None)
-
         parallel_config = vllm_config.parallel_config
         tensor_parallelism = parallel_config.tensor_parallel_size
         data_parallelism = parallel_config.data_parallel_size
-        expert_parallelism = additional_config.get("expert_parallelism", 1)
-        sequence_parallelism = additional_config.get("sequence_parallelism", 1)
+        expert_parallelism = sharding_strategy.get("expert_parallelism", 1)
+        sequence_parallelism = sharding_strategy.get("sequence_parallelism", 1)
+        device_indexes = sharding_strategy.get("device_indexes", None)
 
-        # Replicate attention layer when num_kv_heads < TP
-        enable_dp_attention = additional_config.get("enable_dp_attention",
+        enable_dp_attention = sharding_strategy.get("enable_dp_attention",
                                                     False)
         if enable_dp_attention:
+            # Replicate attention layer when num_kv_heads < TP
             num_kv_heads = vllm_config.model_config.get_total_num_kv_heads()
-
             kv_dtype = utils.get_jax_dtype_from_str_dtype(
                 vllm_config.cache_config.cache_dtype) or jnp.bfloat16
             packing = 4 // jnp.dtype(kv_dtype).itemsize
             # When num_kv_heads * 2 / packing < TP, tensor parallelism would
             # duplicate KV heads across devices, wasting kv cache memory.
             # Use attention DP instead to reduce per-device num_kv_heads and
-            # xeliminate this waste.
+            # eliminate this waste.
             num_kv_heads_per_device_in_kv_cache = (num_kv_heads * 2) / packing
             attn_dp = max(
                 int(tensor_parallelism // num_kv_heads_per_device_in_kv_cache),
@@ -141,6 +132,7 @@ class ShardingConfigManager:
             tensor_parallelism = tensor_parallelism // attn_dp
         else:
             attn_dp = 1
+
         sharding_strategy = ShardingStrategy(
             tensor_parallelism=tensor_parallelism,
             data_parallelism=data_parallelism,
@@ -148,7 +140,7 @@ class ShardingConfigManager:
             sequence_parallelism=sequence_parallelism,
             attention_data_parallelism=attn_dp)
 
-        # Must override to avoid vLLM spinning up multiple DP engines.
+        # Must override here to avoid vLLM spinning up multiple DP engines.
         if vllm_config.parallel_config.data_parallel_size > 1:
             vllm_config.parallel_config.data_parallel_size = 1
             vllm_config.parallel_config.data_parallel_rank = 0
