@@ -387,12 +387,15 @@ class CompilationManager:
         logger.info("Compiling sampling with different input shapes.")
         hsize = self.runner.model_config.get_vocab_size()
         for num_reqs in self.runner.num_reqs_paddings:
-            sharding = NamedSharding(
+            logits_sharding = NamedSharding(
                 self.runner.mesh,
                 PartitionSpec(ShardingAxisName.ATTN_DATA, "model"))
             dp_size = self.runner.vllm_config.sharding_config.total_dp_size
+            sampling_metadata_sharding =  NamedSharding(
+                self.runner.mesh,
+                PartitionSpec(ShardingAxisName.ATTN_DATA)) if dp_size > 1 else None
             logits = self._create_dummy_tensor((num_reqs, hsize), jnp.bfloat16,
-                                               sharding)
+                                               logits_sharding)
             for do_sampling in (True, False):
                 if do_sampling:
                     temperature = np.full((num_reqs, ), 0.7, dtype=np.float32)
@@ -400,7 +403,7 @@ class CompilationManager:
                     top_p = np.full((num_reqs, ), 0.8, dtype=np.float32)
                     (temperature, top_k, top_p) = device_array(
                         self.runner.mesh, (temperature, top_k, top_p),
-                        sharding=sharding if dp_size > 1 else None)
+                        sharding=sampling_metadata_sharding)
                 else:
                     temperature = None
                     top_k = None

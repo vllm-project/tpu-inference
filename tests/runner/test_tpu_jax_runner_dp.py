@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -556,6 +557,329 @@ class TestTPUJaxRunnerDPInputsLightweight:
         expected_selector = np.array([0, 1])
         np.testing.assert_array_equal(logits_indices_selector,
                                       expected_selector)
+
+
+    @patch('tpu_inference.runner.tpu_jax_runner.NamedSharding')
+    @patch('tpu_inference.runner.tpu_jax_runner.runner_utils')
+    @patch('tpu_inference.runner.tpu_jax_runner.device_array',
+           side_effect=lambda mesh, tensors, **kwargs: tensors)
+    @patch('tpu_inference.runner.tpu_jax_runner.TPUSupportedSamplingMetadata')
+    def test_prepare_async_token_substitution_indices_dp(
+            self, mock_sampling_metadata, mock_device_array, mock_runner_utils,
+            mock_named_sharding):
+
+        # Setup test data
+        req_ids_dp = {0: ["req1", "req2"], 1: ["req3"]}
+        scheduled_tokens_per_dp_rank = {0: [3, 2], 1: [4]}
+        padded_num_scheduled_tokens_per_dp_rank = 8
+        dp_size = 2
+
+        # Setup _pre_async_results with placeholder mapping
+        self.runner._pre_async_results = MagicMock()
+        self.runner._pre_async_results.placeholder_req_id_to_index = {
+            "req1": 0,
+            "req3": 2
+        }  # req2 is not a placeholder
+
+        # Call the method
+        result = self.runner._prepare_async_token_substitution_indices_dp(
+            req_ids_dp, scheduled_tokens_per_dp_rank,
+            padded_num_scheduled_tokens_per_dp_rank, dp_size)
+
+        token_in_tpu_cur_input_indices_dp, token_in_tpu_pre_next_tokens_indices_dp = result
+
+        # Verify DP rank 0
+        # req1: token_offset=0, acc_cur_len starts at 0, after 3 tokens: 3, so last token at 2
+        # req2: not a placeholder, should be skipped
+        assert token_in_tpu_cur_input_indices_dp[0] == [2]
+        assert token_in_tpu_pre_next_tokens_indices_dp[0] == [0]
+
+        # Verify DP rank 1
+        # req3: token_offset=8, acc_cur_len starts at 8, after 4 tokens: 12, so last token at 11
+        assert token_in_tpu_cur_input_indices_dp[1] == [11]
+        assert token_in_tpu_pre_next_tokens_indices_dp[1] == [2]
+
+    @patch('tpu_inference.runner.tpu_jax_runner.NamedSharding')
+    @patch('tpu_inference.runner.tpu_jax_runner.runner_utils')
+    @patch('tpu_inference.runner.tpu_jax_runner.device_array',
+           side_effect=lambda mesh, tensors, **kwargs: tensors)
+    @patch('tpu_inference.runner.tpu_jax_runner.TPUSupportedSamplingMetadata')
+    def test_prepare_async_token_substitution_indices_dp_no_placeholders(
+            self, mock_sampling_metadata, mock_device_array, mock_runner_utils,
+            mock_named_sharding):
+        """Test when no requests are placeholders."""
+
+        req_ids_dp = {0: ["req1", "req2"], 1: ["req3"]}
+        scheduled_tokens_per_dp_rank = {0: [3, 2], 1: [4]}
+        padded_num_scheduled_tokens_per_dp_rank = 8
+        dp_size = 2
+
+        # No placeholders
+        self.runner._pre_async_results = MagicMock()
+        self.runner._pre_async_results.placeholder_req_id_to_index = {}
+
+        result = self.runner._prepare_async_token_substitution_indices_dp(
+            req_ids_dp, scheduled_tokens_per_dp_rank,
+            padded_num_scheduled_tokens_per_dp_rank, dp_size)
+
+        token_in_tpu_cur_input_indices_dp, token_in_tpu_pre_next_tokens_indices_dp = result
+
+        # All lists should be empty since no placeholders
+        assert token_in_tpu_cur_input_indices_dp[0] == []
+        assert token_in_tpu_pre_next_tokens_indices_dp[0] == []
+        assert token_in_tpu_cur_input_indices_dp[1] == []
+        assert token_in_tpu_pre_next_tokens_indices_dp[1] == []
+
+    def test_apply_async_token_substitution_empty_indices(self):
+        """Test _apply_async_token_substitution with empty indices (line 1025)."""
+
+        # Bind the actual method
+        self.runner._apply_async_token_substitution = TPUModelRunner._apply_async_token_substitution.__get__(
+            self.runner)
+
+        input_ids = np.array([1, 2, 3, 4, 5])
+        token_in_tpu_cur_input_indices = np.array([])
+        token_in_tpu_pre_next_tokens_indices = np.array([])
+
+        # Setup _pre_async_results
+        self.runner._pre_async_results = MagicMock()
+        self.runner._pre_async_results.next_tokens = np.array([10, 20, 30])
+        self.runner.mesh = MagicMock()
+
+        result = self.runner._apply_async_token_substitution(
+            input_ids, token_in_tpu_cur_input_indices,
+            token_in_tpu_pre_next_tokens_indices)
+
+        # Should return input_ids unchanged
+        np.testing.assert_array_equal(result, input_ids)
+
+    @patch('tpu_inference.runner.tpu_jax_runner.device_array',
+           side_effect=lambda mesh, tensors, **kwargs: tensors)
+    def test_apply_async_token_substitution_with_padding(
+            self, mock_device_array):
+        """Test _apply_async_token_substitution with padding."""
+
+        # Bind the actual method
+        self.runner._apply_async_token_substitution = TPUModelRunner._apply_async_token_substitution.__get__(
+            self.runner)
+
+        input_ids = np.array([1, 2, 3, 4, 5, 6, 7, 8])
+        # Substitute positions 2 and 5
+        token_in_tpu_cur_input_indices = np.array([2, 5])
+        token_in_tpu_pre_next_tokens_indices = np.array([0, 1])
+
+        # Setup _pre_async_results
+        self.runner._pre_async_results = MagicMock()
+        self.runner._pre_async_results.next_tokens = np.array([100, 200, 300])
+        self.runner.mesh = MagicMock()
+        self.runner.maybe_forbid_compile = nullcontext()
+
+        # Mock the substitute function to verify it's called correctly
+        mock_substitute_fn = MagicMock(
+            return_value=np.array([1, 2, 100, 4, 5, 200, 7, 8]))
+        self.runner._substitute_placeholder_token_fn = mock_substitute_fn
+
+        result = self.runner._apply_async_token_substitution(
+            input_ids, token_in_tpu_cur_input_indices,
+            token_in_tpu_pre_next_tokens_indices)
+
+        # Verify the substitute function was called
+        mock_substitute_fn.assert_called_once()
+        call_args = mock_substitute_fn.call_args[0]
+
+        # Verify input_ids
+        np.testing.assert_array_equal(call_args[0], input_ids)
+
+        # Verify padded indices length matches input_ids length
+        assert len(call_args[1]) == len(input_ids)
+        assert len(call_args[2]) == len(input_ids)
+
+        # Verify placeholder_num
+        assert call_args[4] == 2  # Number of actual substitutions
+
+    def test_prepare_inputs_routing_to_dp(self):
+        """Test _prepare_inputs routes to _prepare_inputs_dp when dp_size > 1."""
+
+        # Bind the actual _prepare_inputs method
+        self.runner._prepare_inputs = TPUModelRunner._prepare_inputs.__get__(
+            self.runner)
+
+        self.runner.dp_size = 2
+        self.runner._prepare_inputs_dp = MagicMock(
+            return_value=(None, None, None, None, None, None))
+
+        scheduler_output = MagicMock()
+        self.runner._prepare_inputs(scheduler_output)
+
+        # Verify _prepare_inputs_dp was called
+        self.runner._prepare_inputs_dp.assert_called_once_with(scheduler_output)
+
+    def test_prepare_inputs_routing_to_non_dp(self):
+        """Test _prepare_inputs routes to _prepare_inputs_non_dp when dp_size == 1."""
+
+        # Bind the actual _prepare_inputs method
+        self.runner._prepare_inputs = TPUModelRunner._prepare_inputs.__get__(
+            self.runner)
+
+        self.runner.dp_size = 1
+        self.runner._prepare_inputs_non_dp = MagicMock(
+            return_value=(None, None, None, None, None, None))
+
+        scheduler_output = MagicMock()
+        self.runner._prepare_inputs(scheduler_output)
+
+        # Verify _prepare_inputs_non_dp was called
+        self.runner._prepare_inputs_non_dp.assert_called_once_with(
+            scheduler_output)
+
+    @patch('tpu_inference.runner.tpu_jax_runner.NamedSharding')
+    @patch('tpu_inference.runner.tpu_jax_runner.runner_utils')
+    @patch('tpu_inference.runner.tpu_jax_runner.device_array',
+           side_effect=lambda mesh, tensors, **kwargs: tensors)
+    @patch('tpu_inference.runner.tpu_jax_runner.TPUSupportedSamplingMetadata')
+    def test_prepare_inputs_dp_with_async_scheduling(
+            self, mock_sampling_metadata, mock_device_array, mock_runner_utils,
+            mock_named_sharding):
+
+        # Setup mocking
+        def mock_get_padded_token_len(paddings_list, val):
+            if val <= 2:
+                return 4
+            elif val <= 5:
+                return 8
+            else:
+                return 16
+
+        mock_runner_utils.get_padded_token_len.side_effect = mock_get_padded_token_len
+        mock_sampling_instance = MagicMock()
+        mock_sampling_metadata.from_input_batch.return_value = mock_sampling_instance
+        mock_named_sharding.return_value = MagicMock()
+
+        # Setup test data
+        num_scheduled_tokens = {"req1": 3, "req2": 2}
+        assigned_dp_ranks = {"req1": 0, "req2": 1}
+
+        self.runner.input_batch.num_reqs = 2
+        self.runner.input_batch.req_ids = ["req1", "req2"]
+        self.runner.input_batch.num_computed_tokens_cpu = np.array([4, 6])
+        self.runner.input_batch.token_ids_cpu = np.zeros((8, 64),
+                                                         dtype=np.int32)
+
+        scheduler_output = self._create_mock_scheduler_output(
+            num_scheduled_tokens, assigned_dp_ranks)
+
+        # Enable async scheduling
+        self.runner.scheduler_config.async_scheduling = True
+        self.runner._pre_async_results = MagicMock()
+        self.runner._pre_async_results.placeholder_req_id_to_index = {
+            "req1": 0
+        }
+        self.runner._pre_async_results.next_tokens = np.array([100])
+
+        # Setup required attributes
+        self.runner.uses_mrope = False
+        self.runner.phase_based_profiler = None
+        self.runner.lora_config = None
+        self.runner.mesh = MagicMock()
+        self.runner.data_parallel_sharding = MagicMock()
+        self.runner.data_parallel_attn_sharding = MagicMock()
+        self.runner.mm_manager = MagicMock()
+        self.runner.speculative_decoding_manager = MagicMock()
+        self.runner.lora_utils = MagicMock()
+
+        # Mock the token substitution preparation
+        mock_prepare_async = MagicMock(return_value=({
+            0: [2],
+            1: []
+        }, {
+            0: [0],
+            1: []
+        }))
+        self.runner._prepare_async_token_substitution_indices_dp = mock_prepare_async
+
+        # Execute the method
+        result = self.runner._prepare_inputs_dp(scheduler_output)
+
+        # Verify async token substitution was called
+        mock_prepare_async.assert_called_once()
+
+
+    @patch('tpu_inference.runner.tpu_jax_runner.NamedSharding')
+    @patch('tpu_inference.runner.tpu_jax_runner.runner_utils')
+    @patch('tpu_inference.runner.tpu_jax_runner.device_array',
+           side_effect=lambda mesh, tensors, **kwargs: tensors)
+    @patch('tpu_inference.runner.tpu_jax_runner.TPUSupportedSamplingMetadata')
+    def test_prepare_inputs_dp_async_token_substitution_application(
+            self, mock_sampling_metadata, mock_device_array, mock_runner_utils,
+            mock_named_sharding):
+        """Test async token substitution application in DP mode."""
+
+        # Setup mocking
+        def mock_get_padded_token_len(paddings_list, val):
+            if val <= 2:
+                return 4
+            elif val <= 5:
+                return 8
+            else:
+                return 16
+
+        mock_runner_utils.get_padded_token_len.side_effect = mock_get_padded_token_len
+        mock_sampling_instance = MagicMock()
+        mock_sampling_metadata.from_input_batch.return_value = mock_sampling_instance
+        mock_named_sharding.return_value = MagicMock()
+
+        # Setup test data
+        num_scheduled_tokens = {"req1": 3, "req2": 2}
+        assigned_dp_ranks = {"req1": 0, "req2": 1}
+
+        self.runner.input_batch.num_reqs = 2
+        self.runner.input_batch.req_ids = ["req1", "req2"]
+        self.runner.input_batch.num_computed_tokens_cpu = np.array([4, 6])
+        self.runner.input_batch.token_ids_cpu = np.zeros((8, 64),
+                                                         dtype=np.int32)
+
+        scheduler_output = self._create_mock_scheduler_output(
+            num_scheduled_tokens, assigned_dp_ranks)
+
+        # Enable async scheduling with placeholders
+        self.runner.scheduler_config.async_scheduling = True
+        self.runner._pre_async_results = MagicMock()
+        self.runner._pre_async_results.placeholder_req_id_to_index = {
+            "req1": 0,
+            "req2": 1
+        }
+        self.runner._pre_async_results.next_tokens = np.array([100, 200])
+
+        # Setup required attributes
+        self.runner.uses_mrope = False
+        self.runner.phase_based_profiler = None
+        self.runner.lora_config = None
+        self.runner.mesh = MagicMock()
+        self.runner.data_parallel_sharding = MagicMock()
+        self.runner.data_parallel_attn_sharding = MagicMock()
+        self.runner.mm_manager = MagicMock()
+        self.runner.speculative_decoding_manager = MagicMock()
+        self.runner.lora_utils = MagicMock()
+
+        # Mock the async token substitution application
+        mock_apply_async = MagicMock(
+            return_value=np.array([1, 2, 100, 4, 5, 200, 7, 8]))
+        self.runner._apply_async_token_substitution = mock_apply_async
+
+        # Execute the method
+        result = self.runner._prepare_inputs_dp(scheduler_output)
+
+        # Verify _apply_async_token_substitution was called
+        mock_apply_async.assert_called_once()
+        call_args = mock_apply_async.call_args[0]
+
+        # Verify indices were concatenated from both DP ranks
+        token_in_tpu_cur_input_indices = call_args[1]
+        token_in_tpu_pre_next_tokens_indices = call_args[2]
+
+        # Should have indices from both ranks
+        assert len(token_in_tpu_cur_input_indices) == 2
+        assert len(token_in_tpu_pre_next_tokens_indices) == 2
 
 
 if __name__ == "__main__":
