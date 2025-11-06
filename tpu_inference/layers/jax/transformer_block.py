@@ -71,7 +71,7 @@ class SharedExpertsTransformerBlock(TransformerBlock):
     def __call__(self, x_TD, is_prefill, kv_cache, attention_metadata):
         # Attn Block
         attn_residual_TD = x_TD
-        # x_TD = self.pre_attention_norm(x_TD)
+        x_TD = self.pre_attention_norm(x_TD)
         new_cache, attn_output_TD = self.attn(x_TD, is_prefill, kv_cache,
                                               attention_metadata,
                                               self.use_attention_rope)
@@ -79,8 +79,7 @@ class SharedExpertsTransformerBlock(TransformerBlock):
 
         # FFW Block
         ffw_residual_TD = attn_output_TD
-        # normed_ffw_input_TD = self.pre_mlp_norm(attn_output_TD)
-        normed_ffw_input_TD = attn_output_TD
+        normed_ffw_input_TD = self.pre_mlp_norm(attn_output_TD)
 
         if isinstance(self.custom_module, MoE):
             moe_layer = self.custom_module
