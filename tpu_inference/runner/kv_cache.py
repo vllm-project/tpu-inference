@@ -9,7 +9,6 @@ from torchax.ops.mappings import t2j_dtype
 
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
-from tpu_inference.layers.jax.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
@@ -76,10 +75,7 @@ def create_kv_caches(
                                                num_kv_heads, head_size,
                                                cache_dtype)
 
-    sharding = NamedSharding(
-        mesh,
-        PartitionSpec(ShardingAxisName.ATTN_DATA, None,
-                      ShardingAxisName.ATTN_HEAD))
+    sharding = NamedSharding(mesh, PartitionSpec(None, None, "model"))
 
     def _allocate() -> jax.Array:
         return jnp.empty(
