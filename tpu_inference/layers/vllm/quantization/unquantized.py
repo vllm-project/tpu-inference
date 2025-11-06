@@ -165,7 +165,7 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                  ep_axis_name: str = 'model'):
         super().__init__(moe)
         self.mesh = mesh
-        self.use_kernel = os.getenv("USE_MOE_EP_KERNEL", "0")
+        self.use_kernel = bool(int(os.getenv("USE_MOE_EP_KERNEL", "0")))
         self.ep_axis_name = ep_axis_name
         # TODO: Use autotune table once we have it.
         self.block_size = {
