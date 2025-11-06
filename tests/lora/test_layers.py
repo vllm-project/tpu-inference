@@ -12,11 +12,13 @@ from vllm.config import LoRAConfig
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.lora.layers import (BaseLayerWithLoRA, LoRAMapping,
-                              MergedColumnParallelLinearWithLoRA)
+                              MergedColumnParallelLinearWithLoRA,
+                              MergedQKVParallelLinearWithLoRA)
 # yapf: enable
 from vllm.lora.models import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.punica_wrapper import get_punica_wrapper
-from vllm.model_executor.layers.linear import MergedColumnParallelLinear
+from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
+                                               QKVParallelLinear)
 from vllm.model_executor.utils import set_random_seed
 from vllm.platforms import current_platform
 
@@ -217,7 +219,7 @@ def _create_linear_and_lora_wrapper(linear, base_linear, lora_cls, vllm_config,
 
 @torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 9])
-@pytest.mark.parametrize("repeats", [2])
+@pytest.mark.parametrize("repeats", [2, 3])
 @pytest.mark.parametrize("stage", [True, False])
 def test_column_parallel_packed(dist_init, num_loras, repeats, stage) -> None:
     max_loras = 9
@@ -273,12 +275,30 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, stage) -> None:
                 vllm_config=dist_init,
                 mesh=mesh)
         elif repeats == 3:
-            raise NotImplementedError("NYI: for MergedQKVParallelLinear case")
+
+            def _create_qkv_column_linear():
+                return QKVParallelLinear(64,
+                                         64,
+                                         32,
+                                         bias=False,
+                                         params_dtype=torch.float16)
+
+            linear = _create_qkv_column_linear()
+            linear.weight.data = torch.rand_like(linear.weight.data)
+
+            base_linear = _create_qkv_column_linear()
+            lora_linear = _create_linear_and_lora_wrapper(
+                linear,
+                base_linear,
+                MergedQKVParallelLinearWithLoRA,
+                vllm_config=dist_init,
+                mesh=mesh)
 
         else:
             raise NotImplementedError("NYI: for QKVParallelLinear case")
 
         with torchax.default_env():
+            # In the e2e, this is done when we create the lora model (`load_lora_model`).
             lora_linear.create_lora_weights(max_loras, lora_config)
         # In the e2e, the lora_layer's weight is moved to TPU in _shard_module_to_tpu.
         _shard_module_to_tpu(lora_linear, mesh)
