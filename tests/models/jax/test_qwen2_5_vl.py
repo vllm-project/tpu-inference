@@ -98,8 +98,8 @@ def mesh():
     if not jax.devices():
         pytest.skip("No JAX devices available for mesh creation.")
     devices = np.array(jax.local_devices())
-    return Mesh(devices.reshape((len(devices), 1)),
-                axis_names=('data', 'model'))
+    return Mesh(devices.reshape((len(devices), 1, 1)),
+                axis_names=('data', 'attn_dp', 'model'))
 
 
 @pytest.fixture
