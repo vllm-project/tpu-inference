@@ -967,6 +967,91 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 padded_total_num_scheduled_tokens, padded_num_reqs_per_dp_rank,
                 logits_indices_selector, max_num_reqs_per_dp_rank)
 
+    def _prepare_async_token_substitution_indices_dp(
+            self, req_ids_dp, scheduled_tokens_per_dp_rank,
+            padded_num_scheduled_tokens_per_dp_rank, dp_size):
+        """Prepare token substitution indices for async scheduling in DP mode."""
+        token_in_tpu_cur_input_indices_dp = {}
+        token_in_tpu_pre_next_tokens_indices_dp = {}
+
+        for dp_rank in range(dp_size):
+            token_in_tpu_cur_input_indices_dp[dp_rank] = []
+            token_in_tpu_pre_next_tokens_indices_dp[dp_rank] = []
+
+            token_offset = padded_num_scheduled_tokens_per_dp_rank * dp_rank
+            acc_cur_len = token_offset
+
+            for i, req_id in enumerate(req_ids_dp[dp_rank]):
+                acc_cur_len += scheduled_tokens_per_dp_rank[dp_rank][i]
+                if req_id not in self._pre_async_results.placeholder_req_id_to_index:
+                    continue
+
+                token_in_tpu_cur_input_indices_dp[dp_rank].append(acc_cur_len -
+                                                                  1)
+                token_in_tpu_pre_next_tokens_indices_dp[dp_rank].append(
+                    self._pre_async_results.placeholder_req_id_to_index[req_id]
+                )
+
+        return token_in_tpu_cur_input_indices_dp, token_in_tpu_pre_next_tokens_indices_dp
+
+    def _prepare_async_token_substitution_indices_non_dp(
+            self, num_reqs, num_scheduled_tokens_per_req):
+        """Prepare token substitution indices for async scheduling in non-DP mode."""
+        token_in_tpu_cur_input_indices_list = []
+        token_in_tpu_pre_next_tokens_indices_list = []
+        acc_cur_len = 0
+
+        for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+            acc_cur_len += num_scheduled_tokens_per_req[i]
+            assert req_id is not None
+            if req_id not in self._pre_async_results.placeholder_req_id_to_index:
+                continue
+
+            token_in_tpu_cur_input_indices_list.append(acc_cur_len - 1)
+            token_in_tpu_pre_next_tokens_indices_list.append(
+                self._pre_async_results.placeholder_req_id_to_index[req_id])
+
+        if len(token_in_tpu_cur_input_indices_list) > 0:
+            return (np.array(token_in_tpu_cur_input_indices_list),
+                    np.array(token_in_tpu_pre_next_tokens_indices_list))
+        else:
+            return np.array([]), np.array([])
+
+    def _apply_async_token_substitution(self, input_ids,
+                                        token_in_tpu_cur_input_indices,
+                                        token_in_tpu_pre_next_tokens_indices):
+        """Apply async token substitution if needed."""
+        if len(token_in_tpu_cur_input_indices) == 0:
+            return input_ids
+
+        idx_pad_len = len(input_ids) - len(token_in_tpu_cur_input_indices)
+
+        # Pad according to the instructions written inside self._substitute_placeholder_token_fn
+        full_range = np.arange(0, len(input_ids))
+        missing_values = np.setdiff1d(full_range,
+                                      token_in_tpu_cur_input_indices)
+        padded_token_in_tpu_cur_input_indices = np.concatenate(
+            (token_in_tpu_cur_input_indices, missing_values))
+
+        padded_token_in_tpu_pre_next_tokens_indices = np.pad(
+            token_in_tpu_pre_next_tokens_indices, (0, idx_pad_len),
+            mode='constant',
+            constant_values=-1)
+
+        (padded_token_in_tpu_cur_input_indices,
+         padded_token_in_tpu_pre_next_tokens_indices) = device_array(
+             self.mesh, (padded_token_in_tpu_cur_input_indices,
+                         padded_token_in_tpu_pre_next_tokens_indices))
+
+        with self.maybe_forbid_compile:
+            input_ids = self._substitute_placeholder_token_fn(
+                input_ids, padded_token_in_tpu_cur_input_indices,
+                padded_token_in_tpu_pre_next_tokens_indices,
+                self._pre_async_results.next_tokens,
+                len(token_in_tpu_cur_input_indices))
+
+        return input_ids
+
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
         if self.dp_size > 1:
             return self._prepare_inputs_dp(scheduler_output)
@@ -1001,23 +1086,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.scheduler_config.async_scheduling and self._pre_async_results is not None:
             # If async previous results exists, we will prepare for the token substitution here
             # The actual substitution will be performed in tpu during later parts of this function.
-            for dp_rank in range(dp_size):
-                token_in_tpu_cur_input_indices_dp[dp_rank] = []
-                token_in_tpu_pre_next_tokens_indices_dp[dp_rank] = []
-
-                token_offset = padded_num_scheduled_tokens_per_dp_rank * dp_rank
-                acc_cur_len = token_offset
-
-                for i, req_id in enumerate(req_ids_dp[dp_rank]):
-                    acc_cur_len += scheduled_tokens_per_dp_rank[dp_rank][i]
-                    if req_id not in self._pre_async_results.placeholder_req_id_to_index:
-                        continue
-
-                    token_in_tpu_cur_input_indices_dp[dp_rank].append(
-                        acc_cur_len - 1)
-                    token_in_tpu_pre_next_tokens_indices_dp[dp_rank].append(
-                        self._pre_async_results.
-                        placeholder_req_id_to_index[req_id])
+            (token_in_tpu_cur_input_indices_dp,
+             token_in_tpu_pre_next_tokens_indices_dp
+             ) = self._prepare_async_token_substitution_indices_dp(
+                 req_ids_dp, scheduled_tokens_per_dp_rank,
+                 padded_num_scheduled_tokens_per_dp_rank, dp_size)
 
         # Populates input_ids and positions
         for dp_rank in range(dp_size):
@@ -1210,31 +1283,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     all_token_indices_to_substitute)
                 token_in_tpu_pre_next_tokens_indices = np.array(
                     all_pre_next_tokens_indices)
-                idx_pad_len = len(input_ids) - len(
-                    token_in_tpu_cur_input_indices)
-
-                # Pad according to the instructions written inside self._substitute_placeholder_token_fn
-                full_range = np.arange(0, len(input_ids))
-                missing_values = np.setdiff1d(full_range,
-                                              token_in_tpu_cur_input_indices)
-                padded_token_in_tpu_cur_input_indices = np.concatenate(
-                    (token_in_tpu_cur_input_indices, missing_values))
-
-                padded_token_in_tpu_pre_next_tokens_indices = np.pad(
-                    token_in_tpu_pre_next_tokens_indices, (0, idx_pad_len),
-                    mode='constant',
-                    constant_values=-1)
-                (padded_token_in_tpu_cur_input_indices,
-                 padded_token_in_tpu_pre_next_tokens_indices) = device_array(
-                     self.mesh, (padded_token_in_tpu_cur_input_indices,
-                                 padded_token_in_tpu_pre_next_tokens_indices))
-
-                with self.maybe_forbid_compile:
-                    input_ids = self._substitute_placeholder_token_fn(
-                        input_ids, padded_token_in_tpu_cur_input_indices,
-                        padded_token_in_tpu_pre_next_tokens_indices,
-                        self._pre_async_results.next_tokens,
-                        len(token_in_tpu_cur_input_indices))
+                input_ids = self._apply_async_token_substitution(
+                    input_ids, token_in_tpu_cur_input_indices,
+                    token_in_tpu_pre_next_tokens_indices)
 
         if self.lora_config is not None:
             self.lora_utils.set_active_loras(
@@ -1295,25 +1346,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.scheduler_config.async_scheduling and self._pre_async_results is not None:
             # If async previous results exists, we will prepare for the token substitution here
             # The actual substitution will be performed in tpu during later parts of this function.
-            token_in_tpu_cur_input_indices_list = []
-            token_in_tpu_pre_next_tokens_indices_list = []
-            acc_cur_len = 0
-            for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
-                acc_cur_len += num_scheduled_tokens_per_req[i]
-                assert req_id is not None
-                if req_id not in self._pre_async_results.placeholder_req_id_to_index:
-                    continue
-
-                token_in_tpu_cur_input_indices_list.append(acc_cur_len - 1)
-                token_in_tpu_pre_next_tokens_indices_list.append(
-                    self._pre_async_results.placeholder_req_id_to_index[req_id]
-                )
-
-            if len(token_in_tpu_cur_input_indices_list) > 0:
-                token_in_tpu_cur_input_indices = np.array(
-                    token_in_tpu_cur_input_indices_list)
-                token_in_tpu_pre_next_tokens_indices = np.array(
-                    token_in_tpu_pre_next_tokens_indices_list)
+            (token_in_tpu_cur_input_indices,
+             token_in_tpu_pre_next_tokens_indices
+             ) = self._prepare_async_token_substitution_indices_non_dp(
+                 num_reqs, num_scheduled_tokens_per_req)
 
         # Get batched arange.
         # E.g., [2, 5, 3] -> [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
@@ -1422,29 +1458,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.scheduler_config.async_scheduling and len(
                 token_in_tpu_cur_input_indices) > 0:
             assert self._pre_async_results is not None
-            idx_pad_len = len(input_ids) - len(token_in_tpu_cur_input_indices)
-
-            # Pad according to the instructions written inside self._substitute_placeholder_token_fn
-            full_range = np.arange(0, len(input_ids))
-            missing_values = np.setdiff1d(full_range,
-                                          token_in_tpu_cur_input_indices)
-            padded_token_in_tpu_cur_input_indices = np.concatenate(
-                (token_in_tpu_cur_input_indices, missing_values))
-
-            padded_token_in_tpu_pre_next_tokens_indices = np.pad(
-                token_in_tpu_pre_next_tokens_indices, (0, idx_pad_len),
-                mode='constant',
-                constant_values=-1)
-            (padded_token_in_tpu_cur_input_indices,
-             padded_token_in_tpu_pre_next_tokens_indices) = device_array(
-                 self.mesh, (padded_token_in_tpu_cur_input_indices,
-                             padded_token_in_tpu_pre_next_tokens_indices))
-            with self.maybe_forbid_compile:
-                input_ids = self._substitute_placeholder_token_fn(
-                    input_ids, padded_token_in_tpu_cur_input_indices,
-                    padded_token_in_tpu_pre_next_tokens_indices,
-                    self._pre_async_results.next_tokens,
-                    len(token_in_tpu_cur_input_indices))
+            input_ids = self._apply_async_token_substitution(
+                input_ids, token_in_tpu_cur_input_indices,
+                token_in_tpu_pre_next_tokens_indices)
 
         if self.lora_config is not None:
             self.lora_utils.set_active_loras(
