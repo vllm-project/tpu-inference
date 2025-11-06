@@ -150,7 +150,7 @@ class Llama4ForCausalLM(nnx.Module):
                 temperature_tuning=True,
                 temperature_tuning_scale=0.1,
                 temperature_tuning_floor_scale=8192,
-                use_qk_norm=True,
+                use_qk_norm=False,
                 attention_chunk_size=None if use_attention_rope else 8192,
                 mesh=self.mesh,
                 random_init=force_random_weights,
@@ -548,7 +548,7 @@ class JAXLlama4VisionEncoderLayer(nnx.Module):
             rngs=rngs,
             rope_input_ordering="interleaved",
             temperature_tuning=False,
-            use_qk_norm=True, #TODO: Was False before
+            use_qk_norm=False, #TODO: Was False before
             mesh=mesh,  # Assuming no sharding. Not sure if this is correct
             #random_init=random_init,
             is_causal=False,  # Forces bidirectional mask for ViT Encoder
@@ -583,9 +583,14 @@ class JAXLlama4VisionEncoderLayer(nnx.Module):
 
     def __call__(self, hidden_state: jax.Array,
                  freqs_ci_stacked: jax.Array, **kwargs) -> jax.Array:
+
+        jax.debug.print("TRACE 0 (Input): Hidden State Slice: {}", hidden_state[0, 0, :5])
+
         # Self Attention
         residual = hidden_state
         hidden_state = self.input_layernorm(hidden_state)
+
+        jax.debug.print("TRACE 1: After Input LayerNorm Slice: {}", hidden_state[0, 0, :5])
 
         original_shape = hidden_state.shape
         B, S, D = original_shape # Capture B, S, D for later use
@@ -607,18 +612,18 @@ class JAXLlama4VisionEncoderLayer(nnx.Module):
         )
         attention_output = attention_output_2D.reshape(original_shape)
 
+        jax.debug.print("TRACE 2: Attention Output Slice: {}", attention_output[0, 0, :5])
+
         hidden_state = residual + attention_output
-        
-        # --- DEBUG MLP START ---
-        # 1. Print state before MLP LayerNorm
-        jax.debug.print("DEBUG: State BEFORE MLP LayerNorm slice: {}", hidden_state[0, 0, :5])
+
+        jax.debug.print("TRACE 3: After Attn Residual Add Slice: {}", hidden_state[0, 0, :5])
         
         residual = hidden_state
 
         # MLP
         hidden_state = self.post_attention_layernorm(hidden_state)
         # 2. Print state AFTER MLP LayerNorm
-        jax.debug.print("DEBUG: State AFTER MLP LayerNorm slice: {}", hidden_state[0, 0, :5])
+        jax.debug.print("TRACE 4: After MLP LayerNorm Slice: {}", hidden_state[0, 0, :5])
 
         # ** FIX: Flatten hidden_state to 2D before passing to MLP **
         hidden_state_2D = hidden_state.reshape(B * S, D)
@@ -628,12 +633,12 @@ class JAXLlama4VisionEncoderLayer(nnx.Module):
         # ** FIX: Restore original 3D shape **
         hidden_state = hidden_state_2D.reshape(B, S, D)
 
-        # 3. Print state AFTER MLP FFW
-        jax.debug.print("DEBUG: State AFTER MLP FFW slice: {}", hidden_state[0, 0, :5])
+        jax.debug.print("TRACE 5: After MLP FFW Slice: {}", hidden_state[0, 0, :5])
+
 
         hidden_state = residual + hidden_state
         # 4. Print final output slice
-        jax.debug.print("DEBUG: FINAL Layer Output slice: {}", hidden_state[0, 0, :5])
+        jax.debug.print("TRACE 6: FINAL Layer Output Slice: {}", hidden_state[0, 0, :5])
         # --- DEBUG MLP END ---
         
         return hidden_state

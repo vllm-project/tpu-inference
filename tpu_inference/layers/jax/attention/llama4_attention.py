@@ -346,6 +346,12 @@ class Llama4VisionAttention(nnx.Module): # <--- Inherits from nnx.Module
                                               self.nhd_sharding,
                                               self.dtype,
                                               random_init=random_init)
+        
+        self.bias_q_proj_NH = create_param(rngs, (N, H), self.nhd_sharding, self.dtype, random_init=random_init)
+        self.bias_k_proj_KH = create_param(rngs, (K, H), self.dnh_sharding, self.dtype, random_init=random_init)
+        self.bias_v_proj_KH = create_param(rngs, (K, H), self.dkh_sharding, self.dtype, random_init=random_init)
+        self.bias_o_proj_D = create_param(rngs, (D,), self.dkh_sharding, self.dtype, random_init=random_init)
+
     def __call__(self,
                  x, # This is the hidden state (S, D) or (B*T, D)
                  is_prefill,
@@ -372,24 +378,38 @@ class Llama4VisionAttention(nnx.Module): # <--- Inherits from nnx.Module
 
         with jax.named_scope("q_proj"):
             q_TNH = jnp.einsum('TD,DNH -> TNH', x_q_TD, self.kernel_q_proj_DNH.value)
+
+            # >>> ADDITION: Apply Bias <<<
+            q_TNH += self.bias_q_proj_NH.value[None, ...]
+
+            # --- NEW TRACE POINT A_in (Input to RoPE) ---
+            jax.debug.print("JAX TRACE A_in (Q Pre-RoPE): {}", q_TNH[0, 0, :5])
+
             if use_attention_rope:
                 q_TNH = apply_rope(q_TNH, md.input_positions, H, rope_theta,
                                    rope_scaling, self.rope_input_ordering)
-                if self.use_qk_norm:
-                    q_TNH = l2_norm(q_TNH)
+                # if self.use_qk_norm:  #TODO: MAYBE UNCOMMENT
+                #     q_TNH = l2_norm(q_TNH)
+            
+            jax.debug.print("TRACE A: Q after L2Norm/RoPE Slice: {}", q_TNH[0, 0, :5])
             q_TNH = nnx.with_sharding_constraint(q_TNH, self.query_tnh)
 
         with jax.named_scope("k_proj"):
             k_SKH = jnp.einsum('SD,DKH -> SKH', x_SD, self.kernel_k_proj_DKH.value)
+            # >>> ADDITION: Apply Bias <<<
+            k_SKH += self.bias_k_proj_KH.value[None, ...]
+            
             if use_attention_rope:
                 k_SKH = apply_rope(k_SKH, md.input_positions, H, rope_theta,
                                    rope_scaling, self.rope_input_ordering)
-                if self.use_qk_norm:
-                    k_SKH = l2_norm(k_SKH)
+                # if self.use_qk_norm: #TODO: MAYBE UNCOMMENT
+                #     k_SKH = l2_norm(k_SKH)
             k_SKH = nnx.with_sharding_constraint(k_SKH, self.keyvalue_skh)
 
         with jax.named_scope("v_proj"):
             v_SKH = jnp.einsum('SD,DKH -> SKH', x_SD, self.kernel_v_proj_DKH.value)
+            # >>> ADDITION: Apply Bias <<<
+            v_SKH += self.bias_v_proj_KH.value[None, ...]
             v_SKH = nnx.with_sharding_constraint(v_SKH, self.keyvalue_skh)
         
         # --- Flash Attention Migration Logic (Starts here, no change needed) ---
@@ -443,11 +463,13 @@ class Llama4VisionAttention(nnx.Module): # <--- Inherits from nnx.Module
             outputs_BNTH = sharded_flash_attention(
                 mesh=self.mesh,
                 causal=False, 
-                sm_scale=1.0, #self.head_dim**-0.5,
+                sm_scale=self.head_dim**-0.5,
             )(q_BNTH, k_BKTH, v_BKTH, segment_ids)
             
             new_kv_cache = kv_cache
             
+        jax.debug.print("TRACE B (Raw Attn Output): {}", outputs_BNTH[0, 0, 0, :5])
+
         # 4. Reverse Transpose and Reshape for Output Projection (NEW FIX 2)
         
         # a. Reverse Transpose: [B, N, T_padded, H] -> [T_padded, B, N, H]
@@ -464,6 +486,9 @@ class Llama4VisionAttention(nnx.Module): # <--- Inherits from nnx.Module
             # Standard Llama/Attention einsum: [T, N, H] * [N, H, D] -> [T, D]
             o_TD = jnp.einsum('TNH,NHD -> TD', outputs_TNH,
                               self.kernel_o_proj_NHD.value)
+            # >>> ADDITION: Apply Bias <<<
+            o_TD += self.bias_o_proj_D.value
+            
             o_TD = nnx.with_sharding_constraint(
                 o_TD, self.activation_attention_out_td)
 

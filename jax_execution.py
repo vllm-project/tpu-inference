@@ -125,7 +125,7 @@ def inject_weights(jax_model: JAXLlama4VisionEncoder, weights_to_load: Dict[str,
             # 1. Determine transposition
             if name in ['q_proj', 'k_proj', 'v_proj']:
                 # FIX: Q, K, V must NOT be transposed (required for numerical correctness)
-                pt_kernel_transposed = pt_kernel_f32
+                pt_kernel_transposed = np.ascontiguousarray(np.transpose(pt_kernel_f32))
             else: # name == 'o_proj'
                 # FIX: W_O MUST be transposed (required for structural/numerical correctness)
                 pt_kernel_transposed = np.ascontiguousarray(np.transpose(pt_kernel_f32)) 
@@ -140,6 +140,70 @@ def inject_weights(jax_model: JAXLlama4VisionEncoder, weights_to_load: Dict[str,
 
             # 3. Final Assignment
             jax_kernel_attr.value = jnp.asarray(jax_kernel_final, dtype=JAX_DTYPE)
+        
+        # --- ATTENTION BIASES (Q, K, V, O) INJECTION ---
+        for name, jax_bias_attr in [
+            ('q_proj', jax_layer.self_attn.bias_q_proj_NH),
+            ('k_proj', jax_layer.self_attn.bias_k_proj_KH),
+            ('v_proj', jax_layer.self_attn.bias_v_proj_KH),
+            ('o_proj', jax_layer.self_attn.bias_o_proj_D),
+        ]:
+            prefix = f'layer.{i}.attn.{name}'
+            pt_bias_f32 = weights_to_load[f'{prefix}.bias'] 
+
+            # Biases are typically loaded directly (no transpose needed)
+            # Reshape PT bias [N*H] -> JAX bias [N, H] if necessary, or [D] -> [D]
+            if name == 'o_proj':
+                jax_bias_final = pt_bias_f32 # [D] -> [D]
+            else:
+                # Q/K/V are [N*H], reshape to [N, H]
+                jax_bias_final = pt_bias_f32.reshape(jax_bias_attr.value.shape)
+
+            jax_bias_attr.value = jnp.asarray(jax_bias_final, dtype=JAX_DTYPE)
+
+        if i == 0:
+            # We will verify the kernel (W) and bias (b) for q_proj
+            
+            # --- Kernel Verification (W) ---
+            q_kernel_attr = jax_layer.self_attn.kernel_q_proj_DNH
+            q_kernel_np_f32 = weights_to_load[f'layer.0.attn.q_proj.kernel']
+            
+            # 1. Apply the same transposition/permutation done during injection
+            # W_Q: PT [N*H, D] -> (Transpose) -> [D, N*H]
+            pt_kernel_transposed = np.ascontiguousarray(np.transpose(q_kernel_np_f32))
+            
+            # 2. Reshape [D, N*H] -> [D, N, H]
+            expected_kernel_f32 = pt_kernel_transposed.reshape(D, N, H).astype(np.float32)
+
+            jax_loaded_kernel_f32 = np.asarray(jax.device_get(q_kernel_attr.value)).astype(np.float32)
+
+            # --- Bias Verification (b) ---
+            q_bias_attr = jax_layer.self_attn.bias_q_proj_NH
+            pt_bias_f32 = weights_to_load[f'layer.0.attn.q_proj.bias']
+            
+            # Bias is reshaped from [N*H] to [N, H] during load
+            expected_bias_f32 = pt_bias_f32.reshape(N, H).astype(np.float32)
+            jax_loaded_bias_f32 = np.asarray(jax.device_get(q_bias_attr.value)).astype(np.float32)
+
+
+            print("\n--- ATTENTION WEIGHT VERIFICATION (Layer 0, q_proj) ---")
+            
+            # Print sample values for direct comparison (First Head, First 5 elements of D)
+            print("Kernel Expected (Sample W[0, 0, :5]):", expected_kernel_f32[0, 0, :5].tolist())
+            print("Kernel Loaded (Sample W[0, 0, :5]):", jax_loaded_kernel_f32[0, 0, :5].tolist())
+            
+            # Print sample values for bias (First Head, First 5 elements of H)
+            print("Bias Expected (Sample b[0, :5]):", expected_bias_f32[0, :5].tolist())
+            print("Bias Loaded (Sample b[0, :5]):", jax_loaded_bias_f32[0, :5].tolist())
+            
+            # 2. Check the difference between the loaded JAX kernel and the expected kernel
+            kernel_diff = np.max(np.abs(expected_kernel_f32 - jax_loaded_kernel_f32))
+            bias_diff = np.max(np.abs(expected_bias_f32 - jax_loaded_bias_f32))
+
+            if kernel_diff < 1e-4 and bias_diff < 1e-4:
+                print(f"\nLOAD CHECK: All Q-proj weights match NumPy/PT source (Max K Diff: {kernel_diff:.6f}, Max B Diff: {bias_diff:.6f}).")
+            else:
+                print(f"\nLOAD CHECK: Weights MISMATCH. Re-check injection/transpose logic! (Max K Diff: {kernel_diff:.6f}, Max B Diff: {bias_diff:.6f}).")
             
     print("--- Injection Complete. ---")
 

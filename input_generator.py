@@ -57,7 +57,7 @@ def generate_canonical_data(config: Llama4VisionConfig) -> Tuple[torch.Tensor, t
     # 2. Generate Canonical RoPE Frequencies (Fixed 2D position embedding math)
     hf_rope = Llama4VisionRotaryEmbedding(config)
     dummy_hiddens = torch.empty(1, 1, 1) 
-    torch_freqs = hf_rope.forward(dummy_hiddens).to(DTYPE) # Complex tensor
+    torch_freqs = hf_rope.forward(dummy_hiddens).to(torch.complex32) # Complex tensor
     
     # 3. Save JAX-Friendly Inputs
     jax_hiddens_np = torch_hiddens.to(torch.float32).numpy()
@@ -82,6 +82,10 @@ def generate_canonical_data(config: Llama4VisionConfig) -> Tuple[torch.Tensor, t
             # Extract WEIGHT
             attn_weight = pt_attn_linear.weight.data.to(torch.float32).numpy()
             weights_to_save[f'{prefix}{name}.kernel'] = attn_weight
+
+            # >>> ADDITION: Extract BIAS <<<
+            attn_bias = pt_attn_linear.bias.data.to(torch.float32).numpy()
+            weights_to_save[f'{prefix}{name}.bias'] = attn_bias
         
         # --- MLP Kernels/Biases ---
         for name, layer in [('fc1', pt_layer.mlp.fc1), ('fc2', pt_layer.mlp.fc2)]:

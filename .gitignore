@@ -204,3 +204,6 @@ csrc/moe/marlin_moe_wna16/kernel_*
 
 *.npy
 *.npz
+
+HF_trace_output.txt
+jax_execution_trace_output.txt

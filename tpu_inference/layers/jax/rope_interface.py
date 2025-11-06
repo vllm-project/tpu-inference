@@ -123,20 +123,26 @@ def apply_rope(
         print("This is the shape of cos after squeeze: ", cos.shape)
         print("This is the shape of sin after squeeze: ", sin.shape)
 
-        #TODO: REMOVE THIS SWAP
-        temp_cos = cos
-        cos = sin
-        sin = temp_cos
-
         # ----------------------------------------------------
         # The Problem: This reshapes to (S, 1, D_rot)
         cos = cos[:, jnp.newaxis, :]
         sin = sin[:, jnp.newaxis, :]
         # ----------------------------------------------------
 
+        # --- NEW TRACE POINT A_cos/A_sin (RoPE Factors) ---
+        # Grab the first 5 elements for the first token (index 0, newaxis=0, :5)
+        jax.debug.print("JAX TRACE A_cos (RoPE Factor): {}", cos[0, 0, :5])
+        jax.debug.print("JAX TRACE A_sin (RoPE Factor): {}", sin[0, 0, :5])
+        # ---------------------------------------------------
+
+        inputs_f32 = inputs.astype(jnp.float32)
+
         # Apply rotation (Standard split logic)
-        inputs_real = inputs[..., :head_dim // 2]
-        inputs_imag = inputs[..., head_dim // 2:head_dim]
+        inputs_real = inputs_f32[..., :head_dim // 2]
+        inputs_imag = inputs_f32[..., head_dim // 2:head_dim]
+
+        cos_f32 = cos.astype(jnp.float32)
+        sin_f32 = sin.astype(jnp.float32)
 
         # # --- FIX: Reshape to correctly broadcast over the flattened input ---
         # # The input is (Total_Tokens, Num_Heads, Half_Head_Dim) -> (9232, 16, 44)
@@ -164,8 +170,8 @@ def apply_rope(
         print("This is the shape of inputs_imag: ", inputs_imag.shape)
         print("This is the shape of sin after broadcast: ", sin.shape)
 
-        outputs_real = inputs_real * cos - inputs_imag * sin
-        outputs_imag = inputs_real * sin + inputs_imag * cos
+        outputs_real = inputs_real * cos_f32 - inputs_imag * sin_f32
+        outputs_imag = inputs_real * sin_f32 + inputs_imag * cos_f32
 
         out = jnp.concatenate([outputs_real, outputs_imag], axis=-1)
 
