@@ -39,11 +39,11 @@ def mesh():
     """Provides a mock 1D JAX mesh for testing."""
     # Create a mesh with available devices, useful for running on CPU/GPU/TPU
     # For this test, it will likely be a single CPU device.
-    devices = np.array(jax.local_devices())
+    devices = np.array(jax.local_devices()[:1])
     if not devices.any():
         # Add a mock device if no devices are present (e.g., in a CI environment)
         devices = np.array([jax.devices("cpu")[0]])
-    return Mesh(devices.reshape((-1, 1)), ("data", "model"))
+    return Mesh(devices.reshape((-1, 1, 1)), ("data", "attn_dp", "model"))
 
 
 # ---- Test for `attention` ----

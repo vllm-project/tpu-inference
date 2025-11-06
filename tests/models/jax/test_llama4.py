@@ -89,9 +89,10 @@ def mesh():
     # Reshape devices into a 3D array to name 3 axes: data, model, and expert.
     # The 'model' and 'expert' axes will have a size of 1.
     num_devices = len(devices)
-    device_mesh = devices.reshape((num_devices, 1, 1))
+    device_mesh = devices.reshape((num_devices, 1, 1, 1))
 
-    with Mesh(device_mesh, axis_names=('data', 'model', 'expert')) as m:
+    with Mesh(device_mesh,
+              axis_names=('data', 'attn_dp', 'model', 'expert')) as m:
         yield m
 
 
