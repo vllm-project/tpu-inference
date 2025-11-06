@@ -558,7 +558,6 @@ class TestTPUJaxRunnerDPInputsLightweight:
         np.testing.assert_array_equal(logits_indices_selector,
                                       expected_selector)
 
-
     @patch('tpu_inference.runner.tpu_jax_runner.NamedSharding')
     @patch('tpu_inference.runner.tpu_jax_runner.runner_utils')
     @patch('tpu_inference.runner.tpu_jax_runner.device_array',
@@ -679,7 +678,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
             return_value=np.array([1, 2, 100, 4, 5, 200, 7, 8]))
         self.runner._substitute_placeholder_token_fn = mock_substitute_fn
 
-        result = self.runner._apply_async_token_substitution(
+        _ = self.runner._apply_async_token_substitution(
             input_ids, token_in_tpu_cur_input_indices,
             token_in_tpu_pre_next_tokens_indices)
 
@@ -705,14 +704,16 @@ class TestTPUJaxRunnerDPInputsLightweight:
             self.runner)
 
         self.runner.dp_size = 2
-        self.runner._prepare_inputs_dp = MagicMock(
-            return_value=(None, None, None, None, None, None))
+        self.runner._prepare_inputs_dp = MagicMock(return_value=(None, None,
+                                                                 None, None,
+                                                                 None, None))
 
         scheduler_output = MagicMock()
         self.runner._prepare_inputs(scheduler_output)
 
         # Verify _prepare_inputs_dp was called
-        self.runner._prepare_inputs_dp.assert_called_once_with(scheduler_output)
+        self.runner._prepare_inputs_dp.assert_called_once_with(
+            scheduler_output)
 
     def test_prepare_inputs_routing_to_non_dp(self):
         """Test _prepare_inputs routes to _prepare_inputs_non_dp when dp_size == 1."""
@@ -737,9 +738,11 @@ class TestTPUJaxRunnerDPInputsLightweight:
     @patch('tpu_inference.runner.tpu_jax_runner.device_array',
            side_effect=lambda mesh, tensors, **kwargs: tensors)
     @patch('tpu_inference.runner.tpu_jax_runner.TPUSupportedSamplingMetadata')
-    def test_prepare_inputs_dp_with_async_scheduling(
-            self, mock_sampling_metadata, mock_device_array, mock_runner_utils,
-            mock_named_sharding):
+    def test_prepare_inputs_dp_with_async_scheduling(self,
+                                                     mock_sampling_metadata,
+                                                     mock_device_array,
+                                                     mock_runner_utils,
+                                                     mock_named_sharding):
 
         # Setup mocking
         def mock_get_padded_token_len(paddings_list, val):
@@ -798,11 +801,10 @@ class TestTPUJaxRunnerDPInputsLightweight:
         self.runner._prepare_async_token_substitution_indices_dp = mock_prepare_async
 
         # Execute the method
-        result = self.runner._prepare_inputs_dp(scheduler_output)
+        _ = self.runner._prepare_inputs_dp(scheduler_output)
 
         # Verify async token substitution was called
         mock_prepare_async.assert_called_once()
-
 
     @patch('tpu_inference.runner.tpu_jax_runner.NamedSharding')
     @patch('tpu_inference.runner.tpu_jax_runner.runner_utils')
@@ -867,7 +869,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
         self.runner._apply_async_token_substitution = mock_apply_async
 
         # Execute the method
-        result = self.runner._prepare_inputs_dp(scheduler_output)
+        _ = self.runner._prepare_inputs_dp(scheduler_output)
 
         # Verify _apply_async_token_substitution was called
         mock_apply_async.assert_called_once()
