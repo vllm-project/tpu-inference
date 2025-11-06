@@ -169,14 +169,14 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         self.ep_axis_name = ep_axis_name
         # TODO: Use autotune table once we have it.
         self.block_size = {
-            "bt": 16,
-            "bf": 384,
-            "bd1": 512,
-            "bd2": 512,
-            "btc": 16,
-            "bfc": 384,
-            "bd1c": 256,
-            "bd2c": 256,
+            "bt": 64,
+            "bf": 768,
+            "bd1": 2048,
+            "bd2": 2048,
+            "btc": 64,
+            "bfc": 768,
+            "bd1c": 2048,
+            "bd2c": 2048,
         }
 
     def select_gemm_impl(
