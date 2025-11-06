@@ -1,7 +1,7 @@
 import json
 import math
-from dataclasses import asdict, dataclass
 import os
+from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, List, Optional
 
 import jax.numpy as jnp
@@ -26,10 +26,11 @@ class ShardingAxisNameBase:
     EXPERT = ('attn_dp', 'expert', 'model')
     VOCAB = ('expert', 'model')
 
+
 class ShardingAxisName2D:
-    """Sharding axis names for 2D data parallelism scenarios. 
+    """Sharding axis names for 2D data parallelism scenarios.
     NOTE(wenxindongwork): This is used for now because the MoE kernel
-    expects a 2D mesh. 
+    expects a 2D mesh.
     """
     SEQUENCE = 'data'
     ATTN_DATA = 'data'
@@ -39,16 +40,17 @@ class ShardingAxisName2D:
     MLP_TENSOR = ('model', 'expert')
     MOE_TENSOR = 'model'
     EXPERT = 'expert'
-    VOCAB =  ('data', 'expert', 'model')
+    VOCAB = ('data', 'expert', 'model')
+
 
 try:
     _use_base_sharding = os.getenv("NEW_MODEL_DESIGN", False)
     if _use_base_sharding:
-        ShardingAxisName = ShardingAxisNameBase  
+        ShardingAxisName = ShardingAxisNameBase
     else:
-        ShardingAxisName = ShardingAxisName2D  
+        ShardingAxisName = ShardingAxisName2D
 except Exception:
-    ShardingAxisName = ShardingAxisName2D  
+    ShardingAxisName = ShardingAxisName2D
 
 
 @dataclass
@@ -170,8 +172,8 @@ class ShardingConfigManager:
                     f"set data parallelism to 1.")
             if not os.environ.get("NEW_MODEL_DESIGN", False):
                 raise ValueError(
-                    f"Must run DP with NEW_MODEL_DESIGN enabled. Please set the "
-                    f"NEW_MODEL_DESIGN=True.")
+                    "Must run DP with NEW_MODEL_DESIGN enabled. Please set the "
+                    "NEW_MODEL_DESIGN=True.")
 
     @property
     def total_dp_size(self) -> int:
