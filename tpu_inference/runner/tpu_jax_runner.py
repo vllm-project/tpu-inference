@@ -274,7 +274,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             mesh_shape = (sharding_strategy.model_dp_size,
                           sharding_strategy.tp_size)
 
-        enforce_device_order = self.vllm_config.sharding_config.device_indexes is not None
+        enforce_device_order = self.vllm_config.sharding_config.device_indexes is not None and len(
+            self.vllm_config.sharding_config.device_indexes) > 0
         if enforce_device_order:
             self.mesh = jax.make_mesh(mesh_shape,
                                       axis_names,
