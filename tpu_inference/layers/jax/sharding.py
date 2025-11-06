@@ -29,18 +29,19 @@ class ShardingAxisNameBase:
 
 class ShardingAxisName2D:
     """Sharding axis names for 2D data parallelism scenarios.
-    NOTE(wenxindongwork): This is used for now because the MoE kernel
-    expects a 2D mesh.
+    NOTE(wenxindongwork): The new MoE kernel expects a 2D mesh for now.
+    We should use ShardingAxisNameBase once the new MoE kernel supports
+    more general mesh shapes.
     """
     SEQUENCE = 'data'
     ATTN_DATA = 'data'
     MLP_DATA = 'data'
     ATTN_HEAD = 'model'
     ATTN_TENSOR = None
-    MLP_TENSOR = ('model', 'expert')
+    MLP_TENSOR = 'model'
     MOE_TENSOR = 'model'
-    EXPERT = 'expert'
-    VOCAB = ('data', 'expert', 'model')
+    EXPERT = 'model'
+    VOCAB = ('data','model')
 
 
 try:
