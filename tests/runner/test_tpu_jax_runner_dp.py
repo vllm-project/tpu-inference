@@ -48,10 +48,17 @@ class TestTPUJaxRunnerDPInputsLightweight:
         self.runner.block_table_cpu = np.zeros((8, 8), dtype=np.int32)
         self.runner.arange_cpu = np.arange(64, dtype=np.int64)
 
+        # Mock scheduler config for async scheduling
+        self.runner.scheduler_config = MagicMock()
+        self.runner.scheduler_config.async_scheduling = False  # Default to False for most tests
+        self.runner._pre_async_results = None  # Default to None for most tests
+
         # Bind the actual methods to our mock
         self.runner._prepare_inputs_dp = TPUModelRunner._prepare_inputs_dp.__get__(
             self.runner)
         self.runner._prepare_dp_input_metadata = TPUModelRunner._prepare_dp_input_metadata.__get__(
+            self.runner)
+        self.runner._prepare_async_token_substitution_indices_dp = TPUModelRunner._prepare_async_token_substitution_indices_dp.__get__(
             self.runner)
 
     def _create_mock_scheduler_output(self,
