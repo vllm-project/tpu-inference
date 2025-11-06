@@ -23,7 +23,6 @@ from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm.sequence import IntermediateTensors
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.jax.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.sharding import shard_model_to_tpu
 from tpu_inference.logger import init_logger
@@ -189,8 +188,8 @@ class VllmModelWrapper:
 
         @functools.partial(
             jax.jit,
-            out_shardings=(NamedSharding(
-                self.mesh, PartitionSpec(None, ShardingAxisName.MLP_TENSOR))),
+            out_shardings=(NamedSharding(self.mesh,
+                                         PartitionSpec(None, "model"))),
         )
         def compute_logits_func(
             params_and_buffers: Any,
