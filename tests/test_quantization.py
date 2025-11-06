@@ -109,7 +109,7 @@ class TestQwixQuantizeNnxModel(unittest.TestCase):
         if not jax.devices():
             self.skipTest(
                 "JAX device not found, skipping JAX-dependent tests.")
-        self.mesh = Mesh(jax.devices(), ('data', ))
+        self.mesh = Mesh(jax.devices(), ('model', ))
         self.rng = jax.random.PRNGKey(0)
         self.model = SimpleModel(rngs=nnx.Rngs(0))
 

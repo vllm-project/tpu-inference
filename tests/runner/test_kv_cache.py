@@ -2,6 +2,7 @@ from unittest.mock import MagicMock, patch
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
@@ -11,8 +12,9 @@ from tpu_inference.runner.kv_cache import (create_kv_caches,
 
 @pytest.fixture
 def mesh():
-    devices = jax.devices()
-    return Mesh(devices, axis_names=("model", ))
+    devices = np.array(jax.local_devices()[:1])
+    devices = devices.reshape((1, 1, -1))
+    return Mesh(devices, axis_names=("data", "attn_dp", "model"))
 
 
 def test_create_kv_caches(mesh: Mesh):
@@ -26,7 +28,8 @@ def test_create_kv_caches(mesh: Mesh):
     head_size = 128
     layer_names = ["decoder.0", "decoder.1", "decoder.2"]  # Test with 3 layers
 
-    expected_sharding = NamedSharding(mesh, PartitionSpec(None, None, "model"))
+    expected_sharding = NamedSharding(mesh,
+                                      PartitionSpec("data", None, "model"))
     expected_dtype = jnp.bfloat16
     expected_shape = get_kv_cache_shape_with_mesh(mesh, num_blocks, block_size,
                                                   num_kv_heads, head_size,
