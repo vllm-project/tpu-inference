@@ -41,7 +41,7 @@ class ShardingAxisName2D:
     MLP_TENSOR = 'model'
     MOE_TENSOR = 'model'
     EXPERT = 'model'
-    VOCAB = ('data','model')
+    VOCAB = ('data', 'model')
 
 
 try:
@@ -113,7 +113,7 @@ class ShardingConfigManager:
         """
         additional_config = vllm_config.additional_config.get(
             "sharding", {}).get("sharding_strategy", {})
-        device_indexes = additional_config.get("device_indexes")
+        device_indexes = additional_config.get("device_indexes", None)
 
         parallel_config = vllm_config.parallel_config
         tensor_parallelism = parallel_config.tensor_parallel_size
