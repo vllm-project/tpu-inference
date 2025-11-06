@@ -579,21 +579,7 @@ class Qwen2_5_VisionTransformer(nnx.Module):
         seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
         return max_seqlen, seqlens
 
-    def __call__(self, x: jax.Array, grid_thw: tuple[tuple[int, int,
-                                                           int]]) -> jax.Array:
-        # x: pixel_values: jax.Array
-        # """Shape:
-        # `(num_patches, num_channels * patch_size * patch_size)`
-        # """
-
-        # grid_thw: image_grid_thw: jax.Array
-        # """Shape: `(num_images, 3)`
-        # This should be in `(grid_t, grid_h, grid_w)` format.
-        # """
-        hidden_states = self.patch_embed(x)
-
-        # num of patches
-        seq_len = x.shape[0]
+    def compute_aux_arrays(self, grid_thw: tuple[tuple[int, int, int]]):
         # num of images/videoes
         num_grids = len(grid_thw)
 
@@ -638,6 +624,16 @@ class Qwen2_5_VisionTransformer(nnx.Module):
         cu_seqlens = jnp.pad(cu_seqlens, ((1, 0), ),
                              mode='constant',
                              constant_values=0)
+        return window_index, rotary_pos_emb, cu_seqlens, cu_window_seqlens
+
+    @jax.jit
+    def compute_hidden_states(self, x: jax.Array, window_index: jax.Array,
+                              rotary_pos_emb: jax.Array, cu_seqlens: jax.Array,
+                              cu_window_seqlens: jax.Array) -> jax.Array:
+        hidden_states = self.patch_embed(x)
+
+        # num of patches
+        seq_len = x.shape[0]
 
         hidden_states = hidden_states.reshape(
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
@@ -663,6 +659,22 @@ class Qwen2_5_VisionTransformer(nnx.Module):
         reverse_indices = jnp.argsort(window_index)
         hidden_states = hidden_states[reverse_indices, :]
         return hidden_states
+
+    def __call__(self, x: jax.Array, grid_thw: tuple[tuple[int, int,
+                                                           int]]) -> jax.Array:
+        # x: pixel_values: jax.Array
+        # """Shape:
+        # `(num_patches, num_channels * patch_size * patch_size)`
+        # """
+
+        # grid_thw: image_grid_thw: jax.Array
+        # """Shape: `(num_images, 3)`
+        # This should be in `(grid_t, grid_h, grid_w)` format.
+        # """
+        window_index, rotary_pos_emb, cu_seqlens, cu_window_seqlens = self.compute_aux_arrays(
+            grid_thw)
+        return self.compute_hidden_states(x, window_index, rotary_pos_emb,
+                                          cu_seqlens, cu_window_seqlens)
 
 
 class Qwen2_5_VLForConditionalGeneration(nnx.Module):
@@ -888,10 +900,6 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             #         "video"] = self._parse_and_validate_video_input(**kwargs)
         return mm_input_by_modality
 
-    @partial(
-        jax.jit,
-        static_argnames=("image_grid_thw", ),
-    )
     def get_single_image_embedding(self, image_pixel_values, image_grid_thw):
         return self.visual(image_pixel_values, (image_grid_thw, ))
 
