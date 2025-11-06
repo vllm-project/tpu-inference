@@ -13,7 +13,8 @@ from vllm.config import LoRAConfig
 # yapf: disable
 from vllm.lora.layers import (BaseLayerWithLoRA, LoRAMapping,
                               MergedColumnParallelLinearWithLoRA,
-                              MergedQKVParallelLinearWithLoRA)
+                              MergedQKVParallelLinearWithLoRA,
+                              QKVParallelLinearWithLoRA)
 # yapf: enable
 from vllm.lora.models import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.punica_wrapper import get_punica_wrapper
@@ -219,7 +220,7 @@ def _create_linear_and_lora_wrapper(linear, base_linear, lora_cls, vllm_config,
 
 @torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 9])
-@pytest.mark.parametrize("repeats", [2, 3])
+@pytest.mark.parametrize("repeats", [1, 2, 3])
 @pytest.mark.parametrize("stage", [True, False])
 def test_column_parallel_packed(dist_init, num_loras, repeats, stage) -> None:
     max_loras = 9
@@ -276,17 +277,17 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, stage) -> None:
                 mesh=mesh)
         elif repeats == 3:
 
-            def _create_qkv_column_linear():
+            def _create_qkv_linear():
                 return QKVParallelLinear(64,
                                          64,
                                          32,
                                          bias=False,
                                          params_dtype=torch.float16)
 
-            linear = _create_qkv_column_linear()
+            linear = _create_qkv_linear()
             linear.weight.data = torch.rand_like(linear.weight.data)
 
-            base_linear = _create_qkv_column_linear()
+            base_linear = _create_qkv_linear()
             lora_linear = _create_linear_and_lora_wrapper(
                 linear,
                 base_linear,
@@ -295,7 +296,24 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, stage) -> None:
                 mesh=mesh)
 
         else:
-            raise NotImplementedError("NYI: for QKVParallelLinear case")
+
+            def _create_qkv_linear():
+                return QKVParallelLinear(64,
+                                         64,
+                                         32,
+                                         bias=False,
+                                         params_dtype=torch.float16)
+
+            linear = _create_qkv_linear()
+            linear.weight.data = torch.rand_like(linear.weight.data)
+
+            base_linear = _create_qkv_linear()
+            lora_linear = _create_linear_and_lora_wrapper(
+                linear,
+                base_linear,
+                QKVParallelLinearWithLoRA,
+                vllm_config=dist_init,
+                mesh=mesh)
 
         with torchax.default_env():
             # In the e2e, this is done when we create the lora model (`load_lora_model`).
