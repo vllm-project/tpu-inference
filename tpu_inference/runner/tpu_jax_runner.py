@@ -62,7 +62,7 @@ from tpu_inference.runner.structured_decoding_manager import \
 from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
 from tpu_inference.utils import (device_array, make_optimized_mesh,
                                  time_function)
-
+from jax.experimental import mesh_utils
 logger = init_logger(__name__)
 
 INVALID_TOKEN_ID = -1
@@ -264,10 +264,56 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # to a 2D mesh for now, and we may change this in the future.
         if os.getenv("NEW_MODEL_DESIGN", False):
             axis_names = ("data", "attn_dp", "expert", "model")
-            mesh_shape = (sharding_strategy.model_dp_size,
-                          sharding_strategy.attn_dp_size,
-                          sharding_strategy.expert_size,
-                          sharding_strategy.tp_size)
+            num_slices = int(os.environ.get('NUM_SLICES', 1))
+
+            print("devices", len(self.devices))
+            print("num_slices", num_slices)
+            if num_slices == 1:
+                mesh_shape = (sharding_strategy.model_dp_size,
+                    sharding_strategy.attn_dp_size,
+                    sharding_strategy.expert_size,
+                    sharding_strategy.tp_size)
+
+                devices_array = mesh_utils.create_device_mesh(
+                    mesh_shape,
+                    self.devices,
+                    allow_split_physical_axes=True
+                )
+            else:
+                if sharding_strategy.model_dp_size < num_slices:
+                    raise ValueError(
+                        f"Cannot use {num_slices} slices with model_dp_size={sharding_strategy.model_dp_size}. "
+                        f"Number of slices cannot exceed model data parallelism size.")
+                
+                if sharding_strategy.model_dp_size % num_slices != 0:
+                    raise ValueError(
+                        f"model_dp_size ({sharding_strategy.model_dp_size}) must be evenly divisible by "
+                        f"num_slices ({num_slices}). Current remainder: {sharding_strategy.model_dp_size % num_slices}")
+                
+                dp_outer = num_slices
+                dp_inner = sharding_strategy.model_dp_size // num_slices
+                attn_dp_outer = 1  # Keep attention DP within slices for now
+                attn_dp_inner = sharding_strategy.attn_dp_size
+                
+                assert dp_inner * dp_outer == sharding_strategy.model_dp_size, \
+                    f"dp_inner ({dp_inner}) * dp_outer ({dp_outer}) must equal model_dp_size ({sharding_strategy.model_dp_size})"
+                assert attn_dp_inner * attn_dp_outer == sharding_strategy.attn_dp_size, \
+                    f"attn_dp_inner ({attn_dp_inner}) * attn_dp_outer ({attn_dp_outer}) must equal attn_dp_size ({sharding_strategy.attn_dp_size})"
+                
+                intra_node_shape = (dp_inner, attn_dp_inner, sharding_strategy.expert_size, sharding_strategy.tp_size)
+                outer_node_shape = (dp_outer, attn_dp_outer, 1, 1)
+                devices_array = mesh_utils.create_hybrid_device_mesh(
+                    mesh_shape=intra_node_shape,      # Inner (Fast/ICI/NVLink)
+                    dcn_mesh_shape=outer_node_shape,  # Outer (Slow/DCN/Ethernet)
+                    devices=self.devices,
+                    allow_split_physical_axes=True
+                )
+            self.mesh = jax.sharding.Mesh(
+                devices_array,
+                axis_names
+            )
+            logger.info(f"Init mesh | mesh={self.mesh}")
+            return 
 
         else:
             axis_names = ("data", "model")
