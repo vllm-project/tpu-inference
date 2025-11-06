@@ -36,9 +36,10 @@ def mesh():
     devices = np.array(jax.local_devices()[:1])
     num_devices = len(devices)
     assert num_devices == 1
-    device_mesh = devices.reshape((num_devices, 1))
+    device_mesh = devices.reshape((num_devices, 1, 1, 1))
 
-    with Mesh(device_mesh, axis_names=('data', 'model')) as m:
+    with Mesh(device_mesh,
+              axis_names=('data', 'attn_dp', 'expert', 'model')) as m:
         yield m
 
 
@@ -89,7 +90,12 @@ class TestLlamaForCausalLM:
         model_config = mock_vllm_config.model_config
         hf_config = model_config.hf_config
 
-        assert model.mesh.shape == {"data": 1, "model": 1}
+        assert model.mesh.shape == {
+            "data": 1,
+            "attn_dp": 1,
+            "expert": 1,
+            "model": 1
+        }
 
         layers = model.model.layers
         assert len(layers) == hf_config.num_hidden_layers

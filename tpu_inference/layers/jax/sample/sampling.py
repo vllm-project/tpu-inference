@@ -9,6 +9,7 @@ from vllm.v1.outputs import LogprobsTensors
 from tpu_inference.layers.jax.binary_search import topk_mask, topp_mask
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
+from tpu_inference.layers.jax.sharding import ShardingAxisName
 
 _SAMPLING_EPS = 1e-5
 
@@ -27,7 +28,7 @@ def sample(
     if tpu_sampling_metadata.do_sampling:
         # Unshard the logits explicity to avoid latency increase.
         logits = jax.lax.with_sharding_constraint(
-            logits, NamedSharding(mesh, P(None, None)))
+            logits, NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None)))
     greedy_sampled = jnp.argmax(logits, axis=-1)
     if not tpu_sampling_metadata.do_sampling:
         return greedy_sampled
