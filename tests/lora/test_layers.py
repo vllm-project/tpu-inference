@@ -413,7 +413,9 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, stage) -> None:
         lora_result = lora_linear(torch.cat(jax_inputs))[0]
 
     expected_results: list[torch.Tensor] = []
+    # len(inputs_)=32, prompt_mapping: prompt->lora_id mapping.
     for input_, lora_id in zip(inputs, prompt_mapping):
+        # eg. input_: [1, 64]. lora_id: 1
         # linear(input_) returns (output, output_bias) so we only need the first one.
         result = linear(input_)[0]
         subloras = sublora_dict[lora_id]
@@ -506,7 +508,7 @@ def test_linear_parallel(dist_init, num_loras, orientation, stage) -> None:
     mesh_shape = (1, len(devices))
     mesh = jax.make_mesh(mesh_shape, axis_names, devices=devices)
 
-    def create_column_parallel_packed_layer():
+    def create_random_linear_parallel_layer():
         # We first create a base linear layer, then a lora layer to wrap it.
         if orientation == "row":
 
@@ -567,7 +569,7 @@ def test_linear_parallel(dist_init, num_loras, orientation, stage) -> None:
 
     set_random_seed(6)
 
-    linear, lora_linear = create_column_parallel_packed_layer()
+    linear, lora_linear = create_random_linear_parallel_layer()
     with torchax.default_env():
         if len(devices) == 1:
             assert torch.equal(linear.weight.data,
@@ -602,7 +604,6 @@ def test_linear_parallel(dist_init, num_loras, orientation, stage) -> None:
     lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
 
     with torchax.default_env():
-        # Here we move the metadata from cpu to tpu.
         punica_wrapper.update_metadata(
             lora_mapping,
             index_to_id,
@@ -620,22 +621,22 @@ def test_linear_parallel(dist_init, num_loras, orientation, stage) -> None:
     jax_inputs = []
     with torchax.default_env():
         for input in inputs:
-            # without `torch_view`, you get an error `AttributeError: 'jaxlib._jax.ArrayImpl' object has no attribute 'apply_jax_'`
-            # without `t2j`, you get an error `AttributeError: 'Tensor' object has no attribute 'apply_jax_'`
             jax_input = torch_view(t2j(input))
-            jax_input.apply_jax_(jax.device_put,
-                                 NamedSharding(mesh, P(None, None)))
+            sharding = NamedSharding(mesh, P(
+                None, 'model')) if orientation == "row" else NamedSharding(
+                    mesh, P(None, None))
+            jax_input.apply_jax_(jax.device_put, sharding)
             jax_inputs.append(jax_input)
     with torchax.default_env():
-        lora_result = lora_linear(torch.cat(jax_inputs))[0]
+        jax_inputs = torch.cat(jax_inputs)
+        lora_result = lora_linear(jax_inputs)[0]
 
     expected_results: list[torch.Tensor] = []
     for input_, lora_id in zip(inputs, prompt_mapping):
-        # What does input_ and lora_id looks like?
-        # linear(input_) returns (output, output_bias) so we only need the first one.
         result = linear(input_)[0]
         lora = lora_dict[lora_id]
-        result += input_ @ lora.lora_a.T @ lora.lora_b.T * lora.scaling
+        temp_lora_result = input_ @ lora.lora_a.T @ lora.lora_b.T * lora.scaling
+        result += temp_lora_result
         expected_results.append(result)
     expected_result = torch.cat(expected_results)
 

@@ -128,7 +128,8 @@ class VllmUnquantizedLinearMethod(UnquantizedLinearMethod):
         x_jax = jax_view(x)
         weight_jax = jax_view(layer.weight)
 
-        outs = jnp.einsum("mn,pn->mp", x_jax, weight_jax)
+        outs = jnp.einsum("mn,pn->mp", x_jax.astype(jnp.float32),
+                          weight_jax.astype(jnp.float32)).astype(x_jax.dtype)
         if bias is not None and not layer.skip_bias_add:
             outs += bias.jax()
 
