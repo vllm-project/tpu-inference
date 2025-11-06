@@ -610,7 +610,9 @@ class TPUConnectorScheduler():
                     f"in decode phase, next_block_boundary: {next_block_boundary}, "
                 )
                 # NOTE(jcgu): for decode, we do not drop or pad, just accumulate tokens until the next block boundary
-                if num_total_tokens >= next_block_boundary:
+                if num_total_tokens == next_block_boundary:
+                    # always save the full block for decode (not affected by saving_behavior)
+                    assert num_total_tokens == adjusted_num_total_tokens, f" decode_save: {num_total_tokens} != (adjusted) {adjusted_num_total_tokens}"
                     should_save = True
 
         logger.info(f"    - Preparing meta for req (save): {tracker.req_id}, "
@@ -840,6 +842,7 @@ class TPUConnectorScheduler():
             )
             logger.info(f"    - New blocks allocated: {len(new_blocks)}")
 
+            logger.info(f"---{new_token_ids}, {new_blocks}")
             # Update the tracker with the incremental data.
             tracker.update(new_blocks, new_token_ids)
             logger.info(f"    - Updated tracker for {req_id}: "
