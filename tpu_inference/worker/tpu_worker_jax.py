@@ -25,7 +25,6 @@ from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from tpu_inference import utils
 from tpu_inference.distributed.utils import (get_host_ip, get_kv_transfer_port,
                                              get_node_id)
-from tpu_inference.layers.jax.sharding import ShardingConfigManager
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.kv_cache import get_rpa_page_size_bytes
 from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
@@ -112,11 +111,16 @@ class TPUWorker:
 
     def init_device(self):
         if not self.devices:
-            sharding_config: ShardingConfigManager = self.vllm_config.sharding_config
-            device_indexes = sharding_config.device_indexes
-            if device_indexes is not None and len(device_indexes) > 0:
-                # Enforcing the devices sequence to be consistent with the specified device indexes
-                self.devices = [jax.devices()[i] for i in device_indexes]
+            device_indexes = []
+            tp = self.parallel_config.tensor_parallel_size
+            try:
+                device_indexes = self.vllm_config.additional_config[
+                    "sharding"]["sharding_strategy"]["device_indexes"]
+            except KeyError:
+                self.devices = jax.devices()[:tp]
+
+            # Enforcing the devices sequence to be consistent with the specified device indexes
+            if not self.devices:
                 all_devices = jax.devices()
                 device_dict = {device.id: device for device in all_devices}
                 self.devices = []
@@ -128,9 +132,7 @@ class TPUWorker:
                             f"jax.devices() with IDs {list(device_dict.keys())}!"
                         )
                     self.devices.append(device)
-                self.devices = self.devices[:sharding_config.total_devices]
-            else:
-                self.devices = jax.devices()[:sharding_config.total_devices]
+                self.devices = self.devices[:tp]
 
         # Initialize the vLLM distribution layer as a single chip environment,
         # we'll swap the model's parallel modules with TPU SPMD equivalents.

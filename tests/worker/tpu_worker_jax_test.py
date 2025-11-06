@@ -35,9 +35,6 @@ def mock_vllm_config():
     config.parallel_config = mock_parallel_conf
     config.additional_config = mock_additional_config
 
-    config.sharding_config = MagicMock()
-    config.sharding_config.total_devices = 2
-
     return config
 
 

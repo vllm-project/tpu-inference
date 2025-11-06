@@ -11,7 +11,6 @@ from tpu_inference import utils
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.attention_interface import attention
 from tpu_inference.layers.jax.rope_interface import apply_rope
-from tpu_inference.layers.jax.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (get_default_maps,
                                                          load_hf_weights)
@@ -33,8 +32,7 @@ class LlamaMLP(nnx.Module):
             intermediate_size,
             use_bias=False,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(
-                init_fn, (None, ShardingAxisName.MLP_TENSOR)),
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
             rngs=rng,
         )
         self.up_proj = nnx.Linear(
@@ -42,8 +40,7 @@ class LlamaMLP(nnx.Module):
             intermediate_size,
             use_bias=False,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(
-                init_fn, (None, ShardingAxisName.MLP_TENSOR)),
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
             rngs=rng,
         )
         self.down_proj = nnx.Linear(
@@ -51,8 +48,7 @@ class LlamaMLP(nnx.Module):
             hidden_size,
             use_bias=False,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(
-                init_fn, (ShardingAxisName.MLP_TENSOR, None)),
+            kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
         )
         self.act_fn = modeling_flax_utils.ACT2FN[act]
@@ -79,7 +75,7 @@ class LlamaAttention(nnx.Module):
                                          self.hidden_size // self.num_heads)
         self.head_dim = utils.get_padded_head_dim(self.head_dim_original)
 
-        sharding_size = mesh.shape["model"] * mesh.shape.get("attn_dp", 1)
+        sharding_size = mesh.shape["model"]
         self.num_heads = utils.get_padded_num_heads(self.num_heads,
                                                     sharding_size)
         self.num_kv_heads = utils.get_padded_num_heads(self.num_kv_heads,
@@ -91,32 +87,28 @@ class LlamaAttention(nnx.Module):
             "TD,DNH->TNH",
             (self.hidden_size, self.num_heads, self.head_dim),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(
-                init_fn, (None, ShardingAxisName.ATTN_HEAD, None)),
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             rngs=rng,
         )
         self.k_proj = nnx.Einsum(
             "TD,DKH->TKH",
             (self.hidden_size, self.num_kv_heads, self.head_dim),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(
-                init_fn, (None, ShardingAxisName.ATTN_HEAD, None)),
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             rngs=rng,
         )
         self.v_proj = nnx.Einsum(
             "TD,DKH->TKH",
             (self.hidden_size, self.num_kv_heads, self.head_dim),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(
-                init_fn, (None, ShardingAxisName.ATTN_HEAD, None)),
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             rngs=rng,
         )
         self.o_proj = nnx.Einsum(
             "TNH,NHD->TD",
             (self.num_heads, self.head_dim, self.hidden_size),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(
-                init_fn, (ShardingAxisName.ATTN_HEAD, None, None)),
+            kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
             rngs=rng,
         )
 
@@ -239,8 +231,7 @@ class LlamaModel(nnx.Module):
             num_embeddings=vocab_size,
             features=hidden_size,
             param_dtype=dtype,
-            embedding_init=nnx.with_partitioning(
-                init_fn, (ShardingAxisName.VOCAB, None)),
+            embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
         )
         self.layers = [
@@ -265,7 +256,7 @@ class LlamaModel(nnx.Module):
         else:
             self.lm_head = nnx.Param(
                 init_fn(rng.params(), (hidden_size, vocab_size), dtype),
-                sharding=(None, ShardingAxisName.VOCAB),
+                sharding=(None, "model"),
             )
 
         self.aux_hidden_state_layers = []
