@@ -1213,14 +1213,22 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     all_pre_next_tokens_indices)
                 idx_pad_len = len(input_ids) - len(
                     token_in_tpu_cur_input_indices)
-                padded_token_in_tpu_cur_input_indices = np.pad(
-                    token_in_tpu_cur_input_indices, (0, idx_pad_len),
-                    mode='constant',
-                    constant_values=-1)
+
+                # Pad according to the instructions written inside self._substitute_placeholder_token_fn
+                full_range = np.arange(0, len(input_ids))
+                missing_values = np.setdiff1d(full_range,
+                                            token_in_tpu_cur_input_indices)
+                padded_token_in_tpu_cur_input_indices = np.concatenate(
+                    (token_in_tpu_cur_input_indices, missing_values))
+
                 padded_token_in_tpu_pre_next_tokens_indices = np.pad(
                     token_in_tpu_pre_next_tokens_indices, (0, idx_pad_len),
                     mode='constant',
                     constant_values=-1)
+                (padded_token_in_tpu_cur_input_indices,
+                padded_token_in_tpu_pre_next_tokens_indices) = device_array(
+                    self.mesh, (padded_token_in_tpu_cur_input_indices,
+                                padded_token_in_tpu_pre_next_tokens_indices))
 
                 with self.maybe_forbid_compile:
                     input_ids = self._substitute_placeholder_token_fn(
