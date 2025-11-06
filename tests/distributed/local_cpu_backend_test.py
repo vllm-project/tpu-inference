@@ -132,9 +132,10 @@ class TestLocalCPUBackend:
         key = CacheKey(model_name="test_model", chunk_hash="A")
         backend.add(key, create_mock_value(10))
 
-        assert key not in backend.pinned_keys
+        assert key not in backend.pin_counts
         backend.contains(key, pin_on_hit=True)
-        assert key in backend.pinned_keys
+        assert key in backend.pin_counts
+        assert backend.pin_counts[key] == 1
 
     def test_pinned_item_is_not_evicted(self, clean_backend_instance):
         """Tests that a pinned item is protected from eviction."""
@@ -147,7 +148,7 @@ class TestLocalCPUBackend:
         backend.add(key_a, value)
         backend.add(key_b, value)
         backend.contains(key_a, pin_on_hit=True)
-        assert key_a in backend.pinned_keys
+        assert key_a in backend.pin_counts
 
         # This should evict key_b, because key_a is pinned
         backend.add(key_c, value)
@@ -172,8 +173,8 @@ class TestLocalCPUBackend:
         assert list(backend.cache.keys()) == [key_b, key_a]
 
         # Unpin A, making it the LRU evictable item
-        backend.unpin_keys([key_a])
-        assert key_a not in backend.pinned_keys
+        backend.maybe_unpin_keys([key_a])
+        assert key_a not in backend.pin_counts
 
         # This should now evict B
         backend.add(key_c, value)
@@ -182,8 +183,7 @@ class TestLocalCPUBackend:
         assert key_a in backend.cache
         assert key_c in backend.cache
 
-    def test_cache_full_of_pinned_items_prevents_add(self,
-                                                     clean_backend_instance):
+    def test_cache_full_of_pinned_items_prevents_add(clean_backend_instance):
         """
         Tests that no new items can be added if the cache is full of
         pinned items.
@@ -208,3 +208,93 @@ class TestLocalCPUBackend:
         assert key_a in backend.cache
         assert key_b in backend.cache
         assert backend.current_size_bytes == 100
+        assert key_a in backend.pin_counts
+        assert key_b in backend.pin_counts
+
+    def test_pinning_same_key_multiple_times_increments_count(
+            self, clean_backend_instance):
+        """Verifies that pinning an already-pinned key increments its count."""
+        backend = LocalCPUBackend(max_cpu_cache_size_bytes=100)
+        key = CacheKey(model_name="test_model", chunk_hash="A")
+        backend.add(key, create_mock_value(10))
+
+        backend.contains(key, pin_on_hit=True)
+        assert backend.pin_counts[key] == 1
+
+        backend.contains(key, pin_on_hit=True)
+        assert backend.pin_counts[key] == 2
+
+    def test_unpin_decrements_count_and_removes_at_zero(
+            self, clean_backend_instance):
+        """Tests the core reference counting logic of the unpin_keys method."""
+        backend = LocalCPUBackend(max_cpu_cache_size_bytes=100)
+        key = CacheKey(model_name="test_model", chunk_hash="A")
+        backend.add(key, create_mock_value(10))
+
+        # Pin twice
+        backend.contains(key, pin_on_hit=True)
+        backend.contains(key, pin_on_hit=True)
+        assert backend.pin_counts[key] == 2
+
+        # Unpin once
+        backend.maybe_unpin_keys([key])
+        assert key in backend.pin_counts
+        assert backend.pin_counts[key] == 1
+
+        # Unpin again
+        backend.maybe_unpin_keys([key])
+        assert key not in backend.pin_counts
+
+    def test_item_with_positive_pin_count_is_not_evicted(
+            self, clean_backend_instance):
+        """
+        Tests that an item with a pin count > 0 is not evicted, confirming
+        the race condition fix.
+        """
+        backend = LocalCPUBackend(max_cpu_cache_size_bytes=100)
+        key_a = CacheKey(model_name="test_model", chunk_hash="A")
+        key_b = CacheKey(model_name="test_model", chunk_hash="B")
+        key_c = CacheKey(model_name="test_model", chunk_hash="C")
+        value = create_mock_value(50)
+
+        backend.add(key_a, value)  # Will be LRU
+        backend.add(key_b, value)
+
+        # Pin key_a twice (simulating two requests)
+        backend.contains(key_a, pin_on_hit=True)
+        backend.contains(key_a, pin_on_hit=True)
+
+        # Unpin key_a once (simulating one request finishing)
+        backend.maybe_unpin_keys([key_a])
+        assert backend.pin_counts[key_a] == 1
+
+        # This add should trigger eviction of key_b, as key_a is still pinned.
+        backend.add(key_c, value)
+
+        assert key_a in backend.cache
+        assert key_b not in backend.cache
+        assert key_c in backend.cache
+        assert key_a in backend.pin_counts
+
+    def test_unpin_keys_returns_correct_counts(self, clean_backend_instance):
+        """Validates the meaningful return values of unpin_keys."""
+        backend = LocalCPUBackend(max_cpu_cache_size_bytes=100)
+        key_a = CacheKey(model_name="test_model", chunk_hash="A")
+        key_b = CacheKey(model_name="test_model", chunk_hash="B")
+        value = create_mock_value(10)
+
+        backend.add(key_a, value)
+        backend.add(key_b, value)
+
+        # Pin A twice, B once
+        backend.contains(key_a, pin_on_hit=True)
+        backend.contains(key_a, pin_on_hit=True)
+        backend.contains(key_b, pin_on_hit=True)
+
+        # Unpin both. A should be decremented, B should be fully unpinned.
+        unpinned_count, found_count = backend.maybe_unpin_keys([key_a, key_b])
+
+        assert found_count == 2  # Both keys were found in pin_counts
+        assert unpinned_count == 1  # Only key_b's count went to 0
+        assert backend.pin_counts[key_a] == 1
+        assert key_b not in backend.pin_counts

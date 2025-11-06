@@ -50,7 +50,8 @@ class LocalCPUBackend:
         # The cache is an OrderedDict for LRU behavior.
         self.cache: OrderedDict[CacheKey, Any] = OrderedDict()
         self.current_size_bytes = 0
-        self.pinned_keys: set[CacheKey] = set()
+        # Use a dictionary for reference counting of pinned keys.
+        self.pin_counts: dict[CacheKey, int] = {}
         self._initialized = True
         logger.info("Singleton LocalCPUBackend initialized."
                     f"CPU cache size: {self.max_cpu_cache_size_bytes} bytes")
@@ -93,7 +94,7 @@ class LocalCPUBackend:
             evicted_key = None
             # Find the first unpinned key from the LRU end of the cache.
             for k in self.cache:
-                if k not in self.pinned_keys:
+                if k not in self.pin_counts:
                     evicted_key = k
                     break
 
@@ -139,19 +140,31 @@ class LocalCPUBackend:
             # Mark as most recently used, since this is an access.
             self.cache.move_to_end(key)
             if pin_on_hit:
-                self.pinned_keys.add(key)
-                logger.info(f"Pinned key on hit. Hash: {key.chunk_hash}")
+                self.pin_counts[key] = self.pin_counts.get(key, 0) + 1
+                logger.info(f"Pinned key on hit. Hash: {key.chunk_hash}, "
+                            f"New count: {self.pin_counts[key]}")
             return True
         return False
 
-    def unpin_keys(self, keys: List[CacheKey]) -> Tuple[int, int]:
-        """Unpins a list of keys, making them eligible for eviction again."""
+    def maybe_unpin_keys(self, keys: List[CacheKey]) -> Tuple[int, int]:
+        """
+        Unpins a list of keys.
+
+        Decrements the pin count for each key. If a key's count reaches zero,
+        it is fully unpinned and becomes eligible for eviction.
+        """
         unpinned_count = 0
         found_count = 0
         for key in keys:
-            if key in self.pinned_keys:
+            if key in self.pin_counts:
                 found_count += 1
-                self.pinned_keys.remove(key)
-                unpinned_count += 1
-                logger.info(f"Unpinned key. Hash: {key.chunk_hash}")
+                self.pin_counts[key] -= 1
+                logger.info(
+                    f"Decremented pin count for key. Hash: {key.chunk_hash}, "
+                    f"New count: {self.pin_counts[key]}")
+                if self.pin_counts[key] == 0:
+                    del self.pin_counts[key]
+                    unpinned_count += 1
+                    logger.info(
+                        f"Unpinned key completely. Hash: {key.chunk_hash}")
         return unpinned_count, found_count
