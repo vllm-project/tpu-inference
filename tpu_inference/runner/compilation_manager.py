@@ -131,7 +131,8 @@ class CompilationManager:
 
         dp_size = self.runner.vllm_config.sharding_config.total_dp_size
         dp_sharding = NamedSharding(
-            self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, ))
+            self.runner.mesh, PartitionSpec(
+                ShardingAxisName.ATTN_DATA, )) if dp_size > 1 else None
 
         # Keep existing pattern for complex array operations
         block_tables = self.runner.block_table_cpu[:self.runner.max_num_reqs]
@@ -211,7 +212,8 @@ class CompilationManager:
                  (padded_token_in_tpu_cur_input_indices,
                   padded_token_in_tpu_pre_next_tokens_indices))
             dp_sharding = NamedSharding(
-                self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, ))
+                self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, )
+            ) if self.runner.vllm_config.sharding_config.total_dp_size > 1 else None
 
             for num_reqs in self.runner.num_reqs_paddings:
                 input_ids = self._create_dummy_tensor((num_tokens, ),
@@ -238,7 +240,9 @@ class CompilationManager:
     def _precompile_backbone_text_only(self) -> None:
         for num_tokens in self.runner.num_tokens_paddings:
             dp_sharding = NamedSharding(
-                self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, ))
+                self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, )
+            ) if self.runner.vllm_config.sharding_config.total_dp_size > 1 else None
+
             input_ids = self._create_dummy_tensor((num_tokens, ), jnp.int32,
                                                   dp_sharding)
             positions = self._create_dummy_tensor((num_tokens, ), jnp.int32,
@@ -325,16 +329,16 @@ class CompilationManager:
             index_paddings = self.runner.num_logits_paddings
         else:
             index_paddings = self.runner.num_reqs_paddings
-
+        dp_sharding = NamedSharding(self.runner.mesh,
+                                    PartitionSpec(ShardingAxisName.ATTN_DATA))
+        dp_size = self.runner.vllm_config.sharding_config.total_dp_size
         self._precompile_select_from_array_helper(
             name="select all logits",
             source_paddings=self.runner.num_tokens_paddings,
             indices_paddings=index_paddings,
             hidden_dim=hsize,
-            input_sharding=NamedSharding(
-                self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA)),
-            indices_sharding=NamedSharding(
-                self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA)),
+            input_sharding=dp_sharding,
+            indices_sharding=dp_sharding if dp_size > 1 else None,
         )
 
         if self.runner.speculative_config:
@@ -361,11 +365,11 @@ class CompilationManager:
         logger.info("Compiling compute_logits with different input shapes.")
         hsize = self.runner.model_config.get_hidden_size()
         leading_shape = self.runner.num_reqs_paddings if not self.runner.speculative_config else self.runner.num_logits_paddings
+        dp_sharding = NamedSharding(self.runner.mesh,
+                                    PartitionSpec(ShardingAxisName.ATTN_DATA))
         for num_reqs in leading_shape:
             hidden_states = self._create_dummy_tensor(
-                (num_reqs, hsize), jnp.bfloat16,
-                NamedSharding(self.runner.mesh,
-                              PartitionSpec(ShardingAxisName.ATTN_DATA)))
+                (num_reqs, hsize), jnp.bfloat16, dp_sharding)
             with self.runner.maybe_select_dummy_loras(
                     self.runner.lora_config,
                     np.array([num_reqs], dtype=np.int32)):
@@ -386,6 +390,7 @@ class CompilationManager:
             sharding = NamedSharding(
                 self.runner.mesh,
                 PartitionSpec(ShardingAxisName.ATTN_DATA, "model"))
+            dp_size = self.runner.vllm_config.sharding_config.total_dp_size
             logits = self._create_dummy_tensor((num_reqs, hsize), jnp.bfloat16,
                                                sharding)
             for do_sampling in (True, False):
@@ -393,9 +398,9 @@ class CompilationManager:
                     temperature = np.full((num_reqs, ), 0.7, dtype=np.float32)
                     top_k = np.full((num_reqs, ), 20, dtype=np.int32)
                     top_p = np.full((num_reqs, ), 0.8, dtype=np.float32)
-                    (temperature, top_k,
-                     top_p) = device_array(self.runner.mesh,
-                                           (temperature, top_k, top_p))
+                    (temperature, top_k, top_p) = device_array(
+                        self.runner.mesh, (temperature, top_k, top_p),
+                        sharding=sharding if dp_size > 1 else None)
                 else:
                     temperature = None
                     top_k = None
