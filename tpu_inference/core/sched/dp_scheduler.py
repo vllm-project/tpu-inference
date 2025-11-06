@@ -432,7 +432,6 @@ class DPScheduler(SchedulerInterface):
         # Aggregate stats from all schedulers
         total_running_reqs = 0
         total_waiting_reqs = 0
-        total_corrupted_reqs = 0
         total_kv_cache_usage = 0.0
 
         combined_prefix_cache_stats = PrefixCacheStats()
@@ -447,7 +446,6 @@ class DPScheduler(SchedulerInterface):
 
             total_running_reqs += rank_stats.num_running_reqs
             total_waiting_reqs += rank_stats.num_waiting_reqs
-            total_corrupted_reqs += rank_stats.num_corrupted_reqs
             total_kv_cache_usage += rank_stats.kv_cache_usage
 
             # Combine prefix cache stats
@@ -477,7 +475,6 @@ class DPScheduler(SchedulerInterface):
             prefix_cache_stats=combined_prefix_cache_stats,
             connector_prefix_cache_stats=combined_connector_prefix_cache_stats,
             spec_decoding_stats=spec_decoding_stats,
-            num_corrupted_reqs=total_corrupted_reqs,
             kv_connector_stats=kv_connector_stats.data
             if kv_connector_stats else None,
         )
