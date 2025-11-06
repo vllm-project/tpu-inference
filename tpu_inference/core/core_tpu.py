@@ -176,9 +176,10 @@ class _DisaggOrchestrator:
                 continue
 
             scheduler_output = prefill_engine.scheduler.schedule()
-            with LatencyTracker(f"prefill-{idx}"):
-                model_output = prefill_engine.execute_model_with_error_logging(
-                    prefill_engine.model_executor.execute_model,
+            with LatencyTracker(
+                    f"prefill-{idx}"), prefill_engine.log_error_detail(
+                        scheduler_output):
+                model_output = prefill_engine.model_executor.execute_model(
                     scheduler_output)
 
             if scheduler_output.total_num_scheduled_tokens > 0:
@@ -350,9 +351,10 @@ class _DisaggOrchestrator:
                 new block ids - {scheduler_output.scheduled_cached_reqs.new_block_ids}'''
                          )
 
-            with LatencyTracker(f"decode-{idx}"):
-                model_output = decode_engine.execute_model_with_error_logging(
-                    decode_engine.model_executor.execute_model,
+            with LatencyTracker(
+                    f"decode-{idx}"), decode_engine.log_error_detail(
+                        scheduler_output):
+                model_output = decode_engine.model_executor.execute_model(
                     scheduler_output)
             if scheduler_output.total_num_scheduled_tokens > 0:
                 logger.debug(f"Decode result: {model_output}")
