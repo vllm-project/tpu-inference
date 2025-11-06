@@ -31,15 +31,15 @@ class ShardingAxisName2D:
     NOTE(wenxindongwork): This is used for now because the MoE kernel
     expects a 2D mesh. 
     """
-    SEQUENCE = ('data')
-    ATTN_DATA = ('data')
+    SEQUENCE = 'data'
+    ATTN_DATA = 'data'
     MLP_DATA = 'data'
     ATTN_HEAD = 'model'
     ATTN_TENSOR = None
-    MLP_TENSOR = ('model')
-    MOE_TENSOR = ('model')
-    EXPERT = ('model')
-    VOCAB = ('model')
+    MLP_TENSOR = ('model', 'expert')
+    MOE_TENSOR = 'model'
+    EXPERT = 'expert'
+    VOCAB =  ('data', 'expert', 'model')
 
 try:
     _use_base_sharding = os.getenv("NEW_MODEL_DESIGN", False)
