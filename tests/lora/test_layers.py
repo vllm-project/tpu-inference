@@ -11,15 +11,18 @@ from torchax.ops.mappings import t2j
 from vllm.config import LoRAConfig
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.lora.layers import (BaseLayerWithLoRA, LoRAMapping,
-                              MergedColumnParallelLinearWithLoRA,
+from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
+                              LoRAMapping, MergedColumnParallelLinearWithLoRA,
                               MergedQKVParallelLinearWithLoRA,
-                              QKVParallelLinearWithLoRA)
+                              QKVParallelLinearWithLoRA,
+                              RowParallelLinearWithLoRA)
 # yapf: enable
 from vllm.lora.models import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.punica_wrapper import get_punica_wrapper
-from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
-                                               QKVParallelLinear)
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               MergedColumnParallelLinear,
+                                               QKVParallelLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.utils import set_random_seed
 from vllm.platforms import current_platform
 
@@ -418,6 +421,221 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, stage) -> None:
             result[:, sublora.lora_b.shape[0] * i:sublora.lora_b.shape[0] *
                    (i + 1)] += (input_ @ sublora.lora_a.T @ sublora.lora_b.T *
                                 sublora.scaling)
+        expected_results.append(result)
+    expected_result = torch.cat(expected_results)
+
+    rtol, atol = TOLERANCES[lora_result.dtype]
+    with torchax.default_env():
+        lora_result_cpu = lora_result.to('cpu')
+        torch.testing.assert_close(lora_result_cpu,
+                                   expected_result,
+                                   rtol=rtol,
+                                   atol=atol)
+        print(
+            f'Output max diff: {torch.max(torch.abs(expected_result - lora_result_cpu))}'
+        )
+        print(
+            f'Output mean diff: {torch.mean(torch.abs(expected_result - lora_result_cpu))}'
+        )
+
+    # Check that resetting the lora weights succeeds
+    # Here we set all lora weight to be empty.
+    for slot_idx in range(max_loras):
+        lora_linear.reset_lora(slot_idx)
+
+    inputs, index_mapping, prompt_mapping = create_random_inputs(
+        active_lora_ids=[0],  # different from the above create_random_inputs
+        num_inputs=32,
+        input_size=(1, 64),
+        input_range=(0, 1),
+        input_type=torch.float16,
+        device='cpu')
+    lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
+
+    with torchax.default_env():
+        punica_wrapper.update_metadata(
+            lora_mapping,
+            index_to_id,
+            max_loras,
+            512,
+            lora_config.lora_extra_vocab_size,
+        )
+
+    jax_inputs = []
+    with torchax.default_env():
+        for input in inputs:
+            jax_input = torch_view(t2j(input))
+            jax_input.apply_jax_(jax.device_put,
+                                 NamedSharding(mesh, P(None, None)))
+            jax_inputs.append(jax_input)
+    with torchax.default_env():
+        lora_result = lora_linear(torch.cat(jax_inputs))[0]
+    expected_result = linear(torch.cat(inputs))[0]
+
+    rtol, atol = TOLERANCES[lora_result.dtype]
+    with torchax.default_env():
+        lora_result_cpu = lora_result.to('cpu')
+        torch.testing.assert_close(lora_result_cpu,
+                                   expected_result,
+                                   rtol=rtol,
+                                   atol=atol)
+        print(
+            f'Output max diff: {torch.max(torch.abs(expected_result - lora_result_cpu))}'
+        )
+        print(
+            f'Output mean diff: {torch.mean(torch.abs(expected_result - lora_result_cpu))}'
+        )
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize("num_loras", [1, 2, 4, 9])
+@pytest.mark.parametrize("orientation", ["row", "column"])
+@pytest.mark.parametrize("stage", [True, False])
+def test_linear_parallel(dist_init, num_loras, orientation, stage) -> None:
+    max_loras = 9
+    max_lora_rank = 8
+    lora_config = LoRAConfig(
+        max_loras=max_loras,
+        max_lora_rank=max_lora_rank,
+        fully_sharded_loras=False,
+        lora_dtype=torch.float16,
+    )
+
+    axis_names = ("data", "model")
+    devices = jax.devices()
+    mesh_shape = (1, len(devices))
+    mesh = jax.make_mesh(mesh_shape, axis_names, devices=devices)
+
+    def create_column_parallel_packed_layer():
+        # We first create a base linear layer, then a lora layer to wrap it.
+        if orientation == "row":
+
+            def _create_row_linear():
+                return RowParallelLinear(
+                    64,  # input_size
+                    64,  # output_size
+                    bias=False,
+                    params_dtype=torch.float16)
+
+            linear = _create_row_linear()
+            linear.weight.data = torch.rand_like(linear.weight.data)
+
+            base_linear = _create_row_linear()
+            lora_linear = _create_linear_and_lora_wrapper(
+                linear,
+                base_linear,
+                RowParallelLinearWithLoRA,
+                vllm_config=dist_init,
+                mesh=mesh)
+        else:
+
+            def _create_column_linear():
+                return ColumnParallelLinear(64,
+                                            64,
+                                            bias=False,
+                                            params_dtype=torch.float16)
+
+            linear = _create_column_linear()
+            linear.weight.data = torch.rand_like(linear.weight.data)
+
+            base_linear = _create_column_linear()
+            lora_linear = _create_linear_and_lora_wrapper(
+                linear,
+                base_linear,
+                ColumnParallelLinearWithLoRA,
+                vllm_config=dist_init,
+                mesh=mesh)
+
+        with torchax.default_env():
+            lora_linear.create_lora_weights(max_loras, lora_config)
+        _shard_module_to_tpu(lora_linear, mesh)
+
+        assert jax_view(lora_linear.lora_a_stacked[0]).platform(
+        ) == 'tpu', 'lora_a_stacked should have been moved to TPU.'
+        assert not isinstance(
+            jax_view(lora_linear.lora_a_stacked[0]).sharding, jax.sharding.
+            SingleDeviceSharding), 'lora_a_stacked should have been sharded.'
+        assert jax_view(lora_linear.lora_b_stacked[0]).platform(
+        ) == 'tpu', 'lora_b_stacked should have been moved to TPU.'
+        assert not isinstance(
+            jax_view(lora_linear.lora_b_stacked[0]).sharding, jax.sharding.
+            SingleDeviceSharding), 'lora_b_stacked should have been sharded.'
+        assert (lora_linear.n_slices == len(lora_linear.lora_a_stacked) == len(
+            lora_linear.lora_b_stacked) == 1)
+
+        return linear, lora_linear
+
+    set_random_seed(6)
+
+    linear, lora_linear = create_column_parallel_packed_layer()
+    with torchax.default_env():
+        if len(devices) == 1:
+            assert torch.equal(linear.weight.data,
+                               lora_linear.weight.to('cpu'))
+
+    max_num_batched_tokens = 8192
+    max_batches = 256
+    with torchax.default_env():
+        punica_wrapper = get_punica_wrapper(max_num_batched_tokens,
+                                            max_batches,
+                                            'jax',
+                                            max_loras=max_loras)
+    assert check_punica_wrapper(punica_wrapper)
+    lora_linear.set_mapping(punica_wrapper)
+
+    # Populate lora matrices (lora_a and lora_b) in the lora layer.
+    index_to_id = get_random_index_to_id(num_loras, max_loras)
+    # lora_dict: lora_id -> LoRALayerWeights|PackedLoRALayerWeights
+    lora_dict, sublora_dict = populate_loras(
+        index_to_id,
+        lora_layer=lora_linear,
+        baselayer_weights=linear.weight,
+    )
+
+    inputs, index_mapping, prompt_mapping = create_random_inputs(
+        active_lora_ids=list(lora_dict.keys()),
+        num_inputs=32,
+        input_size=(1, 64),
+        input_range=(0, 1),
+        input_type=torch.float16,
+        device='cpu')
+    lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
+
+    with torchax.default_env():
+        # Here we move the metadata from cpu to tpu.
+        punica_wrapper.update_metadata(
+            lora_mapping,
+            index_to_id,
+            max_loras,
+            vocab_size=512,
+            extra_vocab_size=lora_config.lora_extra_vocab_size,
+        )
+        assert jax_view(punica_wrapper._lora_indices_per_batch).platform(
+        ) == 'tpu', 'punica_wrapper._lora_indices_per_batch should have been moved to TPU.'
+        assert isinstance(
+            jax_view(punica_wrapper._lora_indices_per_batch).sharding,
+            jax.sharding.SingleDeviceSharding
+        ), 'punica_wrapper._lora_indices_per_batch should have been moved to TPU.'
+
+    jax_inputs = []
+    with torchax.default_env():
+        for input in inputs:
+            # without `torch_view`, you get an error `AttributeError: 'jaxlib._jax.ArrayImpl' object has no attribute 'apply_jax_'`
+            # without `t2j`, you get an error `AttributeError: 'Tensor' object has no attribute 'apply_jax_'`
+            jax_input = torch_view(t2j(input))
+            jax_input.apply_jax_(jax.device_put,
+                                 NamedSharding(mesh, P(None, None)))
+            jax_inputs.append(jax_input)
+    with torchax.default_env():
+        lora_result = lora_linear(torch.cat(jax_inputs))[0]
+
+    expected_results: list[torch.Tensor] = []
+    for input_, lora_id in zip(inputs, prompt_mapping):
+        # What does input_ and lora_id looks like?
+        # linear(input_) returns (output, output_bias) so we only need the first one.
+        result = linear(input_)[0]
+        lora = lora_dict[lora_id]
+        result += input_ @ lora.lora_a.T @ lora.lora_b.T * lora.scaling
         expected_results.append(result)
     expected_result = torch.cat(expected_results)
 

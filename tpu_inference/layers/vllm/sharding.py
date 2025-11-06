@@ -174,6 +174,7 @@ MODULE_TYPE_TO_SHARDING_FUNC = [
     (ParallelLMHead, _shard_lm_head),
     (VocabParallelEmbedding, _shard_vocab_parallel_embedding),
     # Shard LoRA layers
+    (ColumnParallelLinearWithLoRA, _shard_column_linear_lora),
     (QKVParallelLinearWithLoRA, _shard_qkv_linear_lora),
     (MergedColumnParallelLinearWithLoRA,
      _shard_merged_column_parallel_linear_lora),
