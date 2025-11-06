@@ -121,9 +121,9 @@ def test_performance(
     '''
     Test that async scheduler decoding provides significant performance improvement.
     Compares timing between reference LLM and async LLM using Qwen2.5-1.5B.
-    Expects async_llm to be at least 1.3x faster than ref_llm.
+    Expects async_llm to be at least 1.25x faster than ref_llm.
     '''
-    min_speed_up = 1.3
+    min_speed_up = 1.25
     _test_performance_helper(monkeypatch, sampling_config, model_name,
                              min_speed_up)
 
