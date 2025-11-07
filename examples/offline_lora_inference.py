@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Usage:
+# To run: MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax  python examples/offline_lora_inference.py --tensor-parallel-size $tp
+# To profile: VLLM_TORCH_PROFILER_DIR=/mnt/disks/persist/myprofiles MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax  python examples/offline_lora_inference.py --tensor-parallel-size $tp
 
 import os
 import time

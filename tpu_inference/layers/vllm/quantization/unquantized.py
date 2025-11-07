@@ -134,8 +134,12 @@ class VllmUnquantizedLinearMethod(UnquantizedLinearMethod):
 
         outs = slice_sharded_tensor_for_concatenation(
             outs, self.jax_config.output_sizes, self.jax_config.n_shards)
-        out = jnp.concatenate(outs, axis=-1)
-        return torch_view(out)
+        # with jax.named_scope(
+        #         "jnp.concat scope"):  # shows up as HLO op metadata
+        #     with jax.profiler.TraceAnnotation("jnp.concat trace annotation"
+        #                                       ):  # shows up as a trace region
+        #         out = jnp.concatenate(outs, axis=-1)
+        return [torch_view(out) for out in outs]
 
     def _apply_split(self,
                      layer: torch.nn.Module,

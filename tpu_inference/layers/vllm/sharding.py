@@ -66,11 +66,15 @@ def _extract_all_params_buffers(model: torch.nn.Module):
 
 
 def _tensor_is_in_cpu(tensor: torch.tensor) -> bool:
+    # xw32: There are many torch.nn.parameter.Parameter. e.g. https://paste.googleplex.com/4571608492670976
     # Check if a tensor haven't been converted to torchax tensor.
     if not isinstance(tensor, torchax.tensor.Tensor):
         return True
     # Check if torchax tensor is still in CPU.
-    return tensor.jax_device == jax.devices('cpu')[0]
+    if tensor.jax_device == jax.devices('cpu')[0]:
+        return True
+    else:
+        return False
 
 
 def _convert_to_torchax_and_shard(tensor: torch.Tensor,
