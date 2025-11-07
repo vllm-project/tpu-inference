@@ -3,6 +3,7 @@
 
 import os
 import sys
+import threading
 from collections import OrderedDict
 from typing import Any, List, Optional, Tuple
 
@@ -42,6 +43,7 @@ class LocalCPUBackend:
         if self._initialized:
             return
 
+        self.lock = threading.Lock()
         env_cache_size_gb = os.getenv("TPU_OFFLOAD_CPU_CACHE_SIZE_GB")
         self.max_cpu_cache_size_bytes = (int(env_cache_size_gb) *
                                          GB if env_cache_size_gb is not None
@@ -76,58 +78,62 @@ class LocalCPUBackend:
         If the cache is full, it evicts the least recently used, unpinned
         entries until there is enough space.
         """
-        value_size = self._get_value_size(value)
-        # Do not add if the item itself is larger than the cache capacity.
-        if value_size > self.max_cpu_cache_size_bytes:
-            logger.warning(
-                f"Cannot add item of size {value_size} bytes to "
-                f"cache with capacity {self.max_cpu_cache_size_bytes} bytes.")
-            return
-
-        # If key already exists, remove it to update its size and position.
-        if key in self.cache:
-            old_value = self.cache.pop(key)
-            self.current_size_bytes -= self._get_value_size(old_value)
-
-        # Evict old, unpinned entries until there is enough space for the new item.
-        while self.current_size_bytes + value_size > self.max_cpu_cache_size_bytes:
-            evicted_key = None
-            # Find the first unpinned key from the LRU end of the cache.
-            for k in self.cache:
-                if k not in self.pin_counts:
-                    evicted_key = k
-                    break
-
-            # If no unpinned key can be evicted, we cannot make space.
-            if evicted_key is None:
+        with self.lock:
+            value_size = self._get_value_size(value)
+            # Do not add if the item itself is larger than the cache capacity.
+            if value_size > self.max_cpu_cache_size_bytes:
                 logger.warning(
-                    "Cache is full of pinned items. Cannot add new key "
-                    f"({key.chunk_hash}) until some are unpinned.")
-                # If we popped the key before, we need to decide what to do.
-                # For simplicity, we just won't add the new value.
+                    f"Cannot add item of size {value_size} bytes to "
+                    f"cache with capacity {self.max_cpu_cache_size_bytes} bytes."
+                )
                 return
 
-            # Evict the found key.
-            evicted_value = self.cache.pop(evicted_key)
-            self.current_size_bytes -= self._get_value_size(evicted_value)
-            logger.info(f"Evicted key {evicted_key.chunk_hash} to make space.")
+            # If key already exists, remove it to update its size and position.
+            if key in self.cache:
+                old_value = self.cache.pop(key)
+                self.current_size_bytes -= self._get_value_size(old_value)
 
-        # Add the new item.
-        self.cache[key] = value
-        self.current_size_bytes += value_size
-        logger.info(f"Added key to CPU backend. Hash: {key.chunk_hash}")
-        logger.info(f"Cache size: {self.current_size_bytes} bytes / "
-                    f"{self.max_cpu_cache_size_bytes} bytes")
+            # Evict old, unpinned entries until there is enough space for the new item.
+            while self.current_size_bytes + value_size > self.max_cpu_cache_size_bytes:
+                evicted_key = None
+                # Find the first unpinned key from the LRU end of the cache.
+                for k in self.cache:
+                    if k not in self.pin_counts:
+                        evicted_key = k
+                        break
+
+                # If no unpinned key can be evicted, we cannot make space.
+                if evicted_key is None:
+                    logger.warning(
+                        "Cache is full of pinned items. Cannot add new key "
+                        f"({key.chunk_hash}) until some are unpinned.")
+                    # If we popped the key before, we need to decide what to do.
+                    # For simplicity, we just won't add the new value.
+                    return
+
+                # Evict the found key.
+                evicted_value = self.cache.pop(evicted_key)
+                self.current_size_bytes -= self._get_value_size(evicted_value)
+                logger.info(
+                    f"Evicted key {evicted_key.chunk_hash} to make space.")
+
+            # Add the new item.
+            self.cache[key] = value
+            self.current_size_bytes += value_size
+            logger.info(f"Added key to CPU backend. Hash: {key.chunk_hash}")
+            logger.info(f"Cache size: {self.current_size_bytes} bytes / "
+                        f"{self.max_cpu_cache_size_bytes} bytes")
 
     def get(self, key: CacheKey) -> Optional[Any]:
         """
         Gets the value for a given key and marks it as recently used.
         """
-        if key in self.cache:
-            # Mark as most recently used.
-            self.cache.move_to_end(key)
-            return self.cache[key]
-        return None
+        with self.lock:
+            if key in self.cache:
+                # Mark as most recently used.
+                self.cache.move_to_end(key)
+                return self.cache[key]
+            return None
 
     def contains(self, key: CacheKey, pin_on_hit: bool = False) -> bool:
         """
@@ -136,15 +142,16 @@ class LocalCPUBackend:
         If the key is found, it's marked as recently used. If `pin_on_hit`
         is True, the key is also pinned to prevent eviction.
         """
-        if key in self.cache:
-            # Mark as most recently used, since this is an access.
-            self.cache.move_to_end(key)
-            if pin_on_hit:
-                self.pin_counts[key] = self.pin_counts.get(key, 0) + 1
-                logger.info(f"Pinned key on hit. Hash: {key.chunk_hash}, "
-                            f"New count: {self.pin_counts[key]}")
-            return True
-        return False
+        with self.lock:
+            if key in self.cache:
+                # Mark as most recently used, since this is an access.
+                self.cache.move_to_end(key)
+                if pin_on_hit:
+                    self.pin_counts[key] = self.pin_counts.get(key, 0) + 1
+                    logger.info(f"Pinned key on hit. Hash: {key.chunk_hash}, "
+                                f"New count: {self.pin_counts[key]}")
+                return True
+            return False
 
     def maybe_unpin_keys(self, keys: List[CacheKey]) -> Tuple[int, int]:
         """
@@ -153,18 +160,19 @@ class LocalCPUBackend:
         Decrements the pin count for each key. If a key's count reaches zero,
         it is fully unpinned and becomes eligible for eviction.
         """
-        unpinned_count = 0
-        found_count = 0
-        for key in keys:
-            if key in self.pin_counts:
-                found_count += 1
-                self.pin_counts[key] -= 1
-                logger.info(
-                    f"Decremented pin count for key. Hash: {key.chunk_hash}, "
-                    f"New count: {self.pin_counts[key]}")
-                if self.pin_counts[key] == 0:
-                    del self.pin_counts[key]
-                    unpinned_count += 1
+        with self.lock:
+            unpinned_count = 0
+            found_count = 0
+            for key in keys:
+                if key in self.pin_counts:
+                    found_count += 1
+                    self.pin_counts[key] -= 1
                     logger.info(
-                        f"Unpinned key completely. Hash: {key.chunk_hash}")
-        return unpinned_count, found_count
+                        f"Decremented pin count for key. Hash: {key.chunk_hash}, "
+                        f"New count: {self.pin_counts[key]}")
+                    if self.pin_counts[key] == 0:
+                        del self.pin_counts[key]
+                        unpinned_count += 1
+                        logger.info(
+                            f"Unpinned key completely. Hash: {key.chunk_hash}")
+            return unpinned_count, found_count
