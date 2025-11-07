@@ -21,16 +21,9 @@ from tpu_inference.layers.jax.transformer_block import \
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (
     get_param, model_weights_generator, print_param_info, reshape_params,
-    transpose_params)
+    transpose_params, convert_torch_to_jax_with_view)
 
 logger = init_logger(__name__)
-
-DTYPE_VIEW_MAP = {
-    jnp.dtype(jnp.float8_e4m3fn): torch.uint8,
-    jnp.dtype(jnp.bfloat16): torch.uint16,
-    jnp.dtype(jnp.float32): torch.uint32,
-}
-
 
 class Llama4ForCausalLM(nnx.Module):
 
@@ -450,7 +443,7 @@ class Llama4WeightLoader:
         cast_type = jnp.dtype(jnp.bfloat16)
         # loaded_weight is a jax.Array when framework="flax", otherwise it's bfloat16
         if not isinstance(loaded_weight, jax.Array):
-            loaded_weight = self._convert_torch_to_jax_with_view(
+            loaded_weight = self.convert_torch_to_jax_with_view(
                 loaded_weight, cast_type)
 
         split_weights = jnp.split(loaded_weight, 2, axis=-1)
@@ -506,17 +499,6 @@ class Llama4WeightLoader:
             return int(match.group(1))
         return None
 
-    def _convert_torch_to_jax_with_view(self, loaded_weight: torch.Tensor,
-                                        cast_type: jnp.dtype) -> jax.Array:
-        """
-        Converts a PyTorch tensor to a JAX array by reinterpreting its
-        bit representation using a dtype view map.
-        """
-        torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
-        loaded_weight = jnp.array(
-            loaded_weight.view(torch_view_type).numpy()).view(cast_type)
-        return loaded_weight
-
     def load_weights(self, model_for_loading: nnx.Module):
         model_params = nnx.state(model_for_loading)
 
@@ -540,7 +522,7 @@ class Llama4WeightLoader:
                     else:
                         cast_type = model_weight.array.qvalue.value.dtype
 
-                    loaded_weight = self._convert_torch_to_jax_with_view(
+                    loaded_weight = self.convert_torch_to_jax_with_view(
                         loaded_weight, cast_type)
                     loaded_weight = transpose_params(
                         loaded_name, loaded_weight, self._transpose_map)
@@ -571,7 +553,7 @@ class Llama4WeightLoader:
                     logger.debug(
                         f"Converting PyTorch tensor {loaded_name} to JAX {cast_type}"
                     )
-                    loaded_weight = self._convert_torch_to_jax_with_view(
+                    loaded_weight = self.convert_torch_to_jax_with_view(
                         loaded_weight, cast_type)
 
                 if not loaded_name.endswith(".bias"):
