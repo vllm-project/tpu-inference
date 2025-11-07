@@ -55,6 +55,7 @@ def vllm_config() -> MagicMock:
     mock_config.model_config.dtype = jnp.bfloat16
     mock_config.load_config = MagicMock()
     mock_config.load_config.download_dir = None
+    mock_config.load_config.load_format = "auto"
     mock_config.additional_config = {}
     mock_config.cache_config = MagicMock(cache_dtype="auto")
     return mock_config
