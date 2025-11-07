@@ -178,12 +178,12 @@ def _jax_attn_func(
         q,
         k,
         v,
-        sinks,
         attention_metadata,
         mesh,
         q_scale=q_scale,
         k_scale=k_scale,
         v_scale=v_scale,
+        sinks=sinks,
     )
 
     # Convert the shape back to vLLM's convention

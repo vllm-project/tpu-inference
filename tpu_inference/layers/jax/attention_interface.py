@@ -342,7 +342,6 @@ def attention(
     q: jax.Array,
     k: jax.Array,
     v: jax.Array,
-    sinks: jax.Array | None,
     attention_metadata: AttentionMetadata,
     mesh: Mesh,
     head_dim_original: int | None = None,  # before padding,
@@ -350,6 +349,7 @@ def attention(
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
+    sinks: jax.Array | None = None,
 ) -> Tuple[jax.Array, jax.Array]:
     # T: seq_len
     # N: num_heads

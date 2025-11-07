@@ -210,7 +210,7 @@ def main(args: dict):
 
         # Get the token IDs directly from the tokenizer
         tokenized_prompt = tokenizer.encode(prompt_str,
-                                            add_special_tokens=False)
+                                            add_special_tokens=False).ids
 
         #print("this is the tokenized prompt: ", tokenized_prompt)
 
