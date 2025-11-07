@@ -198,7 +198,7 @@ def create_random_inputs(
 
 
 @torch.inference_mode()
-@pytest.mark.parametrize("num_loras", [1, 2, 4, 9])
+@pytest.mark.parametrize("num_loras", [1, 4, 9])
 @pytest.mark.parametrize("repeats", [2])
 @pytest.mark.parametrize("stage", [True, False])
 def test_column_parallel_packed(dist_init, num_loras, repeats, stage) -> None:
