@@ -1,4 +1,3 @@
-import functools
 import os
 from typing import Any, Callable, Optional, Union
 
@@ -24,7 +23,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 
 from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
-from tpu_inference.layers.vllm.fused_moe import jax_fused_moe_func_padded
+from tpu_inference.layers.vllm.fused_moe import fused_moe_func_padded
 from tpu_inference.layers.vllm.linear_common import (
     reorder_concatenated_tensor_for_sharding,
     slice_sharded_tensor_for_concatenation, torch_to_jax_param)
@@ -191,8 +190,26 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         assert isinstance(layer, FusedMoE)
 
-        w2_weight = t2j(layer.w2_weight, use_dlpack=False)
         w13_weight = t2j(layer.w13_weight, use_dlpack=False)
+        w2_weight = t2j(layer.w2_weight, use_dlpack=False)
+
+        if self.moe.has_bias:
+            w13_bias = t2j(layer.w13_bias, use_dlpack=False)
+            w2_bias = t2j(layer.w2_bias, use_dlpack=False)
+
+        if layer.activation == "swigluoai":
+            # When using swigluoai, vLLM splits gmm output in a interleaved way.
+            # However, interleaved split is not performant on TPU. Therefore,
+            # we preprocess the weight so that splitting gmm output by middle
+            # can still get the same result.
+            w1_weight = w13_weight[:, ::2, :]
+            w3_weight = w13_weight[:, 1::2, :]
+            w13_weight = jnp.concat([w1_weight, w3_weight], axis=1)
+
+            if self.moe.has_bias:
+                w1_bias = w13_bias[:, ::2]
+                w3_bias = w13_bias[:, 1::2]
+                w13_bias = jnp.concat([w1_bias, w3_bias], axis=1)
 
         if self.use_kernel and layer.use_ep:
             # Kernel expects:
@@ -208,25 +225,34 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             # Reshape and transpose w13_weight to (num_experts, 2, hidden_size, intermediate_size)
             w13_reshaped = w13_weight.reshape(num_experts, 2,
                                               intermediate_size, hidden_size)
-            w13_weight = jnp.transpose(w13_reshaped, (0, 1, 3, 2))
+            w13_weight_transposed = jnp.transpose(w13_reshaped, (0, 1, 3, 2))
 
             # Transpose w2_weight to (num_experts, intermediate_size, hidden_size)
             w2_weight_transposed = jnp.transpose(w2_weight, (0, 2, 1))
 
             # Apply EP sharding
             w13_weight = jax.device_put(
-                w13_weight,
+                w13_weight_transposed,
                 Format(Layout((0, 1, 2, 3)),
                        NamedSharding(self.mesh, P("model", None, None, None))))
-            w2_weight_transposed = jax.device_put(
+            w2_weight = jax.device_put(
                 w2_weight_transposed,
                 Format(Layout((0, 1, 2)),
                        NamedSharding(self.mesh, P("model", None, None))))
 
-            layer.w13_weight = Parameter(torch_view(w13_weight),
-                                         requires_grad=False)
-            layer.w2_weight = Parameter(torch_view(w2_weight_transposed),
-                                        requires_grad=False)
+            if self.moe.has_bias:
+                w13_bias = w13_bias.reshape(num_experts, 2, intermediate_size)
+
+                # Apply EP sharding
+                w13_bias = jax.device_put(
+                    w13_bias,
+                    Format(Layout((0, 1, 2)),
+                           NamedSharding(self.mesh, P("model", None, None))))
+                w2_bias = jax.device_put(
+                    w2_bias,
+                    Format(Layout((0, 1)),
+                           NamedSharding(self.mesh, P("model", None))))
+
         else:
             # Original logic for non-kernel path
             if layer.use_ep:
@@ -238,6 +264,17 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                     w2_weight,
                     Format(Layout((0, 1, 2)),
                            NamedSharding(self.mesh, P("model", None, None))))
+
+                if self.moe.has_bias:
+                    w13_bias = jax.device_put(
+                        w13_bias,
+                        Format(Layout((0, 1)),
+                               NamedSharding(self.mesh, P("model", None))))
+                    w2_bias = jax.device_put(
+                        w2_bias,
+                        Format(Layout((0, 1)),
+                               NamedSharding(self.mesh, P("model", None))))
+
             else:
                 intermediate_size = w13_weight.shape[1] // 2
                 assert intermediate_size == w2_weight.shape[-1]
@@ -255,10 +292,26 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                     Format(Layout((0, 1, 2)),
                            NamedSharding(self.mesh, P(None, None, "model"))))
 
-            layer.w13_weight = Parameter(torch_view(w13_weight),
-                                         requires_grad=False)
-            layer.w2_weight = Parameter(torch_view(w2_weight),
-                                        requires_grad=False)
+                if self.moe.has_bias:
+                    w13_bias = reorder_concatenated_tensor_for_sharding(
+                        w13_bias, output_sizes, n_shards, dim=1)
+                    w13_bias = jax.device_put(
+                        w13_bias,
+                        Format(Layout((0, 1)),
+                               NamedSharding(self.mesh, P(None, "model"))))
+                    w2_bias = jax.device_put(
+                        w2_bias,
+                        Format(Layout((0, 1)),
+                               NamedSharding(self.mesh, P(None, None))))
+
+        layer.w13_weight = Parameter(torch_view(w13_weight),
+                                     requires_grad=False)
+        layer.w2_weight = Parameter(torch_view(w2_weight), requires_grad=False)
+
+        if self.moe.has_bias:
+            layer.w13_bias = Parameter(torch_view(w13_bias),
+                                       requires_grad=False)
+            layer.w2_bias = Parameter(torch_view(w2_bias), requires_grad=False)
 
     def apply(
         self,
@@ -284,9 +337,6 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         assert isinstance(layer, FusedMoE)
-        if activation != "silu":
-            raise NotImplementedError(
-                "Only silu is supported for activation function.")
         if scoring_func != "softmax":
             raise NotImplementedError(
                 "Only softmax is supported for scoring_func")
@@ -304,24 +354,20 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             )
         else:
             # Use the original implementation
-            _fused_moe_func = functools.partial(
-                jax.jit(jax_fused_moe_func_padded,
-                        static_argnames=[
-                            "topk", "global_num_experts", "renormalize",
-                            "reduce_results", "mesh", "use_ep"
-                        ]),
+            output = fused_moe_func_padded(
+                jax_view(x),
+                jax_view(layer.w13_weight),
+                jax_view(layer.w2_weight),
+                jax_view(layer.w13_bias) if self.moe.has_bias else None,
+                jax_view(layer.w2_bias) if self.moe.has_bias else None,
+                jax_view(router_logits),
                 topk=top_k,
                 global_num_experts=global_num_experts,
                 renormalize=renormalize,
                 reduce_results=layer.reduce_results,
                 mesh=self.mesh,
-                use_ep=layer.use_ep)
-
-            output = _fused_moe_func(
-                jax_view(x),
-                jax_view(layer.w13_weight),
-                jax_view(layer.w2_weight),
-                jax_view(router_logits),
+                use_ep=layer.use_ep,
+                activation=activation,
             )
 
         return torch_view(output)

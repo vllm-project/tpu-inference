@@ -86,6 +86,11 @@ class VllmModelWrapper:
         assert self.vllm_config.model_config.dtype in TORCH_DTYPE_TO_JAX, "The model_config.dtype must be a PyTorch dtype."
         vllm_config_for_load.device_config.device = "cpu"
 
+        # When expert parallelism is enabled, vLLM loads weight in sharding
+        # aware manner. Since tpu-inference has its own sharding logic, this
+        # may casue errors. Therefore, we disable it during weight loading.
+        vllm_config_for_load.parallel_config.enable_expert_parallel = False
+
         if os.getenv("JAX_RANDOM_WEIGHTS", False):
             vllm_config_for_load.load_config.load_format = "dummy"
             use_random_weights = True
