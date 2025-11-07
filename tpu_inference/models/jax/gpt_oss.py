@@ -1,6 +1,5 @@
 import re
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -9,17 +8,22 @@ from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from vllm.config import VllmConfig
 
 from tpu_inference.layers.jax.attention.gpt_oss_attention import (
-    AttentionMetadata, GptOssAttention)
+    AttentionMetadata,
+    GptOssAttention,
+)
 from tpu_inference.layers.jax.constants import KVCacheType
 from tpu_inference.layers.jax.layers import Embedder, LMhead, RMSNorm
 from tpu_inference.layers.jax.moe.gpt_oss_moe import GptOssMoE, GptOssRouter
 from tpu_inference.layers.jax.transformer_block import TransformerBlock
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (
-    get_param, model_weights_generator, print_param_info)
+    get_param,
+    model_weights_generator,
+    print_param_info,
+)
+from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -136,6 +140,7 @@ class GptOss(nnx.Module):
                 edf_sharding=('model', None, None),
                 efd_sharding=('model', None, None),
                 ed_sharding=('model', None),
+                mesh=self.mesh,
             )
 
             block = TransformerBlock(
@@ -180,7 +185,7 @@ class GptOss(nnx.Module):
     def apply(self, variables, *args, **kwargs):
         return self.__call__(*args, **kwargs)
 
-    def load_weights(self, rng: PRNGKey, cache_dir: Optional[str] = None):
+    def load_weights(self, rng: PRNGKey, cache_dir: str | None = None):
         """Loads and transforms all weights from a checkpoint"""
         self.rng = nnx.Rngs(rng)
 
@@ -328,11 +333,11 @@ class GptOss(nnx.Module):
 
     def __call__(
         self,
-        kv_caches: List[jax.Array],
+        kv_caches: list[jax.Array],
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
         *args,
-    ) -> Tuple[List[KVCacheType], jax.Array, List[jax.Array]]:
+    ) -> tuple[list[KVCacheType], jax.Array, list[jax.Array]]:
         is_prefill = False
         x = self.embedder.encode(input_ids)
 
