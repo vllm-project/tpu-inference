@@ -621,6 +621,8 @@ class Llama4WeightLoader:
                             )
 
                         if buffer_key.endswith("kernel_down_proj_EFD_scale"):
+                            # The model's default sharding may incorrectly place the 'model' split on an axis that is not divisible by the mesh size (8),
+                            # so this explicitly enforces ('expert', None, 'model') to ensure correct Tensor and Expert Parallelism.
                             correct_sharding_names = ('expert', None, 'model')
                             model_weight.array.scale.value = shard_put(
                                 aggregated_weight,
