@@ -126,7 +126,8 @@ class Llama4ForCausalLM(nnx.Module):
                             rngs=self.rng,
                             activation_ffw_td=('data', None),
                             # ed_sharding=(None, 'expert'),
-                            ed_sharding=('model', 'expert'),
+                            # ed_sharding=('model', 'expert'),
+                            ed_sharding=(None, None),
                             random_init=force_random_weights)
 
             moe_ffw = MoE(dtype=dtype,
