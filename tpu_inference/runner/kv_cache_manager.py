@@ -389,8 +389,8 @@ class KVCacheManager:
 
             sharding_spec_pytree = jax.tree.map(get_sharding, kv_cache_slices)
             transferred_kv_cache = experimental_reshard.reshard(
-                tuple(kv_cache_slices),
-                tuple(sharding_spec_pytree),
+                kv_cache_slices,
+                sharding_spec_pytree,
                 donate=False,
             )
         else:
