@@ -292,6 +292,7 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 "Only softmax is supported for scoring_func")
 
         if self.use_kernel and layer.use_ep:
+            print('fused_ep_moe: start')
             output = fused_ep_moe(
                 mesh=self.mesh,
                 tokens=jax_view(x),
@@ -302,6 +303,8 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 ep_axis_name=self.ep_axis_name,
                 **self.block_size,
             )
+            output.block_until_ready()
+            print('fused_ep_moe: end')
         else:
             # Use the original implementation
             _fused_moe_func = functools.partial(
