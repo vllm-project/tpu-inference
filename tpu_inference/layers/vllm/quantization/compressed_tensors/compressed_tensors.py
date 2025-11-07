@@ -18,7 +18,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
 
 from tpu_inference.layers.vllm.quantization.common import JaxCommonConfig
 from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors_moe import \
-    CompressedTensorsW8A8Fp8MoEMethod
+    VllmCompressedTensorsW8A8Fp8MoEMethod
 from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import \
     VllmCompressedTensorsW8A8Fp8
 from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_int8 import \
@@ -75,10 +75,6 @@ class VllmCompressedTensorsConfig(CompressedTensorsConfig, JaxCommonConfig):
             return None
 
         # TODO(kyuyeunk): Add support for different act_quant_format
-        # act_quant_format = (
-        #     is_activation_quantization_format(  # noqa: F841
-        #         format) if format is not None else
-        #     is_activation_quantization_format(self.quant_format))
 
         linear_config = self.get_linear_config(layer)
         if self._is_fp8_w8a8(weight_quant, input_quant):
@@ -115,8 +111,8 @@ class VllmCompressedTensorsConfig(CompressedTensorsConfig, JaxCommonConfig):
             layer.scheme = scheme
             return CompressedTensorsLinearMethod(self)
         if isinstance(layer, FusedMoE):
-            return CompressedTensorsW8A8Fp8MoEMethod(self, layer.quant_config,
-                                                     self.mesh)
+            return VllmCompressedTensorsW8A8Fp8MoEMethod(
+                self, layer.quant_config, self.mesh)
         if isinstance(layer, Attention):
             return CompressedTensorsKVCacheMethod(self)
         return None
