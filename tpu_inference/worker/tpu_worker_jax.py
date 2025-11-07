@@ -133,23 +133,29 @@ class TPUWorker:
         # set tpu visible devices for Jax runtime in single host PP.
         multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "").lower()
         if multihost_backend != "ray" and self.parallel_config.pipeline_parallel_size > 1:
-            # Note: a v6e8 TPU vm can only be subsliced into 2 slices with
-            # each with 4 TPU chips each. 
-            # Or subsliced into 8 slices with 1 chip each.
+            # Note: Below is the setting for v6e8 host (8 chips of v6e)
+            # There are 2 ways of subslicing a v6e:
+            # 1) 2 slices with 4 TPU chips each, we can do PP=2, TP=1/2/3/4
+            # 2) 1 chip for each subslice, with at most 8 subslices,
+            #    we can do TP=1, PP=1/2/3/4/5/6/7/8
             # Replace with your own topology.
-            # os.environ["TPU_PROCESS_BOUNDS"] = "1,1,1"
-            # os.environ["TPU_CHIPS_PER_PROCESS_BOUNDS"] = f"1,4,1"
-            # os.environ["TPU_VISIBLE_CHIPS"] = "0,1,2,3" if self.rank == 0 else "4,5,6,7"
-            pp_world_size = self.parallel_config.pipeline_parallel_size
-            os.environ["TPU_PROCESS_BOUNDS"] = f"1,{pp_world_size},1"
-            os.environ["TPU_CHIPS_PER_PROCESS_BOUNDS"] = "1,1,1"
-            os.environ["TPU_VISIBLE_CHIPS"] = f"{self.rank}"
-            tpu_ports = [5000 + i for i in range(pp_world_size)]
+
+            tpu_ports = [5000 + i for i in range(self.pp_world_size)]
             os.environ["TPU_PROCESS_ADDRESSES"] = ",".join([f"localhost:{port}" for port in tpu_ports])
             os.environ["TPU_PROCESS_PORT"] = f"{tpu_ports[self.rank]}"
             os.environ["CLOUD_TPU_TASK_ID"] = f"{self.rank}"
+            
+            # first way of subslicing.
+            # os.environ["TPU_PROCESS_BOUNDS"] = "1,1,1"
+            # os.environ["TPU_CHIPS_PER_PROCESS_BOUNDS"] = f"1,4,1"
+            # os.environ["TPU_VISIBLE_CHIPS"] = "0,1,2,3" if self.rank == 0 else "4,5,6,7"
+
+            # second way of subslicing.
+            os.environ["TPU_PROCESS_BOUNDS"] = f"1,{self.pp_world_size},1"
+            os.environ["TPU_CHIPS_PER_PROCESS_BOUNDS"] = "1,1,1"
+            os.environ["TPU_VISIBLE_CHIPS"] = f"{self.rank}"
+            
         
-        logger.info(f'[debug] tpu worker tp={self.parallel_config.tensor_parallel_size}')
         if not self.devices:
             sharding_config: ShardingConfigManager = self.vllm_config.sharding_config
             device_indexes = sharding_config.device_indexes
@@ -167,8 +173,10 @@ class TPUWorker:
                             f"jax.devices() with IDs {list(device_dict.keys())}!"
                         )
                     self.devices.append(device)
+                assert len(self.devices) >= sharding_config.total_devices
                 self.devices = self.devices[:sharding_config.total_devices]
             else:
+                assert jax.local_device_count() >= sharding_config.total_devices
                 self.devices = jax.local_devices()[:sharding_config.total_devices]
         # Initialize the vLLM distribution layer as a single chip environment,
         # we'll swap the model's parallel modules with TPU SPMD equivalents.
@@ -279,7 +287,7 @@ class TPUWorker:
             self.step_counter += 1
             return None
         else:
-            self.step_count += 1
+            self.step_counter += 1
             # With a connector, the scheduler expects output from all workers
             # TODO(mrjunwan): Figure out if this is ok after https://github.com/vllm-project/vllm/pull/26866
             if has_kv_transfer_group():
