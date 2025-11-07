@@ -210,73 +210,18 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, stage) -> None:
         fully_sharded_loras=False,
         lora_dtype=torch.float16,
     )
+    vllm_config = dist_init
+    vllm_config.lora_config = lora_config
 
     axis_names = ("data", "model")
     devices = jax.devices()
     mesh_shape = (1, len(devices))
     mesh = jax.make_mesh(mesh_shape, axis_names, devices=devices)
 
-    def create_column_parallel_packed_layer():
-        # We first create a base linear layer, then a lora layer to wrap it.
-        if repeats == 2:
-            # In e2e, MergedColumnParallelLinear is created when we load the model. The base_layer weights are sharded and moved to TPU in VllmUnquantizedLinearMethod.process_weights_after_loading.
-            linear = MergedColumnParallelLinear(
-                64,  # input_size
-                [64] * repeats,  # output_size
-                bias=False,
-                params_dtype=torch.float16)
-            linear.weight.data = torch.rand_like(linear.weight.data)
-
-            base_linear = MergedColumnParallelLinear(
-                64,  # input_size
-                [64] * repeats,  # output_size
-                bias=False,
-                params_dtype=torch.float16)
-            base_linear.weight.data = linear.weight.data
-            vllm_config = dist_init
-            jax_config = JaxCommonLinearConfig(vllm_config, mesh, base_linear)
-            linear_method = VllmUnquantizedLinearMethod(jax_config)
-            base_linear.quant_method = linear_method
-            linear_method.process_weights_after_loading(
-                base_linear
-            )  # here base_linear.weight is moved to TPU and sharded.
-            assert jax_view(base_linear.weight).platform(
-            ) == 'tpu', 'base_linear.weight should have been moved to TPU.'
-            assert not isinstance(
-                jax_view(base_linear.weight).sharding,
-                jax.sharding.SingleDeviceSharding
-            ), 'base_linear.weight should have been sharded.'
-
-            lora_linear = MergedColumnParallelLinearWithLoRA(base_linear)
-        elif repeats == 3:
-            raise NotImplementedError("NYI: for MergedQKVParallelLinear case")
-        else:
-            raise NotImplementedError("NYI: for QKVParallelLinear case")
-
-        with torchax.default_env():
-            lora_linear.create_lora_weights(max_loras, lora_config)
-        # In the e2e, the lora_layer's weight is moved to TPU in _shard_module_to_tpu.
-        _shard_module_to_tpu(lora_linear, mesh)
-
-        assert jax_view(lora_linear.lora_a_stacked[0]).platform(
-        ) == 'tpu', 'lora_a_stacked should have been moved to TPU.'
-        assert not isinstance(
-            jax_view(lora_linear.lora_a_stacked[0]).sharding, jax.sharding.
-            SingleDeviceSharding), 'lora_a_stacked should have been sharded.'
-        assert jax_view(lora_linear.lora_b_stacked[0]).platform(
-        ) == 'tpu', 'lora_b_stacked should have been moved to TPU.'
-        assert not isinstance(
-            jax_view(lora_linear.lora_b_stacked[0]).sharding, jax.sharding.
-            SingleDeviceSharding), 'lora_b_stacked should have been sharded.'
-        n_slices = repeats
-        assert (lora_linear.n_slices == len(lora_linear.lora_a_stacked) == len(
-            lora_linear.lora_b_stacked) == n_slices)
-
-        return linear, lora_linear
-
     set_random_seed(6)
 
-    linear, lora_linear = create_column_parallel_packed_layer()
+    linear, lora_linear = _create_column_parallel_packed_layer(
+        repeats, vllm_config, mesh)
     with torchax.default_env():
         # lora_linear.weight has type torchax.tensor.Tensor
         # BaseLinearLayerWithLoRA.weight property guarantees this.
@@ -419,3 +364,63 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, stage) -> None:
         print(
             f'Output mean diff: {torch.mean(torch.abs(expected_result - lora_result_cpu))}'
         )
+
+
+def _create_column_parallel_packed_layer(repeats, vllm_config, mesh):
+    # We first create a base linear layer, then a lora layer to wrap it.
+    if repeats == 2:
+        # In e2e, MergedColumnParallelLinear is created when we load the model. The base_layer weights are sharded and moved to TPU in VllmUnquantizedLinearMethod.process_weights_after_loading.
+        linear = MergedColumnParallelLinear(
+            64,  # input_size
+            [64] * repeats,  # output_size
+            bias=False,
+            params_dtype=torch.float16)
+        linear.weight.data = torch.rand_like(linear.weight.data)
+
+        base_linear = MergedColumnParallelLinear(
+            64,  # input_size
+            [64] * repeats,  # output_size
+            bias=False,
+            params_dtype=torch.float16)
+        base_linear.weight.data = linear.weight.data
+        jax_config = JaxCommonLinearConfig(vllm_config, mesh, base_linear)
+        linear_method = VllmUnquantizedLinearMethod(jax_config)
+        base_linear.quant_method = linear_method
+        linear_method.process_weights_after_loading(
+            base_linear
+        )  # here base_linear.weight is moved to TPU and sharded.
+        assert jax_view(base_linear.weight).platform(
+        ) == 'tpu', 'base_linear.weight should have been moved to TPU.'
+        assert not isinstance(
+            jax_view(
+                base_linear.weight).sharding, jax.sharding.SingleDeviceSharding
+        ), 'base_linear.weight should have been sharded.'
+
+        lora_linear = MergedColumnParallelLinearWithLoRA(base_linear)
+    elif repeats == 3:
+        raise NotImplementedError("NYI: for MergedQKVParallelLinear case")
+    else:
+        raise NotImplementedError("NYI: for QKVParallelLinear case")
+
+    lora_config = vllm_config.lora_config
+    max_loras = lora_config.max_loras
+    with torchax.default_env():
+        lora_linear.create_lora_weights(max_loras, lora_config)
+    # In the e2e, the lora_layer's weight is moved to TPU in _shard_module_to_tpu.
+    _shard_module_to_tpu(lora_linear, mesh)
+
+    assert jax_view(lora_linear.lora_a_stacked[0]).platform(
+    ) == 'tpu', 'lora_a_stacked should have been moved to TPU.'
+    assert not isinstance(
+        jax_view(lora_linear.lora_a_stacked[0]).sharding, jax.sharding.
+        SingleDeviceSharding), 'lora_a_stacked should have been sharded.'
+    assert jax_view(lora_linear.lora_b_stacked[0]).platform(
+    ) == 'tpu', 'lora_b_stacked should have been moved to TPU.'
+    assert not isinstance(
+        jax_view(lora_linear.lora_b_stacked[0]).sharding, jax.sharding.
+        SingleDeviceSharding), 'lora_b_stacked should have been sharded.'
+    n_slices = repeats
+    assert (lora_linear.n_slices == len(lora_linear.lora_a_stacked) == len(
+        lora_linear.lora_b_stacked) == n_slices)
+
+    return linear, lora_linear
