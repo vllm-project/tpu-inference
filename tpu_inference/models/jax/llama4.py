@@ -140,7 +140,8 @@ class Llama4ForCausalLM(nnx.Module):
                           activation_ffw_ted=('data', 'expert', None),
                           edf_sharding=('expert', None, 'model'),
                           efd_sharding=('expert', 'model', None),
-                          random_init=force_random_weights)
+                          random_init=force_random_weights) if is_moe_layer else None
+
 
             dense_ffw = DenseFFW(dtype=dtype,
                                  hidden_act=self.hidden_act,
@@ -150,7 +151,7 @@ class Llama4ForCausalLM(nnx.Module):
                                  rngs=self.rng,
                                  df_sharding=(None, 'model'),
                                  fd_sharding=('model', None),
-                                 activation_ffw_td=('data', None))
+                                 activation_ffw_td=('data', None)) if not is_moe_layer else None
 
             attn = Llama4Attention(
                 hidden_size=self.hidden_size,
@@ -192,7 +193,7 @@ class Llama4ForCausalLM(nnx.Module):
                 random_init=force_random_weights,
                 df_sharding=(None, 'model'),
                 fd_sharding=('model', None),
-                activation_ffw_td=('data', None))
+                activation_ffw_td=('data', None)) if is_moe_layer else None
 
             pre_attention_norm = RMSNorm(
                 dims=self.hidden_size,
@@ -350,6 +351,10 @@ class Llama4WeightLoader:
         }
 
         # Set the mappings from loaded parameter keys to standardized names.
+
+        # 1. EXPERT_MAPPINGS_FUSED: Used for non-quantized (e.g., BF16) checkpoints.
+        #    - This format typically comes from standard checkpoints where 'gate' and 'up' projection weights might be combined (FUSED) into a single tensor.
+        #    - Expert weights are usually stacked, with the expert dimension (E) being the first dimension.
         EXPERT_MAPPINGS_FUSED = {
             "language_model.model.layers.*.feed_forward.experts.down_proj":
             "layers.*.moe_ffw.kernel_down_proj_EFD",
@@ -357,6 +362,9 @@ class Llama4WeightLoader:
             "layers.*.moe_ffw.kernel_up_proj_EDF",
         }
 
+        # 2. EXPERT_MAPPINGS_UNFUSED: Specifically designed for quantized checkpoints (e.g., FP8).
+        #    - Quantized checkpoints store each expert's weights separately and explicitly separate the 'weight' (quantized value) from the 'weight_scale' (quantization scale).
+        #    - The mapping captures both the `.weight` and `.weight_scale` components. This allows the loader to aggregate (stack) the individual expert weights and scales.
         EXPERT_MAPPINGS_UNFUSED = {
             "language_model.model.layers.*.feed_forward.experts.*.down_proj.weight":
             "layers.*.moe_ffw.kernel_down_proj_EFD",
@@ -522,27 +530,27 @@ class Llama4WeightLoader:
                 is_scale = loaded_name.endswith(".weight_scale")
 
                 if is_unfused_expert:
-                    if layer_num is not None:
-                        mapped_name = self.map_loaded_to_standardized_name(
-                            loaded_name)
-                        model_weight = get_param(model_params, mapped_name)
+                    # if layer_num is not None:
+                    mapped_name = self.map_loaded_to_standardized_name(
+                        loaded_name)
+                    model_weight = get_param(model_params, mapped_name)
 
-                        if is_scale:
-                            cast_type = model_weight.array.scale.value.dtype
-                        else:
-                            cast_type = model_weight.array.qvalue.value.dtype
+                    if is_scale:
+                        cast_type = model_weight.array.scale.value.dtype
+                    else:
+                        cast_type = model_weight.array.qvalue.value.dtype
 
-                        loaded_weight = self._convert_torch_to_jax_with_view(
-                            loaded_weight, cast_type)
-                        loaded_weight = transpose_params(
-                            loaded_name, loaded_weight, self._transpose_map)
+                    loaded_weight = self._convert_torch_to_jax_with_view(
+                        loaded_weight, cast_type)
+                    loaded_weight = transpose_params(
+                        loaded_name, loaded_weight, self._transpose_map)
 
-                        buffer_key = f"{mapped_name}_{'scale' if is_scale else 'qvalue'}"
-                        if buffer_key not in self.expert_weights_buffer:
-                            self.expert_weights_buffer[buffer_key] = {}
-                        self.expert_weights_buffer[buffer_key][
-                            expert_num] = loaded_weight
-                        continue
+                    buffer_key = f"{mapped_name}_{'scale' if is_scale else 'qvalue'}"
+                    if buffer_key not in self.expert_weights_buffer:
+                        self.expert_weights_buffer[buffer_key] = {}
+                    self.expert_weights_buffer[buffer_key][
+                        expert_num] = loaded_weight
+                    continue
 
                 if layer_num is not None:
                     is_moe_layer = (layer_num + 1) % \
