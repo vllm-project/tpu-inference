@@ -75,7 +75,7 @@ def create_parser():
     parser.set_defaults(model="meta-llama/Llama-Guard-4-12B")
     parser.set_defaults(max_model_len=4096)
     parser.set_defaults(
-        hf_overrides='{"architectures": ["LlamaGuard4ForCausalLM"]}')
+        hf_overrides='{"architectures": ["Llama4ForConditionalGeneration"]}')
     parser.add_argument("--chat-template",
                         type=str,
                         required=True,
