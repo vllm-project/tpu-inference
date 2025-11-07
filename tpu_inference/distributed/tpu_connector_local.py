@@ -1379,7 +1379,7 @@ class TPUConnectorWorker:
                 )
 
         if keys_to_unpin:
-            unpinned_count, found_count = self.cpu_backend.unpin_keys(
+            unpinned_count, found_count = self.cpu_backend.maybe_unpin_keys(
                 keys_to_unpin)
             logger.info(
                 f"Unpinned {unpinned_count} out of {found_count} existing keys (Request to unpin {len(keys_to_unpin)} keys)."
