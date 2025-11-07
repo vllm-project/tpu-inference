@@ -443,7 +443,7 @@ class Llama4WeightLoader:
         cast_type = jnp.dtype(jnp.bfloat16)
         # loaded_weight is a jax.Array when framework="flax", otherwise it's bfloat16
         if not isinstance(loaded_weight, jax.Array):
-            loaded_weight = self.convert_torch_to_jax_with_view(
+            loaded_weight = convert_torch_to_jax_with_view(
                 loaded_weight, cast_type)
 
         split_weights = jnp.split(loaded_weight, 2, axis=-1)
@@ -522,7 +522,7 @@ class Llama4WeightLoader:
                     else:
                         cast_type = model_weight.array.qvalue.value.dtype
 
-                    loaded_weight = self.convert_torch_to_jax_with_view(
+                    loaded_weight = convert_torch_to_jax_with_view(
                         loaded_weight, cast_type)
                     loaded_weight = transpose_params(
                         loaded_name, loaded_weight, self._transpose_map)
@@ -553,7 +553,7 @@ class Llama4WeightLoader:
                     logger.debug(
                         f"Converting PyTorch tensor {loaded_name} to JAX {cast_type}"
                     )
-                    loaded_weight = self.convert_torch_to_jax_with_view(
+                    loaded_weight = convert_torch_to_jax_with_view(
                         loaded_weight, cast_type)
 
                 if not loaded_name.endswith(".bias"):
