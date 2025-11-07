@@ -488,7 +488,7 @@ class Llama4WeightLoader:
             return int(match.group(1))
         return None
 
-    def _get_expect_num(self, loaded_key: str) -> Optional[int]:
+    def _get_expert_num(self, loaded_key: str) -> Optional[int]:
         """
         Extracts the expect number from a HuggingFace weight key string.
         Returns the expect number (int) or None if no expect number is found.
@@ -516,7 +516,7 @@ class Llama4WeightLoader:
             for loaded_name, loaded_weight in self.names_and_weights_generator:
                 is_moe_layer = False
                 layer_num = self._get_layer_num(loaded_name)
-                expert_num = self._get_expect_num(loaded_name)
+                expert_num = self._get_expert_num(loaded_name)
                 # Quantized (FP8) checkpoints unstack the expert weights, while unquantized (BF16) checkpoints keep them stacked.
                 is_unfused_expert = self.quantization_config is not None and expert_num is not None
                 is_scale = loaded_name.endswith(".weight_scale")
