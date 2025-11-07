@@ -151,6 +151,10 @@ class SparseMoE(MoE):
     def __post_init__(self, rngs: nnx.Rngs):
         super().__post_init__(rngs)
 
+        self.kernel_gating_and_up_proj_EDF = jnp.concatenate([self.kernel_gating_EDF, self.kernel_up_proj_EDF], axis=1)
+        del self.kernel_gating_EDF
+        del self.kernel_up_proj_EDF
+
         # Derive the expert sharding
         self.expert_axis_name = self.edf_sharding[0]
         if self.expert_axis_name is None:
@@ -376,8 +380,9 @@ class SparseMoE(MoE):
         x_TD: jax.Array,
         router_weights_TX: jax.Array,
         selected_experts_TX: jax.Array,
-        kernel_gating: jax.Array,
-        kernel_up_proj: jax.Array,
+        # kernel_gating: jax.Array,
+        # kernel_up_proj: jax.Array,
+        kernel_gating_and_up_proj: jax.Array,
         kernel_down_proj: jax.Array,
     ):
         """
@@ -488,18 +493,20 @@ class SparseMoE(MoE):
             local_sorted_indices = jnp.arange(sorted_inputs.shape[0])
 
         # 4. Compute: Apply experts using Grouped Matrix Multiply
-        with jax.named_scope("gating"):
+        with jax.named_scope("gating_and_projection"):
             # compute_inputs: (local total assignments, D)
-            gating_TEF = self._gmm(compute_inputs, kernel_gating,
+            gating_and_up_proj_TE2F = self._gmm(compute_inputs, kernel_gating_and_up_proj,
                                    compute_group_sizes)
+            gating_TEF, up_proj_TEF = jnp.split(gating_and_up_proj_TE2F, 2, axis=-1)
             activated_gating_TEF = modeling_flax_utils.ACT2FN[self.hidden_act](
                 gating_TEF)
 
-        with jax.named_scope("up_projection"):
-            up_proj_TEF = self._gmm(compute_inputs, kernel_up_proj,
-                                    compute_group_sizes)
+            fuse_TEF = activated_gating_TEF * up_proj_TEF
+        # with jax.named_scope("up_projection"):
+        #     up_proj_TEF = self._gmm(compute_inputs, kernel_up_proj,
+        #                             compute_group_sizes)
 
-        fuse_TEF = activated_gating_TEF * up_proj_TEF
+        # fuse_TEF = activated_gating_TEF * up_proj_TEF
 
         with jax.named_scope("down_projection"):
             # intermediate_output: (local total assignments, D)
@@ -583,27 +590,36 @@ class SparseMoE(MoE):
                                  check_rep=False)(
                                      SparseMoE._distributed_sparse_moe_fwd)
 
-        kernel_gating_EDF = self.kernel_gating_EDF.value
-        kernel_up_proj_EDF = self.kernel_up_proj_EDF.value
+        # kernel_gating_EDF = self.kernel_gating_EDF.value
+        # kernel_up_proj_EDF = self.kernel_up_proj_EDF.value
+        kernel_gating_and_up_proj_EDF = self.kernel_gating_and_up_proj_EDF.value
         kernel_down_proj_EFD = self.kernel_down_proj_EFD.value
 
         if self.quantized_dtype:
-            if not isinstance(kernel_gating_EDF, ptq.WithAux):
-                kernel_gating_EDF = manually_quantize_qwix_weight(
-                    kernel_gating_EDF, self.quantized_dtype, [0, 2], {},
+            if not isinstance(kernel_gating_and_up_proj_EDF, ptq.WithAux):
+                kernel_gating_and_up_proj_EDF = manually_quantize_qwix_weight(
+                    kernel_gating_and_up_proj_EDF, self.quantized_dtype, [0, 2], {},
                     "absmax")
-            if not isinstance(kernel_up_proj_EDF, ptq.WithAux):
-                kernel_up_proj_EDF = manually_quantize_qwix_weight(
-                    kernel_up_proj_EDF, self.quantized_dtype, [0, 2], {},
-                    "absmax")
+
+            # if not isinstance(kernel_gating_EDF, ptq.WithAux):
+            #     kernel_gating_EDF = manually_quantize_qwix_weight(
+            #         kernel_gating_EDF, self.quantized_dtype, [0, 2], {},
+            #         "absmax")
+            # if not isinstance(kernel_up_proj_EDF, ptq.WithAux):
+            #     kernel_up_proj_EDF = manually_quantize_qwix_weight(
+            #         kernel_up_proj_EDF, self.quantized_dtype, [0, 2], {},
+            #         "absmax")
             if not isinstance(kernel_down_proj_EFD, ptq.WithAux):
                 kernel_down_proj_EFD = manually_quantize_qwix_weight(
                     kernel_down_proj_EFD, self.quantized_dtype, [0, 1], {},
                     "absmax")
-            kernel_gating_EDF = kernel_gating_EDF.array
-            kernel_up_proj_EDF = kernel_up_proj_EDF.array
+            kernel_gating_and_up_proj_EDF = kernel_gating_and_up_proj_EDF.array
+            # kernel_gating_EDF = kernel_gating_EDF.array
+            # kernel_up_proj_EDF = kernel_up_proj_EDF.array
             kernel_down_proj_EFD = kernel_down_proj_EFD.array
 
         return mapped_moe_fwd(self, x_TD, router_weights_TX,
-                              selected_experts_TX, kernel_gating_EDF,
-                              kernel_up_proj_EDF, kernel_down_proj_EFD)
+                              selected_experts_TX, kernel_gating_and_up_proj_EDF,
+                              # selected_experts_TX, kernel_gating_EDF,
+                              # kernel_up_proj_EDF, kernel_down_proj_EFD)
+                              kernel_down_proj_EFD)
