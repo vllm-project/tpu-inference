@@ -33,6 +33,11 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         assert mesh is not None
 
         self.vllm_config = vllm_config
+
+        #Did this to get past dtype error in vllm/vllm/multimodal/processing.py
+        import torch
+        self.vllm_config.model_config.dtype = torch.bfloat16
+
         model_config = vllm_config.model_config
 
 
