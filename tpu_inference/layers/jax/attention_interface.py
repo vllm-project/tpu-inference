@@ -14,6 +14,7 @@ from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
+import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
 from tpu_inference.kernels.flash_attention.kernel import flash_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.sharding import ShardingAxisName
@@ -25,6 +26,9 @@ MAX_ALLOWED_PAGE_INDICES_N = (
 
 ragged_paged_attention = rpa.ragged_paged_attention
 get_kv_cache_shape = rpa.get_kv_cache_shape
+
+ragged_paged_attention_hd64 = rpa_hd64.ragged_paged_attention_hd64
+get_kv_cache_shape_hd64 = rpa_hd64.get_kv_cache_shape
 
 
 def sharded_flash_attention(
@@ -268,8 +272,17 @@ def sharded_splash_attention(
 
 
 def sharded_ragged_paged_attention(
-    sm_scale: float,
     mesh: Mesh,
+    q: jax.Array,
+    k: jax.Array,
+    v: jax.Array,
+    kv_cache: jax.Array,
+    kv_lens: jax.Array,
+    page_indices: jax.Array,
+    cu_q_lens: jax.Array,
+    distribution: jax.Array,
+    attention_sink: jax.Array | None,
+    sm_scale: float,
     attention_chunk_size: int | None = None,
     q_scale: float | None = None,
     k_scale: float | None = None,
@@ -277,8 +290,9 @@ def sharded_ragged_paged_attention(
 ):
     """Shards along KV heads."""
 
-    qkv_spec = P(ShardingAxisName.ATTN_DATA, "model", None)
-    kv_cache_spec = P(ShardingAxisName.ATTN_DATA, None, "model")
+    qkv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
+    kv_cache_spec = P(ShardingAxisName.ATTN_DATA, None,
+                      ShardingAxisName.ATTN_HEAD, None, None)
     in_specs = (
         qkv_spec,  # q
         qkv_spec,  # k
@@ -291,8 +305,21 @@ def sharded_ragged_paged_attention(
     )
     out_specs = (qkv_spec, kv_cache_spec)
 
+    args = (q, k, v, kv_cache, kv_lens, page_indices, cu_q_lens, distribution)
+
+    use_hd64 = q.shape[-1] == 64
+    func = ragged_paged_attention_hd64 if use_hd64 else ragged_paged_attention
+
+    if attention_sink is not None:
+        if not use_hd64:
+            raise NotImplementedError(
+                "Attention sink support is only available when head_dim==64")
+
+        in_specs += (P(ShardingAxisName.ATTN_HEAD), )
+        args += (attention_sink, )
+
     def _ragged_paged_attention(*args):
-        return ragged_paged_attention(
+        return func(
             *args,
             sm_scale=sm_scale,
             sliding_window=attention_chunk_size,
@@ -301,14 +328,13 @@ def sharded_ragged_paged_attention(
             v_scale=v_scale,
         )
 
-    return jax.jit(
-        shard_map.shard_map(
-            _ragged_paged_attention,
-            mesh=mesh,
-            in_specs=in_specs,
-            out_specs=out_specs,
-            check_rep=False,
-        ))
+    return shard_map.shard_map(
+        _ragged_paged_attention,
+        mesh=mesh,
+        in_specs=in_specs,
+        out_specs=out_specs,
+        check_rep=False,
+    )(*args)
 
 
 def attention(
@@ -316,6 +342,7 @@ def attention(
     q: jax.Array,
     k: jax.Array,
     v: jax.Array,
+    sinks: jax.Array | None,
     attention_metadata: AttentionMetadata,
     mesh: Mesh,
     head_dim_original: int | None = None,  # before padding,
@@ -343,16 +370,21 @@ def attention(
 
     # (T, N, H)
     output, kv_cache = sharded_ragged_paged_attention(
-        head_dim_original**-0.5, mesh, attention_chunk_size, q_scale, k_scale,
-        v_scale)(
-            q,
-            k,
-            v,
-            kv_cache,
-            md.seq_lens,
-            md.block_tables,
-            md.query_start_loc,
-            md.request_distribution,
-        )
+        mesh,
+        q,
+        k,
+        v,
+        kv_cache,
+        md.seq_lens,
+        md.block_tables,
+        md.query_start_loc,
+        md.request_distribution,
+        sinks,
+        sm_scale=head_dim_original**-0.5,
+        attention_chunk_size=attention_chunk_size,
+        q_scale=q_scale,
+        k_scale=k_scale,
+        v_scale=v_scale,
+    )
 
     return kv_cache, output

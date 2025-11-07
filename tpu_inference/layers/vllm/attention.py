@@ -4,9 +4,11 @@ import functools
 from typing import Optional, Tuple
 
 import jax
+import jax.numpy as jnp
 import torch
 from jax.sharding import Mesh
 from torchax.interop import jax_view, torch_view
+from torchax.ops.mappings import t2j
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 
@@ -39,18 +41,14 @@ class PallasAttentionBackendImpl(AttentionImpl):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[list[float]],
-        sliding_window: Optional[int],
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
         kv_cache_dtype: str,
-        logits_soft_cap: Optional[float] = None,
-        attn_type: str = AttentionType.DECODER,
-        kv_sharing_target_layer_name: Optional[int] = None,
-        use_irope: bool = False,
+        logits_soft_cap: float | None = None,
+        attn_type: AttentionType = AttentionType.DECODER,
+        kv_sharing_target_layer_name: str | None = None,
+        sinks: torch.Tensor | None = None,
     ) -> None:
-        if use_irope:
-            logger.warning_once(
-                "Using irope in Pallas is not supported yet, it will fall back "
-                "to global attention for long context.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -72,6 +70,14 @@ class PallasAttentionBackendImpl(AttentionImpl):
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
                                       "PallasAttentionBackendImpl")
+
+        #TODO (kyuyeunk): Shard the sinks along head axis.
+        self.sinks = sinks
+        if self.sinks is not None:
+            self.sinks = t2j(self.sinks, use_dlpack=False).astype(jnp.float32)
+            assert self.sinks.shape[0] == num_heads, (
+                "Sinks must have the same number of heads as the number of "
+                "heads in the layer")
 
     def forward(
         self,
@@ -115,9 +121,12 @@ class PallasAttentionBackendImpl(AttentionImpl):
             k_scale = layer._k_scale_float
             v_scale = layer._v_scale_float
 
+        sinks = None if self.sinks is None else jax_view(self.sinks)
+
         new_kv_cache, outputs = _jax_attn_func(kv_cache, query, key, value,
-                                               attn_metadata, mesh, self.scale,
-                                               self.head_size, self.num_heads,
+                                               sinks, attn_metadata, mesh,
+                                               self.scale, self.head_size,
+                                               self.num_heads,
                                                self.num_kv_heads, q_scale,
                                                k_scale, v_scale)
         vllm_model_wrapper_context.kv_caches[kv_cache_index] = new_kv_cache
@@ -128,7 +137,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
 @functools.partial(
     jax.jit,
     static_argnums=(
-        5, 6, 7, 8, 9, 10, 11, 12
+        6, 7, 8, 9, 10, 11, 12, 13
     ),  # mesh, scale, head_size, num_heads, num_kv_heads, q_scale, k_scale, v_scale
     donate_argnums=(0, ),  # donate kv_cache
 )
@@ -137,6 +146,7 @@ def _jax_attn_func(
     q: jax.Array,
     k: jax.Array,
     v: jax.Array,
+    sinks: jax.Array | None,
     attention_metadata: AttentionMetadata,
     mesh: Mesh,
     scale: float,
@@ -168,6 +178,7 @@ def _jax_attn_func(
         q,
         k,
         v,
+        sinks,
         attention_metadata,
         mesh,
         q_scale=q_scale,
