@@ -13,6 +13,8 @@ from vllm.v1.request import Request
 
 from tpu_inference.core.sched.dp_scheduler import (
     DPScheduler, DPSchedulerOutput, update_vllm_config_for_dp_scheduler)
+from vllm.v1.core.sched.async_scheduler import AsyncScheduler
+from vllm.v1.core.sched.scheduler import Scheduler
 
 
 class TestDPScheduler:
@@ -24,9 +26,10 @@ class TestDPScheduler:
         config.sharding_config = MagicMock()
         config.sharding_config.total_dp_size = 2
         config.scheduler_config = MagicMock()
-        config.scheduler_config._original_scheduler_cls = "vllm.v1.core.sched.scheduler.Scheduler"
+        config.scheduler_config._original_scheduler_cls = Scheduler
         config.scheduler_config.max_num_seqs = 8
         config.scheduler_config.max_num_batched_tokens = 1024
+        config.scheduler_config.async_scheduling = False
         return config
 
     @pytest.fixture
@@ -46,18 +49,13 @@ class TestDPScheduler:
                                         mock_structured_output_manager,
                                         **kwargs):
         """Helper to create a DPScheduler with properly mocked schedulers."""
-        with patch(
-                "tpu_inference.core.sched.dp_scheduler.resolve_obj_by_qualname"
-        ) as mock_resolve:
-            # Create individual mock scheduler instances
-            mock_scheduler_0 = MagicMock()
-            mock_scheduler_1 = MagicMock()
+        # Create individual mock scheduler instances
+        mock_scheduler_0 = MagicMock()
+        mock_scheduler_1 = MagicMock()
 
-            # Set up the mock class to return these instances
-            mock_scheduler_cls = MagicMock(
-                side_effect=[mock_scheduler_0, mock_scheduler_1])
-            mock_resolve.return_value = mock_scheduler_cls
-
+        # Patch the Scheduler class to return our mock instances
+        with patch.object(mock_vllm_config.scheduler_config, '_original_scheduler_cls',
+                          MagicMock(side_effect=[mock_scheduler_0, mock_scheduler_1])):
             scheduler = DPScheduler(
                 vllm_config=mock_vllm_config,
                 kv_cache_config=mock_kv_cache_config,
@@ -67,38 +65,35 @@ class TestDPScheduler:
 
             return scheduler
 
-    @patch("tpu_inference.core.sched.dp_scheduler.resolve_obj_by_qualname")
     def test_init_creates_per_rank_schedulers(
         self,
-        mock_resolve,
         mock_vllm_config,
         mock_kv_cache_config,
         mock_structured_output_manager,
     ):
         """Test Initialization creates schedulers for each DP rank."""
         # Mock the scheduler class
-        mock_scheduler_cls = MagicMock()
         mock_scheduler_instance = MagicMock()
-        mock_scheduler_cls.return_value = mock_scheduler_instance
-        mock_resolve.return_value = mock_scheduler_cls
+        mock_scheduler_cls = MagicMock(return_value=mock_scheduler_instance)
+        
+        with patch.object(mock_vllm_config.scheduler_config, '_original_scheduler_cls', mock_scheduler_cls):
+            scheduler = DPScheduler(
+                vllm_config=mock_vllm_config,
+                kv_cache_config=mock_kv_cache_config,
+                structured_output_manager=mock_structured_output_manager,
+                block_size=16,
+                log_stats=True,
+            )
 
-        scheduler = DPScheduler(
-            vllm_config=mock_vllm_config,
-            kv_cache_config=mock_kv_cache_config,
-            structured_output_manager=mock_structured_output_manager,
-            block_size=16,
-            log_stats=True,
-        )
+            # Verify schedulers were created
+            assert len(scheduler.schedulers) == 2
+            assert scheduler.dp_size == 2
+            assert scheduler.log_stats is True
+            assert len(scheduler.per_rank_kv_cache_configs) == 2
 
-        # Verify schedulers were created
-        assert len(scheduler.schedulers) == 2
-        assert scheduler.dp_size == 2
-        assert scheduler.log_stats is True
-        assert len(scheduler.per_rank_kv_cache_configs) == 2
-
-        # Verify each rank got the correct config
-        for rank_config in scheduler.per_rank_kv_cache_configs:
-            assert rank_config.num_blocks == 50  # 100 / 2
+            # Verify each rank got the correct config
+            for rank_config in scheduler.per_rank_kv_cache_configs:
+                assert rank_config.num_blocks == 50  # 100 / 2
 
     def test_get_rank_token_counts(self, mock_vllm_config,
                                    mock_kv_cache_config,
@@ -296,9 +291,8 @@ class TestDPScheduler:
                                          mock_kv_cache_config,
                                          mock_structured_output_manager):
         """Test _combine_cached_request_data combines data from all ranks."""
-        with patch(
-                "tpu_inference.core.sched.dp_scheduler.resolve_obj_by_qualname"
-        ):
+        mock_scheduler_cls = MagicMock(return_value=MagicMock())
+        with patch.object(mock_vllm_config.scheduler_config, '_original_scheduler_cls', mock_scheduler_cls):
             scheduler = DPScheduler(
                 vllm_config=mock_vllm_config,
                 kv_cache_config=mock_kv_cache_config,
@@ -403,9 +397,8 @@ class TestDPScheduler:
             self, mock_vllm_config, mock_kv_cache_config,
             mock_structured_output_manager):
         """Test get_grammar_bitmask returns None when no structured output."""
-        with patch(
-                "tpu_inference.core.sched.dp_scheduler.resolve_obj_by_qualname"
-        ):
+        mock_scheduler_cls = MagicMock(return_value=MagicMock())
+        with patch.object(mock_vllm_config.scheduler_config, '_original_scheduler_cls', mock_scheduler_cls):
             scheduler = DPScheduler(
                 vllm_config=mock_vllm_config,
                 kv_cache_config=mock_kv_cache_config,
@@ -452,9 +445,8 @@ class TestDPScheduler:
             self, mock_vllm_config, mock_kv_cache_config,
             mock_structured_output_manager):
         """Test update_from_output splits output and updates each scheduler."""
-        with patch(
-                "tpu_inference.core.sched.dp_scheduler.resolve_obj_by_qualname"
-        ):
+        mock_scheduler_cls = MagicMock(return_value=MagicMock())
+        with patch.object(mock_vllm_config.scheduler_config, '_original_scheduler_cls', mock_scheduler_cls):
             scheduler = DPScheduler(
                 vllm_config=mock_vllm_config,
                 kv_cache_config=mock_kv_cache_config,
@@ -551,9 +543,8 @@ class TestDPScheduler:
                                         mock_kv_cache_config,
                                         mock_structured_output_manager):
         """Test _split_model_output_by_rank distributes output correctly."""
-        with patch(
-                "tpu_inference.core.sched.dp_scheduler.resolve_obj_by_qualname"
-        ):
+        mock_scheduler_cls = MagicMock(return_value=MagicMock())
+        with patch.object(mock_vllm_config.scheduler_config, '_original_scheduler_cls', mock_scheduler_cls):
             scheduler = DPScheduler(
                 vllm_config=mock_vllm_config,
                 kv_cache_config=mock_kv_cache_config,
@@ -597,9 +588,8 @@ class TestDPScheduler:
                                        mock_kv_cache_config,
                                        mock_structured_output_manager):
         """Test _cleanup_finished_requests removes finished requests."""
-        with patch(
-                "tpu_inference.core.sched.dp_scheduler.resolve_obj_by_qualname"
-        ):
+        mock_scheduler_cls = MagicMock(return_value=MagicMock())
+        with patch.object(mock_vllm_config.scheduler_config, '_original_scheduler_cls', mock_scheduler_cls):
             scheduler = DPScheduler(
                 vllm_config=mock_vllm_config,
                 kv_cache_config=mock_kv_cache_config,
@@ -669,9 +659,8 @@ class TestDPScheduler:
                                    mock_kv_cache_config,
                                    mock_structured_output_manager):
         """Test has_finished_requests checks all ranks."""
-        with patch(
-                "tpu_inference.core.sched.dp_scheduler.resolve_obj_by_qualname"
-        ):
+        mock_scheduler_cls = MagicMock(return_value=MagicMock())
+        with patch.object(mock_vllm_config.scheduler_config, '_original_scheduler_cls', mock_scheduler_cls):
             scheduler = DPScheduler(
                 vllm_config=mock_vllm_config,
                 kv_cache_config=mock_kv_cache_config,
@@ -798,9 +787,8 @@ class TestDPScheduler:
                                               mock_kv_cache_config,
                                               mock_structured_output_manager):
         """Test make_stats returns None when logging is disabled."""
-        with patch(
-                "tpu_inference.core.sched.dp_scheduler.resolve_obj_by_qualname"
-        ):
+        mock_scheduler_cls = MagicMock(return_value=MagicMock())
+        with patch.object(mock_vllm_config.scheduler_config, '_original_scheduler_cls', mock_scheduler_cls):
             scheduler = DPScheduler(
                 vllm_config=mock_vllm_config,
                 kv_cache_config=mock_kv_cache_config,
@@ -878,11 +866,12 @@ class TestUpdateVllmConfigForDPScheduler:
         mock_config.sharding_config.total_dp_size = 2
         mock_config.scheduler_config._original_scheduler_cls = None
         mock_config.scheduler_config.scheduler_cls = "vllm.v1.core.sched.scheduler.Scheduler"
+        mock_config.scheduler_config.async_scheduling = False
 
         update_vllm_config_for_dp_scheduler(mock_config)
 
         # Verify config was updated
-        assert mock_config.scheduler_config._original_scheduler_cls == "vllm.v1.core.sched.scheduler.Scheduler"
+        assert mock_config.scheduler_config._original_scheduler_cls == Scheduler
         assert mock_config.scheduler_config.scheduler_cls == DPScheduler
 
     def test_update_config_with_dp_size_one(self):
