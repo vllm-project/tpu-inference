@@ -13,6 +13,7 @@ import numpy as np
 import torch
 import vllm.envs as envs
 from flax import nnx
+from jax.experimental import mesh_utils
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.ops.mappings import j2t_dtype
 from vllm.config import VllmConfig
@@ -41,8 +42,7 @@ from tpu_inference.layers.jax.sample.sampling import (compute_logprobs,
                                                       gather_logprobs, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
-from tpu_inference.layers.jax.sharding import (ShardingAxisName,
-                                               ShardingConfigManager)
+from tpu_inference.layers.jax.sharding import (ShardingAxisName)
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.model_loader import get_model
 from tpu_inference.models.jax.utils.weight_utils import (
@@ -62,7 +62,7 @@ from tpu_inference.runner.structured_decoding_manager import \
 from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
 from tpu_inference.utils import (device_array, make_optimized_mesh,
                                  time_function)
-from jax.experimental import mesh_utils
+
 logger = init_logger(__name__)
 
 INVALID_TOKEN_ID = -1
@@ -259,62 +259,124 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.rng_key = jax.random.key(self.model_config.seed)
 
     def _init_mesh(self) -> None:
-        sharding_strategy: ShardingConfigManager = self.vllm_config.sharding_config
-        # NOTE(wenxindongwork): The new MoE kernel expects a 2D mesh, so we default
-        # to a 2D mesh for now, and we may change this in the future.
-        if os.getenv("NEW_MODEL_DESIGN", False):
-            axis_names = ("data", "attn_dp", "expert", "model")
-            num_slices = int(os.environ.get('NUM_SLICES', 1))
+        """Initialize the JAX mesh for distributed computation.
 
-            print("devices", len(self.devices)) #debug only
-            print("num_slices", num_slices) #debug only
-            if num_slices == 1:
-                mesh_shape = (sharding_strategy.model_dp_size,
-                    sharding_strategy.attn_dp_size,
-                    sharding_strategy.expert_size,
-                    sharding_strategy.tp_size)
+        Creates either a 4D mesh (data, attn_dp, expert, model) for new model design
+        or a 2D mesh (data, model) for legacy models. Supports both single-slice and
+        multi-slice configurations.
+        """
+        use_new_model_design = os.getenv("NEW_MODEL_DESIGN", False)
 
-                devices_array = mesh_utils.create_device_mesh(
-                    mesh_shape,
-                    self.devices,
-                    allow_split_physical_axes=True
-                )
-            else:                
-                dp_outer = num_slices
-                dp_inner = sharding_strategy.model_dp_size // num_slices
-                attn_dp_outer = 1
-                
-                intra_node_shape = (dp_inner, sharding_strategy.attn_dp_size, sharding_strategy.expert_size, sharding_strategy.tp_size)
-                outer_node_shape = (dp_outer, 1, 1, 1)
-                devices_array = mesh_utils.create_hybrid_device_mesh(
-                    mesh_shape=intra_node_shape, 
-                    dcn_mesh_shape=outer_node_shape,
-                    devices=self.devices,
-                    allow_split_physical_axes=True
-                )
-            self.mesh = jax.sharding.Mesh(
-                devices_array,
-                axis_names
-            )
-            logger.info(f"Init mesh | mesh={self.mesh}")
-            return 
-
+        if use_new_model_design:
+            self.mesh = self._create_new_model_mesh()
         else:
-            axis_names = ("data", "model")
-            mesh_shape = (sharding_strategy.model_dp_size,
-                          sharding_strategy.tp_size)
+            self.mesh = self._create_2d_mesh()
 
-        enforce_device_order = self.vllm_config.sharding_config.device_indexes is not None and len(
-            self.vllm_config.sharding_config.device_indexes) > 0
-        if enforce_device_order:
-            self.mesh = jax.make_mesh(mesh_shape,
-                                      axis_names,
-                                      devices=self.devices)
-        else:
-            self.mesh = make_optimized_mesh(mesh_shape,
-                                            axis_names,
-                                            devices=self.devices)
         logger.info(f"Init mesh | mesh={self.mesh}")
+
+    def _create_new_model_mesh(self) -> jax.sharding.Mesh:
+        """Create a 4D mesh for new model design (data, attn_dp, expert, model).
+
+        The new MoE kernel expects a 4D mesh structure. This method supports both
+        single-slice and multi-slice configurations via the NUM_SLICES environment
+        variable.
+
+        Returns:
+            A JAX mesh configured for the new model design with 4D axis structure.
+        """
+        axis_names = ("data", "attn_dp", "expert", "model")
+        num_slices = int(os.environ.get('NUM_SLICES', 1))
+
+        logger.info(f"Creating new model mesh | devices={len(self.devices)}, "
+                    f"num_slices={num_slices}")
+
+        if num_slices == 1:
+            devices_array = self._create_single_slice_mesh()
+        else:
+            devices_array = self._create_multi_slice_mesh(num_slices)
+
+        return jax.sharding.Mesh(devices_array, axis_names)
+
+    def _create_single_slice_mesh(self) -> jax.Array:
+        """Create device mesh for single-slice configuration.
+
+        Arranges devices in a 4D mesh shape according to the sharding strategy:
+        (model_dp_size, attn_dp_size, expert_size, tp_size).
+
+        Returns:
+            Device array arranged according to the 4D mesh shape.
+        """
+        sharding_strategy = self.vllm_config.sharding_config
+        mesh_shape = (
+            sharding_strategy.model_dp_size,
+            sharding_strategy.attn_dp_size,
+            sharding_strategy.expert_size,
+            sharding_strategy.tp_size,
+        )
+
+        return mesh_utils.create_device_mesh(
+            mesh_shape,
+            self.devices,
+            allow_split_physical_axes=True,
+        )
+
+    def _create_multi_slice_mesh(self, num_slices: int) -> jax.Array:
+        """Create hybrid device mesh for multi-slice configuration.
+
+        Splits data parallelism across multiple slices (e.g., TPU pods). The outer
+        dimension represents slice-level parallelism, while inner dimensions handle
+        intra-slice parallelism.
+
+        Args:
+            num_slices: Number of slices for outer data parallelism.
+
+        Returns:
+            Hybrid device array with intra-node and inter-node mesh shapes.
+        """
+        sharding_strategy = self.vllm_config.sharding_config
+        dp_inner = sharding_strategy.model_dp_size // num_slices
+
+        intra_node_shape = (
+            dp_inner,
+            sharding_strategy.attn_dp_size,
+            sharding_strategy.expert_size,
+            sharding_strategy.tp_size,
+        )
+        outer_node_shape = (num_slices, 1, 1, 1)
+
+        return mesh_utils.create_hybrid_device_mesh(
+            mesh_shape=intra_node_shape,
+            dcn_mesh_shape=outer_node_shape,
+            devices=self.devices,
+            allow_split_physical_axes=True,
+        )
+
+    def _create_2d_mesh(self) -> jax.sharding.Mesh:
+        """Create a 2D mesh for legacy model design (data, model).
+
+        Creates a traditional 2D mesh with data and model parallelism axes.
+        Supports both optimized mesh creation and enforced device ordering.
+
+        Returns:
+            A JAX mesh configured for the legacy model design with 2D axis structure.
+        """
+        sharding_strategy = self.vllm_config.sharding_config
+        axis_names = ("data", "model")
+        mesh_shape = (
+            sharding_strategy.model_dp_size,
+            sharding_strategy.tp_size,
+        )
+
+        enforce_device_order = (
+            self.vllm_config.sharding_config.device_indexes is not None
+            and len(self.vllm_config.sharding_config.device_indexes) > 0)
+
+        if enforce_device_order:
+            return jax.make_mesh(mesh_shape, axis_names, devices=self.devices)
+        else:
+            return make_optimized_mesh(mesh_shape,
+                                       axis_names,
+                                       devices=self.devices)
 
     def _init_phased_profiling(self) -> None:
         self.phased_profiling_dir = os.getenv("PHASED_PROFILING_DIR", "")
