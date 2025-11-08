@@ -17,11 +17,11 @@ from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from safetensors import safe_open
+from vllm import envs
 
 from tpu_inference import utils
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils import file_utils
-from vllm import envs
 
 logger = init_logger(__name__)
 
@@ -422,8 +422,10 @@ def load_hf_weights(vllm_config,
     # NOTE(xiang): Disable multi-threading mode if running on multi-host.
     # Because multi-threading would cause different JAX processes to load
     # different weights at the same time.
-    using_pathways_multihost = len(mesh.devices()) > 8 and envs.VLLM_TPU_USING_PATHWAYS
-    if os.environ.get("TPU_MULTIHOST_BACKEND", "").lower() == "ray" or using_pathways_multihost:
+    using_pathways_multihost = len(
+        mesh.devices.flatten()) > 8 and envs.VLLM_TPU_USING_PATHWAYS
+    print("using_pathways_multihost:", using_pathways_multihost)
+    if os.environ.get("TPU_MULTIHOST_BACKEND", "").lower() == "ray" or True:
         max_workers = 1
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [

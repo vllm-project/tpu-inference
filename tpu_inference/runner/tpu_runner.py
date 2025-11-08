@@ -65,7 +65,7 @@ from tpu_inference.runner.structured_decoding_manager import \
 from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
 from tpu_inference.utils import (device_array, make_optimized_mesh,
                                  time_function)
-from jax.experimental import mesh_utils
+
 logger = init_logger(__name__)
 
 INVALID_TOKEN_ID = -1
