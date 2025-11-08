@@ -5,6 +5,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.v1.core.sched.output import (CachedRequestData, GrammarOutput,
                                        SchedulerOutput)
+from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
@@ -13,8 +14,6 @@ from vllm.v1.request import Request
 
 from tpu_inference.core.sched.dp_scheduler import (
     DPScheduler, DPSchedulerOutput, update_vllm_config_for_dp_scheduler)
-from vllm.v1.core.sched.async_scheduler import AsyncScheduler
-from vllm.v1.core.sched.scheduler import Scheduler
 
 
 class TestDPScheduler:
@@ -54,8 +53,9 @@ class TestDPScheduler:
         mock_scheduler_1 = MagicMock()
 
         # Patch the Scheduler class to return our mock instances
-        with patch.object(mock_vllm_config.scheduler_config, '_original_scheduler_cls',
-                          MagicMock(side_effect=[mock_scheduler_0, mock_scheduler_1])):
+        with patch.object(
+                mock_vllm_config.scheduler_config, '_original_scheduler_cls',
+                MagicMock(side_effect=[mock_scheduler_0, mock_scheduler_1])):
             scheduler = DPScheduler(
                 vllm_config=mock_vllm_config,
                 kv_cache_config=mock_kv_cache_config,
@@ -75,8 +75,9 @@ class TestDPScheduler:
         # Mock the scheduler class
         mock_scheduler_instance = MagicMock()
         mock_scheduler_cls = MagicMock(return_value=mock_scheduler_instance)
-        
-        with patch.object(mock_vllm_config.scheduler_config, '_original_scheduler_cls', mock_scheduler_cls):
+
+        with patch.object(mock_vllm_config.scheduler_config,
+                          '_original_scheduler_cls', mock_scheduler_cls):
             scheduler = DPScheduler(
                 vllm_config=mock_vllm_config,
                 kv_cache_config=mock_kv_cache_config,
@@ -292,7 +293,8 @@ class TestDPScheduler:
                                          mock_structured_output_manager):
         """Test _combine_cached_request_data combines data from all ranks."""
         mock_scheduler_cls = MagicMock(return_value=MagicMock())
-        with patch.object(mock_vllm_config.scheduler_config, '_original_scheduler_cls', mock_scheduler_cls):
+        with patch.object(mock_vllm_config.scheduler_config,
+                          '_original_scheduler_cls', mock_scheduler_cls):
             scheduler = DPScheduler(
                 vllm_config=mock_vllm_config,
                 kv_cache_config=mock_kv_cache_config,
@@ -398,7 +400,8 @@ class TestDPScheduler:
             mock_structured_output_manager):
         """Test get_grammar_bitmask returns None when no structured output."""
         mock_scheduler_cls = MagicMock(return_value=MagicMock())
-        with patch.object(mock_vllm_config.scheduler_config, '_original_scheduler_cls', mock_scheduler_cls):
+        with patch.object(mock_vllm_config.scheduler_config,
+                          '_original_scheduler_cls', mock_scheduler_cls):
             scheduler = DPScheduler(
                 vllm_config=mock_vllm_config,
                 kv_cache_config=mock_kv_cache_config,
@@ -446,7 +449,8 @@ class TestDPScheduler:
             mock_structured_output_manager):
         """Test update_from_output splits output and updates each scheduler."""
         mock_scheduler_cls = MagicMock(return_value=MagicMock())
-        with patch.object(mock_vllm_config.scheduler_config, '_original_scheduler_cls', mock_scheduler_cls):
+        with patch.object(mock_vllm_config.scheduler_config,
+                          '_original_scheduler_cls', mock_scheduler_cls):
             scheduler = DPScheduler(
                 vllm_config=mock_vllm_config,
                 kv_cache_config=mock_kv_cache_config,
@@ -544,7 +548,8 @@ class TestDPScheduler:
                                         mock_structured_output_manager):
         """Test _split_model_output_by_rank distributes output correctly."""
         mock_scheduler_cls = MagicMock(return_value=MagicMock())
-        with patch.object(mock_vllm_config.scheduler_config, '_original_scheduler_cls', mock_scheduler_cls):
+        with patch.object(mock_vllm_config.scheduler_config,
+                          '_original_scheduler_cls', mock_scheduler_cls):
             scheduler = DPScheduler(
                 vllm_config=mock_vllm_config,
                 kv_cache_config=mock_kv_cache_config,
@@ -589,7 +594,8 @@ class TestDPScheduler:
                                        mock_structured_output_manager):
         """Test _cleanup_finished_requests removes finished requests."""
         mock_scheduler_cls = MagicMock(return_value=MagicMock())
-        with patch.object(mock_vllm_config.scheduler_config, '_original_scheduler_cls', mock_scheduler_cls):
+        with patch.object(mock_vllm_config.scheduler_config,
+                          '_original_scheduler_cls', mock_scheduler_cls):
             scheduler = DPScheduler(
                 vllm_config=mock_vllm_config,
                 kv_cache_config=mock_kv_cache_config,
@@ -660,7 +666,8 @@ class TestDPScheduler:
                                    mock_structured_output_manager):
         """Test has_finished_requests checks all ranks."""
         mock_scheduler_cls = MagicMock(return_value=MagicMock())
-        with patch.object(mock_vllm_config.scheduler_config, '_original_scheduler_cls', mock_scheduler_cls):
+        with patch.object(mock_vllm_config.scheduler_config,
+                          '_original_scheduler_cls', mock_scheduler_cls):
             scheduler = DPScheduler(
                 vllm_config=mock_vllm_config,
                 kv_cache_config=mock_kv_cache_config,
@@ -788,7 +795,8 @@ class TestDPScheduler:
                                               mock_structured_output_manager):
         """Test make_stats returns None when logging is disabled."""
         mock_scheduler_cls = MagicMock(return_value=MagicMock())
-        with patch.object(mock_vllm_config.scheduler_config, '_original_scheduler_cls', mock_scheduler_cls):
+        with patch.object(mock_vllm_config.scheduler_config,
+                          '_original_scheduler_cls', mock_scheduler_cls):
             scheduler = DPScheduler(
                 vllm_config=mock_vllm_config,
                 kv_cache_config=mock_kv_cache_config,
