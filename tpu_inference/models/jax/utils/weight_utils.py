@@ -21,6 +21,7 @@ from safetensors import safe_open
 from tpu_inference import utils
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils import file_utils
+from vllm import envs, utils
 
 logger = init_logger(__name__)
 
@@ -421,7 +422,7 @@ def load_hf_weights(vllm_config,
     # NOTE(xiang): Disable multi-threading mode if running on multi-host.
     # Because multi-threading would cause different JAX processes to load
     # different weights at the same time.
-    if os.environ.get("TPU_MULTIHOST_BACKEND", "").lower() == "ray":
+    if os.environ.get("TPU_MULTIHOST_BACKEND", "").lower() == "ray" or envs.VLLM_TPU_USING_PATHWAYS:
         max_workers = 1
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
